@@ -41,7 +41,7 @@ use chrono::{DateTime, Utc};
 use pidash_db::entity as orm;
 use pidash_db::runner_runs::{agent_run, pod};
 use pidash_db::tasks_ticker::models::scheduler_binding;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::runner_runs::{classify_failure, AgentRunStatus};
 use serde_json::Value;
 use uuid::Uuid;

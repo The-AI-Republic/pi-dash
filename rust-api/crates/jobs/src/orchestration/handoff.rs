@@ -27,8 +27,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use pidash_compat::datetime::render_isoformat as twin_render_isoformat;
+use pidash_db::agent_runs::status::AgentRunStatus as DbAgentRunStatus;
 use pidash_db::config::{ManagedRunnerSettings, RunnerSettings};
-use pidash_db::dispatch::status::AgentRunStatus as DbAgentRunStatus;
 use pidash_db::entity::{
     agent_run, dev_machine, git_code_review_links, git_repositories, git_repository_bindings,
     issue_agent_ticker, issue_assignees, issue_comments, issue_labels, issue_relations, issues,
@@ -37,9 +37,6 @@ use pidash_db::entity::{
 use pidash_db::orm_tx::TxConn;
 use pidash_db::runner_runs::agent_run::merge_error_details;
 use pidash_db::tx::Transaction as DbTransaction;
-use pidash_services::dispatch::{
-    ExecutionFieldsError, ExecutionInputs, ProjectScope, UserFlags as SvcUserFlags,
-};
 use pidash_services::extensions::AssistantModelSeam;
 use pidash_services::orchestration::creation::{self as creation_kernel, user_id_for_run};
 use pidash_services::orchestration::creation::{
@@ -50,12 +47,15 @@ use pidash_services::orchestration::creation::{
     RunView, RunnerView, StateView, TickerBudget,
 };
 use pidash_services::prompting::{composer, context};
+use pidash_services::run_creation::{
+    ExecutionFieldsError, ExecutionInputs, ProjectScope, UserFlags as SvcUserFlags,
+};
 use pidash_services::runner_runs::finalization as finalize_kernel;
 use pidash_services::runner_runs::LifecycleEffect;
 use pidash_services::runner_sessions::live_drains::drain_pod_by_id;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 
-use crate::dispatch::{
+use crate::run_dispatch::{
     dispatch_after_commit as collect_dispatch, dispatch_agent_run,
     execution_fields as resolve_execution_fields, ActorScope, DeferredAdmissionError,
     DispatchDecision,
@@ -915,7 +915,9 @@ impl CreationSeam for HandoffStore<'_, '_> {
     }
 }
 
-fn twin_map_execution_fields(fields: crate::dispatch::ExecutionFields) -> ServiceExecutionFields {
+fn twin_map_execution_fields(
+    fields: crate::run_dispatch::ExecutionFields,
+) -> ServiceExecutionFields {
     let pinned_runner_entry = match fields.executor_kind {
         AgentExecutorKind::CloudAgent => Some(None),
         AgentExecutorKind::ManagedRunner => Some(fields.pinned_runner_id),

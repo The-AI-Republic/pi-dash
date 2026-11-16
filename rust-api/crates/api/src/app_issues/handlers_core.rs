@@ -128,11 +128,6 @@ use pidash_services::app_issues::serializers_detail::{
 };
 use pidash_services::app_issues::serializers_engage;
 use pidash_services::auth_session::shapes::{base_host, HostSettings};
-use pidash_services::dispatch::admission::{
-    managed_runner_availability, managed_runner_probe, LlmProfile, ManagedRunnerProbe,
-    HEARTBEAT_GRACE_SECS,
-};
-use pidash_services::dispatch::policy::{managed_runner_is_enabled, UserFlags};
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::issues as domain_issues;
 use pidash_services::domain::issues::IssueFieldSet as IssueSaveRow;
@@ -140,7 +135,12 @@ use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::orchestration::clock::ProjectClockPolicy;
 use pidash_services::read;
-use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason};
+use pidash_services::run_creation::executor_policy::{managed_runner_is_enabled, UserFlags};
+use pidash_services::run_creation::pidash_agent_availability::{
+    managed_runner_availability, managed_runner_probe, LlmProfile, ManagedRunnerProbe,
+    HEARTBEAT_GRACE_SECS,
+};
+use pidash_types::agent_runs::{AgentExecutorKind, ManagedRunnerReason};
 use pidash_types::orchestration::StateRef;
 use pidash_types::WorkspaceId;
 

@@ -73,7 +73,7 @@ use pidash_services::runner_runs::guards;
 use pidash_services::runner_runs::shape;
 use pidash_services::runner_runs::shape::SchedulerBindingDetailRow;
 use pidash_services::runner_runs::SetValue;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::runner_runs::{AgentRunStatus, ToolCallStatus};
 use pidash_types::WorkspaceId;
 

@@ -89,7 +89,7 @@ use pidash_services::runner_runs::finalization::{self, TerminalEffectsInputs};
 use pidash_services::runner_runs::lifecycle::{self, LifecycleError};
 use pidash_services::runner_runs::scheduler_hook::{self, SchedulerHookPlan};
 use pidash_services::runner_runs::LifecycleEffect;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::runner_runs::{
     classify_run_error, run_message_dedupe_ttl_secs, AgentChatMessageRole, AgentChatMessageStatus,
     AgentChatSessionStatus, AgentRunStatus, DevMachineInfo, RunErrorKind, RunnerInfo,

@@ -348,13 +348,13 @@ pub fn overlay_store_deps(
     managed: &ManagedRunnerSettings,
 ) -> crate::orchestration::StoreDeps<
     fn(Uuid) -> bool,
-    fn(Option<Uuid>) -> pidash_services::dispatch::LlmProfile,
+    fn(Option<Uuid>) -> pidash_services::run_creation::LlmProfile,
 > {
     fn no_llm(_: Uuid) -> bool {
         false
     }
-    fn no_profile(_: Option<Uuid>) -> pidash_services::dispatch::LlmProfile {
-        pidash_services::dispatch::LlmProfile {
+    fn no_profile(_: Option<Uuid>) -> pidash_services::run_creation::LlmProfile {
+        pidash_services::run_creation::LlmProfile {
             available: false,
             reason_code: "revoke-no-profile".to_owned(),
         }

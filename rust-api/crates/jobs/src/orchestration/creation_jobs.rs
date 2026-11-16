@@ -10,7 +10,7 @@
 //!   transaction through [`TxConn`][pidash_db::orm_tx::TxConn]
 //!   (no `query!` macros — there is no build-time database);
 //! * the three `cloud_agent.creation` calls delegate to the merged
-//!   [`crate::dispatch`] functions (`execution_fields` on its own
+//!   [`crate::run_dispatch`] functions (`execution_fields` on its own
 //!   short transaction, like the inner atomic at `creation.py:55-70`;
 //!   `lock_cloud_creation_capacity` on the insertion transaction;
 //!   `dispatch_after_commit` collected, never inline);
@@ -22,7 +22,7 @@
 //! The drivers ([`create_and_dispatch_run`], [`create_continuation_run`],
 //! [`create_project_move_handoff_run`], [`complete_project_move_handoff`])
 //! open the insertion transaction, run the services control flow,
-//! commit, then drain: dispatches via [`dispatch_agent_run`][crate::dispatch::dispatch_agent_run],
+//! commit, then drain: dispatches via [`dispatch_agent_run`][crate::run_dispatch::dispatch_agent_run],
 //! deferred admission consumes via
 //! Terminal effects are returned pending for D-15 — never executed here.
 //!
@@ -45,8 +45,8 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use pidash_db::agent_runs::status::AgentRunStatus;
 use pidash_db::config::ManagedRunnerSettings;
-use pidash_db::dispatch::status::AgentRunStatus;
 use pidash_db::entity::{
     agent_run, dev_machine, git_code_review_links, git_repositories, git_repository_bindings,
     issue_agent_ticker, issue_assignees, issue_comments, issue_labels, issue_relations, issues,
@@ -56,9 +56,6 @@ use pidash_db::orchestration::runs::ACTIVE_STATUSES;
 use pidash_db::orm_tx::{self, TxConn};
 use pidash_db::runner_runs::agent_run as run_bag;
 use pidash_db::tx::Transaction;
-use pidash_services::dispatch::{
-    ExecutionFieldsError, ExecutionInputs, LlmProfile, ProjectScope, UserFlags,
-};
 use pidash_services::orchestration::creation::{
     finalize_failure_reason, state_name_group, user_id_for_run,
     AdmissionError as ServiceAdmissionError, CreationError, CreationSeam, DedicatedPinArgs,
@@ -67,12 +64,15 @@ use pidash_services::orchestration::creation::{
     PodView, ProjectView, RenderBundle, RunView, RunnerView, StateView, TickerBudget,
 };
 use pidash_services::prompting::{composer, context};
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_services::run_creation::{
+    ExecutionFieldsError, ExecutionInputs, LlmProfile, ProjectScope, UserFlags,
+};
+use pidash_types::agent_runs::AgentExecutorKind;
 
-use crate::dispatch::{
+use crate::run_dispatch::{
     dispatch_after_commit as collect_dispatch, dispatch_agent_run, ActorScope, DispatchDecision,
 };
-use crate::dispatch::{execution_fields as resolve_execution_fields, DeferredAdmissionError};
+use crate::run_dispatch::{execution_fields as resolve_execution_fields, DeferredAdmissionError};
 use pidash_compat::datetime::render_isoformat;
 
 // ---------------------------------------------------------------------------
@@ -159,7 +159,7 @@ impl<'c, H, P> LiveCreationStore<'c, H, P> {
 
     /// The operator kill switch (`managed_runner_is_enabled`, L3).
     pub(crate) fn dispatch_managed_runner_enabled(&self) -> bool {
-        pidash_services::dispatch::managed_runner_is_enabled(&self.managed)
+        pidash_services::run_creation::managed_runner_is_enabled(&self.managed)
     }
 
     /// Record an entries driver's rollback request
@@ -979,7 +979,7 @@ where
 /// follows the executor (`creation.py` shapes): cloud always carries
 /// `pinned_runner: None`, managed carries the pick, local carries no
 /// key.
-fn map_execution_fields(fields: crate::dispatch::ExecutionFields) -> ServiceExecutionFields {
+fn map_execution_fields(fields: crate::run_dispatch::ExecutionFields) -> ServiceExecutionFields {
     let pinned_runner_entry = match fields.executor_kind {
         AgentExecutorKind::CloudAgent => Some(None),
         AgentExecutorKind::ManagedRunner => Some(fields.pinned_runner_id),
@@ -2177,7 +2177,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pidash_db::dispatch::status::AgentRunTrigger;
+    use pidash_db::agent_runs::status::AgentRunTrigger;
     use pidash_services::orchestration::creation::{
         ContinuationRequest, CreateDispatchRequest, HandoffCreateRequest,
     };
@@ -2202,7 +2202,7 @@ mod tests {
 
     #[test]
     fn pin_key_presence_follows_executor() {
-        let base = crate::dispatch::ExecutionFields {
+        let base = crate::run_dispatch::ExecutionFields {
             executor_kind: AgentExecutorKind::LocalRunner,
             tool_plan: json!({}),
             pinned_runner_id: None,
@@ -2212,14 +2212,14 @@ mod tests {
         // Local carries no key: the computed pin survives.
         assert_eq!(map_execution_fields(base.clone()).pinned_runner_entry, None);
         // Cloud always carries `None`: the computed pin is clobbered.
-        let cloud = crate::dispatch::ExecutionFields {
+        let cloud = crate::run_dispatch::ExecutionFields {
             executor_kind: AgentExecutorKind::CloudAgent,
             ..base.clone()
         };
         assert_eq!(map_execution_fields(cloud).pinned_runner_entry, Some(None));
         // Managed carries the pick.
         let pin = Uuid::new_v4();
-        let managed = crate::dispatch::ExecutionFields {
+        let managed = crate::run_dispatch::ExecutionFields {
             executor_kind: AgentExecutorKind::ManagedRunner,
             pinned_runner_id: Some(pin),
             ..base

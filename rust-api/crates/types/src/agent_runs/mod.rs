@@ -14,9 +14,9 @@
 //! `rust-api/fixtures/dispatch/fx-disp-01-types.golden.json` (FX-DISP-01).
 
 pub mod executor;
-pub mod managed_runner;
+pub mod pidash_agent;
 pub use executor::{
     get_default_agent_executor, normalize_executor_write, AgentExecutorKind, DEPRECATED_EXECUTORS,
     MACHINE_EXECUTORS,
 };
-pub use managed_runner::{ManagedRunnerReason, ManagedRunnerUnavailable};
+pub use pidash_agent::{ManagedRunnerReason, ManagedRunnerUnavailable};

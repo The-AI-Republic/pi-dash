@@ -7,7 +7,7 @@
 //!   implementation over live SQL (`LiveCreationStore`), plus the
 //!   transaction drivers that commit and drain post-commit dispatch.
 //!   The three `cloud_agent.creation` calls delegate to the merged
-//!   [`crate::dispatch`] functions; nothing here calls back into
+//!   [`crate::run_dispatch`] functions; nothing here calls back into
 //!   services-side logic beyond the seam traits (no new crate edges).
 //!
 //! Fixture ids replayed by the live suites: FX-ORCH-06
