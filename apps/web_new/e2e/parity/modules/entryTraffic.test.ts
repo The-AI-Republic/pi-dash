@@ -6,7 +6,12 @@
 // shell, a license or a plan.
 import { describe, expect, it } from "vitest";
 
-import { entryTrafficViolations, isDesktopOrEditionPath, isModuleEndpointPath, namesModuleTraffic } from "./entryTraffic";
+import {
+  entryTrafficViolations,
+  isDesktopOrEditionPath,
+  isModuleEndpointPath,
+  namesModuleTraffic,
+} from "./entryTraffic";
 
 const LIST = "/api/workspaces/acme/projects/p1/modules/";
 const DETAIL = "/api/workspaces/acme/projects/p1/modules/323e4567-e89b-12d3-a456-426614174002/";

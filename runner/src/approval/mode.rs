@@ -48,6 +48,21 @@ impl EngineThreadSettings {
     };
 }
 
+impl EngineThreadSettings {
+    /// The same sandbox in the shape `turn/start` takes. `thread/start` names
+    /// a sandbox *mode* (`read-only`); a turn override carries a *policy*
+    /// object (`{"type":"readOnly"}`), whose other fields default to what the
+    /// mode resolves to.
+    pub fn turn_sandbox_policy(&self) -> serde_json::Value {
+        let policy = match self.sandbox {
+            "read-only" => "readOnly",
+            "workspace-write" => "workspaceWrite",
+            _ => "dangerFullAccess",
+        };
+        serde_json::json!({ "type": policy })
+    }
+}
+
 impl Default for EngineThreadSettings {
     fn default() -> Self {
         Self::LEGACY_FULL_ACCESS
@@ -102,6 +117,20 @@ mod tests {
         assert_eq!(s.sandbox, "danger-full-access");
         assert_eq!(s.approval_policy, "on-request");
         assert_ne!(s.approval_policy, "never");
+    }
+
+    #[test]
+    fn turn_sandbox_policy_names_the_same_sandbox_as_the_thread_mode() {
+        let policy = |mode| engine_thread_settings(mode).turn_sandbox_policy();
+        assert_eq!(policy(ApprovalMode::Ask), serde_json::json!({"type": "readOnly"}));
+        assert_eq!(
+            policy(ApprovalMode::Workspace),
+            serde_json::json!({"type": "workspaceWrite"})
+        );
+        assert_eq!(
+            policy(ApprovalMode::FullAccess),
+            serde_json::json!({"type": "dangerFullAccess"})
+        );
     }
 
     #[test]

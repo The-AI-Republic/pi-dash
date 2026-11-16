@@ -4,7 +4,7 @@
  * See the LICENSE file for details.
  */
 
-import { render, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { SWRConfig } from "swr";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { IAgentChatSession, IRunner } from "@pi-dash/types";
@@ -71,13 +71,25 @@ vi.mock("@/components/runners/chat/use-agent-chat-events", () => ({
 
 vi.mock("@/components/chat/composer", () => ({ ChatComposer: () => null }));
 vi.mock("@/components/chat/container", () => ({
-  ChatContainer: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
+  // The approval mode control lives in the header.
+  ChatContainer: ({ header, children }: { header?: React.ReactNode; children?: React.ReactNode }) => (
+    <div>
+      {header}
+      {children}
+    </div>
+  ),
 }));
 vi.mock("@/components/chat/history-panel", () => ({ ChatHistoryPanel: () => null }));
 vi.mock("@/components/chat/message", () => ({ ChatMessage: () => null }));
 
 vi.mock("@/pi-dash-web/components/desktop", () => ({
-  ChatApprovalModeSelect: ({ value }: { value: string }) => <span data-testid="approval-mode">{value}</span>,
+  ChatApprovalModeSelect: (props: { value: string; pending?: string | null; onChange: (mode: string) => void }) => (
+    <div>
+      <span data-testid="approval-mode">{props.value}</span>
+      <span data-testid="approval-mode-pending">{props.pending ?? ""}</span>
+      <button type="button" data-testid="pick-ask" onClick={() => props.onChange("ask")} />
+    </div>
+  ),
   ChatApprovalPrompt: () => null,
 }));
 
@@ -148,5 +160,44 @@ describe("RunnerChatPage — approval mode on warm", () => {
 
     await waitFor(() => expect(transport.warmChatSession).toHaveBeenCalledWith("session-1"));
     expect(calls).toEqual(["mode:ask", "warm"]);
+  });
+});
+
+describe("RunnerChatPage — changing the approval mode in an open chat", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    window.localStorage.clear();
+    getRunnerDetail.mockResolvedValue(RUNNER);
+    transport.listChatMessages.mockResolvedValue([]);
+    transport.warmChatSession.mockResolvedValue({ ok: true });
+  });
+
+  it("switches the control and the session's mode at once while the chat is idle", async () => {
+    transport.listChatSessions.mockResolvedValue([SESSION]);
+    renderPage(new Map());
+    await waitFor(() => expect(transport.warmChatSession).toHaveBeenCalledWith("session-1"));
+
+    fireEvent.click(screen.getByTestId("pick-ask"));
+
+    // The next message carries the new mode, so the control may show it now.
+    expect(transport.setApprovalMode).toHaveBeenLastCalledWith("session-1", "ask");
+    expect(screen.getByTestId("approval-mode").textContent).toBe("ask");
+    expect(screen.getByTestId("approval-mode-pending").textContent).toBe("");
+  });
+
+  it("keeps showing the running turn's mode and marks the pick as pending", async () => {
+    transport.listChatSessions.mockResolvedValue([{ ...SESSION, active_message_id: "message-1" }]);
+    renderPage(new Map());
+    await waitFor(() => expect(transport.listChatMessages).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByTestId("approval-mode").textContent).toBe("full_access"));
+
+    fireEvent.click(screen.getByTestId("pick-ask"));
+
+    // The turn in flight still runs under full access; Ask waits for the next
+    // message, which is what the transport slot now holds.
+    expect(transport.setApprovalMode).toHaveBeenLastCalledWith("session-1", "ask");
+    expect(screen.getByTestId("approval-mode").textContent).toBe("full_access");
+    expect(screen.getByTestId("approval-mode-pending").textContent).toBe("ask");
+    expect(window.localStorage.getItem(STORAGE_KEY)).toBe("ask");
   });
 });

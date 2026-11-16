@@ -33,6 +33,10 @@ pub struct Bridge {
     /// starts. Defaults to the historical full-access posture; the local chat
     /// lane overrides it per session from the user's chosen approval mode.
     pub engine_settings: EngineThreadSettings,
+    /// The posture the engine was last told, on `thread/start` or a later
+    /// `turn/start`. `None` until a thread exists. When it differs from
+    /// `engine_settings` the next turn carries the new posture.
+    applied_settings: Option<EngineThreadSettings>,
     initialized: bool,
     thread_id: Option<String>,
     /// A saved thread to resume on the first `warm` (local chat continuation
@@ -112,6 +116,7 @@ impl Bridge {
             model_default,
             effort_default,
             engine_settings,
+            applied_settings: None,
             initialized: false,
             thread_id: None,
             resume_thread_id: resume_thread_id
@@ -132,6 +137,7 @@ impl Bridge {
             model_default,
             effort_default: None,
             engine_settings: EngineThreadSettings::default(),
+            applied_settings: None,
             initialized: false,
             thread_id: None,
             resume_thread_id: None,
@@ -140,6 +146,13 @@ impl Bridge {
             interrupting: false,
             pending: std::collections::VecDeque::new(),
         }
+    }
+
+    /// Change the posture for the turns that follow. A thread that has not
+    /// started yet starts under it; a live thread is retuned by its next
+    /// `turn/start`, so a turn already in flight keeps what it started with.
+    pub fn set_engine_settings(&mut self, settings: EngineThreadSettings) {
+        self.engine_settings = settings;
     }
 
     /// Queue a saved thread for `thread/resume` on the first `warm`. Used by
@@ -289,6 +302,7 @@ impl Bridge {
             },
         )?;
         self.server.send_raw(&line).await?;
+        self.applied_settings = Some(self.engine_settings);
         let resp = self.await_response(id, ENGINE_STARTUP_TIMEOUT).await?;
         thread_id_of(&resp).context("thread/start missing threadId")
     }
@@ -309,6 +323,8 @@ impl Bridge {
 
     async fn start_turn(&mut self, thread_id: &str, payload: &RunPayload) -> Result<()> {
         let id = self.server.alloc_id();
+        let retune = (self.applied_settings != Some(self.engine_settings))
+            .then_some(self.engine_settings);
         let line = jsonrpc::request(
             id,
             "turn/start",
@@ -320,9 +336,12 @@ impl Bridge {
                 }],
                 model: payload.model.clone().or_else(|| self.model_default.clone()),
                 effort: self.effort_default.clone(),
+                approval_policy: retune.map(|s| s.approval_policy.into()),
+                sandbox_policy: retune.map(|s| s.turn_sandbox_policy()),
             },
         )?;
         self.server.send_raw(&line).await?;
+        self.applied_settings = Some(self.engine_settings);
         self.turn_start_request = Some(id);
         Ok(())
     }

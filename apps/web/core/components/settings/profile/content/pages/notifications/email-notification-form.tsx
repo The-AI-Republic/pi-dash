@@ -62,7 +62,9 @@ export const NotificationsProfileSettingsForm = observer(function NotificationsP
     <div data-testid="email-prefs-form" className="flex flex-col gap-y-1">
       <SettingsControlItem
         title={t("Property changes")}
-        description={t("Notify me when work items' properties like assignees, priority, estimates or anything else changes.")}
+        description={t(
+          "Notify me when work items' properties like assignees, priority, estimates or anything else changes."
+        )}
         control={
           <Controller
             control={control}
