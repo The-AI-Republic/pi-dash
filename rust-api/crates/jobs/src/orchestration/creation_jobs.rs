@@ -825,6 +825,9 @@ where
             error_details: Set(row.error_details.clone()),
             failure_reason: Set(String::new()),
             refusal_category: ActiveValue::NotSet,
+            assignment_token: Set(None),
+            assignment_protocol: Set(0),
+            capacity_wait: Set(None),
         };
         let inserted = {
             let conn = TxConn::new(self.tx.inner());

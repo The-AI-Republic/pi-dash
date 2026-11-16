@@ -80,7 +80,7 @@ use pidash_types::runner_runs::{error_diagnostic, RunErrorDiagnostic};
 // ---------------------------------------------------------------------------
 
 /// `AgentRunSerializer.Meta.fields` (`serializers.py:294-329`).
-pub const RUN_WIRE_FIELDS: [&str; 38] = [
+pub const RUN_WIRE_FIELDS: [&str; 39] = [
     "id",
     "status",
     "executor_kind",
@@ -95,6 +95,7 @@ pub const RUN_WIRE_FIELDS: [&str; 38] = [
     "pinned_runner_name",
     "pin_kind",
     "dispatch_wait",
+    "capacity_wait",
     "work_item",
     "scheduler_binding",
     "scheduler_binding_detail",
@@ -120,6 +121,42 @@ pub const RUN_WIRE_FIELDS: [&str; 38] = [
     "tool_plan",
     "tool_calls",
 ];
+
+/// Project the stored `capacity_wait` to its presentation slice (T7).
+/// Only phase/position/queued/reported/active/limit are workspace-visible;
+/// never admission/session ids, tokens, or cross-workspace runner lists.
+/// Returns Null when no capacity state; stale values keep rendering last-known.
+pub fn capacity_wait_presentation(capacity_wait: &Value) -> Value {
+    let Some(obj) = capacity_wait.as_object() else {
+        return Value::Null;
+    };
+    let mut out = serde_json::Map::new();
+    out.insert(
+        "phase".to_string(),
+        obj.get("phase").cloned().unwrap_or(Value::Null),
+    );
+    out.insert(
+        "queue_position".to_string(),
+        obj.get("queue_position").cloned().unwrap_or(Value::Null),
+    );
+    out.insert(
+        "queued_at".to_string(),
+        obj.get("queued_at").cloned().unwrap_or(Value::Null),
+    );
+    out.insert(
+        "reported_at".to_string(),
+        obj.get("reported_at").cloned().unwrap_or(Value::Null),
+    );
+    out.insert(
+        "active".to_string(),
+        obj.get("active").cloned().unwrap_or(Value::Null),
+    );
+    out.insert(
+        "limit".to_string(),
+        obj.get("limit").cloned().unwrap_or(Value::Null),
+    );
+    Value::Object(out)
+}
 
 /// `AgentRunToolCallSerializer.Meta.fields` (`serializers.py:244-256`).
 pub const TOOL_CALL_WIRE_FIELDS: [&str; 11] = [
@@ -338,6 +375,7 @@ pub struct AgentRunView<'a> {
     pub pinned_runner_name: Option<String>,
     pub pin_kind: &'a str,
     pub dispatch_wait: Value,
+    pub capacity_wait: Value,
     pub work_item: Option<String>,
     pub scheduler_binding: Option<String>,
     pub scheduler_binding_detail: Option<SchedulerBindingDetailView<'a>>,
@@ -430,6 +468,11 @@ fn run_to_representation<'a>(
         pinned_runner_name: extras.pinned_runner_name.clone(),
         pin_kind: run.pin_kind.as_str(),
         dispatch_wait: extras.dispatch_wait.clone(),
+        capacity_wait: capacity_wait_presentation(
+            run.capacity_wait
+                .as_ref()
+                .unwrap_or(&serde_json::Value::Null),
+        ),
         work_item: uuid_opt_string(&run.work_item_id),
         scheduler_binding: uuid_opt_string(&run.scheduler_binding_id),
         scheduler_binding_detail: binding.map(scheduler_binding_detail_to_representation),
@@ -869,6 +912,21 @@ mod tests {
             .collect()
     }
 
+    /// NEWPIDASH-241 T2: upgrade a captured Django run body with the
+    /// additive `capacity_wait` key at its wire position (after
+    /// `dispatch_wait`); order-preserving like the wire shape.
+    fn with_capacity_wait(body: &Value) -> Value {
+        let obj = body.as_object().expect("object");
+        let mut upgraded = serde_json::Map::new();
+        for (k, v) in obj {
+            upgraded.insert(k.clone(), v.clone());
+            if k == "dispatch_wait" {
+                upgraded.insert("capacity_wait".to_string(), Value::Null);
+            }
+        }
+        Value::Object(upgraded)
+    }
+
     fn dt(text: &str) -> DateTime<Utc> {
         text.parse().expect("fixture datetime")
     }
@@ -954,6 +1012,12 @@ mod tests {
             assigned_at: dt_opt(&body["assigned_at"]),
             started_at: dt_opt(&body["started_at"]),
             ended_at: dt_opt(&body["ended_at"]),
+            assignment_token: None,
+            assignment_protocol: 0,
+            capacity_wait: match &body["capacity_wait"] {
+                Value::Null => None,
+                v => Some(v.clone()),
+            },
         }
     }
 
@@ -1017,7 +1081,7 @@ mod tests {
             keys(&body["pod_detail"]),
             ["id", "name", "is_default", "project", "project_identifier"]
         );
-        assert_eq!(body.to_string(), gold.to_string());
+        assert_eq!(body.to_string(), with_capacity_wait(gold).to_string());
     }
 
     #[test]
@@ -1032,7 +1096,7 @@ mod tests {
         assert_eq!(keys(&body), RUN_WIRE_FIELDS);
         // The list pins `error_diagnostic: null` even with `error` set…
         assert_eq!(body["error_diagnostic"], Value::Null);
-        assert_eq!(body.to_string(), gold.to_string());
+        assert_eq!(body.to_string(), with_capacity_wait(gold).to_string());
     }
 
     #[test]

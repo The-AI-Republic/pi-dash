@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
+#[cfg(windows)]
+use pidash_ipc::windows_pipe::create_owner_only_pipe;
 use std::collections::HashMap;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufStream};
-#[cfg(windows)]
-use pidash_ipc::windows_pipe::create_owner_only_pipe;
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::NamedPipeServer as IpcStream;
 #[cfg(unix)]
@@ -36,6 +36,10 @@ pub struct IpcServer {
     /// ownership.
     pub instances: Arc<std::sync::RwLock<HashMap<Uuid, RunnerInstance>>>,
     pub(crate) spawn_ctx: crate::daemon::supervisor::RunnerSpawnCtx,
+    /// Durable FIFO coordinator (NEWPIDASH-241). None only in unit tests.
+    /// Production sets it from the supervisor's coordinator (same Arc as
+    /// `spawn_ctx.run_coordinator`).
+    pub run_coordinator: Option<Arc<crate::daemon::run_queue::Coordinator>>,
 }
 
 impl IpcServer {
@@ -160,6 +164,50 @@ impl IpcServer {
             Request::CredentialsReload => {
                 self.spawn_ctx.reload_credentials().await?;
                 Ok(Response::Ack)
+            }
+            Request::MachineRunLimitSet { limit } => {
+                if !(1..=65535).contains(&limit) {
+                    return Ok(Response::Error(crate::ipc::protocol::RpcError {
+                        code: 400,
+                        message: "limit must be 1..=65535".to_string(),
+                    }));
+                }
+                // Live apply: persist to config, then update the coordinator
+                // before replying. On write failure preserve both old values.
+                let mut cfg = crate::config::file::load_config(&self.paths)?;
+                let old_limit = cfg.daemon.max_concurrent_agent_runs;
+                cfg.daemon.max_concurrent_agent_runs = limit;
+                if let Err(e) = crate::config::file::write_config(&self.paths, &cfg) {
+                    crate::config::file::write_config(&self.paths, &{
+                        let mut rolled = crate::config::file::load_config(&self.paths)
+                            .unwrap_or_else(|_| cfg.clone());
+                        rolled.daemon.max_concurrent_agent_runs = old_limit;
+                        rolled
+                    })
+                    .ok();
+                    return Ok(Response::Error(crate::ipc::protocol::RpcError {
+                        code: 500,
+                        message: format!("persist limit failed: {e}"),
+                    }));
+                }
+                self.primary_state.set_config(cfg.clone()).await;
+                if let Some(coord) = self.coordinator() {
+                    if let Err(e) = coord.set_limit(limit) {
+                        return Ok(Response::Error(crate::ipc::protocol::RpcError {
+                            code: 400,
+                            message: e,
+                        }));
+                    }
+                    let revision = coord.counts().revision;
+                    Ok(Response::MachineRunLimitResult { limit, revision })
+                } else {
+                    // No coordinator (storage_blocked or unit test): config
+                    // persisted, next startup uses the persisted value.
+                    Ok(Response::MachineRunLimitResult { limit, revision: 0 })
+                }
+            }
+            Request::RunQueueSnapshot => {
+                Ok(Response::RunQueueSnapshot(self.queue_snapshot().await))
             }
             Request::StatusGet => Ok(Response::Status(self.status_snapshot().await)),
             Request::StatusSubscribe => {
@@ -619,8 +667,41 @@ impl IpcServer {
             .collect()
     }
 
+    /// The machine coordinator: prefer the explicit field, fall back to
+    /// the spawn context (both are the same Arc in production).
+    fn coordinator(&self) -> Option<&Arc<crate::daemon::run_queue::Coordinator>> {
+        let explicit = self.run_coordinator.as_ref();
+        let from_ctx = self.spawn_ctx.run_coordinator.as_ref();
+        explicit.or(from_ctx)
+    }
+
+    /// Live queue snapshot for IPC + Status. No coordinator means the
+    /// store is blocked/unavailable: report `storage_blocked` mode with
+    /// the persisted limit so the TUI never falsely claims "enforced".
+    async fn queue_snapshot(&self) -> pidash_ipc::RunQueueSnapshot {
+        if let Some(coord) = self.coordinator() {
+            coord.snapshot()
+        } else {
+            let limit = crate::config::file::load_config(&self.paths)
+                .map(|c| c.daemon.max_concurrent_agent_runs)
+                .unwrap_or(3);
+            pidash_ipc::RunQueueSnapshot {
+                mode: "storage_blocked".to_string(),
+                limit,
+                active: 0,
+                waiting: 0,
+                held: 0,
+                revision: 0,
+                blocked_reason: Some("run queue store unavailable".to_string()),
+            }
+        }
+    }
+
     async fn status_snapshot(&self) -> StatusSnapshot {
-        let daemon = self.primary_state.daemon_info().await;
+        let mut daemon = self.primary_state.daemon_info().await;
+        // Carry the live machine queue on every Status so the TUI sees
+        // real counts without a second round-trip.
+        daemon.run_queue = Some(self.queue_snapshot().await);
         let instances = self.all_instances();
         let mut runners = Vec::with_capacity(instances.len());
         for inst in instances {
@@ -824,6 +905,7 @@ mod tests {
             paths: paths.clone(),
             instances: Arc::new(std::sync::RwLock::new(HashMap::new())),
             spawn_ctx,
+            run_coordinator: None,
         };
         tokio::spawn(async move {
             let _ = server.run().await;
@@ -1008,6 +1090,7 @@ sleep 1
                 insts.iter().map(|i| (i.runner_id, i.clone())).collect(),
             )),
             spawn_ctx,
+            run_coordinator: None,
         };
         tokio::spawn(async move {
             let _ = server.run().await;
@@ -1236,6 +1319,7 @@ sleep 1
             paths: paths.clone(),
             instances: Arc::new(std::sync::RwLock::new(HashMap::new())),
             spawn_ctx,
+            run_coordinator: None,
         };
         tokio::spawn(async move {
             let _ = ipc.run().await;
@@ -1430,6 +1514,7 @@ sleep 1
             paths: paths.clone(),
             instances: Arc::new(std::sync::RwLock::new(HashMap::new())),
             spawn_ctx,
+            run_coordinator: None,
         };
         tokio::spawn(async move {
             let _ = server.run().await;

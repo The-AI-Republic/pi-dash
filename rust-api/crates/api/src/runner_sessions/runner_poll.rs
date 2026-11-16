@@ -144,7 +144,7 @@ use pidash_types::runner_sessions::{
     session_evicted_poll, unauthorized_poll, DecodedMessage, HttpResponse,
 };
 use sea_orm::sea_query::{Expr, Keyword, SimpleExpr};
-use sea_orm::EntityTrait;
+use sea_orm::{EntityTrait, QueryFilter, QuerySelect};
 
 use crate::runner_enroll::auth::{authenticate_access_token, ALLOW_POST};
 use crate::runner_enroll::now_micros;
@@ -451,6 +451,233 @@ struct ReapOutcome {
 /// stopped-cancel barrier, the candidate scan, one inline finalize
 /// per reaped run. Collects the `on_commit` registrations for the
 /// caller to fire after commit.
+/// Apply poll's held-token/capacity snapshot (T2, NEWPIDASH-241).
+/// Validates token/session before persisting phase or letting in_flight suppress reaping.
+/// Returns the (possibly stripped) reap entry for the reaper.
+async fn apply_capacity_snapshot(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    runner_id: Uuid,
+    sid: Uuid,
+    status_entry: &Map<String, Value>,
+) -> Result<Map<String, Value>, Response> {
+    use pidash_services::runner_runs::capacity as cap;
+    use sea_orm::ColumnTrait;
+    // No held run -> legacy path unchanged
+    let held_raw = status_entry
+        .get("in_flight_run")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    if held_raw.is_empty() {
+        return Ok(status_entry.clone());
+    }
+    let in_flight = match Uuid::parse_str(&held_raw) {
+        Ok(u) => u,
+        Err(_) => return Ok(status_entry.clone()),
+    };
+    let held_token_raw = status_entry.get("held_assignment_token").cloned();
+    let snapshot = status_entry.get("capacity").cloned();
+    if held_token_raw.is_none() && snapshot.is_none() {
+        return Ok(status_entry.clone());
+    }
+    // Lock Run (Runner already locked by caller; order Runner -> Run)
+    let run = {
+        let conn = TxConn::new(&mut *tx);
+        use pidash_db::entity::agent_run;
+        agent_run::Entity::find_by_id(in_flight)
+            .filter(agent_run::Column::RunnerId.eq(runner_id))
+            .lock_exclusive()
+            .one(&conn)
+            .await
+            .map_err(|_| server_error())?
+    };
+    let Some(run) = run else {
+        return Ok(status_entry.clone());
+    };
+    if run.assignment_protocol != cap::PROTOCOL_MACHINE_QUEUE {
+        return Ok(status_entry.clone());
+    }
+    let provided = held_token_raw.as_ref().and_then(|v| {
+        if v.is_null() {
+            None
+        } else {
+            cap::parse_uuid(v)
+        }
+    });
+    if !cap::token_matches(run.assignment_token, provided) {
+        let mut stripped = status_entry.clone();
+        stripped.insert("in_flight_run".to_string(), Value::Null);
+        return Ok(stripped);
+    }
+    // Validate snapshot before persisting
+    let snapshot_dict: Option<&Map<String, Value>> = match snapshot.as_ref() {
+        Some(Value::Object(m)) => Some(m),
+        _ => None,
+    };
+    let stored = run.capacity_wait.as_ref();
+    // Use pure helper to validate and compute new cw if snapshot present
+    if snapshot_dict.is_none() {
+        return Ok(status_entry.clone());
+    }
+    let snapshot_dict = snapshot_dict.unwrap();
+    // revision
+    let stored_rev = stored
+        .and_then(|v| v.get("revision"))
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            stored
+                .and_then(|v| v.get("revision"))
+                .and_then(Value::as_i64)
+                .map(|i| i as u64)
+        });
+    let revision: Option<u64> = if let Some(raw_rev) = snapshot_dict.get("revision") {
+        if raw_rev.is_null() {
+            stored_rev
+        } else {
+            match cap::parse_revision(raw_rev) {
+                Some(r) => Some(r),
+                None => return Ok(status_entry.clone()),
+            }
+        }
+    } else {
+        stored_rev
+    };
+    if let Some(rev) = revision {
+        if let Some(stored) = stored_rev {
+            if rev < stored {
+                return Ok(status_entry.clone());
+            }
+        }
+    }
+    let raw_phase = snapshot_dict
+        .get("phase")
+        .and_then(Value::as_str)
+        .map(|s| s.to_owned());
+    if let Some(ref ph) = raw_phase {
+        if ph != cap::PHASE_WAITING && ph != cap::PHASE_PREPARING {
+            return Ok(status_entry.clone());
+        }
+    }
+    let mut q_at: Option<String> = snapshot_dict
+        .get("queued_at")
+        .and_then(|v| if v.is_null() { None } else { Some(v.clone()) })
+        .map(|v| v.as_str().unwrap_or("").to_owned())
+        .or_else(|| {
+            stored
+                .and_then(|v| v.get("queued_at"))
+                .and_then(Value::as_str)
+                .map(|s| s.to_owned())
+        });
+    if let Some(q) = snapshot_dict.get("queued_at") {
+        if !q.is_null() {
+            let Some(s) = q.as_str() else {
+                return Ok(status_entry.clone());
+            };
+            // queued_at is RFC3339, never a UUID — validate timestamp only.
+            let norm = s.replace('Z', "+00:00");
+            if chrono::DateTime::parse_from_rfc3339(&norm).is_err() {
+                return Ok(status_entry.clone());
+            }
+            q_at = Some(s.to_owned());
+        }
+    }
+    let queue_position: Option<u64> = if let Some(v) = snapshot_dict.get("queue_position") {
+        if v.is_null() {
+            None
+        } else {
+            match cap::validate_count(v, false, true) {
+                Some(n) => Some(n),
+                None => return Ok(status_entry.clone()),
+            }
+        }
+    } else {
+        stored
+            .and_then(|v| v.get("queue_position"))
+            .and_then(Value::as_u64)
+    };
+    let active: Option<u64> = if let Some(v) = snapshot_dict.get("active") {
+        if v.is_null() {
+            None
+        } else {
+            match cap::validate_count(v, true, false) {
+                Some(n) => Some(n),
+                None => return Ok(status_entry.clone()),
+            }
+        }
+    } else {
+        stored.and_then(|v| v.get("active")).and_then(Value::as_u64)
+    };
+    let limit: Option<u64> = if let Some(v) = snapshot_dict.get("limit") {
+        if v.is_null() {
+            None
+        } else {
+            match cap::validate_count(v, false, true) {
+                Some(n) if (cap::CAPACITY_MIN_LIMIT..=cap::CAPACITY_MAX_LIMIT).contains(&n) => {
+                    Some(n)
+                }
+                _ => return Ok(status_entry.clone()),
+            }
+        }
+    } else {
+        stored.and_then(|v| v.get("limit")).and_then(Value::as_u64)
+    };
+    let stored_phase = stored
+        .and_then(|v| v.get("phase"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let phase = raw_phase.unwrap_or_else(|| {
+        if stored_phase.is_empty() {
+            cap::PHASE_WAITING.to_owned()
+        } else {
+            stored_phase.clone()
+        }
+    });
+    let phase = if stored_phase == cap::PHASE_PREPARING && phase == cap::PHASE_WAITING {
+        cap::PHASE_PREPARING.to_owned()
+    } else {
+        phase
+    };
+    let queue_position = if phase == cap::PHASE_PREPARING {
+        None
+    } else {
+        queue_position
+    };
+    let now = Utc::now();
+    let mut cw = serde_json::json!({
+        "phase": phase,
+        "assignment_token": run.assignment_token.map(|u| Value::String(u.to_string())).unwrap_or(Value::Null),
+        "session_id": sid.to_string(),
+        "revision": revision,
+        "queued_at": q_at.map(Value::String).unwrap_or(Value::Null),
+        "reported_at": now.to_rfc3339_opts(chrono::SecondsFormat::Micros, false),
+        "queue_position": queue_position.map(Value::from).unwrap_or(Value::Null),
+        "active": active.map(Value::from).unwrap_or(Value::Null),
+        "limit": limit.map(Value::from).unwrap_or(Value::Null),
+    });
+    if phase == cap::PHASE_PREPARING {
+        if let Some(admission) = stored
+            .and_then(|v| v.get("admission_id"))
+            .and_then(Value::as_str)
+        {
+            cw.as_object_mut().unwrap().insert(
+                "admission_id".to_string(),
+                Value::String(admission.to_owned()),
+            );
+        }
+    }
+    let conn = TxConn::new(&mut *tx);
+    let _ = pidash_db::entity::agent_run::Entity::update_many()
+        .col_expr(
+            pidash_db::entity::agent_run::Column::CapacityWait,
+            sea_orm::sea_query::Expr::val(Some(cw.clone())).into(),
+        )
+        .filter(pidash_db::entity::agent_run::Column::Id.eq(run.id))
+        .exec(&conn)
+        .await;
+    Ok(status_entry.clone())
+}
+
 async fn reap_stale_busy_runs(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     runner_id: Uuid,
@@ -1437,8 +1664,17 @@ pub async fn runner_session_poll(
         publish_pairs: Vec::new(),
         drain_effects: Vec::new(),
     };
-    if !status_entry.is_empty() {
-        reap = match reap_stale_busy_runs(&mut tx, runner_id, &status_entry).await {
+    // T2: apply poll capacity snapshot (holds Runner lock, then Run) before reaper
+    let effective_status = if !status_entry.is_empty() {
+        match apply_capacity_snapshot(&mut tx, runner_id, sid, &status_entry).await {
+            Ok(entry) => entry,
+            Err(response) => return response,
+        }
+    } else {
+        status_entry.clone()
+    };
+    if !effective_status.is_empty() {
+        reap = match reap_stale_busy_runs(&mut tx, runner_id, &effective_status).await {
             Ok(reap) => reap,
             Err(response) => return response,
         };

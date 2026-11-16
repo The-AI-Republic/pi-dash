@@ -88,6 +88,9 @@ pub const COLUMNS: &[&str] = &[
     "assigned_at",
     "started_at",
     "ended_at",
+    "assignment_token",
+    "assignment_protocol",
+    "capacity_wait",
 ];
 
 /// `status` bound (`models.py:947-952`, `max_length=24`).
@@ -487,6 +490,9 @@ pub struct AgentRun {
     pub assigned_at: Option<chrono::DateTime<chrono::Utc>>,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
     pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub assignment_token: Option<uuid::Uuid>,
+    pub assignment_protocol: i16,
+    pub capacity_wait: Option<serde_json::Value>,
 }
 
 impl AgentRun {
@@ -513,8 +519,17 @@ mod tests {
 
     #[test]
     fn columns_match_fixture_in_order() {
-        assert_eq!(ts::owned(COLUMNS), ts::columns(&run_fixture()));
-        assert_eq!(COLUMNS.len(), 42);
+        // NEWPIDASH-241 T1: three native-owned columns added beyond the Django baseline.
+        let fixture_cols = ts::columns(&run_fixture());
+        assert_eq!(
+            &ts::owned(COLUMNS)[..fixture_cols.len()],
+            fixture_cols.as_slice()
+        );
+        assert_eq!(COLUMNS.len(), 45);
+        assert_eq!(
+            &COLUMNS[fixture_cols.len()..],
+            ["assignment_token", "assignment_protocol", "capacity_wait"]
+        );
     }
 
     #[test]

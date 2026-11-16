@@ -406,6 +406,9 @@ impl DirectRunInsert<'_> {
             output_tokens: sea_orm::NotSet,
             total_tokens: sea_orm::NotSet,
             refusal_category: sea_orm::NotSet,
+            assignment_token: Set(None),
+            assignment_protocol: Set(0),
+            capacity_wait: Set(None),
         }
     }
 }

@@ -771,6 +771,9 @@ pub(crate) fn run_from_model(model: orm::agent_run::Model) -> Result<AgentRun, R
         assigned_at: model.assigned_at.map(utc),
         started_at: model.started_at.map(utc),
         ended_at: model.ended_at.map(utc),
+        assignment_token: model.assignment_token,
+        assignment_protocol: model.assignment_protocol,
+        capacity_wait: model.capacity_wait,
     })
 }
 
@@ -839,6 +842,11 @@ pub fn decode_run(row: &sqlx::postgres::PgRow, base: usize) -> Result<AgentRun, 
         assigned_at: row.try_get(base + 38)?,
         started_at: row.try_get(base + 39)?,
         ended_at: row.try_get(base + 40)?,
+        // NEWPIDASH-241 T1: native columns beyond the 41-column baseline
+        // (backward-compatible: missing columns decode as legacy)
+        assignment_token: row.try_get(base + 41).unwrap_or(None),
+        assignment_protocol: row.try_get(base + 42).unwrap_or(0),
+        capacity_wait: row.try_get(base + 43).unwrap_or(None),
     })
 }
 
@@ -2495,9 +2503,10 @@ mod tests {
     fn run_select_list_covers_all_columns_once() {
         let list = run_select_list();
         assert_eq!(list.split(", ").count(), agent_run::COLUMNS.len());
-        assert_eq!(agent_run::COLUMNS.len(), 42);
+        // NEWPIDASH-241 T1: +assignment_token/+assignment_protocol/+capacity_wait.
+        assert_eq!(agent_run::COLUMNS.len(), 45);
         assert!(list.starts_with(r#""agent_run"."id""#));
-        assert!(list.ends_with(r#""agent_run"."ended_at""#));
+        assert!(list.ends_with(r#""agent_run"."capacity_wait""#));
     }
 
     #[test]

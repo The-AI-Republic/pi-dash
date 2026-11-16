@@ -1,11 +1,16 @@
 mod activity_watchdog;
 pub mod drain_journal;
+pub mod execution;
 pub mod pidash_agent_ops;
 pub(crate) mod pidash_agent_reconcile;
 pub mod machine_control;
 pub mod observability;
+pub mod process_guard;
+pub mod receipt;
 pub mod reconnect_triggers;
 mod run_event_mirror;
+pub mod run_queue;
+pub mod run_queue_store;
 pub mod runner_instance;
 pub mod runner_out;
 pub mod state;

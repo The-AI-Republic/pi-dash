@@ -145,7 +145,7 @@ def create_agent_run(
             trigger, prompt_manifest, executor_kind, dispatch_attempts,
             cancel_requested_at, cancel_reason, tool_plan,
             terminal_hooks_applied_at, terminal_capacity_released_at,
-            phase_kind, agent_metadata, usage, pin_kind, failure_reason)
+            phase_kind, agent_metadata, usage, pin_kind, work_type)
            VALUES (%s,%s,%s,'{}','[]','',
                    %s,
                    NULL,'{}','',%s,NULL,

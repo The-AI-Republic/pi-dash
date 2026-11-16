@@ -89,7 +89,7 @@ pub const ASSIGNED_NEVER_STARTED_SECS: i64 = 180;
 /// `AttributeError` on `None.status`, so the caller surfaces it as
 /// [`FireError::OrphanedRun`] (task failure, no retry) rather than guessing.
 pub fn is_in_flight(last_run_id: Option<&Uuid>, last_run_status: Option<&str>) -> bool {
-    is_in_flight_at(last_run_id, last_run_status, None, None, None)
+    is_in_flight_at(last_run_id, last_run_status, None, None, None, None, None)
 }
 
 /// Same as [`is_in_flight`], but exempts an old `ASSIGNED` /
@@ -104,6 +104,8 @@ pub fn is_in_flight_at(
     assigned_at: Option<&DateTime<Utc>>,
     started_at: Option<&DateTime<Utc>>,
     now: Option<&DateTime<Utc>>,
+    capacity_wait: Option<&serde_json::Value>,
+    assignment_token: Option<Uuid>,
 ) -> bool {
     if last_run_id.is_none() {
         return false;
@@ -120,6 +122,17 @@ pub fn is_in_flight_at(
             if now_val.signed_duration_since(*assigned)
                 > chrono::Duration::seconds(ASSIGNED_NEVER_STARTED_SECS)
             {
+                // NEWPIDASH-241 T2: fresh authenticated same-attempt capacity
+                // waits remain protected beyond the cutoff.
+                if let (Some(cw), Some(now2)) = (capacity_wait, now) {
+                    if pidash_services::runner_runs::capacity::is_fresh_capacity_wait(
+                        cw,
+                        assignment_token,
+                        *now2,
+                    ) {
+                        return true;
+                    }
+                }
                 return false;
             }
         }
@@ -425,8 +438,7 @@ pub fn claim_select_sql() -> &'static str {
      b.tzid AS tzid, b.rrule AS rrule, b.rdates AS rdates, b.exdates AS exdates, \
      b.next_run_at AS next_run_at, b.last_run_id AS last_run_id, \
      b.last_error AS last_error, s.is_enabled AS scheduler_is_enabled, \
-     r.status AS last_run_status, r.assigned_at AS last_run_assigned_at, \
-     r.started_at AS last_run_started_at \
+     r.status AS last_run_status, r.assigned_at AS last_run_assigned_at, r.started_at AS last_run_started_at, r.capacity_wait AS last_run_capacity_wait, r.assignment_token AS last_run_assignment_token \
      FROM scheduler_bindings AS b \
      INNER JOIN schedulers AS s ON b.scheduler_id = s.id \
      LEFT JOIN agent_run AS r ON b.last_run_id = r.id \
@@ -540,6 +552,14 @@ pub fn claim_select_stmt(binding_id: Uuid) -> SelectStatement {
             Expr::col(("agent_run", "started_at")),
             Alias::new("last_run_started_at"),
         )
+        .expr_as(
+            Expr::col(("agent_run", "capacity_wait")),
+            Alias::new("last_run_capacity_wait"),
+        )
+        .expr_as(
+            Expr::col(("agent_run", "assignment_token")),
+            Alias::new("last_run_assignment_token"),
+        )
         .from("scheduler_bindings")
         .inner_join(
             "schedulers",
@@ -602,6 +622,8 @@ pub struct ClaimRow {
     pub last_run_status: Option<String>,
     pub last_run_assigned_at: Option<DateTime<Utc>>,
     pub last_run_started_at: Option<DateTime<Utc>>,
+    pub last_run_capacity_wait: Option<serde_json::Value>,
+    pub last_run_assignment_token: Option<Uuid>,
 }
 
 /// The re-fetched binding for dispatch: exactly the FK values the dispatcher
@@ -663,6 +685,9 @@ fn claim_row_from(row: &sea_orm::QueryResult) -> Result<ClaimRow, sea_orm::DbErr
         last_run_status: row.try_get::<Option<String>>("", "last_run_status")?,
         last_run_assigned_at: row.try_get::<Option<DateTime<Utc>>>("", "last_run_assigned_at")?,
         last_run_started_at: row.try_get::<Option<DateTime<Utc>>>("", "last_run_started_at")?,
+        last_run_capacity_wait: row
+            .try_get::<Option<serde_json::Value>>("", "last_run_capacity_wait")?,
+        last_run_assignment_token: row.try_get::<Option<Uuid>>("", "last_run_assignment_token")?,
     })
 }
 
@@ -813,6 +838,8 @@ pub async fn phase1_claim(
                     row.last_run_assigned_at.as_ref(),
                     row.last_run_started_at.as_ref(),
                     Some(now),
+                    row.last_run_capacity_wait.as_ref(),
+                    row.last_run_assignment_token,
                 ) =>
             {
                 tracing::info!(
@@ -1212,7 +1239,9 @@ mod tests {
             Some("assigned"),
             Some(&assigned),
             None,
-            Some(&now)
+            Some(&now),
+            None,
+            None
         ));
         // Exactly at the bound: still in flight (bound is >).
         assert!(is_in_flight_at(
@@ -1220,7 +1249,9 @@ mod tests {
             Some("assigned"),
             Some(&exactly),
             None,
-            Some(&now)
+            Some(&now),
+            None,
+            None
         ));
         // Old assigned never-started: NOT in flight.
         assert!(!is_in_flight_at(
@@ -1228,7 +1259,9 @@ mod tests {
             Some("assigned"),
             Some(&old),
             None,
-            Some(&now)
+            Some(&now),
+            None,
+            None
         ));
         // Old assigned but started (started_at Some): still in flight.
         let started = Some(now - chrono::Duration::seconds(5));
@@ -1237,7 +1270,9 @@ mod tests {
             Some("assigned"),
             Some(&old),
             started.as_ref(),
-            Some(&now)
+            Some(&now),
+            None,
+            None
         ));
         // Old assigned with no assigned_at: no exemption (conservative).
         assert!(is_in_flight_at(
@@ -1245,7 +1280,9 @@ mod tests {
             Some("assigned"),
             None,
             None,
-            Some(&now)
+            Some(&now),
+            None,
+            None
         ));
         // Other statuses unaffected even when old.
         assert!(is_in_flight_at(
@@ -1253,7 +1290,9 @@ mod tests {
             Some("running"),
             Some(&old),
             None,
-            Some(&now)
+            Some(&now),
+            None,
+            None
         ));
         // Backwards compat: is_in_flight still strict.
         assert!(is_in_flight(Some(&run), Some("assigned")));

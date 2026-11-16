@@ -74,6 +74,14 @@ pub struct Model {
     // Canonical failure taxonomy (PDASHOSS01-183, runner 0040):
     // `RunFailureReason` string, blank for non-failed runs.
     pub failure_reason: String,
+    // Dev-machine run queue T1 (NEWPIDASH-241, implementation.md §3):
+    // per-attempt identity, additive and nullable. Existing rows stay
+    // legacy (protocol 0, no token). Native SeaORM migration DB
+    // assignment_protocol SMALLINT NOT NULL DEFAULT 0 CHECK 0/1.
+    pub assignment_token: Option<Uuid>,
+    pub assignment_protocol: i16,
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub capacity_wait: Option<Json>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

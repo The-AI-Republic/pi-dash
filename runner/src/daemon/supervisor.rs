@@ -191,6 +191,28 @@ impl Supervisor {
             let shutdown = state.shutdown_notified();
             tokio::spawn(async move { engine.run(shutdown).await })
         });
+        // Durable FIFO coordinator (NEWPIDASH-241 T3): one SQLite store +
+        // fs2 lock under data_dir. Failure enters storage_blocked: Assigns
+        // fail closed (NACK, no execution) until restart with fixed storage.
+        let (run_coordinator, run_queue_blocked) = match crate::daemon::run_queue::Coordinator::new(
+            paths.data_dir.clone(),
+            config.daemon.max_concurrent_agent_runs,
+        ) {
+            Ok(c) => (Some(Arc::new(c)), false),
+            Err(e) => {
+                tracing::warn!("run queue storage_blocked: {e}");
+                (None, true)
+            }
+        };
+        // Durable receipt-before-ACK (T4): one SQLite store shared by every
+        // HttpLoop; a frame commits before any HTTP ACK leaves.
+        let run_receipt =
+            crate::daemon::receipt::ReceiptStore::open(paths.data_dir.join("run_receipts.sqlite3"))
+                .map(Arc::new)
+                .map_err(|e| {
+                    tracing::warn!("run receipts storage unavailable: {e}");
+                })
+                .ok();
         let spawn_ctx = RunnerSpawnCtx {
             engine: engine.clone(),
             local_chat: Arc::new(crate::ipc::pidash_agent_chat::PidashAgentChatProfile::new(
@@ -208,6 +230,9 @@ impl Supervisor {
             activation_lock: Arc::new(tokio::sync::Mutex::new(())),
             engine_ops_lock: Arc::new(tokio::sync::Mutex::new(())),
             pending_idle_restarts: Default::default(),
+            run_coordinator: run_coordinator.clone(),
+            run_queue_blocked,
+            run_receipt: run_receipt.clone(),
         };
 
         let ipc = IpcServer {
@@ -219,6 +244,7 @@ impl Supervisor {
             paths: paths.clone(),
             instances: ipc_instances,
             spawn_ctx: spawn_ctx.clone(),
+            run_coordinator: run_coordinator.clone(),
         };
         let ipc_handle = tokio::spawn(async move {
             if let Err(e) = ipc.run().await {
@@ -234,6 +260,11 @@ impl Supervisor {
         let mut replay_retry_handle: Option<tokio::task::JoinHandle<()>> = None;
         if !opts.offline {
             replay_drain_journal_once(&paths, &hello_runners).await;
+            // Legacy journal dispositions first, then SQLite outbox retry:
+            // managed terminal signals redeliver their exact payload.
+            if let Some(coord) = run_coordinator.as_ref() {
+                replay_terminal_outbox_once(coord, &hello_runners).await;
+            }
             if !drain_journal::load(&paths).is_empty() {
                 let replay_paths = paths.clone();
                 let replay_runners = hello_runners.clone();
@@ -250,6 +281,20 @@ impl Supervisor {
         for inst in &instances {
             let tasks = spawn_instance_tasks(inst, &spawn_ctx).await;
             spawn_ctx.register_tasks(inst.runner_id, tasks);
+        }
+        // Restart orphan sweep (NEWPIDASH-241 T6): waiting entries whose
+        // runner no longer exists can never be re-hydrated — durable-cancel
+        // them so they cannot block the FIFO forever. The cloud re-queues
+        // the run through the reaper.
+        if let Some(coord) = run_coordinator.as_ref() {
+            let live: std::collections::HashSet<uuid::Uuid> =
+                instances.iter().map(|i| i.runner_id).collect();
+            for entry in coord.waiting_entries() {
+                if !live.contains(&entry.runner_id) {
+                    tracing::warn!(run_id=%entry.run_id, "waiting entry for removed runner; durable cancel");
+                    let _ = coord.cancel_waiting(entry.run_id);
+                }
+            }
         }
 
         // Machine-level control session: lets the cloud push
@@ -339,7 +384,7 @@ impl Supervisor {
         // better than losing the entire shutdown sequence.
         if let Err(_elapsed) = tokio::time::timeout(
             Duration::from_secs(5),
-            drain_in_flight_runs(hello_runners.clone(), &paths),
+            drain_in_flight_runs(hello_runners.clone(), &paths, run_coordinator.clone()),
         )
         .await
         {
@@ -443,6 +488,15 @@ pub(crate) struct RunnerSpawnCtx {
     pub(crate) engine_ops_lock: Arc<tokio::sync::Mutex<()>>,
     /// Runners waiting to be restarted with new credentials once idle.
     pending_idle_restarts: Arc<std::sync::Mutex<std::collections::HashSet<uuid::Uuid>>>,
+    /// Durable FIFO coordinator (NEWPIDASH-241 T3). None only in unit tests
+    /// that never touch the queue; production always has one.
+    pub(crate) run_coordinator: Option<Arc<crate::daemon::run_queue::Coordinator>>,
+    /// True when the queue store failed to open (storage_blocked): Assigns
+    /// fail closed (NACK, no execution) until restart with fixed storage.
+    pub(crate) run_queue_blocked: bool,
+    /// Durable receipt-before-ACK store (NEWPIDASH-241 T4). Shared across
+    /// runners; None only in unit tests.
+    pub(crate) run_receipt: Option<Arc<crate::daemon::receipt::ReceiptStore>>,
 }
 
 /// How often a busy runner whose credentials changed is checked for idle.
@@ -1098,6 +1152,8 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
     let attach_working_dir = resolve_working_dir(inst);
     let inst_chat_active = inst.chat_active.clone();
     let inst_engine = ctx.engine.clone();
+    let inst_coordinator = ctx.run_coordinator.clone();
+    let inst_queue_blocked = ctx.run_queue_blocked;
     let h = tokio::spawn(async move {
         let run = RunnerLoop {
             runner_paths,
@@ -1116,6 +1172,8 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
             current_chat: None,
             local_chat_active: inst_chat_active,
             engine: inst_engine,
+            coordinator: inst_coordinator,
+            queue_blocked: inst_queue_blocked,
         };
         if let Err(e) = run.run().await {
             tracing::error!("runner loop exited: {e:#}");
@@ -1145,7 +1203,9 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
         )
         .with_state(inst.state.clone())
         .with_teardown_rx(inst.remove_tx.subscribe())
-        .with_reconnect_kick(inst.state.reconnect_notified());
+        .with_reconnect_kick(inst.state.reconnect_notified())
+        .with_receipt_store(ctx.run_receipt.clone())
+        .with_coordinator(ctx.run_coordinator.clone());
         let close_client = client.clone();
         let local_state = inst.state.clone();
         let daemon_state = ctx.daemon_state.clone();
@@ -1273,13 +1333,20 @@ async fn purge_cloud_deleted_runner(
 /// a serial loop (each attempt potentially walking through the shared
 /// reqwest Client's 60s timeout) would starve later runners entirely.
 ///
-/// Every in-flight run is journaled BEFORE the sends are attempted and
-/// removed only on a confirmed send, so a run whose `RunFailed` misses
+/// Every in-flight run is recorded BEFORE the sends are attempted and
+/// cleared only on a confirmed send, so a run whose `RunFailed` misses
 /// the 2s window (or a SIGKILL mid-drain) is replayed by the next
 /// daemon start instead of being silently dropped — a dropped signal
 /// leaves the cloud showing the run busy forever, pinned to a runner
-/// that no longer knows about it.
-async fn drain_in_flight_runs(runners: Arc<RwLock<HelloRunnerMap>>, paths: &Paths) -> usize {
+/// that no longer knows about it. The record splits by ownership:
+/// managed queue attempts persist their exact payload to the SQLite
+/// terminal outbox (coordinator-owned, retried verbatim on restart);
+/// legacy in-flight runs use the drain journal.
+async fn drain_in_flight_runs(
+    runners: Arc<RwLock<HelloRunnerMap>>,
+    paths: &Paths,
+    coord: Option<Arc<crate::daemon::run_queue::Coordinator>>,
+) -> usize {
     // Snapshot under the read lock so the lock is dropped before any
     // network I/O; concurrent writers (config reloads, etc.) are not
     // expected during shutdown but this keeps the contract clean.
@@ -1292,19 +1359,42 @@ async fn drain_in_flight_runs(runners: Arc<RwLock<HelloRunnerMap>>, paths: &Path
     };
     let now = Utc::now();
     const DETAIL: &str = "daemon shutdown requested";
-    let pending: Vec<drain_journal::PendingRunFailure> = snapshot
-        .iter()
-        .filter_map(|(runner_id, in_flight, _)| {
-            Some(drain_journal::PendingRunFailure {
+    // Split by ownership: managed queue attempts persist their exact
+    // DaemonRestart payload to the SQLite terminal outbox before sending;
+    // legacy in-flight runs use the drain journal (unchanged).
+    let mut managed: Vec<(uuid::Uuid, uuid::Uuid)> = Vec::new();
+    let mut pending: Vec<drain_journal::PendingRunFailure> = Vec::new();
+    for (runner_id, in_flight, _) in &snapshot {
+        let Some(run_id) = in_flight else {
+            continue;
+        };
+        let is_managed = coord.as_ref().is_some_and(|c| c.holds_run(*run_id));
+        if is_managed {
+            let msg = ClientMsg::RunFailed {
+                run_id: *run_id,
+                reason: FailureReason::DaemonRestart,
+                detail: Some(DETAIL.to_string()),
+                ended_at: now,
+                tokens: None,
+                model: None,
+            };
+            let payload = serde_json::to_vec(&msg).unwrap_or_default();
+            if let Some(c) = coord.as_ref() {
+                let key = format!("drain-{}", run_id);
+                let _ = c.persist_terminal(*run_id, &payload, &key);
+            }
+            managed.push((*runner_id, *run_id));
+        } else {
+            pending.push(drain_journal::PendingRunFailure {
                 runner_id: *runner_id,
-                run_id: (*in_flight)?,
+                run_id: *run_id,
                 reason: FailureReason::DaemonRestart,
                 detail: DETAIL.to_string(),
                 ended_at: now,
                 recorded_at: now,
-            })
-        })
-        .collect();
+            });
+        }
+    }
     // spawn_blocking keeps the sync fs I/O off the runtime workers and,
     // more importantly, keeps the caller's 5s shutdown deadline honest:
     // sync I/O has no await point for the timeout to fire at, so a
@@ -1369,6 +1459,14 @@ async fn drain_in_flight_runs(runners: Arc<RwLock<HelloRunnerMap>>, paths: &Path
         .into_iter()
         .flatten()
         .collect();
+    // Managed delivered terminals clear their SQLite outbox rows
+    // (coordinator owns clearing). Legacy rows were never journaled as
+    // managed, so clearing them here is a no-op for the journal path.
+    for run_id in &delivered {
+        if let Some(c) = coord.as_ref() {
+            let _ = c.complete_terminal(*run_id);
+        }
+    }
     // spawn_blocking for the same reasons as record_all above; it also
     // means the cleanup completes even if the caller's 5s deadline
     // drops this future between join_all and here.
@@ -1551,6 +1649,76 @@ async fn replay_drain_journal_once(paths: &Paths, runners: &Arc<RwLock<HelloRunn
         tracing::warn!("failed to update drain journal after replay: {e:#}");
     }
     delivered
+}
+
+/// Retry SQLite terminal-outbox records once at startup: managed queue
+/// attempts redeliver their exact persisted payload (same bytes/key),
+/// never re-executing. Records for removed runners are cleared (the
+/// cloud reaper handles the run). Runs redelivered in flight are
+/// resolved without a second signal.
+async fn replay_terminal_outbox_once(
+    coord: &crate::daemon::run_queue::Coordinator,
+    runners: &Arc<RwLock<HelloRunnerMap>>,
+) -> usize {
+    let pending = coord.terminal_pending();
+    if pending.is_empty() {
+        return 0;
+    }
+    let guard = runners.read().await;
+    let mut sends = Vec::new();
+    for entry in pending {
+        let Some(payload) = entry.pending_terminal_payload.clone() else {
+            let _ = coord.complete_terminal(entry.run_id);
+            continue;
+        };
+        let Some((out, state, _)) = guard.get(&entry.runner_id) else {
+            tracing::warn!(run_id=%entry.run_id, "dropping outbox terminal: runner no longer configured");
+            let _ = coord.complete_terminal(entry.run_id);
+            continue;
+        };
+        if *state.rx_in_flight.borrow() == Some(entry.run_id) {
+            tracing::info!(run_id=%entry.run_id, "dropping outbox terminal: run redelivered");
+            let _ = coord.complete_terminal(entry.run_id);
+            continue;
+        }
+        let out = out.clone();
+        sends.push(async move {
+            let msg: Result<ClientMsg, _> = serde_json::from_slice(&payload);
+            match msg {
+                Ok(m) => match send_run_failed_bounded(out, m, Duration::from_secs(10)).await {
+                    RunFailedSend::Delivered => {
+                        tracing::info!(run_id=%entry.run_id, "redelivered SQLite outbox terminal");
+                        let _ = coord.complete_terminal(entry.run_id);
+                        true
+                    }
+                    RunFailedSend::Failed(e) if is_permanent_run_failed_rejection(&e) => {
+                        tracing::warn!(run_id=%entry.run_id, "dropping outbox terminal: cloud rejected permanently: {e:#}");
+                        let _ = coord.complete_terminal(entry.run_id);
+                        false
+                    }
+                    RunFailedSend::Failed(e) => {
+                        tracing::warn!(run_id=%entry.run_id, "outbox retry failed, keeps terminal_pending: {e:#}");
+                        false
+                    }
+                    RunFailedSend::TimedOut => {
+                        tracing::warn!(run_id=%entry.run_id, "outbox retry timed out, keeps terminal_pending");
+                        false
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(run_id=%entry.run_id, "unparsable outbox payload; dropping record: {e:#}");
+                    let _ = coord.complete_terminal(entry.run_id);
+                    false
+                }
+            }
+        });
+    }
+    drop(guard);
+    futures_util::future::join_all(sends)
+        .await
+        .into_iter()
+        .filter(|d| *d)
+        .count()
 }
 
 /// How one replayed journal entry ended up.
@@ -1810,6 +1978,10 @@ struct RunnerLoop {
     /// The machine's Pi Dash Agent, for the current profile lane the
     /// free-quota classifier is tied to. Threaded into each `AssignWorker`.
     engine: Arc<crate::pidash_agent::manager::PidashAgentManager>,
+    /// Machine FIFO coordinator (NEWPIDASH-241). None only in tests.
+    coordinator: Option<Arc<crate::daemon::run_queue::Coordinator>>,
+    /// True when the queue store is blocked (fail closed, no execution).
+    queue_blocked: bool,
 }
 
 struct CurrentRun {
@@ -1949,7 +2121,112 @@ impl RunnerLoop {
         tx
     }
 
+    /// Reserve this runner for a run and spawn its worker. Shared by the
+    /// Assign arm and restart re-hydration so outer-loop semantics (early
+    /// `in_flight` stamp, single-tenant guard, completion wakeup) cannot
+    /// diverge between the two paths.
+    async fn reserve_and_spawn(
+        &mut self,
+        run_id: uuid::Uuid,
+        prompt: String,
+        repo_url: Option<String>,
+        expected_codex_model: Option<String>,
+    ) {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (done_tx, done_rx) = oneshot::channel();
+        self.current_run = Some(CurrentRun {
+            run_id,
+            cancel: cancel.clone(),
+            done_rx,
+        });
+        self.state
+            .set_current_run(Some(CurrentRunSummary {
+                run_id,
+                thread_id: None,
+                status: "preparing".to_string(),
+                started_at: Utc::now(),
+                events: 0,
+            }))
+            .await;
+        let runner_paths = self.runner_paths.clone();
+        let daemon_paths = self.paths.clone();
+        let runner_config = self.runner_config.clone();
+        let state = self.state.clone();
+        let approvals = self.approvals.clone();
+        let out = self.out.clone();
+        let engine = self.engine.clone();
+        let coordinator = self.coordinator.clone();
+        let queue_blocked = self.queue_blocked;
+        tokio::spawn(async move {
+            let mut worker = AssignWorker {
+                runner_paths,
+                daemon_paths,
+                runner_config,
+                state,
+                approvals,
+                out,
+                cancel,
+                engine,
+                coordinator,
+                queue_blocked,
+            };
+            if let Err(e) = worker
+                .run(run_id, prompt, repo_url, expected_codex_model)
+                .await
+            {
+                tracing::error!("run {run_id} failed: {e:#}");
+                let _ = worker
+                    .out
+                    .send(ClientMsg::RunFailed {
+                        run_id,
+                        reason: FailureReason::Internal,
+                        detail: Some(format!("{e:#}")),
+                        ended_at: Utc::now(),
+                        tokens: None,
+                        model: None,
+                    })
+                    .await;
+                worker.state.set_current_run(None).await;
+            }
+            let _ = done_tx.send(());
+        });
+    }
+
     async fn run(mut self) -> Result<()> {
+        // Restart re-hydration (NEWPIDASH-241 T6): awaiting entries that
+        // survived a crash become this loop's current run again — the
+        // worker blocks oldest-first and never replays started work
+        // (non-waiting phases never load). Malformed payloads fail closed
+        // (durable cancel, no execution).
+        if let Some(coord) = self.coordinator.as_ref()
+            && let Some(entry) = coord.waiting_for(self.runner_paths.runner_id)
+        {
+            let parsed: Result<serde_json::Value, _> =
+                serde_json::from_slice(&entry.assignment_payload);
+            match parsed {
+                Ok(v) if v.get("prompt").and_then(|p| p.as_str()).is_some() => {
+                    let prompt = v
+                        .get("prompt")
+                        .and_then(|p| p.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let repo_url = v
+                        .get("repo_url")
+                        .and_then(|r| r.as_str())
+                        .map(|s| s.to_string());
+                    let model = v
+                        .get("expected_codex_model")
+                        .and_then(|m| m.as_str())
+                        .map(|s| s.to_string());
+                    self.reserve_and_spawn(entry.run_id, prompt, repo_url, model)
+                        .await;
+                }
+                _ => {
+                    tracing::error!(run_id=%entry.run_id, "waiting payload unparsable; durable cancel, no execution");
+                    let _ = coord.cancel_waiting(entry.run_id);
+                }
+            }
+        }
         loop {
             let frame = {
                 let inbound = self.inbound.recv();
@@ -1959,7 +2236,14 @@ impl RunnerLoop {
                 tokio::select! {
                     biased;
                     () = wait_done(&mut self.current_run) => {
-                        self.current_run = None;
+                        // Machine FIFO: release the slot so the oldest
+                        // waiting runner can start (coordinator owns
+                        // reservation clearing; worker no longer clears).
+                        if let Some(finished) = self.current_run.take()
+                            && let Some(coord) = self.coordinator.as_ref()
+                        {
+                            let _ = coord.complete(finished.run_id);
+                        }
                         continue;
                     }
                     () = wait_chat_done(&mut self.current_chat) => {
@@ -2061,6 +2345,7 @@ impl RunnerLoop {
                     prompt,
                     repo_url,
                     expected_codex_model,
+                    assignment_token,
                     ..
                 } => {
                     // Cross-lane exclusion: a runner has one working dir shared
@@ -2117,77 +2402,67 @@ impl RunnerLoop {
                         );
                         continue;
                     }
-                    let cancel = tokio_util::sync::CancellationToken::new();
-                    let (done_tx, done_rx) = oneshot::channel();
-                    self.current_run = Some(CurrentRun {
-                        run_id,
-                        cancel: cancel.clone(),
-                        done_rx,
-                    });
-                    // Stamp ``rx_in_flight = Some(run_id)`` synchronously, before
-                    // the worker does anything slow. The cloud put this run
-                    // into a BUSY status the moment it sent the Assign;
-                    // ``reap_stale_busy_runs`` (services/session_service.py)
-                    // will fail any BUSY run whose runner Hellos with
-                    // ``in_flight_run=null``. Without this early stamp, a
-                    // session reconnect during workspace setup (which can
-                    // take 30s+ for a fresh clone) reports null truthfully
-                    // and the run gets reaped before it ever starts.
-                    // The worker re-stamps a fuller summary at the
-                    // ``set_current_run`` site below; same run_id, so the
-                    // watch channel doesn't toggle in/out of None.
-                    self.state
-                        .set_current_run(Some(CurrentRunSummary {
+                    // Durable held check: covers the startup window before
+                    // re-hydration reserves the runner (current_run is still
+                    // None while the waiting entry already exists).
+                    if let Some(coord) = self.coordinator.as_ref()
+                        && coord.runner_held(self.runner_paths.runner_id)
+                    {
+                        tracing::warn!(%run_id, "assign while runner already holds an attempt; rejecting");
+                        self.nack_assign(
                             run_id,
-                            thread_id: None,
-                            status: "preparing".to_string(),
-                            started_at: Utc::now(),
-                            events: 0,
+                            "assign rejected: runner already holds an attempt".to_string(),
+                        );
+                        continue;
+                    }
+                    // Machine FIFO (NEWPIDASH-241): storage failure fails
+                    // closed — NACK so the cloud re-queues, never execute.
+                    if self.queue_blocked {
+                        tracing::warn!(%run_id, "assign while run queue storage_blocked; rejecting");
+                        self.nack_assign(
+                            run_id,
+                            "run queue storage_blocked: durable queue unavailable".to_string(),
+                        );
+                        continue;
+                    }
+                    // Durable enqueue before any workspace prep: allocate
+                    // the FIFO sequence and persist the payload. The worker
+                    // below holds this runner without starting until the
+                    // coordinator admits it (oldest-first).
+                    if let Some(coord) = self.coordinator.as_ref() {
+                        let payload = serde_json::to_vec(&serde_json::json!({
+                            "prompt": prompt,
+                            "repo_url": repo_url,
+                            "expected_codex_model": expected_codex_model,
                         }))
-                        .await;
-                    let runner_paths = self.runner_paths.clone();
-                    let daemon_paths = self.paths.clone();
-                    let runner_config = self.runner_config.clone();
-                    let state = self.state.clone();
-                    let approvals = self.approvals.clone();
-                    let out = self.out.clone();
-                    let engine = self.engine.clone();
-                    tokio::spawn(async move {
-                        let mut worker = AssignWorker {
-                            runner_paths,
-                            daemon_paths,
-                            runner_config,
-                            state,
-                            approvals,
-                            out,
-                            cancel,
-                            engine,
-                        };
-                        if let Err(e) = worker
-                            .run(run_id, prompt, repo_url, expected_codex_model)
-                            .await
-                        {
-                            tracing::error!("run {run_id} failed: {e:#}");
-                            let _ = worker
-                                .out
-                                .send(ClientMsg::RunFailed {
-                                    run_id,
-                                    reason: FailureReason::Internal,
-                                    detail: Some(format!("{e:#}")),
-                                    ended_at: Utc::now(),
-                                    tokens: None,
-                                    model: None,
-                                })
-                                .await;
-                            worker.state.set_current_run(None).await;
+                        .unwrap_or_default();
+                        if let Err(e) = coord.enqueue_assign(
+                            self.runner_paths.runner_id,
+                            run_id,
+                            assignment_token,
+                            payload,
+                        ) {
+                            tracing::error!(%run_id, error = %e, "durable enqueue failed; rejecting");
+                            self.nack_assign(
+                                run_id,
+                                format!("run queue storage_blocked: enqueue failed: {e}"),
+                            );
+                            continue;
                         }
-                        let _ = done_tx.send(());
-                    });
+                    }
+                    self.reserve_and_spawn(run_id, prompt, repo_url, expected_codex_model)
+                        .await;
                 }
                 ServerMsg::Cancel { run_id, reason } => {
                     tracing::info!(%run_id, ?reason, "cancel received");
                     if let Some(run) = &self.current_run {
                         if run.run_id == run_id {
+                            // Durable cancel first (waiting runs must never
+                            // start workspace prep or an agent), then signal
+                            // the worker (blocked or executing) to stop.
+                            if let Some(coord) = self.coordinator.as_ref() {
+                                let _ = coord.cancel_waiting(run_id);
+                            }
                             run.cancel.cancel();
                         } else {
                             tracing::warn!(
@@ -3760,6 +4035,9 @@ struct AssignWorker {
     /// free-quota classifier is tied to. Read live per event, so a profile
     /// refresh mid-run still gates correctly.
     engine: Arc<crate::pidash_agent::manager::PidashAgentManager>,
+    /// Machine FIFO coordinator (NEWPIDASH-241). None only in tests.
+    coordinator: Option<Arc<crate::daemon::run_queue::Coordinator>>,
+    queue_blocked: bool,
 }
 
 struct RunMetadata {
@@ -3812,6 +4090,25 @@ impl AssignWorker {
         repo_url: Option<String>,
         expected_codex_model: Option<String>,
     ) -> Result<()> {
+        // Machine FIFO gate (NEWPIDASH-241 T6): hold this runner without
+        // workspace preparation or agent start until the coordinator
+        // admits it (oldest-first). Waiting cancellation never reaches
+        // workspace prep or an agent. Storage failure fails closed.
+        if self.queue_blocked {
+            anyhow::bail!("run queue storage_blocked: durable queue unavailable");
+        }
+        if let Some(coord) = self.coordinator.as_ref() {
+            match coord.admit_blocking(run_id, &self.cancel).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    // Cancelled while waiting: no workspace prep, no agent,
+                    // no RunFailed (cancel already acked by RunnerLoop).
+                    tracing::info!(%run_id, "assign cancelled while waiting for machine capacity");
+                    return Ok(());
+                }
+                Err(e) => anyhow::bail!("queue admission failed: {e}"),
+            }
+        }
         self.handle_assign(run_id, prompt, repo_url, expected_codex_model)
             .await
     }
@@ -5022,6 +5319,9 @@ mod tests {
             activation_lock: Arc::new(tokio::sync::Mutex::new(())),
             engine_ops_lock: Arc::new(tokio::sync::Mutex::new(())),
             pending_idle_restarts: Default::default(),
+            run_coordinator: None,
+            run_queue_blocked: false,
+            run_receipt: None,
         }
     }
 
@@ -5634,6 +5934,8 @@ mod tests {
                 approvals: ApprovalRouter::new(),
                 out: RunnerOut::new(config.runner_id, tx),
                 cancel: tokio_util::sync::CancellationToken::new(),
+                coordinator: None,
+                queue_blocked: false,
             };
             worker
                 .run(
@@ -6054,7 +6356,7 @@ mod tests {
                 .collect(),
         ));
 
-        let sent = drain_in_flight_runs(runners, &paths).await;
+        let sent = drain_in_flight_runs(runners, &paths, None).await;
         assert_eq!(sent, 1, "exactly one runner had an in-flight run");
         assert!(
             drain_journal::load(&paths).is_empty(),
@@ -6116,7 +6418,7 @@ mod tests {
                 .collect(),
         ));
 
-        let sent = drain_in_flight_runs(runners, &paths).await;
+        let sent = drain_in_flight_runs(runners, &paths, None).await;
         assert_eq!(sent, 0);
         assert!(drain_journal::load(&paths).is_empty());
         let stray =
@@ -6167,7 +6469,7 @@ mod tests {
                 .collect(),
         ));
 
-        let sent = drain_in_flight_runs(runners, &paths).await;
+        let sent = drain_in_flight_runs(runners, &paths, None).await;
         assert_eq!(sent, 0, "send must fail with a dropped receiver");
 
         let journal = drain_journal::load(&paths);
@@ -6408,6 +6710,8 @@ mod tests {
             out: RunnerOut::new(config.runner_id, tx),
             cancel: tokio_util::sync::CancellationToken::new(),
             engine,
+            coordinator: None,
+            queue_blocked: false,
         };
         let run_id = uuid::Uuid::new_v4();
         let hist = HistoryWriter::open(&runner_paths, run_id).await.unwrap();
