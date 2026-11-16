@@ -10,6 +10,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
+import { platform } from "../../../../core/platform/index.js";
 import { AssistantLayout } from "../../../../features/assistant/components/AssistantLayout.js";
 
 export const Route = createFileRoute("/$ws/_gated/assistant")({
@@ -18,6 +19,13 @@ export const Route = createFileRoute("/$ws/_gated/assistant")({
   // bundle — this loader only runs on assistant navigation, after first
   // paint. The loader still resolves before render, as before.
   loader: async ({ context, params }) => {
+    // On the desktop the page is the local chat, which reads no server
+    // threads (NEWPIDASH-300); prefetching them would still be a wasted
+    // server read on every navigation. The check is inline against the
+    // platform seam (the same test as core/platform/local-chat.ts) because
+    // this loader's module ships with the route tree: a dynamic import of
+    // the predicate would cost more eager bytes than the check itself.
+    if (platform.localChat !== undefined) return undefined;
     const { assistantThreadsQueryOptions } = await import("../../../../features/assistant/api/queries.js");
     return context.queryClient
       .ensureQueryData(assistantThreadsQueryOptions(context.apiClient, params.ws))
