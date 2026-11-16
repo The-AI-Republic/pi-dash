@@ -503,15 +503,17 @@ async fn decide(
         if action != "reconcile" {
             return Ok(("legacy_in_flight".to_string(), None));
         }
-        let is_assigned = locked.status == AgentRunStatus::Assigned.value()
-            || locked.status == "waiting_for_worktree";
+        // Django oracle requires exactly ASSIGNED for adoption (not
+        // waiting_for_worktree): a legacy attempt whose worktree is pending
+        // stays legacy_in_flight until it reaches assigned.
+        let is_assigned = locked.status == AgentRunStatus::Assigned.value();
         let cw_phase = locked
             .capacity_wait
             .as_ref()
             .and_then(|v| v.get("phase"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        if !is_assigned || cw_phase == "preparing" {
+        if !is_assigned || cw_phase == cap::PHASE_PREPARING {
             return Ok(("legacy_in_flight".to_string(), None));
         }
         let new_token = Uuid::new_v4();

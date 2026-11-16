@@ -570,14 +570,13 @@ async fn apply_capacity_snapshot(
         });
     if let Some(q) = snapshot_dict.get("queued_at") {
         if !q.is_null() {
-            let s = q.as_str().unwrap_or("");
-            if s.is_empty() || cap::parse_uuid(&Value::String(s.to_owned())).is_some() {
-                // actually need RFC3339 check via parse helper
-                // Use chrono parse
-                let norm = s.replace('Z', "+00:00");
-                if chrono::DateTime::parse_from_rfc3339(&norm).is_err() {
-                    return Ok(status_entry.clone());
-                }
+            let Some(s) = q.as_str() else {
+                return Ok(status_entry.clone());
+            };
+            // queued_at is RFC3339, never a UUID — validate timestamp only.
+            let norm = s.replace('Z', "+00:00");
+            if chrono::DateTime::parse_from_rfc3339(&norm).is_err() {
+                return Ok(status_entry.clone());
             }
             q_at = Some(s.to_owned());
         }
