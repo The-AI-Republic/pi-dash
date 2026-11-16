@@ -296,7 +296,13 @@ impl Supervisor {
             if let Some(coord) = run_coordinator.as_ref() {
                 replay_terminal_outbox_once(coord, &hello_runners).await;
             }
-            if !drain_journal::load(&paths).is_empty() {
+            // Always-on retry loop (NEWPIDASH-251): normal RunFailed
+            // sends journaled mid-run (not only shutdown drains) must
+            // replay without waiting for the next daemon start. The
+            // loop exits on its own within one 60s tick once the
+            // journal is empty, so spawning it unconditionally costs
+            // one short-lived task.
+            {
                 let replay_paths = paths.clone();
                 let replay_runners = hello_runners.clone();
                 let replay_previous = previous_exit.clone();
@@ -5367,8 +5373,53 @@ impl AssignWorker {
     }
 
     async fn send(&self, msg: ClientMsg) {
+        // Clone the journal-relevant fields BEFORE the send consumes
+        // `msg`: an undelivered RunFailed (NEWPIDASH-251) would
+        // otherwise be discarded with only a warn log, leaving the
+        // run non-terminal cloud-side forever. The clone is cheap
+        // (RunFailed carries one short detail string) and only made
+        // for that variant.
+        let failed_signal: Option<(uuid::Uuid, FailureReason, DateTime<Utc>, Option<String>)> =
+            match &msg {
+                ClientMsg::RunFailed {
+                    run_id,
+                    reason,
+                    detail,
+                    ended_at,
+                    ..
+                } => Some((*run_id, *reason, *ended_at, detail.clone())),
+                _ => None,
+            };
         if let Err(err) = self.out.send(msg).await {
             tracing::warn!(error = %err, "failed to send runner lifecycle message");
+            if let Some((run_id, reason, ended_at, detail)) = failed_signal {
+                // Journal the signal so the (always-on) replay loop
+                // redelivers it until the cloud acknowledges; the
+                // server's first-writer-wins finalize makes a late
+                // redelivery after a sweep reap a no-op ack.
+                let entry = drain_journal::PendingRunFailure {
+                    runner_id: self.out.runner_id(),
+                    run_id,
+                    reason,
+                    detail: detail.clone().unwrap_or_default(),
+                    ended_at,
+                    recorded_at: Utc::now(),
+                    trigger: None,
+                    previous_exit: None,
+                };
+                let journal_paths = self.daemon_paths.clone();
+                match tokio::task::spawn_blocking(move || {
+                    drain_journal::record_all(&journal_paths, std::slice::from_ref(&entry))
+                })
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        tracing::warn!("failed to journal undelivered RunFailed: {e:#}")
+                    }
+                    Err(e) => tracing::warn!("drain journal task panicked: {e:#}"),
+                }
+            }
         }
     }
 }
@@ -6759,6 +6810,129 @@ mod tests {
         assert_eq!(
             journal[0].detail,
             "daemon shutdown requested (SIGTERM; previous exit: oom-kill)"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn undelivered_run_failed_is_journaled_by_assign_worker_send() {
+        // NEWPIDASH-251: a normal (non-drain) RunFailed whose send
+        // exhausts its retries must land in the journal so the
+        // replay loop redelivers it, not be discarded with a warn.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        paths.ensure().unwrap();
+        let config = runner_config("journaltest", "WEB", tmp.path().join("wd"));
+        let runner_paths = paths.for_runner(config.runner_id);
+        runner_paths.ensure().unwrap();
+        let (out_tx, out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+        drop(out_rx); // force every send to fail
+        let worker = AssignWorker {
+            runner_paths,
+            daemon_paths: paths.clone(),
+            runner_config: config.clone(),
+            state: StateHandle::new(Config {
+                engine: Default::default(),
+                auth: Default::default(),
+                version: 2,
+                daemon: Default::default(),
+                runners: vec![config.clone()],
+                cli: None,
+            }),
+            approvals: ApprovalRouter::new(),
+            out: RunnerOut::new(config.runner_id, out_tx),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            engine: crate::pidash_agent::manager::PidashAgentManager::new(
+                None,
+                paths.clone(),
+                WorkspaceTokens::default(),
+                None,
+            ),
+            coordinator: None,
+            queue_blocked: false,
+        };
+        let run_id = uuid::Uuid::new_v4();
+        let ended_at = Utc::now();
+        worker
+            .send(ClientMsg::RunFailed {
+                run_id,
+                reason: FailureReason::AgentCrash,
+                detail: Some("timed out waiting for muse exec's run.lifecycle.started record".into()),
+                ended_at,
+                tokens: None,
+                model: None,
+            })
+            .await;
+
+        let journal = drain_journal::load(&paths);
+        assert_eq!(journal.len(), 1, "undelivered RunFailed must be journaled");
+        assert_eq!(journal[0].runner_id, config.runner_id);
+        assert_eq!(journal[0].run_id, run_id);
+        assert!(matches!(journal[0].reason, FailureReason::AgentCrash));
+        assert_eq!(
+            journal[0].detail,
+            "timed out waiting for muse exec's run.lifecycle.started record"
+        );
+        assert_eq!(journal[0].ended_at, ended_at);
+        assert!(journal[0].trigger.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delivered_run_failed_is_not_journaled() {
+        // The healthy path journals nothing: a delivered RunFailed
+        // leaves the journal empty so replay has nothing to do.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        paths.ensure().unwrap();
+        let config = runner_config("healthytest", "WEB", tmp.path().join("wd"));
+        let runner_paths = paths.for_runner(config.runner_id);
+        runner_paths.ensure().unwrap();
+        let (out_tx, mut out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+        let worker = AssignWorker {
+            runner_paths,
+            daemon_paths: paths.clone(),
+            runner_config: config.clone(),
+            state: StateHandle::new(Config {
+                engine: Default::default(),
+                auth: Default::default(),
+                version: 2,
+                daemon: Default::default(),
+                runners: vec![config.clone()],
+                cli: None,
+            }),
+            approvals: ApprovalRouter::new(),
+            out: RunnerOut::new(config.runner_id, out_tx),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            engine: crate::pidash_agent::manager::PidashAgentManager::new(
+                None,
+                paths.clone(),
+                WorkspaceTokens::default(),
+                None,
+            ),
+            coordinator: None,
+            queue_blocked: false,
+        };
+        worker
+            .send(ClientMsg::RunFailed {
+                run_id: uuid::Uuid::new_v4(),
+                reason: FailureReason::Timeout,
+                detail: Some("agent stalled".into()),
+                ended_at: Utc::now(),
+                tokens: None,
+                model: None,
+            })
+            .await;
+        // The send went out on the channel (delivered).
+        let env = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            out_rx.recv(),
+        )
+        .await
+        .expect("timed out waiting for RunFailed")
+        .expect("channel closed before RunFailed arrived");
+        assert!(matches!(env.body, ClientMsg::RunFailed { .. }));
+        assert!(
+            drain_journal::load(&paths).is_empty(),
+            "delivered RunFailed must not be journaled"
         );
     }
 
