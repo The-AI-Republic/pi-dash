@@ -2,11 +2,12 @@
 //!
 //! Linux adapter is verified: anchor process in its own session/group
 //! (setsid, distinct pid per scope) + starttime identity from
-//! /proc/<pid>/stat + /proc pgrp scan. macOS anchor spawn uses setsid
-//! but identity stays None (no /proc), so every verify is uncertain ->
-//! fail closed with diagnostic; a sysctl kinfo_proc adapter is pending
-//! native macOS coverage (not claimed as verified). Windows Job Object
-//! is likewise pending: every verify is uncertain -> fail closed.
+//! /proc/<pid>/stat + /proc pgrp scan. macOS adapter is verified via
+//! `ps` (no new dependencies): start-time identity from `ps -o lstart`
+//! plus `ps -A -o pgid` group scan, same contract as Linux (verified on
+//! native macOS CI). Windows Job Object is pending: every verify is
+//! uncertain -> fail closed (the runner crate forbids unsafe_code, so
+//! the Job helper needs a pidash-ipc FFI carve-out; tracked separately).
 //! Unknown teardown never silently releases a slot.
 //!
 //! Guard scope records + stopped receipts; uncertain teardown blocks admission,
@@ -112,11 +113,25 @@ impl ProcessGuard {
                 }
             }
         } else if cfg!(target_os = "macos") {
-            // macOS: try reading /proc fallback or sysctl; if unavailable, fail closed
+            // macOS: same contract as Linux (ps start-time identity +
+            // pgid scan): live + members -> uncertain; dead with prior
+            // identity -> verified; unknown/reused -> fail closed.
             match read_anchor_identity(scope.anchor_pid) {
-                Some(_) if group_has_members(scope.anchor_pid) => "uncertain",
-                Some(_) => "verified",
-                None => "uncertain",
+                Some(current) if scope.anchor_identity.as_ref() == Some(&current) => {
+                    if group_has_members(scope.anchor_pid) {
+                        "uncertain"
+                    } else {
+                        "verified"
+                    }
+                }
+                Some(_) => "uncertain",
+                None => {
+                    if scope.anchor_identity.is_some() {
+                        "verified"
+                    } else {
+                        "uncertain"
+                    }
+                }
             }
         } else if cfg!(target_os = "windows") {
             // Windows Job Object: would check handle via Job; stub to fail closed if unknown
@@ -174,8 +189,20 @@ fn read_anchor_identity(pid: u32) -> Option<String> {
     }
     #[cfg(target_os = "macos")]
     {
-        // macOS: try /proc fallback (not present) then bail
-        None
+        // macOS: start time from `ps -o lstart` is stable for one pid and
+        // changes on PID reuse, so it serves as the anchor identity.
+        // No new dependencies; `ps` failure (pid gone) means no identity.
+        let out = std::process::Command::new("ps")
+            .args(["-o", "lstart=", "-p", &pid.to_string()])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if s.is_empty() { None } else { Some(s) }
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
@@ -252,7 +279,34 @@ fn group_has_members(anchor_pid: u32) -> bool {
         // Fallback when /proc is unreadable: anchor-alive means members.
         std::path::Path::new(&format!("/proc/{anchor_pid}")).exists()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        // macOS: scan `ps -A -o pgid=` for the anchor's process group.
+        // Errors fail closed (unknown group state is uncertain).
+        let out = std::process::Command::new("ps")
+            .args(["-A", "-o", "pgid="])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output();
+        let Ok(out) = out else {
+            return true;
+        };
+        if !out.status.success() {
+            return true;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            if let Ok(pgrp) = line.trim().parse::<u32>() {
+                if pgrp == anchor_pid {
+                    return true;
+                }
+            }
+        }
+        // No process in the group found: empty unless the anchor itself
+        // is still alive (ps race) — anchor-alive means members.
+        read_anchor_identity(anchor_pid).is_some()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         // Fail closed: unknown group state is uncertain.
         true
@@ -291,6 +345,25 @@ mod tests {
         assert!(r.is_err(), "live anchor group must block release");
         assert!(r.unwrap_err().contains("uncertain"));
         // Cleanup: kill anchor so the 30s sleep does not linger.
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn live_group_is_uncertain_on_macos() {
+        let mut g = ProcessGuard::new();
+        let scope = g.spawn_scope(Uuid::new_v4());
+        let pid = g.scopes.get(&scope).unwrap().anchor_pid;
+        assert!(
+            group_has_members(pid),
+            "live anchor group has members (ps pgid scan)"
+        );
+        let r = g.verify_teardown(scope);
+        assert!(r.is_err(), "live anchor group must block release");
+        assert!(r.unwrap_err().contains("uncertain"));
         let _ = nix::sys::signal::kill(
             nix::unistd::Pid::from_raw(pid as i32),
             nix::sys::signal::Signal::SIGKILL,
