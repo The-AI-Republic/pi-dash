@@ -35,7 +35,9 @@ pub struct ProcessGuard {
 }
 
 impl Default for ProcessGuard {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 impl ProcessGuard {
     pub fn new() -> Self {
