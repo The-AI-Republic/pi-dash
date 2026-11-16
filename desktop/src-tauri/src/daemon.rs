@@ -89,7 +89,7 @@ impl DaemonPaths {
     /// The daemon's engine home for `account`:
     /// `<daemon data>/engine/<account>/codex-home` (design §5), keyed like
     /// the runner's `engine::codex_config::account_dir_name`.
-    pub fn engine_home(&self, account: Option<&str>) -> PathBuf {
+    pub fn pidash_agent_home(&self, account: Option<&str>) -> PathBuf {
         self.data_dir
             .join("engine")
             .join(account_dir_name(account))
@@ -521,7 +521,7 @@ pub async fn daemon_engine_status() -> Result<EngineStatusInfo, String> {
     }
 }
 
-/// The owner's "Pause the built-in engine" switch for this computer
+/// The owner's "Pause the Pi Dash Agent" switch for this computer
 /// (design §8). The daemon asks the server and answers with the engine
 /// status, pause state included.
 #[tauri::command]
@@ -556,7 +556,7 @@ pub async fn daemon_engine_settings_set(
     }
 }
 
-/// Turn the built-in engine on for a project (design §5).
+/// Turn the Pi Dash Agent on for a project (design §5).
 #[tauri::command]
 pub async fn daemon_engine_runner_add(
     workspace: String,
@@ -593,6 +593,24 @@ pub async fn daemon_credentials_reload() -> Result<(), String> {
     }
 }
 
+/// Ask the daemon to retry its cloud connections now (PIDESKAPP-181): cuts
+/// every runner's backoff wait short and starts the schedule over, so the
+/// built-in agent comes back within seconds after an outage instead of
+/// waiting out a backoff that can be hours long. Best-effort — the webview
+/// calls this on window focus, network recovery and Run, and ignores errors
+/// (no daemon, or an older daemon that does not know the verb).
+#[tauri::command]
+pub async fn daemon_reconnect() -> Result<(), String> {
+    reconnect_at(&socket()?).await.map_err(|e| e.message())
+}
+
+pub async fn reconnect_at(socket: &Path) -> Result<(), CallError> {
+    match call_at(socket, Request::Reconnect { runner: None }, CALL_TIMEOUT).await? {
+        Response::Ack => Ok(()),
+        other => Err(CallError::Failed(unexpected(&other))),
+    }
+}
+
 /// One `[[runner]]` block of the daemon, without anything secret.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct LocalRunner {
@@ -601,7 +619,7 @@ pub struct LocalRunner {
     pub workspace_slug: Option<String>,
     pub project_slug: Option<String>,
     pub working_dir: PathBuf,
-    /// `agent.kind`: `engine` for the built-in engine.
+    /// `agent.kind`: `engine` for the Pi Dash Agent.
     pub agent: String,
 }
 
@@ -988,7 +1006,7 @@ mod tests {
             runtime_dir: "/r".into(),
         };
         assert_eq!(
-            paths.engine_home(Some("u-1")),
+            paths.pidash_agent_home(Some("u-1")),
             PathBuf::from("/d/engine/u-1/codex-home")
         );
         assert_eq!(paths.socket(), PathBuf::from("/r/pidash.sock"));
@@ -1110,5 +1128,46 @@ mod tests {
         )
         .await;
         assert_eq!(probe_hello(&new).await, HelloProbe::Answered(Box::new(h)));
+    }
+
+    /// Reconnect over a real socket: the stub must see `Reconnect` (with no
+    /// runner selector), an `Ack` is success, and a daemon error is a
+    /// failure the Tauri command maps to a string.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reconnect_over_the_socket() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        async fn serve(socket: PathBuf, answer: serde_json::Value) {
+            let listener = UnixListener::bind(&socket).unwrap();
+            tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                assert!(line.contains("\"method\":\"reconnect\""), "{line}");
+                assert!(!line.contains("runner"), "{line}");
+                let mut bytes = serde_json::to_vec(&answer).unwrap();
+                bytes.push(b'\n');
+                reader.get_mut().write_all(&bytes).await.unwrap();
+            });
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let ok = dir.path().join("ok.sock");
+        serve(ok.clone(), serde_json::to_value(Response::Ack).unwrap()).await;
+        assert_eq!(reconnect_at(&ok).await, Ok(()));
+
+        let err = dir.path().join("err.sock");
+        serve(
+            err.clone(),
+            serde_json::json!({"result": "error", "data": {"code": 400, "message": "unknown method"}}),
+        )
+        .await;
+        assert!(matches!(
+            reconnect_at(&err).await,
+            Err(CallError::Failed(_))
+        ));
     }
 }

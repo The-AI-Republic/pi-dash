@@ -41,8 +41,8 @@
 //!
 //! Reused, never redefined: `AgentRunStatus`
 //! (`pidash_types::runner_runs`), `AgentExecutorKind`
-//! (`pidash_types::dispatch`), `effective_executor_for_issue`
-//! (`crate::dispatch`), and the `Runner` status/provisioning
+//! (`pidash_types::agent_runs`), `effective_executor_for_issue`
+//! (`crate::run_creation`), and the `Runner` status/provisioning
 //! values + `MAX_PER_USER`
 //! (`pidash_db::runner_enroll::columns`).
 //!

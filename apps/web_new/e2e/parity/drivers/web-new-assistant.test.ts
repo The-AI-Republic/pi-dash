@@ -664,7 +664,10 @@ describe("assistant conversation rail", () => {
 });
 
 describe("assistant dashboard card", () => {
-  it("reports the card visible only when its input exists", async () => {
+  // NEWPIDASH-301 (DIFF-39): the new card renders a textarea composer and
+  // a sibling recents section, while the oracle home keeps a single-line
+  // input with recents inside the card.
+  it("reports the card visible only when its composer exists", async () => {
     const shown = new WebNewDriver(pageOf({ locator: () => locator({ count: async () => 1 }) }));
     await expect(shown.assistantCardVisible()).resolves.toBe(true);
 
@@ -677,7 +680,7 @@ describe("assistant dashboard card", () => {
     const press = vi.fn(async () => undefined);
     const input = locator({ fill, press, inputValue: async () => "draft" });
     const page = pageOf({
-      locator: (selector: string) => (selector.includes("input[placeholder") ? input : locator()),
+      locator: (selector: string) => (selector.includes("textarea[placeholder") ? input : locator()),
     });
     const driver = new WebNewDriver(page);
 
@@ -743,7 +746,8 @@ describe("assistant dashboard card", () => {
           locator({ count: async () => links.length + 1, nth: () => links[0]! })
     );
     const page = pageOf({
-      locator: (selector: string) => (selector === "#home-assistant-card" ? locator({ locator: scoped }) : locator()),
+      locator: (selector: string) =>
+        selector === '[data-testid="home-recent-conversations"]' ? locator({ locator: scoped }) : locator(),
     });
     const driver = new WebNewDriver(page);
 
@@ -764,7 +768,8 @@ describe("assistant dashboard card", () => {
     const click = vi.fn(async () => undefined);
     const scoped = vi.fn((_selector: string) => locator({ nth: () => locator({ click }) }));
     const page = pageOf({
-      locator: (selector: string) => (selector === "#home-assistant-card" ? locator({ locator: scoped }) : locator()),
+      locator: (selector: string) =>
+        selector === '[data-testid="home-recent-conversations"]' ? locator({ locator: scoped }) : locator(),
     });
     const driver = new WebNewDriver(page);
 

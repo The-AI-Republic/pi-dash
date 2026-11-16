@@ -17,6 +17,18 @@ export const RUNNER_MODEL_AGENTS: readonly { agent: string; label: string }[] = 
   { agent: "muse-code", label: "Muse Code" },
 ];
 
+/** The OpenHub assistant-model catalog group (NEWPIDASH-302). Not a runner agent. */
+export const OPENHUB_AGENT = "openhub";
+export const OPENHUB_AGENT_LABEL = "OpenHub";
+export const OPENHUB_HEADING = "OpenHub (assistant models)";
+
+/** Heading/description copy for the OpenHub section. */
+export const OPENHUB_DESCRIPTION =
+  "Assistant models the Pi Dash assistant offers through OpenHub. These are assistant models, not runner models.";
+export const OPENHUB_NOTE =
+  "Deleting or disabling a model removes it from the assistant picker. Users who saved it fall back to the default model.";
+export const OPENHUB_SLUG_HINT = "The slug must match OpenHub exactly — a typo shows as a gateway error at runtime.";
+
 /** Effort values offered by Codex models (the allowed set). */
 export const RUNNER_MODEL_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
 
@@ -75,6 +87,8 @@ export function formErrorMessage(error: unknown): string {
         return "Each effort may appear once.";
       case "duplicate_model":
         return "This agent already has a model with that name.";
+      case "efforts_not_allowed":
+        return "OpenHub models have no reasoning efforts.";
       case "not_found":
         return "That model no longer exists.";
     }

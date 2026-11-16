@@ -33,19 +33,17 @@ use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use pidash_db::entity::{
-    agent_run, agent_run_event, dev_machine, issues, machine_session, pod as pod_entity,
-    projects as project_entity, runner as runner_entity, workspaces as workspace_entity,
+    agent_run, dev_machine, issues, machine_session, pod as pod_entity, projects as project_entity,
+    runner as runner_entity, workspaces as workspace_entity,
 };
 use pidash_types::runner_runs::AgentRunStatus;
 
-use crate::domain::engine_credential;
 use crate::domain::issue_assignment;
 use crate::domain::tokens;
-use crate::runner_enroll::engine_naming;
+use crate::runner_enroll::pidash_agent_naming;
 use crate::runner_enroll::queries::enroll_reads;
 use crate::runner_enroll::revoke as revoke_kernels;
 use crate::runner_runs::finalization;
-use crate::runner_runs::SetValue;
 use crate::runner_sessions::guards;
 
 /// Live-session window (`LIVE_SESSION_WINDOW`, 90s).
@@ -267,18 +265,6 @@ async fn finalize_merge_cancel(
     cancel_reason: Option<&str>,
     error: &str,
 ) -> Result<bool, DbErr> {
-    let mut extras: Vec<(&'static str, SetValue)> = vec![
-        ("error", SetValue::Text(error.to_owned())),
-        (
-            "error_code",
-            SetValue::Text(revoke_kernels::FINALIZE_ERROR_CODE.to_owned()),
-        ),
-    ];
-    if let Some(reason) = cancel_reason {
-        extras.push(("cancel_reason", SetValue::Text(reason.to_owned())));
-    }
-    let values = finalization::plan_finalize_values(AgentRunStatus::Cancelled, &extras)
-        .map_err(|err| DbErr::RecordNotFound(err.to_string()))?;
     let locked = agent_run::Entity::find_by_id(run_id)
         .lock_exclusive()
         .one(db)
@@ -337,41 +323,6 @@ async fn finalize_merge_cancel(
         .exec(db)
         .await
         .map(drop)?;
-    // Cloud-only terminal event (`:82-94`).
-    if run.executor_kind == "cloud_agent" {
-        let exists = agent_run_event::Entity::find()
-            .filter(agent_run_event::Column::AgentRunId.eq(run_id))
-            .filter(agent_run_event::Column::Kind.eq("terminal"))
-            .limit(1u64)
-            .all(db)
-            .await?;
-        if exists.is_empty() {
-            let max_seq = agent_run_event::Entity::find()
-                .filter(agent_run_event::Column::AgentRunId.eq(run_id))
-                .order_by_desc(agent_run_event::Column::Seq)
-                .limit(1u64)
-                .all(db)
-                .await?
-                .first()
-                .map(|row| row.seq);
-            let plan = finalization::plan_terminal_event(
-                max_seq,
-                AgentRunStatus::Cancelled,
-                &finalization::finalize_error_code(&values),
-            );
-            use sea_orm::{ActiveValue, Set};
-            agent_run_event::Entity::insert(agent_run_event::ActiveModel {
-                id: ActiveValue::NotSet,
-                seq: Set(plan.seq),
-                kind: Set("terminal".to_owned()),
-                payload: Set(plan.payload),
-                created_at: Set(now.into()),
-                agent_run_id: Set(run_id),
-            })
-            .exec_without_returning(db)
-            .await?;
-        }
-    }
     Ok(true)
 }
 
@@ -801,8 +752,8 @@ pub async fn merge_dev_machine(
             .await?
             .ok_or_else(|| MergeError::Db("merge pod vanished".to_owned()))?;
         let project_id = pod.project_id;
-        let is_engine = runner.provisioning == "desktop_bundled";
-        if let Some(survivor) = survivors.get(&project_id).filter(|_| is_engine) {
+        let is_pidash_agent = runner.provisioning == "desktop_bundled";
+        if let Some(survivor) = survivors.get(&project_id).filter(|_| is_pidash_agent) {
             let survivor = survivor.clone();
             // §23.4 first (Django order): the dedicated assignment move
             // and its per-issue run handling, then the bulk re-pin.
@@ -827,7 +778,7 @@ pub async fn merge_dev_machine(
             continue;
         }
         // Move: engine renamed to the target scheme, other uniquified.
-        let name = if is_engine {
+        let name = if is_pidash_agent {
             let workspace = workspace_entity::Entity::find_by_id(runner.workspace_id)
                 .one(db)
                 .await?
@@ -836,7 +787,7 @@ pub async fn merge_dev_machine(
                 .one(db)
                 .await?
                 .ok_or_else(|| MergeError::Db("merge project vanished".to_owned()))?;
-            let base = engine_naming::engine_runner_base_name(
+            let base = pidash_agent_naming::pidash_agent_runner_base_name(
                 target.id,
                 &target.host_label,
                 &target.label,
@@ -871,7 +822,7 @@ pub async fn merge_dev_machine(
             .exec(db)
             .await
             .map(drop)?;
-        if is_engine {
+        if is_pidash_agent {
             // The moved engine becomes the survivor for its project.
             let moved_row = runner_entity::Entity::find_by_id(runner.id)
                 .one(db)
@@ -922,9 +873,14 @@ pub async fn merge_dev_machine(
         .await
         .map(drop)?;
     let (_revoked, revoke_effects) =
-        engine_credential::revoke_engine_credential(db, source.id, "machine_merged", now)
-            .await
-            .map_err(|err| MergeError::Db(err.to_string()))?;
+        crate::domain::pidash_agent_credential::revoke_pidash_agent_credential(
+            db,
+            source.id,
+            "machine_merged",
+            now,
+        )
+        .await
+        .map_err(|err| MergeError::Db(err.to_string()))?;
     for pod in revoke_effects.drain_pod_ids {
         drain_pods.insert(pod);
     }

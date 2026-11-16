@@ -304,7 +304,7 @@ describe("buildExecutionTargets with runners", () => {
     ]);
   });
 
-  it("lists engines as Built-in engine · <machine> (§23.6)", () => {
+  it("lists engines as Pi Dash Agent · <machine> (§23.6)", () => {
     const engine = runner({
       id: "a23e4567-e89b-12d3-a456-426614174009",
       name: "builtin-mbp-acme-ACME",
@@ -315,7 +315,7 @@ describe("buildExecutionTargets with runners", () => {
     const own = runner({ id: "b23e4567-e89b-12d3-a456-426614174010", name: "gpu-box", pod: POD_A.id });
     const targets = buildExecutionTargets([POD_A] as PodList, [engine, own] as unknown as RunnerList);
     expect(targets.map((target) => target.kind)).toEqual(["pod", "runner", "runner"]);
-    expect(targets[1]).toMatchObject({ kind: "runner", runnerId: engine.id, label: "Built-in engine · Work laptop" });
+    expect(targets[1]).toMatchObject({ kind: "runner", runnerId: engine.id, label: "Pi Dash Agent · Work laptop" });
     expect(targets[2]).toMatchObject({ kind: "runner", runnerId: own.id, label: "gpu-box" });
   });
 

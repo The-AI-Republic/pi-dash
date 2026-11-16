@@ -11,7 +11,6 @@
 //!
 //! * [`complete_project_move_handoff_live`]: prefetches the source
 //!   run's creator presence, builds [`StoreDeps`] over the shared
-//!   [`RedisAdmissionCache`][crate::admission::RedisAdmissionCache],
 //!   and runs the jobs handoff driver.
 //! * [`maybe_apply_deferred_pause_live`]: same shape for the
 //!   deferred cap-hit pause (the pause path never reads presence,
@@ -40,9 +39,9 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use pidash_db::agent_runs::status::AgentRunStatus;
 use pidash_db::assistant::models::has_secret;
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
-use pidash_db::dispatch::status::AgentRunStatus;
+use pidash_db::config::{PidashAgentSettings, RunnerSettings};
 use pidash_db::entity::{
     agent_run, assistant_user_llm_config, issue_agent_ticker, issues, projects, states,
 };
@@ -51,13 +50,11 @@ use pidash_db::pool::sea_orm_connection;
 use pidash_db::tasks_ticker::jitter_seconds;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
-use pidash_services::assistant::seams::{agent_model_profile_for_user, has_usable_llm_config};
-use pidash_services::dispatch::LlmProfile;
+use pidash_services::assistant::seams::{has_usable_llm_config, pidash_agent_profile_for_user};
 use pidash_services::domain::clock::apply_clock_write;
-#[cfg(test)]
-use pidash_services::extensions::NoExtraToolsets;
-use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
+use pidash_services::extensions::AssistantModelSeam;
 use pidash_services::orchestration::clock::{self as clock, ClockIssue, ClockWrite, RunEndedRef};
+use pidash_services::run_creation::LlmProfile;
 use pidash_services::runner_sessions::live_drains::{drain_pod_by_id, DrainError};
 use pidash_types::orchestration::{StateRef, TickerEventKind};
 
@@ -68,9 +65,8 @@ use super::creation_jobs::{
 use super::fire_tick_seam::{
     emit_logs, maybe_apply_deferred_pause as drive_pause, DispatchJobsError,
 };
-use crate::admission::RedisAdmissionCache;
-use crate::dispatch::DispatchDecision;
 use crate::queue::enqueue;
+use crate::run_dispatch::DispatchDecision;
 use crate::runner_runs::sweeps_chat::terminal_effects_job;
 
 // ---------------------------------------------------------------------------
@@ -152,7 +148,7 @@ fn profile_fn(
         let key = uid
             .and_then(|uid| presence.get(&uid).copied())
             .unwrap_or(false);
-        let profile = agent_model_profile_for_user(key);
+        let profile = pidash_agent_profile_for_user(key);
         LlmProfile {
             available: profile.available,
             reason_code: profile.reason_code,
@@ -193,7 +189,6 @@ async fn drain_terminal_effects(
 
 /// `complete_project_move_handoff(run_id)` with live inputs: the
 /// source run's creator presence, the installed assistant seam's
-/// llm-gate verdicts over it, the shared [`RedisAdmissionCache`],
 /// and `now`. The shared Redis client and runner settings feed the
 /// replacement run's pod drain. Answers the replacement run id
 /// (`None` on every early-out: unknown run, non-terminal source, no
@@ -201,12 +196,10 @@ async fn drain_terminal_effects(
 #[allow(clippy::too_many_arguments)]
 pub async fn complete_project_move_handoff_live(
     pool: &PgPool,
-    cloud: &CloudAgentSettings,
-    managed: &ManagedRunnerSettings,
+    managed: &PidashAgentSettings,
     redis: Option<&redis::Client>,
     runner: &RunnerSettings,
     run_id: Uuid,
-    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     assistant_seam: Arc<dyn AssistantModelSeam>,
 ) -> Result<Option<Uuid>, CreationJobsError> {
     let actor = run_creator(pool, run_id).await?;
@@ -214,13 +207,9 @@ pub async fn complete_project_move_handoff_live(
     let presence = Arc::new(fetch_presence(pool, &universe).await?);
     let verdicts = Arc::new(gate_verdicts(&assistant_seam, &presence).await);
     let deps = StoreDeps {
-        cloud: cloud.clone(),
         managed: managed.clone(),
-        cache: RedisAdmissionCache::from_env(),
         has_usable_llm_config: gate_fn(verdicts),
-        toolsets,
         llm_profile: profile_fn(presence),
-        now_unix_secs: Utc::now().timestamp(),
     };
     let outcome = drive_handoff(pool, deps, run_id, Utc::now()).await?;
     // The driver's `dispatch_agent_run` only *returns* the decision
@@ -249,20 +238,14 @@ pub async fn complete_project_move_handoff_live(
 /// unread on this path (`left_bucket` never retimes) — `0.0`.
 pub async fn maybe_apply_deferred_pause_live(
     pool: &PgPool,
-    cloud: &CloudAgentSettings,
-    managed: &ManagedRunnerSettings,
+    managed: &PidashAgentSettings,
     run_id: Uuid,
-    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
 ) -> Result<bool, DispatchJobsError> {
     let presence: Arc<HashMap<Uuid, bool>> = Arc::new(HashMap::new());
     let deps = StoreDeps {
-        cloud: cloud.clone(),
         managed: managed.clone(),
-        cache: RedisAdmissionCache::from_env(),
         has_usable_llm_config: has_key_fn(Arc::clone(&presence)),
-        toolsets,
         llm_profile: profile_fn(presence),
-        now_unix_secs: Utc::now().timestamp(),
     };
     let outcome = drive_pause(pool, deps, Utc::now(), 0.0, run_id).await?;
     emit_logs(&outcome.outcome.logs);
@@ -341,13 +324,7 @@ pub async fn fire_pending_entry(pool: &PgPool, run_id: Uuid) -> Result<(), sqlx:
 /// PIDASHCONV-1544) so the overlay shares the recipe instead of
 /// copying it; the ports method is now a thin caller. Re-exported
 /// through `pidash-sdk::ops`.
-pub async fn post_run_orchestration(
-    pool: &PgPool,
-    cloud: &CloudAgentSettings,
-    managed: &ManagedRunnerSettings,
-    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
-    run_id: Uuid,
-) {
+pub async fn post_run_orchestration(pool: &PgPool, managed: &PidashAgentSettings, run_id: Uuid) {
     if let Err(error) = disarm_on_terminal_signal(pool, run_id).await {
         tracing::error!(
             ?error,
@@ -355,9 +332,7 @@ pub async fn post_run_orchestration(
             "orchestration.error: run-ended reconcile failed"
         );
     }
-    if let Err(error) =
-        maybe_apply_deferred_pause_live(pool, cloud, managed, run_id, toolsets).await
-    {
+    if let Err(error) = maybe_apply_deferred_pause_live(pool, managed, run_id).await {
         tracing::error!(
             ?error,
             run_id = %run_id,
@@ -386,33 +361,38 @@ pub async fn post_run_orchestration(
 pub async fn post_run_orchestration_in_tx<'t>(
     tx: Transaction<'t>,
     pool: &'t PgPool,
-    cloud: &CloudAgentSettings,
-    managed: &ManagedRunnerSettings,
-    cache: RedisAdmissionCache,
-    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
+    managed: &PidashAgentSettings,
     run_id: Uuid,
 ) -> Transaction<'t> {
-    if let Err(error) = disarm_on_terminal_signal(pool, run_id).await {
-        tracing::error!(
+    let mut tx = tx;
+    match disarm_on_terminal_signal_deferred(pool, run_id).await {
+        Ok(outcome) if outcome.clear_run_thread_id => {
+            // On the caller's transaction: it holds the run row lock.
+            if let Err(error) = clear_run_thread_id(&TxConn::new(tx.inner()), run_id).await {
+                tracing::error!(
+                    ?error,
+                    run_id = %run_id,
+                    "orchestration.error: fresh-session thread clear failed"
+                );
+            }
+        }
+        Ok(_) => {}
+        Err(error) => tracing::error!(
             ?error,
             run_id = %run_id,
             "orchestration.error: run-ended reconcile failed"
-        );
+        ),
     }
     let deps = StoreDeps {
-        cloud: cloud.clone(),
         managed: managed.clone(),
-        cache,
         // The pause path creates no runs: the presence closures are
         // unread (`maybe_apply_deferred_pause_live`), so the keyless
         // answers mirror it.
         has_usable_llm_config: |_actor: Uuid| false,
-        toolsets,
         llm_profile: |_actor: Option<Uuid>| LlmProfile {
             available: false,
             reason_code: String::new(),
         },
-        now_unix_secs: Utc::now().timestamp(),
     };
     let mut store = LiveCreationStore::new(tx, pool, deps);
     match pidash_services::orchestration::dispatch::maybe_apply_deferred_pause(
@@ -438,7 +418,7 @@ pub async fn post_run_orchestration_in_tx<'t>(
             "orchestration.error: deferred-pause failed"
         ),
     }
-    let (mut tx, _pool, _cache, _dispatches, _deferred, _terminal_effects) = store.into_parts();
+    let (mut tx, _pool, _dispatches, _terminal_effects) = store.into_parts();
     let work_item_id: Option<Uuid> = {
         let conn = TxConn::new(tx.inner());
         match run_work_item_id(&conn, run_id).await {
@@ -507,25 +487,98 @@ pub enum DisarmError {
 /// work item, or a missing issue answers `false` without a transaction —
 /// the planner's `(false, None)` shape.
 pub async fn disarm_on_terminal_signal(pool: &PgPool, run_id: Uuid) -> Result<bool, DisarmError> {
+    let outcome = disarm_on_terminal_signal_deferred(pool, run_id).await?;
+    if outcome.clear_run_thread_id {
+        // No caller lock on the run row here, so a pool connection can
+        // take the write.
+        clear_run_thread_id(&sea_orm_connection(pool), run_id).await?;
+    }
+    Ok(outcome.stopped)
+}
+
+/// What [`disarm_on_terminal_signal_deferred`] decided and left for the
+/// caller.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DisarmOutcome {
+    /// The clock was stopped (`maybe_disarm_on_terminal_signal`'s answer).
+    pub stopped: bool,
+    /// The fresh-session lever (PDASHOSS01-183) fired: the caller must
+    /// clear the run's `thread_id` ([`clear_run_thread_id`]) on *its*
+    /// transaction. The terminal-effects callers hold the run row under
+    /// `FOR UPDATE` while this runs on a second connection, so writing the
+    /// row here would wait on the caller's lock while the caller waits on
+    /// this call — a cross-connection hang Postgres cannot detect, ended
+    /// only by `idle_in_transaction_session_timeout` rolling back the
+    /// caller's hooks transaction. Django clears it inside the same
+    /// `transaction.atomic()`.
+    pub clear_run_thread_id: bool,
+}
+
+/// The fresh-session lever's write (`AgentRun.objects.filter(pk=run.pk)
+/// .update(thread_id="")`): the next continuation builds a fresh-session
+/// Assign instead of resuming the session that will fail again.
+pub async fn clear_run_thread_id(
+    conn: &impl ConnectionTrait,
+    run_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    agent_run::Entity::update_many()
+        .col_expr(
+            agent_run::Column::ThreadId,
+            sea_orm::sea_query::Expr::value(""),
+        )
+        .filter(agent_run::Column::Id.eq(run_id))
+        .exec(conn)
+        .await
+        .map_err(into_sqlx)?;
+    Ok(())
+}
+
+/// [`disarm_on_terminal_signal`] without the run-row write: the ticker
+/// decision and its ticker write commit here; the `thread_id` clear is
+/// returned for the caller to apply where it already holds the run lock.
+pub async fn disarm_on_terminal_signal_deferred(
+    pool: &PgPool,
+    run_id: Uuid,
+) -> Result<DisarmOutcome, DisarmError> {
     let conn = sea_orm_connection(pool);
-    let run: Option<(Option<Uuid>, String, String, Option<Value>)> =
-        agent_run::Entity::find_by_id(run_id)
-            .select_only()
-            .columns([
-                agent_run::Column::WorkItemId,
-                agent_run::Column::Status,
-                agent_run::Column::PhaseKind,
-                agent_run::Column::DonePayload,
-            ])
-            .into_tuple()
-            .one(&conn)
-            .await
-            .map_err(into_sqlx)?;
-    let Some((work_item_id, status, phase_kind, done_payload)) = run else {
-        return Ok(false);
+    #[allow(clippy::type_complexity)]
+    let run: Option<(
+        Option<Uuid>,
+        String,
+        String,
+        Option<Value>,
+        String,
+        Value,
+        String,
+    )> = agent_run::Entity::find_by_id(run_id)
+        .select_only()
+        .columns([
+            agent_run::Column::WorkItemId,
+            agent_run::Column::Status,
+            agent_run::Column::PhaseKind,
+            agent_run::Column::DonePayload,
+            agent_run::Column::FailureReason,
+            agent_run::Column::ErrorDetails,
+            agent_run::Column::ThreadId,
+        ])
+        .into_tuple()
+        .one(&conn)
+        .await
+        .map_err(into_sqlx)?;
+    let Some((
+        work_item_id,
+        status,
+        phase_kind,
+        done_payload,
+        failure_reason,
+        error_details,
+        thread_id,
+    )) = run
+    else {
+        return Ok(DisarmOutcome::default());
     };
     let Some(work_item_id) = work_item_id else {
-        return Ok(false);
+        return Ok(DisarmOutcome::default());
     };
     let status =
         AgentRunStatus::from_value(&status).ok_or(DisarmError::Decode("agent_run.status"))?;
@@ -538,7 +591,7 @@ pub async fn disarm_on_terminal_signal(pool: &PgPool, run_id: Uuid) -> Result<bo
         .await
         .map_err(into_sqlx)?;
     let Some((state_id, project_id)) = issue else {
-        return Ok(false);
+        return Ok(DisarmOutcome::default());
     };
     let state: Option<(String, String)> = match state_id {
         Some(state_id) => {
@@ -611,6 +664,23 @@ pub async fn disarm_on_terminal_signal(pool: &PgPool, run_id: Uuid) -> Result<bo
             .map_err(into_sqlx)?
     };
     let mut ticker: Option<IssueAgentTicker> = ticker_model.map(IssueAgentTicker::from);
+    // `consecutive_failure_streak` (PDASHOSS01-183): read under the ticker
+    // lock, over the reason the policy routes on; only a FAILED run
+    // consults it. The stored `error` reads back from `error_details`.
+    let error = pidash_db::runner_runs::agent_run::error_details_text(
+        &error_details,
+        pidash_db::runner_runs::agent_run::ERROR_DETAILS_MESSAGE,
+    )
+    .to_owned();
+    let failure_streak = if status == AgentRunStatus::Failed {
+        let reason = clock::failure_reason_value(&failure_reason, &error);
+        let conn = TxConn::new(tx.inner());
+        pidash_services::runner_runs::failure_effects::failure_streak(&conn, work_item_id, &reason)
+            .await
+            .map_err(into_sqlx)?
+    } else {
+        0
+    };
     let done_payload_ref = done_payload.as_ref().and_then(|payload| match payload {
         Value::Null => None,
         value => Some(value),
@@ -626,6 +696,10 @@ pub async fn disarm_on_terminal_signal(pool: &PgPool, run_id: Uuid) -> Result<bo
             status,
             phase_kind: &phase_kind,
             done_payload: done_payload_ref,
+            failure_reason: &failure_reason,
+            error: &error,
+            thread_id: &thread_id,
+            failure_streak,
         },
         Some(work_item_id),
         now,
@@ -654,7 +728,12 @@ pub async fn disarm_on_terminal_signal(pool: &PgPool, run_id: Uuid) -> Result<bo
             clock::reconcile_log_line(&work_item_id, TickerEventKind::RUN_ENDED, &outcome.decision)
         );
     }
-    Ok(stopped)
+    Ok(DisarmOutcome {
+        stopped,
+        clear_run_thread_id: outcome
+            .as_ref()
+            .is_some_and(|outcome| outcome.clear_run_thread_id),
+    })
 }
 
 #[cfg(test)]
@@ -831,52 +910,14 @@ mod tests {
             .expect("pool connects")
     }
 
-    fn settings() -> (CloudAgentSettings, ManagedRunnerSettings) {
-        (
-            CloudAgentSettings {
-                enabled: false,
-                writes_enabled: false,
-                github_tools_enabled: true,
-                disabled_tools: Vec::new(),
-                job_queue: "celery".to_string(),
-                reconcile_interval_secs: 30,
-                model_request_timeout_secs: 60,
-                execution_timeout_secs: 285,
-                run_soft_limit_secs: 300,
-                run_hard_limit_secs: 330,
-                stale_grace_secs: 60,
-                dispatch_lease_secs: 60,
-                dispatch_backoff_secs: 10,
-                dispatch_scan_interval_secs: 10,
-                sweep_interval_secs: 30,
-                dispatch_scan_batch: 100,
-                max_queue_age_secs: 900,
-                model_request_limit: 25,
-                tool_call_limit: 20,
-                write_call_limit: 3,
-                input_token_limit: 144_000,
-                output_token_limit: 16_000,
-                total_token_limit: 160_000,
-                max_output_tokens_per_request: 4096,
-                max_queued_per_workspace: 20,
-                max_running_per_workspace: 2,
-                user_creation_rate_per_minute: 6,
-                workspace_creation_rate_per_minute: 30,
-                tool_timeout_secs: 20,
-                max_tool_result_bytes: 65536,
-                max_prompt_bytes: 262_144,
-                max_final_result_bytes: 65536,
-                max_events: 500,
-                block_private_urls: true,
-            },
-            ManagedRunnerSettings {
-                enabled: false,
-                queued_max_age_secs: 43200,
-                graceful_stop_secs: 30,
-                sweep_interval_secs: 300,
-                desktop_min_version: String::new(),
-            },
-        )
+    fn settings() -> PidashAgentSettings {
+        PidashAgentSettings {
+            enabled: false,
+            queued_max_age_secs: 43200,
+            graceful_stop_secs: 30,
+            sweep_interval_secs: 300,
+            desktop_min_version: String::new(),
+        }
     }
 
     /// Unknown run answers `Ok(None)` (the driver's unknown-run
@@ -885,16 +926,14 @@ mod tests {
     #[ignore = "needs migrated scratch DB via DATABASE_URL"]
     async fn live_handoff_unknown_run_is_none() {
         let pool = pool().await;
-        let (cloud, managed) = settings();
+        let managed = settings();
         let runner = pidash_db::config::Settings::test_defaults().runner;
         let replacement = complete_project_move_handoff_live(
             &pool,
-            &cloud,
             &managed,
             None,
             &runner,
             Uuid::new_v4(),
-            Arc::new(NoExtraToolsets),
             Arc::new(DefaultSeam),
         )
         .await
@@ -907,16 +946,10 @@ mod tests {
     #[ignore = "needs migrated scratch DB via DATABASE_URL"]
     async fn live_pause_unknown_run_is_false() {
         let pool = pool().await;
-        let (cloud, managed) = settings();
-        let applied = maybe_apply_deferred_pause_live(
-            &pool,
-            &cloud,
-            &managed,
-            Uuid::new_v4(),
-            Arc::new(NoExtraToolsets),
-        )
-        .await
-        .expect("unknown run is Ok");
+        let managed = settings();
+        let applied = maybe_apply_deferred_pause_live(&pool, &managed, Uuid::new_v4())
+            .await
+            .expect("unknown run is Ok");
         assert!(!applied);
     }
 
@@ -1002,7 +1035,7 @@ mod tests {
         .await
         .expect("seed issue");
         sqlx::query(
-            r#"INSERT INTO "agent_run" ("id", "status", "prompt", "run_config", "required_capabilities", "thread_id", "error_details", "created_at", "workspace_id", "work_item_id", "pod_id", "created_by_id", "llm_model", "trigger", "executor_kind", "dispatch_attempts", "cancel_reason", "tool_plan", "phase_kind", "agent_metadata", "usage") VALUES ($1, 'completed', '', '{}', '{}', '', '{}', $2, $3, $4, $5, $6, '', 'tick', 'local_runner', 0, '', '{}', 'coding-task', '{}', '{}')"#,
+            r#"INSERT INTO "agent_run" ("id", "status", "prompt", "run_config", "required_capabilities", "thread_id", "error_details", "created_at", "workspace_id", "work_item_id", "pod_id", "created_by_id", "llm_model", "trigger", "executor_kind", "dispatch_attempts", "cancel_reason", "tool_plan", "phase_kind", "agent_metadata", "usage", "failure_reason") VALUES ($1, 'completed', '', '{}', '{}', '', '{}', $2, $3, $4, $5, $6, '', 'tick', 'local_runner', 0, '', '{}', 'coding-task', '{}', '{}', '')"#,
         )
         .bind(run)
         .bind(now)
@@ -1107,7 +1140,7 @@ mod tests {
         .await
         .expect("seed issue");
         sqlx::query(
-            r#"INSERT INTO "agent_run" ("id", "status", "prompt", "run_config", "required_capabilities", "thread_id", "error_details", "created_at", "workspace_id", "work_item_id", "pod_id", "created_by_id", "llm_model", "trigger", "executor_kind", "dispatch_attempts", "cancel_reason", "tool_plan", "phase_kind", "agent_metadata", "usage") VALUES ($1, 'completed', '', '{}', '{}', '', '{}', $2, $3, $4, $5, $6, '', 'tick', 'local_runner', 0, '', '{}', 'coding-task', '{}', '{}')"#,
+            r#"INSERT INTO "agent_run" ("id", "status", "prompt", "run_config", "required_capabilities", "thread_id", "error_details", "created_at", "workspace_id", "work_item_id", "pod_id", "created_by_id", "llm_model", "trigger", "executor_kind", "dispatch_attempts", "cancel_reason", "tool_plan", "phase_kind", "agent_metadata", "usage", "failure_reason") VALUES ($1, 'completed', '', '{}', '{}', '', '{}', $2, $3, $4, $5, $6, '', 'tick', 'local_runner', 0, '', '{}', 'coding-task', '{}', '{}', '')"#,
         )
         .bind(run)
         .bind(now)
@@ -1233,7 +1266,7 @@ mod tests {
         .await
         .expect("seed ticker");
         sqlx::query(
-            r#"INSERT INTO "agent_run" ("id", "status", "prompt", "run_config", "required_capabilities", "thread_id", "error_details", "created_at", "workspace_id", "work_item_id", "pod_id", "created_by_id", "llm_model", "trigger", "executor_kind", "dispatch_attempts", "cancel_reason", "tool_plan", "phase_kind", "agent_metadata", "usage", "done_payload") VALUES ($1, 'completed', '', '{}', '{}', '', '{}', $2, $3, $4, $5, $6, '', 'tick', 'local_runner', 0, '', '{}', 'coding-task', '{}', '{}', '{"stop_ticking": true}')"#,
+            r#"INSERT INTO "agent_run" ("id", "status", "prompt", "run_config", "required_capabilities", "thread_id", "error_details", "created_at", "workspace_id", "work_item_id", "pod_id", "created_by_id", "llm_model", "trigger", "executor_kind", "dispatch_attempts", "cancel_reason", "tool_plan", "phase_kind", "agent_metadata", "usage", "done_payload", "failure_reason") VALUES ($1, 'completed', '', '{}', '{}', '', '{}', $2, $3, $4, $5, $6, '', 'tick', 'local_runner', 0, '', '{}', 'coding-task', '{}', '{}', '{"stop_ticking": true}', '')"#,
         )
         .bind(run)
         .bind(now)

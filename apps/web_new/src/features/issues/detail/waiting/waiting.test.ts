@@ -106,7 +106,7 @@ describe("waitingReasonText", () => {
       "the wallet is empty"
     );
     expect(waitingReasonText({ ...WAIT, reason: "runner_paused", pause_reason: "engine_sign_in_required" }, now)).toBe(
-      "the engine's sign-in expired"
+      "Pi Dash Agent's sign-in expired"
     );
     expect(waitingReasonText({ ...WAIT, reason: "runner_paused", pause_reason: null }, now)).toBe("paused");
   });

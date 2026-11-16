@@ -31,12 +31,12 @@
 //!
 //! # Ported bugs (translate, don't redesign)
 //!
-//! * BUG-ACT-01 (`:469`): `track_estimate_points` builds
+//! * BUG-ACT-01 (`:469`, PB-1587): `track_estimate_points` builds
 //!   `field="estimate_" + new_estimate.estimate.type` unguarded, so clearing
 //!   the estimate (`new_estimate is None`) raises `AttributeError` before any
 //!   row is appended — the `verb="removed"` branch (`:458`) is dead code.
-//!   [`plan_track_estimate_points`] returns
-//!   [`TrackError::EstimateRemovedField`] on that path instead of a row.
+//!   Fixed in the new system by NEWPIDASH-273 (DIFF-22): the planner derives
+//!   the field from the old side on clear and emits a `removed` row.
 //! * BUG-ACT-02 (`:499`): the restore row hardcodes `old_value="archive"`
 //!   even when the previous value was a manual archive. Kept as-is.
 //!
@@ -198,10 +198,6 @@ pub enum TrackError {
     /// `:380,415`, `State` `:538`): Django raises `DoesNotExist`.
     #[error("row lookup missed: {table} pk={pk}")]
     RowMissing { table: &'static str, pk: String },
-    /// BUG-ACT-01: the `field=` expression raises `AttributeError` when the
-    /// new estimate is `None` (`:469`).
-    #[error("track_estimate_points: field expression on a cleared estimate")]
-    EstimateRemovedField,
 }
 
 /// `pi_dash/utils/uuid.py:10` — `uuid.UUID(s).version == 4`,
@@ -647,8 +643,12 @@ pub fn plan_track_assignees(
 /// (singular) on both sides; each side resolves
 /// `EstimatePoint.objects.filter(pk=...).first()` (`None` id means no
 /// query). Identifiers echo the raw ids; values come from the snapshots.
-/// Clearing the estimate hits BUG-ACT-01 ([`TrackError::EstimateRemovedField`]).
-///
+/// BUG-ACT-01 (PB-1587): the Python `field="estimate_" + new_estimate.estimate.type`
+/// (`:469`) crashes when `new_estimate is None`, so the `verb="removed"`
+/// branch (`:458`) never runs. Fixed by NEWPIDASH-273 (DIFF-22): a clear
+/// emits `verb="removed"` with the field taken from the old side (falling
+/// back to `estimate_points` when neither side resolves, e.g. dangling ids),
+/// so one entry is recorded per affected item like the replacement path.
 /// A non-UUID raw id reaches the resolver untouched, mirroring
 /// `.filter(pk=...)` (which raises on garbage) — unlike the parent/state
 /// helpers this path validates nothing.
@@ -657,30 +657,47 @@ pub fn plan_track_estimate_points(
     current: &Value,
     frame: &TrackFrame,
     resolve: &dyn Fn(&str) -> Option<EstimatePointRef>,
-) -> Result<Option<IssueActivityDraft>, TrackError> {
+) -> Option<IssueActivityDraft> {
     if current.get("estimate_point") == requested.get("estimate_point") {
-        return Ok(None);
+        return None;
     }
     let old = opt_string(current.get("estimate_point"))
         .as_deref()
         .and_then(resolve);
     let new_raw = opt_string(requested.get("estimate_point"));
     let new = new_raw.as_deref().and_then(resolve);
-    let new = match new {
-        Some(n) => n,
-        None => return Err(TrackError::EstimateRemovedField),
+    let (field, verb, old_value, new_value) = match &new {
+        Some(n) => (
+            format!("estimate_{}", n.estimate_type),
+            "updated",
+            old.as_ref().map(|e| e.value.clone()),
+            Some(n.value.clone()),
+        ),
+        None => {
+            let field = old
+                .as_ref()
+                .map(|e| format!("estimate_{}", e.estimate_type))
+                .unwrap_or_else(|| "estimate_points".to_owned());
+            (
+                field,
+                "removed",
+                old.as_ref().map(|e| e.value.clone()),
+                None,
+            )
+        }
     };
     // Identifiers echo the raw ids (`:459-466`), not the snapshot rows.
     let mut row = draft(
         frame,
-        &format!("estimate_{}", new.estimate_type),
+        &field,
         "updated the estimate point to ",
-        old.map(|e| e.value),
-        Some(new.value.clone()),
+        old_value,
+        new_value,
     );
+    row.verb = verb.to_owned();
     row.old_identifier = opt_string(current.get("estimate_point"));
     row.new_identifier = new_raw;
-    Ok(Some(row))
+    Some(row)
 }
 
 /// `track_archive_at` (`:478-526`): one row when `archived_at` differs. A
@@ -1312,7 +1329,8 @@ mod tests {
         assert!(out.subscribers.is_empty());
     }
 
-    // FX-ACT-01 · estimate_points.
+    // FX-ACT-01 · estimate_points (NEWPIDASH-273, DIFF-22: clear emits
+    // a `removed` row instead of BUG-ACT-01's AttributeError).
     #[test]
     fn track_estimate_points_updated_removed_and_same() {
         let f = frame();
@@ -1335,7 +1353,6 @@ mod tests {
             &f,
             &resolve,
         )
-        .unwrap()
         .unwrap();
         assert_eq!(row.field, "estimate_points");
         assert_eq!(row.comment, "updated the estimate point to ");
@@ -1344,25 +1361,106 @@ mod tests {
         assert_eq!(row.new_identifier.as_deref(), Some(new_id));
         assert_eq!(row.old_value.as_deref(), Some("1"));
         assert_eq!(row.new_value.as_deref(), Some("3"));
-        // Clearing the estimate hits BUG-ACT-01: no row, EstimateRemovedField.
+        // Clearing the estimate emits a `removed` row (DIFF-22).
+        let cleared = plan_track_estimate_points(
+            &json!({"estimate_point": null}),
+            &json!({"estimate_point": old_id}),
+            &f,
+            &resolve,
+        )
+        .unwrap();
+        assert_eq!(cleared.field, "estimate_points");
+        assert_eq!(cleared.comment, "updated the estimate point to ");
+        assert_eq!(cleared.verb, "removed");
+        assert_eq!(cleared.old_identifier.as_deref(), Some(old_id));
+        assert_eq!(cleared.new_identifier, None);
+        assert_eq!(cleared.old_value.as_deref(), Some("1"));
+        assert_eq!(cleared.new_value, None);
+    }
+
+    #[test]
+    fn track_estimate_points_clear_edge_cases() {
+        let f = frame();
+        let old_id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+        // Old side missing (dangling / tombstoned without snapshot): clear
+        // still records `removed` with the `estimate_points` fallback.
+        let missing = plan_track_estimate_points(
+            &json!({"estimate_point": null}),
+            &json!({"estimate_point": old_id}),
+            &f,
+            &|_id: &str| None,
+        )
+        .unwrap();
+        assert_eq!(missing.field, "estimate_points");
+        assert_eq!(missing.verb, "removed");
+        assert_eq!(missing.old_value, None);
+        assert_eq!(missing.new_value, None);
+        assert_eq!(missing.old_identifier.as_deref(), Some(old_id));
+        assert_eq!(missing.new_identifier, None);
+        // Set from nothing: `updated` with the new type.
+        let new_id = "99999999-9999-4999-8999-999999999999";
+        let resolve_set = |id: &str| match id {
+            x if x == new_id => Some(EstimatePointRef {
+                value: "5".to_owned(),
+                estimate_type: "categories".to_owned(),
+            }),
+            _ => None,
+        };
+        let set = plan_track_estimate_points(
+            &json!({"estimate_point": new_id}),
+            &json!({"estimate_point": null}),
+            &f,
+            &resolve_set,
+        )
+        .unwrap();
+        assert_eq!(set.field, "estimate_categories");
+        assert_eq!(set.verb, "updated");
+        assert_eq!(set.old_value, None);
+        assert_eq!(set.new_value.as_deref(), Some("5"));
+        assert_eq!(set.old_identifier, None);
+        assert_eq!(set.new_identifier.as_deref(), Some(new_id));
+        // Move across families: field follows the new side (Python :469).
+        let cat_id = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb";
+        let resolve_move = |id: &str| match id {
+            x if x == cat_id => Some(EstimatePointRef {
+                value: "Big".to_owned(),
+                estimate_type: "categories".to_owned(),
+            }),
+            x if x == new_id => Some(EstimatePointRef {
+                value: "3".to_owned(),
+                estimate_type: "points".to_owned(),
+            }),
+            _ => None,
+        };
+        let moved = plan_track_estimate_points(
+            &json!({"estimate_point": new_id}),
+            &json!({"estimate_point": cat_id}),
+            &f,
+            &resolve_move,
+        )
+        .unwrap();
+        assert_eq!(moved.field, "estimate_points");
+        assert_eq!(moved.verb, "updated");
+        assert_eq!(moved.old_value.as_deref(), Some("Big"));
+        assert_eq!(moved.new_value.as_deref(), Some("3"));
+        // Equal ids (including None) and equal raw values → no row.
+        assert_eq!(
+            plan_track_estimate_points(
+                &json!({"estimate_point": old_id}),
+                &json!({"estimate_point": old_id}),
+                &f,
+                &|id: &str| resolve_move(id)
+            ),
+            None
+        );
         assert_eq!(
             plan_track_estimate_points(
                 &json!({"estimate_point": null}),
-                &json!({"estimate_point": old_id}),
+                &json!({"estimate_point": null}),
                 &f,
-                &resolve
+                &|_id: &str| None
             ),
-            Err(TrackError::EstimateRemovedField)
-        );
-        // Equal ids (including None) → no row.
-        assert_eq!(
-            plan_track_estimate_points(
-                &json!({"estimate_point": old_id}),
-                &json!({"estimate_point": old_id}),
-                &f,
-                &resolve
-            ),
-            Ok(None)
+            None
         );
     }
 

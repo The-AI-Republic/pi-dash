@@ -350,6 +350,7 @@ mod tests {
                 agent_observability_v1: false,
                 agent_watchdog: Default::default(),
                 auto_update: true,
+                max_concurrent_agent_runs: 3,
             },
             runners: vec![sample_runner("t", tmp.path().join("wd"))],
             cli: None,
@@ -581,6 +582,7 @@ model_default = "o4-mini"
                 agent_observability_v1: false,
                 agent_watchdog: Default::default(),
                 auto_update: true,
+                max_concurrent_agent_runs: 3,
             },
             runners: vec![
                 sample_runner("a", tmp.path().join("wd-a")),
@@ -632,6 +634,7 @@ model_default = "o4-mini"
                 agent_observability_v1: false,
                 agent_watchdog: Default::default(),
                 auto_update: true,
+                max_concurrent_agent_runs: 3,
             },
             runners: vec![
                 sample_runner("a", tmp.path().join("wd-a")),
@@ -671,6 +674,7 @@ model_default = "o4-mini"
                 agent_observability_v1: false,
                 agent_watchdog: Default::default(),
                 auto_update: true,
+                max_concurrent_agent_runs: 3,
             },
             runners: vec![sample_runner("keep", tmp.path().join("wd"))],
             cli: None,
@@ -713,6 +717,7 @@ model_default = "o4-mini"
                 agent_observability_v1: false,
                 agent_watchdog: Default::default(),
                 auto_update: true,
+                max_concurrent_agent_runs: 3,
             },
             runners: vec![
                 sample_runner("a", tmp.path().join("wd-a")),

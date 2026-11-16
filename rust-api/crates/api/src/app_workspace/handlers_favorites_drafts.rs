@@ -64,7 +64,8 @@
 //!   `DraftIssue` table (`model=DraftIssue`, `draft.py:158`, `:185`, `:198`), so a
 //!   draft's creator passes at any workspace role (PDASHOSS01-320; patch/retrieve
 //!   used to read `Issue`, which made the bypass dead).
-//! * Draft-to-issue on a missing draft 500s (`AttributeError` on `None`, no 404);
+//! * Draft-to-issue on a missing draft 500s (`AttributeError` on `None`, no 404)
+//!   — fixed on Rust by NEWPIDASH-265 (DIFF-35: 404 `OBJECT_NOT_FOUND_BODY`);
 //!   the cycle activity's `project_id` is the string `"None"` (the route carries no
 //!   `project_id` kwarg); the module activity fires once per `module_ids` entry.
 //! * `description_binary` input is silently dropped everywhere (read-only `ModelField`);
@@ -133,18 +134,16 @@ use pidash_services::app_issues::shape::envelope;
 use pidash_services::app_workspace::ser_account_token as fav;
 use pidash_services::app_workspace::tasks as wtask;
 use pidash_services::auth_session::shapes::{base_host, HostSettings};
-use pidash_services::dispatch::admission::{
-    self as admission_q, LlmProfile, ManagedRunnerProbe, HEARTBEAT_GRACE_SECS,
-};
-use pidash_services::dispatch::policy::{
-    cloud_agent_is_configured, managed_runner_is_enabled, UserFlags,
-};
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::issues as domain_issues;
 use pidash_services::domain::issues::IssueFieldSet as IssueSaveRow;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
-use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason};
+use pidash_services::run_creation::executor_policy::{pidash_agent_is_enabled, UserFlags};
+use pidash_services::run_creation::pidash_agent_availability::{
+    self as admission_q, LlmProfile, PidashAgentProbe, HEARTBEAT_GRACE_SECS,
+};
+use pidash_types::agent_runs::{AgentExecutorKind, PidashAgentReason};
 use pidash_types::v1_assets::sticky as sticky_kernel;
 use pidash_types::WorkspaceId;
 use sea_orm::prelude::DateTimeWithTimeZone;
@@ -2048,6 +2047,15 @@ const ISSUE_FIELDS: &[FieldSpec] = &[
         name: "agent_executor",
         shape: FieldShape::Choice {
             choices: EXECUTOR_CHOICES,
+            allow_blank: true,
+        },
+        required: false,
+        allow_null: true,
+    },
+    FieldSpec {
+        name: "work_type",
+        shape: FieldShape::Char {
+            max: Some(32),
             allow_blank: true,
         },
         required: false,
@@ -6448,9 +6456,9 @@ async fn enrolled_runner(
     project_id: &Uuid,
     workspace_id: &Uuid,
 ) -> Result<bool, Denial> {
-    let hit = admission_q::managed_runner_probe(
+    let hit = admission_q::pidash_agent_probe(
         &orm(pool),
-        ManagedRunnerProbe::Enrolled,
+        PidashAgentProbe::Enrolled,
         *user_id,
         *project_id,
         *workspace_id,
@@ -6467,9 +6475,9 @@ async fn online_runner(
     workspace_id: &Uuid,
 ) -> Result<bool, Denial> {
     let bound = Utc::now() - chrono::Duration::seconds(HEARTBEAT_GRACE_SECS);
-    let hit = admission_q::managed_runner_probe(
+    let hit = admission_q::pidash_agent_probe(
         &orm(pool),
-        ManagedRunnerProbe::Online(bound),
+        PidashAgentProbe::Online(bound),
         *user_id,
         *project_id,
         *workspace_id,
@@ -6486,9 +6494,9 @@ async fn paused_runner(
     project_id: &Uuid,
     workspace_id: &Uuid,
 ) -> Result<bool, Denial> {
-    let hit = admission_q::managed_runner_probe(
+    let hit = admission_q::pidash_agent_probe(
         &orm(pool),
-        ManagedRunnerProbe::Paused,
+        PidashAgentProbe::Paused,
         *user_id,
         *project_id,
         *workspace_id,
@@ -6571,6 +6579,12 @@ async fn run_issue_create_validate(
         Some(FieldValue::Text(executor)) => Some(Some(executor.as_str())),
         _ => None,
     };
+    let work_type: Option<Option<&str>> = match find_value(values, "work_type") {
+        None => None,
+        Some(FieldValue::Null) => Some(None),
+        Some(FieldValue::Text(work_type)) => Some(Some(work_type.as_str())),
+        _ => None,
+    };
     let description_stripped: Option<Option<&str>> =
         match find_value(values, "description_stripped") {
             None => None,
@@ -6603,6 +6617,7 @@ async fn run_issue_create_validate(
         // web app and v1 surfaces own the write path).
         assigned_runner: None,
         agent_executor,
+        work_type,
         description_html: text("description_html"),
         description_binary: None,
         assignee_ids: assignee_ids.as_deref(),
@@ -6626,7 +6641,7 @@ async fn run_issue_create_validate(
     let mut fetched_project: Option<ResolvedProject> = None;
     let mut llm_profile = LlmProfile {
         available: false,
-        reason_code: ManagedRunnerReason::LLM_CONFIG_MISSING.to_owned(),
+        reason_code: PidashAgentReason::LLM_CONFIG_MISSING.to_owned(),
     };
     let mut enrolled_exists = false;
     let mut online_exists = false;
@@ -6635,9 +6650,10 @@ async fn run_issue_create_validate(
     if !pod_pure_fail {
         if let Some(Some(executor)) = agent_executor {
             if let Some(kind) = AgentExecutorKind::from_value(executor) {
-                let cloud_blocked = kind == AgentExecutorKind::CloudAgent
-                    && !cloud_agent_is_configured(&state.settings().cloud_agent);
-                if !cloud_blocked && kind == AgentExecutorKind::ManagedRunner {
+                // P1 (agent naming convention): a `cloud_agent` write
+                // on this non-pod path is normalized, not gated on
+                // CLOUD_AGENT_ENABLED.
+                if kind == AgentExecutorKind::PidashAgent {
                     fetched_project = fetch_issue_project(pool, project_id)
                         .await
                         .map_err(|_| db_error())?;
@@ -6645,7 +6661,7 @@ async fn run_issue_create_validate(
                         let flags = viewer_user_flags(pool, actor)
                             .await
                             .map_err(|_| db_error())?;
-                        if managed_runner_is_enabled(&state.settings().managed_runner)
+                        if pidash_agent_is_enabled(&state.settings().pidash_agent)
                             && flags.is_active
                             && !flags.is_bot
                         {
@@ -6655,9 +6671,9 @@ async fn run_issue_create_validate(
                             llm_profile = LlmProfile {
                                 available: false,
                                 reason_code: if keyed {
-                                    ManagedRunnerReason::BYOK_UNSUPPORTED.to_owned()
+                                    PidashAgentReason::BYOK_UNSUPPORTED.to_owned()
                                 } else {
-                                    ManagedRunnerReason::LLM_CONFIG_MISSING.to_owned()
+                                    PidashAgentReason::LLM_CONFIG_MISSING.to_owned()
                                 },
                             };
                             if llm_profile.available {
@@ -6744,8 +6760,7 @@ async fn run_issue_create_validate(
         None => None,
     };
     let policy = ExecutorPolicy {
-        cloud: &state.settings().cloud_agent,
-        managed: &state.settings().managed_runner,
+        managed: &state.settings().pidash_agent,
         viewer: viewer.as_ref(),
     };
     let probes = ValidateProbes {
@@ -6852,6 +6867,8 @@ fn assemble_new_issue(
         assigned_pod_id: pod,
         assigned_runner_id: None,
         agent_executor: opt_text(values, "agent_executor"),
+        // `validate()` normalized `""` to `None` and rejected unknown keys.
+        work_type: filtered.work_type.clone().flatten(),
     };
     Ok((
         row,
@@ -7141,6 +7158,7 @@ async fn render_draft_to_issue_body(
         git_work_branch: row.git_work_branch.as_str(),
         created_via: row.created_via.as_deref(),
         agent_executor: row.agent_executor.as_deref(),
+        work_type: row.work_type.as_deref(),
         point: row.point,
         deleted_at: deleted_at.as_deref(),
         created_at: created_at.as_str(),
@@ -7153,7 +7171,8 @@ async fn render_draft_to_issue_body(
 }
 
 /// W37 POST (`draft.py:205-312`): ADMIN+MEMBER gate, the draft lookup
-/// (miss → 500 — `None.project_id` raises `AttributeError`), the
+/// (miss → 404 `OBJECT_NOT_FOUND_BODY` since NEWPIDASH-265/DIFF-35 —
+/// Django 500s on `None.project_id` `AttributeError`), the
 /// project-required 400, `IssueCreateSerializer` validation + save (the
 /// advisory-locked sequence/sort legs), the `issue.activity.created`
 /// emit, the raw `cycle_id` branch (create + `cycle.activity.created`
@@ -7184,6 +7203,9 @@ async fn draft_to_issue(
     // `None.project_id` raises `AttributeError` → the generic 500.
     // NEWPIDASH-185 (DIFF-14): only the creator may publish (`draft_created_by`
     // check below) and the caller must be an active member of `draft_project`.
+    // NEWPIDASH-265 (DIFF-35, PB-0901): the miss answers 404
+    // `OBJECT_NOT_FOUND_BODY` instead of the ported 500, matching the
+    // drafts viewset's other missing-draft 404s.
     #[derive(Debug, FromQueryResult)]
     struct DraftConvertRow {
         project_id: Option<Uuid>,
@@ -7225,7 +7247,11 @@ async fn draft_to_issue(
     let Some((draft_project_opt, draft_workspace, draft_created_by, draft_updated_by, draft_state)) =
         draft
     else {
-        return Err(Denial::ServerError);
+        // NEWPIDASH-265 (DIFF-35): missing/soft-deleted draft is 404, not 500.
+        return Ok(json_response(
+            StatusCode::NOT_FOUND,
+            OBJECT_NOT_FOUND_BODY.to_owned(),
+        ));
     };
     // NEWPIDASH-185 (DIFF-14): scope to the caller — another user's draft
     // 404s (Django would have converted it).
@@ -7848,6 +7874,7 @@ mod tests {
         // `name` is required on the create shape.
         let filtered = ValidatedAttrs {
             description_html: None,
+            work_type: None,
             assignee_ids: None,
             label_ids: None,
             agent_executor: None,
@@ -7879,6 +7906,7 @@ mod tests {
         // The sanitized html wins over the input.
         let filtered = ValidatedAttrs {
             description_html: Some("<p>clean</p>".to_owned()),
+            work_type: None,
             assignee_ids: None,
             label_ids: None,
             agent_executor: None,

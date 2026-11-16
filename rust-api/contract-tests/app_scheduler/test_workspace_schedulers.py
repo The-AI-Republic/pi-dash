@@ -1,5 +1,6 @@
 """Workspace scheduler list/create contract."""
 
+from _harness.diffs import expect, is_rust
 from _harness.seed import ADMIN
 from . import seed_scheduler as seed_s
 
@@ -17,6 +18,11 @@ SCHEDULER_KEYS = {
 # R7 validate_slug conflict (PDASHOSS01-221): exact wire body on both
 # backends for a duplicate active slug.
 SLUG_TAKEN = {"slug": ["This slug is already in use in this workspace."]}
+
+# Slug-format rejection (NEWPIDASH-257, DIFF-34): the Rust API enforces
+# the web form's SLUG_PATTERN; Django's validate_slug has no format rule
+# and accepts any slug up to 64 chars.
+SLUG_FORMAT = {"slug": ["Use lowercase letters, numbers, and dashes only."]}
 
 
 def test_list_empty(org):
@@ -154,6 +160,27 @@ def test_list_ordered_by_name_with_binding_count(org):
     assert names == ["A First", "B Second", "M Middle"]
     counts = {row["name"]: row["active_binding_count"] for row in r.json()}
     assert counts == {"A First": 0, "B Second": 0, "M Middle": 1}
+
+
+def test_create_badly_formatted_slug_rejected_on_rust(org):
+    # DIFF-34: the format rule is Rust-only. Each badly formatted slug is
+    # fresh in this test's workspace, so the duplicate check cannot
+    # shadow the format check.
+    for bad in ["Bad Slug", "Nightly", "nightly_scan", "-nightly", "nightly.1"]:
+        r = org.request(
+            "POST", sched_list(org), "admin",
+            json={"slug": bad, "name": "N", "prompt": "p"},
+        )
+        assert r.status_code == expect("DIFF-34", django=201, rust=400), r.text
+        if is_rust():
+            assert r.json() == SLUG_FORMAT
+        else:
+            assert r.json()["slug"] == bad
+            # Django stored it; clean up so later cases in this test
+            # start empty. (A soft delete is enough: the row is inert
+            # to every other assertion below.)
+            detail = f"{sched_list(org)}{r.json()['id']}/"
+            assert org.request("DELETE", detail, "admin").status_code == 204
 
 
 def test_create_strips_python_whitespace(org):

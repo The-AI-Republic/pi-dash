@@ -1,7 +1,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Dev-machines route container (NEWFRONT-555, RUN-037; built-in engine
+// Dev-machines route container (NEWFRONT-555, RUN-037; Pi Dash Agent
 // design §11). Resolves the workspace row, loads the table's data (the
 // machines and, for the expanded rows, every runner including built-in
 // engines) and hands the screen its writers. Kept out of the route so a
@@ -19,7 +19,7 @@ import {
   useMergeDevMachine,
   useRevokeDevMachine,
   useRotateDevMachine,
-  useSignOutDevMachineEngine,
+  useSignOutDevMachinePidashAgent,
   useUpdateDevMachine,
 } from "../api/devMachines.js";
 import { useRevokeRunner } from "../api/mutations.js";
@@ -34,10 +34,10 @@ export function DevMachinesContainer({ workspaceSlug }: { workspaceSlug: string 
   const revoke = useRevokeDevMachine(workspaceSlug, workspaceId);
   const remove = useDeleteDevMachine(workspaceSlug, workspaceId);
   const update = useUpdateDevMachine(workspaceSlug, workspaceId);
-  const signOutEngine = useSignOutDevMachineEngine(workspaceSlug, workspaceId);
+  const signOutPidashAgent = useSignOutDevMachinePidashAgent(workspaceSlug, workspaceId);
   const merge = useMergeDevMachine(workspaceSlug);
   // Revoking invalidates every runners read, the expanded rows' included.
-  const removeEngine = useRevokeRunner(workspaceSlug);
+  const removePidashAgent = useRevokeRunner(workspaceSlug);
   if (workspace === undefined) return null;
   const area = buildRunnersAreaValue({ workspaceSlug }, workspace.id, "allowed");
   return (
@@ -58,9 +58,9 @@ export function DevMachinesContainer({ workspaceSlug }: { workspaceSlug: string 
       onRevoke={(id) => revoke.mutateAsync(id)}
       onDelete={(id) => remove.mutateAsync(id)}
       onUpdate={(machineId, patch) => update.mutateAsync({ machineId, patch })}
-      onSignOutEngine={(id) => signOutEngine.mutateAsync(id)}
+      onSignOutPidashAgent={(id) => signOutPidashAgent.mutateAsync(id)}
       onMerge={(sourceId, targetId) => merge.mutateAsync({ sourceId, targetId })}
-      onRemoveEngine={(runnerId) => removeEngine.mutateAsync(runnerId)}
+      onRemovePidashAgent={(runnerId) => removePidashAgent.mutateAsync(runnerId)}
     />
   );
 }

@@ -299,6 +299,20 @@ class IssueCreateSerializer(BaseSerializer):
         validate_execution_target(attrs, issue=self.instance, user=user, project_id=project_id)
         normalize_issue_executor(attrs, instance=self.instance)
 
+        # ``work_type`` is the per-issue work-type override; NULL inherits the
+        # project's ``default_work_type``. Validated against the code-owned
+        # registry (PDASHOSS01-234).
+        if "work_type" in attrs:
+            if not attrs["work_type"]:
+                attrs["work_type"] = None  # normalize "" to the inherit state
+            else:
+                from pi_dash.prompting.work_types import WORK_TYPES
+
+                if attrs["work_type"] not in WORK_TYPES:
+                    raise serializers.ValidationError(
+                        {"work_type": f"unknown work type; expected one of {sorted(WORK_TYPES)}"}
+                    )
+
         # Validate description content for security
         if "description_html" in attrs and attrs["description_html"]:
             is_valid, error_msg, sanitized_html = validate_html_content(attrs["description_html"])
@@ -1115,6 +1129,7 @@ class IssueSerializer(DynamicBaseSerializer):
             "assigned_pod_id",
             "assigned_runner_id",
             "agent_executor",
+            "work_type",
             "module_ids",
             "label_ids",
             "assignee_ids",
@@ -1348,9 +1363,20 @@ class IssueDetailSerializer(IssueSerializer):
         from pi_dash.orchestration.agent_phases import is_ticking_state
         from pi_dash.orchestration.scheduling import is_paused_state
 
-        # Re-tick is offered wherever the grant is honoured: in the bucket,
+        # Re-tick is offered wherever the press is honoured: in the bucket,
         # and on the Paused state the cap-hit auto-pause parks issues in.
-        can_re_tick = (is_ticking_state(obj.state) or is_paused_state(obj.state)) and ticker.cap_reached()
+        # Besides a spent pool, the failure policy's stops (needs-human /
+        # repeated failure, PDASHOSS01-183) also honour Re-tick — it re-arms
+        # the clock without granting, mirroring ``scheduling._on_retick``.
+        from pi_dash.db.models.issue_agent_ticker import TickerDisarmReason
+
+        failure_stopped = not ticker.enabled and ticker.disarm_reason in (
+            TickerDisarmReason.FAILURE_NEEDS_HUMAN,
+            TickerDisarmReason.REPEATED_FAILURE,
+        )
+        can_re_tick = (is_ticking_state(obj.state) or is_paused_state(obj.state)) and (
+            ticker.cap_reached() or failure_stopped
+        )
         return {
             "enabled": ticker.enabled,
             "user_disabled": ticker.user_disabled,
@@ -1448,7 +1474,8 @@ class IssueDetailSerializer(IssueSerializer):
             "done_payload": run.done_payload,
             "error": run.error,
             "error_code": run.error_code,
-            "error_diagnostic": classify_run_error(run.error),
+            "failure_reason": run.failure_reason,
+            "error_diagnostic": classify_run_error(run.error, failure_reason=run.failure_reason),
             "llm_model": run.llm_model,
             "input_tokens": run.input_tokens,
             "output_tokens": run.output_tokens,

@@ -35,10 +35,11 @@
 //!   the isolation loop (re-render each non-default section alone; the
 //!   first failure is the culprit), which is also Python's path for the
 //!   common `UndefinedError` case that carries no lineno.
-//! * `composer.py:286-321` (`compose`), `324-344` (`compose_cloud`),
-//!   `347-364` (`compile_template`) — [`compose`], [`compose_cloud`],
-//!   [`compile_template`]. `compose_cloud` drops Python's
-//!   accepted-and-ignored `workspace` / `project` parameters.
+//! * `composer.py:286-321` (`compose`), `347-364` (`compile_template`)
+//!   — [`compose`], [`compile_template`].
+//!
+//! P3 step B deleted `compose_cloud` (`composer.py:324-344`) with
+//! the retired cloud plane.
 //! * `composer.py:372-380` (`_user_for_run`) — [`user_id_for_run`]: the
 //!   `run_is_human_triggered` predicate owns to the runner layer, so this
 //!   takes its boolean result plus the triggering user's id.
@@ -63,7 +64,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
 
-use super::{recipes, registry, renderer};
+use super::{recipes, registry, renderer, work_types};
 
 /// Manifest/source label for a registry-default section body
 /// (`composer.py:32`).
@@ -403,6 +404,22 @@ fn attributed_detail(
     detail.to_owned()
 }
 
+/// The recipe for `kind` on `executor_kind` with its slots filled for
+/// `work_type` (`work_types.expand(recipes.recipe_for(...), work_type or
+/// DEFAULT_WORK_TYPE)`).
+fn expanded_recipe(
+    kind: &str,
+    executor_kind: Option<&str>,
+    work_type: Option<&str>,
+) -> Result<Vec<&'static str>, PromptComposeError> {
+    let recipe = recipes::recipe_for(kind, executor_kind)
+        .map_err(|e| PromptComposeError::new(e.message()))?;
+    let work_type = work_type
+        .filter(|key| !key.is_empty())
+        .unwrap_or(work_types::DEFAULT_WORK_TYPE);
+    work_types::expand(recipe, work_type).map_err(|e| PromptComposeError::new(e.message()))
+}
+
 /// Resolve, assemble, and render the recipe for `kind`
 /// (`composer.py:286-321`). Raises [`PromptComposeError`] (attributed to
 /// the failing section) when rendering fails.
@@ -413,10 +430,14 @@ fn attributed_detail(
 /// draft_overrides:`). A draft keeps its resolved version and is labeled
 /// [`SOURCE_DRAFT`].
 ///
-/// Unknown kinds / sections surface message-preserving
+/// `work_type` fills the recipe's slots ([`work_types::expand`]); `None`
+/// means the default work type.
+///
+/// Unknown kinds / sections / work types surface message-preserving
 /// [`PromptComposeError`]s (Python propagates `RecipeNotFound` /
-/// `PromptRegistryError` as-is; there are no typed catchers yet, so the
-/// message is the contract).
+/// `PromptRegistryError` / `WorkTypeError` as-is; there are no typed
+/// catchers yet, so the message is the contract).
+#[allow(clippy::too_many_arguments)]
 pub fn compose(
     kind: &str,
     workspace_id: Option<&str>,
@@ -425,9 +446,9 @@ pub fn compose(
     context: &serde_json::Value,
     draft_overrides: Option<&HashMap<String, String>>,
     executor_kind: Option<&str>,
+    work_type: Option<&str>,
 ) -> Result<ComposedPrompt, PromptComposeError> {
-    let recipe = recipes::recipe_for(kind, executor_kind)
-        .map_err(|e| PromptComposeError::new(e.message()))?;
+    let recipe = expanded_recipe(kind, executor_kind, work_type)?;
     let mut resolved = Vec::with_capacity(recipe.len());
     for key in recipe {
         resolved.push(
@@ -462,55 +483,14 @@ pub fn compose(
     }
 }
 
-/// Compose an immutable Cloud recipe without user/workspace overrides
-/// (`composer.py:324-344`).
-pub fn compose_cloud(
-    kind: &str,
-    context: &serde_json::Value,
-) -> Result<ComposedPrompt, PromptComposeError> {
-    let recipe =
-        recipes::cloud_recipe_for(kind).map_err(|e| PromptComposeError::new(e.message()))?;
-    let mut resolved = Vec::with_capacity(recipe.len());
-    for key in recipe {
-        let section =
-            registry::get_section(key).map_err(|e| PromptComposeError::new(e.message()))?;
-        resolved.push(ResolvedSection {
-            key: key.to_string(),
-            title: section.title.to_owned(),
-            customizable: section.customizable.to_owned(),
-            body: section.default_body.clone(),
-            source: SOURCE_DEFAULT.to_owned(),
-            version: 0,
-        });
-    }
-    let (template_body, manifest) = assemble(&resolved);
-    match renderer::render(&template_body, context) {
-        Ok(text) => Ok(ComposedPrompt {
-            text,
-            manifest,
-            template_body,
-            resolved,
-        }),
-        Err(err) => Err(PromptComposeError::new(attributed_detail(
-            err.message(),
-            &manifest,
-            &resolved,
-            Some(context),
-        ))),
-    }
-}
-
-/// Assemble the recipe for `kind` **without rendering** (Jinja markers
-/// intact), powering the "see the final template" view
-/// (`composer.py:347-364`). The returned `text` is the raw assembled body.
 pub fn compile_template(
     kind: &str,
     workspace_id: Option<&str>,
     user_id: Option<&str>,
     index: &OverrideIndex,
+    work_type: Option<&str>,
 ) -> Result<ComposedPrompt, PromptComposeError> {
-    let recipe =
-        recipes::recipe_for(kind, None).map_err(|e| PromptComposeError::new(e.message()))?;
+    let recipe = expanded_recipe(kind, None, work_type)?;
     let mut resolved = Vec::with_capacity(recipe.len());
     for key in recipe {
         resolved.push(
@@ -855,6 +835,7 @@ mod tests {
             &populated_issue_context(),
             None,
             None,
+            None,
         )
         .expect("defaults compose");
         assert_eq!(
@@ -901,6 +882,7 @@ mod tests {
             &populated_issue_context(),
             Some(&drafts),
             None,
+            None,
         )
         .expect("draft composes");
         assert!(composed.text.contains("Hello sample-ws!"));
@@ -919,6 +901,7 @@ mod tests {
             &index,
             &populated_issue_context(),
             Some(&HashMap::new()),
+            None,
             None,
         )
         .expect("empty drafts compose");
@@ -940,6 +923,7 @@ mod tests {
             &index,
             &populated_issue_context(),
             Some(&drafts),
+            None,
             None,
         )
         .expect_err("bad draft fails");
@@ -982,29 +966,12 @@ mod tests {
             Some(WORKSPACE_ID),
             Some(USER_ID),
             &index,
+            None,
         )
         .expect("compiles");
         assert!(compiled.text.contains("{{"));
         assert_eq!(compiled.text, compiled.template_body);
         assert_eq!(compiled.manifest.len(), compiled.resolved.len());
-    }
-
-    #[test]
-    fn compose_cloud_resolves_defaults_only() {
-        // `FIX-compose / compose.cloud_direct_*`.
-        let ctx = crate::prompting::validation::sample_contexts(recipes::KIND_DIRECT)
-            .into_iter()
-            .next()
-            .expect("direct sample");
-        let composed = compose_cloud(recipes::KIND_DIRECT, &ctx).expect("cloud composes");
-        assert!(composed.manifest.iter().all(|e| e.source == SOURCE_DEFAULT));
-        assert!(composed.manifest.iter().all(|e| e.version == 0));
-        assert_eq!(
-            composed.manifest.len(),
-            recipes::cloud_recipe_for(recipes::KIND_DIRECT)
-                .expect("direct cloud recipe")
-                .len()
-        );
     }
 
     #[test]
@@ -1015,6 +982,7 @@ mod tests {
             Some(USER_ID),
             &OverrideIndex::new(),
             &populated_issue_context(),
+            None,
             None,
             None,
         )
@@ -1037,9 +1005,18 @@ mod tests {
             .into_iter()
             .next()
             .expect("populated sample first");
-        compose(kind, None, None, &OverrideIndex::new(), &ctx, None, None)
-            .unwrap_or_else(|err| panic!("{kind} composes: {}", err.message()))
-            .text
+        compose(
+            kind,
+            None,
+            None,
+            &OverrideIndex::new(),
+            &ctx,
+            None,
+            None,
+            None,
+        )
+        .unwrap_or_else(|err| panic!("{kind} composes: {}", err.message()))
+        .text
     }
 
     // Ticking semantics: outcomes are informational; only --stop-ticking
@@ -1120,7 +1097,7 @@ mod tests {
     #[test]
     fn review_kind_splits_external_wait_from_human_wait() {
         let body = composed_text(recipes::KIND_REVIEW);
-        assert!(body.contains("**waiting on CI or the PR**"));
+        assert!(body.contains("**waiting on an external process**"));
         assert!(body.contains("**keep the clock ticking**"));
         assert!(body.contains("`waiting_on_human --stop-ticking`"));
         assert!(body.contains("`done --stop-ticking`"));
@@ -1131,9 +1108,9 @@ mod tests {
     fn test_kind_pass_stops_clock_explicitly_or_moves_on() {
         let body = composed_text(recipes::KIND_TEST);
         assert!(body.contains("`done --stop-ticking`"));
-        assert!(body.contains("explicitly lets agents merge and close"));
+        assert!(body.contains("explicitly lets agents accept and close"));
         assert!(!body.contains("--state \"Done\""));
-        assert!(body.contains("**nothing changed, waiting on CI or a dependency**"));
+        assert!(body.contains("**nothing changed, waiting on an external process**"));
         assert!(body.contains("**nothing changed, waiting on a human**"));
         assert!(body.contains("`waiting_on_external`"));
     }

@@ -466,7 +466,16 @@ test(
       await test.step("no executor row is offered", async () => {
         await driver.propertyOpenPicker("Runs on");
         const options = await driver.pickerOptionTexts();
-        expect(options.some((option) => /cloud agent|pi dash agent/i.test(option))).toBe(false);
+        // An executor row is an option whose own label is the bare agent
+        // name ("Pi Dash Agent", "Pi Dash Agent (desktop)") or a cloud
+        // agent. Runner rows ("Pi Dash Agent · <machine>") are not
+        // executor rows, so only the option's first line is matched, and
+        // it must be the whole label.
+        const isExecutorRow = (option: string): boolean => {
+          const label = option.split("\n")[0]?.trim() ?? "";
+          return /cloud agent/i.test(label) || /^pi dash agent(\s*\([^)]*\))?$/i.test(label);
+        };
+        expect(options.filter(isExecutorRow)).toEqual([]);
         await driver.pickerPressEscape();
       });
 

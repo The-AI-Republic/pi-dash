@@ -15,6 +15,7 @@ storybook-static/
 # apps/api/pi_dash/prompting/fragments/__init__.py and prompting/registry.py.
 apps/api/pi_dash/prompting/fragments/
 apps/api/pi_dash/prompting/sections/
+apps/api/pi_dash/prompting/work_types/
 
 # Parity inventory tables are edited row by row by many agent runs; a whole-table
 # reformat on every commit buries the real change (NEWFRONT-205).

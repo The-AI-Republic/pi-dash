@@ -336,8 +336,9 @@ def apply_assign_rejected_busy(
 #
 # Strings are intentionally compared as prefixes so the runner / cloud
 # can append context (timestamps, run ids) without breaking the guard.
-# When the remediation-map work lands, this hard-coded list goes away
-# and we route on `FailureReason` instead.
+# The stored ``failure_reason`` is the primary route now (a free-retry
+# failure is suppressed the same way); the prefixes stay as a fallback for
+# rows the taxonomy cannot see (and to keep the stall reaper quiet).
 _INFRA_FAILURE_DETAIL_PREFIXES = (
     "daemon shutdown requested",
     "agent stalled: no events for >",
@@ -359,20 +360,39 @@ def _post_failure_comment(run_id: UUID | str, error_detail: str) -> None:
     Suppressed for known infrastructure-flavored failures (daemon
     restart, cloud-side stall reconciler) — see
     ``_INFRA_FAILURE_DETAIL_PREFIXES``. The DB row still gets the
-    ``error`` field; we just don't pollute the issue thread.
+    ``error`` field; we just don't pollute the issue thread. Also
+    suppressed when the failure policy is about to free-retry the run.
+    Neither suppression applies when the failure stops the clock.
     """
     from django.utils.html import format_html
 
     from pi_dash.db.models.issue import IssueComment
     from pi_dash.orchestration.workpad import get_agent_system_user
+    from pi_dash.runner.diagnostics import classify_run_error
+    from pi_dash.orchestration.scheduling import failure_clock_effect
+    from pi_dash.runner.failure import RunFailureReason
 
     detail = (error_detail or "").strip()
-    if detail.startswith(_INFRA_FAILURE_DETAIL_PREFIXES):
-        return
 
     run = AgentRun.objects.select_related("work_item", "work_item__project").filter(pk=run_id).first()
     if run is None or run.work_item_id is None:
         return
+
+    # Route on the stored canonical reason (PDASHOSS01-183), predicting the
+    # decision ``scheduling._apply_failure_policy`` makes when the run's
+    # RUN_ENDED event reconciles (after this hook, same transaction). A
+    # failure the free-retry path is about to re-run silently would be
+    # noise each attempt; but when the clock stops (needs-human, or the
+    # repeated-failure backstop) the user must be told — even for the
+    # infrastructure details that are otherwise kept off the thread.
+    reason = (run.failure_reason or "").strip()
+    effect = failure_clock_effect(run.work_item, run, reason)
+    clock_stopped = effect.clock_stopped
+    if effect.free_retry:
+        return
+    if detail.startswith(_INFRA_FAILURE_DETAIL_PREFIXES) and not clock_stopped:
+        return
+
     if IssueComment.objects.filter(
         issue_id=run.work_item_id,
         speaker_agent_run_id=run.id,
@@ -380,18 +400,31 @@ def _post_failure_comment(run_id: UUID | str, error_detail: str) -> None:
     ).exists():
         return
 
-    if detail:
-        body = format_html(
-            "<p><strong>Run failed.</strong></p><pre>{}</pre>",
-            detail,
-        )
+    label = RunFailureReason(reason).label if reason in RunFailureReason.values else ""
+    diagnostic = classify_run_error(detail, failure_reason=reason) or {}
+    action = diagnostic.get("action") or ""
+
+    parts: list[str] = []
+    if label:
+        parts.append(format_html("<p><strong>Run failed — {}.</strong>{}</p>", label, f" {action}" if action else ""))
     else:
+        parts.append(format_html("<p><strong>Run failed.</strong></p>"))
+    if clock_stopped:
+        parts.append(
+            format_html(
+                "<p>{}</p>",
+                "Automatic runs on this issue are paused — no further tick budget "
+                "will be spent on this failure. Once it is fixed, press Re-tick "
+                "(or Run AI) to resume.",
+            )
+        )
+    if detail:
+        parts.append(format_html("<pre>{}</pre>", detail))
+    elif not label:
         # Defensive: we'd rather post "(no diagnostic detail)" than
         # silently drop the activity entry.
-        body = format_html(
-            "<p><strong>Run failed.</strong> {}</p>",
-            "(no diagnostic detail)",
-        )
+        parts.append(format_html("<p>{}</p>", "(no diagnostic detail)"))
+    body = "".join(parts)
 
     IssueComment.objects.create(
         issue=run.work_item,
@@ -404,6 +437,74 @@ def _post_failure_comment(run_id: UUID | str, error_detail: str) -> None:
         speaker_agent_run_id=run.id,
     )
 
+    if clock_stopped:
+        # A stopped clock with nobody told is exactly the failure mode the
+        # taxonomy exists to prevent — raise an in-app notification to the
+        # people who can act: the issue's creator and the runner's owner.
+        # Behind the one-comment-per-run dedupe above, so repeated terminal
+        # hooks cannot fan out duplicates.
+        try:
+            _notify_clock_stopped(run, label=label, action=action)
+        except Exception:
+            logger.exception("run_lifecycle: clock-stop notification failed for run %s", run.id)
+
+
+def _notify_clock_stopped(run: AgentRun, *, label: str, action: str) -> None:
+    from pi_dash.db.models.notification import Notification
+
+    issue = run.work_item
+    receivers = []
+    seen: set = set()
+    runner_owner = run.runner.owner if run.runner_id and run.runner else None
+    for candidate in (issue.created_by, runner_owner):
+        candidate_id = getattr(candidate, "id", None)
+        if candidate_id is None or candidate_id in seen:
+            continue
+        if not getattr(candidate, "is_active", False) or getattr(candidate, "is_bot", False):
+            continue
+        seen.add(candidate_id)
+        receivers.append(candidate)
+    if not receivers:
+        return
+
+    from django.utils.html import format_html
+
+    message_html = format_html(
+        "<p>Automatic agent runs on <strong>{}</strong> are paused: {}. {}</p>",
+        issue.name,
+        label or "the last run failed",
+        action or "Fix the cause, then press Re-tick to resume.",
+    )
+    Notification.objects.bulk_create(
+        [
+            Notification(
+                workspace=issue.workspace,
+                project=issue.project,
+                receiver=receiver,
+                triggered_by=None,
+                sender="in_app:agent_runs:clock_stopped",
+                entity_identifier=issue.id,
+                entity_name="issue",
+                title=issue.name,
+                message_html=message_html,
+                data={
+                    "issue": {
+                        "id": str(issue.id),
+                        "name": issue.name,
+                        "identifier": str(issue.project.identifier) if issue.project_id else "",
+                        "sequence_id": issue.sequence_id,
+                    },
+                    "agent_run": {
+                        "id": str(run.id),
+                        "failure_reason": run.failure_reason,
+                        "action": action,
+                    },
+                },
+            )
+            for receiver in receivers
+        ]
+    )
+
 
 def finalize_run_terminal(
     runner: Runner,
@@ -412,6 +513,7 @@ def finalize_run_terminal(
     *,
     done_payload: Any = None,
     error_detail: str = "",
+    runner_failure_reason: str = "",
     refusal_category: Any = None,
     tokens: Any = None,
     model: Any = None,
@@ -436,6 +538,14 @@ def finalize_run_terminal(
     if new_status == AgentRunStatus.COMPLETED:
         updates["done_payload"] = done_payload
         updates["error"] = ""
+    if new_status == AgentRunStatus.FAILED:
+        # Classify on the *raw* detail plus the runner's structured reason —
+        # before enrichment prepends operator guidance (PDASHOSS01-183).
+        from pi_dash.runner.failure import classify
+
+        updates["failure_reason"] = classify(
+            error_detail, runner_reason=str(runner_failure_reason or "")
+        ).value
     if new_status == AgentRunStatus.FAILED and error_detail:
         error_detail = enrich_run_error(error_detail, runner=runner, model=model)
         updates["error"] = error_detail[:16000]

@@ -961,7 +961,7 @@ pub async fn insert_runner(db: &impl ConnectionTrait, new: &NewRunner<'_>) -> Re
     .map(drop)
 }
 
-/// `live_engine_runner_for` (#2910): the machine's live engine runner on
+/// `live_pidash_agent_runner_for` (#2910): the machine's live engine runner on
 /// the project, oldest first, optionally locked. Returns `(id, name,
 /// generation, pod_id)`.
 pub struct LiveEngineHit {
@@ -971,7 +971,7 @@ pub struct LiveEngineHit {
     pub pod_id: Uuid,
 }
 
-pub async fn live_engine_runner_for(
+pub async fn live_pidash_agent_runner_for(
     db: &impl ConnectionTrait,
     machine_id: Uuid,
     project_id: Uuid,
@@ -1052,7 +1052,7 @@ pub async fn taken_names(
 
 /// `unique_runner_name` (#2910) over the ORM taken set.
 pub fn unique_runner_name(base: &str, taken: &std::collections::HashSet<String>) -> String {
-    use crate::runner_enroll::engine_naming::with_suffix;
+    use crate::runner_enroll::pidash_agent_naming::with_suffix;
     if !taken.contains(base) {
         return base.to_owned();
     }
@@ -1362,7 +1362,7 @@ mod tests {
         assert_eq!(ffr_cols::TABLE, "runner_force_refresh");
         assert_eq!(WORKSPACES_SELECT_COLUMNS.len(), 14);
         assert_eq!(WORKSPACE_MEMBERS_SELECT_COLUMNS.len(), 17);
-        // Cross-domain projects list (46 cols, id sixth) comes from the
+        // Cross-domain projects list (47 cols, id sixth) comes from the
         // merged app_project port — spot-pin head, id slot and tail.
         assert_eq!(
             &project_cols::COLUMNS[..6],
@@ -1375,9 +1375,10 @@ mod tests {
                 "id"
             ]
         );
-        assert_eq!(project_cols::COLUMNS.len(), 46);
+        assert_eq!(project_cols::COLUMNS.len(), 47);
         assert_eq!(project_cols::COLUMNS[12], "identifier");
         assert_eq!(project_cols::COLUMNS[45], "default_agent_executor");
+        assert_eq!(project_cols::COLUMNS[46], "default_work_type");
         assert_eq!(project_cols::TABLE, "projects");
     }
 

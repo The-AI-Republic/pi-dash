@@ -218,6 +218,7 @@ mod tests {
         let daemon = DaemonConfig {
             cloud_url: "https://cloud.example".into(),
             auto_update: false,
+            max_concurrent_agent_runs: 3,
             ..Default::default()
         };
 

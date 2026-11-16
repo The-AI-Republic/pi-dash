@@ -1,0 +1,38 @@
+name: rust-api-github-sunset-guard
+
+# NEWPIDASH-210: ratchet against new legacy github_* table/model mentions in
+# production Rust code outside db/src/entity/ and migrations. Pure Python,
+# no DB. Advisory like all rust-api CI -- a red PR check must be explained
+# in the PR body before merge. The gate is the local check in
+# rust-api/README.md.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "rust-api/**"
+      - ".github/workflows/rust-api-github-sunset-guard.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "rust-api/**"
+      - ".github/workflows/rust-api-github-sunset-guard.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  github-sunset-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run github sunset guard
+        run: python3 rust-api/scripts/github_sunset_guard.py --check
+      - name: Allowlist count
+        if: always()
+        run: |
+          N=$(grep -vE '^\s*(#|$)' rust-api/scripts/github_sunset_allowlist.txt | wc -l)
+          echo "github-sunset allowlist entries: $N" >> "$GITHUB_STEP_SUMMARY"

@@ -45,11 +45,11 @@ def _insert_run(seeder, world, issue_id, status):
             error_details, workspace_id, work_item_id, pod_id, created_by_id,
             llm_model, trigger, executor_kind, dispatch_attempts, cancel_reason,
             tool_plan, phase_kind, agent_metadata, usage, pinned_runner_id,
-            pin_kind, created_at)
+            pin_kind, created_at, failure_reason)
            VALUES (%s,%s,'e8 prompt','{}','{}','',
                    '{}',%s,%s,%s,%s,'model','human','local_runner',0,'',
                    '{}','work','{}','{"input": 0, "output": 0, "total": 0}',
-                   NULL,'locality',now())""",
+                   NULL,'locality',now(),'')""",
         (
             run_id,
             status,

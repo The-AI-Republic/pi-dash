@@ -12,6 +12,8 @@ import base64
 
 import pytest
 
+from _harness.diffs import expect
+
 from .conftest import page_url
 
 pytestmark = pytest.mark.contract
@@ -261,3 +263,85 @@ def test_description_update_html_still_strips_hostile_markup(
     response = user_client.patch(_desc_url(world, page["id"]), json={"description_html": html})
     assert response.status_code == 200
     assert db.fetchval("SELECT description_html FROM pages WHERE id=%s", (page["id"],)) == stored
+
+
+# NEWPIDASH-272 (DIFF-27): a description PATCH that would store identical
+# content is the live close-store no-op (`apps/live` storeDocument PATCHes
+# the unchanged document on every disconnect), not a user edit. Django
+# stamps `updated_by`/`updated_at` to the viewer unconditionally
+# (`BaseModel.save` via crum); Rust preserves the last real editor.
+# The viewer is a second project member PATCHing the owner's page, so a
+# flip would move attribution from the editor to the viewer.
+OLD_AT = "2021-02-03 04:05:06+00"
+
+
+def _seeded_page(world, seeder, db, *, name):
+    binary = b"\x89contract-binary-payload"
+    page = seeder.create_page(
+        world["workspace"]["id"],
+        world["owner"]["id"],
+        name=name,
+        description_html="<p>hi</p>",
+        description_binary=binary,
+        description_json={"ops": []},
+    )
+    seeder.link_page_project(world["workspace"]["id"], world["project"]["id"], page["id"])
+    db.execute(
+        "UPDATE pages SET updated_by_id=%s, updated_at=%s WHERE id=%s",
+        (world["owner"]["id"], OLD_AT, page["id"]),
+    )
+    return page, binary
+
+
+def _attribution(db, page_id):
+    row = db.fetchone("SELECT updated_by_id, updated_at FROM pages WHERE id=%s", (page_id,))
+    return str(row["updated_by_id"]), row["updated_at"]
+
+
+def test_description_noop_patch_preserves_attribution(member_client, world, seeder, db, member_user):
+    page, binary = _seeded_page(world, seeder, db, name="No-op attribution")
+    before = _attribution(db, page["id"])
+    assert before[0] == str(world["owner"]["id"])
+    payload = {
+        "description_binary": base64.b64encode(binary).decode(),
+        "description_html": "<p>hi</p>",
+        "description_json": {"ops": []},
+    }
+    response = member_client.patch(_desc_url(world, page["id"]), json=payload)
+    assert response.status_code == 200
+    assert response.json() == {"message": "Updated successfully"}
+    after = _attribution(db, page["id"])
+    assert after[0] == expect("DIFF-27", django=str(member_user["id"]), rust=before[0])
+    if expect("DIFF-27", django=False, rust=True):
+        assert after[1] == before[1]
+    else:
+        assert after[1] > before[1]
+    assert (
+        db.fetchval("SELECT description_html FROM pages WHERE id=%s", (page["id"],)) == "<p>hi</p>"
+    )
+
+
+def test_description_empty_patch_preserves_attribution(member_client, world, seeder, db, member_user):
+    page, _binary = _seeded_page(world, seeder, db, name="Empty attribution")
+    before = _attribution(db, page["id"])
+    response = member_client.patch(_desc_url(world, page["id"]), json={})
+    assert response.status_code == 200
+    assert response.json() == {"message": "Updated successfully"}
+    after = _attribution(db, page["id"])
+    assert after[0] == expect("DIFF-27", django=str(member_user["id"]), rust=before[0])
+    if expect("DIFF-27", django=False, rust=True):
+        assert after[1] == before[1]
+    else:
+        assert after[1] > before[1]
+
+
+def test_description_changed_patch_stamps_caller(member_client, world, seeder, db, member_user):
+    page, _binary = _seeded_page(world, seeder, db, name="Changed attribution")
+    before = _attribution(db, page["id"])
+    response = member_client.patch(
+        _desc_url(world, page["id"]), json={"description_html": "<p>changed</p>"}
+    )
+    assert response.status_code == 200
+    after = _attribution(db, page["id"])
+    assert after[0] == str(member_user["id"])
+    assert after[1] > before[1]

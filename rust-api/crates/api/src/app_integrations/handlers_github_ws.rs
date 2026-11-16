@@ -553,8 +553,9 @@ async fn disconnect_write(
 /// `transaction.atomic()`):
 ///
 /// - `wi.config.token = ""` + `disconnected_at = now`, config-only save;
-/// - `GithubRepositorySync(workspace_integration=wi)` off with the stamp;
-/// - `GitRepositoryBinding`s of the PAT accounts off with the stamp;
+/// - `GitRepositoryBinding`s of the PAT accounts off with the stamp
+///   (NEWPIDASH-210: the `GithubRepositorySync` flip retired with the
+///   legacy table; the generic flip below is the only sync write);
 /// - PAT `GitProviderAccount`s to REVOKED with the stamp and an emptied
 ///   `credential_config`.
 async fn apply_disconnect(
@@ -562,7 +563,7 @@ async fn apply_disconnect(
     workspace_id: &uuid::Uuid,
     wi: &WorkspaceIntegrationRow,
 ) -> Result<(), Denial> {
-    use pidash_db::entity::{github_repository_syncs, workspace_integrations};
+    use pidash_db::entity::workspace_integrations;
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
     // `config = wi.config or {}` (`github.py:513`): a truthy non-object
     // fails the item assignment below (`TypeError` → 500), like Python.
@@ -582,21 +583,9 @@ async fn apply_disconnect(
         .await
         .map_err(|_| Denial::ServerError)?;
     // `QuerySet.update()` runs through the default manager, so soft-deleted
-    // rows are untouched (`deleted_at IS NULL`).
-    github_repository_syncs::Entity::update_many()
-        .col_expr(
-            github_repository_syncs::Column::IsSyncEnabled,
-            sea_orm::sea_query::Expr::value(false),
-        )
-        .col_expr(
-            github_repository_syncs::Column::LastSyncError,
-            sea_orm::sea_query::Expr::value(DISCONNECT_ERROR),
-        )
-        .filter(github_repository_syncs::Column::WorkspaceIntegrationId.eq(wi.id))
-        .filter(github_repository_syncs::Column::DeletedAt.is_null())
-        .exec(db)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    // rows are untouched (`deleted_at IS NULL`). NEWPIDASH-210: no
+    // legacy `github_repository_syncs` write — the bindings flip below
+    // (via `disconnect_pat_accounts`) is the only sync write.
     // The PAT accounts of this integration (`github.py:522-527`): their
     // bindings go off first, then the accounts are revoked.
     disconnect_pat_accounts(db, workspace_id, &wi.id).await

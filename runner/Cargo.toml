@@ -67,6 +67,7 @@ axoupdater = { version = "0.10", default-features = false, features = [
     "tokio",
 ] }
 fs2 = "0.4"
+rusqlite = { version = "0.31", features = ["bundled"] }
 # Built-in engine install (`src/engine/install.rs`): verify the release
 # archive against its `.sha256`, and order engine version directories.
 sha2 = "0.10"

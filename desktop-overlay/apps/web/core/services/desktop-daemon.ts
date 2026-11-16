@@ -248,6 +248,18 @@ export async function discoverDaemon(): Promise<Discovery | null> {
   return next;
 }
 
+/**
+ * Ask the daemon to retry its cloud connections now (PIDESKAPP-181): cuts
+ * every runner's backoff wait short, so the built-in agent comes back within
+ * seconds after an outage instead of waiting out a backoff that can be hours
+ * long. Never throws — callers fire it on focus, network recovery and Run,
+ * and a missing or too-old daemon is just a missed wake.
+ */
+export async function requestDaemonReconnect(): Promise<void> {
+  if (!isDesktopHost()) return;
+  await invoke("daemon_reconnect").catch(() => null);
+}
+
 /** The daemon's `Hello` when the app may cooperate with it, else `null`. */
 export function compatibleHello(d: Discovery | null = discovery): HelloInfo | null {
   return d?.kind === "compatible" ? d.hello : null;

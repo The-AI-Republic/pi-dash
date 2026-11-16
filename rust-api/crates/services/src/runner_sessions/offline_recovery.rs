@@ -47,7 +47,7 @@
 use chrono::{DateTime, Utc};
 use pidash_db::entity::{agent_run as run, dev_machine, runner};
 use pidash_db::runner_runs::agent_run;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::runner_runs::AgentRunStatus;
 use sea_orm::sea_query::extension::postgres::PgBinOper;
 use sea_orm::sea_query::{Alias, Condition, Expr, LockType, Query};

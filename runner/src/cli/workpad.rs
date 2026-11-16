@@ -36,7 +36,12 @@ pub enum WorkpadCommand {
         /// `PIDASH_ISSUE_IDENTIFIER`.
         identifier: Option<String>,
     },
-    /// Overwrite the agent workpad. An empty file clears it.
+    /// Overwrite the agent workpad.
+    ///
+    /// Refuses an empty or whitespace-only body unless `--allow-empty` is
+    /// passed, to prevent a failed `workpad get` (e.g. 429) that produced an
+    /// empty file from silently wiping the stored workpad. Pass
+    /// `--allow-empty` when a clear is intentional.
     ///
     /// On a successful upload the `--body-file` is deleted, so the local
     /// staging copy can't go stale and clobber newer server content on a
@@ -48,6 +53,11 @@ pub enum WorkpadCommand {
         /// Path to a file containing the workpad body (markdown).
         #[arg(long = "body-file", value_name = "PATH")]
         body_file: PathBuf,
+        /// Allow an empty or whitespace-only body to clear the workpad.
+        /// Without this flag an empty body is rejected so an accidental
+        /// empty file cannot wipe the stored workpad.
+        #[arg(long = "allow-empty")]
+        allow_empty: bool,
         /// Keep the body file after a successful upload instead of deleting it.
         #[arg(long = "keep")]
         keep: bool,
@@ -69,8 +79,9 @@ pub async fn run(args: WorkpadArgs, paths: &crate::util::paths::Paths) -> i32 {
         WorkpadCommand::Update {
             identifier,
             body_file,
+            allow_empty,
             keep,
-        } => cmd_update(&client, identifier, body_file, keep).await,
+        } => cmd_update(&client, identifier, body_file, allow_empty, keep).await,
     };
     match result {
         Ok(()) => 0,
@@ -98,9 +109,11 @@ async fn cmd_update(
     client: &ApiClient,
     identifier: Option<String>,
     body_file: PathBuf,
+    allow_empty: bool,
     keep: bool,
 ) -> Result<(), CliError> {
     let body = load_workpad_body(&body_file)?;
+    check_workpad_body(&body, allow_empty)?;
     let current_issue = std::env::var("PIDASH_ISSUE_IDENTIFIER").ok();
     let ident = resolve_identifier(identifier.as_deref(), current_issue.as_deref())?;
     let issue = resolve_issue(client, ident).await?;
@@ -200,12 +213,26 @@ fn load_workpad_body(path: &Path) -> Result<String, CliError> {
     })
 }
 
+/// Refuse an empty or whitespace-only workpad body unless `--allow-empty`.
+/// This prevents a failed `workpad get` (e.g. 429) that produced an empty
+/// file from silently wiping the stored workpad.
+fn check_workpad_body(body: &str, allow_empty: bool) -> Result<(), CliError> {
+    if !allow_empty && body.trim().is_empty() {
+        return Err(CliError::new(
+            EXIT_INVALID,
+            "workpad body is empty (empty or whitespace-only); pass --allow-empty to clear intentionally and do not upload an empty file when a get failed (e.g. 429)",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
     use super::{
-        Cleanup, cleanup_body_file, load_workpad_body, resolve_identifier, warn_on_cleanup,
+        Cleanup, check_workpad_body, cleanup_body_file, load_workpad_body, resolve_identifier,
+        warn_on_cleanup,
     };
 
     #[test]
@@ -237,6 +264,30 @@ mod tests {
 
         let body = load_workpad_body(&path).expect("body");
         assert!(body.contains("phase: implementing"));
+    }
+
+    #[test]
+    fn empty_workpad_body_is_rejected_without_allow_empty() {
+        use crate::api_client::EXIT_INVALID;
+
+        for body in ["", "   ", "\n\t \n"] {
+            let err = check_workpad_body(body, false).expect_err("empty must be rejected");
+            assert_eq!(err.exit_code, EXIT_INVALID);
+            assert!(err.message.contains("--allow-empty"));
+        }
+    }
+
+    #[test]
+    fn empty_workpad_body_is_allowed_with_allow_empty() {
+        for body in ["", "   ", "\n"] {
+            check_workpad_body(body, true).expect("allow-empty passes");
+        }
+    }
+
+    #[test]
+    fn non_empty_workpad_body_passes() {
+        check_workpad_body("hello", false).expect("non-empty passes");
+        check_workpad_body("  hello  ", false).expect("non-empty with spaces passes");
     }
 
     // --- cleanup after a successful upload ---------------------------------

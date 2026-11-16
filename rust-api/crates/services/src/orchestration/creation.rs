@@ -36,11 +36,11 @@
 //!   verbatim) plus the three `cloud_agent.creation` calls
 //!   (`execution_fields`, `lock_cloud_creation_capacity`,
 //!   `dispatch_after_commit` — D-11 L6, merged jobs-side). Services code
-//!   must not call `jobs::dispatch` (the `jobs → services` edge is
+//!   must not call `jobs::run_dispatch` (the `jobs → services` edge is
 //!   load-bearing; calling back would cycle), so the jobs-side
 //!   `LiveCreationStore` (`pidash-jobs`, `orchestration/creation_jobs.rs`)
 //!   implements this trait by delegating those three methods to the
-//!   merged `jobs::dispatch` functions.
+//!   merged `jobs::run_dispatch` functions.
 //! * [`FinalizeAgentRunSeam`] — the one-method seam for the
 //!   `finalize_agent_run(run.id, FAILED, …)` call sites in this module.
 //!   Finalization is runner D-15 (downstream of D-12 — no edge, it would
@@ -94,16 +94,16 @@ use uuid::Uuid;
 
 use crate::runner_sessions::guards::HEARTBEAT_GRACE_SECS;
 
-use pidash_db::dispatch::status::{AgentRunStatus, AgentRunTrigger};
+use pidash_db::agent_runs::status::{AgentRunStatus, AgentRunTrigger};
 use pidash_db::orchestration::is_terminal_status;
 use pidash_db::orchestration::runs::ACTIVE_STATUSES;
 use pidash_db::runner_runs::agent_run;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 pub use pidash_types::orchestration::PROJECT_MOVE_HANDOFF_CONFIG_KEY;
 use pidash_types::orchestration::{ContinuationOutcome, PhaseConfig, StateRef, TransitionOutcome};
 
-use crate::dispatch::UserFlags;
-use crate::prompting::{composer, context, recipes};
+use crate::prompting::{composer, context, recipes, work_types};
+use crate::run_creation::UserFlags;
 
 // ---------------------------------------------------------------------------
 // Reasons, triggers, literals
@@ -172,7 +172,7 @@ pub const OWNER_UNASSIGNED: Option<Uuid> = None;
 /// The issue projection every unit reads (`service.py` passes full issue
 /// rows; this projects the consumed columns). `$1` is the issue id.
 pub const ISSUE_SELECT_SQL: &str = "SELECT id, workspace_id, project_id, state_id, parent_id, \
-    created_by_id, assigned_pod_id, assigned_runner_id, agent_executor, git_work_branch, workpad, name, \
+    created_by_id, assigned_pod_id, assigned_runner_id, agent_executor, work_type, git_work_branch, workpad, name, \
     description_stripped, priority, sequence_id, target_date FROM issues WHERE id = $1";
 
 /// The project projection (`service.py` reads `issue.project` for the
@@ -181,8 +181,8 @@ pub const ISSUE_SELECT_SQL: &str = "SELECT id, workspace_id, project_id, state_i
 pub const PROJECT_SELECT_SQL: &str = "SELECT id, workspace_id, identifier, name, description, \
     repo_url, base_branch, default_agent_executor, project_lead_id, default_assignee_id, \
     agent_default_max_ticks, agent_default_interval_seconds, \
-    agent_review_default_interval_seconds, agent_test_default_interval_seconds \
-    FROM projects WHERE id = $1";
+    agent_review_default_interval_seconds, agent_test_default_interval_seconds, \
+    default_work_type FROM projects WHERE id = $1";
 
 /// The state projection (registry reads `name` + `group` only). `$1` is
 /// the state id.
@@ -226,6 +226,7 @@ pub const RUN_VIEW_COLUMNS: &[&str] = &[
     "run_config",
     "tool_plan",
     "error_details",
+    "failure_reason",
     "prompt",
     "prompt_manifest",
     "ended_at",
@@ -333,17 +334,18 @@ pub fn run_lock_sql() -> String {
 /// `JSONKeyTextField` `refusal_category` excluded). Fixed values
 /// are literals (`queued`, `0`, `""`, `{}`, `[]`, NULLs); `$1..$14` and
 /// `$15` (`pin_kind`, appended at the end) carry the caller-supplied
-/// fields in [`NewAgentRun`] order.
+/// fields in [`NewAgentRun`] order, and `$16` the `work_type` stamp
+/// (added after `phase_kind` in model order).
 pub const RUN_INSERT_SQL: &str =
     "INSERT INTO agent_run (id, workspace_id, owner_id, created_by_id, \
     pod_id, runner_id, pinned_runner_id, work_item_id, scheduler_binding_id, parent_run_id, \
     status, executor_kind, dispatch_attempts, cancel_requested_at, cancel_reason, \
     tool_plan, terminal_hooks_applied_at, terminal_capacity_released_at, prompt, trigger, \
-    prompt_manifest, phase_kind, run_config, required_capabilities, thread_id, agent_metadata, \
-    lease_expires_at, done_payload, error_details, llm_model, usage, created_at, \
+    prompt_manifest, phase_kind, work_type, run_config, required_capabilities, thread_id, agent_metadata, \
+    lease_expires_at, done_payload, error_details, failure_reason, llm_model, usage, created_at, \
     assigned_at, started_at, ended_at, pin_kind) \
     VALUES ($1, $2, NULL, $3, $4, NULL, $5, $6, NULL, $7, 'queued', $8, 0, NULL, '', $10, \
-    NULL, NULL, '', $11, NULL, $12, $13, '[]', '', '{}', NULL, NULL, $9, '', '{}', $14, \
+    NULL, NULL, '', $11, NULL, $12, $16, $13, '[]', '', '{}', NULL, NULL, $9, '', '', '{}', $14, \
     NULL, NULL, NULL, $15)";
 
 /// `parent.thread_id = ""; parent.save(update_fields=["thread_id"])`
@@ -385,15 +387,27 @@ pub fn finalize_lock_sql() -> String {
 }
 
 /// The finalize write (`agent_run_finalization.py:52-71`):
+/// `finalize_agent_run`'s `failure_reason` safety net for these FAILED
+/// writes (PDASHOSS01-183): `classify(error, error_code=error_code)` —
+/// no runner reason on the orchestration paths.
+pub fn finalize_failure_reason(error_code: &str, error: &str) -> String {
+    pidash_types::runner_runs::classify_failure(error, "", error_code)
+        .value()
+        .to_owned()
+}
+
 /// status/ended_at/terminal NULLs + the updates
 /// (`error_code`, `error`), folded into `error_details` under the
-/// finalize lock (PDASHOSS01-187). `$1` ended_at, `$2` the
-/// [`finalize_error_details_patch`], `$3` the run id.
+/// finalize lock (PDASHOSS01-187), plus the `failure_reason` safety
+/// net (PDASHOSS01-183, see [`finalize_failure_reason`]). `$1`
+/// ended_at, `$2` the [`finalize_error_details_patch`], `$3`
+/// failure_reason, `$4` the run id.
 pub fn finalize_update_sql() -> String {
     format!(
         "UPDATE agent_run SET status = 'failed', ended_at = $1, \
          terminal_hooks_applied_at = NULL, \
-         terminal_capacity_released_at = NULL, error_details = {} WHERE id = $3",
+         terminal_capacity_released_at = NULL, error_details = {}, \
+         failure_reason = $3 WHERE id = $4",
         crate::runner_runs::finalization::error_details_merge_sql("$2")
     )
 }
@@ -424,22 +438,6 @@ pub fn initial_error_details(error_code: &str) -> Value {
         &[("error_code", Value::String(error_code.to_owned()))],
     )
 }
-
-/// The cloud terminal-event guard (`agent_run_finalization.py:72-75`).
-/// `$1` is the run id.
-pub const TERMINAL_EVENT_EXISTS_SQL: &str =
-    "SELECT EXISTS(SELECT 1 FROM agent_run_event WHERE agent_run_id = $1 AND kind = 'terminal')";
-
-/// The next event seq (`agent_run_finalization.py:76-78`):
-/// `max(seq) + 1`, `1` when no rows. `$1` is the run id.
-pub const TERMINAL_EVENT_SEQ_SQL: &str =
-    "SELECT COALESCE(MAX(seq), 0) + 1 FROM agent_run_event WHERE agent_run_id = $1";
-
-/// The cloud terminal event (`agent_run_finalization.py:79-84`): `$1`
-/// run id, `$2` seq, `$3` the `{"status", "error_code"}` payload, `$4`
-/// created_at.
-pub const TERMINAL_EVENT_INSERT_SQL: &str = "INSERT INTO agent_run_event \
-    (agent_run_id, seq, kind, payload, created_at) VALUES ($1, $2, 'terminal', $3, $4)";
 
 /// Creator flags for the executor seam (`user_has_llm_config` reads
 /// `is_active` / `is_bot`, `agent_execution.py:76`). `$1` is the user id.
@@ -586,11 +584,10 @@ pub fn run_insert_returning_sql() -> String {
 pub mod orm {
     use chrono::{DateTime, Utc};
     use pidash_db::entity::{
-        agent_run as run, agent_run_event as event, dev_machine, git_code_review_links as reviews,
-        git_repositories as repos, git_repository_bindings as bindings,
-        issue_agent_ticker as ticker, issue_assignees, issue_comments as comments, issue_labels,
-        issue_relations as relations, issues, labels, pod, projects,
-        prompt_section_override as overrides, runner, states, users, workspaces,
+        agent_run as run, dev_machine, git_code_review_links as reviews, git_repositories as repos,
+        git_repository_bindings as bindings, issue_agent_ticker as ticker, issue_assignees,
+        issue_comments as comments, issue_labels, issue_relations as relations, issues, labels,
+        pod, projects, prompt_section_override as overrides, runner, states, users, workspaces,
     };
     use sea_orm::sea_query::extension::postgres::{PgBinOper, PgFunc};
     use sea_orm::sea_query::{
@@ -612,7 +609,7 @@ pub mod orm {
     }
 
     /// The [`RUN_VIEW_COLUMNS`] projection as entity columns.
-    pub const RUN_VIEW: [run::Column; 19] = [
+    pub const RUN_VIEW: [run::Column; 20] = [
         run::Column::Id,
         run::Column::WorkspaceId,
         run::Column::CreatedById,
@@ -629,6 +626,7 @@ pub mod orm {
         run::Column::RunConfig,
         run::Column::ToolPlan,
         run::Column::ErrorDetails,
+        run::Column::FailureReason,
         run::Column::Prompt,
         run::Column::PromptManifest,
         run::Column::EndedAt,
@@ -662,6 +660,7 @@ pub mod orm {
                 C::AssignedPodId,
                 C::AssignedRunnerId,
                 C::AgentExecutor,
+                C::WorkType,
                 C::GitWorkBranch,
                 C::Workpad,
                 C::Name,
@@ -694,6 +693,7 @@ pub mod orm {
                 C::AgentDefaultIntervalSeconds,
                 C::AgentReviewDefaultIntervalSeconds,
                 C::AgentTestDefaultIntervalSeconds,
+                C::DefaultWorkType,
             ])
             .from(projects::Entity)
             .and_where(Expr::col(C::Id).eq(project_id))
@@ -775,12 +775,22 @@ pub mod orm {
     /// terminal NULLs, and the `error_details` merge: drop the patch's
     /// keys from the stored object (a non-object counts as `{}`), then
     /// add its non-null values (`jsonb_strip_nulls`, applied here to the
-    /// flat patch).
+    /// flat patch). The `failure_reason` safety net (PDASHOSS01-183)
+    /// classifies from the patch's code/message.
     pub fn finalize_update(
         run_id: Uuid,
         ended_at: DateTime<Utc>,
         patch: &Value,
     ) -> UpdateStatement {
+        let failure_reason = {
+            let get = |key: &str| {
+                patch
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+            };
+            super::finalize_failure_reason(get("code"), get("message"))
+        };
         let stored = Expr::case(
             Expr::expr(Func::cust(alias("jsonb_typeof")).arg(run_col(run::Column::ErrorDetails)))
                 .eq("object"),
@@ -809,6 +819,7 @@ pub mod orm {
                 None::<DateTime<Utc>>,
             )
             .value(run::Column::ErrorDetails, merged)
+            .value(run::Column::FailureReason, failure_reason)
             .and_where(run_col(run::Column::Id).eq(run_id))
             .to_owned()
     }
@@ -937,6 +948,7 @@ pub mod orm {
                 C::Trigger,
                 C::PromptManifest,
                 C::PhaseKind,
+                C::WorkType,
                 C::RunConfig,
                 C::RequiredCapabilities,
                 C::ThreadId,
@@ -944,6 +956,7 @@ pub mod orm {
                 C::LeaseExpiresAt,
                 C::DonePayload,
                 C::ErrorDetails,
+                C::FailureReason,
                 C::LlmModel,
                 C::Usage,
                 C::CreatedAt,
@@ -975,6 +988,7 @@ pub mod orm {
                 Expr::value(row.trigger.as_str()),
                 none_json(),
                 Expr::value(row.phase_kind.as_str()),
+                Expr::value(row.work_type.as_str()),
                 Expr::value(row.run_config.clone()),
                 Expr::value(serde_json::json!([])),
                 Expr::value(""),
@@ -982,6 +996,7 @@ pub mod orm {
                 none_at(),
                 none_json(),
                 Expr::value(row.error_details.clone()),
+                Expr::value(""),
                 Expr::value(""),
                 Expr::value(serde_json::json!({})),
                 Expr::value(row.now),
@@ -1021,66 +1036,6 @@ pub mod orm {
             .table(run::Entity)
             .value(run::Column::RunConfig, config.clone())
             .and_where(run_col(run::Column::Id).eq(run_id))
-            .to_owned()
-    }
-
-    /// [`super::TERMINAL_EVENT_EXISTS_SQL`]: output name `exists`.
-    pub fn terminal_event_exists_select(run_id: Uuid) -> SelectStatement {
-        Query::select()
-            .expr_as(
-                Expr::exists(
-                    Query::select()
-                        .expr(Expr::val(1))
-                        .from(event::Entity)
-                        .and_where(Expr::col(event::Column::AgentRunId).eq(run_id))
-                        .and_where(Expr::col(event::Column::Kind).eq("terminal"))
-                        .to_owned(),
-                ),
-                alias("exists"),
-            )
-            .to_owned()
-    }
-
-    /// [`super::TERMINAL_EVENT_SEQ_SQL`]: `COALESCE(MAX(seq), 0) + 1`,
-    /// output name `seq` (int4, as `MAX(int4) + 1` is).
-    pub fn terminal_event_seq_select(run_id: Uuid) -> SelectStatement {
-        Query::select()
-            .expr_as(
-                Expr::expr(Func::coalesce([
-                    Expr::col(event::Column::Seq).max(),
-                    Expr::val(0_i32).into(),
-                ]))
-                .add(1_i32),
-                alias("seq"),
-            )
-            .from(event::Entity)
-            .and_where(Expr::col(event::Column::AgentRunId).eq(run_id))
-            .to_owned()
-    }
-
-    /// [`super::TERMINAL_EVENT_INSERT_SQL`].
-    pub fn terminal_event_insert(
-        run_id: Uuid,
-        seq: i32,
-        payload: &Value,
-        now: DateTime<Utc>,
-    ) -> InsertStatement {
-        Query::insert()
-            .into_table(event::Entity)
-            .columns([
-                event::Column::AgentRunId,
-                event::Column::Seq,
-                event::Column::Kind,
-                event::Column::Payload,
-                event::Column::CreatedAt,
-            ])
-            .values_panic([
-                Expr::value(run_id),
-                Expr::value(seq),
-                Expr::value("terminal"),
-                Expr::value(payload.clone()),
-                Expr::value(now),
-            ])
             .to_owned()
     }
 
@@ -1436,6 +1391,9 @@ pub struct IssueView {
     pub priority: Option<String>,
     pub sequence_id: i32,
     pub target_date: Option<chrono::NaiveDate>,
+    /// `Issue.work_type`: the per-issue work-type override (NULL inherits
+    /// the project default, PDASHOSS01-234).
+    pub work_type: Option<String>,
 }
 
 /// The consumed `projects` projection ([`PROJECT_SELECT_SQL`]).
@@ -1456,6 +1414,8 @@ pub struct ProjectView {
     pub interval_impl: i64,
     pub interval_review: i64,
     pub interval_test: i64,
+    /// `Project.default_work_type` (PDASHOSS01-234).
+    pub default_work_type: String,
 }
 
 /// The consumed `states` projection ([`STATE_SELECT_SQL`]).
@@ -1634,6 +1594,10 @@ pub struct NewAgentRun {
     pub trigger: String,
     /// The handoff builder passes `""` (it stamps no kind).
     pub phase_kind: String,
+    /// The effective work type the run composes with (`_work_type_for_issue`,
+    /// PDASHOSS01-234): audit metadata stamped on every builder, including
+    /// the handoff.
+    pub work_type: String,
     pub run_config: Value,
     /// `created_at` (`auto_now_add`, supplied explicitly).
     pub now: DateTime<Utc>,
@@ -1722,7 +1686,7 @@ pub struct AdmissionError {
 }
 
 /// The executor-specific fields for one creation (`execution_fields`,
-/// `creation.py:11-89`): mirrors `jobs::dispatch::ExecutionFields`
+/// `creation.py:11-89`): mirrors `jobs::run_dispatch::ExecutionFields`
 /// without importing jobs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExecutionFields {
@@ -1898,6 +1862,16 @@ pub enum ExecutionError {
 // Pure units
 // ---------------------------------------------------------------------------
 
+/// The effective work type a run created for `issue` *now* composes with
+/// (`_work_type_for_issue`): stamped on `AgentRun.work_type` alongside
+/// `phase_kind` as audit metadata (PDASHOSS01-234); nothing routes on it.
+pub fn work_type_for_issue(issue: &IssueView, project: &ProjectView) -> &'static str {
+    work_types::effective_work_type(
+        issue.work_type.as_deref(),
+        Some(project.default_work_type.as_str()),
+    )
+}
+
 /// The prompt kind a run created for the issue *now* will render
 /// (`_phase_kind_for_issue`, `service.py:157-167`): stamped on
 /// `AgentRun.phase_kind`.
@@ -1953,13 +1927,13 @@ pub fn pinned_runner_for(
     now: DateTime<Utc>,
 ) -> Option<Uuid> {
     let runner = runner?;
-    let is_engine = runner.provisioning
+    let is_pidash_agent = runner.provisioning
         == pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED;
     let pod_member = runner.pod_dispatch
         == pidash_db::runner_enroll::columns::enums::RUNNER_POD_DISPATCH_POD_MEMBER;
     if !pidash_auth::permissions::runner::locality_pin_allowed(
         true,
-        is_engine,
+        is_pidash_agent,
         pod_member,
         runner.engine_paused,
     ) {
@@ -2154,7 +2128,6 @@ pub fn render_first_turn(
     bundle: &RenderBundle,
     kind: &str,
     run: &RunRenderRef,
-    extra_toolsets_schema_tool: &str,
 ) -> Result<RenderedTurn, String> {
     let issue = &bundle.issue;
     let project = &bundle.project;
@@ -2195,6 +2168,8 @@ pub fn render_first_turn(
         project_id: project.id.to_string(),
         project_name: project.name.clone(),
         project_description: project.description.clone(),
+        issue_work_type: issue.work_type.clone(),
+        project_default_work_type: Some(project.default_work_type.clone()),
         repo,
         code_reviews: context::code_reviews_context(&bundle.reviews),
         parent: bundle.parent.clone(),
@@ -2213,14 +2188,10 @@ pub fn render_first_turn(
             .get("unavailable_capabilities")
             .cloned()
             .unwrap_or(Value::Null),
-        extra_toolsets_enabled: run
-            .tool_plan
-            .get("extra_toolsets")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        // Named by the EE seam, consulted only when enabled
-        // (`context.py:514-517`); CE names none.
-        extra_toolsets_schema_tool: extra_toolsets_schema_tool.to_owned(),
+        // P4: extra toolsets died with the retired plane; the
+        // keys still render (always false/empty).
+        extra_toolsets_enabled: false,
+        extra_toolsets_schema_tool: String::new(),
         limits: run.tool_plan.get("limits").cloned().unwrap_or(Value::Null),
         tick: tick_value(
             bundle.ticker.as_ref(),
@@ -2263,6 +2234,7 @@ pub fn render_first_turn(
         user_id.as_deref(),
         executor_kind,
         tool_catalog_version,
+        Some(work_type_for_issue(issue, project)),
     )
     .map_err(|error| error.message().to_owned())?;
     let manifest = turn
@@ -2286,7 +2258,7 @@ pub fn render_first_turn(
 /// shape; the SQL text for each lives in the adjacent `*_SQL` consts,
 /// which the pool implementation must execute verbatim. The three
 /// `cloud_agent.creation` calls are methods here (the jobs-side store
-/// delegates them to the merged `jobs::dispatch` functions) so the
+/// delegates them to the merged `jobs::run_dispatch` functions) so the
 /// Python control flow stays services-side in verbatim order.
 ///
 /// Native `async fn` in trait (stable since 1.75): no `async-trait`
@@ -2356,15 +2328,6 @@ pub trait CreationSeam {
         &mut self,
         req: &ExecutionRequest,
     ) -> Result<ExecutionFields, ExecutionError>;
-    /// `lock_cloud_creation_capacity` (`creation.py:155-177`) on the
-    /// caller's insertion transaction. A manual over-capacity raise
-    /// surfaces as [`CreationError::CapacityRefused`] and propagates.
-    async fn lock_cloud_creation_capacity(
-        &mut self,
-        workspace_id: Uuid,
-        executor_kind: AgentExecutorKind,
-        automatic: bool,
-    ) -> Result<Option<AdmissionError>, CreationError>;
     /// `dispatch_after_commit` (`creation.py:148-152`): collect the run
     /// id for post-commit dispatch. Nothing executes inline.
     fn dispatch_after_commit(&mut self, run_id: Uuid);
@@ -2380,10 +2343,7 @@ pub trait CreationSeam {
         trigger: &str,
         created_by_id: Uuid,
     ) -> Result<RenderBundle, CreationError>;
-    /// The EE schema-tool name (`extra_toolsets_schema_tool`,
-    /// `context.py:512-517`): consulted only when the run's plan
-    /// enables extra toolsets. CE names none.
-    fn extra_toolsets_schema_tool(&self) -> String;
+    /// (P4: the extra-toolsets schema tool died with the toolsets seam.)
     /// The dedicated-runner pin decision for one creation (design
     /// §9.1/§9.2 + §11.2/§23.3): the H-11/H-10 refusal answered in
     /// the same probe as the pin (Django `dedicated_run_refusal`
@@ -2536,17 +2496,7 @@ async fn render_new_run<C: CreationSeam>(
             run_ref.created_by_id,
         )
         .await?;
-    let schema_tool = if run_ref
-        .tool_plan
-        .get("extra_toolsets")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        seam.extra_toolsets_schema_tool()
-    } else {
-        String::new()
-    };
-    Ok(render_first_turn(&bundle, kind, run_ref, &schema_tool))
+    Ok(render_first_turn(&bundle, kind, run_ref))
 }
 
 /// Create a fresh `AgentRun` and dispatch it
@@ -2591,11 +2541,7 @@ pub async fn create_and_dispatch_run<S: CreationSeam + FinalizeAgentRunSeam>(
         }
         Err(ExecutionError::Store(error)) => return Err(error),
     };
-    let mut admission_error = execution.cloud_admission_error.clone();
-    admission_error = seam
-        .lock_cloud_creation_capacity(project.workspace_id, execution.executor_kind, automatic)
-        .await?
-        .or(admission_error);
+    let admission_error = execution.cloud_admission_error.clone();
     let effective_parent = if req.fresh_session {
         None
     } else {
@@ -2651,6 +2597,7 @@ pub async fn create_and_dispatch_run<S: CreationSeam + FinalizeAgentRunSeam>(
             tool_plan: execution.tool_plan.clone(),
             trigger: req.trigger.clone(),
             phase_kind: kind.clone(),
+            work_type: work_type_for_issue(&issue, &project).to_owned(),
             run_config: run_config_for_issue(
                 project.repo_url.as_deref(),
                 project.base_branch.as_deref(),
@@ -2757,11 +2704,7 @@ pub async fn create_continuation_run<S: CreationSeam + FinalizeAgentRunSeam>(
         }
         Err(ExecutionError::Store(error)) => return Err(error),
     };
-    let mut admission_error = execution.cloud_admission_error.clone();
-    admission_error = seam
-        .lock_cloud_creation_capacity(project.workspace_id, execution.executor_kind, automatic)
-        .await?
-        .or(admission_error);
+    let admission_error = execution.cloud_admission_error.clone();
     // The dedicated pin (§9.2): a dedicated issue pins its runner,
     // whatever the parent/locality path computed.
     let pin_kind = if issue.assigned_runner_id.is_some() {
@@ -2811,6 +2754,7 @@ pub async fn create_continuation_run<S: CreationSeam + FinalizeAgentRunSeam>(
             tool_plan: execution.tool_plan.clone(),
             trigger: req.trigger.clone(),
             phase_kind: kind.clone(),
+            work_type: work_type_for_issue(&issue, &project).to_owned(),
             run_config,
             now: req.now,
             pin_kind: pin_kind.clone(),
@@ -2952,6 +2896,7 @@ pub async fn create_project_move_handoff_run<S: CreationSeam + FinalizeAgentRunS
             tool_plan: execution.tool_plan.clone(),
             trigger: req.parent.trigger.clone(),
             phase_kind: String::new(),
+            work_type: work_type_for_issue(&issue, &project).to_owned(),
             run_config,
             now: req.now,
             pin_kind,
@@ -3432,11 +3377,12 @@ mod tests {
             pin_kind: "locality".to_owned(),
             work_item_id: uid(0x02),
             parent_run_id: None,
-            executor_kind: AgentExecutorKind::CloudAgent,
+            executor_kind: AgentExecutorKind::RetiredCloudRun,
             error_details: json!({}),
             tool_plan: json!({}),
             trigger: "direct".to_owned(),
             phase_kind: String::new(),
+            work_type: "software".to_owned(),
             run_config: json!({}),
             now: now(),
         })
@@ -3456,20 +3402,6 @@ mod tests {
                     .join(", ")
             )),
             "{insert}"
-        );
-        let seq = render(orm::terminal_event_seq_select(id));
-        assert!(
-            seq.contains("COALESCE(MAX(\"seq\"), 0) + 1 AS \"seq\""),
-            "{seq}"
-        );
-        let exists = render(orm::terminal_event_exists_select(id));
-        assert!(
-            exists.contains("EXISTS(SELECT 1 FROM \"agent_run_event\" WHERE"),
-            "{exists}"
-        );
-        assert!(
-            exists.contains("\"kind\" = 'terminal') AS \"exists\""),
-            "{exists}"
         );
     }
 
@@ -3491,6 +3423,7 @@ mod tests {
             priority: None,
             sequence_id: 1,
             target_date: None,
+            work_type: None,
         }
     }
 
@@ -3510,6 +3443,7 @@ mod tests {
             interval_impl: 10800,
             interval_review: 10800,
             interval_test: 10800,
+            default_work_type: "software".to_owned(),
         }
     }
 
@@ -3907,15 +3841,6 @@ mod tests {
             self.execution.clone().expect("script execution")
         }
 
-        async fn lock_cloud_creation_capacity(
-            &mut self,
-            _workspace_id: Uuid,
-            _executor_kind: AgentExecutorKind,
-            _automatic: bool,
-        ) -> Result<Option<AdmissionError>, CreationError> {
-            self.lock.clone().expect("script lock")
-        }
-
         fn dispatch_after_commit(&mut self, run_id: Uuid) {
             self.dispatched.push(run_id);
         }
@@ -3934,10 +3859,6 @@ mod tests {
             self.bundle
                 .clone()
                 .ok_or_else(|| CreationError::Db("no bundle".to_owned()))
-        }
-
-        fn extra_toolsets_schema_tool(&self) -> String {
-            String::new()
         }
 
         async fn dedicated_pin(
@@ -4335,6 +4256,24 @@ mod tests {
     }
 
     #[test]
+    fn work_type_for_issue_follows_the_resolution_chain() {
+        let mut issue = issue_view();
+        let mut project = project_view();
+        assert_eq!(work_type_for_issue(&issue, &project), "software");
+        project.default_work_type = "general".to_owned();
+        assert_eq!(work_type_for_issue(&issue, &project), "general");
+        issue.work_type = Some("software".to_owned());
+        assert_eq!(work_type_for_issue(&issue, &project), "software");
+        // An unknown stored key falls through to the project default.
+        issue.work_type = Some("retired".to_owned());
+        assert_eq!(work_type_for_issue(&issue, &project), "general");
+        // Blank project default with no override: the `general` net.
+        issue.work_type = None;
+        project.default_work_type = String::new();
+        assert_eq!(work_type_for_issue(&issue, &project), "general");
+    }
+
+    #[test]
     fn handoff_marker_helpers() {
         let config = json!({"_project_move_handoff": {"target_project_id": "p"}});
         assert!(handoff_marker(&config).is_some());
@@ -4414,7 +4353,6 @@ mod tests {
                 tool_plan: json!({}),
                 created_by_id: uid(0x40),
             },
-            "",
         )
         .expect("renders");
         for marker in [
@@ -4422,7 +4360,7 @@ mod tests {
             "FX6 C1",
             "In Progress (group: started)",
             "https://example.com/fx6.git",
-            "coding-task",
+            "Software delivery workflow (work type: software)",
         ] {
             assert!(turn.text.contains(marker), "missing {marker}");
         }
@@ -4435,47 +4373,6 @@ mod tests {
             manifest[0]["section_key"],
             after["prompt_manifest"][0]["section_key"]
         );
-    }
-
-    #[test]
-    fn render_names_injected_schema_tool_for_snapshotted_cloud_runs() {
-        let bundle = test_bundle(
-            issue_view(),
-            project_view(),
-            Some(state_view("In Progress", "started")),
-        );
-        let snapshotted = RunRenderRef {
-            run_id: uid(0x80),
-            parent_run_id: None,
-            trigger: AgentRunTrigger::StateTransition.value().to_owned(),
-            executor_kind: AgentExecutorKind::CloudAgent,
-            tool_plan: json!({"extra_toolsets": true}),
-            created_by_id: uid(0x40),
-        };
-        let turn = render_first_turn(&bundle, "coding-task", &snapshotted, "acme_get_tool_schema")
-            .expect("renders");
-        assert!(
-            turn.text.contains("acme_get_tool_schema"),
-            "injected name reaches the shared prompt"
-        );
-        // No snapshot, no instruction — even with a name on hand, the
-        // section stays hidden (`context.py:514-517`).
-        let unsnapshotted = RunRenderRef {
-            run_id: uid(0x80),
-            parent_run_id: None,
-            trigger: AgentRunTrigger::StateTransition.value().to_owned(),
-            executor_kind: AgentExecutorKind::CloudAgent,
-            tool_plan: json!({}),
-            created_by_id: uid(0x40),
-        };
-        let ce = render_first_turn(
-            &bundle,
-            "coding-task",
-            &unsnapshotted,
-            "acme_get_tool_schema",
-        )
-        .expect("renders");
-        assert!(!ce.text.contains("acme_get_tool_schema"));
     }
 
     #[test]
@@ -4498,7 +4395,6 @@ mod tests {
                 tool_plan: json!({}),
                 created_by_id: uid(0x40),
             },
-            "",
         )
         .expect("renders");
         assert!(turn.text.contains("You are reviewing"));
@@ -4546,6 +4442,9 @@ mod tests {
             row.phase_kind,
             case["after"]["phase_kind"].as_str().unwrap()
         );
+        // The effective work type is stamped alongside the kind
+        // (PDASHOSS01-234): no issue override → the project default.
+        assert_eq!(row.work_type, "software");
         assert_eq!(row.trigger, AgentRunTrigger::StateTransition.value());
         assert_eq!(row.executor_kind, AgentExecutorKind::LocalRunner);
         assert_eq!(row.tool_plan, json!({}));
@@ -4631,43 +4530,9 @@ mod tests {
         assert_eq!(inserted[0].phase_kind, "review");
         let created = outcome.created_run.unwrap();
         let manifest = &seam.saved_prompts.borrow()[&created].1;
-        assert_eq!(manifest.as_array().unwrap().len(), 10);
-    }
-
-    #[tokio::test]
-    async fn c4_admission_error_failed() {
-        let dispatch = fixture(CREATE_DISPATCH);
-        let case = &dispatch["cases"]["C4_admission_error_failed"];
-        let mut seam = FakeSeam::minimal().with_bundle();
-        seam.lock = Some(Ok(Some(AdmissionError {
-            code: "run_quota_exceeded".to_owned(),
-            detail: "Cloud Agent queue is full for this workspace".to_owned(),
-        })));
-        let outcome = create_and_dispatch_run(&mut seam, &dispatch_req(None))
-            .await
-            .expect("failed, not error");
-        assert_eq!(outcome.reason, case["reason"].as_str().unwrap());
-        let created = outcome.created_run.expect("row exists");
-        assert!(seam.dispatched.is_empty());
-        assert!(seam.saved_prompts.borrow().is_empty());
-        assert_eq!(
-            seam.finalized,
-            vec![(
-                created,
-                "run_quota_exceeded".to_owned(),
-                "Cloud Agent queue is full for this workspace".to_owned()
-            )]
-        );
-        let run = seam.runs.borrow()[&created].clone();
-        assert_eq!(run.status, AgentRunStatus::Failed);
-        assert_eq!(
-            run.error_code(),
-            case["after"]["error_code"].as_str().unwrap()
-        );
-        assert_eq!(run.error(), case["after"]["error"].as_str().unwrap());
-        assert_eq!(run.ended_at, Some(now()));
-        assert!(run.prompt.is_empty());
-        assert_eq!(run.prompt_manifest, None);
+        // The review recipe for `software`: 9 core sections plus the
+        // `software.context` and `software.review` slots.
+        assert_eq!(manifest.as_array().unwrap().len(), 11);
     }
 
     #[tokio::test]
@@ -4698,18 +4563,6 @@ mod tests {
         assert_eq!(outcome.created_run, None);
         assert!(seam.inserted.borrow().is_empty());
         assert!(seam.dispatched.is_empty());
-    }
-
-    #[tokio::test]
-    async fn lock_capacity_raise_propagates() {
-        let mut seam = FakeSeam::minimal().with_bundle();
-        seam.lock = Some(Err(CreationError::CapacityRefused(
-            "Cloud Agent queue is full for this workspace".to_owned(),
-        )));
-        let err = create_and_dispatch_run(&mut seam, &dispatch_req(None))
-            .await
-            .expect_err("propagates");
-        assert!(matches!(err, CreationError::CapacityRefused(_)));
     }
 
     fn continuation_req(parent: RunView) -> ContinuationRequest {
@@ -4760,92 +4613,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn continuation_renders_limits_from_in_memory_plan() {
-        // PIDASHCONV-1072: Django composes from the in-memory plan
-        // (`run.prompt = build_first_turn(issue, run)` before any
-        // `refresh_from_db`; `service.py:507`), so the `Limits:` line
-        // prints `policy.py` dict order even though the stored row
-        // carries jsonb order. The seam round-trips the plan to prove
-        // the render does not read the row back.
-        let mut seam = FakeSeam::minimal().with_bundle();
-        seam.normalize_tool_plan = true;
-        seam.execution = Some(Ok(ExecutionFields {
-            executor_kind: AgentExecutorKind::CloudAgent,
-            tool_plan: json!({
-                "v": 1,
-                "catalog_version": 1,
-                "tools": [],
-                "required_tools": [],
-                "limits": {
-                    "model_requests": 25,
-                    "tool_calls": 20,
-                    "writes": 3,
-                    "input_tokens": 144_000,
-                    "output_tokens": 16_000,
-                    "total_tokens": 160_000,
-                    "wall_seconds": 285,
-                },
-                "unavailable_capabilities": ["filesystem", "shell", "worktree"],
-                "extra_toolsets": false,
-            }),
-            pinned_runner_entry: Some(None),
-            error_code: None,
-            cloud_admission_error: None,
-        }));
-        let outcome = create_continuation_run(&mut seam, &continuation_req(run_view(uid(0x70))))
-            .await
-            .expect("creates");
-        assert_eq!(outcome.reason, REASON_CREATED);
-        let created = outcome.created_run.expect("created");
-        // The stored row carries jsonb order (the seam round-tripped it).
-        let stored: Vec<String> = seam.runs.borrow()[&created].tool_plan["limits"]
-            .as_object()
-            .expect("limits object")
-            .keys()
-            .cloned()
-            .collect();
-        assert_eq!(
-            stored,
-            vec![
-                "writes",
-                "tool_calls",
-                "input_tokens",
-                "total_tokens",
-                "wall_seconds",
-                "output_tokens",
-                "model_requests",
-            ]
-        );
-        // The composed prompt prints policy.py dict order.
-        let prompts = seam.saved_prompts.borrow();
-        let (prompt, _) = &prompts[&created];
-        let line = prompt
-            .lines()
-            .find(|line| line.starts_with("Limits:"))
-            .expect("Limits line");
-        assert_eq!(
-            line,
-            "Limits: {'model_requests': 25, 'tool_calls': 20, 'writes': 3, \
-             'input_tokens': 144000, 'output_tokens': 16000, \
-             'total_tokens': 160000, 'wall_seconds': 285}."
-        );
-    }
-
-    #[tokio::test]
-    async fn k2_admission_error_failed() {
-        let mut seam = FakeSeam::minimal().with_bundle();
-        seam.lock = Some(Ok(Some(AdmissionError {
-            code: "run_quota_exceeded".to_owned(),
-            detail: "Cloud Agent queue is full for this workspace".to_owned(),
-        })));
-        let outcome = create_continuation_run(&mut seam, &continuation_req(run_view(uid(0x70))))
-            .await
-            .expect("failed, not error");
-        assert_eq!(outcome.reason, "run_quota_exceeded");
-        assert!(seam.dispatched.is_empty());
-    }
-
-    #[tokio::test]
     async fn k3_render_failed() {
         let mut seam = FakeSeam::minimal().with_bundle().fail_render("{{ broken");
         let outcome = create_continuation_run(&mut seam, &continuation_req(run_view(uid(0x70))))
@@ -4889,7 +4656,7 @@ mod tests {
             },
         );
         seam.execution = Some(Ok(ExecutionFields {
-            executor_kind: AgentExecutorKind::ManagedRunner,
+            executor_kind: AgentExecutorKind::PidashAgent,
             tool_plan: json!({}),
             pinned_runner_entry: Some(Some(uid(0x61))),
             error_code: None,
@@ -4921,7 +4688,7 @@ mod tests {
             },
         );
         seam.execution = Some(Ok(ExecutionFields {
-            executor_kind: AgentExecutorKind::CloudAgent,
+            executor_kind: AgentExecutorKind::RetiredCloudRun,
             tool_plan: json!({"tools": []}),
             pinned_runner_entry: Some(None),
             error_code: None,
@@ -5403,10 +5170,13 @@ mod tests {
         ] {
             assert!(!RUN_INSERT_SQL.contains(column), "generated {column}");
         }
-        // `$1..$14` in NewAgentRun order; `$15` carries pin_kind,
-        // appended so no other bind moves.
+        // `$1..$14` in NewAgentRun order; `$15` carries pin_kind
+        // (appended at the end), `$16` the work_type stamp after
+        // phase_kind.
         assert!(RUN_INSERT_SQL.contains("$14"));
         assert!(RUN_INSERT_SQL.contains("$15"));
+        assert!(RUN_INSERT_SQL.contains("$16"));
+        assert!(RUN_INSERT_SQL.contains("work_type"));
         assert!(PROMPT_UPDATE_SQL.contains("prompt_manifest"));
         assert!(!finalize_update_sql().contains("queue_position"));
         assert!(!RUN_INSERT_SQL.contains("queue_position"));

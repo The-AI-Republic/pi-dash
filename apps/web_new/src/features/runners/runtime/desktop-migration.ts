@@ -11,7 +11,7 @@
 // 2. make sure the daemon holds a credential for the tree's workspace, then
 //    merge the legacy machine into the daemon's machine on the server — its
 //    runner rows, pins and pods move, ids kept;
-// 3. `addEngineRunner` each legacy engine block with its project and working
+// 3. `addPidashAgentRunner` each legacy engine block with its project and working
 //    dir; the server's reuse lookup returns the merged row, so the runner
 //    keeps its id and its folder;
 // 4–5. `finishLegacyTree`: move the account's engine home into the daemon's
@@ -116,7 +116,7 @@ async function migrateTree(tree: LegacyTree, account: string, hello: DaemonHello
       continue;
     }
     // eslint-disable-next-line no-await-in-loop -- one runner at a time, in config order
-    const info = await deps.runtime.addEngineRunner({
+    const info = await deps.runtime.addPidashAgentRunner({
       workspace: tree.workspace,
       project: block.project,
       workingDir: block.working_dir,

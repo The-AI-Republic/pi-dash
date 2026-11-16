@@ -1691,7 +1691,7 @@ fn presigned_get_url(
     let disposition = disposition_value(&filename);
     // Auth params in botocore's insertion order
     // (`SigV4QueryAuth._modify_request_before_signing`).
-    let auth_params = [
+    let mut auth_params = vec![
         ("X-Amz-Algorithm".to_owned(), "AWS4-HMAC-SHA256".to_owned()),
         ("X-Amz-Credential".to_owned(), credential),
         ("X-Amz-Date".to_owned(), amz_date.clone()),
@@ -1699,8 +1699,14 @@ fn presigned_get_url(
             "X-Amz-Expires".to_owned(),
             storage.signed_url_expiration_secs.to_string(),
         ),
-        ("X-Amz-SignedHeaders".to_owned(), "host".to_owned()),
     ];
+    if !storage.session_token.is_empty() {
+        auth_params.push((
+            "X-Amz-Security-Token".to_owned(),
+            storage.session_token.clone(),
+        ));
+    }
+    auth_params.push(("X-Amz-SignedHeaders".to_owned(), "host".to_owned()));
     // The canonical query sorts everything (signing input); the URL
     // keeps operation params before auth params (botocore: "The spec is
     // particular about this").
@@ -3208,8 +3214,11 @@ pub async fn v2_create(
     let timezone = actor_timezone(&db, &user_id).await?;
     let attachment = render_asset(&row, &workspace_slug, &timezone)?;
     let host = host_of(&parts.headers).ok_or(Denial::ServerError)?;
+    let storage_owned = pidash_storage::resolve_storage_settings(&state.settings().storage)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let upload_data = presigned_post(
-        &state.settings().storage,
+        &storage_owned,
         &scheme_of(&parts.headers),
         &host,
         &asset_key,
@@ -3279,8 +3288,11 @@ pub async fn v2_detail(
     };
     let (parts, _) = split_parts(req).await?;
     let host = host_of(&parts.headers).ok_or(Denial::ServerError)?;
+    let storage_owned = pidash_storage::resolve_storage_settings(&state.settings().storage)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let url = presigned_get_url(
-        &state.settings().storage,
+        &storage_owned,
         &scheme_of(&parts.headers),
         &host,
         &row.asset,
@@ -4069,6 +4081,7 @@ mod tests {
             minio_endpoint_ssl: false,
             access_key_id: "access-key".to_owned(),
             secret_access_key: "secret-key".to_owned(),
+            session_token: String::new(),
             bucket_name: "uploads".to_owned(),
             region: "us-east-1".to_owned(),
             endpoint_url: None,
