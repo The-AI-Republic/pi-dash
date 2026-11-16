@@ -107,7 +107,7 @@ async fn install_via_xml(exe: &str) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("temp task path is not valid UTF-8: {:?}", tmp))?;
     let result = run_schtasks(&["/Create", "/TN", TASK_NAME, "/XML", tmp_str, "/F"]).await;
     let _ = tokio::fs::remove_file(&tmp).await;
-    result
+    result.map(|_| ())
 }
 
 pub async fn enable_and_start() -> Result<()> {
