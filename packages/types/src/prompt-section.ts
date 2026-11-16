@@ -8,7 +8,14 @@
 export type TPromptSectionTier = "locked" | "workspace" | "overridable";
 
 /** Prompt kinds whose recipes compose from sections. */
-export type TPromptKind = "coding-task" | "review" | "scheduler";
+export type TPromptKind = "coding-task" | "review" | "test" | "scheduler";
+
+/**
+ * Built-in work types (PDASHOSS01-234). The work type fills the stage
+ * recipes' slots with per-work-type guidance; the stage kinds above are
+ * unchanged by it.
+ */
+export type TWorkTypeKey = "software" | "general";
 
 /** Resolution scope: workspace-level, or the calling user's personal view. */
 export type TPromptScope = "workspace" | "user";
@@ -34,6 +41,7 @@ export interface IResolvedSection {
 export interface IPromptSectionListResponse {
   kind: TPromptKind;
   scope: TPromptScope;
+  work_type: TWorkTypeKey;
   sections: IResolvedSection[];
 }
 
@@ -41,6 +49,7 @@ export interface IPromptSectionListResponse {
 export interface IPromptCompiledResponse {
   kind: TPromptKind;
   scope: TPromptScope;
+  work_type: TWorkTypeKey;
   template_body: string;
   /** Present only when the caller has personal overrides: what automatic runs get. */
   automatic_template_body?: string;
@@ -71,6 +80,8 @@ export interface IPromptPreviewPayload {
   issue_id?: string;
   binding_id?: string;
   scope?: TPromptScope;
+  /** Which work type fills the recipe's slots; defaults to the issue's effective work type. */
+  work_type?: TWorkTypeKey;
   /** Preview an unsaved draft of this section (with `body`) instead of the saved one. */
   section_key?: string;
   body?: string;
@@ -78,5 +89,6 @@ export interface IPromptPreviewPayload {
 
 export interface IPromptPreviewResponse {
   kind: TPromptKind;
+  work_type: TWorkTypeKey;
   prompt: string;
 }

@@ -1,0 +1,159 @@
+{
+  "fixture_id": "FX-DISP-05",
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "trace": [
+    "apps/api/pi_dash/cloud_agent/policy.py:11-42 (READ_TOOLS/WRITE_TOOLS/REPEATABLE/CURRENT_ISSUE)",
+    "apps/api/pi_dash/cloud_agent/github_mcp.py:10 (GITHUB_TOOL_NAMES)",
+    "apps/api/pi_dash/cloud_agent/github_mcp.py:13-52 (build_github_mcp)",
+    "apps/api/pi_dash/cloud_agent/github_mcp.py:55-77 (build_github_toolset)",
+    "apps/api/pi_dash/cloud_agent/tools.py:24-28 (ToolDenied + current_tool_call_id)",
+    "apps/api/pi_dash/cloud_agent/tools.py:31-43 (_canonical/_fingerprint/_bounded)",
+    "apps/api/pi_dash/cloud_agent/tools.py:46-73 (_scope)",
+    "apps/api/pi_dash/cloud_agent/tools.py:76-157 (_audit)",
+    "apps/api/pi_dash/cloud_agent/tools.py:160-171 (_issue_data)",
+    "apps/api/pi_dash/cloud_agent/tools.py:182-513 (build_tools catalog + relation tools)",
+    "apps/api/pi_dash/cloud_agent/tools.py:450-510 (github_get_file/github_get_linked_pull_request)",
+    "apps/api/pi_dash/cloud_agent/tools.py:516-554 (_github_context)",
+    "apps/api/pi_dash/cloud_agent/model.py:11-22 (resolve_model_for_creator)",
+    "apps/api/pi_dash/ee/cloud_agent/model_provider.py:1-7 (resolve_model_for_run)",
+    "apps/api/pi_dash/ee/cloud_agent/toolsets.py:23-50 (CE seam defaults)"
+  ],
+  "method": "Real tools.py executed offline with stubbed app-registry deps (db/runner models, permissions, markdown, events): _canonical/_fingerprint/_bounded vectors, replay sizes, ToolDenied shape, context-var default, build_tools grant-gating, _issue_data shapes. READ/WRITE catalogs verbatim from policy.py + executed build_tool_plan (FX-DISP-03). Path/ref/length/clamp guards in closures need a live run row; their predicates are recorded verbatim from source lines with evaluated truth tables noted as predicate-replicas. Model routing + _github_context + _scope/_audit recorded verbatim (DB-gated).",
+  "read_tools": [
+    "pidash_get_current_issue",
+    "pidash_list_current_issue_comments",
+    "pidash_list_project_states",
+    "pidash_search_project_issues",
+    "pidash_get_project_issue",
+    "pidash_list_linked_code_reviews",
+    "pidash_list_issue_relations",
+    "github_get_file",
+    "github_get_linked_pull_request"
+  ],
+  "write_tools": [
+    "pidash_add_current_issue_comment",
+    "pidash_update_current_issue_workpad",
+    "pidash_transition_current_issue",
+    "pidash_create_project_issue",
+    "pidash_relate_issues",
+    "pidash_unrelate_issues"
+  ],
+  "repeatable_write_tools": [
+    "pidash_relate_issues",
+    "pidash_unrelate_issues"
+  ],
+  "current_issue_write_tools": [
+    "pidash_add_current_issue_comment",
+    "pidash_transition_current_issue",
+    "pidash_update_current_issue_workpad"
+  ],
+  "github_tool_names": [
+    "github_get_file",
+    "github_get_linked_pull_request"
+  ],
+  "canonical": {
+    "sorted_keys": "{\"a\":2,\"b\":1}",
+    "separators": "[1,2,{\"x\":\"y\"}]",
+    "note": "json.dumps(sort_keys=True, separators=(',',':'), default=str).encode()"
+  },
+  "fingerprint": {
+    "sha256_of_canonical": "d3626ac30a87e6f7a6428233b3c68299976865fa5508e4267c5415c76af7a772",
+    "key_order_stable": true
+  },
+  "bounded": {
+    "ok_passthrough": {
+      "ok": true
+    },
+    "overflow": {
+      "raises": "RuntimeError",
+      "message": "tool_result_too_large"
+    },
+    "limit_bytes_setting": "CLOUD_AGENT_MAX_TOOL_RESULT_BYTES"
+  },
+  "audit_shapes": {
+    "tool_denied_is_runtime_error": true,
+    "context_var_default_none": true,
+    "replay_collapse_over_4096_bytes": 5011,
+    "replay_keep_under_4096_bytes": 21,
+    "replay_collapsed_value": {
+      "ok": true
+    },
+    "idempotency_key_hash": "sha256 of {\"run\": str(run_id), \"tool\": tool_name}",
+    "write_guards": [
+      "cloud_agent_disabled",
+      "tool_disabled",
+      "writes_disabled",
+      "github_tools_disabled",
+      "tool_call_fingerprint_mismatch",
+      "tool_call_already_submitted",
+      "write_limit",
+      "write_tool_already_used"
+    ],
+    "read_failure_marks": "FAILED + error_code=type(exc).__name__[:64]",
+    "terminal_event": "events.append(run_id, \"tool_completed\", {tool, risk, status: succeeded})"
+  },
+  "scope_shape": {
+    "cancelled": "run_cancel_requested_at set -> ToolDenied(run_cancelled)",
+    "actor": "created_by inactive/bot/non-member -> ToolDenied(actor_no_longer_authorized)",
+    "roles": "write needs ADMIN/MEMBER; read also allows GUEST",
+    "project_resolution": "work_item.project / scheduler_binding.project / pod.project"
+  },
+  "issue_data": {
+    "brief": {
+      "id": "11111111-1111-1111-1111-111111111111",
+      "identifier": "PRJ-42",
+      "name": "Fix it",
+      "state": "In Progress",
+      "state_group": "started",
+      "priority": "high"
+    },
+    "detail_keys": [
+      "description",
+      "id",
+      "identifier",
+      "name",
+      "priority",
+      "state",
+      "state_group",
+      "workpad"
+    ],
+    "detail_caps": "description[:20000], workpad[:32000]; comments newest 50, body[:10000], isoformat timestamps"
+  },
+  "guard_predicates": {
+    "github_path": "empty/len>1024/leading-slash/backslash/NUL/'..'-segment rejected (tools.py:452-460)",
+    "github_ref": "len>255/'://'/NUL rejected (tools.py:461-462)",
+    "github_pr_aspects": [
+      "summary",
+      "diff",
+      "files",
+      "checks",
+      "reviews",
+      "comments"
+    ],
+    "comment": "blank or len>10000 rejected (tools.py:276-277)",
+    "workpad": "len>32000 rejected (tools.py:298-299)",
+    "create_issue": "blank title/title>255/desc>20000 rejected (tools.py:347-348)",
+    "search_limit_clamp": "max(1, min(limit, 50)) (tools.py:229)",
+    "relation_count": "related_issues must list 1-50 (tools.py:396)",
+    "transition_same_state": "returns {updated: False} without save (tools.py:324-325)"
+  },
+  "build_tools_gating": {
+    "granted_only": [
+      "pidash_get_current_issue"
+    ],
+    "sorted_by_name": true
+  },
+  "github_context_denials": [
+    "github_binding_unavailable",
+    "github_installation_unavailable"
+  ],
+  "resolve_model_routing": {
+    "resolve_model_for_creator": "delegates to ee.assistant.model_provider.resolve_model_for_user(run.created_by); raises assistant.errors.LLMConfigMissing -> surfaced as llm_config_missing (model.py:11-22)",
+    "resolve_model_for_run": "delegates to resolve_model_for_creator(run) (ee/cloud_agent/model_provider.py:6-7)"
+  },
+  "ce_seam_defaults": {
+    "extra_toolsets_enabled_for": false,
+    "resolve_extra_toolsets_for_run": [],
+    "extra_toolsets_schema_tool": ""
+  }
+}

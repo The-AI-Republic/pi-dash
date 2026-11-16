@@ -1,0 +1,125 @@
+{
+ "method": "Ran _read_enabled() with SimpleNamespace(data=...) stubs under settings.test (no DB).",
+ "source": "apps/api/pi_dash/loop/views.py:52-61",
+ "vectors": [
+  {
+   "input": {
+    "enabled": true
+   },
+   "output": {
+    "enabled": true,
+    "ok": true
+   }
+  },
+  {
+   "input": {
+    "enabled": false
+   },
+   "output": {
+    "enabled": false,
+    "ok": true
+   }
+  },
+  {
+   "input": {
+    "enabled": "yes"
+   },
+   "output": {
+    "body": {
+     "error": "invalid_payload"
+    },
+    "ok": false,
+    "status": 400
+   }
+  },
+  {
+   "input": {
+    "enabled": 1
+   },
+   "output": {
+    "body": {
+     "error": "invalid_payload"
+    },
+    "ok": false,
+    "status": 400
+   }
+  },
+  {
+   "input": {
+    "enabled": null
+   },
+   "output": {
+    "body": {
+     "error": "invalid_payload"
+    },
+    "ok": false,
+    "status": 400
+   }
+  },
+  {
+   "input": {
+    "foo": true
+   },
+   "output": {
+    "body": {
+     "error": "invalid_payload"
+    },
+    "ok": false,
+    "status": 400
+   }
+  },
+  {
+   "input": {},
+   "output": {
+    "body": {
+     "error": "invalid_payload"
+    },
+    "ok": false,
+    "status": 400
+   }
+  },
+  {
+   "input": {
+    "enabled": true,
+    "extra": 1
+   },
+   "output": {
+    "body": {
+     "error": "invalid_payload"
+    },
+    "ok": false,
+    "status": 400
+   }
+  },
+  {
+   "input": [],
+   "output": {
+    "body": {
+     "error": "invalid_payload"
+    },
+    "ok": false,
+    "status": 400
+   }
+  },
+  {
+   "input": "x",
+   "output": {
+    "body": {
+     "error": "invalid_payload"
+    },
+    "ok": false,
+    "status": 400
+   }
+  },
+  {
+   "input": null,
+   "output": {
+    "body": {
+     "error": "invalid_payload"
+    },
+    "ok": false,
+    "status": 400
+   }
+  }
+ ]
+}

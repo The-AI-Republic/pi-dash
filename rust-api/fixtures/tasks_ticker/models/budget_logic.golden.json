@@ -1,0 +1,81 @@
+{
+  "_trace": "db/models/issue_agent_ticker.py:200-241 (pool_size, effective_max_ticks, wait_allowance, remaining, cap_reached); 64-72 jitter_seconds",
+  "_method": "ran real methods; pool_size stubbed per vector (project row not present without DB); jitter with random.seed(0)",
+  "tick_count_alias_is_used": true,
+  "wait_allowance_pool10_fresh": 10,
+  "jitter_seconds_10800_seed0": 911.9755996470519,
+  "jitter_seconds_0": 0.0,
+  "jitter_seconds_negative": 0.0,
+  "vectors": [
+    {
+      "pool": 10,
+      "used": 0,
+      "granted": 0,
+      "waited": 0,
+      "effective_max_ticks": 10,
+      "wait_allowance": 10,
+      "remaining": 10,
+      "cap_reached": false
+    },
+    {
+      "pool": 10,
+      "used": 9,
+      "granted": 0,
+      "waited": 0,
+      "effective_max_ticks": 10,
+      "wait_allowance": 10,
+      "remaining": 1,
+      "cap_reached": false
+    },
+    {
+      "pool": 10,
+      "used": 10,
+      "granted": 0,
+      "waited": 0,
+      "effective_max_ticks": 10,
+      "wait_allowance": 10,
+      "remaining": 0,
+      "cap_reached": true
+    },
+    {
+      "pool": 10,
+      "used": 10,
+      "granted": 3,
+      "waited": 0,
+      "effective_max_ticks": 13,
+      "wait_allowance": 10,
+      "remaining": 3,
+      "cap_reached": false
+    },
+    {
+      "pool": 10,
+      "used": 10,
+      "granted": 3,
+      "waited": 2,
+      "effective_max_ticks": 15,
+      "wait_allowance": 8,
+      "remaining": 5,
+      "cap_reached": false
+    },
+    {
+      "pool": -1,
+      "used": 500,
+      "granted": 0,
+      "waited": 0,
+      "effective_max_ticks": -1,
+      "wait_allowance": 0,
+      "remaining": null,
+      "cap_reached": false
+    },
+    {
+      "pool": 10,
+      "used": 0,
+      "granted": 0,
+      "waited": 0,
+      "effective_max_ticks": 10,
+      "wait_allowance": 10,
+      "remaining": 10,
+      "cap_reached": false
+    }
+  ]
+}

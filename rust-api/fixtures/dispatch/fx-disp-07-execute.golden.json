@@ -1,0 +1,96 @@
+{
+  "fixture_id": "FX-DISP-07",
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "trace": [
+    "apps/api/pi_dash/cloud_agent/tasks.py:31-66 (_claim)",
+    "apps/api/pi_dash/cloud_agent/tasks.py:69-72 (_fail)",
+    "apps/api/pi_dash/cloud_agent/tasks.py:75-208 (run_cloud_agent)",
+    "apps/api/pi_dash/cloud_agent/tasks.py:211-236 (scan_queued_runs)",
+    "apps/api/pi_dash/cloud_agent/tasks.py:239-260 (sweep_stale_runs)",
+    "apps/api/pi_dash/managed_runner/tasks.py:31-61 (expire_waiting_runs)",
+    "apps/api/pi_dash/cloud_agent/runtime.py:18-76 (execute)",
+    "apps/api/pi_dash/cloud_agent/runtime.py:79-88 (_usage_report)",
+    "apps/api/pi_dash/celery.py:156-186 (settings-backed beat entries)",
+    "apps/api/pi_dash/settings/common.py:531-590 (MANAGED/CLOUD defaults + settings keys)"
+  ],
+  "method": "_usage_report executed verbatim (exec of runtime.py:79-88 def, dataclass + plain-object probes). Claim/fail/sweep SQL + result rows recorded as ORM shapes verbatim from source (no live DB; compiler-form SQL, shape-derived rows per precedent). Beat entries read verbatim from celery.py with interval settings keys from settings/common.py. Outcome state machine read verbatim from run_cloud_agent.",
+  "claim": {
+    "shape": "atomic: select_for_update QUEUED cloud run + created_by; lock workspace; count RUNNING; over cap -> lease=now+rand(backoff/2..3*backoff/2), save(lease only), return None; else status=RUNNING, started_at=now, lease=None, save(3 fields); append run_started; re-fetch with relations",
+    "before": "status=queued",
+    "after_claimed": "status=running, started_at set, lease_expires_at NULL",
+    "after_capped": "status stays queued, lease_expires_at pushed by random backoff"
+  },
+  "fail": {
+    "shape": "finalize_agent_run(run_id, FAILED, {error_code: code[:64], error: (detail or code)[:16000]})"
+  },
+  "run_outcomes": {
+    "ignored": "claim None (already taken / not queued)",
+    "disabled": "not cloud_agent_is_configured() -> fail cloud_agent_disabled",
+    "unauthorized": "creator inactive/bot/non-member or no project role -> fail actor_no_longer_authorized",
+    "llm_config_missing": "no LLM config -> fail llm_config_missing (pre-check + LLMConfigMissing catch)",
+    "prompt_too_large": "len(prompt.encode()) > CLOUD_AGENT_MAX_PROMPT_BYTES",
+    "cancelled": "cancel_requested_at set (pre or post model) -> CANCELLED",
+    "result_too_large": "canonical final payload > CLOUD_AGENT_MAX_FINAL_RESULT_BYTES",
+    "completed": "outcome completed/noop -> COMPLETED with done_payload {v:1, executor:cloud_agent, status, summary, evidence, tool_calls, writes, limitations} + usage counters",
+    "blocked_state": "outcome blocked -> BLOCKED (same payload shape)",
+    "refused": "classify=provider_refusal -> REFUSED + refusal_category unknown",
+    "failed": "other exceptions -> fail(exc.code or classify code, sanitized text); SoftTimeLimit/TimeoutError -> run_timeout",
+    "master_recheck": "cloud_agent_is_configured() re-checked after model boundary -> disabled"
+  },
+  "scan_queued_runs": {
+    "shape": "expire rows older than MAX_QUEUE_AGE (batch SCAN_BATCH, fail dispatch_timeout); collect queued workspace ids ordered by oldest; CLOUD_AGENT_ENABLED False -> fail all queued cloud_agent_disabled, return 0; else sum dispatch_waiting per workspace"
+  },
+  "sweep_stale_runs": {
+    "cutoff": "now - (RUN_HARD_LIMIT + STALE_GRACE)",
+    "shape": "RUNNING rows older than cutoff (batch SCAN_BATCH): cancel_requested -> CANCELLED else FAILED run_timeout ('worker was lost or exceeded its deadline'); returns count"
+  },
+  "expire_waiting_runs": {
+    "cutoff": "now - MANAGED_RUNNER_QUEUED_MAX_AGE_SECS",
+    "shape": "QUEUED managed rows older than cutoff (first 500): finalize FAILED expected_status=QUEUED {error_code: desktop_not_connected, error: 'never came online...'}; returns expired count"
+  },
+  "usage_report": {
+    "dataclass_report": {
+      "input_tokens": 100,
+      "output_tokens": 50,
+      "total_tokens": 150,
+      "requests": 3
+    },
+    "non_dataclass_report": {
+      "input_tokens": 7,
+      "output_tokens": 8,
+      "total_tokens": 15
+    },
+    "def_source_lines": "runtime.py:79-88"
+  },
+  "beat_entries_owned": {
+    "cloud-agent-scan-queued-runs": {
+      "task": "cloud_agent.scan_queued_runs",
+      "settings_key": "CLOUD_AGENT_DISPATCH_SCAN_INTERVAL_SECONDS"
+    },
+    "cloud-agent-sweep-stale-runs": {
+      "task": "cloud_agent.sweep_stale_runs",
+      "settings_key": "CLOUD_AGENT_SWEEP_INTERVAL_SECONDS"
+    },
+    "managed-runner-expire-waiting-runs": {
+      "task": "managed_runner.expire_waiting_runs",
+      "settings_key": "MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS"
+    },
+    "out_of_scope": "agent-run-reconcile-terminal-effects belongs to the runner domain (D-13...D-15), not ported here"
+  },
+  "settings_defaults": {
+    "CLOUD_AGENT_DISPATCH_SCAN_INTERVAL_SECONDS": 10,
+    "CLOUD_AGENT_SWEEP_INTERVAL_SECONDS": 30,
+    "MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS": 300,
+    "MANAGED_RUNNER_QUEUED_MAX_AGE_SECS": 43200,
+    "CLOUD_AGENT_MAX_QUEUE_AGE_SECONDS": 900,
+    "CLOUD_AGENT_DISPATCH_SCAN_BATCH": 100,
+    "CLOUD_AGENT_DISPATCH_LEASE_SECONDS": 60,
+    "CLOUD_AGENT_DISPATCH_BACKOFF_SECONDS": 10
+  },
+  "ported_quirks": [
+    "creation.py:84-85 carries admission failures under the pseudo-key _cloud_admission_error (not an AgentRun column); callers must pop it before objects.create \u2014 kept as-is.",
+    "events.py:24 silently truncates kind to 64 chars (kind[:64]) \u2014 kept as-is.",
+    "errors.py:20 truncates sanitized text to 16000 chars before classify_error matches on it (errors.py:35) \u2014 kept as-is.",
+    "admission.py:40-42 documents that concurrent bursts may slightly overshoot the per-minute rate; the workspace queue cap is the hard limit \u2014 kept as-is."
+  ]
+}

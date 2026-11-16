@@ -315,6 +315,12 @@ class UserEndpoint(BaseViewSet):
         # Delete all sessions
         Session.objects.filter(user_id=request.user.id).delete()
 
+        # Signing out everywhere also signs out every built-in engine
+        # (built_engine_as_runner §4.3).
+        from pi_dash.runner.services.engine_credentials import revoke_engine_credentials_for_user
+
+        revoke_engine_credentials_for_user(request.user)
+
         # Profile updates
         profile = Profile.objects.get(user=user)
 

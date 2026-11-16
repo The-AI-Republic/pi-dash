@@ -1,0 +1,308 @@
+{
+ "_method": "ast walk of api/serializers/cycle.py and api/serializers/module.py: Meta.fields/read_only_fields via literal_eval, declared DRF fields, validate/create/update spans, ValidationError literals; run: python3 /tmp/gen_cycmod_fixtures.py; no DB touched",
+ "behaviour": {
+  "create_name_rule": "duplicate (name, project) on create -> 400 {id, code MODULE_NAME_ALREADY_EXISTS, error, message} (module.py:89-101); pinned by contract test_create_duplicate_name expecting 400 + code",
+  "date_rule": "start_date > target_date -> Start date cannot exceed target date (module.py:69-74); project gates id required / module_view off (module.py:61-68)",
+  "link_dup": "ModuleLink.create raises {error: URL already exists for this Issue} on (url, module) dup (module.py:255-258); BUG-PORT: message says Issue, and no link routes exist in urls/module.py so this path is unreachable over HTTP",
+  "members_filter": "validate() rewrites members to ProjectMember member_ids for the project (module.py:76-79); to_representation returns member id strings (module.py:203-206)",
+  "update_name_rule": "duplicate (name, project) excluding self on update -> error-only dict (module.py:143-146); members replaced wholesale delete+bulk_create ignore_conflicts (module.py:148-164)"
+ },
+ "fixture": "FX-CYCMOD-03",
+ "serializers": {
+  "ModuleCreateSerializer": {
+   "declared_fields": [
+    {
+     "line": 30,
+     "name": "members"
+    }
+   ],
+   "meta": {
+    "fields": [
+     "name",
+     "description",
+     "start_date",
+     "target_date",
+     "status",
+     "lead",
+     "members",
+     "external_source",
+     "external_id"
+    ],
+    "model": "Name(id='Module', ctx=Load())",
+    "read_only_fields": [
+     "id",
+     "workspace",
+     "project",
+     "created_by",
+     "updated_by",
+     "created_at",
+     "updated_at",
+     "deleted_at"
+    ],
+    "span": [
+     36,
+     58
+    ]
+   },
+   "methods": [
+    {
+     "name": "validate",
+     "span": [
+      60,
+      81
+     ]
+    },
+    {
+     "name": "create",
+     "span": [
+      83,
+      121
+     ]
+    }
+   ],
+   "raises": [
+    {
+     "line": 63,
+     "message": "Project ID is required"
+    },
+    {
+     "line": 66,
+     "message": "Project not found"
+    },
+    {
+     "line": 68,
+     "message": "Modules are not enabled for this project"
+    },
+    {
+     "line": 74,
+     "message": "Start date cannot exceed target date"
+    },
+    {
+     "line": 94,
+     "message": "Dict(keys=[Constant(value='id'), Constant(value='code'), Constant(value='error'), Constant(value='message')], values=[Call(func=Name(id='str', ctx=Load()), args=[Attribute(value=Name(id='module', ctx=Load()), attr='id', ctx=Load())], keywords=[]), Constant(val"
+    }
+   ],
+   "serializer": "ModuleCreateSerializer",
+   "span": [
+    21,
+    121
+   ]
+  },
+  "ModuleIssueRequestSerializer": {
+   "declared_fields": [
+    {
+     "line": 282,
+     "name": "issues"
+    }
+   ],
+   "meta": null,
+   "methods": [],
+   "raises": [],
+   "serializer": "ModuleIssueRequestSerializer",
+   "span": [
+    274,
+    285
+   ]
+  },
+  "ModuleIssueSerializer": {
+   "declared_fields": [
+    {
+     "line": 217,
+     "name": "sub_issues_count"
+    }
+   ],
+   "meta": {
+    "fields": "__all__",
+    "model": "Name(id='ModuleIssue', ctx=Load())",
+    "read_only_fields": [
+     "workspace",
+     "project",
+     "created_by",
+     "updated_by",
+     "created_at",
+     "updated_at",
+     "module"
+    ],
+    "span": [
+     219,
+     230
+    ]
+   },
+   "methods": [],
+   "raises": [],
+   "serializer": "ModuleIssueSerializer",
+   "span": [
+    209,
+    230
+   ]
+  },
+  "ModuleLinkSerializer": {
+   "declared_fields": [],
+   "meta": {
+    "fields": "__all__",
+    "model": "Name(id='ModuleLink', ctx=Load())",
+    "read_only_fields": [
+     "workspace",
+     "project",
+     "created_by",
+     "updated_by",
+     "created_at",
+     "updated_at",
+     "module"
+    ],
+    "span": [
+     241,
+     252
+    ]
+   },
+   "methods": [
+    {
+     "name": "create",
+     "span": [
+      255,
+      258
+     ]
+    }
+   ],
+   "raises": [
+    {
+     "line": 257,
+     "message": {
+      "error": "URL already exists for this Issue"
+     }
+    }
+   ],
+   "serializer": "ModuleLinkSerializer",
+   "span": [
+    233,
+    258
+   ]
+  },
+  "ModuleLiteSerializer": {
+   "declared_fields": [],
+   "meta": {
+    "fields": "__all__",
+    "model": "Name(id='Module', ctx=Load())",
+    "span": [
+     269,
+     271
+    ]
+   },
+   "methods": [],
+   "raises": [],
+   "serializer": "ModuleLiteSerializer",
+   "span": [
+    261,
+    271
+   ]
+  },
+  "ModuleSerializer": {
+   "declared_fields": [
+    {
+     "line": 177,
+     "name": "members"
+    },
+    {
+     "line": 182,
+     "name": "total_issues"
+    },
+    {
+     "line": 183,
+     "name": "cancelled_issues"
+    },
+    {
+     "line": 184,
+     "name": "completed_issues"
+    },
+    {
+     "line": 185,
+     "name": "started_issues"
+    },
+    {
+     "line": 186,
+     "name": "unstarted_issues"
+    },
+    {
+     "line": 187,
+     "name": "backlog_issues"
+    }
+   ],
+   "meta": {
+    "fields": "__all__",
+    "model": "Name(id='Module', ctx=Load())",
+    "read_only_fields": [
+     "id",
+     "workspace",
+     "project",
+     "created_by",
+     "updated_by",
+     "created_at",
+     "updated_at",
+     "deleted_at"
+    ],
+    "span": [
+     189,
+     201
+    ]
+   },
+   "methods": [
+    {
+     "name": "to_representation",
+     "span": [
+      203,
+      206
+     ]
+    }
+   ],
+   "raises": [],
+   "serializer": "ModuleSerializer",
+   "span": [
+    169,
+    206
+   ]
+  },
+  "ModuleUpdateSerializer": {
+   "declared_fields": [],
+   "meta": {
+    "fields": "BinOp(left=Attribute(value=Attribute(value=Name(id='ModuleCreateSerializer', ctx=Load()), attr='Meta', ctx=Load()), attr='fields', ctx=Load()), op=Add(), right=List(elts=[Constant(value='members')], ctx=Load()))",
+    "model": "Name(id='Module', ctx=Load())",
+    "read_only_fields": "Attribute(value=Attribute(value=Name(id='ModuleCreateSerializer', ctx=Load()), attr='Meta', ctx=Load()), attr='read_only_fields', ctx=Load())",
+    "span": [
+     133,
+     138
+    ]
+   },
+   "methods": [
+    {
+     "name": "update",
+     "span": [
+      140,
+      166
+     ]
+    }
+   ],
+   "raises": [
+    {
+     "line": 146,
+     "message": {
+      "error": "Module with this name already exists"
+     }
+    }
+   ],
+   "serializer": "ModuleUpdateSerializer",
+   "span": [
+    124,
+    166
+   ]
+  }
+ },
+ "trace": [
+  "api/serializers/module.py:21-121 ModuleCreate (Meta 36-58, validate 60-81, create 83-121)",
+  "api/serializers/module.py:124-166 ModuleUpdate (Meta 133-138, update 140-166)",
+  "api/serializers/module.py:169-206 ModuleSerializer (to_representation 203-206)",
+  "api/serializers/module.py:209-230 ModuleIssueSerializer",
+  "api/serializers/module.py:233-258 ModuleLinkSerializer (create 255-258)",
+  "api/serializers/module.py:261-271 ModuleLiteSerializer",
+  "api/serializers/module.py:274-285 ModuleIssueRequestSerializer"
+ ]
+}

@@ -1,0 +1,82 @@
+{
+  "_trace": "orchestration/service.py:303-316 (_resolve_fallback_creator); :319-338 (_resolve_pod_for_issue); :550-566 (_run_config_for_issue)",
+  "_method": "live resolver calls on pidash_524_scratch; frozen clock; dangling-pod and no-project pod cases use in-memory attribute overrides (no save) since the DB FKs forbid them",
+  "cases": {
+    "R1_issue_creator": {
+      "issue": "FX6-19",
+      "created_by": "fx6-creator@example.com",
+      "result": "fx6-creator@example.com"
+    },
+    "R2_project_lead": {
+      "issue": "FX6-19",
+      "created_by": null,
+      "project_lead": "fx6-lead@example.com",
+      "result": "fx6-lead@example.com"
+    },
+    "R3_default_assignee": {
+      "issue": "FX6-19",
+      "created_by": null,
+      "project_lead": null,
+      "default_assignee": "fx6-assignee@example.com",
+      "result": "fx6-assignee@example.com"
+    },
+    "R4_none": {
+      "issue": "FX6-19",
+      "created_by": null,
+      "project_lead": null,
+      "default_assignee": null,
+      "result": null
+    },
+    "R5_assigned_pod": {
+      "issue": "FX6-20",
+      "assigned_pod": "fx6-extra",
+      "result": "fx6-extra"
+    },
+    "R6_project_default": {
+      "issue": "FX6-20",
+      "assigned_pod": null,
+      "result": "FX6_pod_1"
+    },
+    "R7_dangling_assigned_pod": {
+      "issue": "FX6-20",
+      "assigned_pod_id": "nonexistent-uuid",
+      "result": "FX6_pod_1"
+    },
+    "R8_no_project": {
+      "assigned_pod": null,
+      "project": null,
+      "result": null
+    },
+    "R9_run_config_refresh": {
+      "issue": "FX6B-1",
+      "base": {
+        "model": "fx6-model",
+        "repo_url": "https://stale.example/x.git",
+        "_project_move_handoff": {
+          "target_project_id": "stale"
+        }
+      },
+      "result": {
+        "model": "fx6-model",
+        "repo_url": "https://example.com/fx6b.git",
+        "repo_ref": "develop",
+        "git_work_branch": "fx6/feature"
+      },
+      "base_unmutated": {
+        "model": "fx6-model",
+        "repo_url": "https://stale.example/x.git",
+        "_project_move_handoff": {
+          "target_project_id": "stale"
+        }
+      }
+    },
+    "R10_run_config_no_base": {
+      "issue": "FX6B-1",
+      "result": {
+        "repo_url": "https://example.com/fx6b.git",
+        "repo_ref": "develop",
+        "git_work_branch": "fx6/feature"
+      }
+    }
+  }
+}

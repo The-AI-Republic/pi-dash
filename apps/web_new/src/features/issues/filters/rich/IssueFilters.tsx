@@ -1,0 +1,90 @@
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
+// Lazy boundary for the issues rich filters (parity/specs/issues.md §9,
+// ISS-095–099). The whole builder — header entry, condition row, value
+// editors and picker reads — rides this chunk so the route chunk stays
+// free of the filter graph. The render prop hands the mounted control and
+// row to the layout root; both come from one builder instance. A saved
+// view passes its record so the row edits the view rather than the
+// personal filter store.
+//
+// The control and row are built here, above the layout root that draws the
+// floating spinner, so this component opens the mutation-loader scope around
+// both. A filter write then enters the same loader the nested root reads, and
+// the spinner covers the write plus the list refetch it triggers (ISS-005).
+
+import * as React from "react";
+import type { SavedView } from "@pidash/api-client";
+
+import type { DisplayPrefs } from "../../prefs/displayPrefs.js";
+import type { IssuesEntity } from "../../prefs/entities.js";
+import { IssuesLoaderProvider } from "../../loaders/loaderContext.js";
+import { useRichFilterBuilder, type RichFilterBuilderParts } from "./RichFilterBuilder.js";
+import type { ViewSnapshot } from "./views.js";
+
+export interface IssueFiltersProps {
+  workspaceSlug: string;
+  projectId: string;
+  /** Entity whose expression the row edits; project when absent. */
+  entity?: IssuesEntity | undefined;
+  hideCycle: boolean;
+  hideModule: boolean;
+  viewsEnabled?: boolean | undefined;
+  /** Saved-view record when the list renders that view (ISS-104). */
+  view?: SavedView | undefined;
+  /** Live display settings of that view (layout/display switches included). */
+  viewDisplay?: DisplayPrefs | undefined;
+  onViewCreated?: ((view: SavedView) => void) | undefined;
+  onViewUpdated?: ((view: SavedView) => void) | undefined;
+  /**
+   * Views-owned save dialog (parity/specs/views.md §8, VIEW-048). When the
+   * host provides it, the row's Save view/Save as entry hands it the live
+   * snapshot instead of opening the minimal form.
+   */
+  onSavePress?: ((snapshot: ViewSnapshot) => void) | undefined;
+  children: (parts: RichFilterBuilderParts) => React.ReactNode;
+}
+
+export default function IssueFilters(props: IssueFiltersProps): React.ReactElement {
+  // The scope wraps the builder hook: the hook captures its loader when it
+  // mounts, so it has to mount below this provider rather than beside it.
+  return (
+    <IssuesLoaderProvider>
+      <MountedFilters {...props} />
+    </IssuesLoaderProvider>
+  );
+}
+
+function MountedFilters({
+  workspaceSlug,
+  projectId,
+  entity,
+  hideCycle,
+  hideModule,
+  viewsEnabled,
+  view,
+  viewDisplay,
+  onViewCreated,
+  onViewUpdated,
+  onSavePress,
+  children,
+}: IssueFiltersProps): React.ReactElement {
+  // Stable identity: the builder resets its local copy whenever the record
+  // reference changes, so a fresh wrapper object per render would loop.
+  const viewProp = React.useMemo(() => (view === undefined ? undefined : { view, isDefault: false }), [view]);
+  const parts = useRichFilterBuilder({
+    workspaceSlug,
+    projectId,
+    entity: entity ?? { scope: "project", projectId },
+    hideCycle,
+    hideModule,
+    viewsEnabled,
+    view: viewProp,
+    viewDisplay,
+    onViewCreated,
+    onViewUpdated,
+    onSavePress,
+  });
+  return <React.Fragment>{children(parts)}</React.Fragment>;
+}
