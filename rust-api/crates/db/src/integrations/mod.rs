@@ -1,13 +1,13 @@
 //! Integrations-library table models (D-05, stage 5).
 //!
-//! Ports `apps/api/pi_dash/db/models/integration/git.py:11-344` and
-//! `apps/api/pi_dash/db/models/integration/github.py:15-262` for the db
+//! Ports `apps/api/pi_dash/db/models/integration/git.py:11-344` for the db
 //! layer, adopting the Django-owned schema column-for-column. Migrations
 //! are not ported; Django stays schema owner until switchover.
 //!
-//! * [`git_models`] — the 8 `Git*` tables (PIDASHCONV-144, git half).
-//! * [`github_models`] — the 8 `Github*` tables used by `github_sync_task`
-//!   (PIDASHCONV-144, github half).
+//! * [`git_models`] — the `Git*` tables (PIDASHCONV-144, git half). The
+//!   legacy `Github*` half (`github_models`, PIDASHCONV-144 github half)
+//!   was removed by NEWPIDASH-210 part 3 once every reader moved onto
+//!   the generic `git_*` tables.
 //!
 //! The layout mirrors the D-01 models convention (PIDASHCONV-116,
 //! `crate::license::models`): one `pub mod` per table with `TABLE`,
@@ -31,8 +31,8 @@
 //!
 //! # Re-exports
 //!
-//! These mirror `db/models/integration/__init__.py`, which re-exports all
-//! 16 `Git*`/`Github*` models. `SlackProjectSync` (same package, `slack.py`)
+//! These mirror `db/models/integration/__init__.py`, which re-exports the
+//! `Git*` models. `SlackProjectSync` (same package, `slack.py`)
 //! belongs to another domain and is not ported here.
 //!
 //! Wiring note: the crate root must declare `pub mod integrations;`
@@ -41,7 +41,6 @@
 //! for this issue.
 
 pub mod git_models;
-pub mod github_models;
 
 pub use git_models::{
     git_code_review_link::GitCodeReviewLink, git_comment_sync::GitCommentSync,
@@ -50,13 +49,6 @@ pub use git_models::{
     git_repository_binding::GitRepositoryBinding, git_webhook_delivery::GitWebhookDelivery,
     git_webhook_registration::GitWebhookRegistration, CodeReviewState as GitCodeReviewState,
     GitAuthType, GitProvider, GitWebhookStatus,
-};
-pub use github_models::{
-    github_comment_sync::GithubCommentSync, github_issue_sync::GithubIssueSync,
-    github_pull_request_link::GithubPullRequestLink, github_repository::GithubRepository,
-    github_repository_sync::GithubRepositorySync, github_webhook_delivery::GithubWebhookDelivery,
-    GithubAccountType, GithubRepositorySelection, GithubSessionStatus, GithubWebhookStatus,
-    PullRequestState,
 };
 
 /// Django-level FK delete behavior (ORM-emulated; the live FKs carry no
