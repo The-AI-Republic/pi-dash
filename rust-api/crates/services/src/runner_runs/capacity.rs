@@ -535,4 +535,46 @@ mod tests {
         let no_time = json!({"phase": "waiting_for_capacity", "assignment_token": tok_str});
         assert!(is_fresh_capacity_wait(&no_time, Some(tok), now));
     }
+
+    #[test]
+    fn fresh_wait_180s_boundary_stays_protected() {
+        // Healthy authenticated same-attempt waits beyond the 180s reaper
+        // cutoff stay protected while reported_at is fresh (<90s). The
+        // reaper excludes these even though assigned_at is old.
+        let now = Utc::now();
+        let tok = Uuid::parse_str("00000000-0000-0000-0000-000000000013").unwrap();
+        let tok_str = tok.to_string();
+        // Assigned 200s ago, but reported 10s ago: healthy, protected.
+        let healthy_beyond_180 = json!({
+            "phase": "waiting_for_capacity",
+            "assignment_token": tok_str,
+            "reported_at": (now - chrono::Duration::seconds(10)).to_rfc3339()
+        });
+        assert!(is_fresh_capacity_wait(&healthy_beyond_180, Some(tok), now));
+        // 90s freshness boundary: exactly 90s is fresh, 91s is stale.
+        let edge_90 = json!({
+            "phase": "waiting_for_capacity",
+            "assignment_token": tok_str,
+            "reported_at": (now - chrono::Duration::seconds(90)).to_rfc3339()
+        });
+        assert!(is_fresh_capacity_wait(&edge_90, Some(tok), now));
+        let edge_91 = json!({
+            "phase": "waiting_for_capacity",
+            "assignment_token": tok_str,
+            "reported_at": (now - chrono::Duration::seconds(91)).to_rfc3339()
+        });
+        assert!(!is_fresh_capacity_wait(&edge_91, Some(tok), now));
+        // Stale report beyond 180s retains bounded recovery (not protected).
+        let stale_old = json!({
+            "phase": "waiting_for_capacity",
+            "assignment_token": tok_str,
+            "reported_at": (now - chrono::Duration::seconds(200)).to_rfc3339()
+        });
+        assert!(!is_fresh_capacity_wait(&stale_old, Some(tok), now));
+        // Wrong-token report is never protected, even when fresh.
+        let other = Uuid::parse_str("00000000-0000-0000-0000-000000000014").unwrap();
+        assert!(!is_fresh_capacity_wait(&healthy_beyond_180, Some(other), now));
+        // Null token (legacy) never matches a stored token.
+        assert!(!is_fresh_capacity_wait(&healthy_beyond_180, None, now));
+    }
 }
