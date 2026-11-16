@@ -189,6 +189,64 @@ impl Store {
         conn.execute("INSERT OR REPLACE INTO tombstones (run_id, cloud_origin, tombstone_at) VALUES (?1,?2,?3)", rusqlite::params![run_id.to_string(), cloud_origin, at]).map_err(|e| e.to_string())?;
         Ok(())
     }
+
+    /// Durable cancel: delete the waiting row and tombstone the attempt so
+    /// a restart never resurrects canceled work. Returns rows deleted.
+    pub fn delete_waiting(&self, run_id: Uuid) -> Result<usize, String> {
+        let conn = self.conn.lock().map_err(|_| "poison".to_string())?;
+        let n = conn
+            .execute(
+                "DELETE FROM queue_entries WHERE run_id = ?1 AND phase = 'waiting'",
+                rusqlite::params![run_id.to_string()],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(n)
+    }
+
+    pub fn is_tombstoned(&self, run_id: Uuid) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|_| "poison".to_string())?;
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tombstones WHERE run_id = ?1",
+                rusqlite::params![run_id.to_string()],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(n > 0)
+    }
+
+    pub fn delete_entry(&self, run_id: Uuid) -> Result<usize, String> {
+        let conn = self.conn.lock().map_err(|_| "poison".to_string())?;
+        let n = conn
+            .execute(
+                "DELETE FROM queue_entries WHERE run_id = ?1",
+                rusqlite::params![run_id.to_string()],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(n)
+    }
+
+    /// All durable phases for restart reconciliation: returns (waiting, other).
+    /// `waiting` preserves FIFO order; callers must never replay `other`.
+    pub fn list_all_phases(&self) -> Result<Vec<(Uuid, String)>, String> {
+        let conn = self.conn.lock().map_err(|_| "poison".to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT run_id, phase FROM queue_entries ORDER BY sequence ASC")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or(Uuid::nil()),
+                    row.get::<_, String>(1)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]

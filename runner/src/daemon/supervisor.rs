@@ -191,6 +191,18 @@ impl Supervisor {
             let shutdown = state.shutdown_notified();
             tokio::spawn(async move { engine.run(shutdown).await })
         });
+        // Durable FIFO coordinator (NEWPIDASH-241 T3): one SQLite store +
+        // fs2 lock under data_dir. Failure enters storage_blocked (no queue)
+        // but never blocks forwarding existing runners.
+        let run_coordinator = crate::daemon::run_queue::Coordinator::new(
+            paths.data_dir.clone(),
+            config.daemon.max_concurrent_agent_runs,
+        )
+        .map(Arc::new)
+        .map_err(|e| {
+            tracing::warn!("run queue storage_blocked: {e}");
+        })
+        .ok();
         let spawn_ctx = RunnerSpawnCtx {
             engine: engine.clone(),
             local_chat: Arc::new(crate::ipc::pidash_agent_chat::PidashAgentChatProfile::new(
@@ -208,6 +220,7 @@ impl Supervisor {
             activation_lock: Arc::new(tokio::sync::Mutex::new(())),
             engine_ops_lock: Arc::new(tokio::sync::Mutex::new(())),
             pending_idle_restarts: Default::default(),
+            run_coordinator: run_coordinator.clone(),
         };
 
         let ipc = IpcServer {
@@ -219,6 +232,7 @@ impl Supervisor {
             paths: paths.clone(),
             instances: ipc_instances,
             spawn_ctx: spawn_ctx.clone(),
+            run_coordinator: run_coordinator.clone(),
         };
         let ipc_handle = tokio::spawn(async move {
             if let Err(e) = ipc.run().await {
@@ -443,6 +457,9 @@ pub(crate) struct RunnerSpawnCtx {
     pub(crate) engine_ops_lock: Arc<tokio::sync::Mutex<()>>,
     /// Runners waiting to be restarted with new credentials once idle.
     pending_idle_restarts: Arc<std::sync::Mutex<std::collections::HashSet<uuid::Uuid>>>,
+    /// Durable FIFO coordinator (NEWPIDASH-241 T3). None only in unit tests
+    /// that never touch the queue; production always has one.
+    pub(crate) run_coordinator: Option<Arc<crate::daemon::run_queue::Coordinator>>,
 }
 
 /// How often a busy runner whose credentials changed is checked for idle.
@@ -5022,6 +5039,7 @@ mod tests {
             activation_lock: Arc::new(tokio::sync::Mutex::new(())),
             engine_ops_lock: Arc::new(tokio::sync::Mutex::new(())),
             pending_idle_restarts: Default::default(),
+            run_coordinator: None,
         }
     }
 

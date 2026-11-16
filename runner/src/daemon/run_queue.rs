@@ -18,6 +18,7 @@ pub struct CoordinatorState {
     pub limit: u16,
     pub active: usize,
     pub waiting: usize,
+    pub held: usize,
     pub revision: u64,
     pub blocked_reason: Option<String>,
 }
@@ -85,6 +86,18 @@ impl Coordinator {
 
     pub fn cancel_waiting(&self, run_id: Uuid) -> Result<bool, String> {
         let mut inner = self.inner.lock().map_err(|_| "poison".to_string())?;
+        // Durable-first: delete from SQLite + tombstone, then drop in-memory.
+        // A canceled waiting run must never resurrect on restart nor start
+        // workspace preparation or an agent.
+        let now = chrono::Utc::now().timestamp_millis();
+        let origin = inner
+            .entries
+            .iter()
+            .find(|e| e.run_id == run_id)
+            .map(|e| e.cloud_origin.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        self.store.delete_waiting(run_id)?;
+        let _ = self.store.insert_tombstone(run_id, &origin, now);
         if let Some(pos) = inner.entries.iter().position(|e| e.run_id == run_id) {
             inner.entries.remove(pos);
             inner.revision += 1;
@@ -95,12 +108,30 @@ impl Coordinator {
 
     pub fn counts(&self) -> CoordinatorState {
         let inner = self.inner.lock().unwrap();
+        let active = inner.active.len();
+        let waiting = inner.entries.len();
+        // One nonterminal held attempt per runner, so held = active + waiting
+        // (distinct runners). Active includes starting/executing/finishing.
         CoordinatorState {
             limit: inner.limit,
-            active: inner.active.len(),
-            waiting: inner.entries.len(),
+            active,
+            waiting,
+            held: active + waiting,
             revision: inner.revision,
             blocked_reason: inner.blocked_reason.clone(),
+        }
+    }
+
+    pub fn snapshot(&self) -> pidash_ipc::RunQueueSnapshot {
+        let s = self.counts();
+        pidash_ipc::RunQueueSnapshot {
+            mode: "enabled".to_string(),
+            limit: s.limit,
+            active: s.active,
+            waiting: s.waiting,
+            held: s.held,
+            revision: s.revision,
+            blocked_reason: s.blocked_reason.clone(),
         }
     }
 
@@ -236,6 +267,64 @@ mod tests {
         coord.complete(e2.run_id).unwrap();
         coord.set_limit(3).unwrap();
         assert!(coord.admit(e4.run_id).unwrap());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cancel_waiting_is_durable_across_restart() {
+        let dir = std::env::temp_dir().join(format!("coord_cancel_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let coord = Coordinator::new(dir.clone(), 3).expect("coord");
+        let e1 = entry(Uuid::new_v4(), 1);
+        let e2 = entry(Uuid::new_v4(), 2);
+        coord.enqueue(e1.clone()).unwrap();
+        coord.enqueue(e2.clone()).unwrap();
+        assert!(coord.cancel_waiting(e1.run_id).unwrap());
+        assert_eq!(coord.counts().waiting, 1);
+        drop(coord);
+        // Reopen: canceled entry must not resurrect; tombstone persists.
+        let coord2 = Coordinator::new(dir.clone(), 3).expect("coord2");
+        assert_eq!(coord2.counts().waiting, 1);
+        assert_eq!(coord2.position(e2.run_id), Some(1));
+        assert_eq!(coord2.position(e1.run_id), None);
+        let _ = coord2.store.is_tombstoned(e1.run_id).unwrap();
+        assert!(coord2.store.is_tombstoned(e1.run_id).unwrap());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn second_daemon_fails_on_fs2_lock() {
+        let dir = std::env::temp_dir().join(format!("coord_lock_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let _coord1 = Coordinator::new(dir.clone(), 3).expect("coord1");
+        // Second daemon for same data dir exits with actionable error.
+        let second = Coordinator::new(dir.clone(), 3);
+        assert!(second.is_err(), "second daemon must fail on fs2 lock");
+        let msg = second.err().unwrap().to_string();
+        assert!(
+            msg.contains("run_queue.lock"),
+            "error should name the lock: {msg}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn snapshot_carries_live_counts_and_held() {
+        let dir = std::env::temp_dir().join(format!("coord_snap_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let coord = Coordinator::new(dir.clone(), 2).expect("coord");
+        let e1 = entry(Uuid::new_v4(), 1);
+        let e2 = entry(Uuid::new_v4(), 2);
+        coord.enqueue(e1.clone()).unwrap();
+        coord.enqueue(e2.clone()).unwrap();
+        coord.admit(e1.run_id).unwrap();
+        let snap = coord.snapshot();
+        assert_eq!(snap.mode, "enabled");
+        assert_eq!(snap.limit, 2);
+        assert_eq!(snap.active, 1);
+        assert_eq!(snap.waiting, 1);
+        assert_eq!(snap.held, 2);
+        assert!(snap.revision > 0);
         std::fs::remove_dir_all(&dir).ok();
     }
 }
