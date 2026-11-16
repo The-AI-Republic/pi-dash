@@ -29,10 +29,10 @@ fn read_stored_id(path: &Path) -> std::io::Result<uuid::Uuid> {
         match std::fs::read_to_string(path) {
             Ok(s) => {
                 let t = s.trim();
-                if let Ok(id) = t.parse::<uuid::Uuid>() {
-                    if !id.is_nil() {
-                        return Ok(id);
-                    }
+                if let Ok(id) = t.parse::<uuid::Uuid>()
+                    && !id.is_nil()
+                {
+                    return Ok(id);
                 }
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -151,23 +151,16 @@ pub fn windows_pipe_name_from_id(id: uuid::Uuid) -> String {
 
 #[cfg(windows)]
 fn create_owner_only_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    use std::ffi::{OsStr, OsString};
+    use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
-    use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Foundation::{INVALID_HANDLE_VALUE, LocalFree};
     use windows_sys::Win32::Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
     };
     use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_ALWAYS,
+        CreateFileW, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
     };
-    // For CREATE_NEW we need OPEN_ALWAYS + existence check; simpler to
-    // use OpenOptions create_new after setting DACL via CreateFileW.
-    // We call CreateFileW with OPEN_ALWAYS then truncate + write, but
-    // to keep create-new atomicity we first try create_new semantics
-    // via OPEN_ALWAYS + GetFileType? Instead use the SDDL + CreateFileW
-    // with CREATE_NEW (1).
     const CREATE_NEW: u32 = 1;
     // Build owner-only SDDL for the current user.
     let sddl_str = current_user_sddl()?;
@@ -236,8 +229,10 @@ fn create_owner_only_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The current user's SID in string form (`S-1-5-...`). Used by
+/// the scheduled-task XML to scope the logon trigger to this user.
 #[cfg(windows)]
-fn current_user_sddl() -> std::io::Result<String> {
+pub fn current_user_sid() -> std::io::Result<String> {
     use std::io;
     use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE};
     use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
@@ -273,6 +268,11 @@ fn current_user_sddl() -> std::io::Result<String> {
         Ok(out)
     })();
     unsafe { CloseHandle(token) };
-    let sid = result?;
+    result
+}
+
+#[cfg(windows)]
+fn current_user_sddl() -> std::io::Result<String> {
+    let sid = current_user_sid()?;
     Ok(format!("O:{sid}D:P(A;;GA;;;{sid})"))
 }

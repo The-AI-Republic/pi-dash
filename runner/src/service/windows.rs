@@ -35,10 +35,16 @@ pub async fn write_unit(paths: &Paths) -> Result<()> {
 
 /// Render the per-user scheduled task definition (Task Scheduler XML).
 /// Pure so the restart block is unit-testable without `schtasks.exe`.
-pub(crate) fn render_task_xml(exe: &str) -> String {
+///
+/// `user_sid` scopes the logon trigger and principal to the installing
+/// user: an unscoped `<LogonTrigger>` fires at *any* account's logon.
+/// The XML declaration says UTF-8 because `install_via_xml` writes UTF-8
+/// bytes; a UTF-16 declaration on UTF-8 content makes schtasks reject it.
+pub(crate) fn render_task_xml(exe: &str, user_sid: &str) -> String {
     let exe_escaped = xml_escape(exe);
+    let user_escaped = xml_escape(user_sid);
     format!(
-        r#"<?xml version="1.0" encoding="UTF-16"?>
+        r#"<?xml version="1.0" encoding="UTF-8"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Description>Pi Dash Runner daemon (starts at logon, restarts on failure)</Description>
@@ -46,10 +52,12 @@ pub(crate) fn render_task_xml(exe: &str) -> String {
   <Triggers>
     <LogonTrigger>
       <Enabled>true</Enabled>
+      <UserId>{user_escaped}</UserId>
     </LogonTrigger>
   </Triggers>
   <Principals>
     <Principal>
+      <UserId>{user_escaped}</UserId>
       <LogonType>InteractiveToken</LogonType>
       <RunLevel>LeastPrivilege</RunLevel>
     </Principal>
@@ -86,7 +94,9 @@ fn xml_escape(s: &str) -> String {
 }
 
 async fn install_via_xml(exe: &str) -> Result<()> {
-    let xml = render_task_xml(exe);
+    let sid = pidash_ipc::pipe_id::current_user_sid()
+        .context("resolving current user SID for scheduled task")?;
+    let xml = render_task_xml(exe, &sid);
     // schtasks /XML expects a file; write a per-install temp file.
     let tmp = std::env::temp_dir().join(format!("pidash-task-{}.xml", uuid::Uuid::new_v4()));
     tokio::fs::write(&tmp, xml)
@@ -203,7 +213,7 @@ mod tests {
 
     #[test]
     fn task_xml_has_restart_on_failure_and_logon_trigger() {
-        let xml = render_task_xml("C:\\Program Files\\Pi Dash\\pidash.exe");
+        let xml = render_task_xml("C:\\Program Files\\Pi Dash\\pidash.exe", "S-1-5-21-1001");
         assert!(xml.contains("<RestartOnFailure>"), "must contain RestartOnFailure: {xml}");
         assert!(xml.contains("<Interval>PT1M</Interval>"), "interval PT1M: {xml}");
         assert!(xml.contains("<Count>3</Count>"), "count 3: {xml}");
@@ -211,6 +221,15 @@ mod tests {
         assert!(xml.contains("pidash.exe"), "exe path: {xml}");
         // Must not use plain schtasks ONLOGON-only fallback as primary.
         assert!(xml.contains("InteractiveToken"), "per-user interactive token: {xml}");
+        // Logon trigger and principal must be scoped to the installing
+        // user, not fire at any account's logon.
+        assert!(
+            xml.contains("<UserId>S-1-5-21-1001</UserId>"),
+            "user-scoped logon: {xml}"
+        );
+        // The file is written as UTF-8 (tokio::fs::write on a String), so
+        // the declaration must say UTF-8 or schtasks rejects it.
+        assert!(xml.contains("encoding=\"UTF-8\""), "utf-8 declaration: {xml}");
     }
 
     #[test]
