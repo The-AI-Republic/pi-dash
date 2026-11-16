@@ -368,7 +368,9 @@ impl IpcServer {
                 Ok(Response::Ack)
             }
             Request::RunnerDisconnect => {
-                self.primary_state.shutdown();
+                self.primary_state.shutdown_with_reason(
+                    crate::daemon::state::DaemonShutdownTrigger::ControlSocket,
+                );
                 Ok(Response::Ack)
             }
             Request::RunnerRemoveLocal { runner } => {
@@ -1074,7 +1076,10 @@ sleep 1
             &paths,
             &insts.iter().collect::<Vec<_>>(),
         );
-        spawn_ctx.local_chat = Arc::new(PidashAgentChatProfile::for_tests(engine, codex_home.clone()));
+        spawn_ctx.local_chat = Arc::new(PidashAgentChatProfile::for_tests(
+            engine,
+            codex_home.clone(),
+        ));
         let server = IpcServer {
             path: paths.ipc_socket_path(),
             primary_state: crate::daemon::state::StateHandle::new(Config {

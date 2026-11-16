@@ -1512,11 +1512,12 @@ async fn post_failure_comment(
         return Ok(());
     }
     let failure_reason = reread.failure_reason.clone();
+    let runner_identity = reread.runner_identity();
     let ids = map_failure_comment_ids(&reread)?;
     // Route on the stored canonical reason (PDASHOSS01-183), predicting the
     // `RUN_ENDED` failure policy that follows on this transaction.
     let effect = failure_effects::failure_clock_effect(&conn, &reread).await?;
-    let clock_stopped = match lifecycle::failure_comment_gate(plan, effect) {
+    let clock_stopped = match lifecycle::failure_comment_gate(plan, &failure_reason, effect) {
         lifecycle::FailureCommentGate::Suppress => return Ok(()),
         lifecycle::FailureCommentGate::Post { clock_stopped } => clock_stopped,
     };
@@ -1530,7 +1531,7 @@ async fn post_failure_comment(
     if duplicate {
         return Ok(());
     }
-    let rendered = plan.render(&failure_reason, clock_stopped);
+    let rendered = plan.render(&failure_reason, clock_stopped, runner_identity.as_ref());
     let comment = &rendered.comment;
     let actor_id = seams.agent_system_user().await.map_err(SweepError::Seam)?;
     // Domain executor twins, in Django order. Ambient user nulls:
@@ -2242,6 +2243,10 @@ mod tests {
             failure_reason: String::new(),
             phase_kind: String::new(),
             issue_state_id: None,
+            runner_name: None,
+            runner_host_label: None,
+            machine_label: None,
+            machine_host_label: None,
         };
         assert!(map_failure_comment_ids(&full).is_ok());
         let dangling = lifecycle::FailureRereadRow {

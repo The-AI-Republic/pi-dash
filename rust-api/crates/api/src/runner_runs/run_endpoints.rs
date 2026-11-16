@@ -1071,9 +1071,9 @@ async fn post_failure_comment(
     let db = |error: sqlx::Error| TerminalEffectsError::Database(error.to_string());
     let orm_err = |error: sea_orm::DbErr| TerminalEffectsError::Database(error.to_string());
     let plan = lifecycle_kernel::plan_failure_comment(error, run_id);
-    let (work_item_id, project_id, workspace_id, failure_reason, clock_stopped) = {
+    let (work_item_id, project_id, workspace_id, failure_reason, runner_identity, clock_stopped) = {
         let conn = TxConn::new(hooks);
-        // `failure_reread`: run + work item (+ project), first row.
+        // `failure_reread`: run + work item (+ project + runner/machine), first row.
         let reread = lifecycle_kernel::failure_reread(&conn, run_id)
             .await
             .map_err(orm_err)?;
@@ -1090,12 +1090,13 @@ async fn post_failure_comment(
             _ => return Ok(()),
         };
         let reason = reread.failure_reason.clone();
+        let identity = reread.runner_identity();
         // Route on the stored canonical reason (PDASHOSS01-183), predicting
         // the `RUN_ENDED` failure policy that follows on this transaction.
         let effect = failure_effects::failure_clock_effect(&conn, &reread)
             .await
             .map_err(orm_err)?;
-        let clock_stopped = match lifecycle_kernel::failure_comment_gate(&plan, effect) {
+        let clock_stopped = match lifecycle_kernel::failure_comment_gate(&plan, &reason, effect) {
             lifecycle_kernel::FailureCommentGate::Suppress => return Ok(()),
             lifecycle_kernel::FailureCommentGate::Post { clock_stopped } => clock_stopped,
         };
@@ -1110,9 +1111,16 @@ async fn post_failure_comment(
         if dupe {
             return Ok(());
         }
-        (work_item, project, workspace, reason, clock_stopped)
+        (
+            work_item,
+            project,
+            workspace,
+            reason,
+            identity,
+            clock_stopped,
+        )
     };
-    let rendered = plan.render(&failure_reason, clock_stopped);
+    let rendered = plan.render(&failure_reason, clock_stopped, runner_identity.as_ref());
     let actor_id = ports
         .agent_system_user_id()
         .await

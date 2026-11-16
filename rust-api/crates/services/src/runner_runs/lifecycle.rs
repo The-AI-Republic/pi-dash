@@ -60,11 +60,11 @@ pub const RUN_ERROR_MAX_CHARS: usize = 16_000;
 pub const LLM_MODEL_MAX_CHARS: usize = 128;
 
 /// Detail prefixes that suppress the failure comment
-/// (`run_lifecycle.py:335-338`), in tuple order.
-pub const INFRA_FAILURE_DETAIL_PREFIXES: [&str; 2] = [
-    "daemon shutdown requested",
-    "agent stalled: no events for >",
-];
+/// (`run_lifecycle.py:335-338`), in tuple order. NEWPIDASH-253 (DIFF-42)
+/// drops `daemon shutdown requested`: daemon-restart failures now post
+/// like any other failure (see [`failure_comment_gate`]), so only the
+/// stall-reaper prefix remains infra noise.
+pub const INFRA_FAILURE_DETAIL_PREFIXES: [&str; 1] = ["agent stalled: no events for >"];
 
 /// `fire_tick` Celery wire name (`bgtasks/agent_ticker.py:77`).
 pub const FIRE_TICK_TASK: &str = "pi_dash.bgtasks.agent_ticker.fire_tick";
@@ -286,12 +286,17 @@ pub fn pause_drain_reread_sql() -> String {
 
 /// Failure-comment re-read (`_post_failure_comment:367`):
 /// `select_related("work_item", "work_item__project").filter(pk).first()` —
-/// 42 + 34 + 46 columns. Param: `$1` run id.
+/// 42 + 34 + 46 columns, plus the NEWPIDASH-253 (DIFF-42) runner +
+/// dev-machine legs for the trailing `Runner:` line. Param: `$1` run id.
 pub fn failure_reread_sql() -> String {
     format!(
-        "SELECT {}, {}, {} FROM \"agent_run\" LEFT OUTER JOIN \"issues\" ON \
+        "SELECT {}, {}, {}, \"runner\".\"name\" AS \"runner_name\", \"runner\".\"host_label\" AS \"runner_host_label\", \
+         \"dev_machine\".\"label\" AS \"machine_label\", \"dev_machine\".\"host_label\" AS \"machine_host_label\" FROM \"agent_run\" \
+         LEFT OUTER JOIN \"issues\" ON \
          (\"agent_run\".\"work_item_id\" = \"issues\".\"id\") LEFT OUTER JOIN \
-         \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") WHERE \
+         \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \
+         \"runner\" ON (\"agent_run\".\"runner_id\" = \"runner\".\"id\") LEFT OUTER JOIN \
+         \"dev_machine\" ON (\"runner\".\"dev_machine_id\" = \"dev_machine\".\"id\") WHERE \
          \"agent_run\".\"id\" = $1 ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1",
         qualified_columns("agent_run", agent_run::COLUMNS),
         qualified_columns("issues", ISSUE_COLUMNS),
@@ -893,10 +898,21 @@ pub enum FailureCommentGate {
 /// the decision `_apply_failure_policy` makes when the run's `RUN_ENDED`
 /// reconciles right after this hook): a free retry is silent; infra noise
 /// is silent unless the clock stops — the user must hear about that.
+/// NEWPIDASH-253 (DIFF-42) exempts `daemon_restart`: a daemon stop is
+/// never silently free-retried — it always posts (one comment per
+/// in-flight run, stating the trigger), even below the backstop.
 pub fn failure_comment_gate(
     plan: &FailureCommentPlan,
+    failure_reason: &str,
     effect: FailureClockEffect,
 ) -> FailureCommentGate {
+    if RunFailureReason::from_value(py_strip(failure_reason))
+        == Some(RunFailureReason::DaemonRestart)
+    {
+        return FailureCommentGate::Post {
+            clock_stopped: effect.clock_stopped,
+        };
+    }
     if effect.free_retry {
         return FailureCommentGate::Suppress;
     }
@@ -910,6 +926,58 @@ pub fn failure_comment_gate(
 
 /// The paused paragraph's text (`_post_failure_comment`).
 const CLOCK_STOPPED_PARAGRAPH: &str = "Automatic runs on this issue are paused — no further tick budget will be spent on this failure. Once it is fixed, press Re-tick (or Run AI) to resume.";
+
+/// Where a run ran, for the trailing `Runner:` line (NEWPIDASH-253,
+/// DIFF-42). `machine` is already resolved (dev-machine label, else
+/// dev-machine host label, else runner host label); `None` means no
+/// machine label was stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerIdentity {
+    pub runner_name: String,
+    pub machine: Option<String>,
+}
+
+impl RunnerIdentity {
+    /// Resolve the machine label exactly as diagnostics `_runner_location`
+    /// does: dev-machine `label` wins over `host_label`, falling back to
+    /// the runner's `host_label`. Returns `None` when there is no runner
+    /// name to display (the comment then omits the line).
+    pub fn new(
+        runner_name: Option<&str>,
+        runner_host_label: Option<&str>,
+        machine_label: Option<&str>,
+        machine_host_label: Option<&str>,
+    ) -> Option<Self> {
+        let name = py_strip(runner_name.unwrap_or(""));
+        if name.is_empty() {
+            return None;
+        }
+        let mut machine = py_strip(machine_label.unwrap_or(""));
+        if machine.is_empty() {
+            machine = py_strip(machine_host_label.unwrap_or(""));
+        }
+        if machine.is_empty() {
+            machine = py_strip(runner_host_label.unwrap_or(""));
+        }
+        Some(Self {
+            runner_name: name.to_owned(),
+            machine: if machine.is_empty() {
+                None
+            } else {
+                Some(machine.to_owned())
+            },
+        })
+    }
+
+    /// The `Runner:` line's text (NEWPIDASH-253): `Runner: <name> on
+    /// <machine>`, or `Runner: <name>` without a machine.
+    pub fn line(&self) -> String {
+        match &self.machine {
+            Some(machine) => format!("Runner: {} on {machine}", self.runner_name),
+            None => format!("Runner: {}", self.runner_name),
+        }
+    }
+}
 
 /// A rendered failure comment plus what the clock-stopped notification
 /// reuses (`label`, `action`).
@@ -926,9 +994,15 @@ impl FailureCommentPlan {
     /// reason label + action header (plain `Run failed.` for an unknown or
     /// empty reason), the paused paragraph when the clock stopped, then
     /// the `<pre>` detail — or `(no diagnostic detail)` when there is
-    /// neither a detail nor a label. Each argument escaped as
-    /// `format_html` does.
-    pub fn render(&self, failure_reason: &str, clock_stopped: bool) -> RenderedFailureComment {
+    /// neither a detail nor a label — then the trailing `Runner:` line
+    /// (NEWPIDASH-253, DIFF-42) when `runner` is `Some`. Each argument
+    /// escaped as `format_html` does.
+    pub fn render(
+        &self,
+        failure_reason: &str,
+        clock_stopped: bool,
+        runner: Option<&RunnerIdentity>,
+    ) -> RenderedFailureComment {
         let reason = py_strip(failure_reason);
         let label = RunFailureReason::from_value(reason)
             .map(|known| known.label())
@@ -958,6 +1032,9 @@ impl FailureCommentPlan {
             html.push_str(&format!("<pre>{}</pre>", escape_html(&self.detail)));
         } else if label.is_empty() {
             html.push_str(&format!("<p>{}</p>", escape_html("(no diagnostic detail)")));
+        }
+        if let Some(identity) = runner {
+            html.push_str(&format!("<p>{}</p>", escape_html(&identity.line())));
         }
         RenderedFailureComment {
             comment: CommentPlan::failure(html, self.run_id),
@@ -1186,7 +1263,9 @@ pub async fn pause_update(
 /// The failure-comment re-read ([`failure_reread_sql`]): the run's work
 /// item plus the joined issue's id / project / workspace (`None` without
 /// an issue row — `LEFT JOIN`). The `projects` leg Django adds is a
-/// primary-key join nothing reads.
+/// primary-key join nothing reads. NEWPIDASH-253 (DIFF-42) adds the
+/// runner + dev-machine legs for [`RunnerIdentity`] (`None` without a
+/// `runner_id` or without those rows — the comment omits the line).
 #[derive(Debug, Clone, PartialEq, Eq, sea_orm::FromQueryResult)]
 pub struct FailureRereadRow {
     pub work_item_id: Option<Uuid>,
@@ -1200,6 +1279,23 @@ pub struct FailureRereadRow {
     pub phase_kind: String,
     /// The joined issue's `state_id` — the failure policy's bucket guard.
     pub issue_state_id: Option<Uuid>,
+    pub runner_name: Option<String>,
+    pub runner_host_label: Option<String>,
+    pub machine_label: Option<String>,
+    pub machine_host_label: Option<String>,
+}
+
+impl FailureRereadRow {
+    /// The trailing `Runner:` identity for this run (NEWPIDASH-253):
+    /// `None` when the run has no runner name to display.
+    pub fn runner_identity(&self) -> Option<RunnerIdentity> {
+        RunnerIdentity::new(
+            self.runner_name.as_deref(),
+            self.runner_host_label.as_deref(),
+            self.machine_label.as_deref(),
+            self.machine_host_label.as_deref(),
+        )
+    }
 }
 
 /// `agent_run.work_item_id -> issues.id` (trimmed from the entity).
@@ -1211,7 +1307,26 @@ fn work_item_rel() -> sea_orm::RelationDef {
         .into()
 }
 
-/// Failure re-read ([`failure_reread_sql`]): run `LEFT JOIN issues`,
+/// `agent_run.runner_id -> runner.id` (NEWPIDASH-253).
+fn failure_runner_rel() -> sea_orm::RelationDef {
+    use sea_orm::EntityTrait;
+    orm::agent_run::Entity::belongs_to(orm::runner::Entity)
+        .from(orm::agent_run::Column::RunnerId)
+        .to(orm::runner::Column::Id)
+        .into()
+}
+
+/// `runner.dev_machine_id -> dev_machine.id` (NEWPIDASH-253).
+fn failure_dev_machine_rel() -> sea_orm::RelationDef {
+    use sea_orm::EntityTrait;
+    orm::runner::Entity::belongs_to(orm::dev_machine::Entity)
+        .from(orm::runner::Column::DevMachineId)
+        .to(orm::dev_machine::Column::Id)
+        .into()
+}
+
+/// Failure re-read ([`failure_reread_sql`]): run `LEFT JOIN issues` +
+/// `LEFT JOIN runner` + `LEFT JOIN dev_machine`,
 /// `ORDER BY created_at DESC LIMIT 1`.
 pub fn failure_reread_select(
     run_id: Uuid,
@@ -1227,7 +1342,13 @@ pub fn failure_reread_select(
         .column(Column::FailureReason)
         .column(Column::PhaseKind)
         .column_as(orm::issues::Column::StateId, "issue_state_id")
+        .column_as(orm::runner::Column::Name, "runner_name")
+        .column_as(orm::runner::Column::HostLabel, "runner_host_label")
+        .column_as(orm::dev_machine::Column::Label, "machine_label")
+        .column_as(orm::dev_machine::Column::HostLabel, "machine_host_label")
         .join(JoinType::LeftJoin, work_item_rel())
+        .join(JoinType::LeftJoin, failure_runner_rel())
+        .join(JoinType::LeftJoin, failure_dev_machine_rel())
         .filter(Column::Id.eq(run_id))
         .order_by_desc(Column::CreatedAt)
         .limit(1)
@@ -2227,10 +2348,10 @@ mod tests {
     /// `failure_reason` (legacy rows) renders exactly the FX-RUN-05 body.
     fn legacy_comment(detail: &str, run_id: Uuid) -> Option<CommentPlan> {
         let plan = plan_failure_comment(detail, run_id);
-        match failure_comment_gate(&plan, FailureClockEffect::default()) {
+        match failure_comment_gate(&plan, "", FailureClockEffect::default()) {
             FailureCommentGate::Suppress => None,
             FailureCommentGate::Post { clock_stopped } => {
-                Some(plan.render("", clock_stopped).comment)
+                Some(plan.render("", clock_stopped, None).comment)
             }
         }
     }
@@ -2280,13 +2401,58 @@ mod tests {
                 streak,
             );
             let plan = plan_failure_comment(detail, Uuid::nil());
-            let rendered = match failure_comment_gate(&plan, effect) {
+            let rendered = match failure_comment_gate(&plan, reason, effect) {
                 FailureCommentGate::Suppress => None,
                 FailureCommentGate::Post { clock_stopped } => {
-                    Some(plan.render(reason, clock_stopped))
+                    Some(plan.render(reason, clock_stopped, None))
                 }
             };
             let case = format!("({detail:?}, {reason:?}, streak={streak}, armed={armed})");
+            // NEWPIDASH-253 (DIFF-42): daemon-shutdown details always post
+            // in the new system (infra list is stalled-only, and
+            // `daemon_restart` is exempt from the free-retry gate), so
+            // Django's suppressed (null html) rows for them now render.
+            // Expect the fixed behaviour there; every other row keeps the
+            // Django html byte-exact.
+            if row["html"].is_null()
+                && (py_strip(reason) == "daemon_restart"
+                    || py_strip(detail).starts_with("daemon shutdown requested"))
+            {
+                // DIFF-42: daemon_restart rows must now post — assert presence
+                // so a still-suppressed daemon fails here, not null==null below.
+                // Detail-only daemon rows with other RetryFree reasons (e.g.
+                // `network`, streak 0) still suppress on free-retry by design,
+                // so they keep the lenient Some→assert / None→fall-through shape.
+                if py_strip(reason) == "daemon_restart" {
+                    let rendered = rendered
+                        .as_ref()
+                        .unwrap_or_else(|| panic!("daemon must post (DIFF-42) {case}"));
+                    assert!(
+                        rendered.comment.comment_html.contains("Run failed"),
+                        "daemon html {case}"
+                    );
+                    assert!(
+                        !py_strip(detail).is_empty() || !rendered.comment.comment_html.is_empty(),
+                        "daemon html {case}"
+                    );
+                    let notified = rendered.clock_stopped;
+                    assert_eq!(Value::Bool(notified), row["notified"], "notified {case}");
+                    continue;
+                }
+                if let Some(rendered) = rendered.as_ref() {
+                    assert!(
+                        rendered.comment.comment_html.contains("Run failed"),
+                        "daemon html {case}"
+                    );
+                    assert!(
+                        !py_strip(detail).is_empty() || !rendered.comment.comment_html.is_empty(),
+                        "daemon html {case}"
+                    );
+                    let notified = rendered.clock_stopped;
+                    assert_eq!(Value::Bool(notified), row["notified"], "notified {case}");
+                    continue;
+                }
+            }
             assert_eq!(
                 rendered.as_ref().map(|r| r.comment.comment_html.as_str()),
                 row["html"].as_str(),
@@ -2452,23 +2618,24 @@ mod tests {
 
     #[test]
     fn failure_comment_suppresses_infra_prefixes() {
+        // NEWPIDASH-253 (DIFF-42): `daemon shutdown requested` no longer
+        // suppresses — daemon-restart failures post like any other.
         assert_eq!(
             INFRA_FAILURE_DETAIL_PREFIXES,
-            [
-                "daemon shutdown requested",
-                "agent stalled: no events for >"
-            ]
+            ["agent stalled: no events for >"]
         );
+        assert_eq!(
+            legacy_comment("agent stalled: no events for >30s", Uuid::nil()),
+            None,
+            "stalled prefix still suppressed"
+        );
+        // Daemon details now post (legacy reason "" has no free_retry).
         for detail in [
             "daemon shutdown requested",
-            "daemon shutdown requested at 2026-01-01 (context suffix)",
-            "agent stalled: no events for >30s",
+            "daemon shutdown requested (SIGTERM; previous exit: oom-kill)",
         ] {
-            assert_eq!(
-                legacy_comment(detail, Uuid::nil()),
-                None,
-                "suppressed: {detail}"
-            );
+            let plan = legacy_comment(detail, Uuid::nil()).expect("daemon posts");
+            assert!(plan.comment_html.contains("Run failed."), "posts: {detail}");
         }
         let fx = fixture();
         assert_eq!(
@@ -2485,6 +2652,129 @@ mod tests {
             caps.get("html").and_then(Value::as_str).expect("html")
         );
         assert_eq!(caps.get("count").and_then(Value::as_u64), Some(1));
+    }
+
+    #[test]
+    fn daemon_restart_always_posts_even_on_free_retry() {
+        // DIFF-42: the gate never silently free-retries a daemon stop.
+        let plan = plan_failure_comment("daemon shutdown requested (SIGTERM)", Uuid::nil());
+        let free_retry = FailureClockEffect {
+            clock_stopped: false,
+            free_retry: true,
+        };
+        match failure_comment_gate(&plan, "daemon_restart", free_retry) {
+            FailureCommentGate::Post {
+                clock_stopped: false,
+            } => {}
+            gate => panic!("daemon_restart must post on free_retry, got {gate:?}"),
+        }
+        // Every other free-retry reason stays silent.
+        let other = plan_failure_comment("boom detail", Uuid::nil());
+        assert_eq!(
+            failure_comment_gate(&other, "network", free_retry),
+            FailureCommentGate::Suppress
+        );
+        // The clock-stopped flag still flows through for daemon_restart.
+        let stopped = FailureClockEffect {
+            clock_stopped: true,
+            free_retry: false,
+        };
+        assert_eq!(
+            failure_comment_gate(&plan, "daemon_restart", stopped),
+            FailureCommentGate::Post {
+                clock_stopped: true
+            }
+        );
+    }
+
+    #[test]
+    fn runner_identity_resolves_machine_and_omits_without_runner() {
+        let identity = RunnerIdentity::new(
+            Some("home-muse-frontend-04"),
+            Some("runner-host"),
+            Some("rich-ThinkCentre-M90t"),
+            Some("dev-host"),
+        )
+        .expect("identity");
+        assert_eq!(
+            identity.line(),
+            "Runner: home-muse-frontend-04 on rich-ThinkCentre-M90t"
+        );
+        // Dev label wins over dev host label, which wins over runner host.
+        let fallback = RunnerIdentity::new(Some("r"), Some("runner-host"), None, Some("dev-host"))
+            .expect("fallback");
+        assert_eq!(fallback.line(), "Runner: r on dev-host");
+        let runner_host =
+            RunnerIdentity::new(Some("r"), Some("runner-host"), None, None).expect("runner host");
+        assert_eq!(runner_host.line(), "Runner: r on runner-host");
+        let bare = RunnerIdentity::new(Some("r"), None, None, None).expect("bare");
+        assert_eq!(bare.line(), "Runner: r");
+        assert_eq!(RunnerIdentity::new(None, None, None, None), None);
+        assert_eq!(RunnerIdentity::new(Some("  "), None, None, None), None);
+        // The rendered comment ends with the escaped line.
+        let plan = plan_failure_comment("boom detail", Uuid::nil());
+        let html = plan
+            .render("internal", false, Some(&identity))
+            .comment
+            .comment_html;
+        assert!(
+            html.ends_with("<p>Runner: home-muse-frontend-04 on rich-ThinkCentre-M90t</p>"),
+            "{html}"
+        );
+        // No runner: no line (cloud runs).
+        let bare_html = plan.render("internal", false, None).comment.comment_html;
+        assert!(!bare_html.contains("Runner:"), "{bare_html}");
+    }
+
+    #[test]
+    fn failure_shapes_name_runner_and_machine() {
+        // NEWPIDASH-253 Done-when: the three shapes each end with the
+        // Runner line. Reaped, start-timeout/offline and daemon-shutdown
+        // all funnel through this render.
+        let identity = RunnerIdentity::new(
+            Some("home-muse-frontend-04"),
+            None,
+            Some("rich-ThinkCentre-M90t"),
+            None,
+        )
+        .expect("identity");
+        let line = "<p>Runner: home-muse-frontend-04 on rich-ThinkCentre-M90t</p>";
+        // Reaped (runner_offline): plain-words detail, Runner line.
+        let reaped = plan_failure_comment(
+            "run reaped: the runner daemon restarted and no longer knows this run (runner reported in_flight_run=(none) but cloud had this run marked busy)",
+            Uuid::nil(),
+        );
+        let html = reaped
+            .render("runner_offline", false, Some(&identity))
+            .comment
+            .comment_html;
+        assert!(html.ends_with(line), "reaped: {html}");
+        assert!(
+            html.contains("daemon restarted and no longer knows this run"),
+            "reaped: {html}"
+        );
+        // Start-timeout / offline sweep (runner_offline).
+        let offline = plan_failure_comment(
+            "runner offline: no heartbeat for >3600s while this run was assigned to it",
+            Uuid::nil(),
+        );
+        let html = offline
+            .render("runner_offline", false, Some(&identity))
+            .comment
+            .comment_html;
+        assert!(html.ends_with(line), "offline: {html}");
+        // Daemon-shutdown (daemon_restart) with the SIGTERM trigger.
+        let daemon = plan_failure_comment(
+            "daemon shutdown requested (SIGTERM; previous exit: oom-kill)",
+            Uuid::nil(),
+        );
+        let html = daemon
+            .render("daemon_restart", false, Some(&identity))
+            .comment
+            .comment_html;
+        assert!(html.ends_with(line), "daemon: {html}");
+        assert!(html.contains("SIGTERM"), "daemon: {html}");
+        assert!(html.contains("oom-kill"), "daemon: {html}");
     }
 
     #[test]
@@ -2623,23 +2913,39 @@ mod tests {
             "tail: {drain}"
         );
         let failure = failure_reread_sql();
+        // NEWPIDASH-253 (DIFF-42): + runner name/host + dev label/host.
         assert_eq!(
             select_runs(&failure),
             vec![
                 ("\"agent_run\"".to_owned(), 45),
                 ("\"issues\"".to_owned(), 35),
                 ("\"projects\"".to_owned(), 47),
+                ("\"runner\"".to_owned(), 2),
+                ("\"dev_machine\"".to_owned(), 2),
             ]
         );
         assert!(
             failure.ends_with(
                 " FROM \"agent_run\" LEFT OUTER JOIN \"issues\" ON \
                  (\"agent_run\".\"work_item_id\" = \"issues\".\"id\") LEFT OUTER JOIN \
-                 \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") WHERE \
+                 \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \
+                 \"runner\" ON (\"agent_run\".\"runner_id\" = \"runner\".\"id\") LEFT OUTER JOIN \
+                 \"dev_machine\" ON (\"runner\".\"dev_machine_id\" = \"dev_machine\".\"id\") WHERE \
                  \"agent_run\".\"id\" = $1 ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1"
             ),
             "tail: {failure}"
         );
+        // Raw-SQL guard: the four DIFF-42 columns must carry distinct
+        // aliases matching FailureRereadRow (two bare host_labels would be
+        // a duplicate output column).
+        for alias in [
+            "\"runner\".\"name\" AS \"runner_name\"",
+            "\"runner\".\"host_label\" AS \"runner_host_label\"",
+            "\"dev_machine\".\"label\" AS \"machine_label\"",
+            "\"dev_machine\".\"host_label\" AS \"machine_host_label\"",
+        ] {
+            assert!(failure.contains(alias), "alias {alias}: {failure}");
+        }
     }
 
     #[test]
@@ -2955,6 +3261,10 @@ mod tests {
                 failure_reason: String::new(),
                 phase_kind: String::new(),
                 issue_state_id: reread.issue_state_id,
+                runner_name: None,
+                runner_host_label: None,
+                machine_label: None,
+                machine_host_label: None,
             }
         );
         assert_eq!(
