@@ -53,6 +53,9 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+# `tauri::test::mock_app` for command-level tests; the feature enables no
+# runtime behaviour (`test = []` upstream), only the module gate.
+tauri = { version = "2", features = ["test"] }
 # Timestamps for the chat frame variants in `chat`'s hermetic stream tests.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # The tests need a runtime and the net/io features on top of the `time`

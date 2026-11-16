@@ -444,6 +444,13 @@ fn remember_app_identity(identity: &AppIdentity) {
     *APP_IDENTITY.lock().unwrap_or_else(|e| e.into_inner()) = Some(identity.clone());
 }
 
+/// Test-only: forget the app's account, so command-level tests do not leak
+/// one into each other (there is no production path that clears it).
+#[cfg(test)]
+pub(crate) fn forget_app_identity_for_tests() {
+    *APP_IDENTITY.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
 fn app_identity() -> Option<AppIdentity> {
     APP_IDENTITY
         .lock()

@@ -306,11 +306,17 @@ pub async fn daemon_update_cli<R: Runtime>(app: AppHandle<R>) -> Result<(), Stri
 /// Hand an engine-only device grant the app approved to the daemon's CLI
 /// (`pidash login --engine --device-code-stdin`, design §4.3). The code goes
 /// on stdin, never argv.
+///
+/// The native PO-13 backstop, exactly as for the workspace sign-in
+/// (`pidash_cli::pidash_cli_login`): the daemon may have been signed in as
+/// someone else since the consent screen, and the engine's silent renewal
+/// trusts the last UI discovery, which can be stale.
 #[tauri::command]
 pub async fn pidash_cli_engine_login<R: Runtime>(
     app: AppHandle<R>,
     device_code: String,
 ) -> Result<(), String> {
+    crate::daemon::check_login_allowed(false).await?;
     blocking(move || {
         let cli = installed_cli()?;
         let (args, stdin) = engine_login_invocation(device_code);
@@ -514,5 +520,182 @@ mod tests {
         );
         assert!(lines[1].starts_with("start "), "{calls}");
         assert!(calls.contains("CFG=unset DATA=unset"), "{calls}");
+    }
+
+    /// Restores the redirected process environment (and the remembered app
+    /// account) when the guard test below drops.
+    #[cfg(unix)]
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    #[cfg(unix)]
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, old) in self.saved.drain(..) {
+                // SAFETY: the guard restores every variable it redirected.
+                unsafe {
+                    match old {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+            crate::daemon::forget_app_identity_for_tests();
+        }
+    }
+
+    /// PO-13 natively for the engine sign-in, like the workspace one: the
+    /// engine login re-probes the daemon and refuses when it is bound to
+    /// another account, without running the CLI at all. A daemon bound to
+    /// the app's own account still lets the sign-in through.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_engine_login_is_refused_when_the_daemon_is_bound_to_another_account() {
+        use std::sync::{Arc, Mutex};
+
+        use pidash_ipc::protocol::{
+            EngineSignInState, EngineState, EngineStatusInfo, HelloAccount, HelloInfo,
+            HelloWorkspace, Response,
+        };
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        use crate::daemon::{AppIdentity, DaemonPaths, Discovery, MAX_DAEMON_IPC, daemon_discover};
+
+        const CLOUD: &str = "https://pidash.example.com";
+
+        let account = |user_id: &str, email: &str| HelloAccount {
+            user_id: Some(user_id.to_string()),
+            email: Some(email.to_string()),
+            cloud_url: CLOUD.to_string(),
+        };
+        let hello_for = |acct: HelloAccount| -> HelloInfo {
+            HelloInfo {
+                daemon_version: "0.2.0".to_string(),
+                ipc_version: MAX_DAEMON_IPC,
+                cloud_url: format!("{CLOUD}/"),
+                account: Some(acct),
+                workspaces: vec![HelloWorkspace {
+                    slug: "acme".to_string(),
+                    signed_in: true,
+                    runners: 0,
+                }],
+                machine_id: Some(uuid::Uuid::nil()),
+                engine: EngineState::Available,
+                engine_detail: Some(EngineStatusInfo {
+                    state: EngineState::Available,
+                    reason_code: None,
+                    sign_in_state: EngineSignInState::Active,
+                    credential_expires_at: None,
+                    model: None,
+                    binary: None,
+                    profile_fetched_at: None,
+                    paused_by_owner: None,
+                    auto_pause_reason: None,
+                    pause_checked_at: None,
+                }),
+            }
+        };
+
+        // Redirect the standard locations (the test host may really have a
+        // `pidash` installed in its home) at a temp home and runtime dir.
+        // The guard drops last, restoring every variable it touched.
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let runtime_dir = tmp.path().join("runtime");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+        let saved: Vec<(&'static str, Option<std::ffi::OsString>)> = [
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_RUNTIME_DIR",
+        ]
+        .iter()
+        .map(|k| (*k, std::env::var_os(k)))
+        .collect();
+        // SAFETY: test-only; the guard restores every variable on drop.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("XDG_CONFIG_HOME", tmp.path().join("config"));
+            std::env::set_var("XDG_DATA_HOME", tmp.path().join("data"));
+            std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
+        }
+        let _env = EnvGuard { saved };
+        crate::daemon::forget_app_identity_for_tests();
+
+        // The stand-in CLI marks a run only for a `login` invocation:
+        // `--version` probes happen at detection too and must not count.
+        let marker = tmp.path().join("engine-login-ran");
+        let cli_bin = home.join(".local").join("bin");
+        std::fs::create_dir_all(&cli_bin).unwrap();
+        script(
+            &cli_bin,
+            "pidash",
+            &format!(
+                "case \"$*\" in *login*) touch '{}' ;; esac\necho fake-pidash 0.0.0-test",
+                marker.display()
+            ),
+        );
+
+        // The stub daemon answers `Hello` for whichever account the test
+        // currently puts it on.
+        let current = Arc::new(Mutex::new(account("u-2", "someone@example.com")));
+        let socket = DaemonPaths::standard().unwrap().socket();
+        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        let listener = UnixListener::bind(&socket).unwrap();
+        let served = Arc::clone(&current);
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let served = Arc::clone(&served);
+                tokio::spawn(async move {
+                    let mut reader = BufReader::new(stream);
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).await.is_err() {
+                        return;
+                    }
+                    let acct = served.lock().unwrap().clone();
+                    let mut bytes = serde_json::to_vec(&Response::Hello(hello_for(acct))).unwrap();
+                    bytes.push(b'\n');
+                    let _ = reader.get_mut().write_all(&bytes).await;
+                });
+            }
+        });
+
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+
+        // Record who the app is signed in as (as discovery does), against a
+        // daemon bound to someone else.
+        let me = AppIdentity {
+            user_id: "u-1".to_string(),
+            email: Some("dev@example.com".to_string()),
+            cloud_url: CLOUD.to_string(),
+        };
+        let found = daemon_discover(me.clone()).await.unwrap();
+        assert!(
+            matches!(found, Discovery::AccountMismatch { .. }),
+            "{found:?}"
+        );
+
+        // The engine sign-in must refuse without running the CLI.
+        let refused = pidash_cli_engine_login(handle.clone(), "device-code-1".to_string()).await;
+        let err = refused.expect_err("engine login must refuse a foreign-account daemon");
+        assert!(err.contains("someone@example.com"), "{err}");
+        assert!(
+            !marker.exists(),
+            "the CLI must not run for a refused sign-in"
+        );
+
+        // Bound to the app's account, the same sign-in goes through.
+        *current.lock().unwrap() = account("u-1", "dev@example.com");
+        pidash_cli_engine_login(handle, "device-code-2".to_string())
+            .await
+            .expect("engine login must allow the app's own account");
+        assert!(marker.exists(), "the CLI must run for the app's account");
     }
 }
