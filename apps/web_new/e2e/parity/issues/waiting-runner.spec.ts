@@ -12,7 +12,7 @@
 // The OSS backend does not yet compute `agent_status.active_run.dispatch_wait`
 // (that is PDASHOSS01-297), so each scenario answers the issue-detail read
 // through the browser and leaves every other call live. Rows: ISS-239,
-// ISS-240, ISS-244. ISS-244 is new-system-only (NEWPIDASH-241, DIFF-37):
+// ISS-240, ISS-244. ISS-244 is new-system-only (NEWPIDASH-241, DIFF-38):
 // `capacity_wait` is stubbed because the machine queue is new-system-only.
 import { test, expect, type Page } from "../fixtures";
 import { fetchIssue, serverCreateIssueFull, serverCleanupIssueWithSession, signInSession } from "../helpers/api";
