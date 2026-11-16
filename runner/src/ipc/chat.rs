@@ -1930,45 +1930,260 @@ sleep 0.3
         );
     }
 
+    /// A fake engine that handles two successful turns, logging every
+    /// incoming frame so the test can assert both turns carried the prompt.
+    #[cfg(unix)]
+    fn two_success_engine(dir: &Path, log: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = format!(
+            r#"#!/bin/sh
+log='{log}'
+next() {{ read line; printf '%s\n' "$line" >> "$log"; }}
+next
+printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"capabilities":{{}}}}}}'
+next
+next
+printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"threadId":"th_legit"}}}}'
+next
+printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"turn":{{"id":"turn_1"}}}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","method":"turn/started","params":{{"threadId":"th_legit","turn":{{"id":"turn_1"}}}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{{"text":"REPL1"}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"th_legit","turn":{{"id":"turn_1","status":"completed"}}}}}}'
+next
+printf '%s\n' '{{"jsonrpc":"2.0","id":4,"result":{{"turn":{{"id":"turn_2"}}}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{{"text":"REPL2"}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"th_legit","turn":{{"id":"turn_2","status":"completed"}}}}}}'
+sleep 0.3
+"#,
+            log = log.display()
+        );
+        let path = dir.join("fake-engine");
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// A fake engine that refuses the first turn with 402 and completes the
+    /// second, logging every incoming frame.
+    #[cfg(unix)]
+    fn credit_dedup_engine(dir: &Path, log: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = format!(
+            r#"#!/bin/sh
+log='{log}'
+next() {{ read line; printf '%s\n' "$line" >> "$log"; }}
+next
+printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"capabilities":{{}}}}}}'
+next
+next
+printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"threadId":"th_credit"}}}}'
+next
+printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"turn":{{"id":"turn_1"}}}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","method":"turn/started","params":{{"threadId":"th_credit","turn":{{"id":"turn_1"}}}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","method":"error","params":{{"error":{{"message":"Reconnecting... 1/5","codexErrorInfo":{{"responseStreamDisconnected":{{"httpStatusCode":402}}}},"additionalDetails":"unexpected status 402 Payment Required: insufficient credit, url: https://gateway.test/v1/responses, request id: req_9"}},"willRetry":true,"threadId":"th_credit","turnId":"turn_1"}}}}'
+next
+printf '%s\n' '{{"jsonrpc":"2.0","id":4,"result":{{}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"th_credit","turn":{{"id":"turn_1","status":"interrupted"}}}}}}'
+next
+printf '%s\n' '{{"jsonrpc":"2.0","id":5,"result":{{"turn":{{"id":"turn_2"}}}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{{"text":"REPL"}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"th_credit","turn":{{"id":"turn_2","status":"completed"}}}}}}'
+sleep 0.3
+"#,
+            log = log.display()
+        );
+        let path = dir.join("fake-engine");
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn legitimate_repeat_after_success_is_not_deduplicated() {
         // A user sending the same text again as a new message after a
         // successful turn is not a retry; it must reach the engine. The
         // pending retry slot is only set for auth failures, so it must not
-        // swallow this legitimate repetition.
-        // We do this with drive_turn directly: two successful turns with the
-        // same content must both carry the prompt.
-        let script = r#"
-            read _
-            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
-            read _
-            read _
-            printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"threadId":"th_legit"}}'
-            read _
-            printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"turn":{"id":"turn_1"}}}'
-            printf '%s\n' '{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"th_legit","turn":{"id":"turn_1"}}}'
-            printf '%s\n' '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"text":"REPL1"}}'
-            printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"th_legit","turn":{"id":"turn_1","status":"completed"}}}'
-            read _
-            printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{"turn":{"id":"turn_2"}}}'
-            printf '%s\n' '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"text":"REPL2"}}'
-            printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"th_legit","turn":{"id":"turn_2","status":"completed"}}}'
-            sleep 0.3
-        "#;
-        let cfg = config();
-        let mut bridge = fake_bridge(script).await;
-        bridge.warm(&cfg.workspace.working_dir).await.expect("warm");
-        let (terminal, _) = run_turn(&mut bridge, "same").await;
-        assert!(matches!(
-            &terminal,
-            Response::ChatMessageCompleted { status, .. } if status == "completed"
-        ));
-        let (terminal, _) = run_turn(&mut bridge, "same").await;
-        assert!(matches!(
-            &terminal,
-            Response::ChatMessageCompleted { status, .. } if status == "completed"
-        ));
+        // swallow this legitimate repetition. Drive it through handle_send
+        // (the dedup layer) and assert both turn/start frames carry the
+        // prompt: a drive_turn-only check would pass even if the dedup
+        // swallowed legitimate repeats.
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("frames.log");
+        let mut cfg = config();
+        cfg.codex.binary = two_success_engine(dir.path(), &log).display().to_string();
+        let inst = {
+            use crate::config::schema::DaemonConfig;
+            use crate::util::paths::Paths;
+            let paths = Paths {
+                config_dir: dir.path().join("config"),
+                data_dir: dir.path().join("data"),
+                runtime_dir: dir.path().join("runtime"),
+                machine_context_dir: dir.path().join("config"),
+            };
+            RunnerInstance::new_offline(cfg, &paths, DaemonConfig::default())
+        };
+        let host = ChatHost::runner(&inst);
+        let chat_session_id = Uuid::new_v4();
+        let cwd = Some(dir.path().display().to_string());
+
+        let mut sink = VecSink::default();
+        handle_warm(
+            &host,
+            WarmArgs {
+                chat_session_id,
+                cwd: cwd.clone(),
+                model: None,
+                mode: None,
+                local_thread_id: None,
+                local_session_id: None,
+            },
+            &mut sink,
+        )
+        .await
+        .expect("warm");
+
+        for _ in 0..2 {
+            sink.frames.clear();
+            let outcome = handle_send(
+                &host,
+                SendArgs {
+                    chat_session_id,
+                    message_id: Uuid::new_v4(),
+                    content: "same".into(),
+                    cwd: cwd.clone(),
+                    model: None,
+                    mode: None,
+                    local_thread_id: None,
+                    local_session_id: None,
+                },
+                &mut sink,
+            )
+            .await
+            .expect("send");
+            assert!(
+                matches!(&outcome, Response::ChatMessageCompleted { status, .. } if status == "completed"),
+                "turn should complete, got {outcome:?}"
+            );
+        }
+        let frames_log = std::fs::read_to_string(&log).unwrap();
+        let turn_starts: Vec<&str> = frames_log
+            .lines()
+            .filter(|l| l.contains(r#""method":"turn/start""#))
+            .collect();
+        assert_eq!(
+            turn_starts.len(),
+            2,
+            "expected two turn/start frames, log:\n{frames_log}"
+        );
+        for (i, frame) in turn_starts.iter().enumerate() {
+            assert!(
+                frame.contains(r#""text":"same""#),
+                "turn {i} must carry the legitimate prompt (not deduped): {frame}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn out_of_credit_does_not_arm_auth_retry_dedup() {
+        // A 402 refusal ends the turn with model_credit_exhausted and must
+        // not arm the auth-retry slot: a subsequent send of the same content
+        // (a new user message, since the frontend never retries 402) must
+        // reach the engine with its prompt intact.
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("frames.log");
+        let mut cfg = config();
+        cfg.codex.binary = credit_dedup_engine(dir.path(), &log).display().to_string();
+        let inst = {
+            use crate::config::schema::DaemonConfig;
+            use crate::util::paths::Paths;
+            let paths = Paths {
+                config_dir: dir.path().join("config"),
+                data_dir: dir.path().join("data"),
+                runtime_dir: dir.path().join("runtime"),
+                machine_context_dir: dir.path().join("config"),
+            };
+            RunnerInstance::new_offline(cfg, &paths, DaemonConfig::default())
+        };
+        let host = ChatHost::runner(&inst);
+        let chat_session_id = Uuid::new_v4();
+        let cwd = Some(dir.path().display().to_string());
+
+        let mut sink = VecSink::default();
+        handle_warm(
+            &host,
+            WarmArgs {
+                chat_session_id,
+                cwd: cwd.clone(),
+                model: None,
+                mode: None,
+                local_thread_id: None,
+                local_session_id: None,
+            },
+            &mut sink,
+        )
+        .await
+        .expect("warm");
+
+        sink.frames.clear();
+        let first = handle_send(
+            &host,
+            SendArgs {
+                chat_session_id,
+                message_id: Uuid::new_v4(),
+                content: "hello".into(),
+                cwd: cwd.clone(),
+                model: None,
+                mode: None,
+                local_thread_id: None,
+                local_session_id: None,
+            },
+            &mut sink,
+        )
+        .await
+        .expect("first send");
+        match first {
+            Response::ChatFailed { code, .. } => assert_eq!(code, CHAT_MODEL_CREDIT_EXHAUSTED),
+            other => panic!("first turn must be credit-exhausted, got {other:?}"),
+        }
+
+        sink.frames.clear();
+        let second = handle_send(
+            &host,
+            SendArgs {
+                chat_session_id,
+                message_id: Uuid::new_v4(),
+                content: "hello".into(),
+                cwd: cwd.clone(),
+                model: None,
+                mode: None,
+                local_thread_id: None,
+                local_session_id: None,
+            },
+            &mut sink,
+        )
+        .await
+        .expect("second send");
+        assert!(
+            matches!(&second, Response::ChatMessageCompleted { status, .. } if status == "completed"),
+            "second turn should complete, got {second:?}"
+        );
+        let frames_log = std::fs::read_to_string(&log).unwrap();
+        let turn_starts: Vec<&str> = frames_log
+            .lines()
+            .filter(|l| l.contains(r#""method":"turn/start""#))
+            .collect();
+        assert_eq!(
+            turn_starts.len(),
+            2,
+            "expected two turn/start frames, log:\n{frames_log}"
+        );
+        assert!(
+            turn_starts[1].contains(r#""text":"hello""#),
+            "402 must not arm dedup: second turn must carry the prompt, got: {}",
+            turn_starts[1]
+        );
     }
 
     #[test]
@@ -2426,7 +2641,7 @@ refresh_interval_ms = 30000
         };
         let inst = RunnerInstance::new_offline(cfg, &paths, DaemonConfig::default());
         // Create a directory the chat will run in (cwd must exist)
-        std::fs::create_dir_all(&dir.path().join("work")).unwrap();
+        std::fs::create_dir_all(dir.path().join("work")).unwrap();
         let host = ChatHost::runner(&inst);
         let chat_session_id = Uuid::new_v4();
         let cwd = Some(dir.path().display().to_string());
