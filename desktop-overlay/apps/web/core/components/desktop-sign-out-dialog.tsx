@@ -66,9 +66,7 @@ export function DesktopSignOutDialog() {
             <Checkbox checked={deleteChatHistory} onChange={(event) => setDeleteChatHistory(event.target.checked)} />
             {t("Delete chat history")}
           </label>
-          <p className="mt-1">
-            {t("Removes this account's chats with the built-in agent from this computer. Task folders are kept.")}
-          </p>
+          <p className="mt-1">{t("Your chats are removed; files the agent created are kept.")}</p>
           {offerComputer && (
             <>
               <label className="mt-2 flex cursor-pointer items-center gap-2 text-primary">
