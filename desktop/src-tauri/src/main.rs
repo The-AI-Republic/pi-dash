@@ -114,6 +114,75 @@ const BUNDLE_ORIGIN: &str = "http://tauri.localhost";
 #[cfg(not(windows))]
 const BUNDLE_ORIGIN: &str = "tauri://localhost";
 
+/// Build-time default for [`storage_connect_sources`]: the bucket path the
+/// self-hosted proxy serves on the API origin (`AWS_S3_BUCKET_NAME`'s default).
+const DEFAULT_STORAGE_PATH: &str = "/uploads";
+
+/// Where the page may send presigned storage uploads, as CSP sources.
+///
+/// `tauri.conf.json`'s policy keeps the API origin out of `connect-src`, so
+/// the page cannot reach the server except through the native transport.
+/// Uploads are the exception that must stay on the webview's own networking;
+/// their origin depends on the deployment, so it is named at build time in
+/// `PIDASH_DESKTOP_CSP_CONNECT_SRC` (space-separated). A source that would
+/// re-open the API itself is an error, not something to drop quietly.
+fn storage_connect_sources(api: &Url, configured: Option<&str>) -> Result<Vec<String>, String> {
+    let api_origin = api.origin().ascii_serialization();
+    let Some(configured) = configured.filter(|v| !v.trim().is_empty()) else {
+        return Ok(vec![
+            format!("{api_origin}{DEFAULT_STORAGE_PATH}"),
+            format!("{api_origin}{DEFAULT_STORAGE_PATH}/"),
+        ]);
+    };
+    let mut sources = Vec::new();
+    for source in configured.split_whitespace() {
+        let reject = |why: &str| {
+            Err(format!(
+                "PIDASH_DESKTOP_CSP_CONNECT_SRC: {source:?} {why} (API origin {api_origin})"
+            ))
+        };
+        let Ok(url) = Url::parse(source) else {
+            return reject("is not an absolute URL source");
+        };
+        let Some(host) = url.host_str() else {
+            return reject("has no host");
+        };
+        if !matches!(url.scheme(), "http" | "https" | "ws" | "wss") {
+            return reject("is not an http(s) or ws(s) source");
+        }
+        let api_host = api.host_str().unwrap_or_default();
+        let covers_api_host = match host.strip_prefix("*.") {
+            Some(suffix) => api_host.ends_with(&format!(".{suffix}")),
+            None => host == api_host && url.port_or_known_default() == api.port_or_known_default(),
+        };
+        let path = url.path();
+        let covers_api_paths = ["/api/", "/auth/"]
+            .iter()
+            .any(|api_path| api_path.starts_with(path) || path.starts_with(api_path));
+        if covers_api_host && covers_api_paths {
+            return reject("would let the page reach the API directly");
+        }
+        sources.push(source.to_owned());
+    }
+    Ok(sources)
+}
+
+/// Add `sources` to the `connect-src` of the policy in `tauri.conf.json`.
+fn allow_connect_sources(config: &mut tauri::Config, sources: Vec<String>) -> Result<(), String> {
+    match &mut config.app.security.csp {
+        Some(tauri::utils::config::Csp::DirectiveMap(policy)) => {
+            policy
+                .entry("connect-src".into())
+                .or_default()
+                .extend(sources);
+            Ok(())
+        }
+        // The bundle's inline scripts are only hashed into the policy when
+        // one is configured at build time, so it cannot be created here.
+        _ => Err("app.security.csp must be a directive map in the Tauri config".into()),
+    }
+}
+
 /// API base `dev-prep.sh` bakes into the SPA when `VITE_API_BASE_URL` is
 /// unset. Must stay equal to the script's `API_BASE` default.
 const DEV_API_BASE: &str = "http://localhost:8000";
@@ -435,7 +504,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             api_url.origin().ascii_serialization()
         );
     }
-    let desktop_http = desktop_http::DesktopHttp::new(api_url)?;
+    let mut desktop_http = desktop_http::DesktopHttp::new(api_url.clone())?;
+    // Editions whose session is a short-lived access cookie plus a refresh
+    // endpoint name that endpoint at build time; the native transport then
+    // refreshes on a 401 itself. Unset (OSS), a 401 means signed out.
+    if let Some(path) = option_env!("PIDASH_DESKTOP_SESSION_REFRESH_PATH").filter(|p| !p.is_empty())
+    {
+        desktop_http = desktop_http.with_session_refresh(path)?;
+    }
     let initial_webview = if hot_reload {
         WebviewUrl::External(target_url.clone())
     } else {
@@ -465,7 +541,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let context = tauri::generate_context!();
+    let mut context = tauri::generate_context!();
+    allow_connect_sources(
+        context.config_mut(),
+        storage_connect_sources(&api_url, option_env!("PIDASH_DESKTOP_CSP_CONNECT_SRC"))?,
+    )?;
     let bundle_root: Option<Url> = if hot_reload {
         None
     } else {
@@ -627,15 +707,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         })
         .setup(move |app| {
-            let api_origin = app
-                .state::<desktop_http::DesktopHttp>()
-                .api_url
-                .origin()
-                .ascii_serialization();
+            let http = app.state::<desktop_http::DesktopHttp>();
+            let api_origin = http.api_url.origin().ascii_serialization();
+            // What the page may assume about the native transport. `refresh`:
+            // a 401 has already been through a session refresh, so the page
+            // must not run its own. `strict`: the page is the bundle, which
+            // is cross-site to the API, so a server request that cannot take
+            // the native route must fail rather than go out without cookies.
+            // Hot-reload pages are served by the server host itself and keep
+            // the webview's own networking as a fallback.
+            let native_session = serde_json::json!({
+                "refresh": http.refreshes_session(),
+                "strict": !hot_reload,
+            });
             let mut window = WebviewWindowBuilder::new(app, "main", initial_webview)
                 .initialization_script(format!(
-                    "Object.defineProperty(window, '__PIDASH_NATIVE_HTTP__', {{ value: {} }});",
-                    serde_json::to_string(&api_origin)?
+                    "Object.defineProperty(window, '__PIDASH_NATIVE_HTTP__', {{ value: {} }});\
+                     Object.defineProperty(window, '__PIDASH_NATIVE_SESSION__', {{ value: Object.freeze({}) }});",
+                    serde_json::to_string(&api_origin)?,
+                    native_session
                 ))
                 .title("Pi Dash")
                 .inner_size(1400.0, 900.0)
@@ -1232,6 +1322,70 @@ mod tests {
         assert!(
             tail.contains("handle_deep_link"),
             "launch URLs must be passed to handle_deep_link"
+        );
+    }
+
+    #[test]
+    fn storage_connect_sources_defaults_to_the_api_upload_path() {
+        let api = Url::parse("https://api.example.com").unwrap();
+        assert_eq!(
+            storage_connect_sources(&api, None).unwrap(),
+            vec![
+                "https://api.example.com/uploads".to_string(),
+                "https://api.example.com/uploads/".to_string(),
+            ]
+        );
+        assert_eq!(
+            storage_connect_sources(&api, Some("")).unwrap(),
+            vec![
+                "https://api.example.com/uploads".to_string(),
+                "https://api.example.com/uploads/".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn storage_connect_sources_uses_the_configured_upload_hosts() {
+        let api = Url::parse("https://apipidash.airepublic.com").unwrap();
+        assert_eq!(
+            storage_connect_sources(&api, Some("https://*.amazonaws.com")).unwrap(),
+            vec!["https://*.amazonaws.com".to_string()]
+        );
+        assert_eq!(
+            storage_connect_sources(
+                &api,
+                Some("https://storage.example.com https://cdn.example.com")
+            )
+            .unwrap(),
+            vec![
+                "https://storage.example.com".to_string(),
+                "https://cdn.example.com".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn storage_connect_sources_rejects_anything_that_re_opens_the_api() {
+        let api = Url::parse("https://api.example.com").unwrap();
+        for bad in [
+            "https://api.example.com/api/users/me/",
+            "https://api.example.com/auth/login/",
+            "https://api.example.com",
+            "https://*.example.com",
+            "not-a-url",
+            "file:///etc/passwd",
+        ] {
+            assert!(storage_connect_sources(&api, Some(bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn storage_connect_sources_allows_path_limited_api_like_hosts() {
+        let api = Url::parse("https://apipidash.airepublic.com").unwrap();
+        // The API host itself is allowed when it does not cover /api/ or /auth/.
+        // /uploads is the default storage proxy on the API origin.
+        assert!(
+            storage_connect_sources(&api, Some("https://apipidash.airepublic.com/uploads")).is_ok()
         );
     }
 }
