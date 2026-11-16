@@ -190,6 +190,58 @@ impl Store {
         Ok(())
     }
 
+    /// Persist a terminal outbox record (finishing -> terminal_pending):
+    /// the exact payload/key the daemon must redeliver after a crash,
+    /// never re-executing and never losing the terminal signal.
+    pub fn set_terminal_pending(
+        &self,
+        run_id: Uuid,
+        payload: &[u8],
+        message_id: &str,
+    ) -> Result<usize, String> {
+        let conn = self.conn.lock().map_err(|_| "poison".to_string())?;
+        let n = conn
+            .execute(
+                "UPDATE queue_entries SET phase = 'terminal_pending', pending_terminal_payload = ?1, pending_terminal_message_id = ?2 WHERE run_id = ?3",
+                rusqlite::params![payload, message_id, run_id.to_string()],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(n)
+    }
+
+    /// All terminal-pending outbox records in FIFO order for startup retry.
+    pub fn list_terminal_pending(&self) -> Result<Vec<QueueEntry>, String> {
+        let conn = self.conn.lock().map_err(|_| "poison".to_string())?;
+        let mut stmt = conn.prepare("SELECT cloud_origin, runner_id, run_id, assignment_token, sequence, queued_at, phase, assignment_payload, report_revision, process_scope_id, pending_terminal_payload, pending_terminal_message_id FROM queue_entries WHERE phase='terminal_pending' ORDER BY sequence ASC").map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(QueueEntry {
+                    cloud_origin: row.get(0)?,
+                    runner_id: Uuid::parse_str(&row.get::<_, String>(1)?).unwrap_or(Uuid::nil()),
+                    run_id: Uuid::parse_str(&row.get::<_, String>(2)?).unwrap_or(Uuid::nil()),
+                    assignment_token: row
+                        .get::<_, Option<String>>(3)?
+                        .and_then(|s| Uuid::parse_str(&s).ok()),
+                    sequence: row.get::<_, i64>(4)? as u64,
+                    queued_at: row.get(5)?,
+                    phase: row.get(6)?,
+                    assignment_payload: row.get(7)?,
+                    report_revision: row.get::<_, i64>(8)? as u64,
+                    process_scope_id: row
+                        .get::<_, Option<String>>(9)?
+                        .and_then(|s| Uuid::parse_str(&s).ok()),
+                    pending_terminal_payload: row.get(10)?,
+                    pending_terminal_message_id: row.get(11)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    }
+
     /// Persist a phase transition (waiting -> starting -> executing).
     /// Restart reconciliation never replays non-waiting phases, so admission
     /// must persist `starting` before the worker launches.

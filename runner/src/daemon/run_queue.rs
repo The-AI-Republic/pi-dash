@@ -117,6 +117,15 @@ impl Coordinator {
         self.enqueue(entry)
     }
 
+    /// True when this exact run is managed (waiting or admitted).
+    pub fn holds_run(&self, run_id: Uuid) -> bool {
+        let inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        inner.entries.iter().any(|e| e.run_id == run_id) || inner.active.contains_key(&run_id)
+    }
+
     /// All waiting entries in FIFO order (for restart reconciliation).
     pub fn waiting_entries(&self) -> Vec<QueueEntry> {
         self.inner
@@ -338,6 +347,45 @@ impl Coordinator {
         }
     }
 
+    /// Persist the exact terminal payload for crash-safe redelivery.
+    /// The slot is NOT released here; `complete`/`complete_terminal`
+    /// owns clearing after the cloud acknowledges.
+    pub fn persist_terminal(
+        &self,
+        run_id: Uuid,
+        payload: &[u8],
+        message_id: &str,
+    ) -> Result<bool, String> {
+        let n = self
+            .store
+            .set_terminal_pending(run_id, payload, message_id)?;
+        Ok(n > 0)
+    }
+
+    /// Terminal-pending outbox records awaiting exact-payload retry.
+    pub fn terminal_pending(&self) -> Vec<QueueEntry> {
+        self.store.list_terminal_pending().unwrap_or_default()
+    }
+
+    /// Clear a terminal-pending record after successful redelivery.
+    /// Deletes the store row even when the in-memory entry is already
+    /// gone (restart loads nothing into `active`).
+    pub fn complete_terminal(&self, run_id: Uuid) -> Result<bool, String> {
+        let mut inner = self.inner.lock().map_err(|_| "poison".to_string())?;
+        let removed = if inner.active.remove(&run_id).is_some() {
+            inner.revision += 1;
+            true
+        } else {
+            false
+        };
+        drop(inner);
+        let _ = self.store.delete_entry(run_id);
+        if removed {
+            self.admission.notify_waiters();
+        }
+        Ok(removed)
+    }
+
     pub fn complete(&self, run_id: Uuid) -> Result<bool, String> {
         let mut inner = self.inner.lock().map_err(|_| "poison".to_string())?;
         let removed = if inner.active.remove(&run_id).is_some() {
@@ -549,6 +597,41 @@ mod tests {
         coord.complete(e1.run_id).unwrap();
         assert!(!coord.runner_held(r1));
         assert_eq!(coord.waiting_for(r1).map(|e| e.run_id), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn terminal_outbox_persists_and_clears() {
+        let dir = std::env::temp_dir().join(format!("coord_term_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let coord = Coordinator::new(dir.clone(), 3).expect("coord");
+        let e1 = entry(Uuid::new_v4(), 1);
+        coord.enqueue(e1.clone()).unwrap();
+        assert!(coord.admit(e1.run_id).unwrap());
+        let payload = b"{\"exact\":\"terminal\"}".to_vec();
+        assert!(
+            coord
+                .persist_terminal(e1.run_id, &payload, "mid-1")
+                .unwrap()
+        );
+        let pending = coord.terminal_pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].pending_terminal_payload.as_deref(),
+            Some(&payload[..])
+        );
+        assert_eq!(
+            pending[0].pending_terminal_message_id.as_deref(),
+            Some("mid-1")
+        );
+        assert_eq!(pending[0].phase, "terminal_pending");
+        // Restart: receipt still loadable from the store.
+        drop(coord);
+        let coord2 = Coordinator::new(dir.clone(), 3).expect("coord2");
+        assert_eq!(coord2.terminal_pending().len(), 1);
+        // Successful redelivery clears.
+        coord2.complete_terminal(e1.run_id).unwrap();
+        assert!(coord2.terminal_pending().is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 

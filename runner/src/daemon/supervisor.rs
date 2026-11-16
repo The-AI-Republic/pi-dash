@@ -260,6 +260,11 @@ impl Supervisor {
         let mut replay_retry_handle: Option<tokio::task::JoinHandle<()>> = None;
         if !opts.offline {
             replay_drain_journal_once(&paths, &hello_runners).await;
+            // Legacy journal dispositions first, then SQLite outbox retry:
+            // managed terminal signals redeliver their exact payload.
+            if let Some(coord) = run_coordinator.as_ref() {
+                replay_terminal_outbox_once(coord, &hello_runners).await;
+            }
             if !drain_journal::load(&paths).is_empty() {
                 let replay_paths = paths.clone();
                 let replay_runners = hello_runners.clone();
@@ -379,7 +384,7 @@ impl Supervisor {
         // better than losing the entire shutdown sequence.
         if let Err(_elapsed) = tokio::time::timeout(
             Duration::from_secs(5),
-            drain_in_flight_runs(hello_runners.clone(), &paths),
+            drain_in_flight_runs(hello_runners.clone(), &paths, run_coordinator.clone()),
         )
         .await
         {
@@ -1328,13 +1333,20 @@ async fn purge_cloud_deleted_runner(
 /// a serial loop (each attempt potentially walking through the shared
 /// reqwest Client's 60s timeout) would starve later runners entirely.
 ///
-/// Every in-flight run is journaled BEFORE the sends are attempted and
-/// removed only on a confirmed send, so a run whose `RunFailed` misses
+/// Every in-flight run is recorded BEFORE the sends are attempted and
+/// cleared only on a confirmed send, so a run whose `RunFailed` misses
 /// the 2s window (or a SIGKILL mid-drain) is replayed by the next
 /// daemon start instead of being silently dropped — a dropped signal
 /// leaves the cloud showing the run busy forever, pinned to a runner
-/// that no longer knows about it.
-async fn drain_in_flight_runs(runners: Arc<RwLock<HelloRunnerMap>>, paths: &Paths) -> usize {
+/// that no longer knows about it. The record splits by ownership:
+/// managed queue attempts persist their exact payload to the SQLite
+/// terminal outbox (coordinator-owned, retried verbatim on restart);
+/// legacy in-flight runs use the drain journal.
+async fn drain_in_flight_runs(
+    runners: Arc<RwLock<HelloRunnerMap>>,
+    paths: &Paths,
+    coord: Option<Arc<crate::daemon::run_queue::Coordinator>>,
+) -> usize {
     // Snapshot under the read lock so the lock is dropped before any
     // network I/O; concurrent writers (config reloads, etc.) are not
     // expected during shutdown but this keeps the contract clean.
@@ -1347,19 +1359,42 @@ async fn drain_in_flight_runs(runners: Arc<RwLock<HelloRunnerMap>>, paths: &Path
     };
     let now = Utc::now();
     const DETAIL: &str = "daemon shutdown requested";
-    let pending: Vec<drain_journal::PendingRunFailure> = snapshot
-        .iter()
-        .filter_map(|(runner_id, in_flight, _)| {
-            Some(drain_journal::PendingRunFailure {
+    // Split by ownership: managed queue attempts persist their exact
+    // DaemonRestart payload to the SQLite terminal outbox before sending;
+    // legacy in-flight runs use the drain journal (unchanged).
+    let mut managed: Vec<(uuid::Uuid, uuid::Uuid)> = Vec::new();
+    let mut pending: Vec<drain_journal::PendingRunFailure> = Vec::new();
+    for (runner_id, in_flight, _) in &snapshot {
+        let Some(run_id) = in_flight else {
+            continue;
+        };
+        let is_managed = coord.as_ref().is_some_and(|c| c.holds_run(*run_id));
+        if is_managed {
+            let msg = ClientMsg::RunFailed {
+                run_id: *run_id,
+                reason: FailureReason::DaemonRestart,
+                detail: Some(DETAIL.to_string()),
+                ended_at: now,
+                tokens: None,
+                model: None,
+            };
+            let payload = serde_json::to_vec(&msg).unwrap_or_default();
+            if let Some(c) = coord.as_ref() {
+                let key = format!("drain-{}", run_id);
+                let _ = c.persist_terminal(*run_id, &payload, &key);
+            }
+            managed.push((*runner_id, *run_id));
+        } else {
+            pending.push(drain_journal::PendingRunFailure {
                 runner_id: *runner_id,
-                run_id: (*in_flight)?,
+                run_id: *run_id,
                 reason: FailureReason::DaemonRestart,
                 detail: DETAIL.to_string(),
                 ended_at: now,
                 recorded_at: now,
-            })
-        })
-        .collect();
+            });
+        }
+    }
     // spawn_blocking keeps the sync fs I/O off the runtime workers and,
     // more importantly, keeps the caller's 5s shutdown deadline honest:
     // sync I/O has no await point for the timeout to fire at, so a
@@ -1424,6 +1459,14 @@ async fn drain_in_flight_runs(runners: Arc<RwLock<HelloRunnerMap>>, paths: &Path
         .into_iter()
         .flatten()
         .collect();
+    // Managed delivered terminals clear their SQLite outbox rows
+    // (coordinator owns clearing). Legacy rows were never journaled as
+    // managed, so clearing them here is a no-op for the journal path.
+    for run_id in &delivered {
+        if let Some(c) = coord.as_ref() {
+            let _ = c.complete_terminal(*run_id);
+        }
+    }
     // spawn_blocking for the same reasons as record_all above; it also
     // means the cleanup completes even if the caller's 5s deadline
     // drops this future between join_all and here.
@@ -1606,6 +1649,76 @@ async fn replay_drain_journal_once(paths: &Paths, runners: &Arc<RwLock<HelloRunn
         tracing::warn!("failed to update drain journal after replay: {e:#}");
     }
     delivered
+}
+
+/// Retry SQLite terminal-outbox records once at startup: managed queue
+/// attempts redeliver their exact persisted payload (same bytes/key),
+/// never re-executing. Records for removed runners are cleared (the
+/// cloud reaper handles the run). Runs redelivered in flight are
+/// resolved without a second signal.
+async fn replay_terminal_outbox_once(
+    coord: &crate::daemon::run_queue::Coordinator,
+    runners: &Arc<RwLock<HelloRunnerMap>>,
+) -> usize {
+    let pending = coord.terminal_pending();
+    if pending.is_empty() {
+        return 0;
+    }
+    let guard = runners.read().await;
+    let mut sends = Vec::new();
+    for entry in pending {
+        let Some(payload) = entry.pending_terminal_payload.clone() else {
+            let _ = coord.complete_terminal(entry.run_id);
+            continue;
+        };
+        let Some((out, state, _)) = guard.get(&entry.runner_id) else {
+            tracing::warn!(run_id=%entry.run_id, "dropping outbox terminal: runner no longer configured");
+            let _ = coord.complete_terminal(entry.run_id);
+            continue;
+        };
+        if *state.rx_in_flight.borrow() == Some(entry.run_id) {
+            tracing::info!(run_id=%entry.run_id, "dropping outbox terminal: run redelivered");
+            let _ = coord.complete_terminal(entry.run_id);
+            continue;
+        }
+        let out = out.clone();
+        sends.push(async move {
+            let msg: Result<ClientMsg, _> = serde_json::from_slice(&payload);
+            match msg {
+                Ok(m) => match send_run_failed_bounded(out, m, Duration::from_secs(10)).await {
+                    RunFailedSend::Delivered => {
+                        tracing::info!(run_id=%entry.run_id, "redelivered SQLite outbox terminal");
+                        let _ = coord.complete_terminal(entry.run_id);
+                        true
+                    }
+                    RunFailedSend::Failed(e) if is_permanent_run_failed_rejection(&e) => {
+                        tracing::warn!(run_id=%entry.run_id, "dropping outbox terminal: cloud rejected permanently: {e:#}");
+                        let _ = coord.complete_terminal(entry.run_id);
+                        false
+                    }
+                    RunFailedSend::Failed(e) => {
+                        tracing::warn!(run_id=%entry.run_id, "outbox retry failed, keeps terminal_pending: {e:#}");
+                        false
+                    }
+                    RunFailedSend::TimedOut => {
+                        tracing::warn!(run_id=%entry.run_id, "outbox retry timed out, keeps terminal_pending");
+                        false
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(run_id=%entry.run_id, "unparsable outbox payload; dropping record: {e:#}");
+                    let _ = coord.complete_terminal(entry.run_id);
+                    false
+                }
+            }
+        });
+    }
+    drop(guard);
+    futures_util::future::join_all(sends)
+        .await
+        .into_iter()
+        .filter(|d| *d)
+        .count()
 }
 
 /// How one replayed journal entry ended up.
@@ -6243,7 +6356,7 @@ mod tests {
                 .collect(),
         ));
 
-        let sent = drain_in_flight_runs(runners, &paths).await;
+        let sent = drain_in_flight_runs(runners, &paths, None).await;
         assert_eq!(sent, 1, "exactly one runner had an in-flight run");
         assert!(
             drain_journal::load(&paths).is_empty(),
@@ -6305,7 +6418,7 @@ mod tests {
                 .collect(),
         ));
 
-        let sent = drain_in_flight_runs(runners, &paths).await;
+        let sent = drain_in_flight_runs(runners, &paths, None).await;
         assert_eq!(sent, 0);
         assert!(drain_journal::load(&paths).is_empty());
         let stray =
@@ -6356,7 +6469,7 @@ mod tests {
                 .collect(),
         ));
 
-        let sent = drain_in_flight_runs(runners, &paths).await;
+        let sent = drain_in_flight_runs(runners, &paths, None).await;
         assert_eq!(sent, 0, "send must fail with a dropped receiver");
 
         let journal = drain_journal::load(&paths);
