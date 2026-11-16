@@ -71,10 +71,13 @@ fn golden() -> &'static Golden {
 /// The usage-extractor table, loaded once.
 static PROVIDER_TABLE: OnceLock<ProviderTable> = OnceLock::new();
 
-/// The loaded usage-extractor table.
+/// The loaded usage-extractor table. (P2: signature follows the new
+/// `UsageDocument` loader; this retired file is deleted in P3.)
 fn provider_table() -> &'static ProviderTable {
-    PROVIDER_TABLE
-        .get_or_init(|| ProviderTable::load(golden()).expect("usage provider table loads"))
+    PROVIDER_TABLE.get_or_init(|| {
+        let document = crate::cloud_agent::usage_table::load().expect("usage fixture parses");
+        ProviderTable::load(&document).expect("usage provider table loads")
+    })
 }
 
 /// One model execution (`execute`'s `agent.run`, `runtime.py:64-76`).

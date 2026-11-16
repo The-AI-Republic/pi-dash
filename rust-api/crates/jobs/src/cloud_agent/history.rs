@@ -58,8 +58,8 @@
 //! fields the model cannot carry — accepting them would silently drop
 //! fields on re-dump). A loud skip beats a silent corruption.
 
-use pidash_jobs::oss_worker::model_runtime::provider::{generate_tool_call_id, ToolArgs};
-use pidash_jobs::oss_worker::model_runtime::usage::{RequestUsage, UsageNumber};
+use crate::cloud_agent::provider::{generate_tool_call_id, ToolArgs};
+use crate::cloud_agent::usage::{RequestUsage, UsageNumber};
 use serde_json::{Map, Value};
 
 /// A stored blob failed validation (`validate_python` raised): the
