@@ -950,6 +950,7 @@ pub async fn submit_register(
             agent_observability_v1: false,
             agent_watchdog: Default::default(),
             auto_update: true,
+            max_concurrent_agent_runs: 3,
         },
         runners: vec![new_runner_block],
         cli: None,

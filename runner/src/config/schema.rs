@@ -362,6 +362,11 @@ pub struct DaemonConfig {
     /// run `pidash update --restart` (or `pidash update` to defer restart).
     #[serde(default = "default_auto_update")]
     pub auto_update: bool,
+    /// Machine-level limit of concurrent issue runs (NEWPIDASH-241 T3/T7).
+    /// Default 3, range 1-65535, applied live via IPC without daemon restart.
+    /// `u16` mirrors the server limit validation (1..=65535).
+    #[serde(default = "default_max_concurrent_agent_runs")]
+    pub max_concurrent_agent_runs: u16,
 }
 
 fn default_auto_update() -> bool {
@@ -439,6 +444,23 @@ impl Default for DaemonConfig {
             agent_observability_v1: false,
             agent_watchdog: AgentWatchdogConfig::default(),
             auto_update: default_auto_update(),
+            max_concurrent_agent_runs: default_max_concurrent_agent_runs(),
+        }
+    }
+}
+
+fn default_max_concurrent_agent_runs() -> u16 {
+    3
+}
+
+impl DaemonConfig {
+    pub fn validate_max_concurrent_agent_runs(v: u16) -> Result<(), String> {
+        if (1..=65535).contains(&v) {
+            Ok(())
+        } else {
+            Err(format!(
+                "max_concurrent_agent_runs must be 1..=65535, got {v}"
+            ))
         }
     }
 }
@@ -1287,6 +1309,7 @@ mod tests {
                 agent_observability_v1: false,
                 agent_watchdog: Default::default(),
                 auto_update: true,
+                max_concurrent_agent_runs: 3,
             },
             runners,
             cli: None,

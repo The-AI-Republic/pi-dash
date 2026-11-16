@@ -6,6 +6,8 @@ pub mod machine_control;
 pub mod observability;
 pub mod reconnect_triggers;
 mod run_event_mirror;
+pub mod run_queue;
+pub mod run_queue_store;
 pub mod runner_instance;
 pub mod runner_out;
 pub mod state;
