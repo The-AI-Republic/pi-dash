@@ -96,12 +96,7 @@ export const NotificationItemSnoozeOption = observer(function NotificationItemSn
 
           return (
             <>
-              <Tooltip
-                tooltipContent={
-                  data.snoozed_till ? t("Un snooze") : t("Snooze")
-                }
-                isMobile={isMobile}
-              >
+              <Tooltip tooltipContent={data.snoozed_till ? t("Un snooze") : t("Snooze")} isMobile={isMobile}>
                 <Popover.Button
                   data-testid="snooze-trigger"
                   className={cn(
@@ -122,10 +117,7 @@ export const NotificationItemSnoozeOption = observer(function NotificationItemSn
                 leaveFrom="opacity-100 translate-y-0"
                 leaveTo="opacity-0 translate-y-1"
               >
-                <Popover.Panel
-                  data-testid="snooze-panel"
-                  className="absolute right-0 z-10 mt-2 min-w-44 select-none"
-                >
+                <Popover.Panel data-testid="snooze-panel" className="absolute right-0 z-10 mt-2 min-w-44 select-none">
                   <div className="space-y-1 rounded-md border border-subtle bg-surface-1 p-2">
                     {data.snoozed_till && (
                       <button

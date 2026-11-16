@@ -9,6 +9,10 @@
  * window there: the app's navigation policy keeps every non-`/api/` server-host
  * navigation inside the bundle, so a form POST to `/auth/sign-out/` never
  * leaves the app and lands on the 404 route instead.
+ *
+ * This is the default edition's strategy, imported from its own module rather
+ * than the ``auth-signout`` seam, so it is still what runs here when an edition
+ * replaces the seam.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -52,7 +56,7 @@ afterEach(() => {
 
 describe("desktop sign-out", () => {
   it("signs out on the server before clearing the app's own session, without a form navigation", async () => {
-    const { performSignOut } = await import("@/services/auth-signout");
+    const { performSignOut } = await import("@/services/auth-signout-default");
     await performSignOut({ requestCSRFToken, post }, "https://pidash.test");
 
     expect(steps).toEqual(["csrf", "post", "desktop_clear_web_data", "navigate"]);
@@ -69,7 +73,7 @@ describe("desktop sign-out", () => {
       steps.push("post");
       throw Object.assign(new Error("API request failed"), { code: "ERR_NETWORK" });
     });
-    const { performSignOut } = await import("@/services/auth-signout");
+    const { performSignOut } = await import("@/services/auth-signout-default");
 
     await expect(performSignOut({ requestCSRFToken, post }, "https://pidash.test")).rejects.toThrow(
       "API request failed"
@@ -82,7 +86,7 @@ describe("desktop sign-out", () => {
       steps.push("post");
       throw Object.assign(new Error("Request failed with status code 403"), { response: { status: 403 } });
     });
-    const { performSignOut } = await import("@/services/auth-signout");
+    const { performSignOut } = await import("@/services/auth-signout-default");
 
     await expect(performSignOut({ requestCSRFToken, post }, "https://pidash.test")).rejects.toThrow("403");
     expect(steps).toEqual(["csrf", "post"]);
@@ -94,7 +98,7 @@ describe("desktop sign-out", () => {
       steps.push("post");
       return { status: 200, data: "<!-- templates/csrf_failure.html -->" };
     });
-    const { performSignOut } = await import("@/services/auth-signout");
+    const { performSignOut } = await import("@/services/auth-signout-default");
 
     await expect(performSignOut({ requestCSRFToken, post }, "https://pidash.test")).rejects.toThrow(
       "Sign-out was not completed"
@@ -104,7 +108,7 @@ describe("desktop sign-out", () => {
 
   it("leaves the browser on the form POST", async () => {
     isDesktop.mockReturnValue(false);
-    const { performSignOut } = await import("@/services/auth-signout");
+    const { performSignOut } = await import("@/services/auth-signout-default");
     await performSignOut({ requestCSRFToken, post }, "https://pidash.test");
 
     expect(steps).toEqual(["csrf", "form-submit"]);
