@@ -2088,31 +2088,31 @@ impl RunnerLoop {
         if let Some(coord) = self.coordinator.as_ref()
             && let Some(entry) = coord.waiting_for(self.runner_paths.runner_id)
         {
-                let parsed: Result<serde_json::Value, _> =
-                    serde_json::from_slice(&entry.assignment_payload);
-                match parsed {
-                    Ok(v) if v.get("prompt").and_then(|p| p.as_str()).is_some() => {
-                        let prompt = v
-                            .get("prompt")
-                            .and_then(|p| p.as_str())
-                            .unwrap_or_default()
-                            .to_string();
-                        let repo_url = v
-                            .get("repo_url")
-                            .and_then(|r| r.as_str())
-                            .map(|s| s.to_string());
-                        let model = v
-                            .get("expected_codex_model")
-                            .and_then(|m| m.as_str())
-                            .map(|s| s.to_string());
-                        self.reserve_and_spawn(entry.run_id, prompt, repo_url, model)
-                            .await;
-                    }
-                    _ => {
-                        tracing::error!(run_id=%entry.run_id, "waiting payload unparsable; durable cancel, no execution");
-                        let _ = coord.cancel_waiting(entry.run_id);
-                    }
+            let parsed: Result<serde_json::Value, _> =
+                serde_json::from_slice(&entry.assignment_payload);
+            match parsed {
+                Ok(v) if v.get("prompt").and_then(|p| p.as_str()).is_some() => {
+                    let prompt = v
+                        .get("prompt")
+                        .and_then(|p| p.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let repo_url = v
+                        .get("repo_url")
+                        .and_then(|r| r.as_str())
+                        .map(|s| s.to_string());
+                    let model = v
+                        .get("expected_codex_model")
+                        .and_then(|m| m.as_str())
+                        .map(|s| s.to_string());
+                    self.reserve_and_spawn(entry.run_id, prompt, repo_url, model)
+                        .await;
                 }
+                _ => {
+                    tracing::error!(run_id=%entry.run_id, "waiting payload unparsable; durable cancel, no execution");
+                    let _ = coord.cancel_waiting(entry.run_id);
+                }
+            }
         }
         loop {
             let frame = {
