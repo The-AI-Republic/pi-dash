@@ -31,6 +31,7 @@ from pi_dash.db.models import (
     IssueSubscriber,
     IssueReaction,
     CycleIssue,
+    ProjectMember,
 )
 from pi_dash.utils.grouper import (
     issue_group_values,
@@ -103,8 +104,22 @@ class IssueArchiveViewSet(BaseViewSet):
             .filter(workspace__slug=self.kwargs.get("slug"))
         )
 
+    def is_scoped_guest(self, request, slug, project_id):
+        """
+        A guest without guest_view_all_features only sees the issues they
+        created, the same scoping as the live issue list and detail.
+        """
+        return ProjectMember.objects.filter(
+            workspace__slug=slug,
+            project_id=project_id,
+            member=request.user,
+            role=5,
+            is_active=True,
+            project__guest_view_all_features=False,
+        ).exists()
+
     @method_decorator(gzip_page)
-    @allow_permission([ROLE.ADMIN, ROLE.MEMBER])
+    @allow_permission([ROLE.ADMIN, ROLE.MEMBER, ROLE.GUEST])
     def list(self, request, slug, project_id):
         filters = issue_filters(request.query_params, "GET")
         show_sub_issues = request.GET.get("show_sub_issues", "true")
@@ -112,6 +127,9 @@ class IssueArchiveViewSet(BaseViewSet):
         order_by_param = request.GET.get("order_by", "-created_at")
 
         issue_queryset = self.get_queryset()
+
+        if self.is_scoped_guest(request, slug, project_id):
+            issue_queryset = issue_queryset.filter(created_by=request.user)
 
         issue_queryset = issue_queryset if show_sub_issues == "true" else issue_queryset.filter(parent__isnull=True)
         # Apply filtering from filterset
@@ -218,7 +236,7 @@ class IssueArchiveViewSet(BaseViewSet):
                 on_results=lambda issues: issue_on_results(group_by=group_by, issues=issues, sub_group_by=sub_group_by),
             )
 
-    @allow_permission([ROLE.ADMIN, ROLE.MEMBER])
+    @allow_permission([ROLE.ADMIN, ROLE.MEMBER, ROLE.GUEST])
     def retrieve(self, request, slug, project_id, pk=None):
         issue = (
             self.get_queryset()
@@ -250,6 +268,11 @@ class IssueArchiveViewSet(BaseViewSet):
             return Response(
                 {"error": "The required object does not exist."},
                 status=status.HTTP_404_NOT_FOUND,
+            )
+        if issue.created_by_id != request.user.id and self.is_scoped_guest(request, slug, project_id):
+            return Response(
+                {"error": "You are not allowed to view this issue"},
+                status=status.HTTP_403_FORBIDDEN,
             )
         serializer = IssueDetailSerializer(issue, expand=self.expand)
         return Response(serializer.data, status=status.HTTP_200_OK)

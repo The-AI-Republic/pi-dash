@@ -49,6 +49,8 @@ export interface IProject extends IPartialProject {
     kind: "local_runner" | "cloud_agent" | "managed_runner";
     available: boolean;
     reason_code: string;
+    /** True for entries kept only for older clients; hide them. */
+    deprecated?: boolean;
   }[];
   archive_in?: number;
   close_in?: number;
@@ -68,6 +70,10 @@ export interface IProject extends IPartialProject {
   next_work_item_sequence?: number;
   repo_url?: string;
   base_branch?: string;
+  // Default work type for this project's issues (PDASHOSS01-234): which
+  // per-work-type prompt guidance agent runs compose with. Resolved at
+  // creation ("software" when a repo is bound, "general" otherwise).
+  default_work_type?: string;
   // Periodic agent re-invocation policy. One budget pool per work item
   // (`agent_default_max_ticks`, `-1` = no cap) spent across every ticking
   // stage, and one cadence column per stage — kept separate on the model so
@@ -77,6 +83,10 @@ export interface IProject extends IPartialProject {
   agent_default_interval_seconds?: number;
   agent_review_default_interval_seconds?: number;
   agent_test_default_interval_seconds?: number;
+  /** Lost-runner rule (§6.6): what happens when a dedicated runner is
+   * revoked or deleted. `fail_to_backlog` (default) fails the run and
+   * moves the issue to Backlog; `fall_back` falls back to the pod. */
+  dedicated_runner_lost_action?: "fail_to_backlog" | "fall_back";
 }
 
 export type TProjectAnalyticsCountParams = {

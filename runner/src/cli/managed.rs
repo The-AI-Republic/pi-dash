@@ -143,7 +143,7 @@ async fn bootstrap(args: BootstrapArgs, paths: &Paths) -> Result<()> {
     // `[cli].token` *is* the machine token, so everything downstream (the
     // agent's own `pidash` calls included) authenticates the same way it does
     // for a hand-installed runner.
-    runner_ops::write_cli_token(paths, &args.cloud_url, &token)
+    runner_ops::write_cli_token(paths, &args.cloud_url, &token, false)
         .context("writing machine token to config.toml")?;
     runner_ops::write_cli_workspace(paths, &args.workspace)
         .context("writing workspace binding to config.toml")?;
@@ -201,6 +201,7 @@ async fn enroll(args: EnrollArgs, paths: &Paths) -> Result<()> {
             host_label: &host_label,
             name: Some(&name),
             pod: None,
+            agent_kind: None,
         },
     )
     .await

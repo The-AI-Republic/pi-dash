@@ -1,0 +1,246 @@
+{
+ "method": "Ran LoopJobTargetsEndpoint GETs via APIRequestFactory + force_authenticate on pidash_loop_fx.",
+ "source": "apps/api/pi_dash/loop/admin_views.py:176-234; target row 212-234 (usage.total_tokens :228 from last_run.usage JSON)",
+ "targets_200": {
+  "body": {
+   "page": 1,
+   "results": [
+    {
+     "id": "a43bd146-bf50-45b9-a45a-d0dd3c64d56e",
+     "last_run": null,
+     "last_skip_reason": "dispatch_error",
+     "last_skipped_at": "2026-09-28T04:28:10.214487+00:00",
+     "next_run_at": "2026-09-29T03:21:09+00:00",
+     "user_email": "fxloop-err@e.com",
+     "workspace_slug": "fxloop-ws"
+    },
+    {
+     "id": "6ca5a88c-61ea-4d29-aa31-5e5a065da9d7",
+     "last_run": {
+      "completed_at": null,
+      "error_code": "",
+      "model_used": "",
+      "status": "queued",
+      "total_tokens": null
+     },
+     "last_skip_reason": "",
+     "last_skipped_at": null,
+     "next_run_at": "2026-09-29T03:43:09+00:00",
+     "user_email": "fxloop-rot@e.com",
+     "workspace_slug": "fxloop-ws"
+    },
+    {
+     "id": "22a5af6a-f3b3-4622-96ba-6b3f70eb947d",
+     "last_run": null,
+     "last_skip_reason": "turn_active",
+     "last_skipped_at": "2026-09-28T04:28:10.006586+00:00",
+     "next_run_at": "2026-09-29T03:00:09+00:00",
+     "user_email": "fxloop-hold@e.com",
+     "workspace_slug": "fxloop-ws"
+    },
+    {
+     "id": "49ba8fd1-f22f-4ca0-ae96-24d722c35934",
+     "last_run": {
+      "completed_at": null,
+      "error_code": "",
+      "model_used": "",
+      "status": "queued",
+      "total_tokens": null
+     },
+     "last_skip_reason": "",
+     "last_skipped_at": null,
+     "next_run_at": "2026-09-28T05:28:09.916359+00:00",
+     "user_email": "fxloop-member@e.com",
+     "workspace_slug": "fxloop-ws"
+    },
+    {
+     "id": "27eae8da-246a-47ef-bfca-6ab68f058096",
+     "last_run": null,
+     "last_skip_reason": "llm_config_missing",
+     "last_skipped_at": "2026-09-28T04:28:09.880362+00:00",
+     "next_run_at": "2026-09-29T03:45:09+00:00",
+     "user_email": "fxloop-adv@e.com",
+     "workspace_slug": "fxloop-ws"
+    },
+    {
+     "id": "0a749570-44b3-4401-a624-2c6a4e4ae687",
+     "last_run": null,
+     "last_skip_reason": "",
+     "last_skipped_at": null,
+     "next_run_at": "2026-09-29T03:06:09+00:00",
+     "user_email": "fxloop-edge@e.com",
+     "workspace_slug": "fxloop-ws"
+    },
+    {
+     "id": "0d7f5a73-83cf-43bc-b451-13c8ee1a4294",
+     "last_run": {
+      "completed_at": "2026-09-28T03:28:09.657296+00:00",
+      "error_code": "",
+      "model_used": "gpt-test",
+      "status": "completed",
+      "total_tokens": 1234
+     },
+     "last_skip_reason": "",
+     "last_skipped_at": null,
+     "next_run_at": "2026-09-28T05:28:09.657296+00:00",
+     "user_email": "fxloop-admin@e.com",
+     "workspace_slug": "fxloop-ws"
+    },
+    {
+     "id": "cf014988-eb26-4ab6-a87d-ff7897a2a8a5",
+     "last_run": null,
+     "last_skip_reason": "min_role",
+     "last_skipped_at": "2026-09-28T04:23:09.657296+00:00",
+     "next_run_at": "2026-09-28T05:28:09.657296+00:00",
+     "user_email": "fxloop-guest@e.com",
+     "workspace_slug": "fxloop-ws"
+    }
+   ]
+  },
+  "status": 200
+ },
+ "targets_404": {
+  "body": {
+   "error": "not_found"
+  },
+  "status": 404
+ },
+ "targets_skip_reason_filter": {
+  "body": {
+   "page": 1,
+   "results": [
+    {
+     "id": "cf014988-eb26-4ab6-a87d-ff7897a2a8a5",
+     "last_run": null,
+     "last_skip_reason": "min_role",
+     "last_skipped_at": "2026-09-28T04:23:09.657296+00:00",
+     "next_run_at": "2026-09-28T05:28:09.657296+00:00",
+     "user_email": "fxloop-guest@e.com",
+     "workspace_slug": "fxloop-ws"
+    }
+   ]
+  },
+  "status": 200
+ },
+ "targets_status_filter": {
+  "body": {
+   "page": 1,
+   "results": [
+    {
+     "id": "0d7f5a73-83cf-43bc-b451-13c8ee1a4294",
+     "last_run": {
+      "completed_at": "2026-09-28T03:28:09.657296+00:00",
+      "error_code": "",
+      "model_used": "gpt-test",
+      "status": "completed",
+      "total_tokens": 1234
+     },
+     "last_skip_reason": "",
+     "last_skipped_at": null,
+     "next_run_at": "2026-09-28T05:28:09.657296+00:00",
+     "user_email": "fxloop-admin@e.com",
+     "workspace_slug": "fxloop-ws"
+    }
+   ]
+  },
+  "status": 200
+ },
+ "targets_workspace_filter": {
+  "body": {
+   "page": 1,
+   "results": [
+    {
+     "id": "a43bd146-bf50-45b9-a45a-d0dd3c64d56e",
+     "last_run": null,
+     "last_skip_reason": "dispatch_error",
+     "last_skipped_at": "2026-09-28T04:28:10.214487+00:00",
+     "next_run_at": "2026-09-29T03:21:09+00:00",
+     "user_email": "fxloop-err@e.com",
+     "workspace_slug": "fxloop-ws"
+    },
+    {
+     "id": "6ca5a88c-61ea-4d29-aa31-5e5a065da9d7",
+     "last_run": {
+      "completed_at": null,
+      "error_code": "",
+      "model_used": "",
+      "status": "queued",
+      "total_tokens": null
+     },
+     "last_skip_reason": "",
+     "last_skipped_at": null,
+     "next_run_at": "2026-09-29T03:43:09+00:00",
+     "user_email": "fxloop-rot@e.com",
+     "workspace_slug": "fxloop-ws"
+    },
+    {
+     "id": "22a5af6a-f3b3-4622-96ba-6b3f70eb947d",
+     "last_run": null,
+     "last_skip_reason": "turn_active",
+     "last_skipped_at": "2026-09-28T04:28:10.006586+00:00",
+     "next_run_at": "2026-09-29T03:00:09+00:00",
+     "user_email": "fxloop-hold@e.com",
+     "workspace_slug": "fxloop-ws"
+    },
+    {
+     "id": "49ba8fd1-f22f-4ca0-ae96-24d722c35934",
+     "last_run": {
+      "completed_at": null,
+      "error_code": "",
+      "model_used": "",
+      "status": "queued",
+      "total_tokens": null
+     },
+     "last_skip_reason": "",
+     "last_skipped_at": null,
+     "next_run_at": "2026-09-28T05:28:09.916359+00:00",
+     "user_email": "fxloop-member@e.com",
+     "workspace_slug": "fxloop-ws"
+    },
+    {
+     "id": "27eae8da-246a-47ef-bfca-6ab68f058096",
+     "last_run": null,
+     "last_skip_reason": "llm_config_missing",
+     "last_skipped_at": "2026-09-28T04:28:09.880362+00:00",
+     "next_run_at": "2026-09-29T03:45:09+00:00",
+     "user_email": "fxloop-adv@e.com",
+     "workspace_slug": "fxloop-ws"
+    },
+    {
+     "id": "0a749570-44b3-4401-a624-2c6a4e4ae687",
+     "last_run": null,
+     "last_skip_reason": "",
+     "last_skipped_at": null,
+     "next_run_at": "2026-09-29T03:06:09+00:00",
+     "user_email": "fxloop-edge@e.com",
+     "workspace_slug": "fxloop-ws"
+    },
+    {
+     "id": "0d7f5a73-83cf-43bc-b451-13c8ee1a4294",
+     "last_run": {
+      "completed_at": "2026-09-28T03:28:09.657296+00:00",
+      "error_code": "",
+      "model_used": "gpt-test",
+      "status": "completed",
+      "total_tokens": 1234
+     },
+     "last_skip_reason": "",
+     "last_skipped_at": null,
+     "next_run_at": "2026-09-28T05:28:09.657296+00:00",
+     "user_email": "fxloop-admin@e.com",
+     "workspace_slug": "fxloop-ws"
+    },
+    {
+     "id": "cf014988-eb26-4ab6-a87d-ff7897a2a8a5",
+     "last_run": null,
+     "last_skip_reason": "min_role",
+     "last_skipped_at": "2026-09-28T04:23:09.657296+00:00",
+     "next_run_at": "2026-09-28T05:28:09.657296+00:00",
+     "user_email": "fxloop-guest@e.com",
+     "workspace_slug": "fxloop-ws"
+    }
+   ]
+  },
+  "status": 200
+ }
+}

@@ -1,0 +1,154 @@
+{
+ "admin_create_201": {
+  "body": {
+   "created_at": "2026-09-28T04:28:10.235328+00:00",
+   "dtstart": "2026-09-28T04:28:10.235211+00:00",
+   "enabled": true,
+   "id": "c9645dfc-7bc8-4c6a-bca8-31b6515e0c99",
+   "is_builtin": false,
+   "min_role": 15,
+   "name": "New",
+   "prompt": "do it",
+   "public_description": "d",
+   "public_name": "NP",
+   "rrule": "FREQ=DAILY;BYHOUR=2",
+   "slug": "fxloop-created",
+   "tzid": "UTC",
+   "updated_at": "2026-09-28T04:28:10.235332+00:00"
+  },
+  "status": 201
+ },
+ "admin_create_400_missing": {
+  "body": {
+   "detail": [
+    "name",
+    "prompt",
+    "public_name",
+    "rrule"
+   ],
+   "error": "missing_fields"
+  },
+  "status": 400
+ },
+ "admin_create_400_rrule": {
+  "body": {
+   "error": "rrule_too_frequent"
+  },
+  "status": 400
+ },
+ "admin_create_400_slug": {
+  "body": {
+   "error": "invalid_slug"
+  },
+  "status": 400
+ },
+ "admin_create_409": {
+  "body": {
+   "error": "slug_taken"
+  },
+  "status": 409
+ },
+ "admin_delete_204": {
+  "body": null,
+  "job_soft_deleted": true,
+  "job_tombstone_kept": true,
+  "status": 204
+ },
+ "admin_delete_404_again": {
+  "body": {
+   "error": "not_found"
+  },
+  "status": 404
+ },
+ "admin_detail_200": {
+  "body": {
+   "created_at": "2026-09-28T04:28:10.235328+00:00",
+   "dtstart": "2026-09-28T04:28:10.235211+00:00",
+   "enabled": true,
+   "id": "c9645dfc-7bc8-4c6a-bca8-31b6515e0c99",
+   "is_builtin": false,
+   "min_role": 15,
+   "name": "New",
+   "prompt": "do it",
+   "public_description": "d",
+   "public_name": "NP",
+   "rrule": "FREQ=DAILY;BYHOUR=2",
+   "slug": "fxloop-created",
+   "stats": {
+    "completed": 0,
+    "failed": 0,
+    "skipped": 0,
+    "target_count": 0
+   },
+   "tzid": "UTC",
+   "updated_at": "2026-09-28T04:28:10.235332+00:00"
+  },
+  "status": 200
+ },
+ "admin_detail_404": {
+  "body": {
+   "error": "not_found"
+  },
+  "status": 404
+ },
+ "admin_list": {
+  "body": [
+   {
+    "created_at": "2026-09-28T04:28:09.657419+00:00",
+    "dtstart": "2026-09-27T04:28:09.657296+00:00",
+    "enabled": true,
+    "id": "42be11bb-067b-495c-86d9-bd53926d4026",
+    "is_builtin": false,
+    "min_role": 15,
+    "name": "Admin name",
+    "prompt": "do the thing",
+    "public_description": "desc",
+    "public_name": "Pub name",
+    "rrule": "FREQ=DAILY;BYHOUR=3;BYMINUTE=0",
+    "slug": "fxloop-job",
+    "tzid": "UTC",
+    "updated_at": "2026-09-28T04:28:09.657422+00:00"
+   }
+  ],
+  "status": 200
+ },
+ "admin_patch_404": {
+  "body": {
+   "error": "not_found"
+  },
+  "status": 404
+ },
+ "admin_patch_409": {
+  "body": {
+   "error": "slug_taken"
+  },
+  "status": 409
+ },
+ "admin_patch_immutable_builtin": {
+  "body": {
+   "created_at": "2026-09-28T04:28:10.235328+00:00",
+   "dtstart": "2026-09-28T04:28:10.235211+00:00",
+   "enabled": false,
+   "id": "c9645dfc-7bc8-4c6a-bca8-31b6515e0c99",
+   "is_builtin": false,
+   "min_role": 15,
+   "name": "New",
+   "prompt": "do it",
+   "public_description": "d",
+   "public_name": "NP",
+   "rrule": "FREQ=DAILY;BYHOUR=2",
+   "slug": "fxloop-created",
+   "tzid": "UTC",
+   "updated_at": "2026-09-28T04:28:10.248120+00:00"
+  },
+  "status": 200
+ },
+ "method": "Ran LoopJobListCreateEndpoint/LoopJobDetailEndpoint via APIRequestFactory + force_authenticate on pidash_loop_fx; celery task_always_eager so the delete cascade runs inline.",
+ "non_admin_get": {
+  "body": {
+   "detail": "You do not have permission to perform this action."
+  },
+  "status": 403
+ },
+ "source": "apps/api/pi_dash/loop/admin_views.py:108-173; routes loop/admin_urls.py:13-18 mounted under /api/instances/loop/; dtstart isoformat :54; soft delete :168-173 (cascade soft_delete_related_objects db/mixins.py:72-78, executed eager in fixture env)"
+}

@@ -102,7 +102,9 @@ def test_pin_kept_for_online_runner_with_fresh_heartbeat(db, create_user, worksp
     runner = _make_runner(create_user, workspace, pod, "alive")
     parent = _make_run(create_user, workspace, pod, status=AgentRunStatus.COMPLETED, runner=runner)
 
-    assert _pinned_runner_for(parent, pod) == runner
+    assert (
+        _pinned_runner_for(parent, pod, creator=create_user, trigger=parent.trigger, issue=parent.work_item) == runner
+    )
 
 
 @pytest.mark.unit
@@ -112,7 +114,9 @@ def test_pin_kept_for_busy_runner(db, create_user, workspace, pod):
     runner = _make_runner(create_user, workspace, pod, "busy", status=RunnerStatus.BUSY)
     parent = _make_run(create_user, workspace, pod, status=AgentRunStatus.COMPLETED, runner=runner)
 
-    assert _pinned_runner_for(parent, pod) == runner
+    assert (
+        _pinned_runner_for(parent, pod, creator=create_user, trigger=parent.trigger, issue=parent.work_item) == runner
+    )
 
 
 @pytest.mark.unit
@@ -133,7 +137,7 @@ def test_no_pin_to_unavailable_runner(db, create_user, workspace, pod, status, s
     runner = _make_runner(create_user, workspace, pod, "gone", status=status, silent_for_s=silent_for_s)
     parent = _make_run(create_user, workspace, pod, status=AgentRunStatus.FAILED, runner=runner)
 
-    assert _pinned_runner_for(parent, pod) is None
+    assert _pinned_runner_for(parent, pod, creator=create_user, trigger=parent.trigger, issue=parent.work_item) is None
 
 
 # ---------------- release_pins_on_offline_runners ----------------
@@ -477,7 +481,12 @@ def test_release_pin_drains_remaining_pods_when_one_drain_fails(db, create_user,
 def test_poll_does_not_cancel_run_that_failed_for_another_reason(db, create_user, workspace, pod, _stub_send_to_runner):
     runner = _make_runner(create_user, workspace, pod, "alive")
     run = _make_run(
-        create_user, workspace, pod, status=AgentRunStatus.FAILED, runner=runner, error_code="heartbeat_reaped"
+        create_user,
+        workspace,
+        pod,
+        status=AgentRunStatus.FAILED,
+        runner=runner,
+        error_details={"code": "heartbeat_reaped"},
     )
 
     session_service.reap_stale_busy_runs(runner, {"in_flight_run": str(run.id)})

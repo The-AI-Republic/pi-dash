@@ -11,7 +11,7 @@ import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 // services
-import { AgentRunService } from "@/services/runner";
+import { AgentRunService, type TRunRefusal } from "@/services/runner";
 import { prepareAgentRun } from "@/services/agent-runtime";
 
 const agentRunService = new AgentRunService();
@@ -28,7 +28,15 @@ type CreateRunArgs = {
    * - ``"comment_and_run"``: the Comment & Run modal — caller has just
    *   posted a comment on the issue. */
   mode: "run_ai" | "comment_and_run";
+  /** Retry as pod_once (§23.3) after a dedicated-runner refusal. */
+  pin?: "pod_once";
 };
+
+function isRunRefusal(err: unknown): err is TRunRefusal {
+  if (!err || typeof err !== "object") return false;
+  const e = err as Record<string, unknown>;
+  return typeof e.reason === "string";
+}
 
 export function useCreateAgentRun() {
   const workspaceStore = useWorkspace();
@@ -37,7 +45,7 @@ export function useCreateAgentRun() {
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const triggerRun = useCallback(
-    async ({ workspaceSlug, projectId, issueId, mode }: CreateRunArgs) => {
+    async ({ workspaceSlug, projectId, issueId, mode, pin }: CreateRunArgs) => {
       const workspace = workspaceStore.getWorkspaceBySlug(workspaceSlug);
       if (!workspace?.id) {
         setToast({
@@ -56,10 +64,12 @@ export function useCreateAgentRun() {
             ? await agentRunService.runAi({
                 workspace: workspace.id,
                 work_item: issueId,
+                ...(pin ? { pin } : {}),
               })
             : await agentRunService.commentAndRun({
                 workspace: workspace.id,
                 work_item: issueId,
+                ...(pin ? { pin } : {}),
               });
         if (run && "queued" in run && run.queued) {
           setToast({
@@ -85,6 +95,27 @@ export function useCreateAgentRun() {
         }
         return run;
       } catch (error: unknown) {
+        if (isRunRefusal(error)) {
+          const podName = error.pod_name ?? error.pod ?? "pod";
+          const msg = error.error ?? t("The dedicated runner is unavailable.");
+          // For dedicated-runner refusals, surface the in-place options in
+          // the toast; the caller re-invokes with pin pod_once or opens the
+          // runner picker ("Change runner").
+          const hint =
+            error.reason === "assigned_runner_offline" || error.reason === "assigned_runner_paused"
+              ? t("You can run on any runner in {pod} once, or change the issue's runner.", { pod: podName })
+              : error.reason === "assigned_runner_not_owner"
+                ? t("You can run on any runner in {pod} once, on your own runner, or change the issue's runner.", {
+                    pod: podName,
+                  })
+                : msg;
+          setToast({
+            type: TOAST_TYPE.ERROR,
+            title: t("Run refused"),
+            message: `${msg} ${hint}`,
+          });
+          return error;
+        }
         const message =
           (error as { error?: string; message?: string })?.error ??
           (error as Error)?.message ??

@@ -7,16 +7,17 @@ use uuid::Uuid;
 // Re-export the shared types under their legacy `codex::bridge::` path so
 // existing integration tests and any downstream callers that imported them
 // from here keep compiling. The canonical definitions live in `agent::`.
+use crate::agent::ENGINE_STARTUP_TIMEOUT;
 pub use crate::agent::{BridgeEvent, RunPayload};
 use crate::approval::EngineThreadSettings;
 use crate::cloud::protocol::{ApprovalDecision, ApprovalKind, FailureReason};
 use crate::codex::app_server::AppServer;
-use crate::util::shell::AgentEnv;
 use crate::codex::jsonrpc::{self, Incoming};
 use crate::codex::schema::{
-    ApprovalResponseParams, ClientInfo, InitializeParams, NotificationKind, ThreadStartParams,
-    TurnInputItem, TurnInterruptParams, TurnStartParams,
+    ApprovalResponseParams, ClientInfo, InitializeParams, NotificationKind, ThreadResumeParams,
+    ThreadStartParams, TurnInputItem, TurnInterruptParams, TurnStartParams,
 };
+use crate::util::shell::AgentEnv;
 
 /// How long a new turn waits for an interrupted one to report its end.
 const INTERRUPT_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -38,6 +39,10 @@ pub struct Bridge {
     applied_settings: Option<EngineThreadSettings>,
     initialized: bool,
     thread_id: Option<String>,
+    /// A saved thread to resume on the first `warm` (local chat continuation
+    /// after a daemon restart). Consumed on that first warm: if the engine
+    /// reports the thread unknown, the bridge falls back to `thread/start`.
+    resume_thread_id: Option<String>,
     /// Request id of a `turn/start` whose response (carrying the turn id) has
     /// not been read yet.
     turn_start_request: Option<u64>,
@@ -82,6 +87,29 @@ impl Bridge {
         engine_settings: EngineThreadSettings,
         env: &AgentEnv,
     ) -> Result<Self> {
+        Self::spawn_with_env_and_resume(
+            binary,
+            cwd,
+            model_default,
+            effort_default,
+            engine_settings,
+            env,
+            None,
+        )
+        .await
+    }
+
+    /// [`Bridge::spawn_with_env`] that also resumes a saved thread on the
+    /// first [`Bridge::warm`]. Empty `resume_thread_id` behaves as `None`.
+    pub async fn spawn_with_env_and_resume(
+        binary: &str,
+        cwd: &Path,
+        model_default: Option<String>,
+        effort_default: Option<String>,
+        engine_settings: EngineThreadSettings,
+        env: &AgentEnv,
+        resume_thread_id: Option<&str>,
+    ) -> Result<Self> {
         let server = AppServer::spawn_with_env(binary, cwd, env).await?;
         Ok(Self {
             server,
@@ -91,6 +119,9 @@ impl Bridge {
             applied_settings: None,
             initialized: false,
             thread_id: None,
+            resume_thread_id: resume_thread_id
+                .filter(|s| !s.is_empty())
+                .map(ToOwned::to_owned),
             turn_start_request: None,
             turn_id: None,
             interrupting: false,
@@ -109,6 +140,7 @@ impl Bridge {
             applied_settings: None,
             initialized: false,
             thread_id: None,
+            resume_thread_id: None,
             turn_start_request: None,
             turn_id: None,
             interrupting: false,
@@ -121,6 +153,14 @@ impl Bridge {
     /// `turn/start`, so a turn already in flight keeps what it started with.
     pub fn set_engine_settings(&mut self, settings: EngineThreadSettings) {
         self.engine_settings = settings;
+    }
+
+    /// Queue a saved thread for `thread/resume` on the first `warm`. Used by
+    /// callers that construct the bridge via [`Bridge::from_server`] in tests.
+    pub fn set_resume_thread_id(&mut self, resume_thread_id: Option<&str>) {
+        self.resume_thread_id = resume_thread_id
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned);
     }
 
     /// Returns the next frame from Codex, consulting the pending buffer first
@@ -176,10 +216,29 @@ impl Bridge {
     /// A warm chat bridge keeps the same Codex app-server process alive for
     /// multiple turns. Codex accepts `initialize` once per process, and the
     /// conversation is anchored by the thread created after initialization.
+    /// On the first warm after a fresh spawn, a queued resume id is tried
+    /// via `thread/resume` so a continued chat reattaches to its saved
+    /// thread; if the engine no longer knows it, the bridge falls back to
+    /// `thread/start` so the chat still proceeds.
     pub async fn warm(&mut self, cwd: &Path) -> Result<String> {
         self.ensure_initialized().await?;
         if let Some(thread_id) = self.thread_id.as_ref() {
             return Ok(thread_id.clone());
+        }
+        if let Some(resume_id) = self.resume_thread_id.take() {
+            match self.resume_thread(&resume_id).await {
+                Ok(thread_id) => {
+                    self.thread_id = Some(thread_id.clone());
+                    return Ok(thread_id);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        resume_thread_id = %resume_id,
+                        error = %format!("{e:#}"),
+                        "thread/resume failed, falling back to thread/start"
+                    );
+                }
+            }
         }
         let thread_id = self.start_thread(cwd).await?;
         self.thread_id = Some(thread_id.clone());
@@ -218,7 +277,7 @@ impl Bridge {
         )?;
         self.server.send_raw(&line).await?;
         // Wait for init response.
-        let _ = self.await_response(id, Duration::from_secs(15)).await?;
+        let _ = self.await_response(id, ENGINE_STARTUP_TIMEOUT).await?;
         let line = jsonrpc::notification("initialized", &serde_json::Value::Null)?;
         self.server.send_raw(&line).await?;
         self.initialized = true;
@@ -244,13 +303,22 @@ impl Bridge {
         )?;
         self.server.send_raw(&line).await?;
         self.applied_settings = Some(self.engine_settings);
-        let resp = self.await_response(id, Duration::from_secs(30)).await?;
-        resp.get("threadId")
-            .or_else(|| resp.get("thread").and_then(|t| t.get("id")))
-            .or_else(|| resp.get("thread_id"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .context("thread/start missing threadId")
+        let resp = self.await_response(id, ENGINE_STARTUP_TIMEOUT).await?;
+        thread_id_of(&resp).context("thread/start missing threadId")
+    }
+
+    async fn resume_thread(&mut self, thread_id: &str) -> Result<String> {
+        let id = self.server.alloc_id();
+        let line = jsonrpc::request(
+            id,
+            "thread/resume",
+            &ThreadResumeParams {
+                thread_id: thread_id.to_string(),
+            },
+        )?;
+        self.server.send_raw(&line).await?;
+        let resp = self.await_response(id, ENGINE_STARTUP_TIMEOUT).await?;
+        thread_id_of(&resp).context("thread/resume missing threadId")
     }
 
     async fn start_turn(&mut self, thread_id: &str, payload: &RunPayload) -> Result<()> {
@@ -357,6 +425,18 @@ fn turn_id_of(value: &serde_json::Value) -> Option<String> {
         .and_then(|turn| turn.get("id"))
         .and_then(|id| id.as_str())
         .map(|id| id.to_string())
+}
+
+/// Extract the thread id from a `thread/start` / `thread/resume` response.
+/// The app-server has used `threadId`, `thread.id` and `thread_id` across
+/// versions, so accept all three.
+fn thread_id_of(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("threadId")
+        .or_else(|| value.get("thread").and_then(|t| t.get("id")))
+        .or_else(|| value.get("thread_id"))
+        .and_then(|v| v.as_str())
+        .map(ToOwned::to_owned)
 }
 
 pub struct BridgeCursor {
@@ -495,7 +575,13 @@ impl BridgeCursor {
                     } else {
                         vec![BridgeEvent::Failed {
                             run_id: self.run_id,
-                            reason: FailureReason::Internal,
+                            // Agent-side, not `Internal`: a failed turn is
+                            // Codex (or its provider) reporting its own
+                            // error, and the cloud's failure classifier
+                            // only consults the detail text for agent-side
+                            // reasons (PDASHOSS01-183). `CodexCrash` keeps
+                            // pre-existing dashboards matching.
+                            reason: FailureReason::CodexCrash,
                             detail: params
                                 .get("error")
                                 .and_then(|v| v.as_str())
@@ -534,7 +620,12 @@ impl BridgeCursor {
                             .map(|s| s.to_string());
                         vec![BridgeEvent::Failed {
                             run_id: self.run_id,
-                            reason: FailureReason::Internal,
+                            // Transport / API failures are agent-side: the
+                            // detail carries the provider's message (a 401,
+                            // a model-not-allowed 400) and the cloud's
+                            // classifier reads it for agent-side reasons
+                            // (PDASHOSS01-183).
+                            reason: FailureReason::CodexCrash,
                             detail,
                         }]
                     }

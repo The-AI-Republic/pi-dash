@@ -103,6 +103,9 @@ def test_todo_to_in_progress_creates_run(
     assert outcome.created_run.status == AgentRunStatus.QUEUED
     assert outcome.created_run.parent_run_id is None
     assert "Pi Dash issue" in outcome.created_run.prompt
+    # The effective work type is stamped at creation like phase_kind
+    # (PDASHOSS01-234) — audit metadata for "which guidance did this run get".
+    assert outcome.created_run.work_type == service._work_type_for_issue(issue)
 
 
 @pytest.mark.unit

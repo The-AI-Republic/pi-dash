@@ -20,15 +20,10 @@ use std::path::Path;
 use std::time::Duration;
 use uuid::Uuid;
 
-use crate::agent::{BridgeEvent, RunPayload};
+use crate::agent::{BridgeEvent, ENGINE_STARTUP_TIMEOUT, RunPayload};
 use crate::claude_code::process::{ClaudeProcess, SpawnArgs};
 use crate::claude_code::schema::{StreamEvent, UserInput};
 use crate::cloud::protocol::{ApprovalDecision, FailureReason};
-
-/// How long to wait for Claude's `system/init` frame before giving up on
-/// the run setup. Chosen to be generous: Claude can take several seconds to
-/// emit init when starting cold.
-const INIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct Bridge {
     proc: ClaudeProcess,
@@ -132,7 +127,7 @@ impl Bridge {
     }
 
     async fn wait_for_init(&mut self, run_id: Uuid) -> Result<String> {
-        let deadline = tokio::time::Instant::now() + INIT_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + ENGINE_STARTUP_TIMEOUT;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             let recv = tokio::time::timeout(remaining, self.proc.inbound.recv())

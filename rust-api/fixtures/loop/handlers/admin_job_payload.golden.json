@@ -1,0 +1,21 @@
+{
+ "keys": [
+  "id",
+  "slug",
+  "name",
+  "public_name",
+  "public_description",
+  "prompt",
+  "min_role",
+  "enabled",
+  "is_builtin",
+  "dtstart",
+  "rrule",
+  "tzid",
+  "created_at",
+  "updated_at",
+  "+stats{target_count,completed,failed,skipped} on detail GET"
+ ],
+ "method": "Ran _job_payload() via the real detail GET on pidash_loop_fx (see handlers/admin_crud admin_detail_200 for the full shape incl. stats).",
+ "source": "apps/api/pi_dash/loop/admin_views.py:43-59; stats rollup 135-149"
+}

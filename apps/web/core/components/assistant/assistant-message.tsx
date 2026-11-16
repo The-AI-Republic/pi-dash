@@ -6,6 +6,7 @@
 
 import type { IAssistantLink, IAssistantMessage, IAssistantSkippedServer } from "@pi-dash/types";
 import { ChatMessage, ChatToolActivity } from "@/components/chat/message";
+import { ReplyCutOffNotice } from "@/components/assistant/reply-cut-off-notice";
 import { ToolServersSkippedNotice } from "@/components/assistant/tool-servers-skipped-notice";
 
 export function AssistantMessage({ message }: { message: IAssistantMessage }) {
@@ -17,7 +18,7 @@ export function AssistantMessage({ message }: { message: IAssistantMessage }) {
   }
   const isTool = message.role === "tool_call" || message.role === "tool_result";
   const links = (message.payload?.links ?? []) as IAssistantLink[];
-  return (
+  const bubble = (
     <ChatMessage
       role={message.role}
       content={message.content}
@@ -25,4 +26,13 @@ export function AssistantMessage({ message }: { message: IAssistantMessage }) {
       toolActivity={isTool ? <ChatToolActivity content={message.content} links={links} /> : undefined}
     />
   );
+  if (message.role === "assistant" && message.payload?.truncated === true) {
+    return (
+      <>
+        {bubble}
+        <ReplyCutOffNotice />
+      </>
+    );
+  }
+  return bubble;
 }

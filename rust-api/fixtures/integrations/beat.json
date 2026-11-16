@@ -1,0 +1,1 @@
+{"entry":"github-issue-sync-every-4h","note":"Legacy schedule name kept so django-celery-beat updates existing GitHub rows instead of running the old GitHub poller and the new provider-neutral poller in parallel.","schedule":{"hour":"*/4","minute":0},"source":"apps/api/pi_dash/celery.py:113-118","task":"pi_dash.bgtasks.git_sync_task.sync_all_bindings"}

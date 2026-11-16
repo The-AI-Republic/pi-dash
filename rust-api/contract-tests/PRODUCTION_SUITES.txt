@@ -1,0 +1,17 @@
+# Suites whose runs need the production settings profile (NEWPIDASH-25).
+#
+# The matrix boots both backends with `pi_dash.settings.test` by default
+# (the job's DJANGO_SETTINGS_MODULE; Rust maps the module's last segment
+# to its profile, crates/api/src/startup/mod.rs). The suites listed here
+# pin behaviour that only the production profile has, so the workflow
+# exports DJANGO_SETTINGS_MODULE=pi_dash.settings.production for both
+# Django starts, the Rust serve/worker and both pytest runs.
+#
+#   prompting: prompting/test_csrf_secure_proxy.py (PIDASHCONV-1228) pins
+#     the CSRF gate behind a TLS proxy: production sets
+#     SECURE_PROXY_SSL_HEADER, so `X-Forwarded-Proto: https` makes
+#     request.is_secure() true (apps/api/pi_dash/settings/production.py).
+#     Under the test profile Django ignores the header and all 8 cases
+#     fail on the oracle run. Proven locally on main: Django 90/90 under
+#     production (the other 82 prompting cases pass on both profiles).
+prompting
