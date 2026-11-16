@@ -20,6 +20,8 @@ import { describe, expect, it, vi } from "vitest";
 import type { RouterContext } from "../../../__root.js";
 import { Route } from "./$threadId.js";
 
+const localChat = vi.hoisted(() => ({ value: false }));
+
 vi.mock("../../../../features/assistant/components/ConversationGate.js", () => ({
   ConversationGate: (props: { workspaceSlug: string; threadId: string; state: unknown }) => (
     <div data-testid="gate-slot" data-slug={props.workspaceSlug} data-thread={props.threadId}>
@@ -27,9 +29,16 @@ vi.mock("../../../../features/assistant/components/ConversationGate.js", () => (
     </div>
   ),
 }));
+vi.mock("../../../../features/assistant/components/DesktopAssistant.js", () => ({
+  DesktopAssistant: (props: { workspaceSlug: string; requestedSessionId: string | null }) => (
+    <div data-testid="desktop-slot" data-slug={props.workspaceSlug} data-session={props.requestedSessionId ?? ""} />
+  ),
+}));
+vi.mock("../../../../features/runners/index.js", () => ({ hasLocalChat: () => localChat.value }));
 
 describe("conversation route", () => {
-  it("passes the params and the handoff state to the gate", async () => {
+  it("passes the params and the handoff state to the gate without local chat", async () => {
+    localChat.value = false;
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const component = Route.options.component;
     if (component === undefined) throw new Error("missing component");
@@ -64,5 +73,36 @@ describe("conversation route", () => {
     expect(gate).toHaveAttribute("data-slug", "acme");
     expect(gate).toHaveAttribute("data-thread", "thread-1");
     expect(gate).toHaveTextContent("hello");
+  });
+
+  it("renders the desktop assistant for the thread id when local chat is present", async () => {
+    localChat.value = true;
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const component = Route.options.component;
+    if (component === undefined) throw new Error("missing component");
+    const rootRoute = createRootRouteWithContext<RouterContext>()();
+    const wsRoute = createRoute({
+      getParentRoute: () => rootRoute,
+      path: "/$ws",
+      component: () => <Outlet />,
+    });
+    const conversationRoute = createRoute({
+      getParentRoute: () => wsRoute,
+      path: "/assistant/$threadId",
+      component,
+    });
+    const router = createRouter({
+      routeTree: rootRoute.addChildren([wsRoute.addChildren([conversationRoute])]),
+      context: { queryClient, apiClient: {} as never },
+      history: createMemoryHistory({ initialEntries: ["/acme/assistant/sess-1"] }),
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>
+    );
+    const slot = await screen.findByTestId("desktop-slot");
+    expect(slot).toHaveAttribute("data-slug", "acme");
+    expect(slot).toHaveAttribute("data-session", "sess-1");
   });
 });

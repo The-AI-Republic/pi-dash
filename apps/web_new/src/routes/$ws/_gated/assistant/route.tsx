@@ -11,6 +11,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
 import { AssistantLayout } from "../../../../features/assistant/components/AssistantLayout.js";
+import { hasLocalChat } from "../../../../features/runners/index.js";
 
 export const Route = createFileRoute("/$ws/_gated/assistant")({
   // NOTE (NEWFRONT-852, size gate): the threads read stays behind a
@@ -18,6 +19,10 @@ export const Route = createFileRoute("/$ws/_gated/assistant")({
   // bundle — this loader only runs on assistant navigation, after first
   // paint. The loader still resolves before render, as before.
   loader: async ({ context, params }) => {
+    // On the desktop the page is the local chat, which reads no server
+    // threads (NEWPIDASH-300); prefetching them would still be a wasted
+    // server read on every navigation.
+    if (hasLocalChat()) return undefined;
     const { assistantThreadsQueryOptions } = await import("../../../../features/assistant/api/queries.js");
     return context.queryClient
       .ensureQueryData(assistantThreadsQueryOptions(context.apiClient, params.ws))

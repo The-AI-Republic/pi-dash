@@ -21,9 +21,12 @@ import type { RouterContext } from "../../../__root.js";
 import { assistantKeys } from "../../../../features/assistant/index.js";
 import { Route } from "./route.js";
 
+const localChat = vi.hoisted(() => ({ value: false }));
+
 vi.mock("../../../../features/assistant/components/AssistantLayout.js", () => ({
   AssistantLayout: (props: { workspaceSlug: string }) => <div data-testid="layout-slot">{props.workspaceSlug}</div>,
 }));
+vi.mock("../../../../features/runners/index.js", () => ({ hasLocalChat: () => localChat.value }));
 
 const THREAD = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -42,7 +45,8 @@ function stubClient(body: (url: string) => unknown) {
 }
 
 describe("assistant layout route", () => {
-  it("warms the thread list in its loader", async () => {
+  it("warms the thread list in its loader without local chat", async () => {
+    localChat.value = false;
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const apiClient = stubClient((url) => {
       if (url.endsWith("/ai-assistant/threads/")) return [THREAD];
@@ -54,7 +58,22 @@ describe("assistant layout route", () => {
     expect(queryClient.getQueryData(assistantKeys.threads("acme"))).toEqual([THREAD]);
   });
 
+  it("reads no server threads when local chat is present", async () => {
+    localChat.value = true;
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const apiClient = stubClient(() => {
+      throw new Error("must not read server threads on the desktop");
+    });
+    const loader = Route.options.loader;
+    if (typeof loader !== "function") throw new Error("missing loader");
+    await expect(
+      loader({ context: { queryClient, apiClient }, params: { ws: "acme" } } as never)
+    ).resolves.toBeUndefined();
+    expect(queryClient.getQueryData(assistantKeys.threads("acme"))).toBeUndefined();
+  });
+
   it("tolerates a refused thread list (guests)", async () => {
+    localChat.value = false;
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const apiClient = stubClient(() => {
       throw new Error("role_not_allowed");

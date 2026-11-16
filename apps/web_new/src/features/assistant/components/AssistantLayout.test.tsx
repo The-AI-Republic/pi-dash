@@ -15,12 +15,16 @@ import { describe, expect, it, vi } from "vitest";
 
 import { AssistantLayout } from "./AssistantLayout.js";
 
+const localChat = vi.hoisted(() => ({ value: false }));
+
 vi.mock("./ConversationRail.js", () => ({
   ConversationRail: (props: { workspaceSlug: string }) => <div data-testid="rail-slot">{props.workspaceSlug}</div>,
 }));
+vi.mock("../../runners/index.js", () => ({ hasLocalChat: () => localChat.value }));
 
 describe("AssistantLayout", () => {
-  it("mounts the rail beside the routed content", async () => {
+  it("mounts the rail beside the routed content without local chat", async () => {
+    localChat.value = false;
     const rootRoute = createRootRoute();
     const layout = createRoute({
       getParentRoute: () => rootRoute,
@@ -39,5 +43,27 @@ describe("AssistantLayout", () => {
     render(<RouterProvider router={router} />);
     expect(await screen.findByText("routed")).toBeInTheDocument();
     expect(screen.getByTestId("rail-slot")).toHaveTextContent("acme");
+  });
+
+  it("renders the routed content alone when local chat is present", async () => {
+    localChat.value = true;
+    const rootRoute = createRootRoute();
+    const layout = createRoute({
+      getParentRoute: () => rootRoute,
+      path: "/$ws",
+      component: () => <AssistantLayout workspaceSlug="acme" />,
+    });
+    const child = createRoute({
+      getParentRoute: () => layout,
+      path: "/assistant",
+      component: () => <p>routed</p>,
+    });
+    const router = createRouter({
+      routeTree: rootRoute.addChildren([layout.addChildren([child])]),
+      history: createMemoryHistory({ initialEntries: ["/acme/assistant"] }),
+    });
+    render(<RouterProvider router={router} />);
+    expect(await screen.findByText("routed")).toBeInTheDocument();
+    expect(screen.queryByTestId("rail-slot")).toBeNull();
   });
 });

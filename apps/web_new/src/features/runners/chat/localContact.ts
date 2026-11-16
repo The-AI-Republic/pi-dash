@@ -48,6 +48,9 @@ export function localChatQueryKey() {
   return ["runners", "local-agent", "availability"] as const;
 }
 
+/** Shown when the availability check fails without words of its own. */
+export const LOCAL_AGENT_UNAVAILABLE_FALLBACK = "Pi Dash Agent is unavailable.";
+
 /**
  * The built-in contact, or an empty list when this build has no local
  * engine. Availability is read once per mount and re-checked slowly; a
@@ -69,7 +72,7 @@ export function usePidashAgentContact(): PidashAgentContact[] {
   if (availability.isError) {
     const error = availability.error;
     unavailableReason =
-      error instanceof Error && error.message !== "" ? error.message : "Pi Dash Agent is unavailable.";
+      error instanceof Error && error.message !== "" ? error.message : LOCAL_AGENT_UNAVAILABLE_FALLBACK;
   } else if (availability.data !== undefined) {
     unavailableReason = pidashAgentContactAvailability(availability.data).unavailableReason;
   }

@@ -135,6 +135,26 @@ export { RunnersProjectShell } from "./RunnersProjectShell.js";
 export type { RunnersProjectShellProps } from "./RunnersProjectShell.js";
 export { RunnersWorkspaceShell } from "./RunnersWorkspaceShell.js";
 export type { RunnersWorkspaceShellProps } from "./RunnersWorkspaceShell.js";
+// Desktop chat (NEWFRONT-553, NEWPIDASH-300): the bundled engine's contact,
+// availability read and chat page. The desktop assistant mounts these so the
+// Assistant page and the rail's local contact share one transport and store.
+export { BUILTIN_CHAT_ID } from "./chat/localTransport.js";
+export {
+  hasLocalChat,
+  LOCAL_AGENT_POLL_INTERVAL_MS,
+  LOCAL_AGENT_UNAVAILABLE_FALLBACK,
+  LOCAL_CONTACT_LABEL,
+  localChatQueryKey,
+  pidashAgentContactAvailability,
+  usePidashAgentContact,
+  type PidashAgentContact,
+} from "./chat/localContact.js";
+export {
+  RUNNER_CHAT_PAGE_TITLE,
+  RunnerChatPage,
+  runnerChatDocumentTitle,
+  type RunnerChatPageProps,
+} from "./chat/RunnerChatPage.js";
 // RUN-022: the shared status badge is consumed outside this area (the
 // scheduler-binding detail), so it belongs on the public barrel. The runs
 // screens and their model stay internal to this feature and are imported

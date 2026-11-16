@@ -7,10 +7,12 @@
 // handoff — and leaves transcript streaming, stop and paging to the
 // thread-view slice, which fills the gate's transcript slot.
 
-import { createFileRoute, useRouterState } from "@tanstack/react-router";
+import { createFileRoute, useNavigate, useRouterState } from "@tanstack/react-router";
 import * as React from "react";
 
 import { ConversationGate } from "../../../../features/assistant/components/ConversationGate.js";
+import { DesktopAssistant } from "../../../../features/assistant/components/DesktopAssistant.js";
+import { hasLocalChat } from "../../../../features/runners/index.js";
 
 export const Route = createFileRoute("/$ws/_gated/assistant/$threadId")({
   component: ConversationComponent,
@@ -19,5 +21,25 @@ export const Route = createFileRoute("/$ws/_gated/assistant/$threadId")({
 function ConversationComponent(): React.ReactElement {
   const { ws, threadId } = Route.useParams();
   const state = useRouterState({ select: (current) => current.location.state });
+  const navigate = useNavigate();
+  // On the desktop this address names a local session of the Pi Dash
+  // Agent; the server conversation below never mounts there (NEWPIDASH-300).
+  if (hasLocalChat()) {
+    return (
+      <DesktopAssistant
+        key={ws}
+        workspaceSlug={ws}
+        requestedSessionId={threadId}
+        onSelectSession={(sessionId) => {
+          if (sessionId === threadId) return;
+          void navigate({
+            to: "/$ws/assistant/$threadId",
+            params: { ws, threadId: sessionId },
+            replace: true,
+          });
+        }}
+      />
+    );
+  }
   return <ConversationGate key={threadId} workspaceSlug={ws} threadId={threadId} state={state} />;
 }
