@@ -4,7 +4,7 @@
 
 mod dist_guard;
 
-use dist_guard::{check_dist_bundle, check_login_handoff, scan_text_assets};
+use dist_guard::{check_dist_bundle, check_login_handoff, resolve_web_base, scan_text_assets};
 
 fn main() {
     println!("cargo:rerun-if-env-changed=PI_DASH_URL");
@@ -115,9 +115,14 @@ fn validate_baked_api_base(dist: &std::path::Path) {
 /// this is never empty, and the panic below is reachable only from a
 /// hand-managed `dist/`.
 fn validate_baked_web_base(dist: &std::path::Path) {
-    let expected = std::env::var("VITE_WEB_BASE_URL")
-        .or_else(|_| std::env::var("PI_DASH_URL"))
-        .unwrap_or_default();
+    // `resolve_web_base` treats empty/whitespace as unset, matching
+    // `dev-prep.sh` (`${VAR:-...}`) and `main.rs`, so a set-but-empty
+    // `VITE_WEB_BASE_URL` falls back to `PI_DASH_URL` here just as it did
+    // when the SPA was baked.
+    let expected = resolve_web_base(
+        std::env::var("VITE_WEB_BASE_URL").ok(),
+        std::env::var("PI_DASH_URL").ok(),
+    );
     if expected.trim().is_empty() {
         panic!(
             "Release build but neither VITE_WEB_BASE_URL nor PI_DASH_URL is set. The bundled \
