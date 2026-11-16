@@ -1,0 +1,33 @@
+{
+  "fixture": "FX-A-G-01",
+  "sources": ["app/permissions/base.py:13-60", "app/views/analytic/base.py", "app/views/analytic/advance.py", "app/views/analytic/project_analytics.py", "app/views/exporter/base.py"],
+  "roles": {"ADMIN": 20, "MEMBER": 15, "GUEST": 5},
+  "mechanism": "allow_permission([...], level=WORKSPACE|PROJECT) checks WorkspaceMember/ProjectMember (member=user, slug, role__in, is_active) else 403 FORBIDDEN; AnalyticViewViewset uses WorkSpaceAdminPermission (DRF class) else 403 VIEWSET_FORBIDDEN; unauthenticated default IsAuthenticated else 401 ANON",
+  "bodies": {
+    "FORBIDDEN": {"error": "You don't have the required permissions."},
+    "VIEWSET_FORBIDDEN": {"detail": "You do not have permission to perform this action."},
+    "ANON": {"detail": "Authentication credentials were not provided."}
+  },
+  "routes": [
+    {"route": "GET analytics/", "allow": ["ADMIN", "MEMBER"], "deny": {"GUEST": 403, "anon": 401, "outsider": 403}},
+    {"route": "GET/POST analytic-view/ + GET/PATCH/DELETE analytic-view/<pk>/", "allow": ["workspace admins (WorkSpaceAdminPermission)"], "deny": {"GUEST": 403, "anon": 401, "outsider": 403}, "note": "viewset gate, not allow_permission; denial body is VIEWSET_FORBIDDEN"},
+    {"route": "GET saved-analytic-view/<id>/", "allow": ["ADMIN", "MEMBER"], "deny": {"GUEST": 403, "anon": 401}},
+    {"route": "POST export-analytics/", "allow": ["ADMIN", "MEMBER"], "deny": {"GUEST": 403, "anon": 401}},
+    {"route": "GET default-analytics/", "allow": ["ADMIN", "MEMBER", "GUEST"], "deny": {"anon": 401, "outsider": 403}},
+    {"route": "GET project-stats/", "allow": ["ADMIN", "MEMBER", "GUEST"], "deny": {"anon": 401, "outsider": 403}},
+    {"route": "GET advance-analytics/ (+?tab=work-items)", "allow": ["ADMIN", "MEMBER"], "deny": {"GUEST": 403, "anon": 401, "outsider": 403}},
+    {"route": "GET advance-analytics-stats/", "allow": ["ADMIN", "MEMBER"], "deny": {"GUEST": 403, "anon": 401}},
+    {"route": "GET advance-analytics-charts/", "allow": ["ADMIN", "MEMBER"], "deny": {"GUEST": 403, "anon": 401}},
+    {"route": "GET projects/<id>/advance-analytics/", "allow": ["ADMIN", "MEMBER"], "deny": {"GUEST": 403, "anon": 401}, "note": "PROJECT-level gate (default level)"},
+    {"route": "GET projects/<id>/advance-analytics-stats/", "allow": ["ADMIN", "MEMBER"], "deny": {"GUEST": 403, "anon": 401}, "note": "PROJECT-level gate"},
+    {"route": "GET projects/<id>/advance-analytics-charts/", "allow": ["ADMIN", "MEMBER", "GUEST"], "deny": {"anon": 401}, "note": "GUEST allowed here (unlike the other two project routes)"},
+    {"route": "GET export-issues/", "allow": ["ADMIN", "MEMBER"], "deny": {"GUEST": 403, "anon": 401, "outsider": 403}},
+    {"route": "POST export-issues/", "allow": ["ADMIN", "MEMBER"], "deny": {"GUEST": 403, "anon": 401}}
+  ],
+  "tripwires": [
+    "removing @allow_permission([ADMIN, MEMBER]) from any analytic/exporter endpoint flips the matching guest-denied case 403->200",
+    "removing WorkSpaceAdminPermission flips viewset guest cases 403->201/200",
+    "removing IsAuthenticated flips every unauthenticated case 401->200/403"
+  ],
+  "oracle": "contract-tests/app_analytics/test_permissions.py (FORBIDDEN/VIEWSET_FORBIDDEN/ANON constants, lines 20-22)"
+}

@@ -1,0 +1,464 @@
+{
+ "_note": "FX-RUN-06 chat-service. Sources: runner/services/chat.py:1-497 (normalize_cwd :112-115, next_message_seq_locked :118-120, next_event_seq_locked :123-125, serialize_event :128-137, publish_event :140-147, append_event_locked :150-171, record_dedupe :180-190, enqueue_chat_message_after_commit :193-224, enqueue_chat_warm_after_commit :227-253, mark_warm_dispatch_failed :256-270, mark_message_dispatch_failed :272-302, create_assistant_message_locked :305-319, active_assistant_message_locked :322-332, finalize_active_messages_locked :335-356, complete_active_turn_locked :359-400, sweep_active_turns :403-448, release_active_chats_for_runner :451-480, sweep_empty_sessions :483-497, drain_tasks_after_chat_release :82-109). Method: live rows in scratch PG pidash_549_fixtures inside one rolled-back transaction; transaction.on_commit captured (enqueue callbacks executed with mocked send_to_runner); drains + redis mocked; sweep SQL via CaptureQueriesContext (probe /tmp/probe549_06.py; venv py3.12 / Django 4.2.30 / DRF 3.15.2, pi_dash.settings.test).",
+ "normalize_cwd": [
+  {
+   "in": "'/tmp'",
+   "out": ""
+  },
+  {
+   "in": "''",
+   "out": ""
+  },
+  {
+   "in": "None",
+   "out": ""
+  },
+  {
+   "in": "'/a/b'",
+   "out": ""
+  },
+  {
+   "in": "123",
+   "out": ""
+  },
+  {
+   "in": "{'x': 1}",
+   "out": ""
+  }
+ ],
+ "seq_allocators": {
+  "empty_message": 1,
+  "empty_event": 1,
+  "after_rows_message": 6,
+  "after_rows_event": 3,
+  "after_gap_message": 2
+ },
+ "seq_rule": "max(seq)+1 per session table; gaps NOT filled (after deleting seq 5 -> 2)",
+ "serialize_event": {
+  "id": 46,
+  "session": "9fe1b18d-4602-48c7-9352-0bee23df1f9d",
+  "message": null,
+  "seq": 2,
+  "kind": "k",
+  "payload": {},
+  "created_at": "2026-10-02T22:52:02.740477+00:00"
+ },
+ "append_event_locked": {
+  "first": {
+   "seq": 3,
+   "kind": "chat_started",
+   "payload": {
+    "a": 1
+   },
+   "source_key": "sk-1"
+  },
+  "dedupe_same_id": true,
+  "dedupe_kept_kind": "chat_started",
+  "count_after_dedupe": 1,
+  "truncated_source_key_len": 160,
+  "truncated_kind_len": 64,
+  "default_payload_message": {
+   "payload": {},
+   "message": null
+  },
+  "on_commit": [
+   "append_event_locked.<locals>.<lambda>",
+   "append_event_locked.<locals>.<lambda>",
+   "append_event_locked.<locals>.<lambda>"
+  ]
+ },
+ "append_rule": "non-empty source_key dedupes (returns existing row, keeps original kind/payload, no new on_commit); source_key[:160], kind[:64], payload default {}; publish registered on_commit",
+ "publish_event": {
+  "published": [
+   {
+    "channel": "agent_chat_session:9fe1b18d-4602-48c7-9352-0bee23df1f9d",
+    "body": {
+     "id": 47,
+     "session": "9fe1b18d-4602-48c7-9352-0bee23df1f9d",
+     "message": null,
+     "seq": 3,
+     "kind": "chat_started",
+     "payload": {
+      "a": 1
+     },
+     "created_at": "2026-10-02T22:52:02.822934+00:00"
+    }
+   }
+  ],
+  "none_client": "no-op, no publish"
+ },
+ "record_dedupe": {
+  "empty_key": true,
+  "empty_created_rows": 0,
+  "first": true,
+  "dup": false,
+  "long": true,
+  "stored_len": 128
+ },
+ "record_dedupe_rule": "empty key -> True with no row; first insert -> True; dup -> False (IntegrityError swallowed; caller must hold a savepoint \u2014 bare dup aborts the PG txn); key[:128]",
+ "enqueue": {
+  "on_commit": [
+   "enqueue_chat_message_after_commit.<locals>._send",
+   "enqueue_chat_warm_after_commit.<locals>._send"
+  ],
+  "sent": [
+   {
+    "runner_id": "cd871d43-1c13-4f30-a838-2495c1c4baac",
+    "payload": {
+     "type": "chat_user_message",
+     "chat_session_id": "9fe1b18d-4602-48c7-9352-0bee23df1f9d",
+     "message_id": "9d469513-f80c-4f0c-ab20-e5827f95c3f9",
+     "content": "hi",
+     "content_parts": [
+      {
+       "t": 1
+      }
+     ],
+     "local_thread_id": null,
+     "local_session_id": "ls",
+     "cwd": null,
+     "model": null
+    }
+   },
+   {
+    "runner_id": "cd871d43-1c13-4f30-a838-2495c1c4baac",
+    "payload": {
+     "type": "chat_warm",
+     "chat_session_id": "9fe1b18d-4602-48c7-9352-0bee23df1f9d",
+     "local_thread_id": "lt",
+     "local_session_id": null,
+     "cwd": "/x",
+     "model": "m"
+    }
+   }
+  ]
+ },
+ "enqueue_rule": "payloads sent on_commit via send_to_runner; local_thread_id/local_session_id/cwd/model coerce '' -> None (message carries type chat_user_message + content/content_parts; warm carries type chat_warm)",
+ "dispatch_failed": {
+  "message": {
+   "session": {
+    "active_message_id": null,
+    "active_turn_id": "",
+    "error": "boom-offline",
+    "status": "open"
+   },
+   "message_status": "failed",
+   "message_completed_set": true,
+   "events": [
+    {
+     "kind": "chat_failed",
+     "payload": {
+      "code": "dispatch_failed",
+      "detail": "boom-offline"
+     }
+    }
+   ],
+   "on_commit_names": [
+    "enqueue_chat_message_after_commit.<locals>._send",
+    "append_event_locked.<locals>.<lambda>",
+    "drain_tasks_after_chat_release.<locals>._drain"
+   ],
+   "drain_registered": true,
+   "cross_session_message_status": "sent"
+  },
+  "warm_events_tail": {
+   "kind": "chat_failed",
+   "payload": {
+    "code": "dispatch_failed",
+    "detail": "boom-offline"
+   }
+  },
+  "warm_closed_session_events": 0
+ },
+ "dispatch_failed_rule": "message send exception -> mark_message_dispatch_failed: explicit message + streaming assistant -> FAILED, active cleared, error=detail, chat_failed{dispatch_failed,detail}; close_requested also closes + chat_closed; drain registered iff was_active. warm send exception (logged) -> mark_warm_dispatch_failed: chat_warm_failed{dispatch_failed} on OPEN sessions only. cross-session message_id silently ignored (pk+session filter).",
+ "create_assistant": {
+  "default": {
+   "role": "assistant",
+   "status": "streaming",
+   "seq": 1,
+   "local_turn_id": "t1",
+   "local_item_id": "i1"
+  },
+  "truncated_item_len": 128,
+  "truncated_turn_len": 128
+ },
+ "active_assistant": {
+  "turn_scoped": true,
+  "fallback_latest": "f7220594-2481-4d71-aae2-f64a321983c8",
+  "fallback_is_asst_long": true
+ },
+ "active_rule": "STREAMING assistants only; active_turn_id match preferred, else latest by created_at",
+ "finalize_active": {
+  "explicit_status": "completed",
+  "explicit_completed_set": true,
+  "assistant_status": "completed",
+  "returned_is_assistant": true
+ },
+ "finalize_rule": "explicit message_id (or session.active_message_id) + latest streaming assistant both -> final_status + completed_at; returns assistant or message (None if neither)",
+ "complete_turn": [
+  {
+   "case": "completed-close",
+   "status": "closed",
+   "closed_set": true,
+   "active_cleared": true,
+   "last_message_set": true,
+   "message_status": "completed",
+   "events": [
+    {
+     "kind": "turn_completed",
+     "payload": {
+      "status": "completed"
+     }
+    },
+    {
+     "kind": "chat_closed",
+     "payload": {
+      "reason": "close_requested"
+     }
+    }
+   ],
+   "on_commit": [
+    "append_event_locked.<locals>.<lambda>",
+    "append_event_locked.<locals>.<lambda>",
+    "drain_tasks_after_chat_release.<locals>._drain"
+   ]
+  },
+  {
+   "case": "cancelled-close",
+   "status": "closed",
+   "closed_set": true,
+   "active_cleared": true,
+   "last_message_set": true,
+   "message_status": "cancelled",
+   "events": [
+    {
+     "kind": "turn_completed",
+     "payload": {
+      "status": "cancelled"
+     }
+    },
+    {
+     "kind": "chat_closed",
+     "payload": {
+      "reason": "close_requested"
+     }
+    }
+   ],
+   "on_commit": [
+    "append_event_locked.<locals>.<lambda>",
+    "append_event_locked.<locals>.<lambda>",
+    "drain_tasks_after_chat_release.<locals>._drain"
+   ]
+  },
+  {
+   "case": "failed-close",
+   "status": "closed",
+   "closed_set": true,
+   "active_cleared": true,
+   "last_message_set": true,
+   "message_status": "failed",
+   "events": [
+    {
+     "kind": "turn_completed",
+     "payload": {
+      "status": "failed"
+     }
+    },
+    {
+     "kind": "chat_closed",
+     "payload": {
+      "reason": "close_requested"
+     }
+    }
+   ],
+   "on_commit": [
+    "append_event_locked.<locals>.<lambda>",
+    "append_event_locked.<locals>.<lambda>",
+    "drain_tasks_after_chat_release.<locals>._drain"
+   ]
+  },
+  {
+   "case": "streaming-close",
+   "status": "open",
+   "closed_set": false,
+   "active_cleared": true,
+   "last_message_set": true,
+   "message_status": "streaming",
+   "events": [
+    {
+     "kind": "turn_completed",
+     "payload": {
+      "status": "streaming"
+     }
+    }
+   ],
+   "on_commit": [
+    "append_event_locked.<locals>.<lambda>",
+    "drain_tasks_after_chat_release.<locals>._drain"
+   ]
+  },
+  {
+   "case": "completed-open",
+   "status": "open",
+   "closed_set": false,
+   "active_cleared": true,
+   "last_message_set": true,
+   "message_status": "completed",
+   "events": [
+    {
+     "kind": "turn_completed",
+     "payload": {
+      "status": "completed"
+     }
+    }
+   ],
+   "on_commit": [
+    "append_event_locked.<locals>.<lambda>",
+    "drain_tasks_after_chat_release.<locals>._drain"
+   ]
+  },
+  {
+   "case": "idle-no-drain",
+   "on_commit_count": 1
+  }
+ ],
+ "complete_rule": "active message -> final_status; active cleared; last_message_at=now; close_requested + final in {completed,cancelled,failed} -> CLOSED + chat_closed; turn_completed event always; drain registered iff was_active",
+ "sweep_active_turns": {
+  "returned": 3,
+  "first_sql": [
+   "SELECT \"agent_chat_session\".\"id\" FROM \"agent_chat_session\" INNER JOIN \"runner\" ON (\"agent_chat_session\".\"runner_id\" = \"runner\".\"id\") WHERE (\"agent_chat_session\".\"status\" = 'open' AND (\"agent_chat_session\".\"active_message_id\" IS NOT NULL OR NOT (\"agent_chat_session\".\"active_turn_id\" = '')) AND (\"agen",
+   "SAVEPOINT \"s8518327680_x8\"",
+   "SELECT \"agent_chat_session\".\"id\", \"agent_chat_session\".\"workspace_id\", \"agent_chat_session\".\"runner_id\", \"agent_chat_session\".\"created_by_id\", \"agent_chat_session\".\"pod_id\", \"agent_chat_session\".\"status\", \"agent_chat_session\".\"agent_kind\", \"agent_chat_session\".\"local_thread_id\", \"agent_chat_session\""
+  ],
+  "rows": {
+   "stale": {
+    "status": "open",
+    "error": "active chat turn timed out",
+    "active_cleared": true,
+    "events": [
+     {
+      "kind": "chat_failed",
+      "payload": {
+       "code": "active_turn_timeout"
+      }
+     }
+    ]
+   },
+   "fresh": {
+    "status": "open",
+    "error": "",
+    "active_cleared": false,
+    "events": []
+   },
+   "offline": {
+    "status": "open",
+    "error": "active chat turn timed out",
+    "active_cleared": true,
+    "events": [
+     {
+      "kind": "chat_failed",
+      "payload": {
+       "code": "active_turn_timeout"
+      }
+     }
+    ]
+   },
+   "idle": {
+    "status": "open",
+    "error": "",
+    "active_cleared": true,
+    "events": []
+   },
+   "closed": {
+    "status": "closed",
+    "error": "",
+    "active_cleared": false,
+    "events": []
+   },
+   "close_req": {
+    "status": "closed",
+    "error": "active chat turn timed out",
+    "active_cleared": true,
+    "events": [
+     {
+      "kind": "chat_failed",
+      "payload": {
+       "code": "active_turn_timeout"
+      }
+     },
+     {
+      "kind": "chat_closed",
+      "payload": {
+       "reason": "close_requested"
+      }
+     }
+    ]
+   }
+  }
+ },
+ "sweep_active_rule": "OPEN + active + (updated_at < now-1800s OR runner OFFLINE); per row: finalize FAILED + 'active chat turn timed out' + chat_failed{active_turn_timeout}; close_requested closes; returns count",
+ "release_active": {
+  "returned": 1,
+  "first_sql": [
+   "SELECT \"agent_chat_session\".\"id\" FROM \"agent_chat_session\" WHERE (\"agent_chat_session\".\"runner_id\" = 'a6007fab1d06459f90623c6bbb794a83'::uuid AND \"agent_chat_session\".\"status\" = 'open' AND (\"agent_chat_session\".\"active_message_id\" IS NOT NULL OR NOT (\"agent_chat_session\".\"active_turn_id\" = ''))) ORD",
+   "SAVEPOINT \"s8518327680_x11\""
+  ],
+  "rows": {
+   "active": {
+    "status": "open",
+    "error_len": 2000,
+    "events": [
+     {
+      "kind": "chat_failed",
+      "payload": {
+       "code": "runner_session_reopened",
+       "detail": "session reopened detail DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"
+      }
+     }
+    ]
+   },
+   "idle": {
+    "status": "open",
+    "error_len": 0,
+    "events": []
+   },
+   "closed": {
+    "status": "closed",
+    "error_len": 0,
+    "events": []
+   },
+   "other_runner": {
+    "status": "open",
+    "error_len": 0,
+    "events": []
+   }
+  }
+ },
+ "release_rule": "OPEN + active for one runner (no staleness filter); per row: finalize FAILED + error=detail[:2000] + chat_failed{runner_session_reopened,detail} + drain; returns count",
+ "sweep_empty": {
+  "returned": 1,
+  "sql": [
+   "SELECT \"agent_chat_session\".\"id\" FROM \"agent_chat_session\" LEFT OUTER JOIN \"agent_chat_message\" ON (\"agent_chat_session\".\"id\" = \"agent_chat_message\".\"session_id\") WHERE (\"agent_chat_session\".\"created_at\" < '2026-10-01 22:52:02.927778+00:00'::timestamptz AND \"agent_chat_message\".\"id\" IS NULL AND \"agent_chat_session\".\"status\" = 'open') ORDER BY \"agent_chat_session\".\"last_message_at\" DESC, \"agent_chat_session\".\"created_at\" DESC",
+   "UPDATE \"agent_chat_session\" SET \"status\" = 'closed', \"closed_at\" = '2026-10-02 22:52:02.928857+00:00'::timestamptz WHERE \"agent_chat_session\".\"id\" IN ('1d27119491314bfcbc3fcb6b36dfa173'::uuid)"
+  ],
+  "rows": {
+   "old_empty": {
+    "status": "closed",
+    "closed_set": true
+   },
+   "old_full": {
+    "status": "open",
+    "closed_set": false
+   },
+   "new_empty": {
+    "status": "open",
+    "closed_set": false
+   },
+   "closed_empty": {
+    "status": "closed",
+    "closed_set": false
+   }
+  }
+ },
+ "sweep_empty_rule": "OPEN + created>24h ago + zero messages -> CLOSED + closed_at in one UPDATE; returns rowcount"
+}

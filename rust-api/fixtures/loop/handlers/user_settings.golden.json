@@ -1,0 +1,73 @@
+{
+ "job_patch_404": {
+  "body": {
+   "error": "not_found"
+  },
+  "status": 404
+ },
+ "job_patch_bad_payload": {
+  "body": {
+   "error": "invalid_payload"
+  },
+  "status": 400
+ },
+ "job_patch_off": {
+  "body": {
+   "enabled": true,
+   "jobs": [
+    {
+     "description": "desc",
+     "enabled": false,
+     "interval_label": "daily",
+     "name": "Pub name",
+     "slug": "fxloop-job"
+    }
+   ]
+  },
+  "status": 200
+ },
+ "method": "Ran AutoPMSettingsEndpoint/AutoPMJobEndpoint via APIRequestFactory + force_authenticate on pidash_loop_fx (real view code, no test client).",
+ "settings_get": {
+  "body": {
+   "enabled": true,
+   "jobs": [
+    {
+     "description": "desc",
+     "enabled": true,
+     "interval_label": "daily",
+     "name": "Pub name",
+     "slug": "fxloop-job"
+    }
+   ]
+  },
+  "status": 200
+ },
+ "settings_patch_bad_type": {
+  "body": {
+   "error": "invalid_payload"
+  },
+  "status": 400
+ },
+ "settings_patch_extra_key": {
+  "body": {
+   "error": "invalid_payload"
+  },
+  "status": 400
+ },
+ "settings_patch_off": {
+  "body": {
+   "enabled": false,
+   "jobs": [
+    {
+     "description": "desc",
+     "enabled": true,
+     "interval_label": "daily",
+     "name": "Pub name",
+     "slug": "fxloop-job"
+    }
+   ]
+  },
+  "status": 200
+ },
+ "source": "apps/api/pi_dash/loop/views.py:24-49 (payload), 64-99 (endpoints); routes loop/urls.py:9-12 mounted at api/users/me/auto-pm/"
+}

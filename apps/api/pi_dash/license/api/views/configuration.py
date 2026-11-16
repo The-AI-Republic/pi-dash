@@ -86,7 +86,32 @@ class DisableEmailFeatureEndpoint(BaseAPIView):
             )
 
 
+def _flag_is_enabled(value):
+    """Normalize a transport-security flag the way save-then-runtime does.
+
+    The configurations PATCH stores values verbatim and every runtime
+    sender compares against "1", so only "1" (and JSON true, which the
+    UI formats as "1") counts as enabled. Any other spelling grades
+    exactly as runtime would treat it after saving.
+    """
+    if isinstance(value, bool):
+        return value
+    return str(value).strip() == "1"
+
+
 class EmailCredentialCheckEndpoint(BaseAPIView):
+    """Grade SMTP settings by sending a real message to ``receiver_email``.
+
+    Besides ``receiver_email`` the body accepts the optional candidate
+    settings ``EMAIL_HOST``, ``EMAIL_PORT``, ``EMAIL_HOST_USER``,
+    ``EMAIL_HOST_PASSWORD``, ``EMAIL_USE_TLS``, ``EMAIL_USE_SSL`` and
+    ``EMAIL_FROM`` (same keys the configurations endpoint stores), so an
+    admin can grade unsaved form values before saving them. Omitted or null
+    fields fall back to the stored configuration; a blank password also
+    falls back to the stored one, since stored secrets read back blank and
+    blank therefore means "unchanged", not "empty".
+    """
+
     def post(self, request):
         receiver_email = request.data.get("receiver_email", False)
         if not receiver_email:
@@ -96,23 +121,50 @@ class EmailCredentialCheckEndpoint(BaseAPIView):
             )
 
         (
-            EMAIL_HOST,
-            EMAIL_HOST_USER,
-            EMAIL_HOST_PASSWORD,
-            EMAIL_PORT,
-            EMAIL_USE_TLS,
-            EMAIL_USE_SSL,
-            EMAIL_FROM,
+            stored_host,
+            stored_user,
+            stored_password,
+            stored_port,
+            stored_use_tls,
+            stored_use_ssl,
+            stored_from,
         ) = get_email_configuration()
+
+        def candidate(key, stored, *, blank_means_stored=False):
+            if key not in request.data:
+                return stored
+            value = request.data.get(key)
+            if value is None:
+                return stored
+            if isinstance(value, str):
+                value = value.strip()
+                if blank_means_stored and not value:
+                    return stored
+            return value
+
+        EMAIL_HOST = candidate("EMAIL_HOST", stored_host)
+        EMAIL_HOST_USER = candidate("EMAIL_HOST_USER", stored_user)
+        EMAIL_HOST_PASSWORD = candidate(
+            "EMAIL_HOST_PASSWORD", stored_password, blank_means_stored=True
+        )
+        EMAIL_FROM = candidate("EMAIL_FROM", stored_from)
+
+        try:
+            port = int(str(candidate("EMAIL_PORT", stored_port)).strip())
+        except (TypeError, ValueError):
+            return Response(
+                {"error": "Could not send email. Please check your configuration"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         # Configure all the connections
         connection = get_connection(
             host=EMAIL_HOST,
-            port=int(EMAIL_PORT),
+            port=port,
             username=EMAIL_HOST_USER,
             password=EMAIL_HOST_PASSWORD,
-            use_tls=EMAIL_USE_TLS == "1",
-            use_ssl=EMAIL_USE_SSL == "1",
+            use_tls=_flag_is_enabled(candidate("EMAIL_USE_TLS", stored_use_tls)),
+            use_ssl=_flag_is_enabled(candidate("EMAIL_USE_SSL", stored_use_ssl)),
         )
         # Prepare email details
         subject = "Email Notification from Pi Dash"

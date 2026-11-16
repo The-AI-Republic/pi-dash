@@ -1,0 +1,18 @@
+{
+ "count": 1,
+ "jobs": [
+  {
+   "min_role": 15,
+   "name": "Auto-close merged-PR issues",
+   "prompt": "Review open issues in the projects you can access, oldest first. An issue is a candidate when it references a pull request \u2014 in its links, description, or comments. For each candidate, call get_pull_request_status on the PR URL. If \u2014 and only if \u2014 the tool reports state \"merged\", move the issue to a state in its project's \"completed\" state group (use list_states to find one) and add a one-line comment naming the merged PR. If merge state is \"unknown\" or the issue's state is already in the completed group, leave it untouched. Do not create or delete anything.",
+   "public_description": "Checks your projects once a day and marks an issue Done when the pull request that implements it has been merged.",
+   "public_name": "Close issues when their PR merges",
+   "rrule": "FREQ=DAILY;BYHOUR=3;BYMINUTE=0",
+   "slug": "auto-close-merged",
+   "tzid": "UTC"
+  }
+ ],
+ "method": "Ran over BUILTIN_LOOP_JOBS under pi_dash.settings.test (no DB); seeded flag read from migration source.",
+ "seeded_enabled": false,
+ "source": "apps/api/pi_dash/loop/builtins.py:17-59; seeded enabled=False by db/migrations/0149_loop_mvp.py:16,44"
+}

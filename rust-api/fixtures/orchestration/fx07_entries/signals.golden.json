@@ -1,0 +1,62 @@
+{
+  "_trace": "orchestration/signals.py:37-52 (flag constants); :61-71 (capture_prior_state); :74-107 (fire_state_transition); :110-116 (_lookup_state)",
+  "_method": "live signal functions on pidash_524_scratch; frozen clock; handle_issue_state_transition mocked at the signals module to capture the exact call args (the handler itself is recorded in transition.matrix); error path drives a real raising handler and captures the log record + counter delta",
+  "cases": {
+    "constants": {
+      "PREVIOUS_STATE_ATTR": "_orchestration_prev_state_id",
+      "DISPATCH_IMMEDIATE_ATTR": "_orchestration_dispatch_immediate",
+      "MOVED_BY_RUN_ATTR": "_orchestration_moved_by_run"
+    },
+    "G1_capture_new_instance": {
+      "pk": null,
+      "prev_state_attr": null
+    },
+    "G2_capture_existing": {
+      "db_state": "In Progress",
+      "unsaved_state": "In Review",
+      "prev_state_attr": "77777777-aaaa-bbbb-cccc-000000007403",
+      "is_in_progress_id": true
+    },
+    "G3_capture_missing_row": {
+      "pk": "unsaved-uuid",
+      "prev_state_attr": null
+    },
+    "G4_no_transition_noop": {
+      "prev_state_id": "== current",
+      "handler_called": false
+    },
+    "G5_handler_args_defaults": {
+      "kwargs": {
+        "from_state": "Todo",
+        "to_state": "In Progress",
+        "actor": null,
+        "dispatch_immediate": true,
+        "moved_by_run": null
+      },
+      "issue_is_instance": true,
+      "handler_called": true
+    },
+    "G5b_handler_args_flags": {
+      "dispatch_immediate": false,
+      "moved_by_run": "run-G5b-mover"
+    },
+    "G5c_to_state_none": {
+      "to_state": null
+    },
+    "G6_error_swallowed": {
+      "counter_after": 1,
+      "log_records": [
+        {
+          "level": "ERROR",
+          "message": "orchestration.error: handle_issue_state_transition failed for issue=77777777-aaaa-bbbb-cccc-000000007128 from_state=77777777-aaaa-bbbb-cccc-000000007401 to_state=77777777-aaaa-bbbb-cccc-000000007403 (total_errors=1)",
+          "exc": "RuntimeError: fx7-boom"
+        }
+      ]
+    },
+    "G7_lookup_state": {
+      "none_id": null,
+      "existing": "Done",
+      "missing": null
+    }
+  }
+}

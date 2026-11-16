@@ -1,0 +1,46 @@
+name: rust-api-raw-sql-guard
+
+# Raw-SQL ratchet (rust-api/scripts/raw_sql_guard.py): no new hand-written
+# SQL in rust-api production code, and no new SELECT with two output columns
+# of one name. Pure Python, no DB. Advisory like all rust-api CI: a red check
+# must be explained in the PR body before merge.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "rust-api/**"
+      - ".github/workflows/rust-api-raw-sql-guard.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "rust-api/**"
+      - ".github/workflows/rust-api-raw-sql-guard.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  raw-sql-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Guard unit tests
+        run: python3 rust-api/scripts/test_raw_sql_guard.py
+      - name: Run raw-SQL guard
+        run: |
+          set -o pipefail
+          python3 rust-api/scripts/raw_sql_guard.py --check | tee /tmp/raw_sql_guard.out
+      - name: Raw-SQL totals
+        if: always()
+        run: |
+          {
+            echo "## Raw SQL remaining in rust-api"
+            echo
+            echo '```'
+            grep -E '^raw_sql_' /tmp/raw_sql_guard.out || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

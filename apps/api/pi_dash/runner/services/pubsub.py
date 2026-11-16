@@ -20,7 +20,6 @@ from typing import Any, Dict
 from uuid import UUID
 
 from pi_dash.runner.services.machine_outbox import (
-    MachineOfflineError,
     enqueue_for_machine,
 )
 from pi_dash.runner.services.outbox import (

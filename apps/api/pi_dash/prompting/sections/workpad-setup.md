@@ -15,9 +15,9 @@ The workpad already exists from a prior run. Its current body is shown below ver
 Reconciliation:
 
 - Read the workpad above end-to-end before deciding any next step.
-- Do not repeat investigation or validation already recorded there unless the repo state has diverged from what the workpad describes.
+- Do not repeat investigation or validation already recorded there unless the state of the work has diverged from what the workpad describes.
 - Do not restart from scratch — pick up where the prior run left off, based on `### Phase`, `### Progress Checkpoints`, and `### Plan`.
-- Check off any items that are already complete based on the current repo state.
+- Check off any items that are already complete based on the current state of the work.
 - Expand the plan to cover any newly-visible scope (e.g., new comments since the prior run).
 - Ensure `Acceptance Criteria` and `Validation` are current and still make sense.
 
@@ -27,29 +27,9 @@ When you write your updated workpad, write the **full** body — `pidash workpad
 This is the first run on this issue — the workpad is empty. You will create it as part of this step.
 
 {% endif %}
-1. Build the workpad body in a local file (e.g. `./.pidash-workpad.md`) following the structure in the "Workpad template" section. Initialize `### Phase` to `investigating` and `### Progress Checkpoints` with all milestone items unchecked unless already completed. If a checkpoint does not apply to this task, mark it as `n/a` in the workpad (e.g. `- [x] pr_opened (n/a)`).
+1. Build the workpad body in a local file (e.g. `./.pidash-workpad.md`) following the structure in the "Workpad template" section. Initialize `### Phase` to `investigating` and `### Progress Checkpoints` with all milestone items unchecked unless already completed. If a checkpoint does not apply to this task, mark it as `n/a` in the workpad (e.g. `- [x] delivered (n/a)`).
 2. Write the hierarchical plan in the workpad.
-3. Ensure the workpad includes an environment stamp at the top in a `text` fenced block, format: `<host>:<abs-workdir>@<short-sha>`.
-4. Capture a concrete reproduction signal (command output, failing test, screenshot description) in the workpad `Notes` section before changing code.
+3. Ensure the workpad includes an environment stamp at the top in a `text` fenced block, format: `<host>:<abs-workdir>`, followed by `@<baseline marker>` when the work-type guidance defines one for this project.
+4. Capture a concrete reproduction signal (command output, failing test, screenshot description) in the workpad `Notes` section before changing anything.
 5. Persist the workpad: `pidash workpad update --body-file ./.pidash-workpad.md`. This is your single source of cross-run truth — re-run `pidash workpad update` after every meaningful change throughout the run. A successful `update` deletes the local `--body-file` (pass `--keep` to retain it), so re-fetch with `pidash workpad get | jq -r .body > ./.pidash-workpad.md` before each subsequent edit — the file being gone after an update is expected, not an error.
-6. **If `task_type == code_change`** (per your Step 0.5 analysis), before any code edits, sync with the repository. Skip this entire sub-step for `noncode` tasks — do not run `git fetch`, `git checkout`, or any other git operation here.
-   - `git fetch origin`
-{% if repo.work_branch %}
-   - `git checkout {{ repo.work_branch }}` — this is the existing branch for this issue; operate on it directly. If it does not exist locally, `git checkout -b {{ repo.work_branch }} origin/{{ repo.work_branch }}`. Do not create a new feature branch.
-   - `git pull --rebase origin {{ repo.work_branch }}`.
-{% else %}
-   - Resolve the **base branch** (what your work branches off of):
-{% if parent and parent.work_branch %}
-     - This issue has a parent ({{ parent.identifier }}) with an active implementation branch. Use the parent's branch as base: `BASE={{ parent.work_branch }}`.
-{% elif parent %}
-     - This issue has a parent ({{ parent.identifier }}) with no implementation branch yet. **Do not treat this as an automatic fall-back to the project base** — route it through the parent-readiness judgment you made in analyze-and-scope (Step 0.5):
-       - Parent is a **research / design / spec** issue (no code expected), or an implementation issue whose work is already merged into the base branch: base off the project base — `BASE={% if repo.base_branch %}{{ repo.base_branch }}{% else %}$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||'){% endif %}` — and note in the workpad `Notes` why the parent's lack of a branch is expected here.
-       - Parent is a **tracking issue** (it was split into child issues; it carries no code branch of its own and will never get one): base off the project base — `BASE={% if repo.base_branch %}{{ repo.base_branch }}{% else %}$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||'){% endif %}` — **or**, when this child's description says it depends on a sibling child, base off that sibling's work branch (`BASE=$(pidash issue get <sibling> | jq -r '.git_work_branch')`, falling back to the project base if the sibling has no branch yet). Do **not** block on the tracking parent's lack of a branch.
-       - Parent is an **implementation** issue still in progress with no branch yet **and this issue depends on its code**: do **not** base off the project base. Treat it as a blocker — follow "Blocking the run" instead of creating a branch, and stop.
-{% else %}
-     - This issue is independent (no parent). Use the project base branch: `BASE={% if repo.base_branch %}{{ repo.base_branch }}{% else %}$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||'){% endif %}`.
-{% endif %}
-   - `git checkout "$BASE" && git pull --rebase origin "$BASE"`.
-   - Create a derived branch off `$BASE`: `BRANCH="pi-dash/{{ issue.identifier|lower }}"; git checkout -b "$BRANCH"`. Always derive — never commit on `$BASE`. Persistence (`pidash issue patch ... --git-work-branch`) happens in Step 2 *after* the first successful push, so a crashed run never leaves a recorded branch with no remote ref.
-{% endif %}
-   - Record the resulting `HEAD` short SHA in the workpad `Notes` and re-run `pidash workpad update` so the stamp survives a crash.
+6. **Prepare the delivery environment.** If the work-type guidance in this prompt defines setup steps that must run before execution (syncing the project's work product, standing on the right baseline), run them now, before any edits. Skip them for an answer-only task, per that guidance.

@@ -447,6 +447,46 @@ pub struct CreateRunnerCmd {
     pub reasoning_effort: String,
 }
 
+/// Body of the machine session's poll, `POST /api/v1/runner/dev-machines/
+/// <mid>/sessions/<sid>/poll` — the machine session's heartbeat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachinePollBody {
+    /// Stream ids of the messages handled since the last poll.
+    pub ack: Vec<String>,
+    /// The machine's built-in engine state (PIDESKAPP-121, design §8): the
+    /// server sets `DevMachine.engine_auto_pause_reason` from it. Absent
+    /// from daemons before the engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_state: Option<EngineStateReport>,
+}
+
+/// `engine_state` in [`MachinePollBody`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineStateReport {
+    /// `available` / `signed_out` / `expiring` / `unavailable`.
+    pub state: pidash_ipc::protocol::EngineState,
+    /// Why it is not available (`engine_sign_in_required`,
+    /// `gateway_session_revoked`, `wallet_empty`, `profile_unavailable`,
+    /// `engine_disabled`, or a local `engine_not_installed` /
+    /// `profile_pending`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    pub sign_in_state: pidash_ipc::protocol::EngineSignInState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_expires_at: Option<DateTime<Utc>>,
+}
+
+impl From<&pidash_ipc::protocol::EngineStatusInfo> for EngineStateReport {
+    fn from(s: &pidash_ipc::protocol::EngineStatusInfo) -> Self {
+        Self {
+            state: s.state,
+            reason_code: s.reason_code.clone(),
+            sign_in_state: s.sign_in_state,
+            credential_expires_at: s.credential_expires_at,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceState {
     pub branch: Option<String>,
@@ -486,6 +526,13 @@ pub enum FailureReason {
     /// the run to FAILED via a deliberate signal instead of inferring it
     /// from the heartbeat reaper after the next reconnect.
     DaemonRestart,
+    /// The model declined the task (e.g. an ACP `stopReason: "refusal"`).
+    /// The wire string `"refusal"` is a cross-language contract: current
+    /// clouds route it to a terminal REFUSED status with a queryable
+    /// `refusal_category` instead of a generic FAILED; older clouds fall
+    /// back to FAILED, which is the same place these landed before this
+    /// variant existed (as `AgentCrash`). See PDASHOSS01-183.
+    Refusal,
     /// The runner rejected an `Assign` because it already has a run in
     /// flight (or an active chat turn). The cloud considers a runner free
     /// the moment its previous run goes terminal in the database — which
@@ -512,6 +559,17 @@ mod tests {
         let back: FailureReason =
             serde_json::from_value(serde_json::json!("assign_rejected_busy")).unwrap();
         assert_eq!(back, FailureReason::AssignRejectedBusy);
+    }
+
+    /// The cloud's RunFailed endpoint branches on the literal string
+    /// `"refusal"` to record a REFUSED run instead of a FAILED one — the
+    /// wire name is a cross-language contract, not an implementation detail.
+    #[test]
+    fn refusal_wire_name_is_stable() {
+        let json = serde_json::to_value(FailureReason::Refusal).unwrap();
+        assert_eq!(json, serde_json::json!("refusal"));
+        let back: FailureReason = serde_json::from_value(serde_json::json!("refusal")).unwrap();
+        assert_eq!(back, FailureReason::Refusal);
     }
 
     #[test]
@@ -682,5 +740,37 @@ mod tests {
             ClientMsg::Hello { runner_id, .. } => assert_eq!(runner_id, body_id),
             other => panic!("expected Hello, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn machine_poll_body_carries_the_engine_state() {
+        let body = MachinePollBody {
+            ack: vec!["1-0".into()],
+            engine_state: Some(EngineStateReport {
+                state: pidash_ipc::protocol::EngineState::SignedOut,
+                reason_code: Some("engine_sign_in_required".into()),
+                sign_in_state: pidash_ipc::protocol::EngineSignInState::Expired,
+                credential_expires_at: None,
+            }),
+        };
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            serde_json::json!({
+                "ack": ["1-0"],
+                "engine_state": {
+                    "state": "signed_out",
+                    "reason_code": "engine_sign_in_required",
+                    "sign_in_state": "expired"
+                }
+            })
+        );
+        let legacy = MachinePollBody {
+            ack: vec![],
+            engine_state: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&legacy).unwrap(),
+            serde_json::json!({"ack": []})
+        );
     }
 }

@@ -1,0 +1,30 @@
+{
+  "name": "@pidash/api-client",
+  "version": "0.0.0",
+  "description": "HTTP client and endpoint contracts for the new frontend. Empty scaffold from NEWFRONT-12; the fetch client and first contracts land in NEWFRONT-14.",
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.mjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "scripts": {
+    "build": "tsdown src/index.ts --dts --format esm",
+    "typecheck": "tsc --noEmit --incremental --tsBuildInfoFile node_modules/.cache/tsc/tsconfig.tsbuildinfo",
+    "lint": "oxlint --deny-warnings",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^3.2.0",
+    "tsdown": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "^3.2.0"
+  },
+  "peerDependencies": {}
+}

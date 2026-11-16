@@ -13,6 +13,8 @@ from pi_dash.runner.models import (
     AgentRunEvent,
     ApprovalRequest,
     DevMachine,
+    EngineCredential,
+    EngineCredentialRevokeReason,
     MachineToken,
     Runner,
     RunnerForceRefresh,
@@ -97,6 +99,52 @@ class MachineTokenAdmin(admin.ModelAdmin):
     list_filter = ("is_service",)
     search_fields = ("user__email", "host_label", "dev_machine__host_label")
     readonly_fields = ("token_hash", "token_fingerprint", "created_at")
+
+
+@admin.register(EngineCredential)
+class EngineCredentialAdmin(admin.ModelAdmin):
+    """Engine credentials (built_engine_as_runner §4.3). Read-only except
+    for the revoke action, which goes through the service so the machine's
+    sign-in state and the audit log follow."""
+
+    list_display = (
+        "id",
+        "user",
+        "dev_machine",
+        "fingerprint",
+        "created_at",
+        "expires_at",
+        "last_used_at",
+        "revoked_at",
+        "revoked_reason",
+    )
+    list_filter = ("revoked_reason",)
+    search_fields = ("user__email", "dev_machine__host_label", "fingerprint")
+    readonly_fields = (
+        "user",
+        "dev_machine",
+        "token_hash",
+        "fingerprint",
+        "created_at",
+        "expires_at",
+        "last_used_at",
+        "revoked_at",
+        "revoked_reason",
+    )
+    actions = ["revoke_selected"]
+
+    def has_add_permission(self, request):
+        return False
+
+    @admin.action(description="Revoke selected engine credentials")
+    def revoke_selected(self, request, queryset):
+        from pi_dash.runner.services.engine_credentials import revoke_engine_credential
+
+        count = 0
+        for credential in queryset.filter(revoked_at__isnull=True).select_related("dev_machine"):
+            if revoke_engine_credential(credential.dev_machine, reason=EngineCredentialRevokeReason.ADMIN):
+                count += 1
+        self.message_user(request, f"Revoked {count} engine credential(s).")
 
 
 @admin.register(AgentRun)

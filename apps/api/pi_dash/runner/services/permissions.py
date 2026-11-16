@@ -95,7 +95,44 @@ def filter_runs_usable_by_runner(qs, runner):
     assigned to the issue. ``deleted_at__isnull=True`` sits in the same
     ``Q``/``filter()`` call as the owner match so both conditions bind to the
     same joined row.
+
+    **Built-in engine runners** (``provisioning = desktop_bundled``) spend
+    their owner's wallet, so the rule is narrower (PO-3, design
+    ``built_engine_as_runner`` §8): runs the owner created, plus *automatic*
+    runs (``tick`` / ``scheduler`` trigger) on the owner's issues or from the
+    owner's scheduler bindings. A human-triggered run created by someone else
+    is admitted only when the owner turned on
+    ``DevMachine.engine_team_runs``, which restores the ordinary rule. The
+    ``owner_id`` clause is dropped for engines: ``owner`` is written from the
+    runner at assignment, so it never admits a run nobody assigned yet.
     """
+    if runner.visibility == Visibility.PRIVATE and runner.is_engine:
+        from pi_dash.runner.services.dispatch_rules import engine_team_runs_enabled
+
+        if not engine_team_runs_enabled(runner):
+            from pi_dash.db.models.issue import Issue
+            from pi_dash.db.models.scheduler import SchedulerBinding
+            from pi_dash.runner.models import HUMAN_TRIGGERS
+
+            owner_issue = Issue.objects.filter(pk=OuterRef("work_item_id")).filter(
+                Q(created_by_id=runner.owner_id)
+                | Q(
+                    issue_assignee__assignee_id=runner.owner_id,
+                    issue_assignee__deleted_at__isnull=True,
+                )
+            )
+            owner_scheduler = SchedulerBinding.objects.filter(
+                pk=OuterRef("scheduler_binding_id"),
+                actor_id=runner.owner_id,
+            )
+            automatic = ~Q(trigger__in=list(HUMAN_TRIGGERS))
+            return qs.annotate(
+                _runner_visible_issue=Exists(owner_issue),
+                _runner_visible_scheduler=Exists(owner_scheduler),
+            ).filter(
+                Q(created_by_id=runner.owner_id)
+                | (automatic & (Q(_runner_visible_issue=True) | Q(_runner_visible_scheduler=True)))
+            )
     if runner.visibility == Visibility.PRIVATE:
         from pi_dash.db.models.issue import Issue
         from pi_dash.db.models.scheduler import SchedulerBinding

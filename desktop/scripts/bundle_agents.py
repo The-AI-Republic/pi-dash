@@ -2,7 +2,12 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""Stage pinned agent release assets for the desktop (no wildcard executable selection)."""
+"""Stage the bundled CLI for the desktop release (no wildcard executable selection).
+
+Only `pidash` is staged. The built-in engine is owned by the CLI release
+(`engine/<version>/` installed by `pidash engine install`) and is never part
+of the desktop bundle.
+"""
 
 import argparse
 import hashlib
@@ -24,10 +29,9 @@ def targets(target):
 
 
 def assets(target):
-    """Exact upstream asset and member names, including Windows executable suffixes."""
+    """Exact release asset and member names, including Windows executable suffixes."""
     windows = target.endswith("windows-msvc")
     suffix = ".exe" if windows else ""
-    engine_target = target.replace("linux-gnu", "linux-musl")
     archive_suffix = ".zip" if windows else ".tar.xz"
     return [
         (
@@ -36,22 +40,22 @@ def assets(target):
             f"pidash{suffix}",
             f"pidash{suffix}",
         ),
-        (
-            "openai/codex",
-            f"codex-{engine_target}{suffix}.tar.gz",
-            f"codex-{engine_target}{suffix}",
-            f"pidash-agent-engine{suffix}",
-        ),
     ]
 
 
-def download(repo, tag, asset):
+def download(repo, tag, asset, pinned=None):
+    """Download one release asset, checked against GitHub's digest and, when
+    given, the digest pinned in the repo."""
     metadata = json.loads(
         subprocess.check_output(["gh", "api", f"repos/{repo}/releases/tags/{tag}"], text=True)
     )
     digest = next((a.get("digest") for a in metadata["assets"] if a["name"] == asset), None)
     if not digest or not digest.startswith("sha256:"):
         raise ValueError(f"Missing SHA-256 digest for {repo}@{tag}/{asset}")
+    if pinned is not None and digest != pinned:
+        raise ValueError(
+            f"{repo}@{tag}/{asset} publishes {digest}, but the repo pins {pinned}"
+        )
     with tempfile.TemporaryDirectory(prefix="pidash-agent-asset-") as directory:
         subprocess.run(
             [
@@ -99,15 +103,16 @@ def executable_bytes(payload, archive, member):
             return executable.read()
 
 
-def stage(target, runner_tag, engine_tag, output):
+def stage(target, runner_tag, output):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="pidash-agent-slices-") as directory:
         slices = {}
         for architecture in targets(target):
             for repo, archive, member, destination in assets(architecture):
-                tag = engine_tag if repo == "openai/codex" else runner_tag
-                payload = executable_bytes(download(repo, tag, archive), archive, member)
+                payload = executable_bytes(
+                    download(repo, runner_tag, archive), archive, member
+                )
                 path = Path(directory) / architecture / destination
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(payload)
@@ -131,10 +136,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", required=True)
     parser.add_argument("--runner-tag", required=True)
-    parser.add_argument("--engine-tag", required=True)
     parser.add_argument("--output", type=Path, default=Path("bin"))
     args = parser.parse_args()
-    stage(args.target, args.runner_tag, args.engine_tag, args.output)
+    stage(args.target, args.runner_tag, args.output)
 
 
 if __name__ == "__main__":
