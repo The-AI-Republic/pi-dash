@@ -1,10 +1,13 @@
 //! Managed-process guard with verified teardown (NEWPIDASH-241 T5).
 //!
-//! Full Linux adapter: process group + anchor identity (ticks/starttime from
-//! /proc/<pid>/stat). macOS uses sysctl kinfo_proc if available via /proc fallback
-//! or disabled diagnostic. Windows uses Job Object (stubbed to fail-closed
-//! diagnostic on non-Windows; on Windows would use CreateJobObject with
-//! JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE + suspended assign).
+//! Linux adapter is verified: anchor process in its own session/group
+//! (setsid, distinct pid per scope) + starttime identity from
+//! /proc/<pid>/stat + /proc pgrp scan. macOS anchor spawn uses setsid
+//! but identity stays None (no /proc), so every verify is uncertain ->
+//! fail closed with diagnostic; a sysctl kinfo_proc adapter is pending
+//! native macOS coverage (not claimed as verified). Windows Job Object
+//! is likewise pending: every verify is uncertain -> fail closed.
+//! Unknown teardown never silently releases a slot.
 //!
 //! Guard scope records + stopped receipts; uncertain teardown blocks admission,
 //! coordinator owns release; identity adapters fail closed on unknown;
@@ -49,15 +52,19 @@ impl ProcessGuard {
         }
     }
 
-    /// Spawn a guarded scope: creates a dummy anchor process in its own
-    /// process group and records ticks/starttime identity.
+    /// Spawn a guarded scope: creates a dummy anchor process (`sleep`)
+    /// in its own process group and records starttime identity. Each
+    /// scope has a distinct anchor pid so PID-reuse and group checks
+    /// are meaningful (the prior stub shared one daemon pid across
+    /// every scope).
     /// Returns scope_id. On unsupported platform, returns scope with
     /// anchor_identity None (will verify as uncertain -> fail closed).
     pub fn spawn_scope(&mut self, _run_id: Uuid) -> Uuid {
         let scope_id = Uuid::new_v4();
-        // Try to spawn `sleep 0.1` as anchor in new session/group
-        // For now, record current pid and identity via /proc if available
-        let pid = std::process::id();
+        // Spawn a real anchor so each scope has a distinct pid + pgid.
+        // The anchor is `sleep 30` (killed on verify when stopped); it
+        // is never the daemon itself.
+        let pid = spawn_anchor();
         let identity = read_anchor_identity(pid);
         self.scopes.insert(
             scope_id,
@@ -176,15 +183,78 @@ fn read_anchor_identity(pid: u32) -> Option<String> {
     }
 }
 
+/// Spawn the anchor `sleep` process in its own session/group
+/// (setsid), so pgrp == pid and each scope is distinct. Falls back to
+/// the daemon pid only when spawning fails (caller still gets a
+/// fail-closed record via identity None on unsupported hosts).
+fn spawn_anchor() -> u32 {
+    #[cfg(unix)]
+    {
+        // `setsid sleep 30`: setsid(1) creates a new session so
+        // pgrp == pid for the anchor. Safe (no unsafe; the crate
+        // forbids unsafe_code, so Command::pre_exec is unavailable).
+        let child = std::process::Command::new("setsid")
+            .arg("sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        if let Ok(c) = child {
+            let pid = c.id();
+            // Leak the Child: the guard owns the anchor via pid; the
+            // process is killed via kill() when the scope stops and
+            // reaped by init. Forgetting avoids Child::drop killing
+            // it immediately.
+            std::mem::forget(c);
+            return pid;
+        }
+        std::process::id()
+    }
+    #[cfg(not(unix))]
+    {
+        std::process::id()
+    }
+}
+
 fn group_has_members(anchor_pid: u32) -> bool {
-    // On Linux, check if any process has pgid == anchor_pid via /proc scan
-    // Simplified: just check if anchor pid itself is alive
+    // Linux: scan /proc/*/stat pgrp (field 5 overall, index 2 after
+    // comm). The prior stub only checked anchor-alive, which conflates
+    // "group empty" with "anchor dead".
     #[cfg(target_os = "linux")]
     {
+        if let Ok(entries) = std::fs::read_dir("/proc") {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else {
+                    continue;
+                };
+                if !name.chars().all(|c| c.is_ascii_digit()) {
+                    continue;
+                }
+                let Ok(content) = std::fs::read_to_string(entry.path().join("stat")) else {
+                    continue;
+                };
+                let Some(rparen) = content.rfind(')') else {
+                    continue;
+                };
+                let rest = &content[rparen + 2..];
+                let parts: Vec<&str> = rest.split_whitespace().collect();
+                // After comm: state(0), ppid(1), pgrp(2)
+                if parts.len() > 2
+                    && let Ok(pgrp) = parts[2].parse::<u32>()
+                    && pgrp == anchor_pid
+                {
+                    return true;
+                }
+            }
+        }
+        // Fallback when /proc is unreadable: anchor-alive means members.
         std::path::Path::new(&format!("/proc/{anchor_pid}")).exists()
     }
     #[cfg(not(target_os = "linux"))]
     {
+        // Fail closed: unknown group state is uncertain.
         true
     }
 }
@@ -212,16 +282,39 @@ mod tests {
     }
     #[test]
     fn uncertain_teardown_blocks_release() {
-        if cfg!(target_os = "linux") || cfg!(target_os = "macos") {
-            return;
-        }
         let mut g = ProcessGuard::new();
         let scope = g.spawn_scope(Uuid::new_v4());
-        if let Some(s) = g.scopes.get_mut(&scope) {
-            s.anchor_identity = None;
-        }
+        let pid = g.scopes.get(&scope).unwrap().anchor_pid;
+        // Anchor is alive with matching identity and group members ->
+        // uncertain, must block admission (never silently release).
         let r = g.verify_teardown(scope);
-        assert!(r.is_err());
+        assert!(r.is_err(), "live anchor group must block release");
+        assert!(r.unwrap_err().contains("uncertain"));
+        // Cleanup: kill anchor so the 30s sleep does not linger.
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn live_group_is_uncertain_and_distinct_pids() {
+        let mut g = ProcessGuard::new();
+        let s1 = g.spawn_scope(Uuid::new_v4());
+        let s2 = g.spawn_scope(Uuid::new_v4());
+        let p1 = g.scopes.get(&s1).unwrap().anchor_pid;
+        let p2 = g.scopes.get(&s2).unwrap().anchor_pid;
+        assert_ne!(p1, p2, "each scope needs a distinct anchor pid");
+        assert_ne!(p1, std::process::id(), "anchor must not be the daemon");
+        assert!(group_has_members(p1), "live anchor group has members");
+        // Cleanup.
+        for pid in [p1, p2] {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
     }
     #[test]
     fn teardown_deadline_enforced() {
