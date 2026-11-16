@@ -24,12 +24,12 @@ const localChat = vi.hoisted(() => ({ value: false }));
 vi.mock("../../../../features/assistant/components/AssistantLanding.js", () => ({
   AssistantLanding: (props: { workspaceSlug: string }) => <div data-testid="landing-slot">{props.workspaceSlug}</div>,
 }));
-vi.mock("../../../../features/assistant/components/DesktopAssistant.js", () => ({
+vi.mock("./DesktopAssistant.js", () => ({
   DesktopAssistant: (props: { workspaceSlug: string; requestedSessionId: string | null }) => (
     <div data-testid="desktop-slot" data-slug={props.workspaceSlug} data-session={props.requestedSessionId ?? ""} />
   ),
 }));
-vi.mock("../../../../core/platform/index.js", () => ({ hasLocalChat: () => localChat.value }));
+vi.mock("../../../../core/platform/local-chat.js", () => ({ hasLocalChat: () => localChat.value }));
 
 describe("assistant landing route", () => {
   it("renders the feature landing for the workspace param without local chat", async () => {

@@ -3,7 +3,7 @@
 // See the LICENSE file for details.
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { hasLocalChat, platform } from "./index.js";
+import { platform } from "./index.js";
 import { createMemoryStore } from "./storage.js";
 import { toApiTransport } from "./transport.js";
 import { platform as desktopPlatform } from "./tauri.js";
@@ -42,9 +42,6 @@ describe("platform selection", () => {
     expect(webPlatform.updates).toBeUndefined();
     expect(webPlatform.sessionTeardown).toBeUndefined();
     expect(webPlatform.shellSignIn).toBeUndefined();
-    // The route branch reads the same seam (NEWPIDASH-300): web stays on
-    // the server assistant.
-    expect(hasLocalChat()).toBe(false);
   });
 
   it("implements the agent-runtime and session-teardown seams (RUN-044, RUN-047)", () => {

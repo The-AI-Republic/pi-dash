@@ -27,6 +27,8 @@ vi.mock("../../../core/platform/index.js", () => ({
       },
     };
   },
+}));
+vi.mock("../../../core/platform/local-chat.js", () => ({
   hasLocalChat: () => platformState.localChat,
 }));
 

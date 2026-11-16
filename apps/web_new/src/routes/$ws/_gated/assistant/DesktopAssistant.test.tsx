@@ -17,12 +17,12 @@ vi.mock("@pidash/api-client", async (importOriginal) => {
   const original = await importOriginal<typeof import("@pidash/api-client")>();
   return { ...original, ...contracts };
 });
-vi.mock("../../../core/session/index.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../../../core/session/index.js")>();
+vi.mock("../../../../core/session/index.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../../../core/session/index.js")>();
   return { ...original, useWorkspaces: session.useWorkspaces, usePermissions: session.usePermissions };
 });
-vi.mock("../../runners/index.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../../runners/index.js")>();
+vi.mock("../../../../features/runners/chat/RunnerChatPage.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../../../features/runners/chat/RunnerChatPage.js")>();
   return {
     ...original,
     RunnerChatPage: (props: { runnerId: string; requestedSessionId: string | null }) => (
@@ -35,8 +35,8 @@ vi.mock("../../runners/index.js", async (importOriginal) => {
   };
 });
 
-const { createAppClient, resetAppClient } = await import("../../../core/api/client.js");
-const { testClient } = await import("../../runners/chat/harness.js");
+const { createAppClient, resetAppClient } = await import("../../../../core/api/client.js");
+const { testClient } = await import("../../../../features/runners/chat/harness.js");
 const { DesktopAssistant } = await import("./DesktopAssistant.js");
 
 const Provider = QueryClientProvider as unknown as React.ComponentType<{

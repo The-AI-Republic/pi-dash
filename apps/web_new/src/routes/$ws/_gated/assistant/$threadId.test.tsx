@@ -29,12 +29,12 @@ vi.mock("../../../../features/assistant/components/ConversationGate.js", () => (
     </div>
   ),
 }));
-vi.mock("../../../../features/assistant/components/DesktopAssistant.js", () => ({
+vi.mock("./DesktopAssistant.js", () => ({
   DesktopAssistant: (props: { workspaceSlug: string; requestedSessionId: string | null }) => (
     <div data-testid="desktop-slot" data-slug={props.workspaceSlug} data-session={props.requestedSessionId ?? ""} />
   ),
 }));
-vi.mock("../../../../core/platform/index.js", () => ({ hasLocalChat: () => localChat.value }));
+vi.mock("../../../../core/platform/local-chat.js", () => ({ hasLocalChat: () => localChat.value }));
 
 describe("conversation route", () => {
   it("passes the params and the handoff state to the gate without local chat", async () => {

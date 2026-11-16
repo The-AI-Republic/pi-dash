@@ -8,15 +8,17 @@ import { Spinner } from "@pidash/kit";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
-import { hasLocalChat } from "../../../../core/platform/index.js";
+import { hasLocalChat } from "../../../../core/platform/local-chat.js";
 import { AssistantLanding } from "../../../../features/assistant/components/AssistantLanding.js";
 
 // Desktop chat (NEWPIDASH-300) splits off the initial bundle (size gate):
 // the route tree statically imports this file on first paint, so a static
-// import of the desktop surface would pull the runner chat transport into
-// the web entry chunk. The desktop chunk loads on assistant navigation.
+// import of the desktop surface would list its chunk in the route preload
+// registry the entry ships. React.lazy keeps the desktop chunk out of that
+// registry entirely: the call site (and its preload list) lives in this
+// route chunk, which only loads on assistant navigation.
 const DesktopAssistant = React.lazy(() =>
-  import("../../../../features/assistant/components/DesktopAssistant.js").then((module) => ({
+  import("./DesktopAssistant.js").then((module) => ({
     default: module.DesktopAssistant,
   }))
 );

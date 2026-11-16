@@ -26,7 +26,16 @@ const localChat = vi.hoisted(() => ({ value: false }));
 vi.mock("../../../../features/assistant/components/AssistantLayout.js", () => ({
   AssistantLayout: (props: { workspaceSlug: string }) => <div data-testid="layout-slot">{props.workspaceSlug}</div>,
 }));
-vi.mock("../../../../core/platform/index.js", () => ({ hasLocalChat: () => localChat.value }));
+vi.mock("../../../../core/platform/index.js", () => ({
+  get platform() {
+    return {
+      kind: "desktop",
+      get localChat() {
+        return localChat.value ? {} : undefined;
+      },
+    };
+  },
+}));
 
 const THREAD = {
   id: "11111111-1111-4111-8111-111111111111",

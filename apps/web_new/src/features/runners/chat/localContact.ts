@@ -13,7 +13,7 @@ import { useQuery } from "@tanstack/react-query";
 import { getPidashAgentProfile } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
-import { hasLocalChat } from "../../../core/platform/index.js";
+import { hasLocalChat } from "../../../core/platform/local-chat.js";
 import { BUILTIN_CHAT_ID } from "./localTransport.js";
 import { agentReasonMessage } from "../../../shared/lib/agentReasons.js";
 import { PIDASH_AGENT_NAME } from "../../../shared/lib/runnerIdentity.js";

@@ -10,7 +10,7 @@
 import { Outlet } from "@tanstack/react-router";
 import * as React from "react";
 
-import { hasLocalChat } from "../../../core/platform/index.js";
+import { hasLocalChat } from "../../../core/platform/local-chat.js";
 import { ConversationRail } from "./ConversationRail.js";
 
 export interface AssistantLayoutProps {

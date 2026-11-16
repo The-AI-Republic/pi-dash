@@ -20,7 +20,7 @@ const localChat = vi.hoisted(() => ({ value: false }));
 vi.mock("./ConversationRail.js", () => ({
   ConversationRail: (props: { workspaceSlug: string }) => <div data-testid="rail-slot">{props.workspaceSlug}</div>,
 }));
-vi.mock("../../../core/platform/index.js", () => ({ hasLocalChat: () => localChat.value }));
+vi.mock("../../../core/platform/local-chat.js", () => ({ hasLocalChat: () => localChat.value }));
 
 describe("AssistantLayout", () => {
   it("mounts the rail beside the routed content without local chat", async () => {

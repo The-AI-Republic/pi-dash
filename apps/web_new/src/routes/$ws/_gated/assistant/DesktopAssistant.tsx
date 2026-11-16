@@ -11,6 +11,13 @@
 // uses (the desktop profile endpoint is never called off the desktop,
 // AGT-059). When the agent cannot run, the page says why with the server's
 // reason sentence; it never falls back to the cloud assistant.
+//
+// Route-local on purpose: the runners surface is imported directly (routes
+// may deep-import feature sources, features/ may not), so the runners
+// barrel — which the issues area statically imports — gains no new
+// re-exports and the desktop chat stays out of the web initial bundle
+// (size gate). Anything importing this file must stay inside the
+// assistant route chunks.
 
 import { getPidashAgentProfile } from "@pidash/api-client";
 import { Spinner } from "@pidash/kit";
@@ -18,21 +25,20 @@ import { useQuery } from "@tanstack/react-query";
 import { Bot } from "lucide-react";
 import * as React from "react";
 
-import { getAppClient } from "../../../core/api/client.js";
-import { selectWorkspace, usePermissions, useWorkspaces } from "../../../core/session/index.js";
+import { getAppClient } from "../../../../core/api/client.js";
+import { selectWorkspace, usePermissions, useWorkspaces } from "../../../../core/session/index.js";
+import { decideWorkspaceRunnersAccess } from "../../../../features/runners/access.js";
+import { buildRunnersAreaValue, RunnersAreaProvider } from "../../../../features/runners/area.js";
 import {
-  BUILTIN_CHAT_ID,
-  buildRunnersAreaValue,
-  decideWorkspaceRunnersAccess,
   LOCAL_AGENT_POLL_INTERVAL_MS,
   LOCAL_AGENT_UNAVAILABLE_FALLBACK,
   localChatQueryKey,
   pidashAgentContactAvailability,
-  RunnerChatPage,
-  RunnersAreaProvider,
-  RunnersNotAuthorized,
-} from "../../runners/index.js";
-import { DESKTOP_AGENT_UNAVAILABLE_TITLE } from "../lib/copy.js";
+} from "../../../../features/runners/chat/localContact.js";
+import { BUILTIN_CHAT_ID } from "../../../../features/runners/chat/localTransport.js";
+import { RunnerChatPage } from "../../../../features/runners/chat/RunnerChatPage.js";
+import { RunnersNotAuthorized } from "../../../../features/runners/components/NotAuthorizedView.js";
+import { DESKTOP_AGENT_UNAVAILABLE_TITLE } from "../../../../features/assistant/lib/copy.js";
 
 export interface DesktopAssistantProps {
   workspaceSlug: string;

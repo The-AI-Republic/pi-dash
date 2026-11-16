@@ -11,13 +11,13 @@ import { Spinner } from "@pidash/kit";
 import { createFileRoute, useNavigate, useRouterState } from "@tanstack/react-router";
 import * as React from "react";
 
-import { hasLocalChat } from "../../../../core/platform/index.js";
+import { hasLocalChat } from "../../../../core/platform/local-chat.js";
 import { ConversationGate } from "../../../../features/assistant/components/ConversationGate.js";
 
 // Desktop chat (NEWPIDASH-300) splits off the initial bundle (size gate);
 // see the landing route for why the desktop surface stays lazy.
 const DesktopAssistant = React.lazy(() =>
-  import("../../../../features/assistant/components/DesktopAssistant.js").then((module) => ({
+  import("./DesktopAssistant.js").then((module) => ({
     default: module.DesktopAssistant,
   }))
 );
