@@ -89,7 +89,12 @@ export function applyIssuePatchLite(
   };
 }
 
-/** Next list page with the patched row fields painted on. */
+/**
+ * Next list page with the patched row fields painted on. The "list"
+ * cache holds flat pages and grouped/sub-grouped envelopes (results is
+ * a bucket map there), so the paint goes through withIssueFields, which
+ * handles every shape and re-buckets a row whose group value changed.
+ */
 export function applyIssuePatchList(
   previous: IssueListResponse | undefined,
   issueId: string,
@@ -98,10 +103,7 @@ export function applyIssuePatchList(
   if (previous === undefined) return previous;
   const painted = pickRowPatch(patch);
   if (Object.keys(painted).length === 0) return previous;
-  return {
-    ...previous,
-    results: previous.results.map((row) => (row.id === issueId ? { ...row, ...painted } : row)),
-  };
+  return withIssueFields(previous, issueId, painted) as IssueListResponse;
 }
 
 /**
