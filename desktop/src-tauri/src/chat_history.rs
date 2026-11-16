@@ -20,7 +20,7 @@
 //! **Why scoped per account.** History is private to the person who created it.
 //! The signed-in account keys the database directory, so a second account
 //! signing in on the same machine sees its own (empty, or previously-kept)
-//! history and never the first account's. The overlay supplies the account
+//! history and never the first account's. The webview supplies the account
 //! identifier the same way it already supplies the workspace slug — this module
 //! is a consumer of the session the webview holds, never a second copy of it.
 //!
@@ -56,7 +56,7 @@ use crate::app_paths::AppPaths;
 const SCHEMA_VERSION: i64 = 1;
 
 // ---------------------------------------------------------------------------
-// Records exchanged with the overlay
+// Records exchanged with the webview
 // ---------------------------------------------------------------------------
 
 /// A chat conversation. The app DB — not the engine's rollout files — is the
@@ -98,7 +98,7 @@ pub struct ChatEvent {
     pub created_at: i64,
 }
 
-/// Fields the overlay supplies to open a new session. The working directory is
+/// Fields the webview supplies to open a new session. The working directory is
 /// resolved by [`chat_working_dir`], not chosen by the caller, so a chat can
 /// never be pointed at a managed run's working copy.
 #[derive(Debug, Clone, Deserialize)]
@@ -113,7 +113,7 @@ pub struct NewChatSession {
     pub engine_version: String,
 }
 
-/// Fields the overlay supplies to append an event.
+/// Fields the webview supplies to append an event.
 #[derive(Debug, Clone, Deserialize)]
 pub struct NewChatEvent {
     pub role: String,

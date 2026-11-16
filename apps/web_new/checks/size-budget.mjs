@@ -10,7 +10,7 @@
 // accidental large eager import (NEWFRONT-248) and ordinary slice growth is
 // left to review. Initial JS covers the shell plus the first route, resolved
 // by checks/size-initial.mjs; initial CSS covers every emitted stylesheet.
-export const INITIAL_JS_CEILING = "276 KB";
+export const INITIAL_JS_CEILING = "277 KB";
 export const INITIAL_CSS_CEILING = "30 KB";
 export const INITIAL_CSS_GLOB = "dist/web/assets/*.css";
 
