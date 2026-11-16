@@ -991,6 +991,7 @@ mod tests {
             model: String::new(),
             reason_code: String::new(),
             top_up_url: String::new(),
+            context_window: None,
         };
         let (available, reason) = pidash_agent_profile_for_user(false, &profile(true));
         assert!(!available);

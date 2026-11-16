@@ -420,6 +420,53 @@ fn thread_id_of(value: &serde_json::Value) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+/// Detect the engine's "no metadata, using fallback" warning (NEWPIDASH-247).
+/// Returns the user-facing failure detail when the notification is a fallback
+/// warning, `None` for every other notification. The check is on the engine's
+/// warning text itself, not on the profile, so a model the engine already
+/// knows (which has built-in metadata and never emits this) keeps working
+/// even when the profile carries no `context_window`.
+pub(crate) fn fallback_warning_detail(method: &str, params: &serde_json::Value) -> Option<String> {
+    if method != "warning" {
+        return None;
+    }
+    let text = warning_text(params)?;
+    if !text.contains("Model metadata") || !text.contains("not found") {
+        return None;
+    }
+    // Extract the model slug: "Model metadata for <slug> not found.…".
+    let model = text
+        .split_once("Model metadata for ")
+        .and_then(|(_, rest)| rest.split_once(" not found"))
+        .map(|(slug, _)| slug.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("the selected model");
+    Some(format!(
+        "model {model} has no metadata: the engine fell back to guessed limits (258,400 usable tokens) and the run was stopped. Set context_window for this model in the profile."
+    ))
+}
+
+/// The human-readable text of a `warning` notification. The app-server sends
+/// the engine's `EventMsg::Warning` as a `warning` notification whose params
+/// hold the message under `message`, `text` or as a bare string; accept all.
+fn warning_text(params: &serde_json::Value) -> Option<String> {
+    if let Some(s) = params.as_str() {
+        return Some(s.to_string());
+    }
+    for key in ["message", "text", "detail"] {
+        if let Some(s) = params.get(key).and_then(|v| v.as_str()) {
+            return Some(s.to_string());
+        }
+    }
+    // Last resort: the params JSON itself must still contain the warning text.
+    let s = serde_json::to_string(params).ok()?;
+    if s.contains("Model metadata") {
+        Some(s)
+    } else {
+        None
+    }
+}
+
 pub struct BridgeCursor {
     pub run_id: Uuid,
     pub thread_id: String,
@@ -576,6 +623,21 @@ impl BridgeCursor {
                                 .or_else(|| Some("turn/completed without conclusion".to_string())),
                         }]
                     }
+                } else if let Some(detail) = fallback_warning_detail(&method, &params) {
+                    // NEWPIDASH-247: "never run on fallback metadata". The
+                    // engine emits `warning` with "Model metadata for X not
+                    // found. Defaulting to fallback metadata…" on every turn
+                    // where its catalog has no entry for X (PDASHOSS01-174).
+                    // Models the engine knows have built-in metadata and never
+                    // emit this, so the check is on the warning itself — not on
+                    // the profile — and an empty profile window for a known
+                    // model keeps working. Stop the turn with a clear error
+                    // naming the model instead of trimming at 258,400 tokens.
+                    vec![BridgeEvent::Failed {
+                        run_id: self.run_id,
+                        reason: FailureReason::CodexCrash,
+                        detail: Some(detail),
+                    }]
                 } else if method == "error" {
                     // Codex emits this for transport / API failures (e.g. a
                     // 400 from OpenAI saying the model isn't allowed). When
@@ -1101,5 +1163,50 @@ mod translate_tests {
             }
             other => panic!("expected fresh ApprovalRequest, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn fallback_warning_stops_the_turn_and_names_the_model() {
+        let mut c = cursor();
+        let evs = c.translate(notif(
+            "warning",
+            json!({"message": "Model metadata for deepseek/deepseek-v4-flash not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}),
+        ));
+        match evs.as_slice() {
+            [BridgeEvent::Failed { detail, .. }] => {
+                let d = detail.as_deref().unwrap_or("");
+                assert!(d.contains("deepseek/deepseek-v4-flash"), "{d}");
+                assert!(d.contains("guessed limits"), "{d}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_fallback_warning_stays_raw() {
+        let mut c = cursor();
+        let evs = c.translate(notif(
+            "warning",
+            json!({"message": "some other harmless warning"}),
+        ));
+        assert!(matches!(evs.as_slice(), [BridgeEvent::Raw { .. }]));
+    }
+
+    #[test]
+    fn fallback_warning_helper_extracts_model() {
+        let detail = fallback_warning_detail(
+            "warning",
+            &json!({"message": "Model metadata for foo/bar not found. Defaulting to fallback metadata"}),
+        )
+        .expect("fallback warning");
+        assert!(detail.contains("foo/bar"));
+        assert!(
+            fallback_warning_detail(
+                "error",
+                &json!({"message": "Model metadata for foo/bar not found"})
+            )
+            .is_none()
+        );
+        assert!(fallback_warning_detail("warning", &json!({"message": "unrelated"})).is_none());
     }
 }

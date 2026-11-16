@@ -7800,6 +7800,7 @@ mod live_tests {
                     model: "hub-default".to_owned(),
                     reason_code: String::new(),
                     top_up_url: String::new(),
+                    context_window: None,
                 }
             })
         }
