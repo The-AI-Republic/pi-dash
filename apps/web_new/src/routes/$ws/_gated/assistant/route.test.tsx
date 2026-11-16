@@ -26,7 +26,7 @@ const localChat = vi.hoisted(() => ({ value: false }));
 vi.mock("../../../../features/assistant/components/AssistantLayout.js", () => ({
   AssistantLayout: (props: { workspaceSlug: string }) => <div data-testid="layout-slot">{props.workspaceSlug}</div>,
 }));
-vi.mock("../../../../features/runners/index.js", () => ({ hasLocalChat: () => localChat.value }));
+vi.mock("../../../../core/platform/index.js", () => ({ hasLocalChat: () => localChat.value }));
 
 const THREAD = {
   id: "11111111-1111-4111-8111-111111111111",

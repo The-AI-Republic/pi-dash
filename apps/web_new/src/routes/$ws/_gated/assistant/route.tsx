@@ -11,7 +11,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
 import { AssistantLayout } from "../../../../features/assistant/components/AssistantLayout.js";
-import { hasLocalChat } from "../../../../features/runners/index.js";
+import { hasLocalChat } from "../../../../core/platform/index.js";
 
 export const Route = createFileRoute("/$ws/_gated/assistant")({
   // NOTE (NEWFRONT-852, size gate): the threads read stays behind a

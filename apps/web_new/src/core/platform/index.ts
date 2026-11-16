@@ -52,7 +52,13 @@ export type {
   Unsubscribe,
   UpdaterApi,
 } from "./types.js";
-export { platform } from "@pidash/platform-target";
+import { platform } from "@pidash/platform-target";
+export { platform };
+
+/** True when this build can serve chat from the machine itself. */
+export function hasLocalChat(): boolean {
+  return platform.localChat !== undefined;
+}
 export {
   bakedHostedOrigin,
   desktopShareUrl,

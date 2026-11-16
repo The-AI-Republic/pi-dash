@@ -13,7 +13,7 @@ import { useQuery } from "@tanstack/react-query";
 import { getPidashAgentProfile } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
-import { platform } from "../../../core/platform/index.js";
+import { hasLocalChat } from "../../../core/platform/index.js";
 import { BUILTIN_CHAT_ID } from "./localTransport.js";
 import { agentReasonMessage } from "../../../shared/lib/agentReasons.js";
 import { PIDASH_AGENT_NAME } from "../../../shared/lib/runnerIdentity.js";
@@ -39,10 +39,7 @@ export function pidashAgentContactAvailability(profile: { available: boolean; re
   return { unavailableReason: profile.available ? null : agentReasonMessage(profile.reason_code) };
 }
 
-/** True when this build can serve chat from the machine itself. */
-export function hasLocalChat(): boolean {
-  return platform.localChat !== undefined;
-}
+export { hasLocalChat };
 
 export function localChatQueryKey() {
   return ["runners", "local-agent", "availability"] as const;

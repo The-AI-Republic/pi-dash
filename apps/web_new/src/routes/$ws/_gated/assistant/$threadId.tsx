@@ -7,12 +7,20 @@
 // handoff — and leaves transcript streaming, stop and paging to the
 // thread-view slice, which fills the gate's transcript slot.
 
+import { Spinner } from "@pidash/kit";
 import { createFileRoute, useNavigate, useRouterState } from "@tanstack/react-router";
 import * as React from "react";
 
+import { hasLocalChat } from "../../../../core/platform/index.js";
 import { ConversationGate } from "../../../../features/assistant/components/ConversationGate.js";
-import { DesktopAssistant } from "../../../../features/assistant/components/DesktopAssistant.js";
-import { hasLocalChat } from "../../../../features/runners/index.js";
+
+// Desktop chat (NEWPIDASH-300) splits off the initial bundle (size gate);
+// see the landing route for why the desktop surface stays lazy.
+const DesktopAssistant = React.lazy(() =>
+  import("../../../../features/assistant/components/DesktopAssistant.js").then((module) => ({
+    default: module.DesktopAssistant,
+  }))
+);
 
 export const Route = createFileRoute("/$ws/_gated/assistant/$threadId")({
   component: ConversationComponent,
@@ -26,19 +34,27 @@ function ConversationComponent(): React.ReactElement {
   // Agent; the server conversation below never mounts there (NEWPIDASH-300).
   if (hasLocalChat()) {
     return (
-      <DesktopAssistant
-        key={ws}
-        workspaceSlug={ws}
-        requestedSessionId={threadId}
-        onSelectSession={(sessionId) => {
-          if (sessionId === threadId) return;
-          void navigate({
-            to: "/$ws/assistant/$threadId",
-            params: { ws, threadId: sessionId },
-            replace: true,
-          });
-        }}
-      />
+      <React.Suspense
+        fallback={
+          <div className="flex h-full items-center justify-center">
+            <Spinner label="Loading assistant" />
+          </div>
+        }
+      >
+        <DesktopAssistant
+          key={ws}
+          workspaceSlug={ws}
+          requestedSessionId={threadId}
+          onSelectSession={(sessionId) => {
+            if (sessionId === threadId) return;
+            void navigate({
+              to: "/$ws/assistant/$threadId",
+              params: { ws, threadId: sessionId },
+              replace: true,
+            });
+          }}
+        />
+      </React.Suspense>
     );
   }
   return <ConversationGate key={threadId} workspaceSlug={ws} threadId={threadId} state={state} />;

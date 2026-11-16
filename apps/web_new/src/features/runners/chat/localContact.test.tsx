@@ -27,6 +27,7 @@ vi.mock("../../../core/platform/index.js", () => ({
       },
     };
   },
+  hasLocalChat: () => platformState.localChat,
 }));
 
 const { createAppClient, resetAppClient } = await import("../../../core/api/client.js");

@@ -4,12 +4,22 @@
 // Assistant landing route (parity/specs/agents.md §9, AGT-038–AGT-040).
 // Thin: the feature owns the greeting/setup swap and the start action.
 
+import { Spinner } from "@pidash/kit";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
+import { hasLocalChat } from "../../../../core/platform/index.js";
 import { AssistantLanding } from "../../../../features/assistant/components/AssistantLanding.js";
-import { DesktopAssistant } from "../../../../features/assistant/components/DesktopAssistant.js";
-import { hasLocalChat } from "../../../../features/runners/index.js";
+
+// Desktop chat (NEWPIDASH-300) splits off the initial bundle (size gate):
+// the route tree statically imports this file on first paint, so a static
+// import of the desktop surface would pull the runner chat transport into
+// the web entry chunk. The desktop chunk loads on assistant navigation.
+const DesktopAssistant = React.lazy(() =>
+  import("../../../../features/assistant/components/DesktopAssistant.js").then((module) => ({
+    default: module.DesktopAssistant,
+  }))
+);
 
 export const Route = createFileRoute("/$ws/_gated/assistant/")({
   component: AssistantLandingComponent,
@@ -22,18 +32,26 @@ function AssistantLandingComponent(): React.ReactElement {
   // server landing below never mounts there (NEWPIDASH-300).
   if (hasLocalChat()) {
     return (
-      <DesktopAssistant
-        key={ws}
-        workspaceSlug={ws}
-        requestedSessionId={null}
-        onSelectSession={(sessionId) => {
-          void navigate({
-            to: "/$ws/assistant/$threadId",
-            params: { ws, threadId: sessionId },
-            replace: true,
-          });
-        }}
-      />
+      <React.Suspense
+        fallback={
+          <div className="flex h-full items-center justify-center">
+            <Spinner label="Loading assistant" />
+          </div>
+        }
+      >
+        <DesktopAssistant
+          key={ws}
+          workspaceSlug={ws}
+          requestedSessionId={null}
+          onSelectSession={(sessionId) => {
+            void navigate({
+              to: "/$ws/assistant/$threadId",
+              params: { ws, threadId: sessionId },
+              replace: true,
+            });
+          }}
+        />
+      </React.Suspense>
     );
   }
   return <AssistantLanding key={ws} workspaceSlug={ws} />;

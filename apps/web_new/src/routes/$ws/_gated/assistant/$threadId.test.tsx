@@ -34,7 +34,7 @@ vi.mock("../../../../features/assistant/components/DesktopAssistant.js", () => (
     <div data-testid="desktop-slot" data-slug={props.workspaceSlug} data-session={props.requestedSessionId ?? ""} />
   ),
 }));
-vi.mock("../../../../features/runners/index.js", () => ({ hasLocalChat: () => localChat.value }));
+vi.mock("../../../../core/platform/index.js", () => ({ hasLocalChat: () => localChat.value }));
 
 describe("conversation route", () => {
   it("passes the params and the handoff state to the gate without local chat", async () => {
