@@ -17,6 +17,7 @@
 pub mod client;
 pub mod dto;
 pub mod protocol;
+pub mod socket;
 #[cfg(windows)]
 pub mod windows_pipe;
 
@@ -25,6 +26,7 @@ pub mod windows_pipe;
 pub use client::Client;
 pub use dto::*;
 pub use protocol::*;
+pub use socket::*;
 
 /// Windows named-pipe name derived deterministically from the socket path.
 ///

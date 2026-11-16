@@ -553,6 +553,7 @@ mod tests {
             config_dir: tmp.path().join("config"),
             data_dir: tmp.path().join("data"),
             runtime_dir: tmp.path().join("runtime"),
+            ipc_socket: None,
             machine_context_dir: tmp.path().join("config"),
         };
         paths.ensure().unwrap();
@@ -778,6 +779,7 @@ mod tests {
             config_dir: tmp.path().join("config"),
             data_dir: tmp.path().join("data"),
             runtime_dir: tmp.path().join("runtime"),
+            ipc_socket: None,
             machine_context_dir: tmp.path().join("config"),
         };
         let tokens = WorkspaceTokens::from_cli(Some(&CliSection {
@@ -841,6 +843,7 @@ mod tests {
             config_dir: tmp.path().join("config"),
             data_dir: tmp.path().join("data"),
             runtime_dir: tmp.path().join("runtime"),
+            ipc_socket: None,
             machine_context_dir: tmp.path().join("config"),
         };
         let only_acme = CliSection {
@@ -930,6 +933,7 @@ mod tests {
             config_dir: tmp.path().join("config"),
             data_dir: tmp.path().join("data"),
             runtime_dir: tmp.path().join("runtime"),
+            ipc_socket: None,
             machine_context_dir: tmp.path().join("config"),
         };
         paths.ensure().unwrap();
@@ -1038,6 +1042,7 @@ mod tests {
             config_dir: tmp.path().join("config"),
             data_dir: tmp.path().join("data"),
             runtime_dir: tmp.path().join("runtime"),
+            ipc_socket: None,
             machine_context_dir: tmp.path().join("config"),
         };
         let cmd = CreateRunnerCmd {
@@ -1101,6 +1106,7 @@ mod tests {
             config_dir: tmp.path().join("config"),
             data_dir: tmp.path().join("data"),
             runtime_dir: tmp.path().join("runtime"),
+            ipc_socket: None,
             machine_context_dir: tmp.path().join("config"),
         };
         assert!(

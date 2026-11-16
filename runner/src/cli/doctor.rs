@@ -473,6 +473,7 @@ mod tests {
             config_dir: dir.path().join("config"),
             data_dir: dir.path().join("data"),
             runtime_dir: dir.path().join("runtime"),
+            ipc_socket: None,
             machine_context_dir: dir.path().join("config"),
         };
         paths.ensure().unwrap();

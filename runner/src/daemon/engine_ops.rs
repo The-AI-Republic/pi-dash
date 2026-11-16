@@ -163,6 +163,7 @@ mod tests {
             config_dir: tmp.path().join("config"),
             data_dir: tmp.path().join("data"),
             runtime_dir: tmp.path().join("runtime"),
+            ipc_socket: None,
             machine_context_dir: tmp.path().join("config"),
         };
         crate::config::file::write_config(
