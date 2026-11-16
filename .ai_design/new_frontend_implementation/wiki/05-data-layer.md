@@ -4,12 +4,12 @@
 
 ## Where state lives
 
-| State           | Example                                                          | Tool                  |
-| --------------- | ---------------------------------------------------------------- | --------------------- |
-| Server data     | issues, projects, members, comments                              | TanStack Query        |
-| View state      | filters, grouping, layout, open issue (`?peek=`)                 | router search params  |
+| State | Example | Tool |
+|---|---|---|
+| Server data | issues, projects, members, comments | TanStack Query |
+| View state | filters, grouping, layout, open issue (`?peek=`) | router search params |
 | Shared UI state | multi-select, peek stack, command palette, sidebar width, drafts | Zustand (per feature) |
-| Local UI state  | a dropdown's open state                                          | `useState`            |
+| Local UI state | a dropdown's open state | `useState` |
 
 ## API client and contracts (`@pidash/api-client`)
 
@@ -19,7 +19,7 @@ The internal endpoints the frontend uses (`/api/workspaces/…`, `/auth/…`) ar
 - One contract module per resource, written by us from the endpoint's behavior and the Django serializer:
   ```ts
   // packages/api-client/src/contracts/issues.ts
-  export const Issue = z.object({ id: z.string(), name: z.string(), state_id: z.string() /* … */ });
+  export const Issue = z.object({ id: z.string(), name: z.string(), state_id: z.string(), /* … */ });
   export type Issue = z.infer<typeof Issue>;
   export const issues = {
     list: (c: Client, ws: string, pid: string, q: IssueQuery) =>

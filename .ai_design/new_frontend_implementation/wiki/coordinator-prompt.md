@@ -7,7 +7,7 @@ Read the rules first: the project description (in your prompt) and NEWFRONT-1 (t
    - every blocked_by issue is Done (`pidash issue get <id>` shows has_open_blockers = false);
    - if it has a parent epic, that epic is In Test ("split accepted");
    - fewer than 6 NEWFRONT issues are In Progress, In Review or In Test in total (runner capacity). Release oldest-first: stage 0 before stage 1, and so on; within a stage, foundation, then inventory, then oracle, then epics, then sub-issues.
-     Never move an issue labeled `human`; those are for people.
+   Never move an issue labeled `human`; those are for people.
 
 2. Unstick work.
    - An issue In Progress, In Review or In Test whose ticking budget is spent: `pidash issue re-tick <id>` once, and comment why.
@@ -22,6 +22,6 @@ Read the rules first: the project description (in your prompt) and NEWFRONT-1 (t
    - human queue: every open issue labeled `human`, with how many issues each one is blocking;
    - stuck: issues with no progress for 24 hours, and why;
    - process issues filed this run.
-     Keep it short; link issues by identifier.
+   Keep it short; link issues by identifier.
 
 Never: edit code, open or merge PRs, change issue descriptions written by others, move issues backwards, cancel issues, or decide an open question.

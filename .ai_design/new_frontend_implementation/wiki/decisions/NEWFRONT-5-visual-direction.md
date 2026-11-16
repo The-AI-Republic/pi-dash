@@ -9,20 +9,20 @@
 
 ## Color tokens
 
-| Token                            | Light     | Dark      |
-| -------------------------------- | --------- | --------- |
-| `--bg`                           | `#FFFFFF` | `#0B0B0D` |
-| `--surface` (sidebar, panels)    | `#FAFAFA` | `#121214` |
+| Token | Light | Dark |
+|---|---|---|
+| `--bg` | `#FFFFFF` | `#0B0B0D` |
+| `--surface` (sidebar, panels) | `#FAFAFA` | `#121214` |
 | `--subtle` (hover, selected row) | `#F4F4F5` | `#1A1A1D` |
-| `--border`                       | `#E4E4E7` | `#26262A` |
-| `--text`                         | `#18181B` | `#EDEDEF` |
-| `--text-muted`                   | `#71717A` | `#8B8B93` |
-| `--accent`                       | `#5E6AD2` | `#7C85E0` |
-| `--accent-hover`                 | `#4F5BC4` | `#8E96E6` |
+| `--border` | `#E4E4E7` | `#26262A` |
+| `--text` | `#18181B` | `#EDEDEF` |
+| `--text-muted` | `#71717A` | `#8B8B93` |
+| `--accent` | `#5E6AD2` | `#7C85E0` |
+| `--accent-hover` | `#4F5BC4` | `#8E96E6` |
 | `--accent-subtle` (selection bg) | `#EEF0FB` | `#1E2140` |
-| `--success`                      | `#2F9E5B` | `#3DB86C` |
-| `--warning`                      | `#D9912B` | `#E5A84A` |
-| `--danger`                       | `#E5484D` | `#F2555A` |
+| `--success` | `#2F9E5B` | `#3DB86C` |
+| `--warning` | `#D9912B` | `#E5A84A` |
+| `--danger` | `#E5484D` | `#F2555A` |
 
 - Workflow state colors come from the project's data (each state has a color), not from tokens.
 - Text contrast meets WCAG AA in both themes; check it in the kit tests.

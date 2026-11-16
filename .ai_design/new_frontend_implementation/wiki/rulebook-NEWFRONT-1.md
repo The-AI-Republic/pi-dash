@@ -24,28 +24,28 @@ CI enforces this on every PR into `web-new-dev` (`.github/workflows/web-new-path
 
 ## Issue types
 
-| Type                | Label                     | What a run does                                                                                                                                                                                                                                                                                                                      |
-| ------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Rulebook            | `kind:rulebook`           | Never worked.                                                                                                                                                                                                                                                                                                                        |
-| Decision / sign-off | `kind:decision` + `human` | A human decides and moves it to Done. Agents never work on these.                                                                                                                                                                                                                                                                    |
-| Foundation          | `kind:foundation`         | Single issue, never split. Builds shared infrastructure; later issues copy its patterns.                                                                                                                                                                                                                                             |
-| Inventory           | `kind:inventory`          | Lists every capability of one area as rows in `parity/inventory/<area>.md`. No code.                                                                                                                                                                                                                                                 |
-| Oracle              | `kind:oracle`             | Writes parity scenarios for one area's rows and makes them green on `apps/web`.                                                                                                                                                                                                                                                      |
-| Area epic           | `kind:epic`               | A container. Its one In Progress run is a **split run** that creates sub-issues (spec → contracts → slices → area gate) and moves the epic to In Review. The review run fixes the tree and moves it to **In Test, meaning "split accepted"**. Sub-issues run only while their epic is In Test. The area gate moves the epic to Done. |
-| Sub-issue           | epic's stage label        | Does exactly what its body says; its row IDs are its Done when.                                                                                                                                                                                                                                                                      |
-| Migration           | `kind:migration`          | Switches the desktop app (M-01) or removes the old frontend (M-02).                                                                                                                                                                                                                                                                  |
+| Type | Label | What a run does |
+|---|---|---|
+| Rulebook | `kind:rulebook` | Never worked. |
+| Decision / sign-off | `kind:decision` + `human` | A human decides and moves it to Done. Agents never work on these. |
+| Foundation | `kind:foundation` | Single issue, never split. Builds shared infrastructure; later issues copy its patterns. |
+| Inventory | `kind:inventory` | Lists every capability of one area as rows in `parity/inventory/<area>.md`. No code. |
+| Oracle | `kind:oracle` | Writes parity scenarios for one area's rows and makes them green on `apps/web`. |
+| Area epic | `kind:epic` | A container. Its one In Progress run is a **split run** that creates sub-issues (spec → contracts → slices → area gate) and moves the epic to In Review. The review run fixes the tree and moves it to **In Test, meaning "split accepted"**. Sub-issues run only while their epic is In Test. The area gate moves the epic to Done. |
+| Sub-issue | epic's stage label | Does exactly what its body says; its row IDs are its Done when. |
+| Migration | `kind:migration` | Switches the desktop app (M-01) or removes the old frontend (M-02). |
 
 ## Stages
 
 Every issue carries a `stage:N` label. Stages are for reporting; **release is driven by blockers**: every dependency is a `blocked_by` edge.
 
-| Stage | Contents                                                                                                                                                                                                               |
-| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0     | Decisions, foundation (F-01…F-11), inventories, oracle scenarios, inventory sign-offs                                                                                                                                  |
-| 1     | Epics: auth, shell, issues, comments, drafts                                                                                                                                                                           |
-| 2     | Epics: runners, agents (schedulers, prompts, assistant), notifications, desktop; M-01 desktop switch                                                                                                                   |
-| 3     | Epics: views, archives, intake, cycles, modules, pages, estimates, analytics, stickies, exports, project settings, workspace settings, profile, cloud edition, instance admin (`/god-mode`), public boards (`/spaces`) |
-| 4     | Human acceptance pass; M-02 removal                                                                                                                                                                                    |
+| Stage | Contents |
+|---|---|
+| 0 | Decisions, foundation (F-01…F-11), inventories, oracle scenarios, inventory sign-offs |
+| 1 | Epics: auth, shell, issues, comments, drafts |
+| 2 | Epics: runners, agents (schedulers, prompts, assistant), notifications, desktop; M-01 desktop switch |
+| 3 | Epics: views, archives, intake, cycles, modules, pages, estimates, analytics, stickies, exports, project settings, workspace settings, profile, cloud edition, instance admin (`/god-mode`), public boards (`/spaces`) |
+| 4 | Human acceptance pass; M-02 removal |
 
 ## Release and the coordinator
 
@@ -55,14 +55,14 @@ Every issue carries a `stage:N` label. Stages are for reporting; **release is dr
 
 ## Where things live
 
-| What                         | Where                                                               |
-| ---------------------------- | ------------------------------------------------------------------- |
-| Wiki (reference)             | project pages, starting at "Start here"                             |
-| Design record                | `.ai_design/new_frontend_implementation/design.md` on `web-new-dev` |
-| Inventory                    | `.ai_design/new_frontend_implementation/parity/inventory/<area>.md` |
-| Area specs                   | `.ai_design/new_frontend_implementation/parity/specs/<area>.md`     |
-| Parity scenarios and drivers | `apps/web_new/e2e/parity/`                                          |
-| Runbook                      | `apps/web_new/README.md` (created by F-01)                          |
+| What | Where |
+|---|---|
+| Wiki (reference) | project pages, starting at "Start here" |
+| Design record | `.ai_design/new_frontend_implementation/design.md` on `web-new-dev` |
+| Inventory | `.ai_design/new_frontend_implementation/parity/inventory/<area>.md` |
+| Area specs | `.ai_design/new_frontend_implementation/parity/specs/<area>.md` |
+| Parity scenarios and drivers | `apps/web_new/e2e/parity/` |
+| Runbook | `apps/web_new/README.md` (created by F-01) |
 
 ## Environment safety
 

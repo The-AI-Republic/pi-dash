@@ -297,9 +297,7 @@ test(
     try {
       await driver.adminOpenPath("/loop/");
       await driver.adminWaitForRootBranch("dashboard");
-      await expect
-        .poll(async () => (await driver.adminLoopListFacts()).skeletonVisible, { timeout: 15_000 })
-        .toBe(true);
+      await expect.poll(async () => (await driver.adminLoopListFacts()).skeletonVisible, { timeout: 15_000 }).toBe(true);
       const during = await driver.adminLoopListFacts();
       expect(during.skeletonRows).toBe(2);
       expect(during.skeletonHeights).toEqual(["48px", "48px"]);
