@@ -1,0 +1,20 @@
+# Browser flows that gate every web_new PR (web-new.yml, job "browser flows
+# (web_new on the Rust API)", part of web-new-required). Each line is a
+# Playwright file filter under e2e/parity/, run on the `new` project only,
+# against web_new's production build on the Rust API with the Rust worker.
+#
+# Add a flow only after it has passed several runs in a row on that stack:
+# a flaky required check blocks every PR. Keep the set small; the full
+# parity suite is not a PR gate.
+#
+# Not here yet: issues/issue-detail-core (a different test failed on each
+# of three local runs on 2026-11-16: ISS-147, ISS-161, ISS-162).
+
+# NEWPIDASH-251: peek edits while the list is grouped by state.
+issues/peek-grouped-list-edit
+# Sidebar state picker on the detail page.
+issues/state-dropdown
+# Peek open, deep link, loading and error states.
+issues/issue-detail-peek
+# List layout rows, groups and quick-add.
+issues/layouts-a-list
