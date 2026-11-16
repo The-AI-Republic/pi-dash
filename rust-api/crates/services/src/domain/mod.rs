@@ -64,6 +64,7 @@ pub mod issues_move;
 pub(crate) mod issues_move_creation;
 pub mod pidash_agent_credential;
 pub mod pidash_agent_state;
+pub mod project_settings;
 pub mod projects;
 pub mod relations;
 pub mod tokens;

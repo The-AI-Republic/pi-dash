@@ -226,6 +226,10 @@ fn project_row(id: Uuid, p: &NewProject<'_>) -> projects::ActiveModel {
         // writable project serializers may override it on create.
         dedicated_runner_lost_action: Set(p.dedicated_runner_lost_action.to_owned()),
         default_work_type: Set(p.default_work_type.to_owned()),
+        // New projects start with the all-defaults bag (the DB default
+        // would fill `{}` too; named explicitly like every other
+        // column — NEWPIDASH-278).
+        settings: Set(Value::Object(Default::default())),
     }
 }
 
@@ -895,6 +899,8 @@ fn seed_project_row(id: Uuid, p: &SeedProject<'_>) -> projects::ActiveModel {
         // `Project.save()` fills a blank one from the repo binding; the
         // seed's repo_url is empty, so `general`.
         default_work_type: Set("general".to_owned()),
+        // All-defaults bag (NEWPIDASH-278).
+        settings: Set(Value::Object(Default::default())),
     }
 }
 
@@ -983,6 +989,8 @@ fn demo_project_row(id: Uuid, p: &DemoProject<'_>) -> projects::ActiveModel {
         // `Project.save()` fills a blank one from the repo binding; the
         // dummy project has no repo_url, so `general`.
         default_work_type: Set("general".to_owned()),
+        // All-defaults bag (NEWPIDASH-278).
+        settings: Set(Value::Object(Default::default())),
         ..Default::default()
     }
 }
