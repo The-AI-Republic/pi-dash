@@ -153,7 +153,9 @@ function renderThread(options: HarnessOptions = {}) {
   const wsRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/$ws",
-    component: () => <ThreadView workspaceSlug="acme" threadId={THREAD_ID} state={options.state} configured />,
+    component: () => (
+      <ThreadView workspaceSlug="acme" threadId={THREAD_ID} state={options.state} configured config={KEYED} />
+    ),
   });
   const router = createRouter({
     routeTree: rootRoute.addChildren([wsRoute]),
