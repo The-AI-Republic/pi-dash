@@ -271,36 +271,180 @@ pub async fn daemon_ensure_engine<R: Runtime>(app: AppHandle<R>) -> Result<(), S
     .await
 }
 
+/// Whether the daemon's runners are idle (no run in flight, no approval
+/// pending). `pidash restart` stops any agent run in progress, so an
+/// auto-update defers the restart until this is true and retries at the
+/// next launch or idle point. A missing/unreachable daemon counts as idle
+/// (there is no run to interrupt).
+async fn daemon_is_idle() -> bool {
+    match crate::daemon::daemon_status().await {
+        Ok(snapshot) => crate::daemon::is_idle(&snapshot),
+        Err(_) => true,
+    }
+}
+
 /// "Update Pi Dash on this computer" (design §4.4): install the CLI the app
 /// carries over the installed one, atomically, then restart the service with
-/// the CLI's reload helper (`pidash restart`). Only on the user's click, and
-/// refused for an install the app cannot write.
+/// the CLI's reload helper (`pidash restart`), deferring the restart until
+/// runners are idle. Only on the user's click, and refused for an install the
+/// app cannot write.
+///
+/// Version-aware (PIDESKAPP-137): never downgrades, never overwrites an
+/// unparseable version, and shows the manual-update hint for system installs.
+/// The same logic backs the silent launch-time check
+/// [`daemon_maybe_update_cli`].
 #[tauri::command]
 pub async fn daemon_update_cli<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    let bundled = pidash_cli::bundled_cli(&app);
+    let bundled_path = pidash_cli::bundled_cli(&app);
+    let bundled_ver = pidash_cli::bundled_version_parsed(&app);
+    let bundled_ver_str = pidash_cli::bundled_version(&app);
+    // Decide before the copy (needs the installed version without an AppHandle)
+    let status = crate::pidash_cli::detect_pidash_cli_sync();
+    let installed_ver = status.version.as_deref().and_then(crate::pidash_cli::parse_version_string);
+    let decision = crate::pidash_cli::decide_update(status.installed, installed_ver.clone(), bundled_ver.clone());
+    match decision {
+        crate::pidash_cli::UpdateDecision::Install => {
+            // Nothing installed: fall through to the copy below (handled by
+            // `installed_cli` erroring, but we install via the bundled copy into
+            // the standard install dir). To keep this command's contract, try
+            // the standard install path; if there is no bundled copy, error.
+            let bundled = bundled_path.ok_or(
+                "This build of the app carries no Pi Dash CLI. Run `pidash update` in a terminal.",
+            )?;
+            let Some(home) = crate::pidash_cli::home_for_install() else {
+                return Err(
+                    "Unable to locate the user's home directory to install Pi Dash.".into(),
+                );
+            };
+            let dest_dir = crate::pidash_cli::cli_install_dir_for_home(&home);
+            let app_clone = app.clone();
+            blocking(move || {
+                log(&app_clone, format!("Installing {}", dest_dir.display()));
+                pidash_cli::copy_bundled_cli(&bundled, &dest_dir)?;
+                Ok(())
+            })
+            .await?;
+            return Ok(());
+        }
+        crate::pidash_cli::UpdateDecision::Keep => {
+            return Err(format!(
+                "Pi Dash {} is already {}. Nothing to install.",
+                status.version.as_deref().unwrap_or(""),
+                bundled_ver_str.as_deref().unwrap_or("bundled"),
+            ));
+        }
+        crate::pidash_cli::UpdateDecision::Unknown => {
+            return Err(
+                "Unable to determine the installed Pi Dash version; it will not be overwritten. Update it manually (for example `pidash update`)."
+                    .into(),
+            );
+        }
+        crate::pidash_cli::UpdateDecision::Update => {}
+    }
+    let bundled_path_for_copy = bundled_path;
+    let bundled_ver_for_log = bundled_ver_str;
+    // From here: installed < bundled and the decision is to update.
+    let app_clone = app.clone();
+    let status_path = status.path.clone();
     blocking(move || {
-        let cli = installed_cli()?;
+        let cli = status_path.ok_or("The pidash CLI is not installed yet.")?;
         let (updatable, hint) = crate::daemon::cli_update_offer(Some(&cli));
         if !updatable {
             return Err(hint.unwrap_or_else(|| "This app cannot update Pi Dash here.".into()));
         }
-        let bundled = bundled.ok_or(
+        let bundled = bundled_path_for_copy.ok_or(
             "This build of the app carries no Pi Dash CLI. Run `pidash update` in a terminal.",
         )?;
         let dir = cli.parent().ok_or("the installed CLI has no directory")?;
-        log(&app, format!("Updating {}", cli.display()));
+        log(
+            &app_clone,
+            format!(
+                "Updating {} (bundled {})",
+                cli.display(),
+                bundled_ver_for_log.as_deref().unwrap_or("")
+            ),
+        );
         pidash_cli::copy_bundled_cli(&bundled, dir)?;
-        run_cli(&app, &cli, &["restart".into()], None, None)?;
+        Ok(())
+    })
+    .await?;
+    // Restart after the copy, deferring until idle so a running agent run is
+    // not killed (PIDESKAPP-137 default: wait until idle, retry at next launch).
+    if !daemon_is_idle().await {
+        log(
+            &app,
+            "Pi Dash on this computer will restart when its runners are idle. You can keep working; the restart happens at the next idle point or next launch.",
+        );
+        return Ok(());
+    }
+    let cli = blocking(installed_cli).await?;
+    let app_clone = app.clone();
+    blocking(move || {
+        run_cli(&app_clone, &cli, &["restart".into()], None, None)?;
         let has_engine =
             pidash_cli::spawn_piped(&cli, &["engine".into(), "path".into()], None, None)
                 .and_then(|c| c.wait_with_output().map_err(|e| e.to_string()))
                 .is_ok_and(|out| out.status.success());
         if !has_engine {
-            run_cli(&app, &cli, &["engine".into(), "install".into()], None, None)?;
+            run_cli(&app_clone, &cli, &["engine".into(), "install".into()], None, None)?;
         }
         Ok(())
     })
     .await
+}
+
+/// Silent launch-time version check (PIDESKAPP-137): if the installed CLI is
+/// older than the bundled one and this app may write to it, copy the bundled
+/// CLI over atomically and restart when idle. Call this in the background
+/// after `daemon_discover`; it never downgrades and never overwrites an
+/// unparseable install. Returns `Ok(())` when nothing needed doing.
+#[tauri::command]
+pub async fn daemon_maybe_update_cli<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
+    let bundled_path = pidash_cli::bundled_cli(&app);
+    let bundled_ver = pidash_cli::bundled_version_parsed(&app);
+    if bundled_path.is_none() || bundled_ver.is_none() {
+        return Ok(false);
+    }
+    let status = crate::pidash_cli::detect_pidash_cli_sync();
+    if !status.installed {
+        return Ok(false); // Install stays consent-gated via `install_pidash_cli`.
+    }
+    let installed_ver = status.version.as_deref().and_then(crate::pidash_cli::parse_version_string);
+    if crate::pidash_cli::decide_update(true, installed_ver, bundled_ver) != crate::pidash_cli::UpdateDecision::Update {
+        return Ok(false);
+    }
+    let cli = status.path.clone().ok_or("install vanished during update check")?;
+    let (updatable, hint) = crate::daemon::cli_update_offer(Some(&cli));
+    if !updatable {
+        // System installs: do not touch; surface the hint via CliInfo.
+        let _ = hint;
+        return Ok(false);
+    }
+    let app_clone = app.clone();
+    let bundled = bundled_path.unwrap();
+    let dir = cli.parent().ok_or("the installed CLI has no directory")?.to_path_buf();
+    let installed_display = cli.clone();
+    let updated = blocking(move || {
+        log(&app_clone, format!("Auto-updating {}", installed_display.display()));
+        pidash_cli::copy_bundled_cli(&bundled, &dir).map(|_| ())
+    })
+    .await?;
+    let _ = updated;
+    if !daemon_is_idle().await {
+        log(
+            &app,
+            "Auto-update copied; Pi Dash will restart when its runners are idle.",
+        );
+        return Ok(true);
+    }
+    let cli_again = blocking(installed_cli).await?;
+    let app_clone = app.clone();
+    blocking(move || {
+        run_cli(&app_clone, &cli_again, &["restart".into()], None, None)?;
+        Ok(())
+    })
+    .await?;
+    Ok(true)
 }
 
 /// Hand an engine-only device grant the app approved to the daemon's CLI

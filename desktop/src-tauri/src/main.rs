@@ -559,6 +559,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             setup::daemon_install_service,
             setup::daemon_ensure_engine,
             setup::daemon_update_cli,
+            setup::daemon_maybe_update_cli,
             setup::pidash_cli_engine_login,
             setup::pidash_cli_logout,
             // Moving older builds' private daemon trees to the shared daemon.
@@ -848,6 +849,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Launching the app installs and starts nothing: the CLI and its
             // service are set up only from the consent screen (design §4.7).
+            //
+            // PIDESKAPP-137: on each launch the app quietly compares the
+            // installed CLI (`pidash --version`) with the bundled CLI
+            // (`bin/pidash.version`) and auto-updates an older, writable
+            // install in the background, deferring `pidash restart` until
+            // runners are idle. Missing/system/unknown installs are left
+            // alone (see `daemon::CliInfo`).
+            let cli_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = setup::daemon_maybe_update_cli(cli_handle).await;
+            });
 
             Ok(())
         })

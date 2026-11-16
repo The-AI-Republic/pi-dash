@@ -159,6 +159,16 @@ fn dirs_home() -> Option<PathBuf> {
     home_from_env(cfg!(windows), |key| std::env::var_os(key))
 }
 
+/// The user's home dir for install destinations (wrapper for setup.rs).
+pub(crate) fn home_for_install() -> Option<PathBuf> {
+    home_from_env(cfg!(windows), |key| std::env::var_os(key))
+}
+
+/// Convenience for `cli_install_dir` with no LOCALAPPDATA override.
+pub(crate) fn cli_install_dir_for_home(home: &Path) -> PathBuf {
+    cli_install_dir(home, None)
+}
+
 /// The home directory an environment names: `USERPROFILE` on Windows
 /// (falling back to `HOME` for Git Bash / MSYS2 sessions that set it),
 /// `HOME` elsewhere. Pure so the Windows layout is testable anywhere.
@@ -308,6 +318,190 @@ pub(crate) fn bundled_cli<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
         .join("bin")
         .join(name);
     path.is_file().then_some(path)
+}
+
+// ---------------------------------------------------------------------------
+// Bundled version + semver comparison (PIDESKAPP-137)
+// ---------------------------------------------------------------------------
+
+/// A parsed semver `major.minor.patch[-prerelease]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemVer {
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+    pub pre: Option<String>,
+}
+
+impl SemVer {
+    fn to_string(&self) -> String {
+        match &self.pre {
+            Some(pre) => format!("{}.{}.{}-{}", self.major, self.minor, self.patch, pre),
+            None => format!("{}.{}.{}", self.major, self.minor, self.patch),
+        }
+    }
+}
+
+/// Parse a bare `X.Y.Z[-pre][+build]` token. Build metadata is ignored for
+/// ordering (SemVer §10). `None` on any non-numeric segment or wrong arity.
+pub(crate) fn parse_semver(s: &str) -> Option<SemVer> {
+    let s = s.trim();
+    // Strip build metadata
+    let core = s.split('+').next().unwrap_or(s);
+    // Split pre-release at the first hyphen after the triple
+    let (triple, pre) = match core.split_once('-') {
+        Some((t, p)) if !p.is_empty() => (t, Some(p.to_string())),
+        Some((t, _)) => (t, None),
+        None => (core, None),
+    };
+    let mut parts = triple.split('.');
+    let major = parts.next()?.trim().parse().ok()?;
+    let minor = parts.next()?.trim().parse().ok()?;
+    let patch = parts.next()?.trim().parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(SemVer { major, minor, patch, pre })
+}
+
+/// Extract a version from `pidash --version` output.
+///
+/// The CLI reports `pidash X.Y.Z` (clap default), but be tolerant: also accept
+/// `pidash-vX.Y.Z`, bare `X.Y.Z`, and a leading `v`. Any unrecognised output is
+/// `None` (unknown → never overwrite).
+pub(crate) fn extract_version_from_output(output: &str) -> Option<SemVer> {
+    for token in output.split_whitespace() {
+        let tok = token.trim().trim_matches('"').trim_matches('\'');
+        // Handle `pidash-v0.1.30` as a single token
+        let candidate = tok
+            .strip_prefix("pidash-v")
+            .or_else(|| tok.strip_prefix("pidash-"))
+            .unwrap_or(tok);
+        let candidate = candidate.strip_prefix('v').unwrap_or(candidate);
+        if let Some(v) = parse_semver(candidate) {
+            return Some(v);
+        }
+        // Token may be `0.1.30` with trailing punctuation (rare)
+        let trimmed = candidate.trim_matches(|c: char| c == ',' || c == ';');
+        if let Some(v) = parse_semver(trimmed) {
+            return Some(v);
+        }
+    }
+    // No version token found (e.g. "pidash version 0.1.30 (nightly)" is
+    // covered above; plain "unknown" returns None)
+    None
+}
+
+/// Parse a raw `PidashStatus::version` string (already a single line).
+pub(crate) fn parse_version_string(s: &str) -> Option<SemVer> {
+    extract_version_from_output(s)
+}
+
+/// Semver ordering: numeric triple first, then pre-release.
+pub(crate) fn cmp_semver(a: &SemVer, b: &SemVer) -> std::cmp::Ordering {
+    match (a.major, a.minor, a.patch).cmp(&(b.major, b.minor, b.patch)) {
+        std::cmp::Ordering::Equal => {}
+        other => return other,
+    }
+    match (&a.pre, &b.pre) {
+        (None, None) => std::cmp::Ordering::Equal,
+        // Pre-release < release for the same triple (SemVer §11.4)
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (Some(pa), Some(pb)) => cmp_pre_release(pa, pb),
+    }
+}
+
+fn cmp_pre_release(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let mut ai = a.split('.');
+    let mut bi = b.split('.');
+    loop {
+        match (ai.next(), bi.next()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less, // shorter < longer when prefix equal
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) => {
+                let xn = x.parse::<u64>().is_ok();
+                let yn = y.parse::<u64>().is_ok();
+                let ord = match (xn, yn) {
+                    (true, true) => x.parse::<u64>().unwrap().cmp(&y.parse::<u64>().unwrap()),
+                    (true, false) => Ordering::Less, // numeric < alphanumeric (SemVer §11.4.3)
+                    (false, true) => Ordering::Greater,
+                    (false, false) => x.cmp(y),
+                };
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+        }
+    }
+}
+
+/// What the app should do with the installed CLI given the bundled one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateDecision {
+    /// No CLI installed → install the bundled one.
+    Install,
+    /// Installed is older than bundled → auto-update (caller checks `cli_update_offer`).
+    Update,
+    /// Installed is same or newer → keep as-is (never downgrade).
+    Keep,
+    /// Either version is missing/unparseable → keep, never overwrite.
+    Unknown,
+}
+
+/// Pure decision table (no I/O, fully tested):
+/// - not installed → Install
+/// - installed but either version unknown → Unknown
+/// - installed < bundled → Update
+/// - otherwise → Keep
+pub(crate) fn decide_update(
+    installed: bool,
+    installed_ver: Option<SemVer>,
+    bundled_ver: Option<SemVer>,
+) -> UpdateDecision {
+    if !installed {
+        return UpdateDecision::Install;
+    }
+    let (iv, bv) = match (installed_ver, bundled_ver) {
+        (Some(i), Some(b)) => (i, b),
+        _ => return UpdateDecision::Unknown,
+    };
+    if cmp_semver(&iv, &bv) == std::cmp::Ordering::Less {
+        UpdateDecision::Update
+    } else {
+        UpdateDecision::Keep
+    }
+}
+
+/// Read the bundled version string from `bin/pidash.version` (no binary run).
+pub(crate) fn bundled_version_path<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
+    let p = tauri::Manager::path(app)
+        .resource_dir()
+        .ok()?
+        .join("bin")
+        .join("pidash.version");
+    p.is_file().then_some(p)
+}
+
+/// The bundled version as a bare string (`0.1.30`), if recorded.
+pub(crate) fn bundled_version<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
+    let path = bundled_version_path(app)?;
+    let text = std::fs::read_to_string(path).ok()?;
+    let trimmed = text.trim().to_string();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+/// The bundled version parsed as semver.
+pub(crate) fn bundled_version_parsed<R: Runtime>(app: &AppHandle<R>) -> Option<SemVer> {
+    bundled_version(app).and_then(|s| parse_semver(&s))
+}
+
+/// Testable helper: parse a version file's contents without an `AppHandle`.
+pub(crate) fn bundled_version_from_path(path: &Path) -> Option<SemVer> {
+    let text = std::fs::read_to_string(path).ok()?;
+    parse_semver(text.trim())
 }
 
 /// Copy the bundled CLI to `dest_dir`, atomically, and make it executable.
@@ -1320,5 +1514,107 @@ mod tests {
         assert!(script.contains("Remove-Item -LiteralPath $tmp"));
         assert!(!script.contains("iex"));
         assert!(!script.contains("Invoke-Expression"));
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    fn v(s: &str) -> SemVer {
+        parse_semver(s).unwrap_or_else(|| panic!("bad semver {s}"))
+    }
+
+    #[test]
+    fn parse_semver_accepts_release_and_prerelease() {
+        assert_eq!(v("0.1.30"), SemVer { major: 0, minor: 1, patch: 30, pre: None });
+        assert_eq!(v("0.1.23-rc.7"), SemVer { major: 0, minor: 1, patch: 23, pre: Some("rc.7".into()) });
+        // build metadata ignored
+        assert_eq!(v("1.2.3+build.5"), v("1.2.3"));
+        assert_eq!(v("1.2.3-rc.1+exp.sha.5114f85"), SemVer { major: 1, minor: 2, patch: 3, pre: Some("rc.1".into()) });
+        // invalid
+        assert!(parse_semver("1.2").is_none());
+        assert!(parse_semver("a.b.c").is_none());
+        assert!(parse_semver("1.2.3.4").is_none());
+        assert!(parse_semver("").is_none());
+    }
+
+    #[test]
+    fn extract_version_from_output_is_tolerant() {
+        for (input, expected) in [
+            ("pidash 0.1.30", "0.1.30"),
+            ("pidash 0.1.23-rc.7", "0.1.23-rc.7"),
+            ("pidash-v0.1.30", "0.1.30"),
+            ("pidash 0.1.30 (2026-11-12)", "0.1.30"),
+            ("0.1.30", "0.1.30"),
+            ("v0.1.30", "0.1.30"),
+        ] {
+            let out = extract_version_from_output(input).unwrap();
+            assert_eq!(out, v(expected), "{input}");
+        }
+        assert!(extract_version_from_output("unknown").is_none());
+        assert!(extract_version_from_output("").is_none());
+        assert!(extract_version_from_output("pidash").is_none());
+        // parse_version_string is the wrapper used for `PidashStatus::version`
+        assert_eq!(parse_version_string("pidash 0.1.30"), Some(v("0.1.30")));
+        assert_eq!(parse_version_string("garbage"), None);
+    }
+
+    #[test]
+    fn cmp_semver_orders_triples_then_prerelease() {
+        use std::cmp::Ordering::*;
+        assert_eq!(cmp_semver(&v("0.1.30"), &v("0.1.29")), Greater);
+        assert_eq!(cmp_semver(&v("0.2.0"), &v("0.1.99")), Greater);
+        assert_eq!(cmp_semver(&v("1.0.0"), &v("0.99.99")), Greater);
+        assert_eq!(cmp_semver(&v("0.1.30"), &v("0.1.30")), Equal);
+        // Pre-release < release for the same triple (SemVer §11.4)
+        assert_eq!(cmp_semver(&v("0.1.30-rc.7"), &v("0.1.30")), Less);
+        assert_eq!(cmp_semver(&v("0.1.30"), &v("0.1.30-rc.7")), Greater);
+        // Two pre-releases order lexically/numerically per spec
+        assert_eq!(cmp_semver(&v("0.1.30-rc.1"), &v("0.1.30-rc.2")), Less);
+        assert_eq!(cmp_semver(&v("0.1.30-rc.10"), &v("0.1.30-rc.2")), Greater);
+        // Numeric pre < alphanumeric pre
+        assert_eq!(cmp_semver(&v("0.1.30-1"), &v("0.1.30-a")), Less);
+        // Shorter pre < longer when prefix equal
+        assert_eq!(cmp_semver(&v("0.1.30-rc"), &v("0.1.30-rc.1")), Less);
+    }
+
+    #[test]
+    fn decide_update_covers_all_cases() {
+        // Missing → Install
+        assert_eq!(decide_update(false, None, Some(v("0.1.30"))), UpdateDecision::Install);
+        assert_eq!(decide_update(false, Some(v("0.1.29")), Some(v("0.1.30"))), UpdateDecision::Install);
+        // Older → Update
+        assert_eq!(decide_update(true, Some(v("0.1.29")), Some(v("0.1.30"))), UpdateDecision::Update);
+        assert_eq!(decide_update(true, Some(v("0.1.30-rc.7")), Some(v("0.1.30"))), UpdateDecision::Update);
+        assert_eq!(decide_update(true, Some(v("0.1.23-rc.7")), Some(v("0.1.30"))), UpdateDecision::Update);
+        // Same → Keep, never downgrade
+        assert_eq!(decide_update(true, Some(v("0.1.30")), Some(v("0.1.30"))), UpdateDecision::Keep);
+        // Newer installed → Keep (no downgrade)
+        assert_eq!(decide_update(true, Some(v("0.1.31")), Some(v("0.1.30"))), UpdateDecision::Keep);
+        assert_eq!(decide_update(true, Some(v("0.1.30")), Some(v("0.1.29"))), UpdateDecision::Keep);
+        // Unparseable / missing version → Unknown (never overwrite)
+        assert_eq!(decide_update(true, None, Some(v("0.1.30"))), UpdateDecision::Unknown);
+        assert_eq!(decide_update(true, Some(v("0.1.29")), None), UpdateDecision::Unknown);
+        assert_eq!(decide_update(true, None, None), UpdateDecision::Unknown);
+    }
+
+    #[test]
+    fn bundled_version_file_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("pidash.version");
+        std::fs::write(&path, "0.1.30\n").unwrap();
+        assert_eq!(bundled_version_from_path(&path), Some(v("0.1.30")));
+        assert_eq!(bundled_version_from_path(&tmp.path().join("missing")), None);
+        std::fs::write(&path, "garbage\n").unwrap();
+        assert_eq!(bundled_version_from_path(&path), None);
+    }
+
+    #[test]
+    fn older_pre_release_install_is_updated_to_stable() {
+        // The exact drift the issue cites: pinned pre-release 0.1.23-rc.7 vs stable 0.1.30
+        let installed = parse_version_string("pidash 0.1.23-rc.7").unwrap();
+        let bundled = parse_semver("0.1.30").unwrap();
+        assert_eq!(decide_update(true, Some(installed), Some(bundled)), UpdateDecision::Update);
     }
 }
