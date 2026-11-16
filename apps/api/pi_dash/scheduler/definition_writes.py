@@ -23,8 +23,10 @@ from pi_dash.db.models import Scheduler, SchedulerBinding
 def create_definition(workspace, data: Mapping) -> Scheduler:
     """Create a scheduler definition in ``workspace`` and return it.
 
-    The workspace goes into the serializer context so a duplicate slug is
-    a ``{"slug": [...]}`` field error rather than an IntegrityError.
+    The workspace goes into the serializer context so a duplicate name
+    (checked on the slug derived from the name, PDASHOSS01-319) is a
+    ``{"name": [...]}`` field error rather than an IntegrityError.
+    A body ``slug`` is ignored: the server derives it from ``name``.
     Raises ``rest_framework.serializers.ValidationError`` on bad input.
     """
     from pi_dash.app.serializers.scheduler import SchedulerSerializer

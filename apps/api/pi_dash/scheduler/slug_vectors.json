@@ -1,0 +1,30 @@
+[
+  { "name": "Nightly Bug Scan", "slug": "nightly-bug-scan" },
+  { "name": "  PR  review!!", "slug": "pr-review" },
+  { "name": "Security Audit", "slug": "security-audit" },
+  { "name": "Bug Scan", "slug": "bug-scan" },
+  { "name": "bug-scan", "slug": "bug-scan" },
+  { "name": "BUG_SCAN", "slug": "bug-scan" },
+  { "name": "GDPR — compliance & audit", "slug": "gdpr-compliance-audit" },
+  { "name": "  ...weekly review!  ", "slug": "weekly-review" },
+  { "name": "SOC2 Type 2", "slug": "soc2-type-2" },
+  { "name": "Café crème", "slug": "caf-cr-me" },
+  { "name": "İstanbul Ops", "slug": "i-stanbul-ops" },
+  { "name": "Ops 🚀 Daily", "slug": "ops-daily" },
+  { "name": "!!!", "slug": "" },
+  { "name": "", "slug": "" },
+  { "name": "   ", "slug": "" },
+  { "name": "日本語", "slug": "" },
+  {
+    "name": "Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa Bbbb",
+    "slug": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+    "name": "Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa Bbbb",
+    "slug": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+    "name": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "slug": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  }
+]

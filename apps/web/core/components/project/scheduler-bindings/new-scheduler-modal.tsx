@@ -14,7 +14,6 @@ import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import type { IScheduler, ISchedulerBinding, SchedulerOutcomeMode } from "@pi-dash/services";
 import { SchedulerService } from "@pi-dash/services";
 import { EModalPosition, EModalWidth, ModalCore } from "@pi-dash/ui";
-import { deriveSchedulerSlug } from "@/components/schedulers/definition-helpers";
 import { SchedulerDefinitionFields } from "@/components/schedulers/scheduler-definition-fields";
 import { BindingOutcomeModeField, DEFAULT_OUTCOME_MODE } from "./binding-outcome-mode-field";
 import { BindingPodField } from "./binding-pod-field";
@@ -30,7 +29,6 @@ interface NewSchedulerFormValues {
   scheduler: string;
   // create mode — definition fields
   name: string;
-  slug: string;
   description: string;
   prompt: string;
   color: string;
@@ -66,7 +64,6 @@ type Props = {
 const DEFAULT_VALUES = (): NewSchedulerFormValues => ({
   scheduler: "",
   name: "",
-  slug: "",
   description: "",
   prompt: "",
   color: COLOR_PALETTE[0],
@@ -112,7 +109,7 @@ export const NewSchedulerModal = observer(function NewSchedulerModal(props: Prop
     reset,
     setError,
     setValue,
-    formState: { errors, isSubmitting, dirtyFields },
+    formState: { errors, isSubmitting },
   } = useForm<NewSchedulerFormValues>({ defaultValues: DEFAULT_VALUES() });
 
   const [mode, setMode] = useState<NewSchedulerMode>("install");
@@ -143,14 +140,6 @@ export const NewSchedulerModal = observer(function NewSchedulerModal(props: Prop
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, reset]);
 
-  // Auto-derive the slug from the name until the user edits the slug field
-  // themselves (programmatic setValue doesn't mark it dirty, typing does).
-  const watchedName = useWatch({ control, name: "name" }) ?? "";
-  useEffect(() => {
-    if (mode !== "create" || dirtyFields.slug) return;
-    setValue("slug", deriveSchedulerSlug(watchedName));
-  }, [watchedName, mode, dirtyFields.slug, setValue]);
-
   const watchedDtstart = useWatch({ control, name: "dtstart" }) ?? "";
   const watchedRrule = useWatch({ control, name: "rrule" }) ?? "";
 
@@ -171,7 +160,6 @@ export const NewSchedulerModal = observer(function NewSchedulerModal(props: Prop
       let created: IScheduler;
       try {
         created = await schedulerService.createScheduler(workspaceSlug, {
-          slug: values.slug.trim(),
           name: values.name.trim(),
           description: values.description.trim(),
           prompt: values.prompt,
@@ -179,17 +167,17 @@ export const NewSchedulerModal = observer(function NewSchedulerModal(props: Prop
           is_enabled: true,
         });
       } catch (e: unknown) {
-        const err = e as { error?: string; slug?: string[]; name?: string[]; prompt?: string[] } | null;
-        // Slug uniqueness is per workspace — surface the serializer's 400
-        // inline on the field instead of a toast.
-        if (err?.slug?.[0]) {
-          setError("slug", { type: "server", message: err.slug[0] });
+        const err = e as { error?: string; name?: string[]; prompt?: string[] } | null;
+        // The server derives the slug from the name, so a duplicate (unique
+        // per workspace) comes back as a name error — show it inline.
+        if (err?.name?.[0]) {
+          setError("name", { type: "server", message: err.name[0] });
           return;
         }
         setToast({
           type: TOAST_TYPE.ERROR,
           title: t("Something went wrong"),
-          message: err?.error ?? err?.name?.[0] ?? err?.prompt?.[0] ?? t("Could not create the scheduler."),
+          message: err?.error ?? err?.prompt?.[0] ?? t("Could not create the scheduler."),
         });
         return;
       }
@@ -332,7 +320,6 @@ export const NewSchedulerModal = observer(function NewSchedulerModal(props: Prop
             control={control}
             errors={errors}
             nameName="name"
-            slugName="slug"
             descriptionName="description"
             promptName="prompt"
             colorName="color"

@@ -51,6 +51,8 @@ def test_create_install_delete(db, workspace, project, create_user):
         slug=workspace.slug,
     )
     assert created.status_code == 201
+    # The slug is derived from the name; the body slug is ignored.
+    assert created.data["slug"] == "scan"
     scheduler_id = created.data["id"]
 
     duplicate = _call(
@@ -62,7 +64,10 @@ def test_create_install_delete(db, workspace, project, create_user):
         slug=workspace.slug,
     )
     assert duplicate.status_code == 400
-    assert "slug" in duplicate.data
+    # The duplicate is reported on the name (derived-slug collision).
+    assert duplicate.data == {
+        "name": ["A scheduler with the same name already exists in this workspace."]
+    }
 
     install = {
         "scheduler": scheduler_id,

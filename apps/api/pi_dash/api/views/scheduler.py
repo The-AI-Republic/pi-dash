@@ -67,7 +67,6 @@ from pi_dash.scheduler.definition_writes import (
     create_definition,
     delete_definition,
     is_builtin,
-    is_builtin_slug,
     update_definition,
 )
 
@@ -92,8 +91,8 @@ BINDING_WRITABLE_FIELDS = tuple(
     if f in SchedulerBindingSerializer.Meta.fields
 )
 
-#: Definition fields an API-key caller may edit. The app serializer also
-#: takes ``slug``; renaming the slug stays web-app only.
+#: Definition fields an API-key caller may edit. ``slug`` is read-only
+#: (derived from the name, PDASHOSS01-319) and is ignored if sent.
 DEFINITION_WRITABLE_FIELDS = tuple(
     f
     for f in ("prompt", "name", "description", "color", "is_enabled")
@@ -101,7 +100,8 @@ DEFINITION_WRITABLE_FIELDS = tuple(
 )
 
 #: Definition fields an API-key caller may set on create: the editable ones
-#: plus the slug. ``source`` and the rest are server-set.
+#: plus ``slug`` as an ignored key (old CLI callers still send it).
+#: ``source`` and the rest are server-set.
 DEFINITION_CREATE_FIELDS = tuple(
     f
     for f in ("slug", *DEFINITION_WRITABLE_FIELDS)
@@ -234,8 +234,9 @@ class WorkspaceSchedulerListAPIEndpoint(BaseAPIView):
         """POST /api/v1/workspaces/<slug>/schedulers/ — create a definition.
 
         Validation is the web app's (``create_definition``), so a duplicate
-        slug is a ``{"slug": [...]}`` field error. A built-in slug is
-        refused: the reseed would take the row over.
+        name (checked on the slug derived from the name, PDASHOSS01-319)
+        is a ``{"name": [...]}`` field error. A body ``slug`` is ignored:
+        the server derives it from ``name``.
         """
         if not _feature_enabled():
             return _disabled_response()
@@ -246,11 +247,6 @@ class WorkspaceSchedulerListAPIEndpoint(BaseAPIView):
         if unknown:
             return _unwritable_response(
                 data, DEFINITION_CREATE_FIELDS, "a new scheduler"
-            )
-        if isinstance(data.get("slug"), str) and is_builtin_slug(data["slug"].strip()):
-            return Response(
-                {"slug": ["This slug is reserved for a built-in scheduler."]},
-                status=status.HTTP_400_BAD_REQUEST,
             )
         workspace = get_object_or_404(Workspace, slug=slug)
         scheduler = create_definition(workspace, data)

@@ -51,8 +51,8 @@ export interface IScheduler {
   updated_at: string;
 }
 
+/** The server derives `slug` from `name`; clients never send it. */
 export interface ISchedulerCreatePayload {
-  slug: string;
   name: string;
   description?: string;
   prompt: string;

@@ -944,8 +944,6 @@ export default {
   "Looks like all your projects are still active—great job!":
     "Looks like all your projects are still active—great job!",
   Low: "Low",
-  "Lowercase identifier used in URLs. Cannot be changed after creation.":
-    "Lowercase identifier used in URLs. Cannot be changed after creation.",
   Machine: "Machine",
   "Machines that have authenticated with Pi Dash or host runners for this workspace.":
     "Machines that have authenticated with Pi Dash or host runners for this workspace.",
@@ -1012,6 +1010,7 @@ export default {
   "Name (optional)": "Name (optional)",
   "Name is required": "Name is required",
   "Name is required.": "Name is required.",
+  "Name must contain at least one letter or digit.": "Name must contain at least one letter or digit.",
   "Name your workspace": "Name your workspace",
   "name@company.com": "name@company.com",
   Navigate: "Navigate",
@@ -1479,7 +1478,6 @@ export default {
   "Sign out": "Sign out",
   "Sign up": "Sign up",
   Slug: "Slug",
-  "Slug is required.": "Slug is required.",
   Snooze: "Snooze",
   Snoozed: "Snoozed",
   "Some error occurred while copying the current page URL to clipboard.":
@@ -1647,8 +1645,8 @@ export default {
     "This rule uses features the builder can't edit, so it opens as raw RRULE. Editing below keeps it untouched otherwise.",
   "This run is not available. It may have been deleted or belong to a different workspace.":
     "This run is not available. It may have been deleted or belong to a different workspace.",
-  "This soft-deletes the scheduler. Any active project bindings will stop firing. The slug becomes available for re-creation.":
-    "This soft-deletes the scheduler. Any active project bindings will stop firing. The slug becomes available for re-creation.",
+  "This soft-deletes the scheduler. Any active project bindings will stop firing. Its name becomes available for a new scheduler.":
+    "This soft-deletes the scheduler. Any active project bindings will stop firing. Its name becomes available for a new scheduler.",
   "This workspace is back on the shared default template.": "This workspace is back on the shared default template.",
   "{count} of {max} runs used": "{count} of {max} runs used",
   "{count} runs used, no cap": "{count} runs used, no cap",
