@@ -982,6 +982,7 @@ fn open_session_row(
         last_seen_at: Set(Some(at(last_seen_at))),
         revoked_at: Set(None),
         revoked_reason: Set(String::new()),
+        capabilities: Set(serde_json::json!([])),
     }
 }
 

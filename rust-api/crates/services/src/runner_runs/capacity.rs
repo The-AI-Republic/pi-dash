@@ -50,7 +50,7 @@ pub fn protocol_for_capabilities(capabilities: &Value) -> i16 {
 /// u64 revision or None when invalid. Rejects bools, floats,
 /// negatives, overflow and non-ints.
 pub fn parse_revision(value: &Value) -> Option<u64> {
-    if value.is_bool() {
+    if value.is_boolean() {
         return None;
     }
     if let Some(u) = value.as_u64() {
@@ -87,7 +87,7 @@ pub fn parse_session_capabilities(body: &Map<String, Value>) -> Vec<String> {
 
 /// Count field validation: positive (≥1) or allow_zero (≥0).
 pub fn validate_count(value: &Value, allow_zero: bool, positive: bool) -> Option<u64> {
-    if value.is_bool() {
+    if value.is_boolean() {
         return None;
     }
     if let Some(u) = value.as_u64() {
