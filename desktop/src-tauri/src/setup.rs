@@ -51,7 +51,7 @@ const PATH_END: &str = "__PIDASH_PATH_END__";
 /// be run, takes no `-lc` (tcsh/csh, nushell), or prints nothing in time.
 pub fn login_shell_path_with(shell: &Path) -> Option<String> {
     let script = format!("printf '{PATH_BEGIN}%s{PATH_END}' \"$PATH\"");
-    let mut child = std::process::Command::new(shell)
+    let mut child = crate::pidash_cli::hidden_command(shell)
         .args(["-lc", &script])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

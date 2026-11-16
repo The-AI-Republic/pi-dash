@@ -60,6 +60,29 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Runtime};
 
+/// Build a `Command` that never opens a console window on Windows.
+///
+/// The desktop app is a `windows_subsystem = "windows"` process (no console
+/// of its own), but every child it starts — `pidash.exe`, `where.exe`,
+/// `powershell.exe`, the login shell — is a console-subsystem program. A GUI
+/// parent spawning a console child without `CREATE_NO_WINDOW` allocates a
+/// new console and flashes it, even when the child's stdio is piped.
+///
+/// This is the only place `Command::new` may appear in `desktop/src-tauri/src`;
+/// the regression test in this file enforces it so a new spawn site cannot
+/// forget the flag. Piped stdout/stderr keep working with the flag set.
+pub(crate) fn hidden_command<P: AsRef<std::ffi::OsStr>>(program: P) -> Command {
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 /// Result of [`detect_pidash_cli`].
 #[derive(Debug, Serialize, Clone)]
 pub struct PidashStatus {
@@ -204,7 +227,7 @@ const PROBE_VERSION_TIMEOUT: Duration = Duration::from_secs(2);
 /// hang, which we kill the child on. Callers treat "version unknown" as
 /// detected-but-version-unknown rather than failing the whole detection.
 fn probe_version(path: &PathBuf) -> Option<String> {
-    let mut child = match Command::new(path)
+    let mut child = match hidden_command(path)
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -531,7 +554,7 @@ fn which_pidash() -> Option<PathBuf> {
     } else {
         ("which", "pidash")
     };
-    let output = Command::new(cmd)
+    let output = hidden_command(cmd)
         .arg(arg)
         .stdin(Stdio::null())
         .output()
@@ -840,18 +863,12 @@ pub(crate) fn spawn_piped(
 ) -> Result<Child, String> {
     use std::io::Write;
 
-    let mut command = Command::new(program);
+    let mut command = hidden_command(program);
     command
         .env_remove("PIDASH_CONFIG_DIR")
         .env_remove("PIDASH_DATA_DIR");
     if let Some(path) = path {
         command.env("PATH", path);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
     }
     let mut child = command
         .args(args)
@@ -1320,5 +1337,82 @@ mod tests {
         assert!(script.contains("Remove-Item -LiteralPath $tmp"));
         assert!(!script.contains("iex"));
         assert!(!script.contains("Invoke-Expression"));
+    }
+}
+
+#[cfg(test)]
+mod hidden_command_regression {
+    use std::path::PathBuf;
+
+    fn slice_fn<'a>(src: &'a str, needle: &str) -> &'a str {
+        let start = src
+            .find(needle)
+            .unwrap_or_else(|| panic!("function {needle:?} not found"));
+        let open = src[start..]
+            .find('{')
+            .unwrap_or_else(|| panic!("no opening brace for {needle:?}"));
+        let mut depth = 0usize;
+        for (i, c) in src[start + open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return &src[start..start + open + i + 1];
+                    }
+                }
+                _ => {}
+            }
+        }
+        &src[start..]
+    }
+
+    /// PIDESKAPP-115: a GUI-subsystem parent spawning a console child without
+    /// CREATE_NO_WINDOW flashes a console window. Every spawn in
+    /// `desktop/src-tauri/src` must go through `hidden_command` so a new site
+    /// cannot forget the flag. This test scans the source so it runs on Linux
+    /// CI too.
+    #[test]
+    fn all_child_spawns_go_through_hidden_command() {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let src = std::fs::read_to_string(manifest.join("src").join("pidash_cli.rs"))
+            .expect("reading pidash_cli.rs");
+        // Helper must exist.
+        assert!(
+            src.contains("fn hidden_command"),
+            "missing shared hidden_command helper — add it in pidash_cli.rs"
+        );
+        // The helper itself must construct the Command.
+        let helper = slice_fn(&src, "fn hidden_command");
+        assert!(
+            helper.contains("Command::new"),
+            "hidden_command must be the only place that calls Command::new"
+        );
+        // Each spawn site must call the helper and must not contain a bare
+        // construction. Check the function bodies only, so this test's own
+        // search string cannot self-match.
+        for fname in ["fn probe_version", "fn which_pidash", "fn spawn_piped"] {
+            let body = slice_fn(&src, fname);
+            assert!(
+                body.contains("hidden_command("),
+                "{fname} must spawn via hidden_command, got:\n{body}"
+            );
+            assert!(
+                !body.contains("Command::new"),
+                "{fname} still contains a bare Command::new — use hidden_command"
+            );
+        }
+        // setup.rs login-shell spawn (Unix-only today) must also go through it.
+        let setup_src = std::fs::read_to_string(manifest.join("src").join("setup.rs"))
+            .expect("reading setup.rs");
+        let body = slice_fn(&setup_src, "fn login_shell_path_with");
+        assert!(
+            body.contains("hidden_command("),
+            "login_shell_path_with must spawn via hidden_command, got:\n{body}"
+        );
+        assert!(
+            !body.contains("Command::new"),
+            "login_shell_path_with still contains a bare Command::new"
+        );
     }
 }
