@@ -502,6 +502,10 @@ pub struct AssignmentFacts {
     pub prompt: String,
     /// `run.run_config` for the assign frame (`dict.get` lookups).
     pub run_config: Map<String, Value>,
+    /// Fresh attempt token minted for this assignment (NEWPIDASH-241 T1).
+    pub assignment_token: Uuid,
+    /// Negotiated assignment protocol (0 legacy, 1 machine queue).
+    pub assignment_protocol: i16,
 }
 
 /// One committed assignment: the ordered `SET` plan plus the
@@ -550,11 +554,21 @@ pub enum DrainEffect {
 pub fn plan_assignment(facts: &AssignmentFacts) -> AssignmentPlan {
     let run_id = facts.run_id.to_string();
     let work_item_id = facts.work_item_id.map(|id| id.to_string());
-    let message = build_assign_msg(
+    let mut message = build_assign_msg(
         &run_id,
         work_item_id.as_deref(),
         &facts.prompt,
         &facts.run_config,
+    );
+    // NEWPIDASH-241 T1: carry attempt identity so the daemon echoes it on
+    // capacity/lifecycle calls. Old daemons ignore the additive fields.
+    message.insert(
+        "assignment_token".to_string(),
+        Value::String(facts.assignment_token.to_string()),
+    );
+    message.insert(
+        "assignment_protocol".to_string(),
+        Value::from(facts.assignment_protocol),
     );
     AssignmentPlan {
         run_id: facts.run_id,
@@ -575,6 +589,18 @@ pub fn plan_assignment(facts: &AssignmentFacts) -> AssignmentPlan {
             SetClause {
                 column: "assigned_at",
                 value: SetValue::Now,
+            },
+            SetClause {
+                column: "assignment_token",
+                value: SetValue::Text(facts.assignment_token.to_string()),
+            },
+            SetClause {
+                column: "assignment_protocol",
+                value: SetValue::Text(facts.assignment_protocol.to_string()),
+            },
+            SetClause {
+                column: "capacity_wait",
+                value: SetValue::Null,
             },
         ],
         after_commit: DrainEffect::SendAssign {
@@ -1238,10 +1264,24 @@ mod tests {
             work_item_id: Uuid::parse_str("d36a0a49-a1f3-41de-a09d-f8a74e031f4c").ok(),
             prompt: String::new(),
             run_config: Map::new(),
+            assignment_token: Uuid::parse_str("00000000-0000-0000-0000-000000000099")
+                .expect("token"),
+            assignment_protocol: 1,
         };
         let plan = plan_assignment(&facts);
         let columns: Vec<&str> = plan.set_clauses.iter().map(|c| c.column).collect();
-        assert_eq!(columns, ["owner_id", "runner_id", "status", "assigned_at"]);
+        assert_eq!(
+            columns,
+            [
+                "owner_id",
+                "runner_id",
+                "status",
+                "assigned_at",
+                "assignment_token",
+                "assignment_protocol",
+                "capacity_wait"
+            ]
+        );
         assert_eq!(
             plan.set_clauses[0].value,
             SetValue::Text("ce755a5b-0c64-4e83-8f27-6218e639df62".to_string())
@@ -1255,6 +1295,12 @@ mod tests {
             SetValue::Text("assigned".to_string())
         );
         assert_eq!(plan.set_clauses[3].value, SetValue::Now);
+        assert_eq!(
+            plan.set_clauses[4].value,
+            SetValue::Text("00000000-0000-0000-0000-000000000099".to_string())
+        );
+        assert_eq!(plan.set_clauses[5].value, SetValue::Text("1".to_string()));
+        assert_eq!(plan.set_clauses[6].value, SetValue::Null);
         // The frame matches the drained assign shape.
         let frame = &fx07()["drain_pod"]["sent_frames"][0];
         assert_eq!(

@@ -269,11 +269,39 @@ async fn dispatch_facts_of(
     })
 }
 
+/// Mint a fresh attempt token and choose the protocol from the runner's
+/// active session capabilities (Django `mint_assignment_attempt` +
+/// `protocol_for_runner`; Rust-only T1). Called inside the assignment
+/// transaction so Runner → Session order is preserved. Missing session or
+/// capability means legacy (protocol 0); a fresh UUID is minted on every
+/// new assignment, including to the same runner.
+async fn mint_attempt(
+    db: &impl ConnectionTrait,
+    runner_id: Uuid,
+) -> Result<(Uuid, i16), DrainError> {
+    let caps = crate::runner_sessions::pubsub::active_runner_sessions(db, runner_id)
+        .await
+        .map_err(DrainError::from)
+        .unwrap_or_default();
+    // Active sessions newest-first; take the first with a capabilities field
+    // that advertises machine_run_queue_v1. Use capacity helper.
+    let mut protocol = crate::runner_runs::capacity::PROTOCOL_LEGACY;
+    for session in caps {
+        if crate::runner_runs::capacity::supports_machine_queue(&session.capabilities) {
+            protocol = crate::runner_runs::capacity::PROTOCOL_MACHINE_QUEUE;
+            break;
+        }
+    }
+    Ok((Uuid::new_v4(), protocol))
+}
+
 async fn write_assignment(
     db: &impl ConnectionTrait,
     owner_id: Uuid,
     runner_id: Uuid,
     run_id: Uuid,
+    assignment_token: Uuid,
+    assignment_protocol: i16,
 ) -> Result<(), DrainError> {
     // A fresh `timezone.now()` per assignment (`matcher.py:285-289`).
     use sea_orm::sea_query::Expr;
@@ -282,6 +310,18 @@ async fn write_assignment(
         .col_expr(agent_run::Column::RunnerId, Expr::value(runner_id))
         .col_expr(agent_run::Column::Status, Expr::value("assigned"))
         .col_expr(agent_run::Column::AssignedAt, Expr::value(now_micros()))
+        .col_expr(
+            agent_run::Column::AssignmentToken,
+            Expr::value(Some(assignment_token)),
+        )
+        .col_expr(
+            agent_run::Column::AssignmentProtocol,
+            Expr::value(assignment_protocol),
+        )
+        .col_expr(
+            agent_run::Column::CapacityWait,
+            Expr::val(None::<serde_json::Value>).into(),
+        )
         .filter(agent_run::Column::Id.eq(run_id))
         .exec(db)
         .await?;
@@ -376,7 +416,16 @@ async fn drain_for_runner(
             "drain_for_runner: run_config is not an object".to_owned(),
         ));
     };
-    write_assignment(&txn, owner_id, runner_id, run_id).await?;
+    let (assignment_token, assignment_protocol) = mint_attempt(&txn, runner_id).await?;
+    write_assignment(
+        &txn,
+        owner_id,
+        runner_id,
+        run_id,
+        assignment_token,
+        assignment_protocol,
+    )
+    .await?;
     let plan = drain_kernel::plan_assignment(&drain_kernel::AssignmentFacts {
         run_id,
         runner_id,
@@ -384,6 +433,8 @@ async fn drain_for_runner(
         work_item_id,
         prompt,
         run_config,
+        assignment_token,
+        assignment_protocol,
     });
     txn.commit().await?;
     let drain_kernel::DrainEffect::SendAssign { runner_id, message } = &plan.after_commit;
@@ -469,7 +520,16 @@ async fn drain_pod(
                 "drain_pod: run_config is not an object".to_owned(),
             ));
         };
-        write_assignment(&txn, owner_id, runner_id, run_id).await?;
+        let (assignment_token, assignment_protocol) = mint_attempt(&txn, runner_id).await?;
+        write_assignment(
+            &txn,
+            owner_id,
+            runner_id,
+            run_id,
+            assignment_token,
+            assignment_protocol,
+        )
+        .await?;
         plans.push(drain_kernel::plan_assignment(
             &drain_kernel::AssignmentFacts {
                 run_id,
@@ -478,6 +538,8 @@ async fn drain_pod(
                 work_item_id,
                 prompt,
                 run_config,
+                assignment_token,
+                assignment_protocol,
             },
         ));
     }
