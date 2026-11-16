@@ -13,13 +13,9 @@ the same routes through its MITM proxy instead. Seeds, payloads and DB
 assertions are imported from the oracle module; only the transport (this
 module's publish + stub-hit gate) differs.
 
-The legacy cases below (PIDASHCONV-1512) replay the legacy oracle
-tests the same way: the legacy handler used to panic on ANY live HTTP
-sync ("Cannot drop a runtime in a context where blocking is not
-allowed" — ``GithubRestClient`` was built in async context and dropped
-there), so this module covered the new path only until that fix moved
-client construction inside ``spawn_blocking``. The Django-leg legacy
-tests still pin the oracle behavior.
+The legacy cases used to live here too (PIDASHCONV-1512); the legacy
+poller is deleted from the Rust worker (PDASHOSS01-358), so they now
+live with the Django oracle only (``test_github_redirect.py``).
 
 Run with the Django worker (and beat) STOPPED and the Rust worker
 running against the same DATABASE_URL (dedicated CI job; no shared
@@ -155,65 +151,6 @@ def test_rust_post_completion_comment_follows_307(
     )
     oracle.assert_comment_posted(
         database_url, sync_id, table="git_issue_syncs", expect_id=str(oracle.COMMENT_ID)
-    )
-    oracle.assert_post_reached_stub(
-        redirect_stub.snapshot(), body_marker="completed in Pi Dash"
-    )
-
-
-def test_rust_legacy_sync_one_repo_follows_rename_redirects(
-    database_url, redirect_stub, redirect_case
-):
-    sync_id = oracle.seed_old_legacy_sync(database_url, redirect_case)
-    project_id = str(redirect_case["anchor"]["projects"][0]["id"])
-    _publish_and_settle(
-        database_url,
-        redirect_stub,
-        oracle.LEGACY_SYNC_ONE,
-        [sync_id],
-        "SELECT last_sync_error, last_synced_at FROM github_repository_syncs"
-        " WHERE id = %s AND (last_synced_at IS NOT NULL OR last_sync_error <> '')",
-        (sync_id,),
-        "legacy sync_one_repo",
-    )
-    oracle.assert_sync_repo_ok(database_url, sync_id, project_id)
-    entries = redirect_stub.snapshot()
-    assert oracle.hits_matching(
-        entries, "GET", f"/repos/{oracle.OLD_OWNER}/{oracle.OLD_NAME}/issues"
-    ), "stub never saw the old-path issues listing"
-    assert oracle.hits_matching(entries, "GET", "/repositories/1/issues"), (
-        "stub never saw the followed listing"
-    )
-
-
-def test_rust_legacy_post_completion_comment_follows_307(
-    database_url, redirect_stub, redirect_case
-):
-    sync_id = oracle.seed_old_legacy_sync(database_url, redirect_case)
-    issue_sync_id = seed.legacy_issue_sync(
-        database_url,
-        redirect_case["scope"],
-        sync_id=sync_id,
-        issue_id=str(redirect_case["issue"]["id"]),
-        project_id=str(redirect_case["anchor"]["projects"][0]["id"]),
-        workspace_id=redirect_case["workspace_id"],
-        repo_issue_id=oracle.ISSUE_NUMBER,
-    )
-    _publish_and_settle(
-        database_url,
-        redirect_stub,
-        oracle.LEGACY_POST_COMMENT,
-        [issue_sync_id],
-        "SELECT metadata FROM github_issue_syncs WHERE id = %s"
-        " AND (metadata ? 'completion_comment_id'"
-        " OR metadata ? 'completion_comment_error')",
-        (issue_sync_id,),
-        "legacy post_completion_comment",
-    )
-    # Legacy stores the payload id verbatim (JSON number), unlike the new
-    # path's str() (github_sync_task.py:387 vs git_sync_task.py:321).
-    oracle.assert_comment_posted(
-        database_url, issue_sync_id, table="github_issue_syncs", expect_id=oracle.COMMENT_ID
     )
     oracle.assert_post_reached_stub(
         redirect_stub.snapshot(), body_marker="completed in Pi Dash"
