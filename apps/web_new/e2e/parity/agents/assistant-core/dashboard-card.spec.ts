@@ -7,7 +7,7 @@
 // keyless sends with an error notice instead of starting. (Card presence
 // itself is SHELL-007, already green; guests see nothing per AGT-041.)
 // Row: AGT-048.
-// NEWPIDASH-301 (DIFF-38): the new home renders a multi-line textarea
+// NEWPIDASH-301 (DIFF-39): the new home renders a multi-line textarea
 // composer with the Ask action inside it and recents as their own
 // section under the composer, while the oracle home keeps its
 // single-line input with recents inside the card. The driver abstracts

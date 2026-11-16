@@ -10,11 +10,11 @@
 // dialog lists every surfaced widget with a toggle plus drag handles,
 // changes confirm with a notice, and the retired stickies key stays
 // invisible everywhere.
-// NEWPIDASH-301 (DIFF-38): the new home drops the all-off illustration —
+// NEWPIDASH-301 (DIFF-39): the new home drops the all-off illustration —
 // an all-widgets-off home shows only the composer while Manage widgets
 // stays reachable — so the all-off step below asserts per target: the
 // oracle shows its guidance illustration (old behavior), the new home
-// shows none and keeps Manage reachable (DIFF-38).
+// shows none and keeps Manage reachable (DIFF-39).
 import { test, expect } from "../../fixtures";
 import type { ParityDriver } from "../../drivers/parity-driver";
 import {
@@ -196,7 +196,7 @@ test(
         )
         .toBe(true);
       if (driver.target === "web_new") {
-        // NEWPIDASH-301 (DIFF-38): no all-off illustration on the new
+        // NEWPIDASH-301 (DIFF-39): no all-off illustration on the new
         // home, but the Manage widgets control stays reachable so
         // widgets can be turned back on.
         await driver.homeReload();

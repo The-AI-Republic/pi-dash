@@ -867,7 +867,7 @@ pub fn home_autocreate_plan<'a>(existing: &[&'a str]) -> Vec<HomePrefRow<'a>> {
     inserted
 }
 
-/// R10 autocreate `is_enabled` default per key (NEWPIDASH-301, DIFF-38):
+/// R10 autocreate `is_enabled` default per key (NEWPIDASH-301, DIFF-39):
 /// `quick_links` and `recents` are created disabled so a first-time home is
 /// the chat composer with no widget clutter; `my_stickies` keeps the Django
 /// column default (`workspace.py:457`, `default=True`). Only newly autocreated
@@ -1499,7 +1499,7 @@ mod tests {
             home_autocreate_plan(&["quick_links"]),
             vec![("recents", 999), ("my_stickies", 998)]
         );
-        // NEWPIDASH-301 (DIFF-38): chat-first defaults.
+        // NEWPIDASH-301 (DIFF-39): chat-first defaults.
         assert!(!home_pref_autocreate_is_enabled("quick_links"));
         assert!(!home_pref_autocreate_is_enabled("recents"));
         assert!(home_pref_autocreate_is_enabled("my_stickies"));

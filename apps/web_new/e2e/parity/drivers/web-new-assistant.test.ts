@@ -664,7 +664,7 @@ describe("assistant conversation rail", () => {
 });
 
 describe("assistant dashboard card", () => {
-  // NEWPIDASH-301 (DIFF-38): the new card renders a textarea composer and
+  // NEWPIDASH-301 (DIFF-39): the new card renders a textarea composer and
   // a sibling recents section, while the oracle home keeps a single-line
   // input with recents inside the card.
   it("reports the card visible only when its composer exists", async () => {

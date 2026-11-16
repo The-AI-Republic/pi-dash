@@ -3419,7 +3419,7 @@ async fn home_prefs_get(
         // `bulk_create` binds every column: `config` rides the Python-side
         // field default (`{}`, `workspace.py:458`), which has no DB-level
         // DEFAULT — omitting it violates NOT NULL. `is_enabled` rides
-        // NEWPIDASH-301 (DIFF-38): `quick_links`/`recents` are created
+        // NEWPIDASH-301 (DIFF-39): `quick_links`/`recents` are created
         // disabled for a chat-first first home, `my_stickies` keeps the
         // Django column default (`True`, `workspace.py:457`). Only new rows
         // use this; existing rows are never rewritten.

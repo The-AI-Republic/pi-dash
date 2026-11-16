@@ -3520,7 +3520,7 @@ export class WebNewDriver implements ParityDriver {
   // the link dialog reports validation through an alert.
 
   async homeAllOffVisible(): Promise<boolean> {
-    // NEWPIDASH-301 (DIFF-38): the new home renders no all-off
+    // NEWPIDASH-301 (DIFF-39): the new home renders no all-off
     // illustration — an all-widgets-off home shows only the composer
     // while Manage widgets stays reachable. The oracle home keeps its
     // guidance illustration (see web.ts).
@@ -18495,7 +18495,7 @@ export class WebNewDriver implements ParityDriver {
   /**
    * The dashboard card's entry composer. The new home renders a
    * multi-line textarea composer with the Ask action inside it
-   * (NEWPIDASH-301, DIFF-38), while the oracle home keeps its
+   * (NEWPIDASH-301, DIFF-39), while the oracle home keeps its
    * single-line input.
    */
   private assistantHomeCardInput() {
@@ -18509,7 +18509,7 @@ export class WebNewDriver implements ParityDriver {
 
   /**
    * The recent-conversations section. The new home renders recents as
-   * their own section below the composer (NEWPIDASH-301, DIFF-38),
+   * their own section below the composer (NEWPIDASH-301, DIFF-39),
    * while the oracle home lists them inside the card.
    */
   private assistantRecentConversations() {
@@ -18835,7 +18835,7 @@ export class WebNewDriver implements ParityDriver {
   async assistantCardRecents(): Promise<{ title: string; href: string }[]> {
     if (!(await this.assistantCardVisible())) return [];
     // Only the sibling recents section counts: it lives outside the card
-    // (NEWPIDASH-301, DIFF-38), so the keyless setup link inside the card
+    // (NEWPIDASH-301, DIFF-39), so the keyless setup link inside the card
     // can never displace the newest thread.
     const links = this.assistantRecentConversations().locator("ul a");
     const total = await links.count();

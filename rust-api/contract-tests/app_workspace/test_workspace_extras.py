@@ -1502,18 +1502,18 @@ def test_home_prefs_autocreate(user_api, space):
     body = res.json()
     assert {p["key"] for p in body} == {"my_stickies", "recents", "quick_links"}
     assert set(body[0].keys()) == {"config", "is_enabled", "key", "sort_order"}
-    # NEWPIDASH-301 (DIFF-38): the new home autocreates quick_links/recents
+    # NEWPIDASH-301 (DIFF-39): the new home autocreates quick_links/recents
     # disabled so a first-time home is the chat composer with no widget
     # clutter; Django autocreates all three enabled (model default).
     by_key = {p["key"]: p for p in body}
     assert by_key["quick_links"]["is_enabled"] == expect(
-        "DIFF-38", django=True, rust=False
+        "DIFF-39", django=True, rust=False
     )
     assert by_key["recents"]["is_enabled"] == expect(
-        "DIFF-38", django=True, rust=False
+        "DIFF-39", django=True, rust=False
     )
     assert by_key["my_stickies"]["is_enabled"] == expect(
-        "DIFF-38", django=True, rust=True
+        "DIFF-39", django=True, rust=True
     )
 
 
