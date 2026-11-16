@@ -2617,6 +2617,10 @@ pub fn routes() -> Router<AppState> {
     const UNOWNED: &[&str] = &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"];
     Router::new()
         .route(
+            "/api/v1/runner/runs/{run_id}/capacity/",
+            owned(post(crate::runner_runs::capacity::run_capacity), UNOWNED),
+        )
+        .route(
             "/api/v1/runner/runs/{run_id}/accept/",
             owned(post(run_accept), UNOWNED),
         )

@@ -311,6 +311,8 @@ pub(crate) async fn drain_pod_by_id(
             .ok_or_else(|| {
                 MoveDrainError("move pod drain: run_config is not an object".to_owned())
             })?;
+        let assignment_token = Uuid::new_v4();
+        let assignment_protocol = 0; // Legacy for move-path; capacity drain mints protocol-1 via active session
         let plan = plan_assignment(&AssignmentFacts {
             run_id,
             runner_id,
@@ -318,6 +320,8 @@ pub(crate) async fn drain_pod_by_id(
             work_item_id,
             prompt,
             run_config,
+            assignment_token,
+            assignment_protocol,
         });
         use sea_orm::sea_query::Expr;
         agent_run::Entity::update_many()
@@ -325,6 +329,18 @@ pub(crate) async fn drain_pod_by_id(
             .col_expr(agent_run::Column::RunnerId, Expr::value(runner_id))
             .col_expr(agent_run::Column::Status, Expr::value("assigned"))
             .col_expr(agent_run::Column::AssignedAt, Expr::value(Utc::now()))
+            .col_expr(
+                agent_run::Column::AssignmentToken,
+                Expr::value(Some(assignment_token)),
+            )
+            .col_expr(
+                agent_run::Column::AssignmentProtocol,
+                Expr::value(assignment_protocol),
+            )
+            .col_expr(
+                agent_run::Column::CapacityWait,
+                Expr::val(None::<serde_json::Value>).into(),
+            )
             .filter(agent_run::Column::Id.eq(run_id))
             .exec(&txn)
             .await

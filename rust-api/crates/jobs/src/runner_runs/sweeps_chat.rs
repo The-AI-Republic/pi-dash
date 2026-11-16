@@ -414,6 +414,8 @@ pub struct AssignedNeverStartedCandidate {
     pub runner_id: Option<Uuid>,
     pub pod_id: Option<Uuid>,
     pub assigned_at: Option<DateTime<Utc>>,
+    pub capacity_wait: Option<serde_json::Value>,
+    pub assignment_token: Option<Uuid>,
 }
 
 /// The assigned-never-started cutoff: `now - ASSIGNED_NEVER_STARTED_SECS`.
@@ -422,6 +424,14 @@ pub struct AssignedNeverStartedCandidate {
 /// for the whole window is equally lost. The 180s bound comfortably
 /// exceeds the 25s long-poll + processing, so healthy runners are
 /// never reaped.
+pub fn is_fresh_capacity_wait(
+    cw: &serde_json::Value,
+    token: Option<Uuid>,
+    now: DateTime<Utc>,
+) -> bool {
+    pidash_services::runner_runs::capacity::is_fresh_capacity_wait(cw, token, now)
+}
+
 pub fn assigned_never_started_cutoff(now: DateTime<Utc>) -> DateTime<Utc> {
     now - chrono::Duration::seconds(ASSIGNED_NEVER_STARTED_SECS)
 }
@@ -441,6 +451,8 @@ pub fn assigned_never_started_select(
         .column_as(Column::RunnerId, "runner_id")
         .column_as(Column::PodId, "pod_id")
         .column_as(Column::AssignedAt, "assigned_at")
+        .column_as(Column::CapacityWait, "capacity_wait")
+        .column_as(Column::AssignmentToken, "assignment_token")
         .filter(Column::Status.eq(AgentRunStatus::Assigned.value()))
         .filter(Column::StartedAt.is_null())
         .filter(Column::AssignedAt.lt(cutoff))
@@ -996,6 +1008,42 @@ async fn reap_assigned_never_started_row(
     let Some(runner_id) = candidate.runner_id else {
         return Ok(false);
     };
+    // NEWPIDASH-241 T2: fresh authenticated same-attempt capacity waits
+    // remain protected beyond 180s; stale/wrong-token reports retain bounded recovery.
+    if let Some(cw) = candidate.capacity_wait.as_ref() {
+        if pidash_services::runner_runs::capacity::is_fresh_capacity_wait(
+            cw,
+            candidate.assignment_token,
+            Utc::now(),
+        ) {
+            return Ok(false);
+        }
+    }
+    // Recheck under row locks before finalizing (not just in the candidate query).
+    // Fetch the locked row's current assignment_token/capacity_wait; if it became fresh, skip.
+    if let Some(fresh) = {
+        use orm::agent_run::{Column, Entity};
+        let row = Entity::find()
+            .select_only()
+            .columns([Column::AssignmentToken, Column::CapacityWait])
+            .filter(Column::Id.eq(candidate.run_id))
+            .lock_exclusive()
+            .one(&sea_orm_connection(pool))
+            .await
+            .map_err(|_| SweepError::BadRow("recheck"))?;
+        if let Some(model) = row {
+            model
+                .capacity_wait
+                .as_ref()
+                .map(|cw| is_fresh_capacity_wait(cw, model.assignment_token, Utc::now()))
+        } else {
+            None
+        }
+    } {
+        if fresh {
+            return Ok(false);
+        }
+    }
     let detail = assigned_never_started_detail(ASSIGNED_NEVER_STARTED_SECS);
     // Live state: the runner never observed this run, so this is
     // almost always None; asking is harmless.
@@ -1059,6 +1107,8 @@ pub async fn reap_assigned_never_started_by_id(
         runner_id: Some(runner_id),
         pod_id: Some(run.pod_id),
         assigned_at: run.assigned_at.map(|at| at.with_timezone(&Utc)),
+        capacity_wait: run.capacity_wait.clone(),
+        assignment_token: run.assignment_token,
     };
     reap_assigned_never_started_row(pool, seams, &candidate).await
 }

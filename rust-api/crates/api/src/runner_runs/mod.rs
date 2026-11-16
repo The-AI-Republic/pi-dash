@@ -180,6 +180,7 @@
 #![allow(clippy::result_large_err)]
 
 pub mod approvals;
+pub mod capacity;
 pub mod chat;
 pub mod dispatch;
 pub mod metrics;
