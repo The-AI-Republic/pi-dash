@@ -218,6 +218,8 @@ export function discoveryProblem(discovery: DaemonDiscovery | null): string | nu
       return `Pi Dash on this computer (${discovery.daemon_version}) is newer than this app understands. Update the app.`;
     case "not_answering":
       return "Pi Dash on this computer is not answering right now. The app will try again.";
+    case "pipe_squatted":
+      return "Pi Dash's pipe on this computer is held by another account; the daemon may be blocked.";
     case "signed_out":
       return "Pi Dash on this computer is signed out.";
     case "account_mismatch":

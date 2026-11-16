@@ -15,13 +15,89 @@ pub async fn write_unit(paths: &Paths) -> Result<()> {
     paths.ensure()?;
     let exe = std::env::current_exe().context("resolving current pidash.exe path")?;
     let exe = validate_exe_path(&exe)?;
-    let task_run = format!("\"{exe}\" __run");
-    run_schtasks(&[
-        "/Create", "/TN", TASK_NAME, "/SC", "ONLOGON", "/TR", &task_run, "/F",
-    ])
-    .await?;
+    // PIDESKAPP-236: restart the daemon after a crash via task XML
+    // (`<RestartOnFailure>`). `schtasks /SC ONLOGON` has no restart
+    // setting, so a daemon that exits (e.g. pipe squatted) stayed down
+    // until the next logon. XML gives us restart interval/count.
+    if let Err(xml_err) = install_via_xml(exe).await {
+        tracing::warn!(
+            "task XML install failed ({xml_err:#}), falling back to ONLOGON schtasks"
+        );
+        let task_run = format!("\"{exe}\" __run");
+        run_schtasks(&[
+            "/Create", "/TN", TASK_NAME, "/SC", "ONLOGON", "/TR", &task_run, "/F",
+        ])
+        .await?;
+    }
     println!("installed Windows scheduled task {TASK_NAME}");
     Ok(())
+}
+
+/// Render the per-user scheduled task definition (Task Scheduler XML).
+/// Pure so the restart block is unit-testable without `schtasks.exe`.
+pub(crate) fn render_task_xml(exe: &str) -> String {
+    let exe_escaped = xml_escape(exe);
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Pi Dash Runner daemon (starts at logon, restarts on failure)</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>"{exe_escaped}" __run</Command>
+    </Exec>
+  </Actions>
+</Task>
+"#
+    )
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+async fn install_via_xml(exe: &str) -> Result<()> {
+    let xml = render_task_xml(exe);
+    // schtasks /XML expects a file; write a per-install temp file.
+    let tmp = std::env::temp_dir().join(format!("pidash-task-{}.xml", uuid::Uuid::new_v4()));
+    tokio::fs::write(&tmp, xml)
+        .await
+        .with_context(|| format!("writing task XML to {:?}", tmp))?;
+    let tmp_str = tmp
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("temp task path is not valid UTF-8: {:?}", tmp))?;
+    let result = run_schtasks(&["/Create", "/TN", TASK_NAME, "/XML", tmp_str, "/F"]).await;
+    let _ = tokio::fs::remove_file(&tmp).await;
+    result
 }
 
 pub async fn enable_and_start() -> Result<()> {
@@ -119,4 +195,27 @@ fn looks_task_missing(e: &anyhow::Error) -> bool {
 fn looks_not_running(e: &anyhow::Error) -> bool {
     let s = e.to_string();
     s.contains("not currently running") || s.contains("cannot find")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{render_task_xml, xml_escape};
+
+    #[test]
+    fn task_xml_has_restart_on_failure_and_logon_trigger() {
+        let xml = render_task_xml("C:\\Program Files\\Pi Dash\\pidash.exe");
+        assert!(xml.contains("<RestartOnFailure>"), "must contain RestartOnFailure: {xml}");
+        assert!(xml.contains("<Interval>PT1M</Interval>"), "interval PT1M: {xml}");
+        assert!(xml.contains("<Count>3</Count>"), "count 3: {xml}");
+        assert!(xml.contains("<LogonTrigger>"), "logon trigger: {xml}");
+        assert!(xml.contains("pidash.exe"), "exe path: {xml}");
+        // Must not use plain schtasks ONLOGON-only fallback as primary.
+        assert!(xml.contains("InteractiveToken"), "per-user interactive token: {xml}");
+    }
+
+    #[test]
+    fn xml_escape_prevents_breakout() {
+        let escaped = xml_escape(r#"C:\a&b<>"'"#);
+        assert_eq!(escaped, "C:\\a&amp;b&lt;&gt;&quot;&apos;");
+    }
 }

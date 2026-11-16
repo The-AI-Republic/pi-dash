@@ -131,6 +131,7 @@ export type DaemonDiscovery =
   | { kind: "too_old"; daemon_version?: string | undefined; ipc_version?: number | undefined; cli: DaemonCliInfo }
   | { kind: "app_too_old"; daemon_version: string; ipc_version: number }
   | { kind: "not_answering"; reason: string }
+  | { kind: "pipe_squatted"; reason: string }
   | { kind: "signed_out"; hello: DaemonHello }
   | { kind: "account_mismatch"; daemon_account: string; daemon_cloud_url: string; hosts_runners: boolean }
   | { kind: "compatible"; hello: DaemonHello };

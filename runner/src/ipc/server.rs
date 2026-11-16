@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufStream};
 #[cfg(windows)]
+use pidash_ipc::pipe_id;
+#[cfg(windows)]
 use pidash_ipc::windows_pipe::create_owner_only_pipe;
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::NamedPipeServer as IpcStream;
@@ -80,12 +82,45 @@ impl IpcServer {
 
     #[cfg(windows)]
     pub async fn run(self) -> Result<()> {
-        let pipe_name = crate::ipc::windows_pipe_name(&self.path);
-        // Owner-only DACL on every instance: the pipe namespace is
-        // machine-wide, so this is Windows' stand-in for the Unix 0700 dir
-        // + 0600 socket above (PIDESKAPP-152).
-        let mut server = create_owner_only_pipe(&pipe_name, true)
-            .with_context(|| format!("creating named pipe {pipe_name}"))?;
+        // PIDESKAPP-236: the pipe name is unguessable (stored random ID
+        // in `<runtime_dir>/pipe-id`), but a foreign account could still
+        // hold the *old* deterministic name. `FILE_FLAG_FIRST_PIPE_INSTANCE`
+        // makes the first bind fail with ERROR_ALREADY_EXISTS. The old code
+        // propagated `?` and the daemon exited until next logon. Now we
+        // rotate the stored ID and retry (bounded) so the daemon can come
+        // up under a fresh, uncontested name. `CREATE_PIPE_INSTANCE`
+        // fallback is not attempted because the squatter controls the
+        // DACL and can deny it.
+        const ERROR_ALREADY_EXISTS: i32 = 17;
+        const MAX_ROTATIONS: u32 = 3;
+        let runtime_dir = self.paths.runtime_dir.clone();
+        let mut pipe_name = crate::ipc::windows_pipe_name(&self.path);
+        let mut rotations = 0;
+        let mut server = loop {
+            match create_owner_only_pipe(&pipe_name, true) {
+                Ok(s) => break s,
+                Err(e)
+                    if e.raw_os_error() == Some(ERROR_ALREADY_EXISTS)
+                        && rotations < MAX_ROTATIONS =>
+                {
+                    // The name is taken (squatter or stale). Rotate and retry.
+                    tracing::warn!(
+                        "named pipe {pipe_name} already exists; regenerating pipe ID and retrying"
+                    );
+                    let new_id = pipe_id::regenerate_pipe_id(&runtime_dir)
+                        .with_context(|| format!("regenerating pipe ID in {:?}", runtime_dir))?;
+                    rotations += 1;
+                    pipe_name = pipe_id::windows_pipe_name_from_id(new_id);
+                    continue;
+                }
+                Err(e) => {
+                    return Err(anyhow::Error::new(e)
+                        .context(format!("creating named pipe {pipe_name}")))
+                }
+            }
+        };
+        // Owner-only DACL on every instance (PIDESKAPP-152): machine-wide
+        // pipe namespace, so this is Windows' stand-in for Unix 0700 dir.
 
         let me = Arc::new(self);
         loop {

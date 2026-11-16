@@ -16,6 +16,7 @@
 
 pub mod client;
 pub mod dto;
+pub mod pipe_id;
 pub mod protocol;
 #[cfg(windows)]
 pub mod windows_pipe;
@@ -26,17 +27,25 @@ pub use client::Client;
 pub use dto::*;
 pub use protocol::*;
 
-/// Windows named-pipe name derived deterministically from the socket path.
+/// Windows named-pipe name from the stored random pipe ID.
 ///
 /// macOS/Linux bind a Unix socket at `<runtime_dir>/pidash.sock`; Windows
-/// has no filesystem sockets, so the same path is hashed into a stable pipe
-/// name both ends agree on. Kept here (rather than in `client`) because the
-/// runner's IPC *server* needs the identical derivation.
+/// has no filesystem sockets. The pipe name was previously
+/// `UUIDv5(socket path)` — computable by any local user who knows the
+/// path, so another account could squat `\\.\pipe\pidash-<id>` and
+/// keep the daemon down until logon (PIDESKAPP-236).
+///
+/// It is now `pidash-<stored-uuid>` where the UUID is a fresh random
+/// v4 value persisted in `<runtime_dir>/pipe-id` (owner-only). The
+/// path argument's parent is the runtime dir; if it has no parent we
+/// fall back to the path itself. A file-system failure degrades to a
+/// fresh ephemeral UUID (still unguessable, not the deterministic
+/// hash) rather than the predictable one.
 #[cfg(windows)]
 pub fn windows_pipe_name(path: &std::path::Path) -> String {
-    let id = uuid::Uuid::new_v5(
-        &uuid::Uuid::NAMESPACE_OID,
-        path.to_string_lossy().as_bytes(),
-    );
-    format!(r"\\.\pipe\pidash-{id}")
+    let runtime = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| path.to_path_buf());
+    match pipe_id::read_or_create_pipe_id(&runtime) {
+        Ok(id) => pipe_id::windows_pipe_name_from_id(id),
+        Err(_) => format!(r"\\.\\pipe\pidash-{}", uuid::Uuid::new_v4()),
+    }
 }

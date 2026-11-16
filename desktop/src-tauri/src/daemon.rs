@@ -139,6 +139,10 @@ pub enum CallError {
     /// A daemon may be there but did not take the connection or answer in
     /// time (a busy pipe, a slow daemon). Not "no daemon", not "too old".
     NoAnswer(String),
+    /// The pipe is held by another account (PIDESKAPP-236). Distinct from
+    /// `NoAnswer`: the user needs to know the name is squatted, not that
+    /// the daemon is merely slow.
+    ForeignOwned(String),
     /// The daemon answered with an error (its message), or not in time, or
     /// with something that is not the expected frame.
     Failed(String),
@@ -149,6 +153,9 @@ impl CallError {
         match self {
             Self::Unreachable(e) => format!("Pi Dash is not running on this computer ({e})"),
             Self::NoAnswer(e) => format!("Pi Dash on this computer is not answering ({e})"),
+            Self::ForeignOwned(e) => format!(
+                "Pi Dash's pipe on this computer is held by another account; the daemon may be blocked ({e})"
+            ),
             Self::Failed(e) => e.clone(),
         }
     }
@@ -174,10 +181,22 @@ pub async fn call_at(
 }
 
 /// Only "nothing is there" (no socket or pipe, or a stale socket nobody
-/// listens on) means no daemon. Anything else, such as a pipe that stays
-/// busy or a permission error, is a daemon that did not answer.
+/// listens on) means no daemon. A pipe owned by another principal is
+/// not "not answering": it is squatted (PIDESKAPP-236), so callers can
+/// show a clear "held by another account" error. Anything else, such
+/// as a pipe that stays busy, is a daemon that did not answer.
 fn classify_connect_error(e: anyhow::Error) -> CallError {
     let message = format!("{e:#}");
+    // `verify_pipe_owner` fails with `PermissionDenied` and a message
+    // containing "not owned by the current user" (see `pidash-ipc`).
+    let foreign = e
+        .chain()
+        .filter_map(|c| c.downcast_ref::<std::io::Error>())
+        .any(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
+        && message.contains("not owned by the current user");
+    if foreign {
+        return CallError::ForeignOwned(message);
+    }
     let absent = e
         .chain()
         .filter_map(|c| c.downcast_ref::<std::io::Error>())
@@ -210,6 +229,9 @@ pub enum HelloProbe {
     /// A daemon may be there but did not answer in time or took no
     /// connection (busy). Asked again later, not reported as too old.
     NoAnswer(String),
+    /// The daemon pipe is owned by another account (PIDESKAPP-236):
+    /// the name was squatted before checking ownership.
+    ForeignOwned(String),
     Answered(Box<HelloInfo>),
 }
 
@@ -217,6 +239,7 @@ pub async fn probe_hello(socket: &Path) -> HelloProbe {
     match call_at(socket, Request::Hello, HELLO_TIMEOUT).await {
         Err(CallError::Unreachable(_)) => HelloProbe::Unreachable,
         Err(CallError::NoAnswer(e)) => HelloProbe::NoAnswer(e),
+        Err(CallError::ForeignOwned(e)) => HelloProbe::ForeignOwned(e),
         Err(CallError::Failed(e)) => HelloProbe::NoHello(e),
         Ok(Response::Hello(info)) => HelloProbe::Answered(Box::new(info)),
         Ok(other) => HelloProbe::NoHello(format!("unexpected answer to Hello: {other:?}")),
@@ -273,6 +296,12 @@ pub enum Discovery {
     NotAnswering {
         reason: String,
     },
+    /// Another account is holding the daemon's pipe (PIDESKAPP-236).
+    /// Distinct from `NotAnswering`: the user should restart or the
+    /// squatter should release the name.
+    PipeSquatted {
+        reason: String,
+    },
     /// A daemon newer than this app understands: update the app.
     AppTooOld {
         daemon_version: String,
@@ -309,6 +338,7 @@ pub fn evaluate(probe: HelloProbe, app: &AppIdentity, cli: CliInfo) -> Discovery
             };
         }
         HelloProbe::NoAnswer(reason) => return Discovery::NotAnswering { reason },
+        HelloProbe::ForeignOwned(reason) => return Discovery::PipeSquatted { reason },
         HelloProbe::Answered(hello) => hello,
     };
     if hello.ipc_version < MIN_DAEMON_IPC {
@@ -837,6 +867,33 @@ mod tests {
             classify_connect_error(denied),
             CallError::NoAnswer(_)
         ));
+        // A foreign-owned pipe (verify_pipe_owner) is not generic "not
+        // answering" — it is squatted (PIDESKAPP-236).
+        let foreign = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "named pipe \\\\ pipe is not owned by the current user (owner S-1-5; refusing to use it)",
+        ));
+        assert!(
+            matches!(classify_connect_error(foreign), CallError::ForeignOwned(_)),
+            "foreign-owned pipe must be ForeignOwned, not NoAnswer"
+        );
+    }
+
+    #[test]
+    fn a_squatted_pipe_is_a_distinct_discovery_not_no_answer() {
+        let out = evaluate(
+            HelloProbe::ForeignOwned("owner S-1-5".into()),
+            &app(),
+            CliInfo::default(),
+        );
+        assert!(
+            matches!(out, Discovery::PipeSquatted { .. }),
+            "foreign-owned must be PipeSquatted, got {out:?}"
+        );
+        assert!(
+            !matches!(out, Discovery::NotAnswering { .. }),
+            "must not be generic NotAnswering"
+        );
     }
 
     /// PO-13 natively: a sign-in is refused when the daemon is signed in as
