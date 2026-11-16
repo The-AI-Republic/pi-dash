@@ -1307,6 +1307,8 @@ async fn open_redeliver(
                         work_item_id: row.work_item_id,
                         prompt: row.prompt,
                         run_config,
+                        assignment_token: row.assignment_token,
+                        assignment_protocol: row.assignment_protocol,
                     }),
                 }
             }

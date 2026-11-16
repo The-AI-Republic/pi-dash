@@ -368,6 +368,8 @@ pub(super) struct RedeliverAssignRow {
     pub work_item_id: Option<Uuid>,
     pub prompt: String,
     pub run_config: Value,
+    pub assignment_token: Option<Uuid>,
+    pub assignment_protocol: i16,
 }
 
 /// Assign redeliver scan (`redeliver_assign_sql`): the oldest
@@ -383,6 +385,8 @@ pub(super) fn redeliver_assign_select(
             agent_run::Column::WorkItemId,
             agent_run::Column::Prompt,
             agent_run::Column::RunConfig,
+            agent_run::Column::AssignmentToken,
+            agent_run::Column::AssignmentProtocol,
         ])
         .filter(agent_run::Column::Status.is_in([
             AgentRunStatus::Assigned.value(),
