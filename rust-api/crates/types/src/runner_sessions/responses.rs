@@ -117,6 +117,13 @@ pub fn runner_open_201(
             Value::String(version.to_string()),
         );
     }
+    // NEWPIDASH-241 T1: advertise machine_run_queue_v1. Old daemons simply
+    // ignore the additive field; new daemons enable managed admission only
+    // when both parties advertise it.
+    welcome.insert(
+        "capabilities".to_string(),
+        Value::Array(vec![Value::String("machine_run_queue_v1".to_string())]),
+    );
     let mut body = Map::with_capacity(4);
     body.insert(
         "session_id".to_string(),

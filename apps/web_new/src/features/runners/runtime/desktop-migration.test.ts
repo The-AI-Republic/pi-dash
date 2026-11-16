@@ -94,7 +94,7 @@ function fakeComputer(options: {
   const runtime = {
     scanLegacyTrees: vi.fn(async () => trees),
     localRunners: vi.fn(async () => runners),
-    addEngineRunner: vi.fn(async (input: { workspace: string; project: string; workingDir?: string }) => {
+    addPidashAgentRunner: vi.fn(async (input: { workspace: string; project: string; workingDir?: string }) => {
       const added: DaemonLocalRunner = {
         name: `builtin-${input.project}`,
         runner_id: `id-${input.project}`,

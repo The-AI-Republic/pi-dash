@@ -53,10 +53,10 @@ export function waitingReasonText(wait: WaitingReasonInput, nowMs: number = Date
       const reason = wait.pause_reason ?? null;
       if (reason === "dispatch_paused" || reason === "owner_paused") return "paused by its owner";
       if (reason === "wallet_empty") return "the wallet is empty";
-      if (reason === "engine_sign_in_required") return "the engine's sign-in expired";
+      if (reason === "engine_sign_in_required") return "Pi Dash Agent's sign-in expired";
       if (reason === "gateway_session_revoked") return "the gateway session was revoked";
       if (reason === "profile_unavailable") return "the profile is unavailable";
-      if (reason === "engine_disabled") return "the engine is disabled";
+      if (reason === "engine_disabled") return "Pi Dash Agent is disabled";
       return reason ? `paused: ${reason}` : "paused";
     }
     case "runner_busy":

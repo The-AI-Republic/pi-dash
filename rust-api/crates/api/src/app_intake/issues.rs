@@ -88,7 +88,7 @@ use pidash_services::domain::issues::IssueFieldSet;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::orchestration::clock::ProjectClockPolicy;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::orchestration::StateRef;
 
 use super::{
@@ -2221,7 +2221,7 @@ async fn validate_executor(
         );
         return Ok(Some(ExecutorTranslation { stored: None }));
     }
-    let normalized = pidash_types::dispatch::normalize_executor_write(&value)
+    let normalized = pidash_types::agent_runs::normalize_executor_write(&value)
         .expect("known value parses")
         .value()
         .to_owned();
@@ -6045,7 +6045,7 @@ async fn validate_issue_create(
         {
             // #2903: deprecated writes translate to local_runner.
             Some(
-                pidash_types::dispatch::normalize_executor_write(executor)
+                pidash_types::agent_runs::normalize_executor_write(executor)
                     .expect("choice passes")
                     .value()
                     .to_owned(),
@@ -6770,7 +6770,7 @@ fn opt_limited_string(
 /// * `cloud_agent` needs the instance kill switch
 ///   (`CLOUD_AGENT_ENABLED`); the per-run BYOK question is answered at
 ///   run creation, not here.
-/// * `managed_runner` evaluates `managed_runner_availability` in gate
+/// * `managed_runner` evaluates `pidash_agent_availability` in gate
 ///   order; the desktop-unenrolled case (`NO_RUNNER_FOR_PROJECT`) is
 ///   ACCEPTED (the client self-resolves on open). The deeper gates
 ///   (LLM profile, enrollment, online presence) need the managed-runner

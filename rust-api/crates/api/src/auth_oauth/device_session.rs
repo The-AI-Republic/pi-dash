@@ -126,7 +126,7 @@ const OK_TRUE_BODY: &str = r#"{"ok":true}"#;
 /// exchange opportunistically issues the engine credential per
 /// `_maybe_issue_engine_credential` and the revoke locks the machine and,
 /// when it revokes the last live `mt_`, signs the engine out via
-/// `revoke_engine_credential`.
+/// `revoke_pidash_agent_credential`.
 pub fn routes() -> Router<AppState> {
     use axum::routing::{get, post};
     Router::new()
@@ -1001,7 +1001,7 @@ async fn exchange_in_transaction(
             .await
             .unwrap_or(None);
         m.map(|m| {
-            pidash_services::domain::engine_credential::current_engine_sign_in_state(
+            pidash_services::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
                 &m.engine_sign_in_state,
                 m.engine_credential_expires_at.as_ref().map(
                     |dt: &sea_orm::prelude::DateTimeWithTimeZone| dt.with_timezone(&chrono::Utc),
@@ -1051,7 +1051,7 @@ async fn exchange_in_transaction(
                 m.map(|m| m.revoked_at.is_some()).unwrap_or(true)
             };
             if !machine_revoked
-                && pidash_services::domain::engine_credential::engine_profile_for_user_available(
+                && pidash_services::domain::pidash_agent_credential::pidash_agent_profile_for_user_available(
                     settings,
                 )
                 .0
@@ -1067,7 +1067,7 @@ async fn exchange_in_transaction(
                 };
                 let should_issue = if silent {
                     if let Some(m) = machine_for_silent {
-                        pidash_services::domain::engine_credential::silent_issue_allowed(
+                        pidash_services::domain::pidash_agent_credential::silent_issue_allowed(
                             &pidash_db::orm_tx::TxConn::new(tx) as &_,
                             m.id,
                             now,
@@ -1083,7 +1083,7 @@ async fn exchange_in_transaction(
                 if should_issue {
                     let dbc = pidash_db::orm_tx::TxConn::new(tx);
                     let issued =
-                        pidash_services::domain::engine_credential::issue_engine_credential(
+                        pidash_services::domain::pidash_agent_credential::issue_pidash_agent_credential(
                             &dbc,
                             secret_key,
                             user_id,
@@ -1107,7 +1107,7 @@ async fn exchange_in_transaction(
                             .await
                             .unwrap_or(None);
                             m.map(|m| {
-                                pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                                pidash_services::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
                                     &m.engine_sign_in_state,
                                     m.engine_credential_expires_at.as_ref().map(|dt: &sea_orm::prelude::DateTimeWithTimeZone| dt.with_timezone(&chrono::Utc)),
                                     now,
@@ -1156,7 +1156,7 @@ async fn exchange_in_transaction(
 /// Idempotent — a missing or already-inactive `APIToken` still answers
 /// ok (`device.py:503-507`). For a machine-token caller, in one
 /// transaction, lock the token's machine, revoke the token, and when the
-/// machine then has no live token, `revoke_engine_credential`.
+/// machine then has no live token, `revoke_pidash_agent_credential`.
 async fn post_revoke(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
@@ -1239,7 +1239,7 @@ async fn post_revoke(State(state): State<AppState>, headers: HeaderMap) -> Respo
                 };
                 if !has_live {
                     let (_revoked, effects) =
-                        pidash_services::domain::engine_credential::revoke_engine_credential(
+                        pidash_services::domain::pidash_agent_credential::revoke_pidash_agent_credential(
                             &pidash_db::orm_tx::TxConn::new(&mut tx),
                             mid,
                             "signed_out",

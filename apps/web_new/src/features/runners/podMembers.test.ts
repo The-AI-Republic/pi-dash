@@ -5,7 +5,7 @@ import { ApiError, type Pod, type Runner } from "@pidash/api-client";
 import { describe, expect, it } from "vitest";
 
 import {
-  ENGINE_PROJECT_FIXED_MESSAGE,
+  PIDASH_AGENT_PROJECT_FIXED_MESSAGE,
   RUNNER_BUSY_MESSAGE,
   RUNNER_UPDATE_FAILED,
   addToPodPatch,
@@ -85,7 +85,7 @@ describe("runnerUpdateErrorMessage", () => {
   it("explains busy runners and engines leaving their project", () => {
     expect(runnerUpdateErrorMessage(refusal(409, { code: "runner_busy" }))).toBe(RUNNER_BUSY_MESSAGE);
     expect(runnerUpdateErrorMessage(refusal(400, { code: "engine_runner_project_fixed" }))).toBe(
-      ENGINE_PROJECT_FIXED_MESSAGE
+      PIDASH_AGENT_PROJECT_FIXED_MESSAGE
     );
   });
 

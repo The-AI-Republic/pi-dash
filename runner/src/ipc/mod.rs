@@ -1,6 +1,6 @@
 pub mod chat;
 pub mod client;
-pub mod engine_chat;
+pub mod pidash_agent_chat;
 pub mod probe;
 pub mod protocol;
 pub mod server;

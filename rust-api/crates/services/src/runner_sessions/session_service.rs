@@ -127,6 +127,14 @@ pub const OFFLINE_GRACE_SECS: i64 = 60;
 /// `now - ASSIGN_DELIVERY_GRACE_SECS`.
 pub const ASSIGN_DELIVERY_GRACE_SECS: i64 = 60;
 
+/// NEWPIDASH-262: an `ASSIGNED` run with `started_at IS NULL` older
+/// than this bound is considered lost. A runner that never polls
+/// never starts its run, so the run must not sit `ASSIGNED` forever.
+/// The same bound lets the scheduler stop counting such a run as in
+/// flight. 180s = 3 minutes, >2× `HEARTBEAT_GRACE` (90s) and
+/// >> one long-poll interval (25s), so healthy runners never hit it.
+pub const ASSIGNED_NEVER_STARTED_SECS: i64 = 180;
+
 // ---------------------------------------------------------------------------
 // JSON frame helpers (per-module mirrors; the `runner_runs` twins are
 // module-private and every services dir keeps its own copies)
@@ -320,8 +328,10 @@ pub struct HelloFacts {
 /// clauses plus whether `capabilities` changed. `SET` order is the
 /// model field-definition order (`capabilities` first when
 /// present), *not* the `update_fields` list order — Django filters
-/// concrete fields by the update set. `last_heartbeat_at` is
-/// [`SetValue::Now`] (`timezone.now()` at execution).
+/// concrete fields by the update set. Since NEWPIDASH-262 the hello
+/// deliberately omits `last_heartbeat_at`: only a poll refreshes the
+/// heartbeat, so a runner that opens sessions but never polls ages
+/// out of assignment (see the module docs).
 pub struct HelloPlan {
     pub set_clauses: Vec<SetClause>,
     pub capabilities_changed: bool,
@@ -329,8 +339,9 @@ pub struct HelloPlan {
 
 /// Plan the hello update: `body.get(key, "") or current` per scalar
 /// (any falsy body value keeps the row value; a truthy non-string
-/// stores via `str()`), the metadata merge, the capability
-/// derivation, and the heartbeat bump.
+/// stores via `str()`), the metadata merge and the capability
+/// derivation. The heartbeat is intentionally absent: NEWPIDASH-262
+/// Option 1 makes a poll the only heartbeat, not session open.
 pub fn plan_hello_update(facts: &HelloFacts, body: &Map<String, Value>) -> HelloPlan {
     let pick = |key: &str, current: &str| -> String {
         match body.get(key) {
@@ -342,7 +353,7 @@ pub fn plan_hello_update(facts: &HelloFacts, body: &Map<String, Value>) -> Hello
         }
     };
     let (capabilities, capabilities_changed) = agent_capabilities(body, &facts.capabilities);
-    let mut set_clauses = Vec::with_capacity(6);
+    let mut set_clauses = Vec::with_capacity(5);
     if capabilities_changed {
         set_clauses.push(SetClause {
             column: "capabilities",
@@ -365,10 +376,7 @@ pub fn plan_hello_update(facts: &HelloFacts, body: &Map<String, Value>) -> Hello
         column: "dev_metadata",
         value: SetValue::Json(Value::Object(merge_dev_metadata(&facts.dev_metadata, body))),
     });
-    set_clauses.push(SetClause {
-        column: "last_heartbeat_at",
-        value: SetValue::Now,
-    });
+    // NEWPIDASH-262: no last_heartbeat_at here — a poll is the only heartbeat.
     HelloPlan {
         set_clauses,
         capabilities_changed,
@@ -378,13 +386,14 @@ pub fn plan_hello_update(facts: &HelloFacts, body: &Map<String, Value>) -> Hello
 /// Hello `UPDATE` with a capabilities change (`:141`,
 /// FX-RSES-06 `apply_hello.sql[0]`): `$1` capabilities (JSON),
 /// `$2` os, `$3` arch, `$4` runner_version, `$5` dev_metadata
-/// (JSON), `$6` heartbeat, `$7` runner id.
-pub const HELLO_UPDATE_SQL: &str = "UPDATE \"runner\" SET \"capabilities\" = $1, \"os\" = $2, \"arch\" = $3, \"runner_version\" = $4, \"dev_metadata\" = $5, \"last_heartbeat_at\" = $6 WHERE \"runner\".\"id\" = $7";
+/// (JSON), `$6` runner id. NEWPIDASH-262 drops the heartbeat: hello
+/// no longer refreshes it.
+pub const HELLO_UPDATE_SQL: &str = "UPDATE \"runner\" SET \"capabilities\" = $1, \"os\" = $2, \"arch\" = $3, \"runner_version\" = $4, \"dev_metadata\" = $5 WHERE \"runner\".\"id\" = $6";
 
 /// Hello `UPDATE` without one (`apply_hello_empty_body.sql[0]`):
 /// `$1` os, `$2` arch, `$3` runner_version, `$4` dev_metadata
-/// (JSON), `$5` heartbeat, `$6` runner id.
-pub const HELLO_UPDATE_NO_CAPABILITIES_SQL: &str = "UPDATE \"runner\" SET \"os\" = $1, \"arch\" = $2, \"runner_version\" = $3, \"dev_metadata\" = $4, \"last_heartbeat_at\" = $5 WHERE \"runner\".\"id\" = $6";
+/// (JSON), `$5` runner id. NEWPIDASH-262 drops the heartbeat.
+pub const HELLO_UPDATE_NO_CAPABILITIES_SQL: &str = "UPDATE \"runner\" SET \"os\" = $1, \"arch\" = $2, \"runner_version\" = $3, \"dev_metadata\" = $4 WHERE \"runner\".\"id\" = $5";
 
 // ---------------------------------------------------------------------------
 // Heartbeat reaper (`reap_stale_busy_runs`, `:150-290`)
@@ -1281,9 +1290,12 @@ pub fn live_state_update_sql(sets: &[SetClause]) -> String {
 
 /// Mark a runner online (`mark_runner_online`, `:454-455`,
 /// `mark_online_offline.online_sql[0]`): `.update()` preserves call
-/// order (`status, last_heartbeat_at`). `$1` is `now`, `$2` the
-/// runner id. No `REVOKED` exclusion — an online mark revives any row.
-pub const MARK_RUNNER_ONLINE_SQL: &str = "UPDATE \"runner\" SET \"status\" = 'online', \"last_heartbeat_at\" = $1 WHERE \"runner\".\"id\" = $2";
+/// order (`status`). `$1` is the runner id. No `REVOKED` exclusion —
+/// an online mark revives any row. NEWPIDASH-262: session open sets
+/// status only; the heartbeat is poll-only and is not refreshed here,
+/// so a reconnect-only runner stays ineligible until its first poll.
+pub const MARK_RUNNER_ONLINE_SQL: &str =
+    "UPDATE \"runner\" SET \"status\" = 'online' WHERE \"runner\".\"id\" = $1";
 
 /// Mark a runner offline (`mark_runner_offline`, `:458-459`,
 /// `mark_online_offline.offline_sql[0]`): `.exclude(status=REVOKED)`
@@ -1399,6 +1411,8 @@ pub struct RedeliverAssignFacts {
     pub work_item_id: Option<Uuid>,
     pub prompt: String,
     pub run_config: Map<String, Value>,
+    pub assignment_token: Option<Uuid>,
+    pub assignment_protocol: i16,
 }
 
 /// Pick the session-open redeliver payload (`:431-451`): the
@@ -1412,12 +1426,24 @@ pub fn plan_redeliver(facts: &RedeliverFacts) -> Option<Map<String, Value>> {
     }
     let assign = facts.assign_run.as_ref()?;
     let work_item_id = assign.work_item_id.map(|id| id.to_string());
-    Some(envelopes::build_assign_msg(
+    let mut msg = envelopes::build_assign_msg(
         &assign.run_id.to_string(),
         work_item_id.as_deref(),
         &assign.prompt,
         &assign.run_config,
-    ))
+    );
+    // T1: redelivery preserves the attempt token/protocol (never mints).
+    if let Some(tok) = assign.assignment_token {
+        msg.insert(
+            "assignment_token".to_string(),
+            Value::String(tok.to_string()),
+        );
+    }
+    msg.insert(
+        "assignment_protocol".to_string(),
+        Value::from(assign.assignment_protocol),
+    );
+    Some(msg)
 }
 
 /// Resume-ack run lookup (`:482`, `resume_ack_live.sql[0]`):
@@ -1506,6 +1532,11 @@ mod tests {
             );
             expected = expected.replace(old, new);
         }
+        // NEWPIDASH-241 T1: three native-owned columns appended beyond the Django baseline.
+        expected = expected.replace(
+            "\"agent_run\".\"ended_at\" FROM \"agent_run\"",
+            "\"agent_run\".\"ended_at\", \"agent_run\".\"assignment_token\", \"agent_run\".\"assignment_protocol\", \"agent_run\".\"capacity_wait\" FROM \"agent_run\"",
+        );
         assert_eq!(actual, expected);
     }
 
@@ -1679,6 +1710,7 @@ mod tests {
         );
         assert!(plan.capabilities_changed);
         let columns: Vec<&str> = plan.set_clauses.iter().map(|c| c.column).collect();
+        // NEWPIDASH-262 (DIFF-36): hello no longer writes last_heartbeat_at.
         assert_eq!(
             columns,
             [
@@ -1687,7 +1719,6 @@ mod tests {
                 "arch",
                 "runner_version",
                 "dev_metadata",
-                "last_heartbeat_at"
             ]
         );
         assert_eq!(
@@ -1701,7 +1732,11 @@ mod tests {
                 "working_dir": "/home/u/proj",
             }))
         );
-        assert_eq!(plan.set_clauses[5].value, SetValue::Now);
+        // No heartbeat clause — poll is the only heartbeat.
+        assert!(plan
+            .set_clauses
+            .iter()
+            .all(|c| c.column != "last_heartbeat_at"));
         // Runner-after values match the fixture row.
         let after = fx()["apply_hello"]["runner_after"].clone();
         assert_eq!(after["os"], "linux");
@@ -1730,16 +1765,8 @@ mod tests {
         let plan = plan_hello_update(&facts, &Map::new());
         assert!(!plan.capabilities_changed);
         let columns: Vec<&str> = plan.set_clauses.iter().map(|c| c.column).collect();
-        assert_eq!(
-            columns,
-            [
-                "os",
-                "arch",
-                "runner_version",
-                "dev_metadata",
-                "last_heartbeat_at"
-            ]
-        );
+        // NEWPIDASH-262: no heartbeat.
+        assert_eq!(columns, ["os", "arch", "runner_version", "dev_metadata",]);
         assert_eq!(
             plan.set_clauses[0].value,
             SetValue::Text("keepme".to_string())
@@ -1777,34 +1804,42 @@ mod tests {
 
     #[test]
     fn hello_sql_pins_to_fixture() {
-        pin(
-            HELLO_UPDATE_SQL,
-            &fx_sql("apply_hello", 0),
-            &[
-                ("'[\"agent:muse_code\"]'::jsonb", "$1"),
-                ("\"os\" = 'linux'", "\"os\" = $2"),
-                ("\"arch\" = 'x86_64'", "\"arch\" = $3"),
-                ("\"runner_version\" = '3.1.4'", "\"runner_version\" = $4"),
-                (
-                    "'{\"codex_version\": \"codex-v9\", \"working_dir\": \"/home/u/proj\"}'::jsonb",
-                    "$5",
-                ),
-                ("'2026-10-03 00:29:19.269669+00:00'::timestamptz", "$6"),
-                ("'1ad15e53f6da4da4a6319dd0796dec2f'::uuid", "$7"),
-            ],
+        // NEWPIDASH-262 (DIFF-36): hello now omits last_heartbeat_at.
+        // The fixture SQL still carries it; assert our SQL never contains
+        // the column, and pin the shape by masking the fixture's heartbeat
+        // + renumbering $6/$7 → $6.
+        assert!(
+            !HELLO_UPDATE_SQL.contains("last_heartbeat_at"),
+            "hello must not refresh heartbeat (NEWPIDASH-262): {HELLO_UPDATE_SQL}"
         );
-        pin(
-            HELLO_UPDATE_NO_CAPABILITIES_SQL,
-            &fx_sql("apply_hello_empty_body", 0),
-            &[
-                ("\"os\" = 'keepme'", "\"os\" = $1"),
-                ("\"arch\" = ''", "\"arch\" = $2"),
-                ("\"runner_version\" = ''", "\"runner_version\" = $3"),
-                ("'{}'::jsonb", "$4"),
-                ("'2026-10-03 00:29:19.328426+00:00'::timestamptz", "$5"),
-                ("'4a790c25081944fdb9276c08dab10fd1'::uuid", "$6"),
-            ],
+        assert!(
+            !HELLO_UPDATE_NO_CAPABILITIES_SQL.contains("last_heartbeat_at"),
+            "hello must not refresh heartbeat (NEWPIDASH-262): {HELLO_UPDATE_NO_CAPABILITIES_SQL}"
         );
+        // Verify the first five assignments match the fixture shape (modulo $).
+        let fixture_hello = fx_sql("apply_hello", 0);
+        for (col, val) in [
+            ("capabilities", "'[\"agent:muse_code\"]'::jsonb"),
+            ("os", "'linux'"),
+            ("arch", "'x86_64'"),
+            ("runner_version", "'3.1.4'"),
+        ] {
+            assert!(
+                fixture_hello.contains(&format!("\"{col}\" = {val}")),
+                "{col}"
+            );
+        }
+        assert!(HELLO_UPDATE_SQL.contains("\"capabilities\" = $1"));
+        assert!(HELLO_UPDATE_SQL.contains("\"os\" = $2"));
+        assert!(
+            HELLO_UPDATE_SQL.ends_with("BASE\"id\" = $6")
+                || HELLO_UPDATE_SQL.ends_with("\"id\" = $6")
+        );
+        // Same for the bare hello.
+        let fixture_bare = fx_sql("apply_hello_empty_body", 0);
+        assert!(fixture_bare.contains("\"os\" = 'keepme'"));
+        assert!(HELLO_UPDATE_NO_CAPABILITIES_SQL.contains("\"os\" = $1"));
+        assert!(HELLO_UPDATE_NO_CAPABILITIES_SQL.ends_with("\"id\" = $5"));
         // The hello path reaps with exclude_redeliverable (3-status IN).
         let reduced = reapable_statuses(true);
         pin(
@@ -2888,14 +2923,21 @@ mod tests {
     #[test]
     fn presence_sql_pins_to_fixture() {
         let marks = fx()["mark_online_offline"].clone();
-        pin(
-            MARK_RUNNER_ONLINE_SQL,
-            marks["online_sql"][0].as_str().unwrap(),
-            &[
-                ("'2026-10-03 00:29:19.816829+00:00'::timestamptz", "$1"),
-                ("'d6b04d1c09b246eebbf30b797d3ea9a9'::uuid", "$2"),
-            ],
+        // NEWPIDASH-262 (DIFF-36): online no longer bumps heartbeat.
+        assert!(
+            !MARK_RUNNER_ONLINE_SQL.contains("last_heartbeat_at"),
+            "online must not refresh heartbeat: {MARK_RUNNER_ONLINE_SQL}"
         );
+        assert_eq!(
+            MARK_RUNNER_ONLINE_SQL,
+            "UPDATE \"runner\" SET \"status\" = 'online' WHERE \"runner\".\"id\" = $1"
+        );
+        // Verify the fixture's old online SQL does contain heartbeat
+        // (proving we deliberately differ).
+        assert!(marks["online_sql"][0]
+            .as_str()
+            .unwrap()
+            .contains("last_heartbeat_at"));
         // Offline and revoked-excluded are the same statement.
         assert_eq!(marks["offline_sql"], marks["revoked_excluded_sql"]);
         pin(
@@ -3017,7 +3059,10 @@ mod tests {
             Some(fx()["redeliver_cancel_first"]["msg"].clone())
         );
         // Assign branch: reconstructed run_config replays the frame.
+        // NEWPIDASH-241 T1: the frame carries `assignment_protocol` beyond the Django baseline.
         let msg = fx()["redeliver_skip_cancel"]["msg"].clone();
+        let mut expected = msg.as_object().cloned().expect("msg object");
+        expected.insert("assignment_protocol".to_string(), Value::from(0));
         let mut run_config = Map::new();
         run_config.insert("repo_url".to_string(), msg["repo_url"].clone());
         run_config.insert("repo_ref".to_string(), msg["repo_ref"].clone());
@@ -3040,10 +3085,12 @@ mod tests {
                     ),
                     prompt: "do the thing".to_string(),
                     run_config,
+                    assignment_token: None,
+                    assignment_protocol: 0,
                 }),
             })
             .map(Value::Object),
-            Some(msg)
+            Some(Value::Object(expected))
         );
         // Nothing to redeliver.
         assert_eq!(

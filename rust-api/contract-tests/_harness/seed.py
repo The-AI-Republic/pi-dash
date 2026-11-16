@@ -1210,7 +1210,7 @@ class Seeder:
                 agent_default_interval_seconds, agent_default_max_ticks,
                 agent_review_default_interval_seconds, agent_test_default_interval_seconds,
                 agent_ticking_enabled, default_agent_executor,
-                dedicated_runner_lost_action,
+                dedicated_runner_lost_action, default_work_type,
                 created_at, updated_at)
                VALUES (%s,%s,'',2,%s,%s,
                        false,false,false,true,false,
@@ -1218,7 +1218,7 @@ class Seeder:
                        false,true,
                        0,0,'{}','UTC','','main',
                        10800,10,10800,10800,
-                       true,'local_runner','fail_to_backlog',
+                       true,'local_runner','fail_to_backlog','software',
                        now(),now())""",
             (
                 project_id,
@@ -2360,13 +2360,13 @@ class Seeder:
                 required_capabilities, thread_id, agent_metadata, tool_plan,
                 usage, dispatch_attempts, error_details, failure_reason,
                 llm_model,
-                cancel_reason, phase_kind, pin_kind,
+                cancel_reason, phase_kind, pin_kind, work_type,
                 created_at)
                VALUES (%s,%s,%s,%s,%s,%s,
                        %s,'','direct','local_runner','{}',
                        '[]','{}','{}','{}',
                        '{}',0,'{}','','',
-                       '','','locality',
+                       '','','locality','',
                        now())""",
             (run_id, workspace_id, owner_id, owner_id, pod_id, runner_id, status),
         )

@@ -33,6 +33,7 @@ export {
 } from "./lib/byok.js";
 export type { ByokDraft, ByokProblems, ByokProvider, ByokSubmission } from "./lib/byok.js";
 export {
+  annotateChoices,
   BUILTIN_CODEX_MODELS,
   BYOK_MODEL_SUGGESTIONS,
   connectionModelFlags,
@@ -42,6 +43,7 @@ export {
   isDisconnected,
   isStaleHostedRow,
   modelChoices,
+  OPENHUB_MODEL_DESCRIPTIONS,
   toConnectionRow,
 } from "./lib/rows.js";
 export type { ConnectionModelFlags, ConnectionRow, ModelChoice, ModelControlKind, ModelCredit } from "./lib/rows.js";

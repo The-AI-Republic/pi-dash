@@ -2171,8 +2171,8 @@ pub async fn execute_get_pull_request_status<S: ToolStore>(
     args: &tool_args::PrStatusArgs,
 ) -> Result<Value, ToolFailure> {
     use pidash_services::assistant::tools_github::{
-        check_pr_budget, parse_code_review_url, pick_sync_token, review_api_url, review_headers,
-        status_reason, unknown_state,
+        check_pr_budget, parse_code_review_url, review_api_url, review_headers, status_reason,
+        unknown_state,
     };
     // Per-run budget (`github.py:94-98`): exhausted answers without
     // consuming; otherwise the counter increments before parsing.
@@ -2194,11 +2194,10 @@ pub async fn execute_get_pull_request_status<S: ToolStore>(
     ) {
         return Ok(unknown_state("blocked"));
     }
-    // Token (`github._find_token :48-82`): the binding row wins
-    // outright — even an empty/undecryptable token returns without
-    // consulting the sync fallback (`github.py:63-65` sits inside
-    // `if binding is not None: return ...`). Each stored token
-    // decrypts (failures read back as `""`, which behaves as no
+    // Token (`github._find_token :48-82`): the binding row wins.
+    // NEWPIDASH-210: the legacy sync fallback (`github.py:67-82`) is
+    // retired — 0152 backfilled a binding per sync row. Each stored
+    // token decrypts (failures read back as `""`, which behaves as no
     // token — the ported `_maybe_decrypt` bug, preserved).
     let binding = store
         .github_binding_config(deps, &parsed.provider, &parsed.namespace, &parsed.repo_name)
@@ -2207,21 +2206,6 @@ pub async fn execute_get_pull_request_status<S: ToolStore>(
     if let Some(config) = binding {
         // `config.get("token")` (`github.py:63`).
         token = store.decrypt_token(config.get("token").and_then(Value::as_str));
-    } else if parsed.provider == "github" {
-        if let Some(credentials) = store
-            .github_sync_credentials(deps, &parsed.namespace, &parsed.repo_name)
-            .await?
-        {
-            // `creds.get("access_token") or creds.get("token")`
-            // (`github.py:81`).
-            token = store.decrypt_token(
-                pick_sync_token(
-                    credentials.get("access_token").and_then(Value::as_str),
-                    credentials.get("token").and_then(Value::as_str),
-                )
-                .as_deref(),
-            );
-        }
     }
     let headers = review_headers(&parsed.provider, token.as_deref());
     match store.fetch_pr(&api_url, &headers).await {
@@ -2348,7 +2332,6 @@ mod tests {
         /// `apply_execution_target_post_commit` calls, in order.
         applied_targets: Mutex<Vec<(Uuid, Option<Uuid>)>>,
         binding_configs: HashMap<(String, String, String), Value>,
-        sync_creds: HashMap<(String, String), Value>,
         decrypt_map: HashMap<String, String>,
         pr_fetch: PrFetch,
         pr_fetch_calls: Mutex<Vec<PrFetchCall>>,
@@ -2632,7 +2615,6 @@ mod tests {
                 drive_pod_once: Mutex::new(Vec::new()),
                 applied_targets: Mutex::new(Vec::new()),
                 binding_configs: HashMap::new(),
-                sync_creds: HashMap::new(),
                 decrypt_map: HashMap::new(),
                 pr_fetch: PrFetch::NetworkError,
                 pr_fetch_calls: Mutex::new(Vec::new()),
@@ -3395,18 +3377,6 @@ mod tests {
             Ok(self
                 .binding_configs
                 .get(&(provider.to_owned(), namespace.to_owned(), repo.to_owned()))
-                .cloned())
-        }
-
-        async fn github_sync_credentials(
-            &self,
-            _deps: &AssistantDeps,
-            namespace: &str,
-            repo: &str,
-        ) -> Result<Option<Value>, StoreError> {
-            Ok(self
-                .sync_creds
-                .get(&(namespace.to_owned(), repo.to_owned()))
                 .cloned())
         }
 
@@ -4912,23 +4882,16 @@ mod tests {
 
     #[tokio::test]
     async fn pr_status_token_paths() {
-        // Binding token decrypts onto the request; the sync fallback is
-        // not consulted when a binding row exists.
+        // Binding token decrypts onto the request (NEWPIDASH-210:
+        // binding-only; the legacy sync fallback is retired).
         let mut store = FixtureStore::standard();
         store.binding_configs.insert(
             ("github".to_owned(), "acme".to_owned(), "web".to_owned()),
             json!({"token": "enc-binding"}),
         );
-        store.sync_creds.insert(
-            ("acme".to_owned(), "web".to_owned()),
-            json!({"access_token": "sync-plain"}),
-        );
         store
             .decrypt_map
             .insert("enc-binding".to_owned(), "binding-plain".to_owned());
-        store
-            .decrypt_map
-            .insert("sync-plain".to_owned(), "sync-plain".to_owned());
         let env = pr_env(false, HashMap::new());
         let mut deps = store.deps();
         let _ = pr_call(
@@ -4952,20 +4915,13 @@ mod tests {
                 ),
             ]
         );
-        // A binding row with no usable token still wins outright: no
-        // sync fallback (`github.py:63-65`).
+        // A binding row with no usable token still wins: the request
+        // goes out unauthenticated.
         let mut store = FixtureStore::standard();
         store.binding_configs.insert(
             ("github".to_owned(), "acme".to_owned(), "web".to_owned()),
             json!({}),
         );
-        store.sync_creds.insert(
-            ("acme".to_owned(), "web".to_owned()),
-            json!({"access_token": "sync-plain"}),
-        );
-        store
-            .decrypt_map
-            .insert("sync-plain".to_owned(), "sync-plain".to_owned());
         let mut deps = store.deps();
         let _ = pr_call(
             &store,
@@ -4999,40 +4955,22 @@ mod tests {
             calls[0].1,
             vec![("Accept".to_owned(), "application/json".to_owned())]
         );
-        // No binding: the sync fallback answers, preferring
-        // `access_token` over `token` — first non-empty wins.
-        for credentials in [
-            json!({"access_token": "sync-plain", "token": "other"}),
-            json!({"access_token": "", "token": "sync-plain"}),
-        ] {
-            let mut store = FixtureStore::standard();
-            store
-                .sync_creds
-                .insert(("acme".to_owned(), "web".to_owned()), credentials);
-            store
-                .decrypt_map
-                .insert("sync-plain".to_owned(), "sync-plain".to_owned());
-            store
-                .decrypt_map
-                .insert("other".to_owned(), "other".to_owned());
-            let mut deps = store.deps();
-            let _ = pr_call(
-                &store,
-                &mut deps,
-                &env,
-                "https://github.com/acme/web/pull/42",
-            )
-            .await;
-            let calls = store.pr_fetch_calls.lock().unwrap();
-            assert_eq!(
-                calls[0].1,
-                vec![
-                    ("Accept".to_owned(), "application/json".to_owned()),
-                    ("X-GitHub-Api-Version".to_owned(), "2022-11-28".to_owned()),
-                    ("Authorization".to_owned(), "Bearer sync-plain".to_owned()),
-                ]
-            );
-        }
+        // No binding at all: the request goes out unauthenticated
+        // (NEWPIDASH-210: no legacy sync fallback).
+        let store = FixtureStore::standard();
+        let mut deps = store.deps();
+        let _ = pr_call(
+            &store,
+            &mut deps,
+            &env,
+            "https://github.com/acme/web/pull/42",
+        )
+        .await;
+        let calls = store.pr_fetch_calls.lock().unwrap().clone();
+        assert_eq!(
+            calls[0].1,
+            vec![("Accept".to_owned(), "application/json".to_owned())]
+        );
         // GitLab tokens ride `PRIVATE-TOKEN`, never `Authorization`.
         let mut store = FixtureStore::standard();
         store.binding_configs.insert(

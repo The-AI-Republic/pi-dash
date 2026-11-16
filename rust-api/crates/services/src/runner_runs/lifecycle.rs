@@ -596,8 +596,8 @@ pub fn plan_requeue_from_locked(run: &RequeueRunFacts) -> RequeuePlan {
 /// `DatabaseError`.
 pub fn requeue_update_sql() -> &'static str {
     "UPDATE \"agent_run\" SET \"status\" = $1, \"runner_id\" = $2, \
-     \"pinned_runner_id\" = $3, \"assigned_at\" = $4 \
-     WHERE \"agent_run\".\"id\" = $5"
+     \"pinned_runner_id\" = $3, \"assigned_at\" = $4, \"capacity_wait\" = $5 \
+     WHERE \"agent_run\".\"id\" = $6"
 }
 
 /// Requeue `UPDATE` for a dedicated pin
@@ -607,8 +607,8 @@ pub fn requeue_update_sql() -> &'static str {
 /// null, `$4` run id.
 pub fn requeue_update_keep_pin_sql() -> &'static str {
     "UPDATE \"agent_run\" SET \"status\" = $1, \"runner_id\" = $2, \
-     \"assigned_at\" = $3 \
-     WHERE \"agent_run\".\"id\" = $4"
+     \"assigned_at\" = $3, \"capacity_wait\" = $4 \
+     WHERE \"agent_run\".\"id\" = $5"
 }
 
 /// Parent thread clear (`apply_run_resume_unavailable:279-281`):
@@ -630,6 +630,25 @@ pub struct AssignRejectedBusyPlan {
 /// Plan the busy rejection: the flip plus [`plan_requeue_from_locked`].
 pub fn plan_assign_rejected_busy(runner_id: Uuid, run: &RequeueRunFacts) -> AssignRejectedBusyPlan {
     AssignRejectedBusyPlan {
+        busy_flip_runner_id: runner_id,
+        requeue: plan_requeue_from_locked(run),
+    }
+}
+
+/// The Muse auth-missing rejection: same DB effect as
+/// [`plan_assign_rejected_busy`] (BUSY flip + requeue) so the pod drain
+/// cannot instantly re-dispatch `agent_auth_missing` to the same
+/// credential-less runner. Wire name `agent_auth_missing` distinguishes
+/// telemetry from `assign_rejected_busy`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentAuthMissingPlan {
+    pub busy_flip_runner_id: Uuid,
+    pub requeue: RequeuePlan,
+}
+
+/// Plan the auth-missing rejection: the flip plus [`plan_requeue_from_locked`].
+pub fn plan_agent_auth_missing(runner_id: Uuid, run: &RequeueRunFacts) -> AgentAuthMissingPlan {
+    AgentAuthMissingPlan {
         busy_flip_runner_id: runner_id,
         requeue: plan_requeue_from_locked(run),
     }
@@ -1317,6 +1336,7 @@ pub fn requeue_update_statement(run_id: Uuid) -> sea_orm::UpdateMany<orm::agent_
         .col_expr(Column::RunnerId, SimpleExpr::Keyword(Keyword::Null))
         .col_expr(Column::PinnedRunnerId, SimpleExpr::Keyword(Keyword::Null))
         .col_expr(Column::AssignedAt, SimpleExpr::Keyword(Keyword::Null))
+        .col_expr(Column::CapacityWait, SimpleExpr::Keyword(Keyword::Null))
         .filter(Column::Id.eq(run_id))
 }
 
@@ -1345,6 +1365,7 @@ pub fn requeue_update_keep_pin_statement(
         .col_expr(Column::Status, Expr::value(AgentRunStatus::Queued.value()))
         .col_expr(Column::RunnerId, SimpleExpr::Keyword(Keyword::Null))
         .col_expr(Column::AssignedAt, SimpleExpr::Keyword(Keyword::Null))
+        .col_expr(Column::CapacityWait, SimpleExpr::Keyword(Keyword::Null))
         .filter(Column::Id.eq(run_id))
 }
 
@@ -1859,8 +1880,8 @@ mod tests {
         assert_eq!(
             requeue_update_keep_pin_sql(),
             "UPDATE \"agent_run\" SET \"status\" = $1, \"runner_id\" = $2, \
-             \"assigned_at\" = $3 \
-             WHERE \"agent_run\".\"id\" = $4"
+             \"assigned_at\" = $3, \"capacity_wait\" = $4 \
+             WHERE \"agent_run\".\"id\" = $5"
         );
     }
 
@@ -1878,6 +1899,15 @@ mod tests {
             Some("busy")
         );
         let plan = plan_assign_rejected_busy(Uuid::nil(), &requeue_facts());
+        assert_eq!(plan.busy_flip_runner_id, Uuid::nil());
+        assert_eq!(plan.requeue, plan_requeue_from_locked(&requeue_facts()));
+    }
+
+    #[test]
+    fn agent_auth_missing_plan_matches_busy_effect() {
+        // `agent_auth_missing` reuses the busy rejection's DB effect: BUSY flip
+        // + shared requeue, with a distinct plan type for telemetry.
+        let plan = plan_agent_auth_missing(Uuid::nil(), &requeue_facts());
         assert_eq!(plan.busy_flip_runner_id, Uuid::nil());
         assert_eq!(plan.requeue, plan_requeue_from_locked(&requeue_facts()));
     }
@@ -2524,9 +2554,11 @@ mod tests {
 
     #[test]
     fn lock_sql_match_django_tails() {
+        // NEWPIDASH-241 T1: agent_run projections carry 45 columns
+        // (42 Django baseline + 3 native-owned); tails are unchanged.
         let pause = lock_run_for_pause_sql();
         assert!(pause.starts_with("SELECT \"agent_run\".\"id\", "), "prefix");
-        assert_eq!(select_runs(&pause), vec![("\"agent_run\"".to_owned(), 42)]);
+        assert_eq!(select_runs(&pause), vec![("\"agent_run\"".to_owned(), 45)]);
         assert!(
             pause.ends_with(
                 " FROM \"agent_run\" WHERE (\"agent_run\".\"id\" = $1 AND \
@@ -2539,7 +2571,7 @@ mod tests {
         let requeue = lock_run_for_requeue_sql();
         assert_eq!(
             select_runs(&requeue),
-            vec![("\"agent_run\"".to_owned(), 42)]
+            vec![("\"agent_run\"".to_owned(), 45)]
         );
         assert!(
             requeue.ends_with(
@@ -2558,7 +2590,7 @@ mod tests {
         assert_eq!(
             select_runs(&reread),
             vec![
-                ("\"agent_run\"".to_owned(), 42),
+                ("\"agent_run\"".to_owned(), 45),
                 ("\"issues\"".to_owned(), 35),
             ]
         );
@@ -2574,7 +2606,7 @@ mod tests {
         assert_eq!(
             select_runs(&drain),
             vec![
-                ("\"agent_run\"".to_owned(), 42),
+                ("\"agent_run\"".to_owned(), 45),
                 ("\"issues\"".to_owned(), 35),
                 ("\"projects\"".to_owned(), 47),
                 ("\"states\"".to_owned(), 18),
@@ -2594,7 +2626,7 @@ mod tests {
         assert_eq!(
             select_runs(&failure),
             vec![
-                ("\"agent_run\"".to_owned(), 42),
+                ("\"agent_run\"".to_owned(), 45),
                 ("\"issues\"".to_owned(), 35),
                 ("\"projects\"".to_owned(), 47),
             ]
@@ -2668,8 +2700,8 @@ mod tests {
         assert_eq!(
             requeue_update_sql(),
             "UPDATE \"agent_run\" SET \"status\" = $1, \"runner_id\" = $2, \
-             \"pinned_runner_id\" = $3, \"assigned_at\" = $4 \
-             WHERE \"agent_run\".\"id\" = $5"
+             \"pinned_runner_id\" = $3, \"assigned_at\" = $4, \"capacity_wait\" = $5 \
+             WHERE \"agent_run\".\"id\" = $6"
         );
         assert_eq!(
             parent_thread_clear_sql(),

@@ -22,6 +22,7 @@ import uuid
 import pytest
 
 from _harness import env
+from _harness.diffs import expect
 from _harness.seed import Seed
 
 THEME_KEYS = {
@@ -922,6 +923,41 @@ def test_draft_to_issue_requires_project(user_api, space):
     assert res.json() == {"error": "Project is required to create an issue."}
 
 
+def test_draft_to_issue_missing_draft_404(user_api, space):
+    # NEWPIDASH-265 (DIFF-35, PB-0901): draft-to-issue on a missing draft id
+    # must answer 404 {"error": "The required object does not exist."},
+    # matching the drafts viewset's other missing-draft 404s (retrieve).
+    # Django dereferences None.project_id and answers 500; Rust answers 404.
+    # Covers both the never-existed id and the already-deleted draft id.
+    missing = str(uuid.uuid4())
+    res = user_api.post(
+        f"/api/workspaces/{space['slug']}/draft-to-issue/{missing}/",
+        json={"name": "I1"},
+    )
+    assert res.status_code == expect("DIFF-35", django=500, rust=404), res.text
+    assert res.json() == expect(
+        "DIFF-35",
+        django={"error": "Something went wrong please try again later"},
+        rust={"error": "The required object does not exist."},
+    )
+    did = user_api.post(
+        f"/api/workspaces/{space['slug']}/draft-issues/", json={"name": "D1"}
+    ).json()["id"]
+    assert (
+        user_api.delete(f"/api/workspaces/{space['slug']}/draft-issues/{did}/").status_code
+        == 204
+    )
+    res = user_api.post(
+        f"/api/workspaces/{space['slug']}/draft-to-issue/{did}/", json={"name": "I1"}
+    )
+    assert res.status_code == expect("DIFF-35", django=500, rust=404), res.text
+    assert res.json() == expect(
+        "DIFF-35",
+        django={"error": "Something went wrong please try again later"},
+        rust={"error": "The required object does not exist."},
+    )
+
+
 def test_draft_to_issue_converts_with_project(user_api, space, world):
     # PIDASHCONV-904: converting a project-bearing draft 500'd on Rust
     # (the issue_sequences INSERT missed its deleted_at bind) while
@@ -1466,6 +1502,19 @@ def test_home_prefs_autocreate(user_api, space):
     body = res.json()
     assert {p["key"] for p in body} == {"my_stickies", "recents", "quick_links"}
     assert set(body[0].keys()) == {"config", "is_enabled", "key", "sort_order"}
+    # NEWPIDASH-301 (DIFF-39): the new home autocreates quick_links/recents
+    # disabled so a first-time home is the chat composer with no widget
+    # clutter; Django autocreates all three enabled (model default).
+    by_key = {p["key"]: p for p in body}
+    assert by_key["quick_links"]["is_enabled"] == expect(
+        "DIFF-39", django=True, rust=False
+    )
+    assert by_key["recents"]["is_enabled"] == expect(
+        "DIFF-39", django=True, rust=False
+    )
+    assert by_key["my_stickies"]["is_enabled"] == expect(
+        "DIFF-39", django=True, rust=True
+    )
 
 
 def test_home_pref_patch(user_api, space):

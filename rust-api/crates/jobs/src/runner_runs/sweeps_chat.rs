@@ -89,7 +89,7 @@ use pidash_services::runner_runs::finalization::{self, TerminalEffectsInputs};
 use pidash_services::runner_runs::lifecycle::{self, LifecycleError};
 use pidash_services::runner_runs::scheduler_hook::{self, SchedulerHookPlan};
 use pidash_services::runner_runs::LifecycleEffect;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::runner_runs::{
     classify_run_error, run_message_dedupe_ttl_secs, AgentChatMessageRole, AgentChatMessageStatus,
     AgentChatSessionStatus, AgentRunStatus, DevMachineInfo, RunErrorKind, RunnerInfo,
@@ -143,6 +143,11 @@ pub async fn emit_terminal_effects(pool: &PgPool, run_id: Uuid) -> Result<(), sq
 pub const STALL_THRESHOLD_SECS_DEFAULT: i64 = 360;
 /// `RUNNER_AGENT_OBSERVABILITY_STALE_SECS` default (`tasks.py:439`).
 pub const OBSERVABILITY_STALE_SECS_DEFAULT: i64 = 90;
+/// NEWPIDASH-262: an `ASSIGNED` run with `started_at IS NULL` older
+/// than this many seconds is considered lost (runner never polled).
+/// 180s = 3 minutes, >2× heartbeat grace (90s). Mirrors
+/// `pidash_services::runner_sessions::session_service::ASSIGNED_NEVER_STARTED_SECS`.
+pub const ASSIGNED_NEVER_STARTED_SECS: i64 = 180;
 
 /// Resolve a seconds setting: the env var under Django's setting name,
 /// or `default` when unset or unparsable (the F-09 `env_secs`
@@ -258,12 +263,6 @@ pub trait RunnerRunsSeams: Send + Sync {
     fn drain_pod(
         &self,
         pod_id: Uuid,
-    ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>>;
-    /// `cloud_agent.dispatch.dispatch_waiting` (D-11). Unisolated: a
-    /// failure propagates and the capacity marker stays unset.
-    fn dispatch_waiting(
-        &self,
-        workspace_id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>>;
     /// `orchestration.service.complete_project_move_handoff` (D-12):
     /// after the hooks transaction, isolated.
@@ -406,6 +405,62 @@ pub fn stalled_candidate_select(
         .into_model::<StallCandidate>()
 }
 
+/// A candidate for the NEWPIDASH-262 assigned-never-started sweep:
+/// an `ASSIGNED` run that never started, assigned to a runner that
+/// never polled (so `started_at` is still NULL).
+#[derive(Debug, Clone, PartialEq, Eq, sea_orm::FromQueryResult)]
+pub struct AssignedNeverStartedCandidate {
+    pub run_id: Uuid,
+    pub runner_id: Option<Uuid>,
+    pub pod_id: Option<Uuid>,
+    pub assigned_at: Option<DateTime<Utc>>,
+    pub capacity_wait: Option<serde_json::Value>,
+    pub assignment_token: Option<Uuid>,
+}
+
+/// The assigned-never-started cutoff: `now - ASSIGNED_NEVER_STARTED_SECS`.
+/// Wall-clock only (part b of NEWPIDASH-262): a runner that never
+/// polled also never starts, and a runner that polls but reports idle
+/// for the whole window is equally lost. The 180s bound comfortably
+/// exceeds the 25s long-poll + processing, so healthy runners are
+/// never reaped.
+pub fn is_fresh_capacity_wait(
+    cw: &serde_json::Value,
+    token: Option<Uuid>,
+    now: DateTime<Utc>,
+) -> bool {
+    pidash_services::runner_runs::capacity::is_fresh_capacity_wait(cw, token, now)
+}
+
+pub fn assigned_never_started_cutoff(now: DateTime<Utc>) -> DateTime<Utc> {
+    now - chrono::Duration::seconds(ASSIGNED_NEVER_STARTED_SECS)
+}
+
+/// Candidate select for `ASSIGNED` / never-started runs: `status='assigned'`
+/// AND `started_at IS NULL` AND `assigned_at < cutoff`. Ordered oldest-first
+/// so the longest-waiting runs reap first. `assigned_at IS NOT NULL` is
+/// implied by the `<` (NULL never matches), but an assigned run without
+/// `assigned_at` is anomalous; it is excluded and left for the stall sweep.
+pub fn assigned_never_started_select(
+    cutoff: DateTime<Utc>,
+) -> sea_orm::Selector<sea_orm::SelectModel<AssignedNeverStartedCandidate>> {
+    use orm::agent_run::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .column_as(Column::Id, "run_id")
+        .column_as(Column::RunnerId, "runner_id")
+        .column_as(Column::PodId, "pod_id")
+        .column_as(Column::AssignedAt, "assigned_at")
+        .column_as(Column::CapacityWait, "capacity_wait")
+        .column_as(Column::AssignmentToken, "assignment_token")
+        .filter(Column::Status.eq(AgentRunStatus::Assigned.value()))
+        .filter(Column::StartedAt.is_null())
+        .filter(Column::AssignedAt.lt(cutoff))
+        .filter(Column::RunnerId.is_not_null())
+        .order_by_asc(Column::AssignedAt)
+        .into_model::<AssignedNeverStartedCandidate>()
+}
+
 /// The terminal-effects batch select (`tasks.py:345-350`): terminal
 /// runs missing at least one marker, oldest `ended_at` first, capped
 /// at 100. Fixture: FX-RUN-07 `reconcile_terminal_effects.sql`.
@@ -432,14 +487,11 @@ pub fn reconcile_terminal_candidate_select() -> sea_orm::Selector<sea_orm::Selec
 
 /// The locked finalize row's decision columns (`agent_run` only).
 struct FinalizeLocked {
-    executor_kind: AgentExecutorKind,
     done_payload: Option<Value>,
 }
 
 fn map_finalize_locked(row: &orm::agent_run::Model) -> Result<FinalizeLocked, SweepError> {
     Ok(FinalizeLocked {
-        executor_kind: AgentExecutorKind::from_value(&row.executor_kind)
-            .ok_or(SweepError::BadRow("executor_kind"))?,
         done_payload: row.done_payload.clone(),
     })
 }
@@ -876,10 +928,18 @@ pub fn stall_error_detail(threshold_secs: i64) -> String {
     format!("agent stalled: no events for >{threshold_secs}s")
 }
 
+/// The assigned-never-started detail (NEWPIDASH-262 part b).
+pub fn assigned_never_started_detail(threshold_secs: i64) -> String {
+    format!("assigned run never started: runner never polled within >{threshold_secs}s")
+}
+
 /// `runner.reconcile_stalled_runs`: reap silent `ASSIGNED`/`RUNNING`
-/// runs as `FAILED` via L4. Per-row guard: a failed reap logs and the
-/// sweep continues (`tasks.py:311-323`); a late (already-closed) row
-/// still counts as reaped (`:318` runs unconditionally).
+/// runs as `FAILED` via L4 (observed-run stall watchdog) plus, since
+/// NEWPIDASH-262, `ASSIGNED` / never-started runs older than
+/// `ASSIGNED_NEVER_STARTED_SECS` (runner never polled). Per-row guard:
+/// a failed reap logs and the sweep continues (`tasks.py:311-323`);
+/// a late (already-closed) row still counts as reaped
+/// (`:318` runs unconditionally).
 pub async fn reconcile_stalled_runs(
     pool: &PgPool,
     seams: &dyn RunnerRunsSeams,
@@ -903,12 +963,154 @@ pub async fn reconcile_stalled_runs(
             ),
         }
     }
+    // NEWPIDASH-262 part b: ASSIGNED, started_at NULL, older than
+    // ASSIGNED_NEVER_STARTED_SECS — the runner never polled, so the
+    // run was never observed and the stall watchdog above misses it.
+    let assigned_cutoff = assigned_never_started_cutoff(*now);
+    let assigned_rows = assigned_never_started_select(assigned_cutoff)
+        .all(&sea_orm_connection(pool))
+        .await?;
+    for candidate in &assigned_rows {
+        let run_id = candidate.run_id;
+        // Skip runs the stall watchdog already reaped in this pass
+        // (same run_id can appear in both selects when the runner did
+        // observe it but never started).
+        if rows.iter().any(|r| r.run_id == run_id) {
+            continue;
+        }
+        match reap_assigned_never_started_row(pool, seams, candidate).await {
+            Ok(true) => reaped += 1,
+            Ok(false) => {}
+            Err(error) => tracing::error!(
+                %error,
+                "reconcile_stalled_runs: failed to reap assigned never-started run {run_id}"
+            ),
+        }
+    }
     if reaped > 0 {
         tracing::info!(
-            "reconcile_stalled_runs reaped {reaped} stalled run(s) (threshold={threshold_secs}s)"
+            "reconcile_stalled_runs reaped {reaped} stalled run(s) (threshold={threshold_secs}s, assigned-never-started>180s)"
         );
     }
     Ok(reaped)
+}
+
+/// One assigned-never-started row: fail it (`FAILED`) so the
+/// scheduler stops counting it as in flight and the run reaches a
+/// terminal state without manual action. Mirrors `reap_stalled_row`
+/// but with the assigned-never-started detail and no live-state
+/// requirement (the runner never observed the run).
+async fn reap_assigned_never_started_row(
+    pool: &PgPool,
+    seams: &dyn RunnerRunsSeams,
+    candidate: &AssignedNeverStartedCandidate,
+) -> Result<bool, SweepError> {
+    let Some(runner_id) = candidate.runner_id else {
+        return Ok(false);
+    };
+    // NEWPIDASH-241 T2: fresh authenticated same-attempt capacity waits
+    // remain protected beyond 180s; stale/wrong-token reports retain bounded recovery.
+    if let Some(cw) = candidate.capacity_wait.as_ref() {
+        if pidash_services::runner_runs::capacity::is_fresh_capacity_wait(
+            cw,
+            candidate.assignment_token,
+            Utc::now(),
+        ) {
+            return Ok(false);
+        }
+    }
+    // Recheck under row locks before finalizing (not just in the candidate query).
+    // Fetch the locked row's current assignment_token/capacity_wait; if it became fresh, skip.
+    if let Some(fresh) = {
+        use orm::agent_run::{Column, Entity};
+        let row = Entity::find()
+            .select_only()
+            .columns([Column::AssignmentToken, Column::CapacityWait])
+            .filter(Column::Id.eq(candidate.run_id))
+            .lock_exclusive()
+            .one(&sea_orm_connection(pool))
+            .await
+            .map_err(|_| SweepError::BadRow("recheck"))?;
+        if let Some(model) = row {
+            model
+                .capacity_wait
+                .as_ref()
+                .map(|cw| is_fresh_capacity_wait(cw, model.assignment_token, Utc::now()))
+        } else {
+            None
+        }
+    } {
+        if fresh {
+            return Ok(false);
+        }
+    }
+    let detail = assigned_never_started_detail(ASSIGNED_NEVER_STARTED_SECS);
+    // Live state: the runner never observed this run, so this is
+    // almost always None; asking is harmless.
+    let live =
+        lifecycle::live_state_usage_facts(&sea_orm_connection(pool), runner_id, candidate.run_id)
+            .await?;
+    let error_detail = Value::String(detail);
+    let null = Value::Null;
+    let inputs = lifecycle::TerminalUpdateInputs {
+        status: AgentRunStatus::Failed,
+        done_payload: &null,
+        error_detail: &error_detail,
+        runner_failure_reason: &null,
+        refusal_category: &null,
+        tokens: &null,
+        model: &null,
+        live: live.as_ref(),
+        runner: None,
+    };
+    let mut values = lifecycle::plan_terminal_finalize(&inputs)?;
+    run_finalize_transaction(pool, &candidate.run_id, &runner_id, &mut values).await?;
+    for effect in finalization::plan_publish_effects(candidate.run_id) {
+        match effect {
+            LifecycleEffect::PublishTerminalEffects { run_id } => {
+                if let Err(error) = enqueue(pool, &terminal_effects_job(&run_id)).await {
+                    tracing::error!(%error, "failed to publish terminal effects for run {run_id}");
+                }
+            }
+            LifecycleEffect::ApplyTerminalEffectsInline { run_id } => {
+                if let Err(error) = apply_agent_run_terminal_effects(pool, seams, &run_id).await {
+                    tracing::error!(%error, "failed to apply terminal effects for run {run_id}");
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(true)
+}
+
+/// Reap a single assigned-never-started run by id (used by tests).
+/// Returns whether the row was finalized.
+pub async fn reap_assigned_never_started_by_id(
+    pool: &PgPool,
+    seams: &dyn RunnerRunsSeams,
+    run_id: Uuid,
+) -> Result<bool, SweepError> {
+    let row = orm::agent_run::Entity::find_by_id(run_id)
+        .one(&sea_orm_connection(pool))
+        .await?;
+    let Some(run) = row else {
+        return Ok(false);
+    };
+    if run.status != AgentRunStatus::Assigned.value() || run.started_at.is_some() {
+        return Ok(false);
+    }
+    let Some(runner_id) = run.runner_id else {
+        return Ok(false);
+    };
+    let candidate = AssignedNeverStartedCandidate {
+        run_id,
+        runner_id: Some(runner_id),
+        pod_id: Some(run.pod_id),
+        assigned_at: run.assigned_at.map(|at| at.with_timezone(&Utc)),
+        capacity_wait: run.capacity_wait.clone(),
+        assignment_token: run.assignment_token,
+    };
+    reap_assigned_never_started_row(pool, seams, &candidate).await
 }
 
 /// One stall row: `finalize_run_terminal(runner, id, FAILED,
@@ -1047,16 +1249,6 @@ async fn run_finalize_transaction(
         );
         let now = Utc::now();
         finalization::finalize_update(&conn, values, *run_id, now).await?;
-        if facts.executor_kind == AgentExecutorKind::CloudAgent {
-            finalization::append_terminal_event_once(
-                &conn,
-                *run_id,
-                AgentRunStatus::Failed,
-                &finalization::finalize_error_code(values),
-                now,
-            )
-            .await?;
-        }
     }
     tx.commit().await?;
     Ok(())
@@ -1513,10 +1705,6 @@ async fn run_capacity_plan(
     plan: &finalization::CapacityPlan,
 ) -> Result<(), SweepError> {
     match plan {
-        finalization::CapacityPlan::Cloud { workspace_id } => seams
-            .dispatch_waiting(*workspace_id)
-            .await
-            .map_err(SweepError::Seam),
         finalization::CapacityPlan::Local { runner_id, pod_id } => {
             if let Some(runner_id) = runner_id {
                 // `release_runner_if_idle` (PDASHOSS01-231): free a
@@ -1796,6 +1984,35 @@ mod tests {
             stall_error_detail(360),
             "agent stalled: no events for >360s"
         );
+        // NEWPIDASH-262: assigned-never-started cutoff and detail.
+        assert_eq!(
+            assigned_never_started_cutoff(now),
+            now - chrono::Duration::seconds(ASSIGNED_NEVER_STARTED_SECS)
+        );
+        assert_eq!(ASSIGNED_NEVER_STARTED_SECS, 180);
+        assert_eq!(
+            assigned_never_started_detail(180),
+            "assigned run never started: runner never polled within >180s"
+        );
+    }
+
+    #[test]
+    fn assigned_never_started_select_shape() {
+        // NEWPIDASH-262: status assigned, started_at NULL, assigned_at < cutoff.
+        let cutoff = utc(2026, 11, 14, 12, 0, 0);
+        let sql = pg_selector(assigned_never_started_select(cutoff));
+        for part in [
+            "\"agent_run\".\"status\" = 'assigned'",
+            "\"agent_run\".\"started_at\" IS NULL",
+            "\"agent_run\".\"assigned_at\" < '2026-11-14 12:00:00.000000 +00:00'",
+            "\"agent_run\".\"runner_id\" IS NOT NULL",
+        ] {
+            assert!(sql.contains(part), "{part} missing: {sql}");
+        }
+        assert!(
+            sql.contains(" ORDER BY \"agent_run\".\"assigned_at\" ASC"),
+            "{sql}"
+        );
     }
 
     #[test]
@@ -1927,17 +2144,24 @@ mod tests {
             .map(|(list, _)| list)
             .expect("SELECT list");
         let entries: Vec<&str> = select_list.split(", ").collect();
-        let agent_entries: Vec<&str> = entries
+        let mut agent_entries: Vec<&str> = entries
             .iter()
             .filter(|e| e.starts_with("\"agent_run\""))
             .copied()
             .collect();
+        // NEWPIDASH-241 T1: three native-owned columns appended beyond the Django baseline.
+        agent_entries.extend([
+            "\"agent_run\".\"assignment_token\"",
+            "\"agent_run\".\"assignment_protocol\"",
+            "\"agent_run\".\"capacity_wait\"",
+        ]);
         let runner_entries: Vec<&str> = entries
             .iter()
             .filter(|e| e.starts_with("\"runner\""))
             .copied()
             .collect();
-        assert_eq!(agent_entries.len(), 42, "agent_run columns");
+        // NEWPIDASH-241 T1: 42 Django-baseline columns + 3 native-owned columns.
+        assert_eq!(agent_entries.len(), 45, "agent_run columns");
         assert_eq!(
             runner_entries.len(),
             32,
@@ -2097,12 +2321,6 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
             Box::pin(async move { Ok(()) })
         }
-        fn dispatch_waiting(
-            &self,
-            _workspace_id: Uuid,
-        ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
-            Box::pin(async move { Ok(()) })
-        }
         fn complete_project_move_handoff(
             &self,
             _run_id: Uuid,
@@ -2249,13 +2467,6 @@ mod tests {
             pod_id: Uuid,
         ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
             self.record(json!({"fn": "drain_pod", "args": [pod_id.to_string()]}));
-            Box::pin(async move { Ok(()) })
-        }
-        fn dispatch_waiting(
-            &self,
-            workspace_id: Uuid,
-        ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
-            self.record(json!({"fn": "dispatch_waiting", "args": [workspace_id.to_string()]}));
             Box::pin(async move { Ok(()) })
         }
         fn complete_project_move_handoff(

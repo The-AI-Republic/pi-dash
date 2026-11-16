@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
+#[cfg(windows)]
+use pidash_ipc::windows_pipe::create_owner_only_pipe;
 use std::collections::HashMap;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufStream};
-#[cfg(windows)]
-use pidash_ipc::windows_pipe::create_owner_only_pipe;
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::NamedPipeServer as IpcStream;
 #[cfg(unix)]
@@ -36,6 +36,10 @@ pub struct IpcServer {
     /// ownership.
     pub instances: Arc<std::sync::RwLock<HashMap<Uuid, RunnerInstance>>>,
     pub(crate) spawn_ctx: crate::daemon::supervisor::RunnerSpawnCtx,
+    /// Durable FIFO coordinator (NEWPIDASH-241). None only in unit tests.
+    /// Production sets it from the supervisor's coordinator (same Arc as
+    /// `spawn_ctx.run_coordinator`).
+    pub run_coordinator: Option<Arc<crate::daemon::run_queue::Coordinator>>,
 }
 
 impl IpcServer {
@@ -160,6 +164,50 @@ impl IpcServer {
             Request::CredentialsReload => {
                 self.spawn_ctx.reload_credentials().await?;
                 Ok(Response::Ack)
+            }
+            Request::MachineRunLimitSet { limit } => {
+                if !(1..=65535).contains(&limit) {
+                    return Ok(Response::Error(crate::ipc::protocol::RpcError {
+                        code: 400,
+                        message: "limit must be 1..=65535".to_string(),
+                    }));
+                }
+                // Live apply: persist to config, then update the coordinator
+                // before replying. On write failure preserve both old values.
+                let mut cfg = crate::config::file::load_config(&self.paths)?;
+                let old_limit = cfg.daemon.max_concurrent_agent_runs;
+                cfg.daemon.max_concurrent_agent_runs = limit;
+                if let Err(e) = crate::config::file::write_config(&self.paths, &cfg) {
+                    crate::config::file::write_config(&self.paths, &{
+                        let mut rolled = crate::config::file::load_config(&self.paths)
+                            .unwrap_or_else(|_| cfg.clone());
+                        rolled.daemon.max_concurrent_agent_runs = old_limit;
+                        rolled
+                    })
+                    .ok();
+                    return Ok(Response::Error(crate::ipc::protocol::RpcError {
+                        code: 500,
+                        message: format!("persist limit failed: {e}"),
+                    }));
+                }
+                self.primary_state.set_config(cfg.clone()).await;
+                if let Some(coord) = self.coordinator() {
+                    if let Err(e) = coord.set_limit(limit) {
+                        return Ok(Response::Error(crate::ipc::protocol::RpcError {
+                            code: 400,
+                            message: e,
+                        }));
+                    }
+                    let revision = coord.counts().revision;
+                    Ok(Response::MachineRunLimitResult { limit, revision })
+                } else {
+                    // No coordinator (storage_blocked or unit test): config
+                    // persisted, next startup uses the persisted value.
+                    Ok(Response::MachineRunLimitResult { limit, revision: 0 })
+                }
+            }
+            Request::RunQueueSnapshot => {
+                Ok(Response::RunQueueSnapshot(self.queue_snapshot().await))
             }
             Request::StatusGet => Ok(Response::Status(self.status_snapshot().await)),
             Request::StatusSubscribe => {
@@ -327,7 +375,7 @@ impl IpcServer {
                 self.remove_local(&runner).await?;
                 Ok(Response::Ack)
             }
-            // ---- Built-in engine (IPC v6, PIDESKAPP-121) ----------------
+            // ---- Pi Dash Agent (IPC v6, PIDESKAPP-121) ----------------
             Request::EngineModelToken => match self.spawn_ctx.engine.model_token().await {
                 Ok(t) => Ok(Response::EngineModelToken {
                     token: t.token,
@@ -358,7 +406,7 @@ impl IpcServer {
             Request::EngineRunnerRemove { runner } => {
                 // Revoke in the cloud first, preserving the runner's row
                 // and history, then remove its local block. The task
-                // folder is kept (built-in engine design §11).
+                // folder is kept (Pi Dash Agent design §11).
                 let (runner_id, token) = self.spawn_ctx.engine_runner_for_removal(&runner)?;
                 crate::cloud::runners::revoke_runner(
                     &self.spawn_ctx.cloud_url(),
@@ -377,7 +425,7 @@ impl IpcServer {
                 self.spawn_ctx.set_engine_settings(task_root).await?,
             )),
             // Local chat (PDASHOSS01-159, IPC v4). The desktop host drives
-            // the built-in engine directly over this socket — never through
+            // the Pi Dash Agent directly over this socket — never through
             // the Pi Dash chat relay. Streamed `Response::Chat*` frames are
             // written onto `buf` mid-call (same pattern as StatusSubscribe);
             // the terminal frame is returned. See `super::chat`. With no
@@ -619,8 +667,41 @@ impl IpcServer {
             .collect()
     }
 
+    /// The machine coordinator: prefer the explicit field, fall back to
+    /// the spawn context (both are the same Arc in production).
+    fn coordinator(&self) -> Option<&Arc<crate::daemon::run_queue::Coordinator>> {
+        let explicit = self.run_coordinator.as_ref();
+        let from_ctx = self.spawn_ctx.run_coordinator.as_ref();
+        explicit.or(from_ctx)
+    }
+
+    /// Live queue snapshot for IPC + Status. No coordinator means the
+    /// store is blocked/unavailable: report `storage_blocked` mode with
+    /// the persisted limit so the TUI never falsely claims "enforced".
+    async fn queue_snapshot(&self) -> pidash_ipc::RunQueueSnapshot {
+        if let Some(coord) = self.coordinator() {
+            coord.snapshot()
+        } else {
+            let limit = crate::config::file::load_config(&self.paths)
+                .map(|c| c.daemon.max_concurrent_agent_runs)
+                .unwrap_or(3);
+            pidash_ipc::RunQueueSnapshot {
+                mode: "storage_blocked".to_string(),
+                limit,
+                active: 0,
+                waiting: 0,
+                held: 0,
+                revision: 0,
+                blocked_reason: Some("run queue store unavailable".to_string()),
+            }
+        }
+    }
+
     async fn status_snapshot(&self) -> StatusSnapshot {
-        let daemon = self.primary_state.daemon_info().await;
+        let mut daemon = self.primary_state.daemon_info().await;
+        // Carry the live machine queue on every Status so the TUI sees
+        // real counts without a second round-trip.
+        daemon.run_queue = Some(self.queue_snapshot().await);
         let instances = self.all_instances();
         let mut runners = Vec::with_capacity(instances.len());
         for inst in instances {
@@ -730,7 +811,7 @@ fn restore_secrets(
     {
         merged_cli
             .engine_credential
-            .get_or_insert_with(crate::config::schema::EngineCredential::default)
+            .get_or_insert_with(crate::config::schema::PidashAgentCredential::default)
             .token = ec.token.clone();
         if merged_cli
             .engine_credential
@@ -791,10 +872,10 @@ fn redact_json_for_ipc(value: &mut serde_json::Value) {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::config::schema::{CliSection, Config, EngineCredential, WorkspaceCredential};
+    use crate::config::schema::{CliSection, Config, PidashAgentCredential, WorkspaceCredential};
     use crate::daemon::supervisor::RunnerSpawnCtx;
     use crate::daemon::workspace_tokens::WorkspaceTokens;
-    use crate::engine::test_server::{self, Handler};
+    use crate::pidash_agent::test_server::{self, Handler};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     async fn daemon_with(
@@ -824,6 +905,7 @@ mod tests {
             paths: paths.clone(),
             instances: Arc::new(std::sync::RwLock::new(HashMap::new())),
             spawn_ctx,
+            run_coordinator: None,
         };
         tokio::spawn(async move {
             let _ = server.run().await;
@@ -841,7 +923,7 @@ mod tests {
         CliSection {
             token: Some("mt_acme".into()),
             workspace_slug: Some("acme".into()),
-            engine_credential: engine.then(|| EngineCredential {
+            engine_credential: engine.then(|| PidashAgentCredential {
                 token: "ec_live".into(),
                 expires_at: Some(chrono::Utc::now() + chrono::Duration::days(10)),
             }),
@@ -866,11 +948,11 @@ mod tests {
         let (_tmp, paths) = daemon_with(cli(true), &server.url).await;
 
         // What `pidash __engine model-token` prints.
-        let token = crate::cli::engine_cmd::fetch_model_token(&paths)
+        let token = crate::cli::pidash_agent_cmd::fetch_model_token(&paths)
             .await
             .unwrap();
         assert_eq!(token, "gw_token");
-        let again = crate::cli::engine_cmd::fetch_model_token(&paths)
+        let again = crate::cli::pidash_agent_cmd::fetch_model_token(&paths)
             .await
             .unwrap();
         assert_eq!(again, "gw_token");
@@ -895,7 +977,7 @@ mod tests {
         let handler: Handler = Arc::new(|_| (500, String::new()));
         let server = test_server::start(handler).await;
         let (_tmp, paths) = daemon_with(cli(false), &server.url).await;
-        let err = crate::cli::engine_cmd::fetch_model_token(&paths)
+        let err = crate::cli::pidash_agent_cmd::fetch_model_token(&paths)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("engine_sign_in_required"), "{err}");
@@ -905,7 +987,7 @@ mod tests {
     // ---- Local chat on the daemon's engine profile (design §12.1) -------
 
     use crate::config::schema::{AgentSection, DaemonConfig, RunnerConfig, WorkspaceSection};
-    use crate::ipc::engine_chat::EngineChatProfile;
+    use crate::ipc::pidash_agent_chat::PidashAgentChatProfile;
 
     /// A fake `pidash-agent-engine app-server`: records the folder it was
     /// started in under `$CODEX_HOME/cwd`, then answers one turn.
@@ -992,7 +1074,7 @@ sleep 1
             &paths,
             &insts.iter().collect::<Vec<_>>(),
         );
-        spawn_ctx.local_chat = Arc::new(EngineChatProfile::for_tests(engine, codex_home.clone()));
+        spawn_ctx.local_chat = Arc::new(PidashAgentChatProfile::for_tests(engine, codex_home.clone()));
         let server = IpcServer {
             path: paths.ipc_socket_path(),
             primary_state: crate::daemon::state::StateHandle::new(Config {
@@ -1008,6 +1090,7 @@ sleep 1
                 insts.iter().map(|i| (i.runner_id, i.clone())).collect(),
             )),
             spawn_ctx,
+            run_coordinator: None,
         };
         tokio::spawn(async move {
             let _ = server.run().await;
@@ -1236,6 +1319,7 @@ sleep 1
             paths: paths.clone(),
             instances: Arc::new(std::sync::RwLock::new(HashMap::new())),
             spawn_ctx,
+            run_coordinator: None,
         };
         tokio::spawn(async move {
             let _ = ipc.run().await;
@@ -1273,7 +1357,7 @@ sleep 1
             Response::EngineStatus(st) => assert_eq!(st.paused_by_owner, Some(true)),
             other => panic!("unexpected {other:?}"),
         }
-        let sent = server.requests_to(&crate::engine::api::dev_machine_path(machine_id));
+        let sent = server.requests_to(&crate::pidash_agent::api::dev_machine_path(machine_id));
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].json()["engine_paused_by_owner"], true);
     }
@@ -1315,7 +1399,7 @@ sleep 1
                         token: "mt_gamma_secret".into(),
                     },
                 ],
-                engine_credential: Some(EngineCredential {
+                engine_credential: Some(PidashAgentCredential {
                     token: "ec_secret_live".into(),
                     expires_at: Some(chrono::Utc::now() + chrono::Duration::days(10)),
                 }),
@@ -1430,6 +1514,7 @@ sleep 1
             paths: paths.clone(),
             instances: Arc::new(std::sync::RwLock::new(HashMap::new())),
             spawn_ctx,
+            run_coordinator: None,
         };
         tokio::spawn(async move {
             let _ = server.run().await;

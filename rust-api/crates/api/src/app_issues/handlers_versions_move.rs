@@ -112,10 +112,9 @@ use super::access;
 use super::queries_engage::VERSION_PAGE_KEYS;
 use super::render::{v2_page, V2Page};
 use super::{query_last, QueryMap};
-use crate::domain_hooks::{AppMoveAdmissionCache, AppMovePostCommitHook, AppTaskEnqueueHook};
+use crate::domain_hooks::{AppMovePostCommitHook, AppTaskEnqueueHook};
 use crate::issue_transition::AppTransitionHook;
 use crate::middleware::body_limit::read_request_bytes;
-use crate::orchestration::SpanCreationDeps;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
 use crate::v1_cycles_modules::json::{
@@ -1073,21 +1072,8 @@ async fn move_issue(
     });
     let transition: Arc<dyn IssueTransitionHook> = Arc::new(AppTransitionHook::new(&state, &pool));
     let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&pool));
-    let span_deps = SpanCreationDeps::from_state(&state);
-    let drain: Arc<dyn MovePostCommitHook> = Arc::new(AppMovePostCommitHook::new(
-        &pool,
-        &state,
-        span_deps.cache.clone(),
-    ));
-    let creation = CreationDeps {
-        pool: pool.clone(),
-        cloud: span_deps.cloud.clone(),
-        managed: span_deps.managed.clone(),
-        now_unix_secs: span_deps.now_unix_secs,
-        toolsets: span_deps.toolsets.clone(),
-        assistant_seam: span_deps.assistant_seam.clone(),
-        admission: Arc::new(AppMoveAdmissionCache::new(span_deps.cache)),
-    };
+    let drain: Arc<dyn MovePostCommitHook> = Arc::new(AppMovePostCommitHook::new(&pool, &state));
+    let creation = CreationDeps { pool: pool.clone() };
     let outcome = domain::run(&ctx, orm, |txn| {
         let transition = transition.clone();
         let enqueue = enqueue.clone();

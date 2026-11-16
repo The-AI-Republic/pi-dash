@@ -124,7 +124,7 @@ function fakeWorld(
       return { notices: { legacy_folders: [], pod_member_projects: [] }, dismissed };
     }),
     localRunners: vi.fn(async () => local),
-    addEngineRunner: vi.fn(async (input: { workspace: string; project: string }) => {
+    addPidashAgentRunner: vi.fn(async (input: { workspace: string; project: string }) => {
       log.push(`add ${input.workspace}/${input.project}`);
       const added: DaemonLocalRunner = {
         name: `builtin-${input.project}`,
@@ -268,15 +268,15 @@ describe("replace-machine prompt", () => {
       },
     });
     const runtime = world.deps.runtime as unknown as {
-      addEngineRunner: (input: { workspace: string; project: string }) => Promise<unknown>;
+      addPidashAgentRunner: (input: { workspace: string; project: string }) => Promise<unknown>;
     };
-    const original = runtime.addEngineRunner.bind(runtime);
-    runtime.addEngineRunner = async (input: { workspace: string; project: string }) => {
-      if (input.project === "WEB") throw new Error("engine unavailable");
+    const original = runtime.addPidashAgentRunner.bind(runtime);
+    runtime.addPidashAgentRunner = async (input: { workspace: string; project: string }) => {
+      if (input.project === "WEB") throw new Error("Pi Dash Agent unavailable");
       return original(input);
     };
     const outcome = await replaceMachine((await findReplacePrompt("u-1", world.deps))!, world.deps);
-    expect(outcome.failed).toEqual([{ project: "acme/WEB", error: "engine unavailable" }]);
+    expect(outcome.failed).toEqual([{ project: "acme/WEB", error: "Pi Dash Agent unavailable" }]);
     expect(outcome.restored).toEqual(["acme/API"]);
   });
 
@@ -287,9 +287,9 @@ describe("replace-machine prompt", () => {
       serverRunners: { acme: [serverRunner("r-web", "WEB", "desktop_bundled")] },
     });
     const runtime = world.deps.runtime as unknown as {
-      addEngineRunner: (input: { workspace: string; project: string }) => Promise<unknown>;
+      addPidashAgentRunner: (input: { workspace: string; project: string }) => Promise<unknown>;
     };
-    runtime.addEngineRunner = async (input: { workspace: string; project: string }) => {
+    runtime.addPidashAgentRunner = async (input: { workspace: string; project: string }) => {
       world.local.push({
         name: "builtin-WEB",
         runner_id: "r-web",
@@ -298,7 +298,7 @@ describe("replace-machine prompt", () => {
         working_dir: "/home/u/pidash/acme/WEB",
         agent: "engine",
       });
-      throw new Error("the built-in engine is already on for WEB in acme");
+      throw new Error("the Pi Dash Agent is already on for WEB in acme");
     };
     const outcome = await replaceMachine((await findReplacePrompt("u-1", world.deps))!, world.deps);
     expect(outcome.restored).toEqual(["acme/WEB"]);

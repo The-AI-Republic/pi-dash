@@ -187,7 +187,10 @@ for admin_service in oracle-admin oracle-admin-prod oracle-admin-cloud-prod; do
 done
 
 # Inside a Pi Dash agent run the stack is torn down when the run ends (no-op
-# for a person's shell or CI; PARITY_KEEP_STACK=1 opts out).
+# for a person's shell or CI; PARITY_KEEP_STACK=1 opts out). The reaper's
+# `arm` writes <workspace>/.pidash/run-end-hook for runner-side teardown
+# (NEWPIDASH-255) and also starts the standalone setsid watcher for
+# manual/CI use.
 "$STACK_DIR/parity-reaper.sh" arm || true
 
 echo "[parity] waiting for the API on port $PARITY_API_PORT"

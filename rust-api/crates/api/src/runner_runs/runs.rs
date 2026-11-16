@@ -19,8 +19,8 @@
 //! * `AgentRunDetailEndpoint.get` (`:565-585`) → [`run_detail`], with
 //!   `?include_events=1`.
 //! * `AgentRunCancelEndpoint.post` (`:590-682`) → [`cancel_run`]: the
-//!   cloud fast-path 202, terminal 409, cloud-duplicate stamp and the
-//!   finalize-CANCELLED arm (via the L4 planners) are owned; the two arms
+//!   terminal 409 and the finalize-CANCELLED arm (via the L4 planners)
+//!   are owned (the cloud arms went with the retired plane); the two arms
 //!   that fan a cancel frame out (D-14 `send_to_runner`, PIDASHCONV-553)
 //!   proxy.
 //! * `AgentRunReleasePinEndpoint.post` (`:697-736`) → [`release_pin`]:
@@ -73,7 +73,7 @@ use pidash_services::runner_runs::guards;
 use pidash_services::runner_runs::shape;
 use pidash_services::runner_runs::shape::SchedulerBindingDetailRow;
 use pidash_services::runner_runs::SetValue;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::runner_runs::{AgentRunStatus, ToolCallStatus};
 use pidash_types::WorkspaceId;
 
@@ -675,22 +675,6 @@ pub fn run_events_select(run_id: Uuid) -> sea_orm::Select<orm::agent_run_event::
         .limit(500)
 }
 
-/// Cloud fast-path stamp (`runs.py:562-564`): single-statement
-/// first-writer check.
-pub fn cloud_fast_stamp_statement(
-    now: chrono::DateTime<Utc>,
-    reason: &str,
-    run_id: Uuid,
-) -> sea_orm::UpdateMany<orm::agent_run::Entity> {
-    use orm::agent_run::{Column, Entity};
-    Entity::update_many()
-        .col_expr(Column::CancelRequestedAt, Expr::value(now))
-        .col_expr(Column::CancelReason, Expr::value(reason.to_owned()))
-        .filter(Column::Id.eq(run_id))
-        .filter(Column::Status.eq(AgentRunStatus::Running.value()))
-        .filter(Column::CancelRequestedAt.is_null())
-}
-
 /// Row lock for the cancel / release-pin branches
 /// (`select_for_update().filter(id).first()`, `runs.py:569/669`): the
 /// full row.
@@ -700,20 +684,6 @@ pub fn lock_run_select(run_id: Uuid) -> sea_orm::Select<orm::agent_run::Entity> 
         .filter(Column::Id.eq(run_id))
         .limit(1)
         .lock_exclusive()
-}
-
-/// Cloud-duplicate stamp (`locked.save(update_fields=[...])`,
-/// `runs.py:588-591`).
-pub fn cloud_dup_stamp_statement(
-    now: chrono::DateTime<Utc>,
-    reason: &str,
-    run_id: Uuid,
-) -> sea_orm::UpdateMany<orm::agent_run::Entity> {
-    use orm::agent_run::{Column, Entity};
-    Entity::update_many()
-        .col_expr(Column::CancelRequestedAt, Expr::value(now))
-        .col_expr(Column::CancelReason, Expr::value(reason.to_owned()))
-        .filter(Column::Id.eq(run_id))
 }
 
 // ---------------------------------------------------------------------------
@@ -801,6 +771,9 @@ pub(crate) fn run_from_model(model: orm::agent_run::Model) -> Result<AgentRun, R
         assigned_at: model.assigned_at.map(utc),
         started_at: model.started_at.map(utc),
         ended_at: model.ended_at.map(utc),
+        assignment_token: model.assignment_token,
+        assignment_protocol: model.assignment_protocol,
+        capacity_wait: model.capacity_wait,
     })
 }
 
@@ -869,6 +842,11 @@ pub fn decode_run(row: &sqlx::postgres::PgRow, base: usize) -> Result<AgentRun, 
         assigned_at: row.try_get(base + 38)?,
         started_at: row.try_get(base + 39)?,
         ended_at: row.try_get(base + 40)?,
+        // NEWPIDASH-241 T1: native columns beyond the 41-column baseline
+        // (backward-compatible: missing columns decode as legacy)
+        assignment_token: row.try_get(base + 41).unwrap_or(None),
+        assignment_protocol: row.try_get(base + 42).unwrap_or(0),
+        capacity_wait: row.try_get(base + 43).unwrap_or(None),
     })
 }
 
@@ -1767,10 +1745,9 @@ async fn retick_inner(
 // ---------------------------------------------------------------------------
 
 /// Cancel: lookup + guard first (404s), then the reason, then the
-/// cloud fast-path 202 and the locked branches. The two
-/// cancel-requested arms proxy (their `on_commit` fan-out is D-14);
-/// everything else — terminal 409, cloud-duplicate stamp, finalize —
-/// is owned.
+/// locked branches. The two cancel-requested arms proxy (their
+/// `on_commit` fan-out is D-14); everything else — terminal 409,
+/// finalize — is owned.
 pub async fn cancel_run(
     State(state): State<AppState>,
     Path(run_raw): Path<String>,
@@ -1835,23 +1812,6 @@ async fn cancel_run_inner(
             return proxy_with_body(state, parts, bytes).await;
         }
     };
-
-    // Cloud fast-path (`runs.py:561-567`): stamp-only, 202. A lost race
-    // (0 rows) falls through to the locked branches — no early return.
-    if guarded.run.executor_kind == AgentExecutorKind::CloudAgent
-        && guarded.run.status == AgentRunStatus::Running
-    {
-        let stamped = cloud_fast_stamp_statement(Utc::now(), &reason, run_id)
-            .exec(&sea_orm_connection(pool))
-            .await;
-        match stamped {
-            Ok(done) if done.rows_affected == 1 => {
-                return render_cancelled(pool, run_id, StatusCode::ACCEPTED).await;
-            }
-            Ok(_) => {}
-            Err(_) => return server_error(),
-        }
-    }
 
     cancel_locked(pool, &state, parts, bytes, run_id, &reason).await
 }
@@ -1935,28 +1895,7 @@ async fn cancel_locked(
         let _ = tx.rollback().await;
         return proxy_with_body(state.clone(), parts, bytes).await;
     }
-    if locked.executor_kind == AgentExecutorKind::CloudAgent
-        && locked.status == AgentRunStatus::Running
-    {
-        // Cloud duplicate (`runs.py:579-592`): record the request and let
-        // the worker's cancellation poll finalize. 200, never a send
-        // (the status stays RUNNING).
-        if locked.cancel_requested_at.is_none() {
-            let stamped = cloud_dup_stamp_statement(Utc::now(), reason, run_id)
-                .exec(&TxConn::new(&mut tx))
-                .await;
-            if stamped.is_err() {
-                let _ = tx.rollback().await;
-                return server_error();
-            }
-        }
-        if tx.commit().await.is_err() {
-            return server_error();
-        }
-        return render_cancelled(pool, run_id, StatusCode::OK).await;
-    }
-    if locked.executor_kind != AgentExecutorKind::CloudAgent
-        && locked.runner_id.is_some()
+    if locked.runner_id.is_some()
         && !matches!(
             locked.status,
             AgentRunStatus::Queued | AgentRunStatus::PausedAwaitingInput
@@ -2032,17 +1971,6 @@ async fn finalize_cancelled(
     finalization::finalize_update(&conn, &values, locked.id, now)
         .await
         .map_err(|_| server_error())?;
-    if locked.executor_kind == AgentExecutorKind::CloudAgent {
-        finalization::append_terminal_event_once(
-            &conn,
-            locked.id,
-            AgentRunStatus::Cancelled,
-            &finalization::finalize_error_code(&values),
-            now,
-        )
-        .await
-        .map_err(|_| server_error())?;
-    }
     Ok(())
 }
 
@@ -2096,7 +2024,7 @@ async fn release_pin_inner(
     if !guards::can_cancel_run(&facts) {
         return not_found();
     }
-    if guarded.run.executor_kind == AgentExecutorKind::CloudAgent {
+    if guarded.run.executor_kind == AgentExecutorKind::RetiredCloudRun {
         return json_response(StatusCode::CONFLICT, EXECUTOR_NOT_LOCAL_BODY.to_owned());
     }
     let mut tx = match pool.begin().await {
@@ -2541,19 +2469,6 @@ mod tests {
     #[test]
     fn cancel_statement_shapes() {
         let now = Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap();
-        assert_eq!(
-            pg_update(cloud_fast_stamp_statement(now, "r", Uuid::nil())),
-            "UPDATE \"agent_run\" SET \"cancel_requested_at\" = '2026-01-02 03:04:05.000000 +00:00', \
-             \"cancel_reason\" = 'r' WHERE \"agent_run\".\"id\" = \
-             '00000000-0000-0000-0000-000000000000' AND \"agent_run\".\"status\" = 'running' AND \
-             \"agent_run\".\"cancel_requested_at\" IS NULL"
-        );
-        assert_eq!(
-            pg_update(cloud_dup_stamp_statement(now, "r", Uuid::nil())),
-            "UPDATE \"agent_run\" SET \"cancel_requested_at\" = '2026-01-02 03:04:05.000000 +00:00', \
-             \"cancel_reason\" = 'r' WHERE \"agent_run\".\"id\" = \
-             '00000000-0000-0000-0000-000000000000'"
-        );
         // The settle-cancel finalize: the L4 base four plus the
         // `runs.py:617-623` extras, folded into one `error_details` merge.
         let values = finalization::plan_finalize_values(
@@ -2588,9 +2503,10 @@ mod tests {
     fn run_select_list_covers_all_columns_once() {
         let list = run_select_list();
         assert_eq!(list.split(", ").count(), agent_run::COLUMNS.len());
-        assert_eq!(agent_run::COLUMNS.len(), 42);
+        // NEWPIDASH-241 T1: +assignment_token/+assignment_protocol/+capacity_wait.
+        assert_eq!(agent_run::COLUMNS.len(), 45);
         assert!(list.starts_with(r#""agent_run"."id""#));
-        assert!(list.ends_with(r#""agent_run"."ended_at""#));
+        assert!(list.ends_with(r#""agent_run"."capacity_wait""#));
     }
 
     #[test]

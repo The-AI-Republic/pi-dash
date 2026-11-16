@@ -198,11 +198,15 @@ pub(crate) fn render_row(row: &rust_runner_model_catalog::Model) -> Value {
     Value::Object(map)
 }
 
-/// `{"agents": {<agent>: [rows…]}}` with every known agent key present
+/// `{"agents": {<agent>: [rows…]}}` with every catalog-group key present
 /// (empty when it has no rows in the filtered set), rows in picker order.
+/// The runner picker filters to `KNOWN_AGENTS` on the client; `openhub`
+/// is a catalog group, not a runner agent, and is surfaced here for the
+/// assistant read (`NEWPIDASH-302`) while never rendering in the add-runner
+/// form.
 pub(crate) fn render_grouped(rows: &[rust_runner_model_catalog::Model]) -> Value {
     let mut agents = Map::new();
-    for agent in guards::KNOWN_AGENTS {
+    for agent in guards::CATALOG_AGENTS {
         let group: Vec<Value> = rows
             .iter()
             .filter(|row| row.agent == agent)
@@ -213,6 +217,38 @@ pub(crate) fn render_grouped(rows: &[rust_runner_model_catalog::Model]) -> Value
     let mut root = Map::new();
     root.insert("agents".to_owned(), Value::Object(agents));
     Value::Object(root)
+}
+
+/// The enabled `openhub` rows in sort order (slug, label, order, default),
+/// for the assistant read API and the cloud overlay via `pidash-sdk`.
+/// Returns an empty vec when the group has no enabled rows (the caller
+/// falls back to the env setting).
+pub async fn openhub_enabled_rows(
+    pool: &PgPool,
+) -> Result<Vec<rust_runner_model_catalog::Model>, sqlx::Error> {
+    let db = pidash_db::sea_orm_connection(pool);
+    rust_runner_model_catalog::Entity::find()
+        .filter(rust_runner_model_catalog::Column::Agent.eq(guards::OPENHUB_AGENT))
+        .filter(rust_runner_model_catalog::Column::IsEnabled.eq(true))
+        .order_by_asc(rust_runner_model_catalog::Column::SortOrder)
+        .order_by_asc(rust_runner_model_catalog::Column::Model)
+        .all(&db)
+        .await
+        .map_err(|_| sqlx::Error::Decode(Box::new(std::io::Error::other("openhub rows failed"))))
+}
+
+/// The OpenHub default slug: the preselected enabled row, else the first
+/// enabled row in sort order, else `None` when the group is empty.
+/// `None` means the caller should fall back to the env default.
+pub async fn openhub_default_model(pool: &PgPool) -> Result<Option<String>, sqlx::Error> {
+    let rows = openhub_enabled_rows(pool).await?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    if let Some(row) = rows.iter().find(|row| row.is_preselected) {
+        return Ok(Some(row.model.clone()));
+    }
+    Ok(rows.first().map(|row| row.model.clone()))
 }
 
 pub(crate) fn json_response(status: StatusCode, value: &Value) -> Response {

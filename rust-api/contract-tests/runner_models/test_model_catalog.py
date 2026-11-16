@@ -29,7 +29,7 @@ def test_member_catalog_returns_grouped_seed(member_api):
         return
     agents = res.json()["agents"]
     assert sorted(agents) == sorted(
-        ["claude-code", "codex", "cursor-agent", "open-claw", "grok", "muse-code"]
+        ["claude-code", "codex", "cursor-agent", "open-claw", "grok", "muse-code", "openhub"]
     )
     assert len(agents["claude-code"]) == 6
     assert len(agents["codex"]) == 7
@@ -37,6 +37,29 @@ def test_member_catalog_returns_grouped_seed(member_api):
     assert len(agents["grok"]) == 2
     assert agents["open-claw"] == []
     assert agents["muse-code"] == []
+    assert len(agents["openhub"]) == 3
+
+
+def test_member_catalog_openhub_default_is_free(member_api):
+    res = member_api.get(CATALOG_PATH)
+    assert res.status_code == expect("DIFF-9", django=404, rust=200)
+    if not is_rust():
+        return
+    rows = res.json()["agents"]["openhub"]
+    assert [row["model"] for row in rows] == [
+        "moonshotai/kimi-k3",
+        "deepseek/deepseek-v4-pro",
+        "openhub_free_llm",
+    ]
+    # Labels are display names, sort order is dense, and only the free
+    # model is preselected (= the default).
+    assert [row["sort_order"] for row in rows] == [0, 1, 2]
+    preselected = [row for row in rows if row["is_preselected"]]
+    assert len(preselected) == 1
+    assert preselected[0]["model"] == "openhub_free_llm"
+    for row in rows:
+        assert row["reasoning_efforts"] == []
+        assert row["is_enabled"] is True
 
 
 def test_member_catalog_preselect_is_opus(member_api):

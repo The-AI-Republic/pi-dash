@@ -52,7 +52,6 @@
 //!   (`ee/cloud_agent/toolsets.py:23-32`).
 //! * The admission cache is the shared Redis (PIDASHCONV-1487): the
 //!   sync `AdmissionCache` trait opens a short sync connection per call
-//!   (the `project_move_handoff::RedisAdmissionCache` position), so the
 //!   per-user / per-workspace minute buckets match Django's exactly,
 //!   sequentially as well as under concurrent load. The drivers consult
 //!   it only when building a cloud-executor run, so every CE/local path
@@ -102,10 +101,8 @@ use pidash_db::entity::{
     workspaces,
 };
 use pidash_db::pool::sea_orm_connection;
-use pidash_db::redis::client_from_settings;
 use pidash_types::orchestration::{normalize_outcome, RUN_OUTCOMES};
 
-use crate::project_move_handoff::RedisAdmissionCache;
 use crate::state::AppState;
 
 use super::perms::{
@@ -248,11 +245,11 @@ fn db_error<E: std::fmt::Display>(error: E, site: &str) -> Denial {
 async fn drain_dispatch_decisions(
     pool: &PgPool,
     state: &AppState,
-    decisions: &[(Uuid, pidash_jobs::dispatch::DispatchDecision)],
+    decisions: &[(Uuid, pidash_jobs::run_dispatch::DispatchDecision)],
     site: &str,
 ) -> Result<(), Denial> {
     for (_, decision) in decisions {
-        if let pidash_jobs::dispatch::DispatchDecision::PodDrain { pod_id } = decision {
+        if let pidash_jobs::run_dispatch::DispatchDecision::PodDrain { pod_id } = decision {
             if crate::runner_sessions::runner_poll::drain_pod_by_id(pool, state, *pod_id)
                 .await
                 .is_err()
@@ -989,13 +986,13 @@ pub fn gate_fn(verdicts: Arc<HashMap<Uuid, bool>>) -> impl Fn(Uuid) -> bool + Cl
 /// The `managed_llm_profile` closure over pre-fetched presence.
 pub fn profile_fn(
     presence: Arc<HashMap<Uuid, bool>>,
-) -> impl Fn(Option<Uuid>) -> pidash_services::dispatch::LlmProfile + Clone + Send + Sync {
-    move |uid: Option<Uuid>| -> pidash_services::dispatch::LlmProfile {
+) -> impl Fn(Option<Uuid>) -> pidash_services::run_creation::LlmProfile + Clone + Send + Sync {
+    move |uid: Option<Uuid>| -> pidash_services::run_creation::LlmProfile {
         let key = uid
             .and_then(|uid| presence.get(&uid).copied())
             .unwrap_or(false);
-        let profile = pidash_services::assistant::seams::agent_model_profile_for_user(key);
-        pidash_services::dispatch::LlmProfile {
+        let profile = pidash_services::assistant::seams::pidash_agent_profile_for_user(key);
+        pidash_services::run_creation::LlmProfile {
             available: profile.available,
             reason_code: profile.reason_code,
         }
@@ -1003,10 +1000,10 @@ pub fn profile_fn(
 }
 
 /// Live [`StoreDeps`](pidash_jobs::orchestration::StoreDeps): settings from
-/// the app state, LLM presence for the creator universe, the installed
-/// toolsets seam, and the shared Redis admission cache.
+/// the app state, LLM presence for the creator universe.
 /// Returns the opaque struct so each driver call site keeps its concrete
-/// closure types.
+/// closure types. (`_now_unix_secs` is retained for the callers'
+/// signature; the admission clock died with the cache family.)
 #[allow(clippy::too_many_arguments)]
 pub async fn dispatch_deps(
     state: &AppState,
@@ -1014,13 +1011,12 @@ pub async fn dispatch_deps(
     actor_id: Uuid,
     issue: &IssueRow,
     project: &ProjectRow,
-    now_unix_secs: i64,
+    _now_unix_secs: i64,
 ) -> Result<
     (
         pidash_jobs::orchestration::StoreDeps<
-            RedisAdmissionCache,
             impl Fn(Uuid) -> bool + Clone + Send + Sync,
-            impl Fn(Option<Uuid>) -> pidash_services::dispatch::LlmProfile + Clone + Send + Sync,
+            impl Fn(Option<Uuid>) -> pidash_services::run_creation::LlmProfile + Clone + Send + Sync,
         >,
         LiveMatcher,
     ),
@@ -1028,18 +1024,11 @@ pub async fn dispatch_deps(
 > {
     let presence = fetch_presence(pool, actor_id, issue, project).await?;
     let verdicts = Arc::new(gate_verdicts(state, &presence).await);
-    let cache = RedisAdmissionCache {
-        client: client_from_settings(state.settings()),
-    };
     Ok((
         pidash_jobs::orchestration::StoreDeps {
-            cloud: state.settings().cloud_agent.clone(),
-            managed: state.settings().managed_runner.clone(),
-            cache,
+            managed: state.settings().pidash_agent.clone(),
             has_usable_llm_config: gate_fn(verdicts),
-            toolsets: state.toolsets().clone(),
             llm_profile: profile_fn(presence),
-            now_unix_secs,
         },
         LiveMatcher::new(pool.clone()),
     ))
@@ -1054,13 +1043,12 @@ pub async fn dispatch_deps_for_ids(
     pool: &PgPool,
     actor_id: Uuid,
     issue_id: Uuid,
-    now_unix_secs: i64,
+    _now_unix_secs: i64,
 ) -> Result<
     (
         pidash_jobs::orchestration::StoreDeps<
-            RedisAdmissionCache,
             impl Fn(Uuid) -> bool + Clone + Send + Sync,
-            impl Fn(Option<Uuid>) -> pidash_services::dispatch::LlmProfile + Clone + Send + Sync,
+            impl Fn(Option<Uuid>) -> pidash_services::run_creation::LlmProfile + Clone + Send + Sync,
         >,
         LiveMatcher,
     ),
@@ -1069,18 +1057,11 @@ pub async fn dispatch_deps_for_ids(
     let universe = creator_universe_for_ids(pool, actor_id, issue_id).await?;
     let presence = Arc::new(fetch_llm_presence(pool, &universe).await?);
     let verdicts = Arc::new(gate_verdicts(state, &presence).await);
-    let cache = RedisAdmissionCache {
-        client: client_from_settings(state.settings()),
-    };
     Ok((
         pidash_jobs::orchestration::StoreDeps {
-            cloud: state.settings().cloud_agent.clone(),
-            managed: state.settings().managed_runner.clone(),
-            cache,
+            managed: state.settings().pidash_agent.clone(),
             has_usable_llm_config: gate_fn(verdicts),
-            toolsets: state.toolsets().clone(),
             llm_profile: profile_fn(presence),
-            now_unix_secs,
         },
         LiveMatcher::new(pool.clone()),
     ))

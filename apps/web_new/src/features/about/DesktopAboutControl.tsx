@@ -28,7 +28,7 @@ export const ABOUT_RETRY_LABEL = "Try again";
  */
 export const ABOUT_LICENSING_SUMMARY =
   "Pi Dash is free software under the GNU Affero General Public License, version 3 only. " +
-  "The agent engine is not part of this app: the Pi Dash command-line tool installs it " +
+  "Pi Dash Agent is not part of this app: the Pi Dash command-line tool installs it " +
   "together with its own licence and notice. The full licence texts bundled with this app follow.";
 
 export function aboutVersionText(version: string): string {

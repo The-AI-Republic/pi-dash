@@ -258,6 +258,48 @@ and the agent drives Git itself. Files are always preserved, and the runner
 never initializes Git for you. Branch checkout is the agent's job, not the
 platform's (PDASHOSS01-136).
 
+## Process containment
+
+Every run starts in its own unit of containment, so whatever the agent
+starts — backgrounded or detached via `setsid`/`nohup` — is found and
+stopped when the run ends. At run end the runner sends SIGTERM to
+everything in the unit, waits 10 seconds, then SIGKILLs what is left,
+and logs one line per run with the count and the names of the processes
+stopped. If the daemon crashes, the start-up sweep empties the units the
+previous daemon left behind. The systemd unit pins `KillMode=control-group`
+so stopping the daemon reaps every run's processes as well.
+
+Backends (picked once per daemon, override with `PIDASH_CONTAINMENT`):
+
+| Value            | Behaviour                                                                                                               |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `auto` (default) | cgroup on Linux; process group elsewhere on Unix                                                                        |
+| `cgroup`         | Child cgroup `pidash-run-<run_id>` under the daemon's cgroup (cgroup v2). Membership survives `setsid` and reparenting. |
+| `process-group`  | Own process group per run, signalled via the group.                                                                     |
+| `off`            | No containment (diagnosis escape hatch only; leaks apply).                                                              |
+
+Limits, documented by design:
+
+- The **process-group** backend cannot see a child that `setsid`s away,
+  and cannot sweep after a crash (a dead PGID can be reused by the OS,
+  so PGIDs are never persisted). On the **cgroup** backend
+  `setsid`-detached children are still contained, and the sweep
+  recovers them.
+- **Windows** gets `kill_on_drop` only (direct child killed at run
+  end); nothing there catches detached grandchildren.
+- **Docker containers** the run started are not child processes; their
+  teardown stays with the stack that started them (the parity stack
+  handles its own). Memory/CPU limits per run are out of scope.
+- A run that needs something to **outlive it** must opt in explicitly
+  by writing a shell script to `<workspace>/.pidash/run-end-hook`. The
+  runner executes it — outside the run's unit, in the daemon's own
+  context — after the unit is emptied, then deletes it. A hook left
+  behind by a crashed daemon is run by the start-up sweep; a stale
+  hook from a previous run is discarded when a fresh run starts. The
+  parity stack's teardown uses this (`parity-reaper.sh arm` writes the
+  hook; the standalone `setsid` watcher is no longer the in-run
+  teardown path).
+
 ## Built-in engine
 
 Each release ships the built-in agent engine — the open-source

@@ -97,8 +97,7 @@ pub struct Settings {
     pub loop_tuning: LoopSettings,
     pub storage: StorageSettings,
     pub runner: RunnerSettings,
-    pub managed_runner: ManagedRunnerSettings,
-    pub cloud_agent: CloudAgentSettings,
+    pub pidash_agent: PidashAgentSettings,
     pub default_agent_executor: String,
     pub session: SessionSettings,
     pub urls: UrlSettings,
@@ -222,54 +221,12 @@ pub struct RunnerSettings {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ManagedRunnerSettings {
+pub struct PidashAgentSettings {
     pub enabled: bool,
     pub queued_max_age_secs: i64,
     pub graceful_stop_secs: i64,
     pub sweep_interval_secs: i64,
     pub desktop_min_version: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct CloudAgentSettings {
-    pub enabled: bool,
-    pub writes_enabled: bool,
-    pub github_tools_enabled: bool,
-    pub disabled_tools: Vec<String>,
-    /// Queue every `cloud_agent.run_agent_run` job is enqueued on.
-    /// Default `celery`; set to `cloud_agent` after the dedicated
-    /// agent-worker pool is running (Phase 2 rollout). Kept as the
-    /// string queue label `NewJob` carries / workers claim on.
-    pub job_queue: String,
-    pub reconcile_interval_secs: i64,
-    pub model_request_timeout_secs: i64,
-    pub execution_timeout_secs: i64,
-    pub run_soft_limit_secs: i64,
-    pub run_hard_limit_secs: i64,
-    pub stale_grace_secs: i64,
-    pub dispatch_lease_secs: i64,
-    pub dispatch_backoff_secs: i64,
-    pub dispatch_scan_interval_secs: i64,
-    pub sweep_interval_secs: i64,
-    pub dispatch_scan_batch: i64,
-    pub max_queue_age_secs: i64,
-    pub model_request_limit: i64,
-    pub tool_call_limit: i64,
-    pub write_call_limit: i64,
-    pub input_token_limit: i64,
-    pub output_token_limit: i64,
-    pub total_token_limit: i64,
-    pub max_output_tokens_per_request: i64,
-    pub max_queued_per_workspace: i64,
-    pub max_running_per_workspace: i64,
-    pub user_creation_rate_per_minute: i64,
-    pub workspace_creation_rate_per_minute: i64,
-    pub tool_timeout_secs: i64,
-    pub max_tool_result_bytes: i64,
-    pub max_prompt_bytes: i64,
-    pub max_final_result_bytes: i64,
-    pub max_events: i64,
-    pub block_private_urls: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1147,7 +1104,7 @@ impl Settings {
                     ConfigValue::from(90),
                 )?,
             },
-            managed_runner: ManagedRunnerSettings {
+            pidash_agent: PidashAgentSettings {
                 enabled: ctx.flag_tri("MANAGED_RUNNER_ENABLED", "false")?,
                 queued_max_age_secs: ctx.req_int(
                     "MANAGED_RUNNER_QUEUED_MAX_AGE_SECS",
@@ -1161,93 +1118,6 @@ impl Settings {
                 )?,
                 desktop_min_version: ctx
                     .req_string("DESKTOP_MIN_VERSION_FOR_MANAGED_RUNNER", "")?,
-            },
-            cloud_agent: CloudAgentSettings {
-                enabled: ctx.flag_tri("CLOUD_AGENT_ENABLED", "false")?,
-                writes_enabled: ctx.flag_tri("CLOUD_AGENT_WRITES_ENABLED", "false")?,
-                github_tools_enabled: ctx.flag_tri("CLOUD_AGENT_GITHUB_TOOLS_ENABLED", "true")?,
-                disabled_tools: ctx.csv_stripped("CLOUD_AGENT_DISABLED_TOOLS", "")?,
-                job_queue: ctx.req_string("CLOUD_AGENT_JOB_QUEUE", "celery")?,
-                reconcile_interval_secs: ctx.req_int(
-                    "AGENT_RUN_TERMINAL_RECONCILE_INTERVAL_SECONDS",
-                    ConfigValue::from(30),
-                )?,
-                model_request_timeout_secs: ctx.req_int(
-                    "CLOUD_AGENT_MODEL_REQUEST_TIMEOUT_SECONDS",
-                    ConfigValue::from(60),
-                )?,
-                execution_timeout_secs: ctx.req_int(
-                    "CLOUD_AGENT_EXECUTION_TIMEOUT_SECONDS",
-                    ConfigValue::from(285),
-                )?,
-                run_soft_limit_secs: ctx
-                    .req_int("CLOUD_AGENT_RUN_SOFT_LIMIT_SECONDS", ConfigValue::from(300))?,
-                run_hard_limit_secs: ctx
-                    .req_int("CLOUD_AGENT_RUN_HARD_LIMIT_SECONDS", ConfigValue::from(330))?,
-                stale_grace_secs: ctx
-                    .req_int("CLOUD_AGENT_STALE_GRACE_SECONDS", ConfigValue::from(60))?,
-                dispatch_lease_secs: ctx
-                    .req_int("CLOUD_AGENT_DISPATCH_LEASE_SECONDS", ConfigValue::from(60))?,
-                dispatch_backoff_secs: ctx.req_int(
-                    "CLOUD_AGENT_DISPATCH_BACKOFF_SECONDS",
-                    ConfigValue::from(10),
-                )?,
-                dispatch_scan_interval_secs: ctx.req_int(
-                    "CLOUD_AGENT_DISPATCH_SCAN_INTERVAL_SECONDS",
-                    ConfigValue::from(10),
-                )?,
-                sweep_interval_secs: ctx
-                    .req_int("CLOUD_AGENT_SWEEP_INTERVAL_SECONDS", ConfigValue::from(30))?,
-                dispatch_scan_batch: ctx
-                    .req_int("CLOUD_AGENT_DISPATCH_SCAN_BATCH", ConfigValue::from(100))?,
-                max_queue_age_secs: ctx
-                    .req_int("CLOUD_AGENT_MAX_QUEUE_AGE_SECONDS", ConfigValue::from(900))?,
-                model_request_limit: ctx
-                    .req_int("CLOUD_AGENT_MODEL_REQUEST_LIMIT", ConfigValue::from(25))?,
-                tool_call_limit: ctx
-                    .req_int("CLOUD_AGENT_TOOL_CALL_LIMIT", ConfigValue::from(20))?,
-                write_call_limit: ctx
-                    .req_int("CLOUD_AGENT_WRITE_CALL_LIMIT", ConfigValue::from(3))?,
-                input_token_limit: ctx
-                    .req_int("CLOUD_AGENT_INPUT_TOKEN_LIMIT", ConfigValue::from(144000))?,
-                output_token_limit: ctx
-                    .req_int("CLOUD_AGENT_OUTPUT_TOKEN_LIMIT", ConfigValue::from(16000))?,
-                total_token_limit: ctx
-                    .req_int("CLOUD_AGENT_TOTAL_TOKEN_LIMIT", ConfigValue::from(160000))?,
-                max_output_tokens_per_request: ctx.req_int(
-                    "CLOUD_AGENT_MAX_OUTPUT_TOKENS_PER_REQUEST",
-                    ConfigValue::from(4096),
-                )?,
-                max_queued_per_workspace: ctx.req_int(
-                    "CLOUD_AGENT_MAX_QUEUED_PER_WORKSPACE",
-                    ConfigValue::from(20),
-                )?,
-                max_running_per_workspace: ctx.req_int(
-                    "CLOUD_AGENT_MAX_RUNNING_PER_WORKSPACE",
-                    ConfigValue::from(2),
-                )?,
-                user_creation_rate_per_minute: ctx.req_int(
-                    "CLOUD_AGENT_USER_CREATION_RATE_PER_MINUTE",
-                    ConfigValue::from(6),
-                )?,
-                workspace_creation_rate_per_minute: ctx.req_int(
-                    "CLOUD_AGENT_WORKSPACE_CREATION_RATE_PER_MINUTE",
-                    ConfigValue::from(30),
-                )?,
-                tool_timeout_secs: ctx
-                    .req_int("CLOUD_AGENT_TOOL_TIMEOUT_SECONDS", ConfigValue::from(20))?,
-                max_tool_result_bytes: ctx.req_int(
-                    "CLOUD_AGENT_MAX_TOOL_RESULT_BYTES",
-                    ConfigValue::from(65536),
-                )?,
-                max_prompt_bytes: ctx
-                    .req_int("CLOUD_AGENT_MAX_PROMPT_BYTES", ConfigValue::from(262144))?,
-                max_final_result_bytes: ctx.req_int(
-                    "CLOUD_AGENT_MAX_FINAL_RESULT_BYTES",
-                    ConfigValue::from(65536),
-                )?,
-                max_events: ctx.req_int("CLOUD_AGENT_MAX_EVENTS", ConfigValue::from(500))?,
-                block_private_urls: ctx.flag_tri("CLOUD_AGENT_BLOCK_PRIVATE_URLS", "true")?,
             },
             default_agent_executor: ctx.req_string("DEFAULT_AGENT_EXECUTOR", "local_runner")?,
             session: SessionSettings {
@@ -1381,38 +1251,6 @@ impl Settings {
             "DESKTOP_MIN_VERSION_FOR_MANAGED_RUNNER",
             "DEFAULT_AGENT_EXECUTOR",
             "AGENT_RUN_TERMINAL_RECONCILE_INTERVAL_SECONDS",
-            "CLOUD_AGENT_ENABLED",
-            "CLOUD_AGENT_WRITES_ENABLED",
-            "CLOUD_AGENT_GITHUB_TOOLS_ENABLED",
-            "CLOUD_AGENT_DISABLED_TOOLS",
-            "CLOUD_AGENT_MODEL_REQUEST_TIMEOUT_SECONDS",
-            "CLOUD_AGENT_EXECUTION_TIMEOUT_SECONDS",
-            "CLOUD_AGENT_RUN_SOFT_LIMIT_SECONDS",
-            "CLOUD_AGENT_RUN_HARD_LIMIT_SECONDS",
-            "CLOUD_AGENT_STALE_GRACE_SECONDS",
-            "CLOUD_AGENT_DISPATCH_LEASE_SECONDS",
-            "CLOUD_AGENT_DISPATCH_BACKOFF_SECONDS",
-            "CLOUD_AGENT_DISPATCH_SCAN_INTERVAL_SECONDS",
-            "CLOUD_AGENT_SWEEP_INTERVAL_SECONDS",
-            "CLOUD_AGENT_DISPATCH_SCAN_BATCH",
-            "CLOUD_AGENT_MAX_QUEUE_AGE_SECONDS",
-            "CLOUD_AGENT_MODEL_REQUEST_LIMIT",
-            "CLOUD_AGENT_TOOL_CALL_LIMIT",
-            "CLOUD_AGENT_WRITE_CALL_LIMIT",
-            "CLOUD_AGENT_INPUT_TOKEN_LIMIT",
-            "CLOUD_AGENT_OUTPUT_TOKEN_LIMIT",
-            "CLOUD_AGENT_TOTAL_TOKEN_LIMIT",
-            "CLOUD_AGENT_MAX_OUTPUT_TOKENS_PER_REQUEST",
-            "CLOUD_AGENT_MAX_QUEUED_PER_WORKSPACE",
-            "CLOUD_AGENT_MAX_RUNNING_PER_WORKSPACE",
-            "CLOUD_AGENT_USER_CREATION_RATE_PER_MINUTE",
-            "CLOUD_AGENT_WORKSPACE_CREATION_RATE_PER_MINUTE",
-            "CLOUD_AGENT_TOOL_TIMEOUT_SECONDS",
-            "CLOUD_AGENT_MAX_TOOL_RESULT_BYTES",
-            "CLOUD_AGENT_MAX_PROMPT_BYTES",
-            "CLOUD_AGENT_MAX_FINAL_RESULT_BYTES",
-            "CLOUD_AGENT_MAX_EVENTS",
-            "CLOUD_AGENT_BLOCK_PRIVATE_URLS",
             "SESSION_COOKIE_AGE",
             "SESSION_COOKIE_NAME",
             "COOKIE_DOMAIN",
@@ -1469,9 +1307,6 @@ mod tests {
         assert_eq!(s.loop_tuning.max_writes, 10);
         assert_eq!(s.file_size_limit, 5242880);
         assert_eq!(s.email_backend, SMTP_BACKEND);
-        // Phase 2 (2.1): the agent job queue defaults to `celery` until
-        // both workers are running.
-        assert_eq!(s.cloud_agent.job_queue, "celery");
         // Non-Local profiles ignore an EMAIL_BACKEND env override, exactly
         // like common.py's hardcoded assignment.
         let s2 = Settings::from_map_with(
@@ -1532,17 +1367,6 @@ mod tests {
             s.urls.admin_base_url.as_deref(),
             Some("https://admin.example")
         );
-    }
-
-    #[test]
-    fn cloud_agent_job_queue_overrides_from_env() {
-        let s = Settings::from_map_with(
-            &vars(&[("CLOUD_AGENT_JOB_QUEUE", "cloud_agent")]),
-            Profile::Common,
-            &NoOverlay,
-        )
-        .expect("resolves");
-        assert_eq!(s.cloud_agent.job_queue, "cloud_agent");
     }
 
     #[test]

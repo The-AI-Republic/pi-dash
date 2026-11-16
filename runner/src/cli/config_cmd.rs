@@ -37,7 +37,7 @@ pub enum SetCommand {
         /// Project identifier or UUID.
         project: String,
     },
-    /// Set the folder new built-in engine runners work under
+    /// Set the folder new Pi Dash Agent runners work under
     /// (`[engine] task_root`). Each project gets
     /// `<root>/<workspace>/<project>/`. Projects already set up keep their
     /// folder; nothing is moved. `default` returns to the default root.
@@ -117,7 +117,7 @@ async fn set_engine_task_root(paths: &crate::util::paths::Paths, raw: &str) -> a
             Response::Error(e) => anyhow::bail!("{}", e.message),
             other => anyhow::bail!("unexpected daemon response: {other:?}"),
         },
-        Err(_) => crate::daemon::engine_ops::set_task_root(paths, task_root)?,
+        Err(_) => crate::daemon::pidash_agent_ops::set_task_root(paths, task_root)?,
     };
     println!(
         "Engine task root: {}{}",

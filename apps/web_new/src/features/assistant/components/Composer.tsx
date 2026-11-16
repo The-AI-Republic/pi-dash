@@ -59,6 +59,8 @@ export interface ComposerProps {
   className?: string;
   /** Voice dictation cell; absent on surfaces without a microphone. */
   dictation?: ComposerDictation | undefined;
+  /** Model picker rendered in the bottom bar next to send; absent elsewhere. */
+  modelPicker?: React.ReactNode;
 }
 
 export function Composer({
@@ -75,6 +77,7 @@ export function Composer({
   bordered = true,
   className,
   dictation,
+  modelPicker,
 }: ComposerProps): React.ReactElement {
   // A running turn does not disable the box: the draft stays editable and an
   // unmodified Enter still posts, exactly as the old surface does. The server
@@ -169,6 +172,7 @@ export function Composer({
           }}
           className="text-body min-h-20 flex-1 resize-none rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-4) py-(--space-3) text-(--text) placeholder:text-(--text-muted) focus:border-(--accent) focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
         />
+        {modelPicker}
         {dictation !== undefined && micShown ? (
           hasSpeechKey || micDisabled ? (
             <Button
