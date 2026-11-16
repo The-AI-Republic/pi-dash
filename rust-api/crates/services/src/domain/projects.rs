@@ -2727,13 +2727,14 @@ mod tests {
             "\"members_can_edit_states\"",
             "\"agent_test_default_interval_seconds\"",
             "\"dedicated_runner_lost_action\"",
+            "\"settings\"",
         ] {
             assert!(insert.contains(column), "{column} named in {insert}");
         }
         assert_eq!(
             insert.matches(", ").count(),
-            2 * 47,
-            "48 columns, 48 values"
+            2 * 48,
+            "49 columns, 49 values"
         );
     }
 

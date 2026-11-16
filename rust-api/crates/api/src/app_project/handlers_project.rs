@@ -1191,6 +1191,8 @@ struct ProjectRow {
     dedicated_runner_lost_action: String,
     default_work_type: String,
     members_can_edit_states: bool,
+    /// `projects.settings` (NEWPIDASH-278), raw stored blob.
+    settings: Value,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     created_by_id: Option<uuid::Uuid>,
@@ -1247,6 +1249,8 @@ struct ProjectRowOrm {
     dedicated_runner_lost_action: String,
     default_work_type: String,
     members_can_edit_states: bool,
+    /// `projects.settings` (NEWPIDASH-278), raw stored blob.
+    settings: Value,
     created_at: sea_orm::prelude::DateTimeWithTimeZone,
     updated_at: sea_orm::prelude::DateTimeWithTimeZone,
     created_by_id: Option<uuid::Uuid>,
@@ -1303,6 +1307,7 @@ fn project_row_from(orm: ProjectRowOrm) -> ProjectRow {
         dedicated_runner_lost_action: orm.dedicated_runner_lost_action,
         default_work_type: orm.default_work_type,
         members_can_edit_states: orm.members_can_edit_states,
+        settings: orm.settings,
         created_at: orm.created_at.with_timezone(&Utc),
         updated_at: orm.updated_at.with_timezone(&Utc),
         created_by_id: orm.created_by_id,
@@ -1384,6 +1389,7 @@ fn project_full_select(user_id: &uuid::Uuid, slug: &str) -> sea_orm::Select<proj
         proj_entity::Column::DedicatedRunnerLostAction,
         proj_entity::Column::DefaultWorkType,
         proj_entity::Column::MembersCanEditStates,
+        proj_entity::Column::Settings,
         proj_entity::Column::CreatedAt,
         proj_entity::Column::UpdatedAt,
         proj_entity::Column::CreatedById,
@@ -2023,6 +2029,10 @@ async fn render_list_row(
     let cover_url =
         cover_image_url(pool, row.cover_image_asset_id, row.cover_image.as_deref()).await?;
     let timezone = actor.timezone;
+    // NEWPIDASH-278: validated settings with defaults filled in.
+    let settings = pidash_services::domain::project_settings::parse_row_settings(&row.settings)
+        .map(|parsed| pidash_services::domain::project_settings::render(&parsed.settings))
+        .map_err(|_| Denial::ServerError)?;
     let read = ProjectListRead {
         id: row.id.to_string(),
         is_favorite: Some(row.is_favorite),
@@ -2081,6 +2091,7 @@ async fn render_list_row(
         agent_executor_options: options.to_vec(),
         next_work_item_sequence: sequence,
         members_can_edit_states: row.members_can_edit_states,
+        settings,
     };
     serde_json::to_string(&read).map_err(|_| Denial::ServerError)
 }
@@ -2143,6 +2154,10 @@ async fn render_current_instance(
     let detail = workspace_detail(pool, &row.workspace_id).await?;
     let options = executor_options(pool, state, &row.id, &row.workspace_id, None).await?;
     let timezone = actor.timezone;
+    // NEWPIDASH-278: validated settings with defaults filled in.
+    let settings = pidash_services::domain::project_settings::parse_row_settings(&row.settings)
+        .map(|parsed| pidash_services::domain::project_settings::render(&parsed.settings))
+        .map_err(|_| Denial::ServerError)?;
     let read = ProjectRead {
         id: row.id.to_string(),
         workspace_detail: detail,
@@ -2195,6 +2210,7 @@ async fn render_current_instance(
         dedicated_runner_lost_action: row.dedicated_runner_lost_action.clone(),
         default_work_type: row.default_work_type.clone(),
         members_can_edit_states: row.members_can_edit_states,
+        settings,
     };
     let value = serde_json::to_value(&read).map_err(|_| Denial::ServerError)?;
     Ok(cpython_dumps(&value))
@@ -6361,8 +6377,43 @@ async fn project_patch(
         Err(Ok((status, body))) => return Err(Denial::Raw(status, body)),
         Err(Err(denial)) => return Err(denial),
     }
+    // NEWPIDASH-278: nested `settings` partial update. Not a DRF
+    // field — Django had no settings key — so `validate_project_input`
+    // ignores it and it is handled here: per-key permission (403),
+    // strict validation (400), then the atomic merge after the
+    // column writes below.
+    let settings_merge = match data.get("settings") {
+        None => None,
+        Some(fragment) => {
+            let project_role = i32::from(membership.project_role.unwrap_or(ROLE_GUEST as i16));
+            let workspace_role = i32::from(membership.workspace_role.unwrap_or(ROLE_GUEST as i16));
+            match pidash_services::domain::project_settings::authorize_and_validate(
+                fragment,
+                project_role,
+                workspace_role,
+            ) {
+                Ok(merge) => Some(merge),
+                Err(error) => {
+                    let status =
+                        StatusCode::from_u16(error.status()).unwrap_or(StatusCode::BAD_REQUEST);
+                    return Err(Denial::Raw(status, error.body()));
+                }
+            }
+        }
+    };
     let now = utc_now_micros();
     apply_update(&pool, &validated, &instance, &actor.id, now).await?;
+    if let Some(merge) = &settings_merge {
+        pidash_services::domain::project_settings::apply_settings_merge(
+            &sea_conn(&pool),
+            merge,
+            now,
+            actor.id,
+            project_id,
+        )
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    }
     // Python order (`base.py:356-367`): the intake ensure runs BEFORE the
     // scoped re-fetch, using the post-save in-memory name (DRF `update()`
     // setattr's the instance before `save()`, so that is the validated

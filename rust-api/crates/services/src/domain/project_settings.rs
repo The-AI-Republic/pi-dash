@@ -266,6 +266,21 @@ pub fn validate_update(fragment: &Value) -> Result<Value, SettingsError> {
     Ok(Value::Object(object.clone()))
 }
 
+/// The PATCH entry point: authorize every key the caller sends, then
+/// validate the fragment. Permissions run first so an actor that may
+/// not change a key learns nothing about the key's value shape.
+pub fn authorize_and_validate(
+    fragment: &Value,
+    project_role: i32,
+    workspace_role: i32,
+) -> Result<Value, SettingsError> {
+    let Value::Object(object) = fragment else {
+        return Err(SettingsError::NotAnObject);
+    };
+    check_permissions(object, project_role, workspace_role)?;
+    validate_update(fragment)
+}
+
 /// The read shape: the validated settings with defaults filled in.
 /// `{}` until the first key lands.
 pub fn render(settings: &ProjectSettings) -> Value {

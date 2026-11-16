@@ -114,6 +114,19 @@ pub const NOT_FOUND_BODY: &str = r#"{"error":"The requested resource does not ex
 /// (`db/models/project.py:213-218`).
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
 
+/// Map a settings PATCH failure to the v1 denial shapes: 400s are
+/// the serializer field-errors body, 403s the `{"error": ...}` view
+/// body, a corrupt stored blob the generic 500.
+pub fn settings_patch_denial(
+    error: pidash_services::domain::project_settings::SettingsError,
+) -> Denial {
+    match error.status() {
+        403 => Denial::ForbiddenError("You don't have the required permissions.".to_owned()),
+        500 => Denial::ServerError,
+        _ => Denial::FieldErrors(error.body()),
+    }
+}
+
 /// Handler failure with its exact status + body.
 #[derive(Debug)]
 pub enum Denial {
@@ -829,6 +842,7 @@ const READ_FIELD_ORDER: &[&str] = &[
     "cover_image_asset",
     "estimate",
     "default_state",
+    "settings",
 ];
 
 /// Annotation values for one project row. `sort_order` is `Some` only on
@@ -1193,6 +1207,14 @@ pub async fn render_project(
         "default_state",
         render_uuid_opt(&row_uuid_opt(row, "default_state_id")?),
     );
+    // NEWPIDASH-278: validated settings with defaults filled in.
+    let settings_raw: Value = row
+        .try_get("", "settings")
+        .map_err(|_| Denial::ServerError)?;
+    let settings = pidash_services::domain::project_settings::parse_row_settings(&settings_raw)
+        .map(|parsed| pidash_services::domain::project_settings::render(&parsed.settings))
+        .map_err(|_| Denial::ServerError)?;
+    put(&mut map, "settings", settings);
 
     // `BaseSerializer.to_representation` expand (`serializers/base.py:71+`):
     // gated on `expand in self.fields` — the fields-filtered serializer
@@ -3451,6 +3473,36 @@ pub async fn patch_project_inner(
             DEFAULT_WORK_TYPE_LOCKED_MESSAGE.to_owned(),
         ));
     }
+    // NEWPIDASH-278: nested `settings` partial update. Not a v1
+    // serializer field — `coerce_write` ignores the key — so it is
+    // handled here: per-key permission (403), strict validation
+    // (400), then the atomic merge after the update write below.
+    let settings_merge = match merged.get("settings") {
+        None => None,
+        Some(fragment) => {
+            let facts =
+                project_base_facts(&pre.pool, &workspace_id, slug, &pre.actor.id, &project_id)
+                    .await?;
+            let project_role = if facts.is_project_admin {
+                pidash_auth::permissions::ROLE_ADMIN
+            } else {
+                pidash_auth::permissions::ROLE_GUEST
+            };
+            let workspace_role = if facts.is_workspace_admin {
+                pidash_auth::permissions::ROLE_ADMIN
+            } else {
+                pidash_auth::permissions::ROLE_GUEST
+            };
+            match pidash_services::domain::project_settings::authorize_and_validate(
+                fragment,
+                project_role,
+                workspace_role,
+            ) {
+                Ok(merge) => Some(merge),
+                Err(error) => return Err(settings_patch_denial(error)),
+            }
+        }
+    };
     let data = coerce_write(&pre.pool, &merged, true, true).await?;
     // Inherited `validate()` first (`ProjectCreateSerializer.validate`).
     let name = field_str(&data, "name");
@@ -3518,6 +3570,17 @@ pub async fn patch_project_inner(
         was_default,
     )
     .await?;
+    if let Some(merge) = &settings_merge {
+        pidash_services::domain::project_settings::apply_settings_merge(
+            &orm(&pre.pool),
+            merge,
+            chrono::Utc::now(),
+            pre.actor.id,
+            project_id,
+        )
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    }
     // `intake_view` newly truthy + no default `Intake` → create it
     // (`views/project.py:431-438`, pre-save name in the title).
     let intake_view_now: bool = {
@@ -4331,7 +4394,7 @@ mod tests {
             &["created_at", "updated_at", "deleted_at", "name",]
         );
         assert_eq!(
-            &READ_FIELD_ORDER[READ_FIELD_ORDER.len() - 8..],
+            &READ_FIELD_ORDER[READ_FIELD_ORDER.len() - 9..],
             &[
                 "created_by",
                 "updated_by",
@@ -4341,6 +4404,7 @@ mod tests {
                 "cover_image_asset",
                 "estimate",
                 "default_state",
+                "settings",
             ]
         );
         assert_eq!(ALLOWED_SUMMARY_FIELDS.len(), 8);

@@ -329,7 +329,8 @@
       "cover_image_asset",
       "estimate",
       "default_state",
-      "dedicated_runner_lost_action"
+      "dedicated_runner_lost_action",
+      "settings"
     ],
     "golden": {
       "id": "c99f8a01-966a-49b3-b1c9-b867196dd9cd",
@@ -406,7 +407,8 @@
       "cover_image_asset": null,
       "estimate": null,
       "default_state": null,
-      "dedicated_runner_lost_action": "fail_to_backlog"
+      "dedicated_runner_lost_action": "fail_to_backlog",
+      "settings": {}
     }
   },
   "list_serializer": {
@@ -486,7 +488,8 @@
       "cover_image_asset": null,
       "estimate": null,
       "default_state": null,
-      "dedicated_runner_lost_action": "fail_to_backlog"
+      "dedicated_runner_lost_action": "fail_to_backlog",
+      "settings": {}
     },
     "key_order": [
       "id",
@@ -545,7 +548,8 @@
       "cover_image_asset",
       "estimate",
       "default_state",
-      "dedicated_runner_lost_action"
+      "dedicated_runner_lost_action",
+      "settings"
     ],
     "members": ["c5545f98-21b6-4fac-88e7-af418831335d"],
     "next_seq_empty": 1,
@@ -708,7 +712,8 @@
       "cover_image_asset": null,
       "estimate": null,
       "default_state": null,
-      "dedicated_runner_lost_action": "fail_to_backlog"
+      "dedicated_runner_lost_action": "fail_to_backlog",
+      "settings": {}
     },
     "key_order": [
       "id",
@@ -763,7 +768,8 @@
       "cover_image_asset",
       "estimate",
       "default_state",
-      "dedicated_runner_lost_action"
+      "dedicated_runner_lost_action",
+      "settings"
     ]
   },
   "deploy_board": {

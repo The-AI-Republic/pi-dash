@@ -1010,6 +1010,7 @@ pub const PROJECT_KEY_ORDER: &[&str] = &[
     "estimate",
     "default_state",
     "dedicated_runner_lost_action",
+    "settings",
 ];
 
 /// `ProjectListSerializer` wire order (`:136-168` over `fields =
@@ -1073,6 +1074,7 @@ pub const PROJECT_LIST_KEY_ORDER: &[&str] = &[
     "estimate",
     "default_state",
     "dedicated_runner_lost_action",
+    "settings",
 ];
 
 /// `ProjectLiteSerializer.Meta.fields` (`:123-132`), in list order (also
@@ -1146,6 +1148,7 @@ pub const PROJECT_DETAIL_KEY_ORDER: &[&str] = &[
     "estimate",
     "default_state",
     "dedicated_runner_lost_action",
+    "settings",
 ];
 
 /// `DeployBoardSerializer.Meta.read_only_fields` (`:266`).
@@ -1297,6 +1300,9 @@ pub struct ProjectRead {
     /// Dedicated-runner lost-runner handling (`__all__` last field).
     /// Non-Option per Django (a choice with a default).
     pub dedicated_runner_lost_action: String,
+    /// Typed settings bag (NEWPIDASH-278): `projects.settings` with
+    /// defaults filled in. `__all__` renders it after the model order.
+    pub settings: Value,
 }
 
 /// `ProjectListSerializer` read shape (`:136-168`,
@@ -1429,6 +1435,9 @@ pub struct ProjectListRead {
     pub default_state: Option<String>,
     /// Dedicated-runner lost-runner handling (`__all__` last field).
     pub dedicated_runner_lost_action: String,
+    /// Typed settings bag (NEWPIDASH-278): `projects.settings` with
+    /// defaults filled in. `__all__` renders it after the model order.
+    pub settings: Value,
 }
 
 /// `ProjectLiteSerializer` read shape (`:120-133`,
@@ -1574,6 +1583,9 @@ pub struct ProjectDetailRead {
     pub default_state: Option<String>,
     /// Dedicated-runner lost-runner handling (`__all__` last field).
     pub dedicated_runner_lost_action: String,
+    /// Typed settings bag (NEWPIDASH-278): `projects.settings` with
+    /// defaults filled in. `__all__` renders it after the model order.
+    pub settings: Value,
 }
 
 /// `DeployBoardSerializer` read shape (`:259-266`,
@@ -2571,7 +2583,7 @@ mod tests {
     #[test]
     fn key_order_consts_match_fixture() {
         let fx = fixture();
-        assert_eq!(PROJECT_KEY_ORDER.len(), 51);
+        assert_eq!(PROJECT_KEY_ORDER.len(), 52);
         assert_eq!(
             PROJECT_KEY_ORDER,
             str_list(
@@ -2582,7 +2594,7 @@ mod tests {
             )
             .as_slice()
         );
-        assert_eq!(PROJECT_LIST_KEY_ORDER.len(), 57);
+        assert_eq!(PROJECT_LIST_KEY_ORDER.len(), 58);
         assert_eq!(
             PROJECT_LIST_KEY_ORDER,
             str_list(
@@ -2597,7 +2609,7 @@ mod tests {
             PROJECT_LITE_FIELDS,
             str_list(fx.get("lite").expect("lite").get("key_order").expect("ko")).as_slice()
         );
-        assert_eq!(PROJECT_DETAIL_KEY_ORDER.len(), 53);
+        assert_eq!(PROJECT_DETAIL_KEY_ORDER.len(), 54);
         assert_eq!(
             PROJECT_DETAIL_KEY_ORDER,
             str_list(
