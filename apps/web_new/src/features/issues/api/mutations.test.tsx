@@ -250,6 +250,34 @@ describe("issue patch updaters", () => {
     expect(applyIssuePatchList(listPage(), ISSUE, { description_html: "<p>x</p>" })).toEqual(listPage());
     expect(applyIssuePatchList(undefined, ISSUE, { name: "New" })).toBeUndefined();
   });
+
+  it("moves the row between buckets of a state-grouped list page instead of throwing", () => {
+    const fromState = listRow().state_id ?? "None";
+    const toState = "623e4567-e89b-12d3-a456-426614174005";
+    const grouped = {
+      ...listPage(),
+      grouped_by: "state_id",
+      results: { [fromState]: { results: [listRow()], total_results: 1 } },
+    } as unknown as IssueListResponse;
+    const painted = applyIssuePatchList(grouped, ISSUE, { state_id: toState }) as unknown as {
+      results: Record<string, { results: { id: string; state_id: string }[] }>;
+    };
+    expect(painted.results[fromState]).toBeUndefined();
+    expect(painted.results[toState]?.results).toEqual([expect.objectContaining({ id: ISSUE, state_id: toState })]);
+  });
+
+  it("paints a row inside a sub-grouped list page", () => {
+    const subGrouped = {
+      ...listPage(),
+      grouped_by: "priority",
+      sub_grouped_by: "state_id",
+      results: { none: { results: { s1: { results: [listRow()], total_results: 1 } }, total_results: 1 } },
+    } as unknown as IssueListResponse;
+    const painted = applyIssuePatchList(subGrouped, ISSUE, { name: "New" }) as unknown as {
+      results: Record<string, { results: Record<string, { results: { name: string }[] }> }>;
+    };
+    expect(painted.results.none?.results.s1?.results[0]?.name).toBe("New");
+  });
 });
 
 describe("useUpdateIssue", () => {
