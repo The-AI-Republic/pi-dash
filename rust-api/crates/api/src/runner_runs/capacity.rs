@@ -269,10 +269,10 @@ async fn run_capacity_inner(
     {
         let conn = TxConn::new(&mut tx);
         let _ = conn
-            .execute_unprepared("SET LOCAL lock_timeout = '5000ms'")
+            .execute_unprepared("SET LOCAL lock_timeout = '5000ms'") // raw-sql: SET LOCAL lock_timeout has no SeaORM equivalent
             .await;
         let _ = conn
-            .execute_unprepared("SET LOCAL statement_timeout = '20000ms'")
+            .execute_unprepared("SET LOCAL statement_timeout = '20000ms'") // raw-sql: SET LOCAL statement_timeout has no SeaORM equivalent
             .await;
     }
 
