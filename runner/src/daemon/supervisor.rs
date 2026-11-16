@@ -24,7 +24,7 @@ use crate::daemon::drain_journal;
 use crate::daemon::run_event_mirror::RunEventMirror;
 use crate::daemon::runner_instance::RunnerInstance;
 use crate::daemon::runner_out::RunnerOut;
-use crate::daemon::state::{AgentHealthReport, StateHandle};
+use crate::daemon::state::{AgentHealthReport, DaemonShutdownTrigger, StateHandle};
 use crate::daemon::workspace_tokens::WorkspaceTokens;
 use crate::history::index::{RunSummary, RunsIndex};
 use crate::history::jsonl::{HistoryEntry, HistoryWriter};
@@ -274,10 +274,23 @@ impl Supervisor {
         // on shutdown, BEFORE any runner loop starts: no session is
         // open yet, so the cloud cannot have redelivered one of these
         // runs and the replay cannot race live work. Leftovers (cloud
-        // unreachable) are retried in the background.
+        // unreachable) are retried in the background. The previous systemd
+        // exit (NEWPIDASH-253) is read once here and carried to both the
+        // replay and this daemon's own shutdown drain.
+        let previous_exit = if opts.offline {
+            None
+        } else {
+            crate::service::systemd::previous_exit_result().await
+        };
+        if let Some(prev) = previous_exit.as_deref() {
+            tracing::info!(
+                previous_exit = prev,
+                "previous systemd exit observed at startup"
+            );
+        }
         let mut replay_retry_handle: Option<tokio::task::JoinHandle<()>> = None;
         if !opts.offline {
-            replay_drain_journal_once(&paths, &hello_runners).await;
+            replay_drain_journal_once(&paths, &hello_runners, previous_exit.clone()).await;
             // Legacy journal dispositions first, then SQLite outbox retry:
             // managed terminal signals redeliver their exact payload.
             if let Some(coord) = run_coordinator.as_ref() {
@@ -286,8 +299,10 @@ impl Supervisor {
             if !drain_journal::load(&paths).is_empty() {
                 let replay_paths = paths.clone();
                 let replay_runners = hello_runners.clone();
+                let replay_previous = previous_exit.clone();
                 replay_retry_handle = Some(tokio::spawn(async move {
-                    replay_drain_journal_retry_loop(replay_paths, replay_runners).await;
+                    replay_drain_journal_retry_loop(replay_paths, replay_runners, replay_previous)
+                        .await;
                 }));
             }
         }
@@ -372,14 +387,24 @@ impl Supervisor {
 
         let shutdown = state.shutdown_notified();
         let sig = crate::util::signal::shutdown();
-        tokio::select! {
+        let shutdown_trigger = tokio::select! {
             _ = shutdown.notified() => {
-                tracing::info!("shutdown requested via IPC");
+                // The trigger was recorded before notify_waiters by the
+                // caller (IPC RunnerDisconnect or invariant restart).
+                state.shutdown_reason().unwrap_or(DaemonShutdownTrigger::ControlSocket)
             }
-            r = sig => {
-                if let Err(e) = r { tracing::warn!("signal watcher failed: {e:#}"); }
-            }
-        }
+            r = sig => match r {
+                Ok(signal) => DaemonShutdownTrigger::from_signal(signal),
+                Err(e) => {
+                    tracing::warn!("signal watcher failed: {e:#}");
+                    DaemonShutdownTrigger::Unknown
+                }
+            },
+        };
+        tracing::info!(
+            trigger = shutdown_trigger.as_str(),
+            "daemon shutdown trigger"
+        );
 
         // Stop the journal replay retry task BEFORE draining: a retry
         // pass running concurrently with the drain could remove() an
@@ -402,7 +427,13 @@ impl Supervisor {
         // better than losing the entire shutdown sequence.
         if let Err(_elapsed) = tokio::time::timeout(
             Duration::from_secs(5),
-            drain_in_flight_runs(hello_runners.clone(), &paths, run_coordinator.clone()),
+            drain_in_flight_runs(
+                hello_runners.clone(),
+                &paths,
+                run_coordinator.clone(),
+                shutdown_trigger,
+                previous_exit.clone(),
+            ),
         )
         .await
         {
@@ -1117,7 +1148,9 @@ fn agent_binary_for(config: &crate::config::schema::RunnerConfig) -> &str {
         crate::config::schema::AgentKind::OpenClaw => &config.openclaw.binary,
         crate::config::schema::AgentKind::Grok => &config.grok.binary,
         crate::config::schema::AgentKind::MuseCode => &config.muse_code.binary,
-        crate::config::schema::AgentKind::PidashAgent => crate::pidash_agent::agent::binary_display(),
+        crate::config::schema::AgentKind::PidashAgent => {
+            crate::pidash_agent::agent::binary_display()
+        }
     }
 }
 
@@ -1277,7 +1310,7 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
                     tracing::error!(
                         "http loop hit a local invariant failure; requesting daemon restart"
                     );
-                    daemon_state.shutdown();
+                    daemon_state.shutdown_with_reason(DaemonShutdownTrigger::Invariant);
                 }
             }
         });
@@ -1333,6 +1366,48 @@ async fn purge_cloud_deleted_runner(
     }
 }
 
+/// The `DaemonRestart` detail for a shutdown (NEWPIDASH-253): keeps the
+/// legacy `daemon shutdown requested` prefix (so stores written before
+/// trigger carriage still classify as `daemon_restart`) and states the
+/// trigger (plus the previous systemd exit when known). Examples:
+/// `daemon shutdown requested (SIGTERM; previous exit: oom-kill)`,
+/// `daemon shutdown requested (control socket disconnect)`.
+pub(crate) fn daemon_shutdown_detail(
+    trigger: DaemonShutdownTrigger,
+    previous_exit: Option<&str>,
+) -> String {
+    match previous_exit {
+        Some(prev) if !prev.trim().is_empty() => {
+            format!(
+                "daemon shutdown requested ({}; previous exit: {})",
+                trigger.as_str(),
+                prev.trim()
+            )
+        }
+        _ => format!("daemon shutdown requested ({})", trigger.as_str()),
+    }
+}
+
+/// Append the freshly-read previous systemd exit to a journaled detail
+/// (NEWPIDASH-253): replay attaches the successor's knowledge of the
+/// previous exit to failures the dead daemon journaled. No-op when the
+/// detail already carries a previous exit or there is nothing to add.
+pub(crate) fn with_previous_exit(detail: &str, previous_exit: Option<&str>) -> String {
+    match previous_exit {
+        Some(prev) if !prev.trim().is_empty() && !detail.contains("previous exit") => {
+            // Insert before the closing paren when the detail carries a
+            // trigger parenthetical already, so `… (SIGTERM)` becomes
+            // `… (SIGTERM; previous exit: oom-kill)`.
+            if let Some(stripped) = detail.strip_suffix(')') {
+                format!("{stripped}; previous exit: {})", prev.trim())
+            } else {
+                format!("{detail} (previous exit: {})", prev.trim())
+            }
+        }
+        _ => detail.to_string(),
+    }
+}
+
 /// On daemon shutdown, send `RunFailed{DaemonRestart}` for every
 /// runner that currently reports an in-flight run. Without this the
 /// cloud is left guessing — its heartbeat reaper eventually fails the
@@ -1364,6 +1439,8 @@ async fn drain_in_flight_runs(
     runners: Arc<RwLock<HelloRunnerMap>>,
     paths: &Paths,
     coord: Option<Arc<crate::daemon::run_queue::Coordinator>>,
+    trigger: DaemonShutdownTrigger,
+    previous_exit: Option<String>,
 ) -> usize {
     // Snapshot under the read lock so the lock is dropped before any
     // network I/O; concurrent writers (config reloads, etc.) are not
@@ -1376,7 +1453,7 @@ async fn drain_in_flight_runs(
             .collect()
     };
     let now = Utc::now();
-    const DETAIL: &str = "daemon shutdown requested";
+    let detail = daemon_shutdown_detail(trigger, previous_exit.as_deref());
     // Split by ownership: managed queue attempts persist their exact
     // DaemonRestart payload to the SQLite terminal outbox before sending;
     // legacy in-flight runs use the drain journal (unchanged).
@@ -1391,7 +1468,7 @@ async fn drain_in_flight_runs(
             let msg = ClientMsg::RunFailed {
                 run_id: *run_id,
                 reason: FailureReason::DaemonRestart,
-                detail: Some(DETAIL.to_string()),
+                detail: Some(detail.clone()),
                 ended_at: now,
                 tokens: None,
                 model: None,
@@ -1407,9 +1484,11 @@ async fn drain_in_flight_runs(
                 runner_id: *runner_id,
                 run_id: *run_id,
                 reason: FailureReason::DaemonRestart,
-                detail: DETAIL.to_string(),
+                detail: detail.clone(),
                 ended_at: now,
                 recorded_at: now,
+                trigger: Some(trigger.as_str().to_string()),
+                previous_exit: previous_exit.clone(),
             });
         }
     }
@@ -1442,7 +1521,7 @@ async fn drain_in_flight_runs(
             let msg = ClientMsg::RunFailed {
                 run_id,
                 reason: FailureReason::DaemonRestart,
-                detail: Some(DETAIL.to_string()),
+                detail: Some(detail.clone()),
                 ended_at: now,
                 tokens: None,
                 model: None,
@@ -1558,8 +1637,15 @@ fn is_permanent_run_failed_rejection(e: &anyhow::Error) -> bool {
 /// The first pass runs from `Supervisor::run` BEFORE the per-runner
 /// loops start, so nothing can be redelivered or in flight yet; later
 /// passes come from a background retry loop where the in-flight guard
-/// does the work.
-async fn replay_drain_journal_once(paths: &Paths, runners: &Arc<RwLock<HelloRunnerMap>>) -> usize {
+/// does the work. `previous_exit` is the successor's freshly-read
+/// previous systemd exit (NEWPIDASH-253): replay attaches it to
+/// journaled details that do not carry one yet (see
+/// [`with_previous_exit`]).
+async fn replay_drain_journal_once(
+    paths: &Paths,
+    runners: &Arc<RwLock<HelloRunnerMap>>,
+    previous_exit: Option<String>,
+) -> usize {
     let entries = drain_journal::load(paths);
     if entries.is_empty() {
         return 0;
@@ -1598,6 +1684,7 @@ async fn replay_drain_journal_once(paths: &Paths, runners: &Arc<RwLock<HelloRunn
             }
             let out = out.clone();
             let in_flight = state.rx_in_flight.clone();
+            let previous_exit = previous_exit.clone();
             sends.push(async move {
                 // Re-check at the last instant before sending: the guard
                 // above ran under the runners lock, but on retry-loop
@@ -1611,10 +1698,14 @@ async fn replay_drain_journal_once(paths: &Paths, runners: &Arc<RwLock<HelloRunn
                     );
                     return ReplayOutcome::Resolved(entry.run_id);
                 }
+                let replayed_detail = with_previous_exit(
+                    &entry.detail,
+                    previous_exit.as_deref().or(entry.previous_exit.as_deref()),
+                );
                 let msg = ClientMsg::RunFailed {
                     run_id: entry.run_id,
                     reason: entry.reason,
-                    detail: Some(entry.detail.clone()),
+                    detail: Some(replayed_detail),
                     ended_at: entry.ended_at,
                     tokens: None,
                     model: None,
@@ -1754,13 +1845,17 @@ enum ReplayOutcome {
 /// deliver (cloud unreachable, token mid-refresh). Exits as soon as
 /// the journal is empty; entries past the TTL are dropped by
 /// [`replay_drain_journal_once`].
-async fn replay_drain_journal_retry_loop(paths: Paths, runners: Arc<RwLock<HelloRunnerMap>>) {
+async fn replay_drain_journal_retry_loop(
+    paths: Paths,
+    runners: Arc<RwLock<HelloRunnerMap>>,
+    previous_exit: Option<String>,
+) {
     loop {
         tokio::time::sleep(Duration::from_secs(60)).await;
         if drain_journal::load(&paths).is_empty() {
             return;
         }
-        replay_drain_journal_once(&paths, &runners).await;
+        replay_drain_journal_once(&paths, &runners, previous_exit.clone()).await;
     }
 }
 
@@ -4971,7 +5066,11 @@ impl AssignWorker {
                     crate::codex::gateway::gateway_will_retry_notice(&method, &params)
                 {
                     let mut base: Option<String> = None;
-                    match crate::pidash_agent::free_quota::classify(&self.engine_lane(), status, &text) {
+                    match crate::pidash_agent::free_quota::classify(
+                        &self.engine_lane(),
+                        status,
+                        &text,
+                    ) {
                         // OpenHub free-lane stop codes: the run fails with
                         // the code's clear reason, keeping resets_at.
                         Some(crate::pidash_agent::free_quota::Disposition::Stop(reason)) => {
@@ -5216,7 +5315,11 @@ impl AssignWorker {
                 // existing cleaning.
                 let disposition = crate::codex::gateway::gateway_status_text(&raw_base).and_then(
                     |(status, text)| {
-                        crate::pidash_agent::free_quota::classify(&self.engine_lane(), status, &text)
+                        crate::pidash_agent::free_quota::classify(
+                            &self.engine_lane(),
+                            status,
+                            &text,
+                        )
                     },
                 );
                 let base = match disposition {
@@ -6416,6 +6519,59 @@ mod tests {
         assert_eq!(received, expected);
     }
 
+    #[test]
+    fn daemon_shutdown_detail_states_trigger_and_previous_exit() {
+        use crate::daemon::state::DaemonShutdownTrigger;
+        assert_eq!(
+            daemon_shutdown_detail(DaemonShutdownTrigger::SigTerm, None),
+            "daemon shutdown requested (SIGTERM)"
+        );
+        assert_eq!(
+            daemon_shutdown_detail(DaemonShutdownTrigger::SigTerm, Some("oom-kill")),
+            "daemon shutdown requested (SIGTERM; previous exit: oom-kill)"
+        );
+        assert_eq!(
+            daemon_shutdown_detail(DaemonShutdownTrigger::SigInt, None),
+            "daemon shutdown requested (SIGINT)"
+        );
+        assert_eq!(
+            daemon_shutdown_detail(DaemonShutdownTrigger::ControlSocket, None),
+            "daemon shutdown requested (control socket disconnect)"
+        );
+        assert_eq!(
+            daemon_shutdown_detail(DaemonShutdownTrigger::Invariant, None),
+            "daemon shutdown requested (local invariant failure)"
+        );
+        assert_eq!(
+            daemon_shutdown_detail(DaemonShutdownTrigger::SigTerm, Some("  ")),
+            "daemon shutdown requested (SIGTERM)"
+        );
+    }
+
+    #[test]
+    fn with_previous_exit_appends_without_duplicating() {
+        assert_eq!(
+            with_previous_exit("daemon shutdown requested (SIGTERM)", Some("oom-kill")),
+            "daemon shutdown requested (SIGTERM; previous exit: oom-kill)"
+        );
+        // Already carrying one: no-op.
+        assert_eq!(
+            with_previous_exit(
+                "daemon shutdown requested (SIGTERM; previous exit: oom-kill)",
+                Some("oom-kill")
+            ),
+            "daemon shutdown requested (SIGTERM; previous exit: oom-kill)"
+        );
+        assert_eq!(
+            with_previous_exit("daemon shutdown requested", Some("oom-kill")),
+            "daemon shutdown requested (previous exit: oom-kill)"
+        );
+        assert_eq!(
+            with_previous_exit("daemon shutdown requested (SIGTERM)", None),
+            "daemon shutdown requested (SIGTERM)"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn drain_in_flight_runs_sends_run_failed_for_busy_runners_only() {
         // Two runners; only one has an in-flight run. Drain should
@@ -6464,7 +6620,8 @@ mod tests {
                 .collect(),
         ));
 
-        let sent = drain_in_flight_runs(runners, &paths, None).await;
+        let sent =
+            drain_in_flight_runs(runners, &paths, None, DaemonShutdownTrigger::SigTerm, None).await;
         assert_eq!(sent, 1, "exactly one runner had an in-flight run");
         assert!(
             drain_journal::load(&paths).is_empty(),
@@ -6486,7 +6643,10 @@ mod tests {
             } => {
                 assert_eq!(run_id, active_run_id);
                 assert!(matches!(reason, FailureReason::DaemonRestart));
-                assert_eq!(detail.as_deref(), Some("daemon shutdown requested"));
+                assert_eq!(
+                    detail.as_deref(),
+                    Some("daemon shutdown requested (SIGTERM)")
+                );
             }
             other => panic!("expected RunFailed, got {other:?}"),
         }
@@ -6526,7 +6686,8 @@ mod tests {
                 .collect(),
         ));
 
-        let sent = drain_in_flight_runs(runners, &paths, None).await;
+        let sent =
+            drain_in_flight_runs(runners, &paths, None, DaemonShutdownTrigger::Unknown, None).await;
         assert_eq!(sent, 0);
         assert!(drain_journal::load(&paths).is_empty());
         let stray =
@@ -6577,7 +6738,14 @@ mod tests {
                 .collect(),
         ));
 
-        let sent = drain_in_flight_runs(runners, &paths, None).await;
+        let sent = drain_in_flight_runs(
+            runners,
+            &paths,
+            None,
+            DaemonShutdownTrigger::SigTerm,
+            Some("oom-kill".to_string()),
+        )
+        .await;
         assert_eq!(sent, 0, "send must fail with a dropped receiver");
 
         let journal = drain_journal::load(&paths);
@@ -6585,6 +6753,13 @@ mod tests {
         assert_eq!(journal[0].runner_id, inst.runner_id);
         assert_eq!(journal[0].run_id, run_id);
         assert!(matches!(journal[0].reason, FailureReason::DaemonRestart));
+        // NEWPIDASH-253: trigger + previous exit carried through the journal.
+        assert_eq!(journal[0].trigger.as_deref(), Some("SIGTERM"));
+        assert_eq!(journal[0].previous_exit.as_deref(), Some("oom-kill"));
+        assert_eq!(
+            journal[0].detail,
+            "daemon shutdown requested (SIGTERM; previous exit: oom-kill)"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6605,9 +6780,11 @@ mod tests {
                 runner_id: inst.runner_id,
                 run_id,
                 reason: FailureReason::DaemonRestart,
-                detail: "daemon shutdown requested".into(),
+                detail: "daemon shutdown requested (SIGTERM)".into(),
                 ended_at,
                 recorded_at: ended_at,
+                trigger: Some("SIGTERM".into()),
+                previous_exit: None,
             }],
         )
         .unwrap();
@@ -6626,7 +6803,10 @@ mod tests {
                 .collect(),
         ));
 
-        let delivered = replay_drain_journal_once(&paths, &runners).await;
+        // NEWPIDASH-253: replay attaches the successor's previous
+        // oom-kill to the journaled SIGTERM detail.
+        let delivered =
+            replay_drain_journal_once(&paths, &runners, Some("oom-kill".to_string())).await;
         assert_eq!(delivered, 1);
         assert!(drain_journal::load(&paths).is_empty());
 
@@ -6639,10 +6819,15 @@ mod tests {
             ClientMsg::RunFailed {
                 run_id: got,
                 reason,
+                detail,
                 ..
             } => {
                 assert_eq!(got, run_id);
                 assert!(matches!(reason, FailureReason::DaemonRestart));
+                assert_eq!(
+                    detail.as_deref(),
+                    Some("daemon shutdown requested (SIGTERM; previous exit: oom-kill)")
+                );
             }
             other => panic!("expected RunFailed, got {other:?}"),
         }
@@ -6681,6 +6866,8 @@ mod tests {
                 detail: "daemon shutdown requested".into(),
                 ended_at: now,
                 recorded_at: now,
+                trigger: None,
+                previous_exit: None,
             }],
         )
         .unwrap();
@@ -6699,7 +6886,7 @@ mod tests {
                 .collect(),
         ));
 
-        let delivered = replay_drain_journal_once(&paths, &runners).await;
+        let delivered = replay_drain_journal_once(&paths, &runners, None).await;
         assert_eq!(delivered, 0);
         assert!(
             drain_journal::load(&paths).is_empty(),
@@ -6730,12 +6917,14 @@ mod tests {
                 detail: "daemon shutdown requested".into(),
                 ended_at: now,
                 recorded_at: now,
+                trigger: None,
+                previous_exit: None,
             }],
         )
         .unwrap();
         let runners: Arc<RwLock<HelloRunnerMap>> = Arc::new(RwLock::new(HashMap::new()));
 
-        let delivered = replay_drain_journal_once(&paths, &runners).await;
+        let delivered = replay_drain_journal_once(&paths, &runners, None).await;
         assert_eq!(delivered, 0);
         assert!(drain_journal::load(&paths).is_empty());
     }
