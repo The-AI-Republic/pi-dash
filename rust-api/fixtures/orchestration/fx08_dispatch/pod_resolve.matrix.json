@@ -1,0 +1,21 @@
+{
+  "_trace": "orchestration/scheduling.py:871-884 (_resolve_pod_for_issue)",
+  "_method": "live resolver calls on pidash_524_scratch; frozen clock; dangling + no-project cases use in-memory instances (DB FKs forbid them)",
+  "cases": {
+    "D1_assigned_pod": {
+      "assigned_pod": "FX8_pod_1",
+      "result": "FX8_pod_1"
+    },
+    "D2_dangling_assigned_pod": {
+      "assigned_pod_id": "nonexistent-uuid",
+      "result": "FX8_pod_1"
+    },
+    "D3_project_default": {
+      "assigned_pod": null,
+      "result": "FX8_pod_1"
+    },
+    "D4_no_project": {
+      "result": null
+    }
+  }
+}

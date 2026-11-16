@@ -8,6 +8,12 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// These cases exercise the web picker. Desktop's native computer hook is
+// covered separately and must not pull native services into this fixture.
+vi.mock("@/components/runners/this-computer", () => ({
+  useThisComputer: () => ({ localEngineRunnerIds: new Set<string>() }),
+}));
+
 const {
   apiBaseUrl,
   listPods,

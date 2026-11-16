@@ -29,7 +29,6 @@ from pi_dash.app.serializers import (
     DraftIssueDetailSerializer,
 )
 from pi_dash.db.models import (
-    Issue,
     DraftIssue,
     CycleIssue,
     ModuleIssue,
@@ -156,7 +155,7 @@ class WorkspaceDraftIssueViewSet(BaseViewSet):
     @allow_permission(
         allowed_roles=[ROLE.ADMIN, ROLE.MEMBER],
         creator=True,
-        model=Issue,
+        model=DraftIssue,
         level="WORKSPACE",
     )
     def partial_update(self, request, slug, pk):
@@ -183,7 +182,7 @@ class WorkspaceDraftIssueViewSet(BaseViewSet):
             return Response(status=status.HTTP_204_NO_CONTENT)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    @allow_permission(allowed_roles=[ROLE.ADMIN], creator=True, model=Issue, level="WORKSPACE")
+    @allow_permission(allowed_roles=[ROLE.ADMIN], creator=True, model=DraftIssue, level="WORKSPACE")
     def retrieve(self, request, slug, pk=None):
         issue = self.get_queryset().filter(pk=pk, created_by=request.user).first()
 

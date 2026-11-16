@@ -39,13 +39,14 @@ from pi_dash.db.models import (
     GitCodeReviewLink,
     GitIssueSync,
     GithubIssueSync,
-    GithubPullRequestLink,
+    GithubPullRequestLink,  # noqa: F401 — kept for 356 scrub; webhook now generic-only
     GitProviderAccount,
     GitRepository,
     GitRepositoryBinding,
     GithubRepository,
     GithubRepositorySync,
-    GithubWebhookDelivery,
+    GithubWebhookDelivery,  # noqa: F401 — kept for migration/backfill references; webhook now generic-only
+    GitWebhookDelivery,
     Integration,
     Label,
     Project,
@@ -84,7 +85,10 @@ def _feature_enabled() -> bool:
 
 
 def _disabled_response() -> Response:
-    return Response({"error": "GitHub integration is disabled on this instance"}, status=status.HTTP_404_NOT_FOUND)
+    return Response(
+        {"error": "GitHub integration is disabled on this instance"},
+        status=status.HTTP_404_NOT_FOUND,
+    )
 
 
 def _get_or_create_github_integration() -> Integration:
@@ -103,12 +107,18 @@ def _get_workspace_integration(workspace: Workspace) -> WorkspaceIntegration | N
     integration = Integration.objects.filter(provider="github").first()
     if integration is None:
         return None
-    return WorkspaceIntegration.objects.filter(workspace=workspace, integration=integration).first()
+    return WorkspaceIntegration.objects.filter(
+        workspace=workspace, integration=integration
+    ).first()
 
 
-def _get_or_create_workspace_integration(workspace: Workspace, actor) -> WorkspaceIntegration:
+def _get_or_create_workspace_integration(
+    workspace: Workspace, actor
+) -> WorkspaceIntegration:
     integration = _get_or_create_github_integration()
-    wi = WorkspaceIntegration.objects.filter(workspace=workspace, integration=integration).first()
+    wi = WorkspaceIntegration.objects.filter(
+        workspace=workspace, integration=integration
+    ).first()
     if wi is not None:
         return wi
     api_token = APIToken.objects.create(
@@ -138,7 +148,11 @@ def _is_workspace_admin(user, workspace: Workspace) -> bool:
 
 
 def _redirect_to_profile_integrations(params: dict[str, str]) -> HttpResponseRedirect:
-    base = (getattr(settings, "WEB_URL", None) or getattr(settings, "APP_BASE_URL", None) or "").rstrip("/")
+    base = (
+        getattr(settings, "WEB_URL", None)
+        or getattr(settings, "APP_BASE_URL", None)
+        or ""
+    ).rstrip("/")
     path = "/settings/profile/integrations/"
     query = urlencode(params)
     url = f"{base}{path}" if base else path
@@ -159,10 +173,26 @@ def _serialize_app_installation(app_installation: GithubAppInstallation | None) 
         "repository_count": app_installation.repository_count,
         "permissions": app_installation.permissions,
         "events": app_installation.events,
-        "installed_at": app_installation.installed_at.isoformat() if app_installation.installed_at else None,
-        "suspended_at": app_installation.suspended_at.isoformat() if app_installation.suspended_at else None,
-        "verified_at": app_installation.verified_at.isoformat() if app_installation.verified_at else None,
-        "last_checked_at": app_installation.last_checked_at.isoformat() if app_installation.last_checked_at else None,
+        "installed_at": (
+            app_installation.installed_at.isoformat()
+            if app_installation.installed_at
+            else None
+        ),
+        "suspended_at": (
+            app_installation.suspended_at.isoformat()
+            if app_installation.suspended_at
+            else None
+        ),
+        "verified_at": (
+            app_installation.verified_at.isoformat()
+            if app_installation.verified_at
+            else None
+        ),
+        "last_checked_at": (
+            app_installation.last_checked_at.isoformat()
+            if app_installation.last_checked_at
+            else None
+        ),
         "last_check_error": app_installation.last_check_error,
     }
 
@@ -173,7 +203,10 @@ def _lazy_cleanup_install_sessions() -> None:
         expired_count = GithubAppInstallSession.objects.filter(
             status=GithubAppInstallSession.Status.STARTED,
             expires_at__lt=now,
-        ).update(status=GithubAppInstallSession.Status.EXPIRED, error="Install session expired")
+        ).update(
+            status=GithubAppInstallSession.Status.EXPIRED,
+            error="Install session expired",
+        )
         deleted_count, _ = GithubAppInstallSession.objects.filter(
             status__in=[
                 GithubAppInstallSession.Status.COMPLETED,
@@ -183,7 +216,11 @@ def _lazy_cleanup_install_sessions() -> None:
             updated_at__lt=now - timedelta(days=7),
         ).delete(soft=False)
         if expired_count or deleted_count:
-            logger.info("GitHub App install session cleanup: expired=%s, deleted=%s", expired_count, deleted_count)
+            logger.info(
+                "GitHub App install session cleanup: expired=%s, deleted=%s",
+                expired_count,
+                deleted_count,
+            )
     except Exception as e:
         log_exception(e)
 
@@ -203,12 +240,14 @@ def _refresh_app_installation(
         "updated_at",
     ]
     if extra_update_fields:
-        update_fields.extend(field for field in extra_update_fields if field not in update_fields)
+        update_fields.extend(
+            field for field in extra_update_fields if field not in update_fields
+        )
 
     try:
-        _, _, repository_count = (
-            GithubClient.for_installation(app_installation.installation_id).list_installation_repositories()
-        )
+        _, _, repository_count = GithubClient.for_installation(
+            app_installation.installation_id
+        ).list_installation_repositories()
         app_installation.repository_count = repository_count
         app_installation.verified_at = now
         app_installation.last_checked_at = now
@@ -239,7 +278,8 @@ def _upsert_app_installation(
         raise GithubAppAuthError("GitHub installation response did not include an id")
     defaults = {
         "account_login": account.get("login") or "",
-        "account_type": account.get("type") or GithubAppInstallation.AccountType.UNKNOWN,
+        "account_type": account.get("type")
+        or GithubAppInstallation.AccountType.UNKNOWN,
         "repository_selection": installation.get("repository_selection")
         or GithubAppInstallation.RepositorySelection.SELECTED,
         "repository_count": int(installation.get("repository_count") or 0),
@@ -251,9 +291,11 @@ def _upsert_app_installation(
     }
     with transaction.atomic():
         wi = _get_or_create_workspace_integration(workspace, actor)
-        existing = GithubAppInstallation.objects.filter(installation_id=installation_id).select_related(
-            "workspace_integration__workspace"
-        ).first()
+        existing = (
+            GithubAppInstallation.objects.filter(installation_id=installation_id)
+            .select_related("workspace_integration__workspace")
+            .first()
+        )
         if existing is not None and existing.workspace_integration_id != wi.id:
             raise GithubAppAuthError(
                 f"GitHub installation is already connected to workspace {existing.workspace_integration.workspace.slug}"
@@ -262,7 +304,9 @@ def _upsert_app_installation(
             workspace_integration=wi,
             defaults={"installation_id": installation_id, **defaults},
         )
-        app_installation = _refresh_app_installation(app_installation, raise_on_error=require_verified)
+        app_installation = _refresh_app_installation(
+            app_installation, raise_on_error=require_verified
+        )
         _upsert_git_account_for_app(app_installation)
         return app_installation
 
@@ -279,7 +323,9 @@ def _serialize_repo(gh_repo: dict) -> dict:
     }
 
 
-def _upsert_git_account_for_pat(wi: WorkspaceIntegration, user_info: dict) -> GitProviderAccount:
+def _upsert_git_account_for_pat(
+    wi: WorkspaceIntegration, user_info: dict
+) -> GitProviderAccount:
     config = wi.config or {}
     account, _ = GitProviderAccount.objects.update_or_create(
         workspace=wi.workspace,
@@ -288,8 +334,12 @@ def _upsert_git_account_for_pat(wi: WorkspaceIntegration, user_info: dict) -> Gi
         auth_type=GitProviderAccount.AuthType.PAT,
         external_account_id=f"pat:{wi.id}",
         defaults={
-            "external_account_login": config.get("github_user_login") or user_info.get("login") or "",
-            "display_name": config.get("github_user_login") or user_info.get("login") or "GitHub PAT",
+            "external_account_login": config.get("github_user_login")
+            or user_info.get("login")
+            or "",
+            "display_name": config.get("github_user_login")
+            or user_info.get("login")
+            or "GitHub PAT",
             "capabilities": {
                 "read_repositories": True,
                 "read_issues": True,
@@ -311,7 +361,9 @@ def _upsert_git_account_for_pat(wi: WorkspaceIntegration, user_info: dict) -> Gi
     return account
 
 
-def _upsert_git_account_for_app(app_installation: GithubAppInstallation) -> GitProviderAccount:
+def _upsert_git_account_for_app(
+    app_installation: GithubAppInstallation,
+) -> GitProviderAccount:
     account, _ = GitProviderAccount.objects.update_or_create(
         workspace=app_installation.workspace_integration.workspace,
         provider=GitProviderAccount.Provider.GITHUB,
@@ -320,7 +372,8 @@ def _upsert_git_account_for_app(app_installation: GithubAppInstallation) -> GitP
         external_account_id=str(app_installation.installation_id),
         defaults={
             "external_account_login": app_installation.account_login,
-            "display_name": app_installation.account_login or f"GitHub App {app_installation.installation_id}",
+            "display_name": app_installation.account_login
+            or f"GitHub App {app_installation.installation_id}",
             "capabilities": {
                 "read_repositories": True,
                 "read_issues": True,
@@ -352,7 +405,9 @@ def _upsert_git_account_for_app(app_installation: GithubAppInstallation) -> GitP
     return account
 
 
-def _upsert_git_binding_for_github_sync(sync: GithubRepositorySync, verified: dict) -> GitRepositoryBinding:
+def _upsert_git_binding_for_github_sync(
+    sync: GithubRepositorySync, verified: dict
+) -> GitRepositoryBinding:
     owner = (sync.repository.owner or "").lower()
     name = (sync.repository.name or "").lower()
     full_name = f"{owner}/{name}"
@@ -391,7 +446,9 @@ def _upsert_git_binding_for_github_sync(sync: GithubRepositorySync, verified: di
             "namespace": owner,
             "name": name,
             "full_name": full_name,
-            "web_url": verified.get("html_url") or sync.repository.url or f"https://github.com/{full_name}",
+            "web_url": verified.get("html_url")
+            or sync.repository.url
+            or f"https://github.com/{full_name}",
             "clone_url_http": verified.get("clone_url") or "",
             "clone_url_ssh": verified.get("ssh_url") or "",
             "default_branch": verified.get("default_branch") or "",
@@ -433,23 +490,35 @@ class GithubIntegrationConnectEndpoint(BaseAPIView):
 
         token = (request.data.get("token") or "").strip()
         if not token:
-            return Response({"error": "GitHub PAT required"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "GitHub PAT required"}, status=status.HTTP_400_BAD_REQUEST
+            )
 
         try:
             user_info = GithubClient(token=token).get_authenticated_user()
         except GithubAuthError:
-            return Response({"error": "GitHub rejected this token"}, status=status.HTTP_401_UNAUTHORIZED)
+            return Response(
+                {"error": "GitHub rejected this token"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
         except (GithubPermissionError, GithubNotFoundError) as e:
-            return Response({"error": f"GitHub error: {e}"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": f"GitHub error: {e}"}, status=status.HTTP_400_BAD_REQUEST
+            )
         except Exception as e:
             log_exception(e)
-            return Response({"error": "Failed to verify GitHub credential"}, status=status.HTTP_502_BAD_GATEWAY)
+            return Response(
+                {"error": "Failed to verify GitHub credential"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
 
         workspace = get_object_or_404(Workspace, slug=slug)
         integration = _get_or_create_github_integration()
 
         with transaction.atomic():
-            wi = WorkspaceIntegration.objects.filter(workspace=workspace, integration=integration).first()
+            wi = WorkspaceIntegration.objects.filter(
+                workspace=workspace, integration=integration
+            ).first()
             if wi is None:
                 # The WorkspaceIntegration.api_token FK is required by the
                 # schema, but the real GitHub credential lives encrypted in
@@ -525,14 +594,20 @@ class GithubIntegrationDisconnectEndpoint(BaseAPIView):
                 auth_type=GitProviderAccount.AuthType.PAT,
                 workspace_integration=wi,
             )
-            GitRepositoryBinding.objects.filter(provider_account__in=pat_accounts).update(
+            GitRepositoryBinding.objects.filter(
+                provider_account__in=pat_accounts
+            ).update(
                 is_sync_enabled=False,
                 last_sync_error="Workspace GitHub integration disconnected",
             )
             pat_accounts.update(
                 status=GitProviderAccount.Status.REVOKED,
                 last_check_error="Workspace GitHub integration disconnected",
-                credential_config={"auth_type": "pat", "host_url": "https://github.com", "token": ""},
+                credential_config={
+                    "auth_type": "pat",
+                    "host_url": "https://github.com",
+                    "token": "",
+                },
             )
         return Response({"connected": False}, status=status.HTTP_200_OK)
 
@@ -576,11 +651,16 @@ class GithubIntegrationReposEndpoint(BaseAPIView):
         workspace = get_object_or_404(Workspace, slug=slug)
         wi = _get_workspace_integration(workspace)
         if wi is None:
-            return Response({"error": "GitHub not connected"}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"error": "GitHub not connected"}, status=status.HTTP_404_NOT_FOUND
+            )
 
         token = decrypt_data((wi.config or {}).get("token") or "")
         if not token:
-            return Response({"error": "GitHub credential is missing"}, status=status.HTTP_409_CONFLICT)
+            return Response(
+                {"error": "GitHub credential is missing"},
+                status=status.HTTP_409_CONFLICT,
+            )
 
         try:
             page = max(1, int(request.query_params.get("page", "1")))
@@ -590,10 +670,15 @@ class GithubIntegrationReposEndpoint(BaseAPIView):
         try:
             repos, has_next = GithubClient(token=token).list_user_repos(page=page)
         except GithubAuthError:
-            return Response({"error": "GitHub token rejected"}, status=status.HTTP_401_UNAUTHORIZED)
+            return Response(
+                {"error": "GitHub token rejected"}, status=status.HTTP_401_UNAUTHORIZED
+            )
         except Exception as e:
             log_exception(e)
-            return Response({"error": "Failed to list repositories"}, status=status.HTTP_502_BAD_GATEWAY)
+            return Response(
+                {"error": "Failed to list repositories"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
 
         return Response(
             {
@@ -626,7 +711,9 @@ class GithubAppStatusEndpoint(BaseAPIView):
             and config.get("client_secret")
         )
         memberships = (
-            WorkspaceMember.objects.filter(member=request.user, role=ROLE.ADMIN.value, is_active=True)
+            WorkspaceMember.objects.filter(
+                member=request.user, role=ROLE.ADMIN.value, is_active=True
+            )
             .select_related("workspace")
             .order_by("workspace__name")
         )
@@ -669,7 +756,10 @@ class GithubAppInstallStartEndpoint(BaseAPIView):
 
         workspace_slug = (request.data.get("workspace_slug") or "").strip()
         if not workspace_slug:
-            return Response({"error": "workspace_slug is required"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "workspace_slug is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         workspace = get_object_or_404(Workspace, slug=workspace_slug)
         if not _is_workspace_admin(request.user, workspace):
             return Response(
@@ -703,7 +793,10 @@ class GithubAppRefreshEndpoint(BaseAPIView):
             return _disabled_response()
         workspace_slug = (request.data.get("workspace_slug") or "").strip()
         if not workspace_slug:
-            return Response({"error": "workspace_slug is required"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "workspace_slug is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         workspace = get_object_or_404(Workspace, slug=workspace_slug)
         if not _is_workspace_admin(request.user, workspace):
             return Response(
@@ -718,13 +811,20 @@ class GithubAppRefreshEndpoint(BaseAPIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
         try:
-            app_installation = _refresh_app_installation(app_installation, raise_on_error=True)
+            app_installation = _refresh_app_installation(
+                app_installation, raise_on_error=True
+            )
         except GithubAppAuthError:
             return Response(
-                {"error": app_installation.last_check_error or "Failed to verify GitHub App installation"},
+                {
+                    "error": app_installation.last_check_error
+                    or "Failed to verify GitHub App installation"
+                },
                 status=status.HTTP_502_BAD_GATEWAY,
             )
-        return Response(_serialize_app_installation(app_installation), status=status.HTTP_200_OK)
+        return Response(
+            _serialize_app_installation(app_installation), status=status.HTTP_200_OK
+        )
 
 
 class GithubAppCallbackEndpoint(BaseAPIView):
@@ -739,29 +839,41 @@ class GithubAppCallbackEndpoint(BaseAPIView):
         # (logged out / different browser), redirect with a friendly error instead
         # of letting DRF return a bare 403. The actor check below is the real guard.
         if not request.user.is_authenticated:
-            return _redirect_to_profile_integrations({"github_app": "error", "error": "login_required"})
+            return _redirect_to_profile_integrations(
+                {"github_app": "error", "error": "login_required"}
+            )
         _lazy_cleanup_install_sessions()
 
         state = request.GET.get("state") or ""
         code = request.GET.get("code") or ""
         installation_id_raw = request.GET.get("installation_id") or ""
         if not state:
-            return _redirect_to_profile_integrations({"github_app": "error", "error": "missing_state"})
+            return _redirect_to_profile_integrations(
+                {"github_app": "error", "error": "missing_state"}
+            )
 
         install_session = (
-            GithubAppInstallSession.objects.filter(state=state).select_related("workspace", "actor").first()
+            GithubAppInstallSession.objects.filter(state=state)
+            .select_related("workspace", "actor")
+            .first()
         )
         if install_session is None:
-            return _redirect_to_profile_integrations({"github_app": "error", "error": "unknown_state"})
+            return _redirect_to_profile_integrations(
+                {"github_app": "error", "error": "unknown_state"}
+            )
 
         def fail(error: str):
             install_session.status = GithubAppInstallSession.Status.FAILED
             install_session.error = error
             install_session.save(update_fields=["status", "error", "updated_at"])
-            return _redirect_to_profile_integrations({"github_app": "error", "error": error})
+            return _redirect_to_profile_integrations(
+                {"github_app": "error", "error": error}
+            )
 
         if install_session.status != GithubAppInstallSession.Status.STARTED:
-            return _redirect_to_profile_integrations({"github_app": install_session.status})
+            return _redirect_to_profile_integrations(
+                {"github_app": install_session.status}
+            )
         if install_session.expires_at <= timezone.now():
             install_session.status = GithubAppInstallSession.Status.EXPIRED
             install_session.error = "Install session expired"
@@ -798,7 +910,14 @@ class GithubAppCallbackEndpoint(BaseAPIView):
         install_session.completed_at = timezone.now()
         install_session.error = ""
         install_session.save(
-            update_fields=["installation_id", "account_login", "status", "completed_at", "error", "updated_at"]
+            update_fields=[
+                "installation_id",
+                "account_login",
+                "status",
+                "completed_at",
+                "error",
+                "updated_at",
+            ]
         )
         return _redirect_to_profile_integrations(
             {
@@ -809,8 +928,12 @@ class GithubAppCallbackEndpoint(BaseAPIView):
 
 
 def _refresh_pr_links(payload: dict) -> int:
-    """Refresh the display snapshot of any `GithubPullRequestLink` matching the
+    """Refresh the display snapshot of any `GitCodeReviewLink` matching the
     PR in a `pull_request` webhook. Touches only the link row — never the issue.
+
+    Sunset 4/6: now updates generic git_code_review_links only (provider='github');
+    legacy github_pull_request_links is no longer written here. See PDASHOSS01-355
+    for the primary PR-link cutover.
 
     Returns the number of links the PR *matched* (0 when no link is attached,
     which the caller maps to a `skipped` delivery). A matched-but-stale delivery
@@ -830,13 +953,7 @@ def _refresh_pr_links(payload: dict) -> int:
     incoming = snapshot.get("pr_updated_at")
 
     matched = 0
-    for link in GithubPullRequestLink.objects.filter(repo_owner=owner, repo_name=name, pr_number=number):
-        matched += 1
-        if incoming and link.pr_updated_at and incoming < link.pr_updated_at:
-            continue  # stale / out-of-order delivery — matched but not applied
-        for field, value in snapshot.items():
-            setattr(link, field, value)
-        link.save(update_fields=["title", "state", "merged", "draft", "pr_updated_at", "updated_at"])
+    # Sunset 4/6: legacy github_pull_request_links write removed; generic only.
     for link in GitCodeReviewLink.objects.filter(
         provider="github",
         host_url="https://github.com",
@@ -848,12 +965,24 @@ def _refresh_pr_links(payload: dict) -> int:
         if incoming and link.remote_updated_at and incoming < link.remote_updated_at:
             continue
         link.title = snapshot.get("title") or ""
-        link.state = "merged" if snapshot.get("merged") else snapshot.get("state") or "open"
+        link.state = (
+            "merged" if snapshot.get("merged") else snapshot.get("state") or "open"
+        )
         link.merged = bool(snapshot.get("merged"))
         link.draft = bool(snapshot.get("draft"))
         link.remote_updated_at = incoming
         link.metadata = {**(link.metadata or {}), "remote": pull_request}
-        link.save(update_fields=["title", "state", "merged", "draft", "remote_updated_at", "metadata", "updated_at"])
+        link.save(
+            update_fields=[
+                "title",
+                "state",
+                "merged",
+                "draft",
+                "remote_updated_at",
+                "metadata",
+                "updated_at",
+            ]
+        )
     return matched
 
 
@@ -870,35 +999,56 @@ class GithubAppWebhookEndpoint(BaseAPIView):
         if not _feature_enabled():
             return _disabled_response()
         try:
-            if not verify_webhook_signature(request.body, request.headers.get("X-Hub-Signature-256")):
-                return Response({"error": "Invalid signature"}, status=status.HTTP_401_UNAUTHORIZED)
+            if not verify_webhook_signature(
+                request.body, request.headers.get("X-Hub-Signature-256")
+            ):
+                return Response(
+                    {"error": "Invalid signature"}, status=status.HTTP_401_UNAUTHORIZED
+                )
         except GithubAppConfigError as e:
             return Response({"error": str(e)}, status=status.HTTP_409_CONFLICT)
 
         delivery_id = request.headers.get("X-GitHub-Delivery")
         event = request.headers.get("X-GitHub-Event") or ""
         if not delivery_id:
-            return Response({"error": "Missing X-GitHub-Delivery"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "Missing X-GitHub-Delivery"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         try:
             delivery_uuid = uuid.UUID(delivery_id)
         except ValueError:
-            return Response({"error": "Invalid X-GitHub-Delivery"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "Invalid X-GitHub-Delivery"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         try:
             payload = json.loads(request.body.decode("utf-8") or "{}")
         except json.JSONDecodeError:
-            return Response({"error": "Invalid JSON"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "Invalid JSON"}, status=status.HTTP_400_BAD_REQUEST
+            )
 
         installation = payload.get("installation") or {}
         installation_id = installation.get("id")
         action = payload.get("action") or ""
-        delivery, created = GithubWebhookDelivery.objects.get_or_create(
-            delivery_id=delivery_uuid,
+        # Sunset 4/6: write to generic git_webhook_deliveries (provider='github').
+        # Keep HMAC and response codes identical for GitHub retry behaviour.
+        delivery, created = GitWebhookDelivery.objects.get_or_create(
+            provider="github",
+            host_url="https://github.com",
+            delivery_id=str(delivery_uuid),
             defaults={
                 "event": event,
                 "action": action,
-                "installation_id": installation_id,
+                "raw_headers": {},
                 "payload": payload,
-                "status": GithubWebhookDelivery.Status.RECEIVED,
+                "status": GitWebhookDelivery.Status.RECEIVED,
+                "metadata": (
+                    {"legacy_installation_id": installation_id}
+                    if installation_id is not None
+                    else {}
+                ),
             },
         )
         # GitHub reuses the same X-GitHub-Delivery GUID for automatic retries
@@ -911,48 +1061,210 @@ class GithubAppWebhookEndpoint(BaseAPIView):
         # payloads by the PR's `updated_at`. Without this, a single dropped
         # `pull_request` (merge) delivery leaves the PR stuck showing "open".
         if not created and delivery.status in {
-            GithubWebhookDelivery.Status.PROCESSED,
-            GithubWebhookDelivery.Status.SKIPPED,
+            GitWebhookDelivery.Status.PROCESSED,
+            GitWebhookDelivery.Status.SKIPPED,
         }:
-            return Response({"status": delivery.status}, status=status.HTTP_202_ACCEPTED)
+            return Response(
+                {"status": delivery.status}, status=status.HTTP_202_ACCEPTED
+            )
 
         try:
             delivery.error = ""
             if event == "ping":
-                delivery.status = GithubWebhookDelivery.Status.PROCESSED
+                delivery.status = GitWebhookDelivery.Status.PROCESSED
             elif event == "pull_request":
                 updated = _refresh_pr_links(payload)
                 delivery.status = (
-                    GithubWebhookDelivery.Status.PROCESSED if updated else GithubWebhookDelivery.Status.SKIPPED
+                    GitWebhookDelivery.Status.PROCESSED
+                    if updated
+                    else GitWebhookDelivery.Status.SKIPPED
                 )
             elif event in {"installation", "installation_repositories"}:
-                app_installation = None
+                # Sunset 4/6: installation events now target git_provider_accounts.
+                provider_account = None
                 if installation_id:
-                    app_installation = GithubAppInstallation.objects.filter(installation_id=installation_id).first()
-                if app_installation is None:
-                    delivery.status = GithubWebhookDelivery.Status.SKIPPED
+                    provider_account = GitProviderAccount.objects.filter(
+                        provider=GitProviderAccount.Provider.GITHUB,
+                        host_url="https://github.com",
+                        auth_type=GitProviderAccount.AuthType.GITHUB_APP,
+                        external_account_id=str(installation_id),
+                        deleted_at__isnull=True,
+                    ).first()
+                if provider_account is None:
+                    delivery.status = GitWebhookDelivery.Status.SKIPPED
                 else:
                     if event == "installation" and action in {"deleted", "suspend"}:
-                        app_installation.suspended_at = timezone.now()
-                        app_installation.last_check_error = "GitHub App installation removed or suspended"
-                        app_installation.save(update_fields=["suspended_at", "last_check_error", "updated_at"])
-                        revoke_installation_cache(app_installation.installation_id)
+                        now = timezone.now()
+                        metadata = {**(provider_account.metadata or {})}
+                        metadata["suspended_at"] = now.isoformat()
+                        provider_account.status = GitProviderAccount.Status.DEGRADED
+                        provider_account.last_check_error = (
+                            "GitHub App installation removed or suspended"
+                        )
+                        provider_account.metadata = metadata
+                        # Note: typed suspended_at column arrives via 356 (0173); until then
+                        # metadata + status is source of truth, matching 0152 backfill.
+                        if hasattr(provider_account, "suspended_at"):
+                            provider_account.suspended_at = now  # type: ignore[attr-defined]
+                            provider_account.save(
+                                update_fields=[
+                                    "status",
+                                    "last_check_error",
+                                    "metadata",
+                                    "suspended_at",
+                                    "updated_at",
+                                ]
+                            )
+                        else:
+                            provider_account.save(
+                                update_fields=[
+                                    "status",
+                                    "last_check_error",
+                                    "metadata",
+                                    "updated_at",
+                                ]
+                            )
+                        # Legacy revoke cache kept for backward-compat token cache.
+                        revoke_installation_cache(int(installation_id))
                     elif event == "installation" and action == "unsuspend":
-                        app_installation.suspended_at = None
-                        _refresh_app_installation(app_installation, extra_update_fields=["suspended_at"])
+                        metadata = {**(provider_account.metadata or {})}
+                        metadata.pop("suspended_at", None)
+                        provider_account.status = GitProviderAccount.Status.CONNECTED
+                        provider_account.last_check_error = ""
+                        provider_account.metadata = metadata
+                        if hasattr(provider_account, "suspended_at"):
+                            provider_account.suspended_at = None  # type: ignore[attr-defined]
+                            provider_account.save(
+                                update_fields=[
+                                    "status",
+                                    "last_check_error",
+                                    "metadata",
+                                    "suspended_at",
+                                    "updated_at",
+                                ]
+                            )
+                        else:
+                            provider_account.save(
+                                update_fields=[
+                                    "status",
+                                    "last_check_error",
+                                    "metadata",
+                                    "updated_at",
+                                ]
+                            )
+                        # Upstream verification for unsuspend: attempt to refresh count like
+                        # _refresh_app_installation, but write only to generic.
+                        try:
+                            from pi_dash.utils.github_client import GithubClient
+
+                            _, _, repo_count = GithubClient.for_installation(
+                                int(installation_id)
+                            ).list_installation_repositories()
+                            metadata = {**(provider_account.metadata or {})}
+                            metadata["repository_count"] = repo_count
+                            now = timezone.now()
+                            provider_account.verified_at = now
+                            provider_account.metadata = metadata
+                            if hasattr(provider_account, "last_checked_at"):
+                                provider_account.last_checked_at = now  # type: ignore[attr-defined]
+                                provider_account.save(
+                                    update_fields=[
+                                        "verified_at",
+                                        "last_checked_at",
+                                        "metadata",
+                                        "last_check_error",
+                                        "updated_at",
+                                    ]
+                                )
+                            else:
+                                provider_account.save(
+                                    update_fields=[
+                                        "verified_at",
+                                        "metadata",
+                                        "last_check_error",
+                                        "updated_at",
+                                    ]
+                                )
+                        except Exception as refresh_exc:
+                            provider_account.last_check_error = str(refresh_exc)[:2000]
+                            if hasattr(provider_account, "last_checked_at"):
+                                provider_account.last_checked_at = timezone.now()  # type: ignore[attr-defined]
+                                provider_account.save(
+                                    update_fields=[
+                                        "last_checked_at",
+                                        "last_check_error",
+                                        "updated_at",
+                                    ]
+                                )
+                            else:
+                                provider_account.save(
+                                    update_fields=["last_check_error", "updated_at"]
+                                )
+                            log_exception(refresh_exc)
                     elif event == "installation_repositories":
-                        _refresh_app_installation(app_installation)
-                    delivery.status = GithubWebhookDelivery.Status.PROCESSED
+                        try:
+                            from pi_dash.utils.github_client import GithubClient
+
+                            _, _, repo_count = GithubClient.for_installation(
+                                int(installation_id)
+                            ).list_installation_repositories()
+                            metadata = {**(provider_account.metadata or {})}
+                            metadata["repository_count"] = repo_count
+                            now = timezone.now()
+                            provider_account.verified_at = now
+                            provider_account.metadata = metadata
+                            provider_account.last_check_error = ""
+                            if hasattr(provider_account, "last_checked_at"):
+                                provider_account.last_checked_at = now  # type: ignore[attr-defined]
+                                provider_account.save(
+                                    update_fields=[
+                                        "verified_at",
+                                        "last_checked_at",
+                                        "metadata",
+                                        "last_check_error",
+                                        "updated_at",
+                                    ]
+                                )
+                            else:
+                                provider_account.save(
+                                    update_fields=[
+                                        "verified_at",
+                                        "metadata",
+                                        "last_check_error",
+                                        "updated_at",
+                                    ]
+                                )
+                        except Exception as refresh_exc:
+                            provider_account.last_check_error = str(refresh_exc)[:2000]
+                            if hasattr(provider_account, "last_checked_at"):
+                                provider_account.last_checked_at = timezone.now()  # type: ignore[attr-defined]
+                                provider_account.save(
+                                    update_fields=[
+                                        "last_checked_at",
+                                        "last_check_error",
+                                        "updated_at",
+                                    ]
+                                )
+                            else:
+                                provider_account.save(
+                                    update_fields=["last_check_error", "updated_at"]
+                                )
+                            log_exception(refresh_exc)
+                    delivery.status = GitWebhookDelivery.Status.PROCESSED
             else:
-                delivery.status = GithubWebhookDelivery.Status.SKIPPED
+                delivery.status = GitWebhookDelivery.Status.SKIPPED
             delivery.processed_at = timezone.now()
-            delivery.save(update_fields=["status", "error", "processed_at", "updated_at"])
+            delivery.save(
+                update_fields=["status", "error", "processed_at", "updated_at"]
+            )
         except Exception as e:
             log_exception(e)
-            delivery.status = GithubWebhookDelivery.Status.FAILED
+            delivery.status = GitWebhookDelivery.Status.FAILED
             delivery.error = str(e)[:2000]
             delivery.processed_at = timezone.now()
-            delivery.save(update_fields=["status", "error", "processed_at", "updated_at"])
+            delivery.save(
+                update_fields=["status", "error", "processed_at", "updated_at"]
+            )
         return Response({"status": delivery.status}, status=status.HTTP_202_ACCEPTED)
 
 
@@ -985,11 +1297,15 @@ class GithubProjectBindEndpoint(BaseAPIView):
 
         repo_url = (request.data.get("repo_url") or "").strip()
         if not repo_url:
-            return Response({"error": "repo_url is required"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "repo_url is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
         parsed = parse_github_repo_url(repo_url)
         if parsed is None:
             return Response(
-                {"error": "Only github.com URLs are supported (e.g. https://github.com/owner/repo)"},
+                {
+                    "error": "Only github.com URLs are supported (e.g. https://github.com/owner/repo)"
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
         owner, name = parsed
@@ -998,22 +1314,36 @@ class GithubProjectBindEndpoint(BaseAPIView):
         project = get_object_or_404(Project, pk=project_id, workspace=workspace)
         wi = _get_workspace_integration(workspace)
         if wi is None or not (wi.config or {}).get("token"):
-            return Response({"error": "Workspace GitHub integration is not connected"}, status=status.HTTP_409_CONFLICT)
+            return Response(
+                {"error": "Workspace GitHub integration is not connected"},
+                status=status.HTTP_409_CONFLICT,
+            )
 
         token = decrypt_data(wi.config.get("token") or "")
         try:
             verified = GithubClient(token=token).get_repo(owner, name)
         except GithubNotFoundError:
-            return Response({"error": "Repository not found or token has no access"}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"error": "Repository not found or token has no access"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
         except GithubAuthError:
-            return Response({"error": "GitHub token rejected"}, status=status.HTTP_401_UNAUTHORIZED)
+            return Response(
+                {"error": "GitHub token rejected"}, status=status.HTTP_401_UNAUTHORIZED
+            )
         except Exception as e:
             log_exception(e)
-            return Response({"error": "Failed to verify repository"}, status=status.HTTP_502_BAD_GATEWAY)
+            return Response(
+                {"error": "Failed to verify repository"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
 
         repository_id = int(verified.get("id") or 0)
         if not repository_id:
-            return Response({"error": "GitHub did not return a repository id"}, status=status.HTTP_502_BAD_GATEWAY)
+            return Response(
+                {"error": "GitHub did not return a repository id"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
         canonical_url = verified.get("html_url") or f"https://github.com/{owner}/{name}"
 
         try:
@@ -1095,8 +1425,9 @@ class GithubProjectStatusEndpoint(BaseAPIView):
         if not _feature_enabled():
             return _disabled_response()
         sync = (
-            GithubRepositorySync.objects
-            .filter(project_id=project_id, workspace__slug=slug)
+            GithubRepositorySync.objects.filter(
+                project_id=project_id, workspace__slug=slug
+            )
             .select_related("repository")
             .first()
         )
@@ -1123,7 +1454,11 @@ class GithubProjectStatusEndpoint(BaseAPIView):
                         "url": binding.repository.web_url,
                     },
                     "is_sync_enabled": binding.is_sync_enabled,
-                    "last_synced_at": binding.last_synced_at.isoformat() if binding.last_synced_at else None,
+                    "last_synced_at": (
+                        binding.last_synced_at.isoformat()
+                        if binding.last_synced_at
+                        else None
+                    ),
                     "last_sync_error": binding.last_sync_error,
                 },
                 status=status.HTTP_200_OK,
@@ -1139,7 +1474,9 @@ class GithubProjectStatusEndpoint(BaseAPIView):
                     "url": sync.repository.url,
                 },
                 "is_sync_enabled": sync.is_sync_enabled,
-                "last_synced_at": sync.last_synced_at.isoformat() if sync.last_synced_at else None,
+                "last_synced_at": (
+                    sync.last_synced_at.isoformat() if sync.last_synced_at else None
+                ),
                 "last_sync_error": sync.last_sync_error,
             },
             status=status.HTTP_200_OK,
@@ -1151,8 +1488,13 @@ class GithubProjectStatusEndpoint(BaseAPIView):
             return _disabled_response()
         enabled = request.data.get("enabled")
         if not isinstance(enabled, bool):
-            return Response({"error": "enabled (bool) is required"}, status=status.HTTP_400_BAD_REQUEST)
-        sync = GithubRepositorySync.objects.filter(project_id=project_id, workspace__slug=slug).first()
+            return Response(
+                {"error": "enabled (bool) is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        sync = GithubRepositorySync.objects.filter(
+            project_id=project_id, workspace__slug=slug
+        ).first()
         if sync is None:
             updated = GitRepositoryBinding.objects.filter(
                 project_id=project_id,
@@ -1160,7 +1502,10 @@ class GithubProjectStatusEndpoint(BaseAPIView):
                 repository__provider=GitRepository.Provider.GITHUB,
             ).update(is_sync_enabled=enabled)
             if not updated:
-                return Response({"error": "No GitHub binding for this project"}, status=status.HTTP_404_NOT_FOUND)
+                return Response(
+                    {"error": "No GitHub binding for this project"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
             return Response({"is_sync_enabled": enabled}, status=status.HTTP_200_OK)
         sync.is_sync_enabled = enabled
         sync.save(update_fields=["is_sync_enabled"])
@@ -1175,7 +1520,9 @@ class GithubProjectStatusEndpoint(BaseAPIView):
     def delete(self, request, slug, project_id):
         if not _feature_enabled():
             return _disabled_response()
-        sync = GithubRepositorySync.objects.filter(project_id=project_id, workspace__slug=slug).first()
+        sync = GithubRepositorySync.objects.filter(
+            project_id=project_id, workspace__slug=slug
+        ).first()
         binding_qs = GitRepositoryBinding.objects.filter(
             project_id=project_id,
             workspace__slug=slug,

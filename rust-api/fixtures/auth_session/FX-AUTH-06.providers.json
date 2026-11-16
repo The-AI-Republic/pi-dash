@@ -1,0 +1,228 @@
+{
+ "_fixture": "FX-AUTH-06",
+ "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+ "_sources": [
+  "apps/api/pi_dash/authentication/provider/credentials/email.py:18-38 (EmailProvider init + ENABLE_EMAIL_PASSWORD gate)",
+  "apps/api/pi_dash/authentication/provider/credentials/email.py:40-60 (signup: USER_ALREADY_EXIST, user_data shape)",
+  "apps/api/pi_dash/authentication/provider/credentials/email.py:61-96 (signin: USER_DOES_NOT_EXIST, AUTHENTICATION_FAILED_SIGN_IN, user_data shape)",
+  "apps/api/pi_dash/authentication/provider/credentials/magic_code.py:25-52 (init gates: SMTP_NOT_CONFIGURED, MAGIC_LINK_LOGIN_DISABLED)",
+  "apps/api/pi_dash/authentication/provider/credentials/magic_code.py:54-95 (initiate: 6-digit token, magic_<email> payload, attempt counting + exhaustion variants)",
+  "apps/api/pi_dash/authentication/provider/credentials/magic_code.py:97-147 (set_user_data: match/delete + INVALID/EXPIRED SIGN_IN/SIGN_UP variants)",
+  "apps/api/pi_dash/authentication/adapter/base.py:64-88 (sanitize_email)",
+  "apps/api/pi_dash/authentication/adapter/base.py:90-100 (validate_password: zxcvbn score<3 -> PASSWORD_TOO_WEAK)",
+  "apps/api/pi_dash/authentication/adapter/base.py:102-120 (__check_signup: SIGNUP_DISABLED unless invited)",
+  "apps/api/pi_dash/authentication/adapter/base.py:220-234 (save_user_data: field writes + activation-mail branch)",
+  "apps/api/pi_dash/authentication/adapter/base.py:256-287 (sync_user_data: names/display/avatar enrichment)",
+  "apps/api/pi_dash/authentication/adapter/base.py:289-360 (complete_login_or_signup: create/update, avatar fallback, profile, callback, token account)",
+  "apps/api/pi_dash/authentication/adapter/credential.py:8-18 (CredentialAdapter.authenticate)",
+  "apps/api/pi_dash/config/registry.py:38-40,82-84 (centralized defaults: ENABLE_SIGNUP=1, ENABLE_EMAIL_PASSWORD=1, ENABLE_MAGIC_LINK_LOGIN=0, EMAIL_HOST='')"
+ ],
+ "_method": "executed /tmp/fx279venv/bin/python /tmp/probe_fx0506.py (providers) + /tmp/probe_fx06w.py (adapter): real provider/adapter classes; get_configuration_value stubbed with stated CFG values (resolver itself out of scope); redis via fakeredis (real protocol semantics); sqlite Users; avatar download/upload stubbed at method boundary (network) with the None-fallback branch executed; celery .delay captured via mock.",
+ "config_values_used": {
+  "EMAIL_HOST": "smtp.x.com",
+  "ENABLE_MAGIC_LINK_LOGIN": "1",
+  "ENABLE_EMAIL_PASSWORD": "1",
+  "ENABLE_SIGNUP": "1"
+ },
+ "config_note": "centralized registry defaults differ from caller defaults (ENABLE_MAGIC_LINK_LOGIN registry '0' vs caller '1'); with no DB row the CALLER default wins (observed).",
+ "email_provider": {
+  "signup_new": {
+   "ok": true,
+   "user_data_email": "email"
+  },
+  "signup_exists": {
+   "exc": {
+    "error_code": 5030,
+    "error_message": "USER_ALREADY_EXIST"
+   }
+  },
+  "signin_ok": {
+   "ok": true,
+   "user_data_email": "email"
+  },
+  "signin_no_user": {
+   "exc": {
+    "error_code": 5060,
+    "error_message": "USER_DOES_NOT_EXIST",
+    "email": "nouser@x.com"
+   }
+  },
+  "signin_bad_pw": {
+   "exc": {
+    "error_code": 5065,
+    "error_message": "AUTHENTICATION_FAILED_SIGN_IN",
+    "email": "ep@x.com"
+   }
+  },
+  "disabled_gate": {
+   "exc": {
+    "error_code": 5056,
+    "error_message": "EMAIL_PASSWORD_AUTHENTICATION_DISABLED"
+   }
+  }
+ },
+ "magic_provider": {
+  "init_first": {
+   "key": "magic_m1@x.com",
+   "token_len": 6,
+   "token_digits": true,
+   "redis": {
+    "current_attempt": 0,
+    "email": "m1@x.com",
+    "token": "771125"
+   }
+  },
+  "init_second_attempt": {
+   "key": "magic_m1@x.com",
+   "attempt": 1
+  },
+  "exhaust_signin": {
+   "exc": {
+    "error_code": 5100,
+    "error_message": "EMAIL_CODE_ATTEMPT_EXHAUSTED_SIGN_IN",
+    "email": "ep@x.com"
+   }
+  },
+  "exhaust_signup": {
+   "exc": {
+    "error_code": 5102,
+    "error_message": "EMAIL_CODE_ATTEMPT_EXHAUSTED_SIGN_UP",
+    "email": "brandnew@x.com"
+   }
+  },
+  "no_smtp": {
+   "exc": {
+    "error_code": 5025,
+    "error_message": "SMTP_NOT_CONFIGURED",
+    "email": "a@x.com"
+   }
+  },
+  "disabled": {
+   "exc": {
+    "error_code": 5016,
+    "error_message": "MAGIC_LINK_LOGIN_DISABLED",
+    "email": "a@x.com"
+   }
+  },
+  "verify_ok": {
+   "ok": true,
+   "email": "ep@x.com",
+   "autoset": true,
+   "redis_deleted": true
+  },
+  "verify_bad_signin": {
+   "exc": {
+    "error_code": 5090,
+    "error_message": "INVALID_MAGIC_CODE_SIGN_IN",
+    "email": "ep@x.com"
+   }
+  },
+  "verify_bad_signup": {
+   "exc": {
+    "error_code": 5092,
+    "error_message": "INVALID_MAGIC_CODE_SIGN_UP",
+    "email": "brandnew@x.com"
+   }
+  },
+  "verify_expired_signin": {
+   "ok": true,
+   "email": "ep@x.com",
+   "autoset": true,
+   "redis_deleted": true
+  },
+  "verify_expired_signup": {
+   "exc": {
+    "error_code": 5092,
+    "error_message": "INVALID_MAGIC_CODE_SIGN_UP",
+    "email": "brandnew@x.com"
+   }
+  }
+ },
+ "magic_token_note": "token = str(secrets.randbelow(900000)+100000): always 6 digits (100000..999999); observed 815926/262950 over runs.",
+ "magic_attempt_note": "exhaustion raises when stored current_attempt > 2 (4th generate onward); payload re-written each generate with current_attempt+1, expiry 600s.",
+ "magic_key_quirks": [
+  "initiate() strips 'magic_' from self.key but self.key is the RAW email there (no-op); set_user_data() strips it where the prefix IS present \u2014 asymmetric but functional."
+ ],
+ "adapter": {
+  "sanitize_email": {
+   "none": {
+    "exc": {
+     "error_code": 5005,
+     "error_message": "INVALID_EMAIL",
+     "email": null
+    }
+   },
+   "empty": {
+    "exc": {
+     "error_code": 5005,
+     "error_message": "INVALID_EMAIL",
+     "email": ""
+    }
+   },
+   "dirty": {
+    "ok": "mixed@x.com"
+   },
+   "bad": {
+    "exc": {
+     "error_code": 5005,
+     "error_message": "INVALID_EMAIL",
+     "email": "not-an-email"
+    }
+   },
+   "nonstr": {
+    "exc": {
+     "error_code": 5005,
+     "error_message": "INVALID_EMAIL",
+     "email": "12345"
+    }
+   }
+  },
+  "weak_password": {
+   "exc": {
+    "error_code": 5021,
+    "error_message": "PASSWORD_TOO_WEAK",
+    "email": "v@x.com"
+   }
+  },
+  "strong_password": {
+   "raised": false
+  },
+  "save_user_data": {
+   "delay_calls": [
+    [
+     "http://localhost:8000",
+     "3f83c0e3-94a5-40db-ac68-ae8944447692",
+     {}
+    ]
+   ],
+   "is_active": true,
+   "last_login_medium": "email",
+   "last_login_ip": "1.2.3.4",
+   "last_login_uagent": "UA-Test/1.0"
+  },
+  "signup_autoset": {
+   "is_password_autoset": true,
+   "is_email_verified": true,
+   "first_name": "N",
+   "callback": {
+    "is_signup": false,
+    "email": "brandnew2@x.com"
+   },
+   "profile_created": true
+  },
+  "existing_login_callback": {
+   "is_signup": true
+  },
+  "signup_disabled": {
+   "exc": {
+    "error_code": 5015,
+    "error_message": "SIGNUP_DISABLED",
+    "email": "blocked@x.com"
+   }
+  }
+ },
+ "adapter_notes": [
+  "save_user_data sets last_login_medium=self.provider ('email' vs 'magic-code'); activation mail fires only when user was inactive, args (base_host_plain, user.id).",
+  "is_signup callback flag is INVERTED (see FX-AUTH-04 ported_bugs)."
+ ]
+}

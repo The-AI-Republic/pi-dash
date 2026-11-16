@@ -9,6 +9,7 @@ import { Controller } from "react-hook-form";
 import type { Control, FieldErrors, FieldValues, Path } from "react-hook-form";
 import { useTranslation } from "@pi-dash/i18n";
 import { TextArea, ToggleSwitch } from "@pi-dash/ui";
+import { RecurrenceEditor } from "./recurrence-editor";
 import { humanizeRrule } from "./rrule-text";
 
 type RhfPath<T extends FieldValues> = Path<T>;
@@ -100,24 +101,24 @@ export function BindingScheduleFields<T extends FieldValues>({
 
       <div className="flex flex-col gap-1">
         <label htmlFor={`field-${String(rruleName)}`} className="text-13 font-medium text-primary">
-          {t("Recurrence (RRULE)")}
+          {t("Recurrence")}
         </label>
         <Controller
           control={control}
           name={rruleName}
           render={({ field }) => (
-            <TextArea
-              {...field}
+            <RecurrenceEditor
               id={`field-${String(rruleName)}`}
-              className="min-h-[56px] text-13"
-              placeholder="FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=9;BYMINUTE=0"
+              value={field.value ?? ""}
+              onChange={field.onChange}
+              onBlur={field.onBlur}
+              dtstart={watchDtstart}
               hasError={!!rruleErr}
             />
           )}
         />
         <p className="text-12 text-secondary">
-          {t("RFC 5545 RRULE — e.g. ``FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR``. Leave blank to fire only once at the start.")}{" "}
-          — <span className="text-primary">{humanRule}</span>
+          <span className="text-primary">{humanRule}</span>
         </p>
         {rruleErr && <span className="text-12 text-danger-primary">{String(rruleErr.message ?? "")}</span>}
       </div>
@@ -180,7 +181,12 @@ function TzidSelect({ id, value, onChange, onBlur, name }: TzidSelectProps) {
     const intlWithSupported = Intl as typeof Intl & { supportedValuesOf?: SupportedValuesOfFn };
     if (typeof intlWithSupported.supportedValuesOf === "function") {
       try {
-        return intlWithSupported.supportedValuesOf("timeZone");
+        const supported = intlWithSupported.supportedValuesOf("timeZone");
+        // Browsers omit bare "UTC" from supportedValuesOf, but it is the
+        // API default tzid — without this a stored "UTC" doesn't match any
+        // <option> and the select silently shows the first zone instead
+        // (Africa/Abidjan).
+        return supported.includes("UTC") ? supported : ["UTC", ...supported];
       } catch {
         // Fall through to the curated fallback list.
       }

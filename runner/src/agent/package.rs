@@ -104,6 +104,11 @@ impl AgentPackage {
             AgentKind::OpenClaw => runner.openclaw.binary = executable,
             AgentKind::Grok => runner.grok.binary = executable,
             AgentKind::MuseCode => runner.muse_code.binary = executable,
+            AgentKind::Engine => {
+                anyhow::bail!(
+                    "the built-in engine ships with pidash; it cannot be an agent package"
+                )
+            }
         }
         runner.agent.kind = self.protocol;
         Ok(())

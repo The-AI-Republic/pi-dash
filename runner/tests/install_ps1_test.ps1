@@ -255,9 +255,9 @@ function Test-IexCase([string] $shell, [string] $name, [string] $installer, [int
         Test-IexCase $shell 'installer fails' $installerFails 0 1 @('fake-installer: boom', 'The pidash installer failed')
         Test-IexCase $shell 'download fails' $unreachable 0 1 @('Could not download the installer')
         Test-IexCase $shell 'binary missing after install' $installerNoBinary 0 1 @('pidash.exe not found')
-        Test-IexCase $shell 'install + login succeed' $installerOk 0 0 @('fake-installer: installed', 'fake-pidash: auth login') -NeedsInteractive `
+        Test-IexCase $shell 'install + login succeed' $installerOk 0 0 @('fake-installer: installed', 'fake-pidash: engine install', 'fake-pidash: auth login') -NeedsInteractive `
             -ExpectOnPath -RejectText @('another copy of pidash')
-        Test-IexCase $shell 'login fails' $installerOk 7 7 @('fake-pidash: auth login') -NeedsInteractive
+        Test-IexCase $shell 'login fails' $installerOk 7 7 @('fake-pidash: engine install', 'built-in agent engine was not installed', 'fake-pidash: auth login') -NeedsInteractive
         # The wrapper must look where cargo-dist installed, not a fixed path.
         Test-IexCase $shell 'PIDASH_INSTALL_DIR override' $installerOk 0 0 @('fake-pidash: auth login') -NeedsInteractive `
             -InstallDir (Join-Path $work "custom-dir-$([guid]::NewGuid())") -ExpectOnPath

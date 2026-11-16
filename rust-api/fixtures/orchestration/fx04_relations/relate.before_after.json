@@ -1,0 +1,78 @@
+{
+  "_trace": "orchestration/relations.py:117-120 (_pair_rows), :123-135 (_log_activity), :166-177 (_check_targets), :180-232 (relate: create 196-213, unchanged/conflicts 214-218, log 219-225)",
+  "_method": "live relate on pidash_524_scratch under impersonate(actor) (BaseModel.save resolves created_by/updated_by from crum); issue_activity.delay mocked, epoch frozen",
+  "live_pairs_before": [],
+  "created_result": {
+    "issue": "FX4B-1",
+    "relation_type": "blocked_by",
+    "created": [
+      "FX4A-1"
+    ],
+    "unchanged": [],
+    "conflicts": []
+  },
+  "created_row_shape": {
+    "issue": "FX4B-1",
+    "related_issue": "FX4A-1",
+    "stored_type": "blocked_by",
+    "project": "FX4B",
+    "workspace": "fx4-workspace",
+    "created_by": "fx4b_actor",
+    "updated_by": null,
+    "deleted_at": null
+  },
+  "live_pairs_after": [
+    [
+      "FX4B-1",
+      "blocked_by",
+      "FX4A-1"
+    ]
+  ],
+  "unchanged_result": {
+    "issue": "FX4B-1",
+    "relation_type": "blocked_by",
+    "created": [],
+    "unchanged": [
+      "FX4A-1"
+    ],
+    "conflicts": []
+  },
+  "two_cycle_conflict_result": {
+    "issue": "FX4A-1",
+    "relation_type": "blocked_by",
+    "created": [],
+    "unchanged": [],
+    "conflicts": [
+      {
+        "identifier": "FX4B-1",
+        "existing_relation": "blocking"
+      }
+    ]
+  },
+  "different_type_conflict_result": {
+    "issue": "FX4A-1",
+    "relation_type": "relates_to",
+    "created": [],
+    "unchanged": [],
+    "conflicts": [
+      {
+        "identifier": "FX4B-1",
+        "existing_relation": "blocking"
+      }
+    ]
+  },
+  "self_relation_error": "FX4A-1 cannot be related to itself",
+  "cross_workspace_error": "FX4X-1 is in a different workspace",
+  "created_activity_kwargs": [
+    {
+      "type": "issue_relation.activity.created",
+      "requested_data": "{\"relation_type\": \"blocked_by\", \"issues\": [\"99999999-aaaa-bbbb-cccc-000000004101\"]}",
+      "actor_id": "99999999-aaaa-bbbb-cccc-000000004002",
+      "issue_id": "99999999-aaaa-bbbb-cccc-000000004104",
+      "project_id": "99999999-aaaa-bbbb-cccc-000000004052",
+      "current_instance": null,
+      "epoch": 1791028800,
+      "notification": true
+    }
+  ]
+}

@@ -32,6 +32,10 @@ _COMMENT_CAP = 500
 # since both would otherwise arrive as Python ``None``.
 _PARENT_UNSET = "__unset__"
 
+# Sentinel default for update_issue's assigned_runner / assigned_pod: same
+# "omitted vs explicit null" distinction (null clears the assignment).
+_EXECUTION_TARGET_UNSET = "__unset__"
+
 
 def _identifier(issue) -> str:
     ident = getattr(issue.project, "identifier", "") if issue.project_id else ""
@@ -50,6 +54,8 @@ def _brief(issue) -> dict:
         "state": issue.state.name if issue.state_id else None,
         "state_group": issue.state.group if issue.state_id else None,
         "priority": issue.priority,
+        "assigned_pod_id": str(issue.assigned_pod_id) if issue.assigned_pod_id else None,
+        "assigned_runner_id": str(issue.assigned_runner_id) if issue.assigned_runner_id else None,
     }
 
 
@@ -179,6 +185,14 @@ def get_issue(ctx: RunContext[AssistantDeps], issue_id: str) -> dict:
             "recent_comments": list(reversed(comments)),
         }
     )
+    # Execution target (design §14.6): the assignment, its detail, and the
+    # waiting state of the latest run (null when nothing is waiting).
+    from pi_dash.runner.models import AgentRun
+    from pi_dash.runner.services.issue_assignment import assigned_runner_detail, build_dispatch_wait
+
+    latest_run = AgentRun.objects.filter(work_item=issue).order_by("-created_at").first()
+    data["assigned_runner_detail"] = assigned_runner_detail(getattr(issue, "assigned_runner", None))
+    data["dispatch_wait"] = build_dispatch_wait(latest_run, viewer=_scoping.user_for(ctx.deps))
     return data
 
 
@@ -225,6 +239,99 @@ def _resolve_parent(deps, project_id, parent_issue_id, child_id=None) -> Issue:
     return parent
 
 
+def _is_uuid(value: str) -> bool:
+    import uuid
+
+    try:
+        uuid.UUID(value)
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
+def _resolve_runner_ref(deps, project, user, ref):
+    """Resolve an ``assigned_runner`` input (UUID or name) in ``project``.
+
+    Names resolve among runners the acting user can see in the project
+    (private runners are owner-only); an ambiguous name lists the matches.
+    Unknown UUIDs fail closed at the lookup; eligibility itself is owned
+    by the shared service (E1-E8), whose codes pass through.
+    """
+    from pi_dash.runner.models import Runner
+    from pi_dash.runner.services.permissions import runner_visible_to_user_q
+
+    ref = (ref or "").strip()
+    if not ref:
+        raise ModelRetry("assigned_runner must not be empty")
+    if _is_uuid(ref):
+        runner = Runner.objects.filter(pk=ref, pod__project=project).first()
+        if runner is None:
+            raise ModelRetry("assigned_runner not found in this project")
+        return runner
+    rows = list(
+        Runner.objects.filter(pod__project=project)
+        .filter(runner_visible_to_user_q(user))
+        .order_by("name")
+    )
+    matches = [r for r in rows if r.name.strip().lower() == ref.lower()]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        available = ", ".join(r.name for r in rows) or "(none)"
+        raise ModelRetry(f"assigned_runner '{ref}' not found; available: {available}")
+    listed = ", ".join(f"{r.name} ({r.id})" for r in matches)
+    raise ModelRetry(f"assigned_runner '{ref}' matched {len(matches)} runners; disambiguate with the UUID: {listed}")
+
+
+def _resolve_pod_ref(project, ref):
+    """Resolve an ``assigned_pod`` input (UUID or name) in ``project``.
+
+    Accepts the full ``<PROJ>_<name>`` or the bare ``<name>``.
+    """
+    from pi_dash.runner.models import Pod
+
+    ref = (ref or "").strip()
+    if not ref:
+        raise ModelRetry("assigned_pod must not be empty")
+    if _is_uuid(ref):
+        pod = Pod.objects.filter(pk=ref, project=project).first()
+        if pod is None:
+            raise ModelRetry("assigned_pod not found in this project")
+        return pod
+    rows = list(Pod.objects.filter(project=project).order_by("name"))
+    matches = [p for p in rows if p.name == ref]
+    if not matches:
+        matches = [p for p in rows if p.name.split("_", 1)[-1] == ref]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        available = ", ".join(p.name for p in rows) or "(none)"
+        raise ModelRetry(f"assigned_pod '{ref}' not found; available: {available}")
+    listed = ", ".join(f"{p.name} ({p.id})" for p in matches)
+    raise ModelRetry(f"assigned_pod '{ref}' matched {len(matches)} pods; disambiguate with the UUID: {listed}")
+
+
+def _validate_execution_target_or_retry(attrs, *, issue, project_id, user):
+    """Run the shared E-code validation, mapping the API's error code and
+    message through to the tool channel unchanged (design §14.6)."""
+    from rest_framework import serializers
+
+    from pi_dash.runner.services.issue_assignment import validate_execution_target
+
+    try:
+        validate_execution_target(attrs, issue=issue, project_id=project_id, user=user)
+    except serializers.ValidationError as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {"error": exc.detail}
+        parts = []
+        for details in detail.values():
+            if not isinstance(details, list):
+                details = [details]
+            for d in details:
+                code = getattr(d, "code", "")
+                parts.append(f"{d} [{code}]" if code else str(d))
+        raise ModelRetry("; ".join(parts)) from exc
+
+
 @assistant.tool
 def create_issue(
     ctx: RunContext[AssistantDeps],
@@ -234,9 +341,14 @@ def create_issue(
     state_id: Optional[str] = None,
     priority: Optional[str] = None,
     parent_issue_id: Optional[str] = None,
+    assigned_runner: Optional[str] = None,
+    assigned_pod: Optional[str] = None,
 ) -> dict:
     """Create an issue. Requires Member or Admin role. Pass parent_issue_id to
-    link it as a sub-issue of another issue in the same project. (Assignees/labels:
+    link it as a sub-issue of another issue in the same project. Pass
+    assigned_runner (UUID or name) to dedicate the issue to one runner and
+    assigned_pod (UUID or name) to set its pod; eligibility follows the
+    shared E-code rules and any E-code is returned to the model. (Assignees/labels:
     set them afterwards in the UI — not yet supported by this tool.)"""
     deps = ctx.deps
     project = _scoping.get_project(deps, project_id)
@@ -250,6 +362,20 @@ def create_issue(
     state = _resolve_state(deps, project_id, state_id)
     parent = _resolve_parent(deps, project_id, parent_issue_id) if parent_issue_id else None
     user = _scoping.user_for(deps)
+    target_pod = _resolve_pod_ref(project, assigned_pod) if assigned_pod else None
+    target_runner = (
+        _resolve_runner_ref(deps, project, user, assigned_runner) if assigned_runner else None
+    )
+    if target_runner is not None:
+        _validate_execution_target_or_retry(
+            {
+                "assigned_runner": target_runner,
+                "assigned_pod": target_pod or target_runner.pod,
+            },
+            issue=None,
+            project_id=project_id,
+            user=user,
+        )
 
     # impersonate so BaseModel.save() attributes created_by to the acting user
     # (the tool runs in Celery with no request, so crum's current user is None).
@@ -274,7 +400,20 @@ def create_issue(
             parent=parent,
             created_by=user,
             created_via=deps.created_via,
+            assigned_pod=target_pod or (target_runner.pod if target_runner else None),
+            assigned_runner=target_runner,
         )
+        if target_runner is not None:
+            from django.utils import timezone as dj_timezone
+
+            from pi_dash.runner.services.issue_assignment import apply_execution_target
+
+            apply_execution_target(
+                issue,
+                new_runner=target_runner,
+                actor=user,
+                decided_by=dj_timezone.now(),
+            )
 
     _results.record_write(
         deps,
@@ -293,12 +432,20 @@ def update_issue(
     state_id: Optional[str] = None,
     priority: Optional[str] = None,
     parent_issue_id: Optional[str] = _PARENT_UNSET,
+    assigned_runner: Optional[str] = _EXECUTION_TARGET_UNSET,
+    assigned_pod: Optional[str] = _EXECUTION_TARGET_UNSET,
 ) -> dict:
-    """Update an issue's name, description, state, or priority. Requires write access.
-    Changing the state may dispatch a coding run if it moves the issue into a
-    delegated/ticking state (same as moving it in the UI). Pass parent_issue_id to
-    re-parent the issue (must be another issue in the same project); pass null to
-    unlink it from its current parent; omit it to leave the parent unchanged."""
+    """Update an issue's name, description, state, priority, parent, pod or
+    dedicated runner. Requires write access. Changing the state may dispatch
+    a coding run if it moves the issue into a delegated/ticking state (same
+    as moving it in the UI). Pass parent_issue_id to re-parent the issue
+    (must be another issue in the same project); pass null to unlink it
+    from its current parent; omit it to leave the parent unchanged.
+    assigned_runner (UUID or name) dedicates the issue to one runner; null
+    clears it back to "any runner in the pod". assigned_pod (UUID or name)
+    sets the pod; null clears it; a pod change with no runner in the same
+    update also clears the dedicated runner (§13.1). Eligibility follows
+    the shared E-code rules and any E-code is returned to the model."""
     deps = ctx.deps
     issue = _scoping.get_issue(deps, issue_id)
     _scoping.require_project_write(deps, str(issue.project_id))
@@ -317,12 +464,27 @@ def update_issue(
     new_parent = None
     if parent_touched and parent_issue_id:
         new_parent = _resolve_parent(deps, str(issue.project_id), parent_issue_id, child_id=issue.id)
+    # Execution target (dedicated runner / pod): sentinel = untouched,
+    # None = clear, else resolve the ref. Resolution happens before the
+    # lock; E-code validation happens on the locked row below.
+    user = _scoping.user_for(deps)
+    runner_touched = assigned_runner != _EXECUTION_TARGET_UNSET
+    pod_touched = assigned_pod != _EXECUTION_TARGET_UNSET
+    project = issue.project
+    new_runner = (
+        _resolve_runner_ref(deps, project, user, assigned_runner)
+        if runner_touched and assigned_runner
+        else None
+    )
+    new_pod = _resolve_pod_ref(project, assigned_pod) if pod_touched and assigned_pod else None
     if (
         name is None
         and description_md is None
         and prio is None
         and to_state is None
         and not parent_touched
+        and not runner_touched
+        and not pod_touched
     ):
         raise ModelRetry("Nothing to update — provide at least one field to change.")
 
@@ -368,6 +530,52 @@ def update_issue(
         setattr(locked, _DISPATCH_IMMEDIATE_ATTR, False)
         locked.save(update_fields=update_fields)
         issue = locked
+
+        # Execution target (dedicated runner / pod), validated on the
+        # locked row through the shared service; pod follows the runner
+        # (§7.2). A pod-only change clears a dedicated runner (§13.1).
+        if runner_touched or pod_touched:
+            if pod_touched:
+                new_pod_id = new_pod.id if new_pod is not None else None
+                if str(new_pod_id) != str(locked.assigned_pod_id) and locked.has_active_run:
+                    raise ModelRetry("cannot reassign pod while the issue has an active run")
+            attrs: dict = {}
+            if runner_touched:
+                attrs["assigned_runner"] = new_runner
+            if pod_touched:
+                attrs["assigned_pod"] = new_pod
+            _validate_execution_target_or_retry(
+                attrs,
+                issue=locked,
+                project_id=str(locked.project_id),
+                user=user,
+            )
+            from django.utils import timezone as dj_timezone
+
+            from pi_dash.runner.services.issue_assignment import (
+                apply_execution_target,
+                clear_dedicated_runner,
+            )
+
+            if pod_touched:
+                locked.assigned_pod = new_pod
+                locked.save(update_fields=["assigned_pod", "updated_at"])
+                changed.append("pod")
+            if runner_touched:
+                apply_execution_target(
+                    locked,
+                    new_runner=new_runner,
+                    actor=user,
+                    decided_by=dj_timezone.now(),
+                )
+                changed.append("runner")
+            elif pod_touched and locked.assigned_runner_id is not None:
+                clear_dedicated_runner(
+                    locked,
+                    reason="pod changed",
+                    actor=user,
+                    decided_by=None,
+                )
 
         # Mirror the UI: a state change routes through the orchestration transition
         # handler, which may dispatch a coding run.

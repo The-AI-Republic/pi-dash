@@ -82,6 +82,29 @@ class ProviderAuthFailed(AssistantError):
     http_status = 502
 
 
+class ProviderSessionExpired(AssistantError):
+    """The provider rejected a credential the user never typed.
+
+    The gateway counterpart of :class:`ProviderAuthFailed`: on a metered
+    gateway connection the credential is a session token minted for the user,
+    so the fix is signing in again, not replacing an API key. 502 rather than
+    401 so a client never mistakes it for its own Pi Dash session ending.
+    """
+
+    code = "provider_session_expired"
+    http_status = 502
+
+
+class ProviderOutOfCredit(AssistantError):
+    code = "provider_out_of_credit"
+    http_status = 402
+
+
+class ProviderRateLimited(AssistantError):
+    code = "provider_rate_limited"
+    http_status = 429
+
+
 class ProviderUnreachable(AssistantError):
     code = "provider_unreachable"
     http_status = 502
@@ -89,6 +112,18 @@ class ProviderUnreachable(AssistantError):
 
 class ModelInvalid(AssistantError):
     code = "model_invalid"
+    http_status = 400
+
+
+class ModelUnavailable(AssistantError):
+    """The provider no longer serves a model the user picked from its catalog.
+
+    Distinct from :class:`ModelInvalid`, which is a model *name the user typed*
+    being wrong: here the configuration was valid when it was made, and the
+    fix is choosing another model rather than correcting a typo.
+    """
+
+    code = "model_unavailable"
     http_status = 400
 
 

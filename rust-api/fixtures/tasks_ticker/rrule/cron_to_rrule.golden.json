@@ -1,0 +1,123 @@
+{
+  "_trace": "bgtasks/_rrule.py:125-212 (cron_to_rrule); 67-122 _parse_cron_field; DOW 7->0 at 147-149; DOM+DOW reject 151-157",
+  "_method": "ran cron_to_rrule live (Django-free module); rejects record error type+message",
+  "vectors": [
+    {
+      "cron": "* * * * *",
+      "rrule": "FREQ=MINUTELY"
+    },
+    {
+      "cron": "*/5 * * * *",
+      "rrule": "FREQ=MINUTELY;INTERVAL=5"
+    },
+    {
+      "cron": "*/30 * * * *",
+      "rrule": "FREQ=MINUTELY;INTERVAL=30"
+    },
+    {
+      "cron": "0 * * * *",
+      "rrule": "FREQ=HOURLY;BYMINUTE=0"
+    },
+    {
+      "cron": "15 * * * *",
+      "rrule": "FREQ=HOURLY;BYMINUTE=15"
+    },
+    {
+      "cron": "0 */6 * * *",
+      "rrule": "FREQ=DAILY;BYHOUR=0,6,12,18;BYMINUTE=0"
+    },
+    {
+      "cron": "0 9 * * *",
+      "rrule": "FREQ=DAILY;BYHOUR=9;BYMINUTE=0"
+    },
+    {
+      "cron": "0 9 * * 1-5",
+      "rrule": "FREQ=WEEKLY;BYHOUR=9;BYMINUTE=0;BYDAY=MO,TU,WE,TH,FR"
+    },
+    {
+      "cron": "0 0 * * 0",
+      "rrule": "FREQ=WEEKLY;BYHOUR=0;BYMINUTE=0;BYDAY=SU"
+    },
+    {
+      "cron": "0 0 * * 7",
+      "rrule": "FREQ=WEEKLY;BYHOUR=0;BYMINUTE=0;BYDAY=SU"
+    },
+    {
+      "cron": "0 0 1 * *",
+      "rrule": "FREQ=MONTHLY;BYHOUR=0;BYMINUTE=0;BYMONTHDAY=1"
+    },
+    {
+      "cron": "15 14 1,15 * *",
+      "rrule": "FREQ=MONTHLY;BYHOUR=14;BYMINUTE=15;BYMONTHDAY=1,15"
+    },
+    {
+      "cron": "0 0 * 6 *",
+      "rrule": "FREQ=YEARLY;BYHOUR=0;BYMINUTE=0;BYMONTH=6"
+    },
+    {
+      "cron": "",
+      "error": "CronConversionError",
+      "message": "cron must have exactly 5 fields, got 0: ''"
+    },
+    {
+      "cron": "not a cron",
+      "error": "CronConversionError",
+      "message": "cron must have exactly 5 fields, got 3: 'not a cron'"
+    },
+    {
+      "cron": "* * * *",
+      "error": "CronConversionError",
+      "message": "cron must have exactly 5 fields, got 4: '* * * *'"
+    },
+    {
+      "cron": "* * * * * *",
+      "error": "CronConversionError",
+      "message": "cron must have exactly 5 fields, got 6: '* * * * * *'"
+    },
+    {
+      "cron": "60 * * * *",
+      "error": "CronConversionError",
+      "message": "value out of range [0..59]: '60'"
+    },
+    {
+      "cron": "* 24 * * *",
+      "error": "CronConversionError",
+      "message": "value out of range [0..23]: '24'"
+    },
+    {
+      "cron": "* * 0 * *",
+      "error": "CronConversionError",
+      "message": "value out of range [1..31]: '0'"
+    },
+    {
+      "cron": "* * 32 * *",
+      "error": "CronConversionError",
+      "message": "value out of range [1..31]: '32'"
+    },
+    {
+      "cron": "* * * 13 *",
+      "error": "CronConversionError",
+      "message": "value out of range [1..12]: '13'"
+    },
+    {
+      "cron": "* * * * 8",
+      "error": "CronConversionError",
+      "message": "value out of range [0..6]: '8'"
+    },
+    {
+      "cron": "*/0 * * * *",
+      "error": "CronConversionError",
+      "message": "interval must be positive: '*/0'"
+    },
+    {
+      "cron": "0 9 1 * 1",
+      "error": "CronConversionError",
+      "message": "cron has both day-of-month and day-of-week set; Vixie OR semantics can't be expressed in a single RRULE: '0 9 1 * 1'"
+    },
+    {
+      "cron": "MON * * * *",
+      "error": "CronConversionError",
+      "message": "bad value: 'MON'"
+    }
+  ]
+}

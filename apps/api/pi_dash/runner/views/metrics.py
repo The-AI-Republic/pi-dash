@@ -9,20 +9,26 @@ Exposes point-in-time gauges derived from DB queries. Scrape with
 ourselves so the endpoint works with any Prometheus-compatible scraper.
 
 Schema (all gauges):
-- ``pi_dash_runner_online``: count of runners in ``online`` state.
+- ``pi_dash_runner_online``: count of runners in ``online`` state that are
+  not paused, i.e. idle capacity that can take new work.
 - ``pi_dash_runner_busy``: count of runners in ``busy`` state.
 - ``pi_dash_runner_offline``: count of runners in ``offline`` state
   (excludes revoked; revoked runners are retired, not a health signal).
+- ``pi_dash_runner_paused``: count of non-revoked runners an operator has
+  paused, whatever their connectivity state.
 - ``pi_dash_runs_active``: count of AgentRuns in an in-flight status
   (assigned / running / cancel_requested / awaiting_approval /
   awaiting_reauth).
 - ``pi_dash_approvals_pending``: count of ApprovalRequests with
   ``status=pending``.
+- ``pi_dash_runs_failed_by_reason{reason="…"}``: count of FAILED
+  AgentRuns per canonical ``failure_reason`` (PDASHOSS01-183). Rows that
+  predate the taxonomy backfill (blank reason) are omitted.
 """
 
 from __future__ import annotations
 
-from django.db.models import Count
+from django.db.models import Count, Q
 from django.http import HttpResponse
 from rest_framework.permissions import AllowAny
 from rest_framework.views import APIView
@@ -54,6 +60,17 @@ def _gauge(name: str, help_text: str, value: int) -> str:
     )
 
 
+def _labeled_gauge(name: str, help_text: str, rows: list[tuple[str, str, int]]) -> str:
+    """One gauge family with a single label. ``rows`` is
+    ``[(label_key, label_value, value), …]``; label values are escaped per
+    the Prometheus text format."""
+    lines = [f"# HELP {name} {help_text}", f"# TYPE {name} gauge"]
+    for key, value, count in rows:
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'{name}{{{key}="{escaped}"}} {count}')
+    return "\n".join(lines) + "\n"
+
+
 class MetricsEndpoint(APIView):
     authentication_classes: list = []
     permission_classes = [AllowAny]
@@ -61,12 +78,18 @@ class MetricsEndpoint(APIView):
     # DRF rendering by returning ``HttpResponse`` directly.
 
     def get(self, request):
-        status_counts = dict(
-            Runner.objects.values_list("status").annotate(c=Count("id"))
+        # One grouped query: total and paused counts per status.
+        rows = Runner.objects.values("status").annotate(
+            c=Count("id"),
+            paused=Count("id", filter=Q(paused_at__isnull=False, revoked_at__isnull=True)),
         )
-        online = status_counts.get(RunnerStatus.ONLINE, 0)
+        status_counts = {row["status"]: row["c"] for row in rows}
+        paused_counts = {row["status"]: row["paused"] for row in rows}
+        # A paused online runner is connected but not capacity.
+        online = status_counts.get(RunnerStatus.ONLINE, 0) - paused_counts.get(RunnerStatus.ONLINE, 0)
         busy = status_counts.get(RunnerStatus.BUSY, 0)
         offline = status_counts.get(RunnerStatus.OFFLINE, 0)
+        paused = sum(paused_counts.values())
 
         active_runs = AgentRun.objects.filter(
             status__in=ACTIVE_RUN_STATUSES
@@ -74,11 +97,17 @@ class MetricsEndpoint(APIView):
         pending_approvals = ApprovalRequest.objects.filter(
             status=ApprovalStatus.PENDING
         ).count()
+        failed_by_reason = sorted(
+            AgentRun.objects.filter(status=AgentRunStatus.FAILED)
+            .exclude(failure_reason="")
+            .values_list("failure_reason")
+            .annotate(c=Count("id"))
+        )
 
         body = "".join([
             _gauge(
                 "pi_dash_runner_online",
-                "Runners currently online.",
+                "Runners online and accepting work (excludes paused).",
                 online,
             ),
             _gauge(
@@ -92,6 +121,11 @@ class MetricsEndpoint(APIView):
                 offline,
             ),
             _gauge(
+                "pi_dash_runner_paused",
+                "Non-revoked runners paused by an operator, in any connectivity state.",
+                paused,
+            ),
+            _gauge(
                 "pi_dash_runs_active",
                 "AgentRuns in an in-flight status.",
                 active_runs,
@@ -100,6 +134,11 @@ class MetricsEndpoint(APIView):
                 "pi_dash_approvals_pending",
                 "ApprovalRequests waiting for a decision.",
                 pending_approvals,
+            ),
+            _labeled_gauge(
+                "pi_dash_runs_failed_by_reason",
+                "FAILED AgentRuns per canonical failure_reason.",
+                [("reason", reason, count) for reason, count in failed_by_reason],
             ),
         ])
         return HttpResponse(body, content_type="text/plain; version=0.0.4")

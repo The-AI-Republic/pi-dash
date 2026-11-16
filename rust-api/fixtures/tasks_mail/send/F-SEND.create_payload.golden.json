@@ -1,0 +1,129 @@
+{
+  "PORT_BUG_2": "line 120 checks data.get('actor_id', {}) with the LITERAL key 'actor_id', never the loop variable: the guard is always True, so activity_time is overwritten per change, last change wins (proven by create_payload_activity_time_last_wins: 11:00 overwritten by second change). Port verbatim.",
+  "_fixture": "F-SEND",
+  "_method": "executed: .venv-django python /tmp/probe_d07_pure.py (real function body via AST exec, real datetime; stdlib-only function so namespace is complete)",
+  "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "_sources": [
+    "apps/api/pi_dash/bgtasks/email_notification_task.py:87-127"
+  ],
+  "cases": [
+    {
+      "in": {
+        "actor-aaa": [
+          {
+            "issue_activity": {
+              "activity_time": "2026-09-01T10:00:00Z",
+              "field": "state",
+              "new_value": "Done",
+              "old_value": "Todo"
+            }
+          },
+          {
+            "issue_activity": {
+              "activity_time": "2026-09-01T10:00:00Z",
+              "field": "state",
+              "new_value": "Done",
+              "old_value": "Todo"
+            }
+          },
+          {
+            "issue_activity": {
+              "activity_time": "2026-09-01T11:00:00Z",
+              "field": "priority",
+              "new_value": "high",
+              "old_value": ""
+            }
+          },
+          {
+            "issue_activity": null
+          },
+          {
+            "no_activity_key": true
+          }
+        ],
+        "actor-bbb": [
+          {
+            "issue_activity": {
+              "activity_time": "2026-09-01T12:30:00Z",
+              "field": "comment",
+              "new_value": "<p>hi</p>",
+              "old_value": "None"
+            }
+          }
+        ]
+      },
+      "out": {
+        "actor-aaa": {
+          "activity_time": "2026-09-01 11:00:00",
+          "priority": {
+            "new_value": [
+              "high"
+            ]
+          },
+          "state": {
+            "new_value": [
+              "Done"
+            ],
+            "old_value": [
+              "Todo"
+            ]
+          }
+        },
+        "actor-bbb": {
+          "activity_time": "2026-09-01 12:30:00",
+          "comment": {
+            "new_value": [
+              "<p>hi</p>"
+            ],
+            "old_value": [
+              "None"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "in": {
+        "actor-zzz": [
+          {
+            "issue_activity": {
+              "activity_time": "2026-09-01T10:00:00Z",
+              "field": "state",
+              "new_value": "b",
+              "old_value": "a"
+            }
+          },
+          {
+            "issue_activity": {
+              "activity_time": "2026-09-02T15:30:00Z",
+              "field": "state",
+              "new_value": "d",
+              "old_value": "c"
+            }
+          }
+        ]
+      },
+      "out": {
+        "actor-zzz": {
+          "activity_time": "2026-09-02 15:30:00",
+          "state": {
+            "new_value": [
+              "b",
+              "d"
+            ],
+            "old_value": [
+              "a",
+              "c"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "rules": [
+    "output {actor: {field: {old_value: [...], new_value: [...]}, activity_time: '%Y-%m-%d %H:%M:%S'}}",
+    "issue_activity None or missing -> row skipped; falsy old/new ('' ) skipped; duplicates deduped",
+    "values stringified with str() first: None becomes 'None' (truthy, kept)",
+    "activity_time parsed from ISO by stripping trailing 'Z' (fromisoformat, naive)"
+  ]
+}
