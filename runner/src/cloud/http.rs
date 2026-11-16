@@ -1399,6 +1399,10 @@ pub struct HttpLoop {
     pub in_flight_rx: watch::Receiver<Option<Uuid>>,
     pub shutdown: Arc<tokio::sync::Notify>,
     pub attach_body: AttachBody,
+    /// Optional durable receipt store (NEWPIDASH-241 T4). When present,
+    /// every inbound frame commits check+insert+sequence before any HTTP
+    /// ACK leaves; pending dedupe stays in-memory.
+    pub receipt_store: Option<Arc<crate::daemon::receipt::ReceiptStore>>,
     /// Optional handle to the daemon's state. When `Some`, `poll_once`
     /// builds a `PollStatus::from_state` (carrying the per-active-run
     /// observability snapshot). When `None`, falls back to `from_wire`,
@@ -1553,6 +1557,29 @@ impl HttpLoop {
         shutdown: Arc<tokio::sync::Notify>,
         attach_body: AttachBody,
     ) -> Self {
+        Self::new_with_receipt(
+            client,
+            mailbox,
+            ack_rx,
+            status_rx,
+            in_flight_rx,
+            shutdown,
+            attach_body,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_receipt(
+        client: RunnerCloudClient,
+        mailbox: mpsc::Sender<InboundEnvelope>,
+        ack_rx: mpsc::UnboundedReceiver<AckEntry>,
+        status_rx: watch::Receiver<WireStatus>,
+        in_flight_rx: watch::Receiver<Option<Uuid>>,
+        shutdown: Arc<tokio::sync::Notify>,
+        attach_body: AttachBody,
+        receipt_store: Option<Arc<crate::daemon::receipt::ReceiptStore>>,
+    ) -> Self {
         Self {
             client,
             mailbox,
@@ -1561,6 +1588,7 @@ impl HttpLoop {
             in_flight_rx,
             shutdown,
             attach_body,
+            receipt_store,
             state: None,
             teardown_rx: None,
             reconnect_kick: None,
@@ -2004,6 +2032,31 @@ impl HttpLoop {
     async fn dispatch(&mut self, msg: PollMessage) -> Result<(), TransportError> {
         let stream_id = msg.stream_id.clone();
         let runner_id = self.client.runner_id();
+        // NEWPIDASH-241 T4: durable receipt-before-ACK. Committed = SQLite
+        // commit precedes any HTTP ACK; pending dedupe stays in-memory.
+        if let Some(store) = self.receipt_store.as_ref() {
+            match store.record_before_ack(&msg.mid, std::slice::from_ref(&stream_id), None, false) {
+                Ok(crate::daemon::receipt::ReceiptResult::AlreadyCommitted { .. })
+                | Ok(crate::daemon::receipt::ReceiptResult::Tombstone) => {
+                    tracing::debug!(runner = %runner_id, mid = %msg.mid, kind = ?msg.kind, "durable duplicate acked");
+                    self.inline_acks.push_back(stream_id);
+                    return Ok(());
+                }
+                Ok(crate::daemon::receipt::ReceiptResult::Pending) => {
+                    // Join stream list without ACK (in-memory pending on HttpLoop owner)
+                    tracing::debug!(runner = %runner_id, mid = %msg.mid, "pending duplicate joins stream list");
+                    return Ok(());
+                }
+                Ok(crate::daemon::receipt::ReceiptResult::Committed { .. }) => {
+                    // Committed before ACK; fall through to dispatch
+                }
+                Err(e) => {
+                    tracing::warn!(runner = %runner_id, "receipt store error: {e}; storage_blocked");
+                    // Fail closed when enabled: do not ACK, retry
+                    return Err(TransportError::Local(format!("storage_blocked: {e}")));
+                }
+            }
+        }
         // At-least-once delivery (design.md §8): a frame the daemon
         // already executed can reappear via PEL replay or stream
         // retries. Drop duplicates by `mid` before they reach the
