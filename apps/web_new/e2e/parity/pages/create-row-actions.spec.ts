@@ -162,10 +162,7 @@ test(
 );
 
 test(
-  specTitle(
-    ["PAGE-007", "PAGE-009"],
-    "guests see no create control, no stars, and a reduced row menu"
-  ),
+  specTitle(["PAGE-007", "PAGE-009"], "guests see no create control, no stars, and a reduced row menu"),
   { tag: specTags(["PAGE-007", "PAGE-009"]) },
   async ({ driver, seed, browser }) => {
     const session = await ownerSession(seed);
@@ -192,10 +189,7 @@ test(
 );
 
 test(
-  specTitle(
-    ["PAGE-008"],
-    "creation dialog validates the title, then creates with visibility and mark"
-  ),
+  specTitle(["PAGE-008"], "creation dialog validates the title, then creates with visibility and mark"),
   { tag: specTags(["PAGE-008"]) },
   async ({ driver, seed }) => {
     const session = await ownerSession(seed);
@@ -428,10 +422,7 @@ test(
 );
 
 test(
-  specTitle(
-    ["PAGE-013"],
-    "visibility toggle hides on shelved pages and the server refuses non-owners"
-  ),
+  specTitle(["PAGE-013"], "visibility toggle hides on shelved pages and the server refuses non-owners"),
   { tag: specTags(["PAGE-013"]) },
   async ({ driver, seed }) => {
     const session = await ownerSession(seed);
@@ -611,9 +602,7 @@ test(
     await driver.pagesRowMenuClick("Delete");
     await expect.poll(() => driver.pagesRowDeleteModalVisible(), { timeout: 15_000 }).toBe(true);
     await driver.pagesRowDeleteModalConfirm();
-    await expect.poll(() => driver.currentUrlPath(), { timeout: 30_000 }).toBe(
-      listUrl(seed, projectId)
-    );
+    await expect.poll(() => driver.currentUrlPath(), { timeout: 30_000 }).toBe(listUrl(seed, projectId));
     expect(await serverPagesRowList(seed.workspaceSlug, projectId, session)).toEqual([]);
   }
 );
@@ -651,9 +640,7 @@ test(
       expect(await peer.driver.pagesRowDetailNotFoundVisible()).toBe(true);
       await peer.driver.pagesRowDetailNotFoundBackToList();
       // The recovery link lands on the list with a trailing slash.
-      await expect.poll(() => peer.driver.currentUrlPath(), { timeout: 30_000 }).toBe(
-        `${listUrl(seed, projectId)}/`
-      );
+      await expect.poll(() => peer.driver.currentUrlPath(), { timeout: 30_000 }).toBe(`${listUrl(seed, projectId)}/`);
       await peer.driver.pagesRowOpenList(seed.workspaceSlug, projectId, "shelved");
       expect(await peer.driver.pagesRowTitles()).toEqual([]);
     } finally {

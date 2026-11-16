@@ -140,7 +140,7 @@ export const useWorkItemCommentOperations = (
           return res;
         } catch (error) {
           console.log("Error in uploading comment asset:", error);
-          throw new Error(t("Asset upload failed. Please try again later."));
+          throw new Error(t("Asset upload failed. Please try again later."), { cause: error });
         }
       },
       duplicateCommentAsset: async (assetId, commentId) => {

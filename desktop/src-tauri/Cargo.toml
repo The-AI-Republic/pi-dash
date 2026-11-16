@@ -47,6 +47,15 @@ toml = "0.9"
 # plus `select!`/`Notify` for canceling native API requests.
 tokio = { version = "1", default-features = false, features = ["time", "macros", "sync"] }
 
+# The OS proxy settings, read directly for the bypass list that reqwest's
+# `system-proxy` drops (see `system_proxy`). Both crates are already in the
+# tree through reqwest.
+[target.'cfg(target_os = "macos")'.dependencies]
+system-configuration = "0.7"
+
+[target.'cfg(windows)'.dependencies]
+windows-registry = "0.5"
+
 [target.'cfg(unix)'.dependencies]
 # `access(2)`: whether the app may update the installed CLI in place.
 libc = "0.2"

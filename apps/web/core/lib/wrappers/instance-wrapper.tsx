@@ -9,7 +9,7 @@ import { observer } from "mobx-react";
 import useSWR from "swr";
 // components
 import { LogoSpinner } from "@/components/common/logo-spinner";
-import { InstanceNotReady, MaintenanceView } from "@/components/instance";
+import { InstanceNotReady, MaintenanceView, unreachableDesktopServer } from "@/components/instance";
 // hooks
 import { useInstance } from "@/hooks/store/use-instance";
 
@@ -36,7 +36,7 @@ const InstanceWrapper = observer(function InstanceWrapper(props: TInstanceWrappe
       </div>
     );
 
-  if (instanceSWRError) return <MaintenanceView />;
+  if (instanceSWRError) return <MaintenanceView unreachableServer={unreachableDesktopServer(instanceSWRError)} />;
 
   // something went wrong while in the request
   if (error && error?.status === "error") return <>{children}</>;

@@ -18,6 +18,7 @@ mod dist_guard;
 mod migration;
 mod pidash_cli;
 mod setup;
+mod system_proxy;
 mod updates;
 
 use std::sync::Mutex;

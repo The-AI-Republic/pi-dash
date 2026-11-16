@@ -2721,6 +2721,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "system-configuration",
  "tauri",
  "tauri-build",
  "tauri-plugin-deep-link",
@@ -2733,6 +2734,7 @@ dependencies = [
  "toml 0.9.12+spec-1.1.0",
  "url",
  "uuid",
+ "windows-registry",
 ]
 
 [[package]]
