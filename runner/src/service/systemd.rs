@@ -245,6 +245,13 @@ pub fn parse_previous_exit(show_output: &str) -> Option<String> {
 /// `Some("oom-kill")` when systemd reports the last invocation died to the
 /// OOM killer; `None` on any other platform, without systemd, or on
 /// failure. Bounded so a wedged systemctl never hangs startup.
+///
+/// Note (review question 2026-11-16): systemd resets `Result` on service
+/// start, so a read after startup may report `success` even when the
+/// previous invocation was oom-killed. This is best-effort by design —
+/// when it returns `None` the daemon detail still carries the shutdown
+/// trigger (e.g. SIGTERM), which meets the Done-when; the oom-kill suffix
+/// is an additive hint when `Result` survives the restart.
 pub async fn previous_exit_result() -> Option<String> {
     #[cfg(target_os = "linux")]
     {

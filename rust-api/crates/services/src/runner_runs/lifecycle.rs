@@ -290,8 +290,8 @@ pub fn pause_drain_reread_sql() -> String {
 /// dev-machine legs for the trailing `Runner:` line. Param: `$1` run id.
 pub fn failure_reread_sql() -> String {
     format!(
-        "SELECT {}, {}, {}, \"runner\".\"name\", \"runner\".\"host_label\", \
-         \"dev_machine\".\"label\", \"dev_machine\".\"host_label\" FROM \"agent_run\" \
+        "SELECT {}, {}, {}, \"runner\".\"name\" AS \"runner_name\", \"runner\".\"host_label\" AS \"runner_host_label\", \
+         \"dev_machine\".\"label\" AS \"machine_label\", \"dev_machine\".\"host_label\" AS \"machine_host_label\" FROM \"agent_run\" \
          LEFT OUTER JOIN \"issues\" ON \
          (\"agent_run\".\"work_item_id\" = \"issues\".\"id\") LEFT OUTER JOIN \
          \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \
@@ -2418,8 +2418,27 @@ mod tests {
                 && (py_strip(reason) == "daemon_restart"
                     || py_strip(detail).starts_with("daemon shutdown requested"))
             {
-                // `Some` is the DIFF-42 fixed behaviour; `None` falls
-                // through to the equality assert below (null == null).
+                // DIFF-42: daemon_restart rows must now post — assert presence
+                // so a still-suppressed daemon fails here, not null==null below.
+                // Detail-only daemon rows with other RetryFree reasons (e.g.
+                // `network`, streak 0) still suppress on free-retry by design,
+                // so they keep the lenient Some→assert / None→fall-through shape.
+                if py_strip(reason) == "daemon_restart" {
+                    let rendered = rendered
+                        .as_ref()
+                        .unwrap_or_else(|| panic!("daemon must post (DIFF-42) {case}"));
+                    assert!(
+                        rendered.comment.comment_html.contains("Run failed"),
+                        "daemon html {case}"
+                    );
+                    assert!(
+                        !py_strip(detail).is_empty() || !rendered.comment.comment_html.is_empty(),
+                        "daemon html {case}"
+                    );
+                    let notified = rendered.clock_stopped;
+                    assert_eq!(Value::Bool(notified), row["notified"], "notified {case}");
+                    continue;
+                }
                 if let Some(rendered) = rendered.as_ref() {
                     assert!(
                         rendered.comment.comment_html.contains("Run failed"),
@@ -2916,6 +2935,17 @@ mod tests {
             ),
             "tail: {failure}"
         );
+        // Raw-SQL guard: the four DIFF-42 columns must carry distinct
+        // aliases matching FailureRereadRow (two bare host_labels would be
+        // a duplicate output column).
+        for alias in [
+            "\"runner\".\"name\" AS \"runner_name\"",
+            "\"runner\".\"host_label\" AS \"runner_host_label\"",
+            "\"dev_machine\".\"label\" AS \"machine_label\"",
+            "\"dev_machine\".\"host_label\" AS \"machine_host_label\"",
+        ] {
+            assert!(failure.contains(alias), "alias {alias}: {failure}");
+        }
     }
 
     #[test]
