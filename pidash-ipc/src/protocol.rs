@@ -54,13 +54,19 @@ use crate::dto::{
 /// the current model token), `EngineStatus`, `EngineRunnerAdd` /
 /// `EngineRunnerRemove`, `EngineSettingsGet` / `EngineSettingsSet`, and the
 /// `engine_detail` field on `HelloInfo`. `Hello.engine` keeps its v5 shape.
+/// v7 (NEWPIDASH-241) added `MachineRunLimitSet` (live limit 1-65535) and
+/// `RunQueueSnapshot` (mode/limit/active/waiting/held/revision/blocked_reason)
+/// for the dev-machine AgentRun queue. `DaemonInfo.run_queue` carries the
+/// snapshot; Configuration RunQueueRecover shows supported/unsupported +
+/// underlying storage state + diagnostics + Retry. Older daemons reject the
+/// new verbs as unknown; the CLI falls back gracefully.
 /// Still within v6 (no release shipped v6 without them, and every addition
 /// is optional on the wire): `EngineSetPaused`, the pause fields of
 /// `EngineStatusInfo` (`paused_by_owner`, `auto_pause_reason`,
 /// `pause_checked_at`), and local chat on the daemon's own engine profile —
 /// a `Chat*` request with no `runner` selector and an absolute `cwd` runs on
 /// the machine-level built-in engine, not on a project runner.
-pub const IPC_VERSION: u32 = 6;
+pub const IPC_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
@@ -216,6 +222,11 @@ pub enum Request {
     /// its in-memory copy and re-creating the data dir, until the
     /// operator manually restarted the service.
     RunnerRemoveLocal { runner: String },
+    /// Set the machine-level concurrent issue-run limit (NEWPIDASH-241 T7).
+    /// Applied live without restarting active work; decreases drain, increases admit.
+    MachineRunLimitSet { limit: u16 },
+    /// Snapshot of the durable FIFO queue (NEWPIDASH-241 T7).
+    RunQueueSnapshot,
 
     // ---- Local chat (PDASHOSS01-159, IPC v4) ------------------------
     //
@@ -337,6 +348,13 @@ pub enum Response {
     Approvals(Vec<ApprovalRecord>),
     Doctor(crate::dto::Report),
     Ack,
+    /// Answer to MachineRunLimitSet: applied live limit.
+    MachineRunLimitResult {
+        limit: u16,
+        revision: u64,
+    },
+    /// Answer to RunQueueSnapshot.
+    RunQueueSnapshot(RunQueueSnapshot),
     Error(RpcError),
     StatusDelta(StatusSnapshot),
 
@@ -594,6 +612,20 @@ pub struct EngineSettings {
     pub warnings: Vec<String>,
 }
 
+/// Snapshot of the durable FIFO queue (NEWPIDASH-241 T7).
+/// Carried in DaemonInfo.run_queue and RunQueueSnapshot response.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RunQueueSnapshot {
+    pub mode: String, // "enabled" or "unsupported"
+    pub limit: u16,
+    pub active: usize,
+    pub waiting: usize,
+    pub held: usize,
+    pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
+}
+
 /// Connection-level state shared across every runner the daemon hosts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonInfo {
@@ -608,6 +640,9 @@ pub struct DaemonInfo {
     /// newer daemon's Status without serde failures during dev.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update: Option<UpdateAdvisory>,
+    /// Durable FIFO queue snapshot (NEWPIDASH-241). None from old daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_queue: Option<RunQueueSnapshot>,
 }
 
 /// Version advisory surfaced via `pidash status` and the TUI. Pure data

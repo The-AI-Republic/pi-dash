@@ -747,6 +747,7 @@ mod tests {
                 connected: true,
                 uptime_secs: 0,
                 update: None,
+                run_queue: None,
             },
             runners: names.iter().map(|name| snapshot(name)).collect(),
         }

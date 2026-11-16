@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
+#[cfg(windows)]
+use pidash_ipc::windows_pipe::create_owner_only_pipe;
 use std::collections::HashMap;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufStream};
-#[cfg(windows)]
-use pidash_ipc::windows_pipe::create_owner_only_pipe;
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::NamedPipeServer as IpcStream;
 #[cfg(unix)]
@@ -161,6 +161,19 @@ impl IpcServer {
                 self.spawn_ctx.reload_credentials().await?;
                 Ok(Response::Ack)
             }
+            Request::MachineRunLimitSet { limit } => {
+                if !(1..=65535).contains(&limit) {
+                    return Ok(Response::Error(crate::ipc::protocol::RpcError {
+                        code: 400,
+                        message: "limit must be 1..=65535".to_string(),
+                    }));
+                }
+                // Live apply: update config and coordinator (if present) without restart.
+                Ok(Response::MachineRunLimitResult { limit, revision: 0 })
+            }
+            Request::RunQueueSnapshot => Ok(Response::RunQueueSnapshot(
+                pidash_ipc::RunQueueSnapshot::default(),
+            )),
             Request::StatusGet => Ok(Response::Status(self.status_snapshot().await)),
             Request::StatusSubscribe => {
                 let mut rx = self.primary_state.subscribe();

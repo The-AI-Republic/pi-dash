@@ -665,6 +665,7 @@ mod tests {
                 connected: daemon_connected,
                 uptime_secs: 1,
                 update: None,
+                run_queue: None,
             },
             runners,
         }
