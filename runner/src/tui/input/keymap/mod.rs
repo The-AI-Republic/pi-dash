@@ -12,7 +12,7 @@ pub mod resolver;
 
 use std::collections::HashMap;
 
-pub use resolver::{resolve, Resolution};
+pub use resolver::{Resolution, resolve};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Context {
@@ -98,7 +98,10 @@ pub struct KeyMatch {
 }
 
 impl KeyMatch {
-    pub const fn new(code: crossterm::event::KeyCode, mods: crossterm::event::KeyModifiers) -> Self {
+    pub const fn new(
+        code: crossterm::event::KeyCode,
+        mods: crossterm::event::KeyModifiers,
+    ) -> Self {
         Self { code, mods }
     }
 }

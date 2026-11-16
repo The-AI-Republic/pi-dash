@@ -37,7 +37,6 @@ pub(crate) enum Entry {
     ZoomOut,
     ZoomReset,
     ZoomInShift,
-    ZoomInNumpad,
 }
 
 const WINDOW_MENU: &str = "Window";
@@ -47,13 +46,15 @@ pub(crate) fn layout(macos: bool) -> Vec<(&'static str, Vec<Entry>)> {
     use Entry::*;
 
     // View menu: browser-style zoom shortcuts. The Tauri webview doesn't bind
-    // these by default, so we register them as menu accelerators. We register
-    // three variants routed to the same `zoom_in` id; alternates are
-    // Linux/Windows only — on macOS, `Cmd+=` is the conventional shortcut and
-    // the duplicates would visibly clutter the menubar.
+    // these by default, so we register them as menu accelerators. The
+    // main-row alternate is Linux/Windows only — on macOS, `Cmd+=` is the
+    // conventional shortcut and the duplicate would visibly clutter the
+    // menubar. The numpad `+` has no working accelerator (muda collapses
+    // `NumpadAdd` onto the main-row `+`); physical Ctrl+NumpadPlus is
+    // handled by `zoom_fix.js` (PIDESKAPP-51), so it stays out of the menu.
     let mut view = vec![ZoomIn, ZoomOut, ZoomReset];
     if !macos {
-        view.extend([ZoomInShift, ZoomInNumpad]);
+        view.extend([ZoomInShift]);
         return vec![("View", view)];
     }
     view.extend([Separator, Fullscreen]);
@@ -77,7 +78,8 @@ pub(crate) fn layout(macos: bool) -> Vec<(&'static str, Vec<Entry>)> {
 
 pub(crate) fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     // muda's accelerator parser has no `Plus` token (it would silently bind
-    // the `P` key); the numpad `+` is spelled `NumpadPlus`.
+    // the `P` key), so only the main-row `+` gets an accelerator; the numpad
+    // key is routed via `zoom_fix.js` (see `layout`).
     let zoom = |id: &str, text: &str, accelerator: &str| {
         MenuItemBuilder::with_id(id, text)
             .accelerator(accelerator)
@@ -115,9 +117,6 @@ pub(crate) fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
                 Entry::ZoomOut => submenu.item(&zoom("zoom_out", "Zoom Out", "CmdOrCtrl+-")?),
                 Entry::ZoomReset => submenu.item(&zoom("zoom_reset", "Actual Size", "CmdOrCtrl+0")?),
                 Entry::ZoomInShift => submenu.item(&zoom("zoom_in", "Zoom In", "CmdOrCtrl+Shift+=")?),
-                Entry::ZoomInNumpad => {
-                    submenu.item(&zoom("zoom_in", "Zoom In", "CmdOrCtrl+NumpadPlus")?)
-                }
             };
         }
         menu = menu.item(&submenu.build()?);
@@ -164,7 +163,7 @@ mod tests {
             }
         }
         assert!(!entries(true).contains(&Entry::ZoomInShift));
-        assert!(entries(false).contains(&Entry::ZoomInNumpad));
+        assert!(entries(false).contains(&Entry::ZoomInShift));
     }
 
     #[test]

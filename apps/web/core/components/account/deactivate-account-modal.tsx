@@ -45,7 +45,7 @@ export function DeactivateAccountModal(props: Props) {
           title: "Success!",
           message: "Account deactivated successfully.",
         });
-        signOut();
+        signOut({ skipConfirmation: true });
         router.push("/");
         handleClose();
         return;

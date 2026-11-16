@@ -1,0 +1,196 @@
+{
+ "_comment": "FX-ACT-01: extract_ids + 12 track_* helpers \u2014 one input pair -> appended IssueActivity shape each. Rows marked executed ran against verbatim-extracted function bodies (probe /tmp/fx_webhooks_probe.py + /tmp/fx_probe2.py); DB-lookup branches transcribed. Source: bgtasks/issue_activities_task.py:41-556. Common frame for every golden: issue_id/actor_id/project_id/workspace_id/epoch are passthrough; verb/comment/field/old/new per helper.",
+ "assignees": {
+  "added": {
+   "comment": "added assignee ",
+   "field": "assignees",
+   "new_identifier": "<assignee.id>",
+   "new_value": "<assignee.display_name>",
+   "old_value": "",
+   "side_effect": "IssueSubscriber(subscriber_id, issue_id, workspace_id, project_id, created_by_id=assignee.id, updated_by_id=assignee.id) collected; bulk_create(batch_size=10, ignore_conflicts=True) AFTER the added loop, BEFORE the dropped loop",
+   "verb": "updated"
+  },
+  "dropped": {
+   "comment": "removed assignee ",
+   "field": "assignees",
+   "new_value": "",
+   "old_identifier": "<assignee.id>",
+   "old_value": "<assignee.display_name>",
+   "verb": "updated"
+  },
+  "keys": "extract_ids(requested, 'assignee_ids', 'assignees') vs extract_ids(current, ...) \u2014 set difference both ways; non-UUID ids skipped silently",
+  "lookup": "User.objects.get(pk=id) \u2014 raises on missing (no guard); note the dropped-loop variable is named dropped_assginees in source"
+ },
+ "closed_to": {
+  "executed": true,
+  "lookup": "State.objects.get(pk=closed_to, project_id=project_id) \u2014 args recorded as call(pk='state-uuid-1', project_id='proj-1')",
+  "none_input": "closed_to None (or key absent) -> NO activity, NO lookup",
+  "row": {
+   "comment": "Pi Dash updated the state to ",
+   "field": "state",
+   "new_identifier": "state-uuid-1",
+   "new_value": "Done",
+   "old_identifier": null,
+   "old_value": null,
+   "verb": "updated"
+  }
+ },
+ "description": {
+  "append": {
+   "comment": "updated the description to",
+   "field": "description",
+   "new_value": "<requested description_html>",
+   "old_value": "<current description_html>",
+   "verb": "updated"
+  },
+  "compare_key": "description_html on BOTH sides (row field is 'description')",
+  "touch_instead": "if latest IssueActivity for the issue (order_by -created_at) has field == 'description' AND str(actor_id) == actor arg: last_activity.created_at = now(); save(update_fields=['created_at']) \u2014 NO new row appended"
+ },
+ "estimate_points": {
+  "compare_key": "estimate_point (singular) on both sides",
+  "lookups": "EstimatePoint.objects.filter(pk=...).first() each side; None id -> None",
+  "removed": "new None -> verb 'removed', new_value None, new_identifier None",
+  "row": {
+   "comment": "updated the estimate point to ",
+   "field": "'estimate_' + new_estimate.estimate.type (CRASHES with AttributeError when new_estimate is None \u2014 port the crash, not a guard)",
+   "new_identifier": "<requested estimate_point id or None>",
+   "new_value": "<new.value or None>",
+   "old_identifier": "<current estimate_point id or None>",
+   "old_value": "<old.value or None>",
+   "verb": "'removed' if new_estimate is None else 'updated'"
+  }
+ },
+ "executed": true,
+ "extract_ids": {
+  "both_keys_missing": "data.get(fallback_key, []) -> set() (no raise); a None VALUE under either key raises TypeError (not iterable)",
+  "executed": true,
+  "fallback": "input {'labels': ['x']} -> ['x']",
+  "none_input": "None -> set()",
+  "precedence": "primary key PRESENCE wins even when its list is empty: {'label_ids': [], 'labels': ['x']} -> set()",
+  "primary": "input {'label_ids': ['b', 'a']} -> ['a', 'b'] (set of str(x), order not stable \u2014 compare as sets)"
+ },
+ "labels": {
+  "added": {
+   "comment": "added label ",
+   "field": "labels",
+   "new_identifier": "<label.id>",
+   "new_value": "<label.name>",
+   "old_identifier": null,
+   "old_value": "",
+   "verb": "updated"
+  },
+  "dropped": {
+   "comment": "removed label ",
+   "field": "labels",
+   "new_identifier": null,
+   "new_value": "",
+   "old_identifier": "<label.id>",
+   "old_value": "<label.name>",
+   "verb": "updated"
+  },
+  "keys": "extract_ids(..., 'label_ids', 'labels') both sides; non-UUID ids skipped",
+  "lookup": "Label.objects.get(pk=id) \u2014 raises on missing (no guard)"
+ },
+ "name": {
+  "executed": true,
+  "row_changed": {
+   "comment": "updated the name to",
+   "field": "name",
+   "new_value": "New",
+   "old_value": "Old",
+   "verb": "updated"
+  },
+  "row_same": "no row when equal (including both None)"
+ },
+ "parent": {
+  "invalid_uuid": "current OR requested id failing is_valid_uuid -> SILENT return, no row (validated BEFORE the equality check; None skips validation)",
+  "key_fallback": "current_instance.get('parent_id') or .get('parent'); same for requested",
+  "lookups": "Issue.objects.filter(pk=...).first() each side (None id -> None, no query)",
+  "row": {
+   "comment": "updated the parent issue to",
+   "field": "parent",
+   "new_identifier": "<new.id or None>",
+   "new_value": "'<IDENT>-<seq>' or '' when no new parent",
+   "old_identifier": "<old.id or None>",
+   "old_value": "'<IDENT>-<seq>' or '' when no old parent",
+   "verb": "updated"
+  }
+ },
+ "priority": {
+  "executed": true,
+  "row_changed": {
+   "comment": "updated the priority to",
+   "field": "priority",
+   "new_value": "high",
+   "old_value": "low",
+   "verb": "updated"
+  }
+ },
+ "start_date": {
+  "executed": true,
+  "note": "comment has a TRAILING SPACE: 'updated the start date to ' (target_date has none) \u2014 port byte for byte",
+  "row_set": {
+   "comment": "updated the start date to ",
+   "field": "start_date",
+   "new_value": "2026-10-01",
+   "old_value": "",
+   "verb": "updated"
+  }
+ },
+ "state": {
+  "invalid_uuid_coerced": "either side failing is_valid_uuid -> coerced to None (NOT a silent return \u2014 unlike track_parent)",
+  "lookups": "State.objects.filter(pk=..., project_id=project_id).first() each side",
+  "row": {
+   "comment": "updated the state to",
+   "field": "state",
+   "new_identifier": "<new.id or None>",
+   "new_value": "<new.name or None>",
+   "old_identifier": "<old.id or None>",
+   "old_value": "<old.name or None>",
+   "verb": "updated"
+  }
+ },
+ "archive_at": {
+  "compare_key": "archived_at; NO row when equal",
+  "executed": true,
+  "manual": {
+   "comment": "Actor has archived the issue",
+   "field": "archived_at",
+   "new_value": "manual_archive",
+   "old_value": null,
+   "verb": "updated"
+  },
+  "with_automation_flag": {
+   "comment": "Pi Dash has archived the issue",
+   "field": "archived_at",
+   "new_value": "archive",
+   "old_value": null,
+   "verb": "updated"
+  },
+  "restore": {
+   "comment": "has restored the issue",
+   "field": "archived_at",
+   "new_value": "restore",
+   "old_value": "archive",
+   "verb": "updated"
+  }
+ },
+ "target_date": {
+  "executed": true,
+  "row_set": {
+   "comment": "updated the target date to",
+   "field": "target_date",
+   "new_value": "2026-10-01",
+   "old_value": "",
+   "verb": "updated"
+  },
+  "row_cleared": {
+   "comment": "updated the target date to",
+   "field": "target_date",
+   "new_value": "",
+   "old_value": "2026-10-01",
+   "verb": "updated"
+  },
+  "note": "None renders as '' on whichever side is None; NO trailing space in comment (unlike start_date)"
+ }
+}

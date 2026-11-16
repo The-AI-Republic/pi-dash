@@ -14,7 +14,7 @@ import { EmptyStateCompact } from "@pi-dash/propel/empty-state";
 import { PlusIcon, SearchIcon } from "@pi-dash/propel/icons";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import { Tooltip } from "@pi-dash/propel/tooltip";
-import { copyUrlToClipboard, orderJoinedProjects } from "@pi-dash/utils";
+import { orderJoinedProjects } from "@pi-dash/utils";
 // components
 import { CreateProjectModal } from "@/components/project/create-project-modal";
 import { SidebarProjectsListItem } from "@/components/workspace/sidebar/projects-list-item";
@@ -23,6 +23,7 @@ import { useAppTheme } from "@/hooks/store/use-app-theme";
 import { useProject } from "@/hooks/store/use-project";
 import { useUserPermissions } from "@/hooks/store/user";
 import type { TProject } from "@/pi-dash-web/types";
+import { copyShareUrl } from "@/utils/share-url";
 import { ExtendedSidebarWrapper } from "./extended-sidebar-wrapper";
 
 export const ExtendedProjectSidebar = observer(function ExtendedProjectSidebar() {
@@ -85,7 +86,7 @@ export const ExtendedProjectSidebar = observer(function ExtendedProjectSidebar()
   const handleClose = useCallback(() => toggleExtendedProjectSidebar(false), [toggleExtendedProjectSidebar]);
 
   const handleCopyText = async (projectId: string) => {
-    await copyUrlToClipboard(`${workspaceSlug}/projects/${projectId}/issues`);
+    await copyShareUrl(`${workspaceSlug}/projects/${projectId}/issues`);
     setToast({
       type: TOAST_TYPE.SUCCESS,
       title: t("Link copied"),

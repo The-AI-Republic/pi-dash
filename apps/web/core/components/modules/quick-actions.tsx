@@ -13,7 +13,7 @@ import { IconButton } from "@pi-dash/propel/icon-button";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import type { TContextMenuItem } from "@pi-dash/ui";
 import { ContextMenu, CustomMenu } from "@pi-dash/ui";
-import { copyUrlToClipboard, cn } from "@pi-dash/utils";
+import { cn } from "@pi-dash/utils";
 // components
 import { useModuleMenuItems } from "@/components/common/quick-actions-helper";
 import { ArchiveModuleModal, CreateUpdateModuleModal, DeleteModuleModal } from "@/components/modules";
@@ -21,6 +21,7 @@ import { ArchiveModuleModal, CreateUpdateModuleModal, DeleteModuleModal } from "
 import { useModule } from "@/hooks/store/use-module";
 import { useUserPermissions } from "@/hooks/store/user";
 import { useAppRouter } from "@/hooks/use-app-router";
+import { copyShareUrl } from "@/utils/share-url";
 
 type Props = {
   parentRef: React.RefObject<HTMLDivElement>;
@@ -55,7 +56,7 @@ export const ModuleQuickActions = observer(function ModuleQuickActions(props: Pr
 
   const moduleLink = `${workspaceSlug}/projects/${projectId}/modules/${moduleId}`;
   const handleCopyText = () =>
-    copyUrlToClipboard(moduleLink).then(() => {
+    copyShareUrl(moduleLink).then(() => {
       setToast({
         type: TOAST_TYPE.SUCCESS,
         title: "Link Copied!",

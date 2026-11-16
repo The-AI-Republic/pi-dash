@@ -5,6 +5,12 @@ services:
       context: ../../
       dockerfile: apps/web/Dockerfile.web
 
+  web_new:
+    image: ${DOCKERHUB_USER:-local}/pi-dash-web-new:${APP_RELEASE:-latest}
+    build:
+      context: ../../
+      dockerfile: apps/web_new/Dockerfile.web-new
+
   space:
     image: ${DOCKERHUB_USER:-local}/pi-dash-space:${APP_RELEASE:-latest}
     build:

@@ -1,0 +1,66 @@
+-- FX-A-Q-05 project advance equivalents (app/views/analytic/project_analytics.py:32-367).
+-- Guards here are PROJECT level: @allow_permission([ADMIN, MEMBER]) with the
+-- default level (project membership), unlike the WORKSPACE level of Q-04.
+--
+-- (Q-05a) get_filtered_counts (project_analytics.py:45-56): current-window-or-all
+--   {"count"} — NO previous helper at all (unlike advance.py).
+--
+-- (Q-05b) ProjectAdvanceAnalyticsEndpoint.get_work_items_stats (project_analytics.py:58-82):
+--   cycle_id → CycleIssue.objects.filter(base_filters, cycle_id).values_list(issue_id);
+--     base = Issue.issue_objects.filter(id__in=...) — NOTE: base_filters already
+--     applied to the through rows AND the issue rows.
+--   module_id → same via ModuleIssue. Else base =
+--     Issue.issue_objects.filter(base_filters, project_id=project_id).
+--   Same five keys as Q-04d. Seed rows: total 3 / started 0 / backlog 2 /
+--   un_started 0 / completed 1; unknown cycle_id → all zeros, still 200.
+--
+-- (Q-05c) ProjectAdvanceAnalyticsStatsEndpoint.get_project_issues_stats
+--   (project_analytics.py:98-117): identical values/annotate/order to Q-04e.
+--
+-- (Q-05d) stats get_work_items_stats (project_analytics.py:119-163): cycle/module
+--   id-list scoping as Q-05b, then annotate display_name=F(assignees__display_name),
+--   assignee_id=F(assignees__id), avatar=F(assignees__avatar),
+--   avatar_url=Case(avatar_asset → Concat('/api/assets/v2/static/', asset, '/');
+--   null → avatar; default NULL) — same Case as Q-01f — then
+--   values(display_name, assignee_id, avatar_url).annotate(
+--   cancelled/completed/backlog/un_started/started = Count(id, filter=Q(...), distinct=True))
+--   .order_by(display_name). NOTE distinct=True here (absent in Q-04e).
+-- Seed row: single NULL bucket {display None, assignee None, avatar_url None,
+-- cancelled 0, completed 1, backlog 2, un_started 0, started 0}.
+--
+-- (Q-05e) ProjectAdvanceAnalyticsChartEndpoint.work_item_completion_chart
+--   (project_analytics.py:183-315): project_id scoped; cycle_id → queryset is
+--   REPLACED by the CycleIssue id list; window = cycle.start/end dates (missing
+--   dates → {"data":[],"schema":{}}); module_id → same via ModuleIssue with
+--   start/target dates. Cycle/module branch: DAILY buckets over
+--   values(created_at__date).annotate(created=Count(id),
+--   completed=Count(id, filter=Q(issue__state__group="completed"))) — NOTE the
+--   issue__ prefix (through-table join) and row count = created+completed.
+--   Plain branch: monthly TruncMonth zero-fill like Q-04g.
+-- Seed row (plain): single bucket {count 3, completed 1, created 3} + schema.
+-- Project chart view has NO "projects"/default type: bare GET → 400
+-- {"message": "Invalid type"} (project_analytics.py:367), unlike Q-04f.
+--
+-- (Q-05f) custom-work-items (project_analytics.py:326-355): Q-04h scoped to
+--   project_id, plus optional cycle/module id-list narrowing, then
+--   build_analytics_chart(queryset, x_axis, group_by).
+--
+-- FX-A-Q-06 exporter queryset + filters (app/views/exporter/base.py:18-84).
+-- (Q-06a) POST (base.py:22-65): Workspace by slug; provider must be in
+--   [csv, xlsx, json] else 400 {"error": f"Provider '{provider}' not found."}
+--   (note Provider capitalized, provider quoted). Empty project list →
+--   Project.objects.filter(workspace__slug, member active, archived null)
+--   .values_list(id) stringified. Row created with type="issue_exports",
+--   then issue_export_task.delay(provider, workspace_id, project_ids,
+--   token_id=token, multiple, slug); 200
+--   {"message": "Once the export is ready you will be able to download it"}.
+-- (Q-06b) GET (base.py:67-84):
+SELECT "exporters".*, ... FROM "exporters"
+  LEFT OUTER JOIN "workspaces" ... LEFT OUTER JOIN "users" ...
+ WHERE ("exporters"."workspace_id" IN (SELECT ... WHERE "slug" = %s)
+        AND "exporters"."type" = 'issue_exports')
+ ORDER BY "exporters"."created_at" DESC;
+-- Paginated via self.paginate (order_by default -created_at; rows serialized
+-- with ExporterHistorySerializer many=True → envelope {results, total_count,
+-- next/prev_page_results}); missing per_page+cursor → 400
+-- {"error": "per_page and cursor are required"}.

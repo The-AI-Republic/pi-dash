@@ -1,0 +1,70 @@
+{
+  "bugs": [],
+  "data": {
+    "renderer": {
+      "env": {
+        "autoescape": false,
+        "loader": "from_string only",
+        "lstrip_blocks": false,
+        "sandbox": "SandboxedEnvironment",
+        "trim_blocks": false,
+        "undefined": "StrictUndefined"
+      },
+      "error_classes": {
+        "PromptSyntaxError_is_PromptRenderError": true
+      },
+      "renders": {
+        "filter_join": {
+          "ok": true,
+          "text": "a, b"
+        },
+        "for_loop": {
+          "ok": true,
+          "text": "a;b;"
+        },
+        "if_missing_var": {
+          "cause_type": "UndefinedError",
+          "error": "PromptRenderError: 'missing' is undefined",
+          "ok": false
+        },
+        "if_true": {
+          "ok": true,
+          "text": "yes"
+        },
+        "sandbox_blocked": {
+          "cause_type": "SecurityError",
+          "error": "PromptRenderError: access to attribute '__class__' of 'str' object is unsafe.",
+          "ok": false
+        },
+        "var": {
+          "ok": true,
+          "text": "Hello Ada!"
+        }
+      },
+      "syntax": {
+        "bad_tag": {
+          "error": "PromptSyntaxError: Expected an expression, got 'end of statement block'",
+          "ok": false
+        },
+        "bad_unclosed": {
+          "error": "PromptSyntaxError: unexpected char '!' at 14",
+          "ok": false
+        },
+        "ok_if": {
+          "ok": true
+        },
+        "ok_simple": {
+          "ok": true
+        }
+      },
+      "trace": "prompting/renderer.py:42-52 (render), 55-63 (validate_syntax); SandboxedEnvironment 34-39 (autoescape=False, trim/lstrip=False, StrictUndefined)"
+    }
+  },
+  "fixture_id": "FIX-render",
+  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world).",
+  "notes": [],
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "trace": [
+    "prompting/renderer.py:21-31 (PromptRenderError/PromptSyntaxError), 34-39 (SandboxedEnvironment), 42-52 (render), 55-63 (validate_syntax)"
+  ]
+}
