@@ -199,11 +199,17 @@ mod tests {
     #[test]
     fn capabilities_and_protocol() {
         assert!(supports_machine_queue(&json!(["machine_run_queue_v1"])));
-        assert!(supports_machine_queue(&json!(["machine_run_queue_v1", "other"])));
+        assert!(supports_machine_queue(&json!([
+            "machine_run_queue_v1",
+            "other"
+        ])));
         assert!(!supports_machine_queue(&json!(["other"])));
         assert!(!supports_machine_queue(&json!([])));
         assert!(!supports_machine_queue(&json!("machine_run_queue_v1")));
-        assert_eq!(protocol_for_capabilities(&json!(["machine_run_queue_v1"])), 1);
+        assert_eq!(
+            protocol_for_capabilities(&json!(["machine_run_queue_v1"])),
+            1
+        );
         assert_eq!(protocol_for_capabilities(&json!([])), 0);
     }
 
@@ -214,7 +220,10 @@ mod tests {
         assert_eq!(caps, vec!["machine_run_queue_v1", "agent:muse_code"]);
         // missing / non-list
         assert!(parse_session_capabilities(json!({}).as_object().unwrap()).is_empty());
-        assert!(parse_session_capabilities(json!({"capabilities": "nope"}).as_object().unwrap()).is_empty());
+        assert!(
+            parse_session_capabilities(json!({"capabilities": "nope"}).as_object().unwrap())
+                .is_empty()
+        );
         // non-string entries filtered, length cap
         let body2 = json!({"capabilities": [1, "ok", 2, "x".repeat(200)]});
         let caps2 = parse_session_capabilities(body2.as_object().unwrap());

@@ -119,6 +119,7 @@ fn session_from_model(
         last_seen_at: model.last_seen_at.map(|at| at.with_timezone(&Utc)),
         revoked_at: model.revoked_at.map(|at| at.with_timezone(&Utc)),
         revoked_reason: model.revoked_reason,
+        capabilities: model.capabilities,
     })
 }
 

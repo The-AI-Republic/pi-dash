@@ -363,6 +363,7 @@ mod tests {
             last_seen_at: Some(at),
             revoked_at: None,
             revoked_reason: String::new(),
+            capabilities: serde_json::json!([]),
         }
     }
 

@@ -64,6 +64,7 @@ pub mod runner_session {
         "last_seen_at",
         "revoked_at",
         "revoked_reason",
+        "capabilities",
     ];
 
     /// `runner` FK target table (`models.py:700`).
@@ -153,6 +154,7 @@ pub mod runner_session {
         pub last_seen_at: Option<chrono::DateTime<chrono::Utc>>,
         pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
         pub revoked_reason: String,
+        pub capabilities: serde_json::Value,
     }
 
     /// Map an open/delete/poll row into [`RunnerSession`], one
@@ -171,6 +173,7 @@ pub mod runner_session {
             last_seen_at: row.try_get("last_seen_at")?,
             revoked_at: row.try_get("revoked_at")?,
             revoked_reason: row.try_get("revoked_reason")?,
+            capabilities: row.try_get("capabilities").unwrap_or(serde_json::json!([])),
         })
     }
 
@@ -194,6 +197,7 @@ pub mod runner_session {
             last_seen_at: model.last_seen_at.map(|at| at.with_timezone(&chrono::Utc)),
             revoked_at: model.revoked_at.map(|at| at.with_timezone(&chrono::Utc)),
             revoked_reason: model.revoked_reason,
+            capabilities: model.capabilities,
         }
     }
 

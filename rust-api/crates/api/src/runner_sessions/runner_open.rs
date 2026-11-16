@@ -1106,11 +1106,19 @@ async fn open_transaction(
     // `create(… last_seen_at=now())`: the kwarg `now()` evaluates
     // first, then `auto_now_add` stamps `created_at` — the domain
     // driver keeps that order.
+    let capabilities = pidash_services::runner_runs::capacity::parse_session_capabilities(body);
+    let capabilities_value = serde_json::Value::Array(
+        capabilities
+            .into_iter()
+            .map(serde_json::Value::String)
+            .collect(),
+    );
     pidash_services::domain::tokens::open_runner_session(
         &pidash_db::orm_tx::TxConn::new(&mut tx),
         new_sid,
         runner.id,
         runner_session::DEFAULT_PROTOCOL_VERSION,
+        capabilities_value,
     )
     .await
     .map_err(TxnFail::from)?;

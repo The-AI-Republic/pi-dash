@@ -973,6 +973,7 @@ fn open_session_row(
     protocol_version: i32,
     created_at: DateTime<Utc>,
     last_seen_at: DateTime<Utc>,
+    capabilities: serde_json::Value,
 ) -> runner_session::ActiveModel {
     runner_session::ActiveModel {
         id: Set(id),
@@ -982,7 +983,7 @@ fn open_session_row(
         last_seen_at: Set(Some(at(last_seen_at))),
         revoked_at: Set(None),
         revoked_reason: Set(String::new()),
-        capabilities: Set(serde_json::json!([])),
+        capabilities: Set(capabilities),
     }
 }
 
@@ -995,6 +996,7 @@ pub async fn open_runner_session(
     id: Uuid,
     runner_id: Uuid,
     protocol_version: i32,
+    capabilities: serde_json::Value,
 ) -> Result<(), sqlx::Error> {
     let last_seen_at = Utc::now();
     let created_at = Utc::now();
@@ -1004,6 +1006,7 @@ pub async fn open_runner_session(
         protocol_version,
         created_at,
         last_seen_at,
+        capabilities,
     ))
     .exec_without_returning(db)
     .await
@@ -1217,6 +1220,7 @@ mod tests {
             4,
             now,
             now,
+            serde_json::json!([]),
         )));
         assert!(
             open.starts_with("INSERT INTO \"runner_session\" ("),
@@ -1230,6 +1234,7 @@ mod tests {
             "\"last_seen_at\"",
             "\"revoked_at\"",
             "\"revoked_reason\"",
+            "\"capabilities\"",
         ] {
             assert!(open.contains(column), "open sets {column}: {open}");
         }
@@ -1261,9 +1266,15 @@ mod tests {
         let mut tx = pool.begin().await.expect("begin");
         let sid = Uuid::new_v4();
         let runner_id = Uuid::new_v4();
-        open_runner_session(&pidash_db::orm_tx::TxConn::new(&mut tx), sid, runner_id, 4)
-            .await
-            .expect("open");
+        open_runner_session(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            sid,
+            runner_id,
+            4,
+            serde_json::json!([]),
+        )
+        .await
+        .expect("open");
         let row: (i32, Option<DateTime<Utc>>) =
             sqlx::query_as("SELECT protocol_version, revoked_at FROM runner_session WHERE id = $1")
                 .bind(sid)
@@ -1717,9 +1728,15 @@ mod tests {
     /// One live session row for the workspace-revoke roundtrip.
     async fn seed_wsrev_session(ex: &mut sqlx::PgConnection, runner: Uuid) -> Uuid {
         let id = Uuid::new_v4();
-        open_runner_session(&pidash_db::orm_tx::TxConn::new(&mut *ex), id, runner, 4)
-            .await
-            .expect("seed session");
+        open_runner_session(
+            &pidash_db::orm_tx::TxConn::new(&mut *ex),
+            id,
+            runner,
+            4,
+            serde_json::json!([]),
+        )
+        .await
+        .expect("seed session");
         id
     }
 
