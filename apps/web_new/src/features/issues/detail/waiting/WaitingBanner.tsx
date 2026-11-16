@@ -66,6 +66,10 @@ export function WaitingBanner({
     }
   }
 
+  const capacity = (waiting.run as { capacity_wait?: { phase: string; queue_position: number | null; queued_at: string | null; reported_at: string | null; active: number | null; limit: number | null } | null }).capacity_wait;
+  const capacityText = capacity && capacity.phase === "waiting_for_capacity"
+    ? `Waiting for machine capacity${capacity.queue_position ? ` — position ${capacity.queue_position}` : ""}${capacity.active != null && capacity.limit != null ? ` (${capacity.active}/${capacity.limit})` : ""}${capacity.reported_at ? ` — last updated ${capacity.reported_at}` : ""}`
+    : null;
   return (
     <section
       aria-label="Waiting for runner"
@@ -75,6 +79,11 @@ export function WaitingBanner({
         <Hourglass size={16} strokeWidth={1.5} className="shrink-0 text-(--text-muted)" aria-hidden="true" />
         {waitingBannerText(waiting.runnerName, waiting.wait)}
       </p>
+      {capacityText && (
+        <p data-testid="capacity-waiting" className="text-body text-(--text-muted)">
+          {capacityText}
+        </p>
+      )}
       <div className="flex flex-wrap items-center gap-(--space-2)">
         {!isDedicated && (
           <Button
