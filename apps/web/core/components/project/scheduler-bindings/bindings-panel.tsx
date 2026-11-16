@@ -29,6 +29,12 @@ const schedulerService = new SchedulerService();
 type Props = {
   workspaceSlug: string;
   projectId: string;
+  /**
+   * Render the header's "New Scheduler" button. The project Schedulers page
+   * passes false because its tab bar carries the button; the project
+   * settings page keeps the default.
+   */
+  showNewSchedulerButton?: boolean;
 };
 
 /**
@@ -37,7 +43,7 @@ type Props = {
  * are gated on PROJECT ADMIN; non-admins see a read-only list.
  */
 export const SchedulerBindingsPanel = observer(function SchedulerBindingsPanel(props: Props) {
-  const { workspaceSlug, projectId } = props;
+  const { workspaceSlug, projectId, showNewSchedulerButton = true } = props;
   const { allowPermissions } = useUserPermissions();
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -73,7 +79,9 @@ export const SchedulerBindingsPanel = observer(function SchedulerBindingsPanel(p
               )}
             </p>
           </div>
-          {canManage && <Button onClick={() => setInstallOpen(true)}>{t("New Scheduler")}</Button>}
+          {canManage && showNewSchedulerButton && (
+            <Button onClick={() => setInstallOpen(true)}>{t("New Scheduler")}</Button>
+          )}
         </header>
 
         <section className="rounded-md border border-subtle">

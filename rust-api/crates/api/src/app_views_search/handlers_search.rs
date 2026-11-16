@@ -1,0 +1,1025 @@
+#![forbid(unsafe_code)]
+
+//! The three app search handlers (D-29, PIDASHCONV-276).
+//!
+//! Ports `apps/api/pi_dash/app/views/search/base.py`
+//! (`GlobalSearchEndpoint.get`, `SearchEndpoint.get`) and
+//! `apps/api/pi_dash/app/views/search/issue.py` (`IssueSearchEndpoint.get`)
+//! with identical URL paths, status codes and JSON byte for byte. Route
+//! patterns live in `apps/api/pi_dash/app/urls/search.py` (3 patterns).
+//!
+//! Query construction lives in
+//! [`pidash_services::app_views_search::queries_search`]; this file owns
+//! param parsing at the HTTP boundary, the issue pipeline's small lookups,
+//! row fetching (via [`super::fetch_shaped`]) and response assembly.
+//!
+//! Ported bugs (translate, don't redesign — also listed in the PR):
+//!
+//! * B5 (`views/search/issue.py:77-80`): `filter_root_issues_only` reads
+//!   `issue.parent` outside the `if issue:` guard, so `sub_issue=true`
+//!   with an unknown `issue_id` raises `AttributeError` → 500 instead of
+//!   returning root issues. Unknown ids 500 here too.
+//! * B7 (`views/search/base.py:230`): `filter_intakes` uses `Issue.objects`
+//!   instead of `Issue.issue_objects` — the intake section keeps the
+//!   soft-delete arm only (see the services builder).
+//! * B8 (`views/search/base.py:297`): `count = int(…)` is unguarded —
+//!   non-numeric counts raise `ValueError` → 500 (never 400), and negative
+//!   counts 500 on Django's negative-slicing assertion. Both 500 here.
+//! * B9 (`views/search/base.py:174-189`): the pages `ArrayAgg` filter
+//!   `~Q(projects__id=True)` coerces `True` to the impossible
+//!   `00000000-…-000000000001` UUID — a no-op for real data, kept in the
+//!   services builder.
+//! * Comment widening has no `IssueComment.access` filter
+//!   (`search/issue.py:78-83`, limitation ported as-is): INTERNAL comment
+//!   text can surface an issue to a member who cannot read that comment.
+
+use axum::extract::{Path, Query, State};
+use axum::response::Response;
+use axum::routing::get;
+use axum::Router;
+
+use pidash_services::app_views_search::queries_search::{
+    self, EntityScope, GlobalScope, IssueSearchError, IssueSearchInput,
+};
+
+use super::{
+    actor_user_id, fetch_shaped, json_response, parse_uuid_or_invalid, primary, query_last,
+    resolve_project_id, Col, Denial, QueryMap,
+};
+use crate::edge;
+use crate::state::AppState;
+use pidash_db::entity::{issue_relations, issues, project_members, projects, states};
+use sea_orm::{
+    ColumnTrait, Condition, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait,
+};
+
+/// Register the three search GET routes. Nothing else: sibling paths stay
+/// unmatched and proxy to Django through the fallback.
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/workspaces/{slug}/search/",
+            edge::owned(get(global_search), &["GET", "TRACE"]),
+        )
+        .route(
+            "/api/workspaces/{slug}/projects/{project_id}/search-issues/",
+            edge::owned(get(issue_search), &["GET", "TRACE"]),
+        )
+        .route(
+            "/api/workspaces/{slug}/entity-search/",
+            edge::owned(get(entity_search), &["GET", "TRACE"]),
+        )
+}
+
+// ---------------------------------------------------------------------------
+// Global search
+// ---------------------------------------------------------------------------
+
+/// `GlobalSearchEndpoint.get` (`search/base.py:255-286`): one section query
+/// per requested entity, `{"results": {<entity>: [...]}}` with HTTP 200.
+/// Sections iterate the request's entity order (default: all 8 mapper
+/// keys); unknown names were already dropped by `requested_entities`.
+async fn global_search(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    Query(query): Query<QueryMap>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+) -> Result<Response, Denial> {
+    let pool = primary(&state)?;
+    let user_id = actor_user_id(extension).ok_or(Denial::Unauthorized)?;
+    let user_text = user_id.to_string();
+
+    let search = query_last(&query, "search");
+    let entities = queries_search::requested_entities(query_last(&query, "entities").as_deref());
+    let workspace_search =
+        query_last(&query, "workspace_search").unwrap_or_else(|| "false".to_owned());
+    let project_raw = query_last(&query, "project_id");
+    // The narrow applies only when `workspace_search == "false"` AND the
+    // param is truthy (`base.py:99-100`); a badly-formed UUID there raises
+    // `ValidationError` in the filter → 400.
+    let narrow = queries_search::project_narrow(&workspace_search, project_raw.as_deref());
+    // `filter_workspaces` / `filter_projects` (`base.py:54-84`) never apply
+    // the narrow, so a badly-formed UUID with only those sections requested
+    // stays 200 in Django — validate only when a requested section consumes
+    // it (anything other than `workspace` / `project`).
+    if narrow.is_some()
+        && entities
+            .iter()
+            .any(|e| *e != "workspace" && *e != "project")
+    {
+        parse_uuid_or_invalid(narrow.unwrap_or_default())?;
+    }
+    let scope = GlobalScope {
+        user_id: &user_text,
+        workspace_slug: &slug,
+        narrow_project_id: narrow,
+    };
+    let search_ref = search.as_deref();
+
+    let mut sections = Vec::with_capacity(entities.len());
+    for entity in entities {
+        let rows = match entity {
+            "workspace" => {
+                fetch_shaped(
+                    &pool,
+                    &queries_search::global_workspaces(&scope, search_ref),
+                    &[("name", Col::Text), ("id", Col::Uuid), ("slug", Col::Text)],
+                )
+                .await?
+            }
+            "project" => {
+                fetch_shaped(
+                    &pool,
+                    &queries_search::global_projects(&scope, search_ref),
+                    &[
+                        ("name", Col::Text),
+                        ("id", Col::Uuid),
+                        ("identifier", Col::Text),
+                        ("workspace__slug", Col::Text),
+                    ],
+                )
+                .await?
+            }
+            "issue" => {
+                fetch_shaped(
+                    &pool,
+                    &queries_search::global_issues(&scope, search_ref),
+                    &GLOBAL_ISSUE_SPEC,
+                )
+                .await?
+            }
+            "cycle" => {
+                fetch_shaped(
+                    &pool,
+                    &queries_search::global_cycles(&scope, search_ref),
+                    &GLOBAL_NAMED_SPEC,
+                )
+                .await?
+            }
+            "module" => {
+                fetch_shaped(
+                    &pool,
+                    &queries_search::global_modules(&scope, search_ref),
+                    &GLOBAL_NAMED_SPEC,
+                )
+                .await?
+            }
+            "issue_view" => {
+                fetch_shaped(
+                    &pool,
+                    &queries_search::global_views(&scope, search_ref),
+                    &GLOBAL_NAMED_SPEC,
+                )
+                .await?
+            }
+            // Output order follows Django's compiler, not the `.values()`
+            // call order: concrete columns first, annotations
+            // (`project_ids`, `project_identifiers`) last
+            // (`base.py:202` vs the emitted `SELECT`).
+            "page" => {
+                fetch_shaped(
+                    &pool,
+                    &queries_search::global_pages(&scope, search_ref),
+                    &[
+                        ("name", Col::Text),
+                        ("id", Col::Uuid),
+                        ("workspace__slug", Col::Text),
+                        ("project_ids", Col::UuidArray),
+                        ("project_identifiers", Col::StrArray),
+                    ],
+                )
+                .await?
+            }
+            // `requested_entities` only yields mapper keys, so the
+            // remainder is `"intake"`.
+            _ => {
+                fetch_shaped(
+                    &pool,
+                    &queries_search::global_intakes(&scope, search_ref),
+                    &GLOBAL_ISSUE_SPEC,
+                )
+                .await?
+            }
+        };
+        sections.push(format!("\"{entity}\":[{}]", rows.join(",")));
+    }
+    Ok(json_response(format!(
+        "{{\"results\":{{{}}}}}",
+        sections.join(",")
+    )))
+}
+
+/// Row spec for the global issue + intake sections
+/// (`values("name", "id", "sequence_id", "project__identifier",
+/// "project_id", "workspace__slug")`, `base.py:102-109,245-252`).
+/// Output order matches `SELECT` order here (no annotations).
+const GLOBAL_ISSUE_SPEC: [(&str, Col); 6] = [
+    ("name", Col::Text),
+    ("id", Col::Uuid),
+    ("sequence_id", Col::Int),
+    ("project__identifier", Col::Text),
+    ("project_id", Col::Uuid),
+    ("workspace__slug", Col::Text),
+];
+
+/// Row spec for the global cycle / module / view sections
+/// (`values("name", "id", "project_id", "project__identifier",
+/// "workspace__slug")`, `base.py:132,156,226`).
+const GLOBAL_NAMED_SPEC: [(&str, Col); 5] = [
+    ("name", Col::Text),
+    ("id", Col::Uuid),
+    ("project_id", Col::Uuid),
+    ("project__identifier", Col::Text),
+    ("workspace__slug", Col::Text),
+];
+
+// ---------------------------------------------------------------------------
+// Entity search
+// ---------------------------------------------------------------------------
+
+/// `SearchEndpoint.get` (`search/base.py:293-691`): one branch query per
+/// requested known `query_type`, `{<type>: [...]}` with HTTP 200, keys in
+/// request order. Unknown types are silently ignored (no key emitted).
+async fn entity_search(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    Query(query): Query<QueryMap>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+) -> Result<Response, Denial> {
+    let pool = primary(&state)?;
+    let user_id = actor_user_id(extension).ok_or(Denial::Unauthorized)?;
+    let user_text = user_id.to_string();
+
+    let search = query_last(&query, "query");
+    // B8 port: `int()` raises `ValueError` → generic 500, and a parsed
+    // negative 500s on Django's negative-slicing assertion.
+    let count = match queries_search::parse_count(query_last(&query, "count").as_deref()) {
+        Ok(n) if n >= 0 => n,
+        _ => return Err(Denial::ServerError),
+    };
+    // A truthy `project_id` selects the project branch; falsy (absent or
+    // `""`) the workspace branch. Django only touches `project_id` inside
+    // branches that filter on it — the `project` branch (`base.py:353-370`)
+    // never filters on it and unknown types touch nothing — so a
+    // badly-formed UUID there stays 200. Validate only when an executed
+    // branch consumes it (`user_mention` / `issue` / `cycle` / `module` /
+    // `page`). `response_data` is a dict (`base.py:504`), so duplicate
+    // `query_type` entries collapse to one key — dedupe preserving order.
+    let project_raw = query_last(&query, "project_id").filter(|v| !v.is_empty());
+    let mut query_types: Vec<String> = Vec::new();
+    for qt in queries_search::split_query_types(query_last(&query, "query_type").as_deref()) {
+        if !query_types.contains(&qt) {
+            query_types.push(qt);
+        }
+    }
+    if project_raw.is_some()
+        && query_types.iter().any(|qt| {
+            matches!(
+                qt.as_str(),
+                "user_mention" | "issue" | "cycle" | "module" | "page"
+            )
+        })
+    {
+        parse_uuid_or_invalid(project_raw.as_deref().unwrap_or_default())?;
+    }
+    let scope = EntityScope {
+        user_id: &user_text,
+        workspace_slug: &slug,
+        project_id: project_raw.as_deref(),
+        count,
+    };
+    let search_ref = search.as_deref();
+    // `timezone.now()`: UTC, bound four times by the cycle builder.
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false);
+
+    let mut branches = Vec::new();
+    for query_type in &query_types {
+        let rows = match query_type.as_str() {
+            // Key order follows Django's compiler: the `member__avatar_url`
+            // annotation selects last even though `.values()` names it
+            // first (`base.py:345-349` vs the emitted `SELECT`).
+            "user_mention" => {
+                let built = queries_search::entity_user_mention(&scope, search_ref);
+                // One spec serves both branches: the project branch's
+                // trailing `created_at` is simply never referenced (the
+                // workspace branch selects no trailing column at all —
+                // `base.py:542`).
+                let spec: [(&str, Col); 3] = [
+                    ("member__display_name", Col::Text),
+                    ("member__id", Col::Uuid),
+                    ("member__avatar_url", Col::Text),
+                ];
+                fetch_shaped(&pool, &built, &spec).await?
+            }
+            "project" => {
+                fetch_shaped(
+                    &pool,
+                    &queries_search::entity_project(&scope, search_ref),
+                    &[
+                        ("name", Col::Text),
+                        ("id", Col::Uuid),
+                        ("identifier", Col::Text),
+                        ("logo_props", Col::Json),
+                        ("workspace__slug", Col::Text),
+                    ],
+                )
+                .await?
+            }
+            "issue" => {
+                fetch_shaped(
+                    &pool,
+                    &queries_search::entity_issue(&scope, search_ref),
+                    &[
+                        ("name", Col::Text),
+                        ("id", Col::Uuid),
+                        ("sequence_id", Col::Int),
+                        ("project__identifier", Col::Text),
+                        ("project_id", Col::Uuid),
+                        ("priority", Col::Text),
+                        ("state_id", Col::Uuid),
+                        ("type_id", Col::Uuid),
+                    ],
+                )
+                .await?
+            }
+            // The `status` annotation selects last (compiler order), even
+            // though `.values()` names it before `workspace__slug`; its
+            // `SELECT` position stays 4.
+            "cycle" => {
+                fetch_shaped(
+                    &pool,
+                    &queries_search::entity_cycle(&scope, search_ref, &now),
+                    &[
+                        ("name", Col::Text),
+                        ("id", Col::Uuid),
+                        ("project_id", Col::Uuid),
+                        ("project__identifier", Col::Text),
+                        ("workspace__slug", Col::Text),
+                        ("status", Col::Text),
+                    ],
+                )
+                .await?
+            }
+            "module" => {
+                fetch_shaped(
+                    &pool,
+                    &queries_search::entity_module(&scope, search_ref),
+                    &[
+                        ("name", Col::Text),
+                        ("id", Col::Uuid),
+                        ("project_id", Col::Uuid),
+                        ("project__identifier", Col::Text),
+                        ("status", Col::Text),
+                        ("workspace__slug", Col::Text),
+                    ],
+                )
+                .await?
+            }
+            "page" => {
+                fetch_shaped(
+                    &pool,
+                    &queries_search::entity_page(&scope, search_ref),
+                    &[
+                        ("name", Col::Text),
+                        ("id", Col::Uuid),
+                        ("logo_props", Col::Json),
+                        ("projects__id", Col::Uuid),
+                        ("workspace__slug", Col::Text),
+                    ],
+                )
+                .await?
+            }
+            // Unknown types emit no key (`base.py` simply has no branch).
+            _ => continue,
+        };
+        branches.push(format!("\"{query_type}\":[{}]", rows.join(",")));
+    }
+    Ok(json_response(format!("{{{}}}", branches.join(","))))
+}
+
+// ---------------------------------------------------------------------------
+// Issue search
+// ---------------------------------------------------------------------------
+
+/// `IssueSearchEndpoint.get` (`search/issue.py:104-166`): the base scope
+/// plus whichever query-param branches activate, rendered as a bare JSON
+/// list (`values(…)` 11 keys, `[:100]`) with HTTP 200.
+async fn issue_search(
+    State(state): State<AppState>,
+    Path((slug, project_raw)): Path<(String, String)>,
+    Query(query): Query<QueryMap>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+) -> Result<Response, Denial> {
+    let pool = primary(&state)?;
+    let user_id = actor_user_id(extension).ok_or(Denial::Unauthorized)?;
+    let user_text = user_id.to_string();
+
+    // `_rewrite_project_kwarg` runs in `initial()`, before auth-gated
+    // `get()`: UUIDs pass through unchecked; identifiers resolve or 404.
+    let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
+
+    let search = query_last(&query, "search");
+    let workspace_search =
+        query_last(&query, "workspace_search").unwrap_or_else(|| "false".to_owned());
+    let flag = |key: &str| query_last(&query, key).as_deref() == Some("true");
+    let parent = flag("parent");
+    let issue_relation = flag("issue_relation");
+    let sub_issue = flag("sub_issue");
+    let cycle = flag("cycle");
+    let module = query_last(&query, "module").filter(|v| !v.is_empty());
+    let target_date_none = query_last(&query, "target_date").as_deref() == Some("none");
+    let issue_id = query_last(&query, "issue_id").filter(|v| !v.is_empty());
+
+    // Filters built on `issue_id` execute `.filter(pk=…)` eagerly via
+    // `.first()` / the relation collection — a badly-formed UUID raises
+    // `ValidationError` → 400. With no consuming flag the param is never
+    // touched (stays 200). Same for a truthy `module` (`issue.py:90-95`).
+    let consumes_issue_id = parent || issue_relation || sub_issue;
+    if consumes_issue_id && issue_id.is_some() {
+        parse_uuid_or_invalid(issue_id.as_deref().unwrap_or_default())?;
+    }
+    if let Some(ref mid) = module {
+        parse_uuid_or_invalid(mid)?;
+    }
+
+    // DB-resolved inputs for the builder. The parent lookup runs under the
+    // `Issue.issue_objects` scope (`issue.py:44,54,73`): a triage, draft,
+    // archived or soft-deleted row reads as unknown (`.first()` is None).
+    let mut issue_parent_id: Option<Option<uuid::Uuid>> = None;
+    let mut related_ids: Vec<String> = Vec::new();
+    if consumes_issue_id {
+        if let Some(ref xid) = issue_id {
+            let xid_uuid = xid
+                .parse::<uuid::Uuid>()
+                .map_err(|_| Denial::InvalidDetail)?;
+            match lookup_issue_parent(&pool, &xid_uuid).await? {
+                // Unknown `issue_id`: the parent and relation filters are
+                // guarded by `if issue:` (no-op); the root-only filter is NOT
+                // (B5) — the builder 500s instead of filtering.
+                None => {
+                    if sub_issue {
+                        return Err(Denial::ServerError);
+                    }
+                }
+                Some(parent_id) => {
+                    issue_parent_id = Some(parent_id);
+                    if issue_relation {
+                        related_ids = lookup_related_ids(&pool, &xid_uuid).await?;
+                        related_ids.push(xid.clone());
+                    }
+                }
+            }
+        }
+    }
+    let issue_parent_text: Option<Option<String>> =
+        issue_parent_id.map(|inner| inner.map(|id| id.to_string()));
+    let issue_parent_ref: Option<Option<&str>> = issue_parent_text
+        .as_ref()
+        .map(|inner| inner.as_ref().map(String::as_str));
+
+    // Guest scoping (`issue.py:146-149`): an active `role=5` membership on
+    // the URL project narrows to rows the user created.
+    let guest = is_guest(&pool, &project_id, &user_id).await?;
+
+    let url_project_text = project_id.to_string();
+    let input = IssueSearchInput {
+        slug: &slug,
+        url_project_id: &url_project_text,
+        user_id: &user_text,
+        query: search.as_deref().filter(|v| !v.is_empty()),
+        workspace_search: &workspace_search,
+        parent,
+        issue_relation,
+        sub_issue,
+        cycle,
+        module: module.as_deref(),
+        target_date_none,
+        issue_id: issue_id.as_deref(),
+        issue_parent_id: issue_parent_ref,
+        related_ids,
+        guest,
+    };
+    // B5 surfaces as `Err(UnknownIssue)` when the builder meets an unknown
+    // id under `sub_issue` (also guarded above — belt and braces).
+    let built = match queries_search::build_issue_search(&input) {
+        Ok(built) => built,
+        Err(IssueSearchError::UnknownIssue) => return Err(Denial::ServerError),
+    };
+    let rows = fetch_shaped(
+        &pool,
+        &built,
+        &[
+            ("name", Col::Text),
+            ("id", Col::Uuid),
+            ("start_date", Col::Date),
+            ("sequence_id", Col::Int),
+            ("project__name", Col::Text),
+            ("project__identifier", Col::Text),
+            ("project_id", Col::Uuid),
+            ("workspace__slug", Col::Text),
+            ("state__name", Col::Text),
+            ("state__group", Col::Text),
+            ("state__color", Col::Text),
+        ],
+    )
+    .await?;
+    Ok(json_response(format!("[{}]", rows.join(","))))
+}
+
+/// `Issue.issue_objects.filter(pk=…).first()` (`issue.py:44,54,73`): the
+/// row's `parent_id` under the manager scope (soft-delete, triage-state,
+/// archived issue/project, drafts — `db/models/issue.py:95-104`, same arms
+/// the section builders use). `None` = unknown id (`.first()` is None).
+fn parent_query(issue_id: uuid::Uuid) -> sea_orm::Select<issues::Entity> {
+    issues::Entity::find()
+        .select_only()
+        .column(issues::Column::ParentId)
+        .join(JoinType::LeftJoin, issues::Relation::States.def())
+        .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+        .filter(issues::Column::Id.eq(issue_id))
+        .filter(issues::Column::DeletedAt.is_null())
+        .filter(
+            Condition::any()
+                .add(states::Column::Group.is_null())
+                .add(states::Column::Group.ne("triage")),
+        )
+        .filter(issues::Column::ArchivedAt.is_null())
+        .filter(projects::Column::ArchivedAt.is_null())
+        .filter(issues::Column::IsDraft.eq(false))
+}
+
+async fn lookup_issue_parent(
+    pool: &sqlx::PgPool,
+    issue_id: &uuid::Uuid,
+) -> Result<Option<Option<uuid::Uuid>>, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<Option<uuid::Uuid>> = parent_query(*issue_id)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row)
+}
+
+/// `filter_issues_excluding_related_issues` (`issue.py:52-70`): both
+/// `IssueRelation` columns touching the issue, flattened
+/// (`values_list("issue_id", "related_issue_id")`), soft-deleted rows
+/// excluded via the manager. The caller appends `issue_id` itself.
+fn related_query(issue_id: uuid::Uuid) -> sea_orm::Select<issue_relations::Entity> {
+    issue_relations::Entity::find()
+        .select_only()
+        .columns([
+            issue_relations::Column::IssueId,
+            issue_relations::Column::RelatedIssueId,
+        ])
+        .filter(
+            Condition::any()
+                .add(issue_relations::Column::IssueId.eq(issue_id))
+                .add(issue_relations::Column::RelatedIssueId.eq(issue_id)),
+        )
+        .filter(issue_relations::Column::DeletedAt.is_null())
+}
+
+async fn lookup_related_ids(
+    pool: &sqlx::PgPool,
+    issue_id: &uuid::Uuid,
+) -> Result<Vec<String>, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows: Vec<(uuid::Uuid, uuid::Uuid)> = related_query(*issue_id)
+        .into_tuple()
+        .all(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let mut ids = Vec::with_capacity(rows.len() * 2);
+    for (left, right) in rows {
+        ids.push(left.to_string());
+        ids.push(right.to_string());
+    }
+    Ok(ids)
+}
+
+/// Guest scoping probe (`issue.py:146-149`): an active `role=5`
+/// (`ROLE.GUEST`) `ProjectMember` row for this user on the URL project.
+fn guest_query(
+    project_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+) -> sea_orm::Select<project_members::Entity> {
+    project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::Id)
+        .filter(project_members::Column::ProjectId.eq(project_id))
+        .filter(project_members::Column::MemberId.eq(user_id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::Role.eq(5i16))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .limit(1)
+}
+
+async fn is_guest(
+    pool: &sqlx::PgPool,
+    project_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+) -> Result<bool, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<uuid::Uuid> = guest_query(*project_id, *user_id)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.is_some())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{query_last, OneOrMany, QueryMap};
+    use super::routes;
+
+    fn query_map(pairs: &[(&str, &str)]) -> QueryMap {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), OneOrMany::One((*value).to_owned())))
+            .collect()
+    }
+
+    #[test]
+    fn denial_bodies_replay_drf_bytes() {
+        use super::super::{
+            INVALID_DETAIL_BODY, PROJECT_NOT_FOUND_BODY, SERVER_ERROR_BODY, UNAUTHENTICATED_BODY,
+        };
+        assert_eq!(
+            UNAUTHENTICATED_BODY,
+            r#"{"detail":"Authentication credentials were not provided."}"#
+        );
+        assert_eq!(
+            INVALID_DETAIL_BODY,
+            r#"{"error":"Please provide valid detail"}"#
+        );
+        // DRF maps `Http404("Project not found")` (the project-kwarg
+        // rewrite miss) to `NotFound` with the message kept.
+        assert_eq!(PROJECT_NOT_FOUND_BODY, r#"{"detail":"Project not found"}"#);
+        assert_eq!(
+            SERVER_ERROR_BODY,
+            r#"{"error":"Something went wrong please try again later"}"#
+        );
+    }
+
+    #[test]
+    fn query_last_wins_like_querydict_get() {
+        let mut map = query_map(&[("search", "first")]);
+        map.insert(
+            "search".to_owned(),
+            OneOrMany::Many(vec!["first".to_owned(), "second".to_owned()]),
+        );
+        assert_eq!(query_last(&map, "search").as_deref(), Some("second"));
+        assert_eq!(query_last(&map, "missing"), None);
+    }
+
+    #[test]
+    fn search_routes_register_without_conflict() {
+        // Construction itself proves no duplicate-path panic against the
+        // merged App group (checked again at overlay build).
+        let _ = routes();
+    }
+
+    #[test]
+    fn issue_row_spec_matches_project_search_keys() {
+        // The contract's PROJECT_SEARCH_KEYS order is the shape order.
+        let keys: Vec<&str> = [
+            "name",
+            "id",
+            "start_date",
+            "sequence_id",
+            "project__name",
+            "project__identifier",
+            "project_id",
+            "workspace__slug",
+            "state__name",
+            "state__group",
+            "state__color",
+        ]
+        .to_vec();
+        assert_eq!(
+            keys,
+            pidash_services::app_views_search::queries_search::PROJECT_SEARCH_KEYS
+        );
+    }
+
+    #[test]
+    fn seaorm_statement_shapes_pin_lookups() {
+        use sea_orm::DbBackend;
+        use sea_orm::QueryTrait;
+        let id = uuid::Uuid::new_v4();
+        let other = uuid::Uuid::new_v4();
+        let parent = super::parent_query(id)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            parent.contains("parent_id"),
+            "parent selects parent_id: {parent}"
+        );
+        assert!(
+            parent.contains("LEFT JOIN"),
+            "states is LEFT JOIN: {parent}"
+        );
+        assert!(
+            parent.contains("INNER JOIN"),
+            "projects is INNER JOIN: {parent}"
+        );
+        assert!(parent.contains("deleted_at"), "soft-delete scope: {parent}");
+        assert!(parent.contains("is_draft"), "draft scope: {parent}");
+        let related = super::related_query(id)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            related.contains("issue_id"),
+            "related selects issue_id: {related}"
+        );
+        assert!(
+            related.contains("related_issue_id"),
+            "related selects related: {related}"
+        );
+        let guest = super::guest_query(id, other)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(guest.contains("is_active"), "guest active scope: {guest}");
+        assert!(guest.contains("LIMIT"), "guest limit 1: {guest}");
+    }
+
+    #[tokio::test]
+    async fn live_search_lookups() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in [
+            "issues",
+            "states",
+            "projects",
+            "issue_relations",
+            "project_members",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        let (ws, proj, issue, state, user) = (
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        for sql in [
+            format!("INSERT INTO projects (id, workspace_id, identifier, deleted_at, archived_at) VALUES ('{proj}', '{ws}', 'ACM', NULL, NULL)"),
+            format!("INSERT INTO states (id, workspace_id, project_id, \"group\", deleted_at) VALUES ('{state}', '{ws}', '{proj}', 'started', NULL)"),
+            format!("INSERT INTO issues (id, project_id, workspace_id, parent_id, state_id, deleted_at, archived_at, is_draft) VALUES ('{issue}', '{proj}', '{ws}', NULL, '{state}', NULL, NULL, false)"),
+            format!("INSERT INTO project_members (id, workspace_id, project_id, member_id, role, is_active, deleted_at) VALUES (gen_random_uuid(), '{ws}', '{proj}', '{user}', 5, true, NULL)"),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+        assert_eq!(
+            super::lookup_issue_parent(&pool, &issue)
+                .await
+                .expect("parent"),
+            Some(None)
+        );
+        let missing = uuid::Uuid::new_v4();
+        assert_eq!(
+            super::lookup_issue_parent(&pool, &missing)
+                .await
+                .expect("missing"),
+            None
+        );
+        assert!(super::is_guest(&pool, &proj, &user).await.expect("guest"));
+        let stranger = uuid::Uuid::new_v4();
+        assert!(!super::is_guest(&pool, &proj, &stranger)
+            .await
+            .expect("not guest"));
+        assert!(super::lookup_related_ids(&pool, &issue)
+            .await
+            .expect("related")
+            .is_empty());
+    }
+
+    /// TEMP tables shadow public (no FKs needed for statement execution).
+    #[tokio::test]
+    async fn live_search_sections() {
+        use crate::app_views_search::{fetch_shaped, Col};
+        use pidash_services::app_views_search::queries_search::{
+            self, EntityScope, GlobalScope, IssueSearchInput,
+        };
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        for table in [
+            "workspaces",
+            "workspace_members",
+            "projects",
+            "project_members",
+            "issues",
+            "states",
+            "issue_comments",
+            "pages",
+            "project_pages",
+            "cycles",
+            "modules",
+            "users",
+        ] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        }
+        // The 731 scratch predates `anchor` (NEWFRONT-972) — see
+        // live_view_list_fetch; no section statement selects it, but the
+        // TEMP copy of issue_views is not needed here at all.
+        // The pages statement's GROUP BY leans on functional dependency
+        // (selected pages.* through the pages.id PK) — TEMP copies carry
+        // no constraints, so restore the two the query needs.
+        for sql in [
+            "ALTER TABLE pg_temp.pages ADD PRIMARY KEY (id)",
+            "ALTER TABLE pg_temp.workspaces ADD CONSTRAINT ws_slug_unique UNIQUE (slug)",
+        ] {
+            sqlx::query(sql).execute(&pool).await.expect("constraints");
+        }
+        let (ws, proj, user) = (
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        let user_s = user.to_string();
+        let proj_s = proj.to_string();
+        let (page, issue, state_ok) = (
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+        );
+        let triage = uuid::Uuid::new_v4();
+        for sql in [
+            format!("INSERT INTO workspaces (id, slug, deleted_at) VALUES ('{ws}', 'acme_live', NULL)"),
+            format!("INSERT INTO workspace_members (id, workspace_id, member_id, is_active, deleted_at) VALUES (gen_random_uuid(), '{ws}', '{user}', true, NULL)"),
+            format!("INSERT INTO projects (id, workspace_id, identifier, name, deleted_at, archived_at) VALUES ('{proj}', '{ws}', 'ACM', 'Acme', NULL, NULL)"),
+            format!("INSERT INTO project_members (id, workspace_id, project_id, member_id, is_active, deleted_at) VALUES (gen_random_uuid(), '{ws}', '{proj}', '{user}', true, NULL)"),
+            format!("INSERT INTO states (id, name, \"group\") VALUES ('{state_ok}', 'Backlog', 'backlog'), ('{triage}', 'Triage', 'triage')"),
+            format!("INSERT INTO issues (id, workspace_id, project_id, name, description_stripped, sequence_id, state_id, deleted_at, archived_at, is_draft, created_by_id) VALUES ('{issue}', '{ws}', '{proj}', 'refund flow', 'refund description', 42, '{state_ok}', NULL, NULL, false, '{user}')"),
+            format!("INSERT INTO issues (id, workspace_id, project_id, name, description_stripped, sequence_id, state_id, deleted_at, archived_at, is_draft, created_by_id) VALUES (gen_random_uuid(), '{ws}', '{proj}', 'triage item', NULL, 43, '{triage}', NULL, NULL, false, '{user}')"),
+            format!("INSERT INTO pages (id, workspace_id, name, access, is_global, deleted_at) VALUES ('{page}', '{ws}', 'Roadmap', 0, true, NULL)"),
+            format!("INSERT INTO project_pages (id, page_id, project_id, created_at, deleted_at) VALUES (gen_random_uuid(), '{page}', '{proj}', now(), NULL)"),
+            format!("INSERT INTO users (id, first_name, last_name, display_name, is_bot) VALUES ('{user}', 'Ada', NULL, 'Ada', false)"),
+        ] {
+            sqlx::query(&sql).execute(&pool).await.expect("seed");
+        }
+        // Global section statements, decoded by name.
+        let scope = GlobalScope {
+            user_id: user_s.as_str(),
+            workspace_slug: "acme_live",
+            narrow_project_id: None,
+        };
+        let built = queries_search::global_workspaces(&scope, None);
+        let rows = fetch_shaped(
+            &pool,
+            &built,
+            &[("name", Col::Text), ("id", Col::Uuid), ("slug", Col::Text)],
+        )
+        .await
+        .expect("workspace section");
+        assert_eq!(rows.len(), 1, "one workspace: {rows:?}");
+        assert!(rows[0].contains("\"slug\":\"acme_live\""), "{}", rows[0]);
+        assert!(rows[0].contains(&format!("\"id\":\"{ws}\"")), "{}", rows[0]);
+        // Pages section: array annotations decode as UUID/string arrays.
+        let built = queries_search::global_pages(&scope, None);
+        let rows = fetch_shaped(
+            &pool,
+            &built,
+            &[
+                ("name", Col::Text),
+                ("id", Col::Uuid),
+                ("project_ids", Col::UuidArray),
+                ("project_identifiers", Col::StrArray),
+                ("workspace__slug", Col::Text),
+            ],
+        )
+        .await
+        .expect("pages section");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(
+            rows[0].contains(&format!("\"id\":\"{page}\"")),
+            "{}",
+            rows[0]
+        );
+        assert!(
+            rows[0].contains("\"workspace__slug\":\"acme_live\""),
+            "{}",
+            rows[0]
+        );
+        // FTS arms execute: the name match hits, an unmatched query misses,
+        // and the triage-state row stays out under the manager scope.
+        let built = queries_search::global_issues(&scope, Some("refund"));
+        let rows = fetch_shaped(
+            &pool,
+            &built,
+            &[
+                ("name", Col::Text),
+                ("id", Col::Uuid),
+                ("sequence_id", Col::Int),
+                ("project__identifier", Col::Text),
+                ("project_id", Col::Uuid),
+                ("workspace__slug", Col::Text),
+            ],
+        )
+        .await
+        .expect("issue section");
+        assert_eq!(rows.len(), 1, "manager scope keeps one: {rows:?}");
+        assert!(rows[0].contains("\"sequence_id\":42"), "{}", rows[0]);
+        let built = queries_search::global_issues(&scope, Some("zzz-unmatched"));
+        let rows = fetch_shaped(&pool, &built, &[("name", Col::Text), ("id", Col::Uuid)])
+            .await
+            .expect("no match");
+        assert!(rows.is_empty(), "unmatched query: {rows:?}");
+        // Entity user_mention workspace branch (avatar CASE) executes.
+        let entity = EntityScope {
+            user_id: user_s.as_str(),
+            workspace_slug: "acme_live",
+            project_id: None,
+            count: 5,
+        };
+        let built = queries_search::entity_user_mention(&entity, None);
+        let rows = fetch_shaped(
+            &pool,
+            &built,
+            &[
+                ("member__display_name", Col::Text),
+                ("member__id", Col::Uuid),
+                ("member__avatar_url", Col::Text),
+            ],
+        )
+        .await
+        .expect("mention section");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(
+            rows[0].contains("\"member__display_name\":\"Ada\""),
+            "{}",
+            rows[0]
+        );
+        // Issue pipeline minimal shape executes with the state joins.
+        let input = IssueSearchInput {
+            slug: "acme_live",
+            url_project_id: proj_s.as_str(),
+            user_id: user_s.as_str(),
+            query: None,
+            workspace_search: "true",
+            parent: false,
+            issue_relation: false,
+            sub_issue: false,
+            cycle: false,
+            module: None,
+            target_date_none: false,
+            issue_id: None,
+            issue_parent_id: None,
+            related_ids: Vec::new(),
+            guest: false,
+        };
+        let built = queries_search::build_issue_search(&input).expect("pipeline");
+        let rows = fetch_shaped(
+            &pool,
+            &built,
+            &[
+                ("name", Col::Text),
+                ("id", Col::Uuid),
+                ("start_date", Col::Date),
+                ("sequence_id", Col::Int),
+                ("project__name", Col::Text),
+                ("project__identifier", Col::Text),
+                ("project_id", Col::Uuid),
+                ("workspace__slug", Col::Text),
+                ("state__name", Col::Text),
+                ("state__group", Col::Text),
+                ("state__color", Col::Text),
+            ],
+        )
+        .await
+        .expect("pipeline section");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(
+            rows[0].contains("\"state__group\":\"backlog\""),
+            "{}",
+            rows[0]
+        );
+    }
+}

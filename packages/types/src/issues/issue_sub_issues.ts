@@ -17,6 +17,13 @@ export type TSubIssuesStateDistribution = {
 export type TIssueSubIssues = {
   state_distribution: TSubIssuesStateDistribution;
   sub_issues: TSubIssueResponse;
+  // pagination envelope, present on the GET response alongside the legacy keys
+  total_count?: number;
+  count?: number;
+  next_cursor?: string;
+  prev_cursor?: string;
+  next_page_results?: boolean;
+  prev_page_results?: boolean;
 };
 
 export type TSubIssueResponse = TIssue[] | { [key: string]: TIssue[] };
@@ -32,6 +39,7 @@ export type TIssueSubIssuesIdMap = {
 export type TSubIssueOperations = {
   copyLink: (path: string) => void;
   fetchSubIssues: (workspaceSlug: string, projectId: string, parentIssueId: string) => Promise<void>;
+  fetchNextSubIssues: (workspaceSlug: string, projectId: string, parentIssueId: string) => Promise<void>;
   addSubIssue: (workspaceSlug: string, projectId: string, parentIssueId: string, issueIds: string[]) => Promise<void>;
   updateSubIssue: (
     workspaceSlug: string,

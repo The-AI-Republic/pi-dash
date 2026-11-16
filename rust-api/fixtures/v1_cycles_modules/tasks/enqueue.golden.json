@@ -1,0 +1,269 @@
+{
+ "_method": "ast walk of api/views/cycle.py + module.py + utils/cycle_transfer_issues.py: every model_activity.delay / issue_activity.delay call site extracted with literal kwargs; DB effects transcribed from the surrounding method source at cited lines; run: python3 /tmp/gen_cycmod_fixtures.py; no broker/DB touched",
+ "before_after": {
+  "cycle_create": {
+   "after": [
+    "cycles row (workspace stamped from project via ProjectBaseModel.save); sort_order = min-10000 when rows exist"
+   ],
+   "before": [
+    "cycles row absent"
+   ],
+   "enqueue": "model_activity.delay(model_name=cycle, model_id=<new uuid str>, requested_data=<raw request.data>, current_instance=None, actor_id=<user.id int>, slug, origin=base_host is_app)"
+  },
+  "cycle_delete": {
+   "after": [
+    "cycle soft-deleted (deleted_at set; row REMAINS \u2014 contract test_delete asserts row + deleted_at); UserFavorite cycle rows deleted"
+   ],
+   "before": [
+    "cycles row live; cycle_issues rows; UserFavorite cycle rows"
+   ],
+   "enqueue": "issue_activity.delay(type=cycle.activity.deleted, requested_data={cycle_id, cycle_name, issues[]}, actor_id str, issue_id None, project_id str, current_instance None, epoch)"
+  },
+  "cycle_issue_add": {
+   "after": [
+    "bulk_create ignore_conflicts new + bulk_update cycle_id moved (batch 100)"
+   ],
+   "before": [
+    "issues outside this cycle"
+   ],
+   "enqueue": "issue_activity.delay(type=cycle.activity.created, requested_data={cycles_list: issues}, current_instance={updated_cycle_issues[], created_cycle_issues: django-serialised json}, notification True, origin)"
+  },
+  "cycle_issue_remove": {
+   "after": [
+    "row hard-deleted (.delete() on soft-delete manager \u2014 contract asserts count 0 + deleted_at IS NULL check)"
+   ],
+   "before": [
+    "cycle_issues row"
+   ],
+   "enqueue": "issue_activity.delay(type=cycle.activity.deleted, requested_data={cycle_id, issues[]}, issue_id str, current_instance None)"
+  },
+  "cycle_transfer": {
+   "after": [
+    "source progress_snapshot overwritten {counts, distribution, estimate_distribution}; open-state issues bulk_update cycle_id=new"
+   ],
+   "before": [
+    "source cycle completed; open-state issues linked to source"
+   ],
+   "enqueue": "issue_activity.delay(type=cycle.activity.created, requested_data={cycles_list: []}, current_instance={updated_cycle_issues[], created_cycle_issues: []}, notification True, origin)"
+  },
+  "cycle_update": {
+   "after": [
+    "row updated; completed cycles: only sort_order path, else 400; archived: 400"
+   ],
+   "before": [
+    "cycles row + current_instance=json(CycleSerializer(cycle))"
+   ],
+   "enqueue": "model_activity.delay(same, current_instance=<json string>)"
+  },
+  "module_create": {
+   "after": [
+    "modules row; ModuleMember bulk_create ignore_conflicts batch 10 for project-filtered members"
+   ],
+   "before": [
+    "modules row absent"
+   ],
+   "enqueue": "model_activity.delay(model_name=module, ...same shape as cycle...)"
+  },
+  "module_delete": {
+   "after": [
+    "module soft-deleted; ModuleIssue rows HARD-deleted (.delete() queryset); UserFavorite module rows deleted"
+   ],
+   "before": [
+    "modules row live; module_issues rows; UserFavorite module rows"
+   ],
+   "enqueue": "issue_activity.delay(type=module.activity.deleted, requested_data={module_id, module_name, issues[]}, issue_id None, current_instance={module_name}, origin) \u2014 NOTE includes origin + current_instance unlike cycle delete"
+  },
+  "module_issue_add": {
+   "after": [
+    "bulk_create ignore_conflicts (batch 10) + bulk_update module (batch 10); QUIRK views/module.py:683-688 match loop filters module_issues by membership in request list, compares module_id(UUID) != module_id(str)"
+   ],
+   "before": [
+    "issues outside this module"
+   ],
+   "enqueue": "issue_activity.delay(type=module.activity.created, requested_data={modules_list: str(issues)} \u2014 str() of values_list, current_instance={updated_module_issues[], created_module_issues: serialised}, NO notification flag)"
+  },
+  "module_issue_remove": {
+   "after": [
+    "row deleted"
+   ],
+   "before": [
+    "module_issues row"
+   ],
+   "enqueue": "issue_activity.delay(type=module.activity.deleted, requested_data={module_id, issues[]}, issue_id str, current_instance={module_name})"
+  },
+  "module_update": {
+   "after": [
+    "ModuleMember rows deleted + bulk_create replaced when members key present; name clash (excl self) 400"
+   ],
+   "before": [
+    "modules row"
+   ],
+   "enqueue": "model_activity.delay(model_name=module, current_instance=<json string>)"
+  }
+ },
+ "extracted_call_sites": {
+  "cycle_views": [
+   {
+    "kwargs": {
+     "actor_id": "<runtime: Call(func=Name(id='str', ctx=Load()), args=[Attribute(value=Attribute(value=Name(id='request', ctx=Load()), attr='user', ctx=Load()), attr='>",
+     "current_instance": null,
+     "epoch": "<runtime: Call(func=Name(id='int', ctx=Load()), args=[Call(func=Attribute(value=Call(func=Attribute(value=Name(id='timezone', ctx=Load()), attr='now',>",
+     "issue_id": null,
+     "project_id": "<runtime: Call(func=Name(id='str', ctx=Load()), args=[Name(id='project_id', ctx=Load())], keywords=[])>",
+     "requested_data": "<runtime: Call(func=Attribute(value=Name(id='json', ctx=Load()), attr='dumps', ctx=Load()), args=[Dict(keys=[Constant(value='cycle_id'), Constant(valu>",
+     "type": "cycle.activity.deleted"
+    },
+    "line": 594,
+    "task": "issue_activity"
+   },
+   {
+    "kwargs": {
+     "actor_id": "<runtime: Call(func=Name(id='str', ctx=Load()), args=[Attribute(value=Attribute(value=Attribute(value=Name(id='self', ctx=Load()), attr='request', ctx>",
+     "current_instance": "<runtime: Call(func=Attribute(value=Name(id='json', ctx=Load()), attr='dumps', ctx=Load()), args=[Dict(keys=[Constant(value='updated_cycle_issues'), C>",
+     "epoch": "<runtime: Call(func=Name(id='int', ctx=Load()), args=[Call(func=Attribute(value=Call(func=Attribute(value=Name(id='timezone', ctx=Load()), attr='now',>",
+     "issue_id": null,
+     "notification": true,
+     "origin": "<runtime: Call(func=Name(id='base_host', ctx=Load()), args=[], keywords=[keyword(arg='request', value=Name(id='request', ctx=Load())), keyword(arg='is>",
+     "project_id": "<runtime: Call(func=Name(id='str', ctx=Load()), args=[Call(func=Attribute(value=Attribute(value=Name(id='self', ctx=Load()), attr='kwargs', ctx=Load()>",
+     "requested_data": "<runtime: Call(func=Attribute(value=Name(id='json', ctx=Load()), attr='dumps', ctx=Load()), args=[Dict(keys=[Constant(value='cycles_list')], values=[N>",
+     "type": "cycle.activity.created"
+    },
+    "line": 990,
+    "task": "issue_activity"
+   },
+   {
+    "kwargs": {
+     "actor_id": "<runtime: Call(func=Name(id='str', ctx=Load()), args=[Attribute(value=Attribute(value=Attribute(value=Name(id='self', ctx=Load()), attr='request', ctx>",
+     "current_instance": null,
+     "epoch": "<runtime: Call(func=Name(id='int', ctx=Load()), args=[Call(func=Attribute(value=Call(func=Attribute(value=Name(id='timezone', ctx=Load()), attr='now',>",
+     "issue_id": "<runtime: Call(func=Name(id='str', ctx=Load()), args=[Name(id='issue_id', ctx=Load())], keywords=[])>",
+     "project_id": "<runtime: Call(func=Name(id='str', ctx=Load()), args=[Call(func=Attribute(value=Attribute(value=Name(id='self', ctx=Load()), attr='kwargs', ctx=Load()>",
+     "requested_data": "<runtime: Call(func=Attribute(value=Name(id='json', ctx=Load()), attr='dumps', ctx=Load()), args=[Dict(keys=[Constant(value='cycle_id'), Constant(valu>",
+     "type": "cycle.activity.deleted"
+    },
+    "line": 1100,
+    "task": "issue_activity"
+   },
+   {
+    "kwargs": {
+     "actor_id": "<runtime: Attribute(value=Attribute(value=Name(id='request', ctx=Load()), attr='user', ctx=Load()), attr='id', ctx=Load())>",
+     "current_instance": "<runtime: Name(id='current_instance', ctx=Load())>",
+     "model_id": "<runtime: Call(func=Name(id='str', ctx=Load()), args=[Attribute(value=Attribute(value=Name(id='serializer', ctx=Load()), attr='instance', ctx=Load()),>",
+     "model_name": "cycle",
+     "origin": "<runtime: Call(func=Name(id='base_host', ctx=Load()), args=[], keywords=[keyword(arg='request', value=Name(id='request', ctx=Load())), keyword(arg='is>",
+     "requested_data": "<runtime: Attribute(value=Name(id='request', ctx=Load()), attr='data', ctx=Load())>",
+     "slug": "<runtime: Name(id='slug', ctx=Load())>"
+    },
+    "line": 549,
+    "task": "model_activity"
+   },
+   {
+    "kwargs": {
+     "actor_id": "<runtime: Attribute(value=Attribute(value=Name(id='request', ctx=Load()), attr='user', ctx=Load()), attr='id', ctx=Load())>",
+     "current_instance": null,
+     "model_id": "<runtime: Call(func=Name(id='str', ctx=Load()), args=[Attribute(value=Attribute(value=Name(id='serializer', ctx=Load()), attr='instance', ctx=Load()),>",
+     "model_name": "cycle",
+     "origin": "<runtime: Call(func=Name(id='base_host', ctx=Load()), args=[], keywords=[keyword(arg='request', value=Name(id='request', ctx=Load())), keyword(arg='is>",
+     "requested_data": "<runtime: Attribute(value=Name(id='request', ctx=Load()), attr='data', ctx=Load())>",
+     "slug": "<runtime: Name(id='slug', ctx=Load())>"
+    },
+    "line": 338,
+    "task": "model_activity"
+   }
+  ],
+  "module_views": [
+   {
+    "kwargs": {
+     "actor_id": "<runtime: Call(func=Name(id='str', ctx=Load()), args=[Attribute(value=Attribute(value=Name(id='request', ctx=Load()), attr='user', ctx=Load()), attr='>",
+     "current_instance": "<runtime: Call(func=Attribute(value=Name(id='json', ctx=Load()), attr='dumps', ctx=Load()), args=[Dict(keys=[Constant(value='module_name')], values=[C>",
+     "epoch": "<runtime: Call(func=Name(id='int', ctx=Load()), args=[Call(func=Attribute(value=Call(func=Attribute(value=Name(id='timezone', ctx=Load()), attr='now',>",
+     "issue_id": null,
+     "origin": "<runtime: Call(func=Name(id='base_host', ctx=Load()), args=[], keywords=[keyword(arg='request', value=Name(id='request', ctx=Load())), keyword(arg='is>",
+     "project_id": "<runtime: Call(func=Name(id='str', ctx=Load()), args=[Name(id='project_id', ctx=Load())], keywords=[])>",
+     "requested_data": "<runtime: Call(func=Attribute(value=Name(id='json', ctx=Load()), attr='dumps', ctx=Load()), args=[Dict(keys=[Constant(value='module_id'), Constant(val>",
+     "type": "module.activity.deleted"
+    },
+    "line": 512,
+    "task": "issue_activity"
+   },
+   {
+    "kwargs": {
+     "actor_id": "<runtime: Call(func=Name(id='str', ctx=Load()), args=[Attribute(value=Attribute(value=Attribute(value=Name(id='self', ctx=Load()), attr='request', ctx>",
+     "current_instance": "<runtime: Call(func=Attribute(value=Name(id='json', ctx=Load()), attr='dumps', ctx=Load()), args=[Dict(keys=[Constant(value='updated_module_issues'), >",
+     "epoch": "<runtime: Call(func=Name(id='int', ctx=Load()), args=[Call(func=Attribute(value=Call(func=Attribute(value=Name(id='timezone', ctx=Load()), attr='now',>",
+     "issue_id": null,
+     "origin": "<runtime: Call(func=Name(id='base_host', ctx=Load()), args=[], keywords=[keyword(arg='request', value=Name(id='request', ctx=Load())), keyword(arg='is>",
+     "project_id": "<runtime: Call(func=Name(id='str', ctx=Load()), args=[Call(func=Attribute(value=Attribute(value=Name(id='self', ctx=Load()), attr='kwargs', ctx=Load()>",
+     "requested_data": "<runtime: Call(func=Attribute(value=Name(id='json', ctx=Load()), attr='dumps', ctx=Load()), args=[Dict(keys=[Constant(value='modules_list')], values=[>",
+     "type": "module.activity.created"
+    },
+    "line": 714,
+    "task": "issue_activity"
+   },
+   {
+    "kwargs": {
+     "actor_id": "<runtime: Call(func=Name(id='str', ctx=Load()), args=[Attribute(value=Attribute(value=Name(id='request', ctx=Load()), attr='user', ctx=Load()), attr='>",
+     "current_instance": "<runtime: Call(func=Attribute(value=Name(id='json', ctx=Load()), attr='dumps', ctx=Load()), args=[Dict(keys=[Constant(value='module_name')], values=[N>",
+     "epoch": "<runtime: Call(func=Name(id='int', ctx=Load()), args=[Call(func=Attribute(value=Call(func=Attribute(value=Name(id='timezone', ctx=Load()), attr='now',>",
+     "issue_id": "<runtime: Call(func=Name(id='str', ctx=Load()), args=[Name(id='issue_id', ctx=Load())], keywords=[])>",
+     "project_id": "<runtime: Call(func=Name(id='str', ctx=Load()), args=[Name(id='project_id', ctx=Load())], keywords=[])>",
+     "requested_data": "<runtime: Call(func=Attribute(value=Name(id='json', ctx=Load()), attr='dumps', ctx=Load()), args=[Dict(keys=[Constant(value='module_id'), Constant(val>",
+     "type": "module.activity.deleted"
+    },
+    "line": 879,
+    "task": "issue_activity"
+   },
+   {
+    "kwargs": {
+     "actor_id": "<runtime: Attribute(value=Attribute(value=Name(id='request', ctx=Load()), attr='user', ctx=Load()), attr='id', ctx=Load())>",
+     "current_instance": null,
+     "model_id": "<runtime: Call(func=Name(id='str', ctx=Load()), args=[Attribute(value=Attribute(value=Name(id='serializer', ctx=Load()), attr='instance', ctx=Load()),>",
+     "model_name": "module",
+     "origin": "<runtime: Call(func=Name(id='base_host', ctx=Load()), args=[], keywords=[keyword(arg='request', value=Name(id='request', ctx=Load())), keyword(arg='is>",
+     "requested_data": "<runtime: Attribute(value=Name(id='request', ctx=Load()), attr='data', ctx=Load())>",
+     "slug": "<runtime: Name(id='slug', ctx=Load())>"
+    },
+    "line": 229,
+    "task": "model_activity"
+   },
+   {
+    "kwargs": {
+     "actor_id": "<runtime: Attribute(value=Attribute(value=Name(id='request', ctx=Load()), attr='user', ctx=Load()), attr='id', ctx=Load())>",
+     "current_instance": "<runtime: Name(id='current_instance', ctx=Load())>",
+     "model_id": "<runtime: Call(func=Name(id='str', ctx=Load()), args=[Attribute(value=Attribute(value=Name(id='serializer', ctx=Load()), attr='instance', ctx=Load()),>",
+     "model_name": "module",
+     "origin": "<runtime: Call(func=Name(id='base_host', ctx=Load()), args=[], keywords=[keyword(arg='request', value=Name(id='request', ctx=Load())), keyword(arg='is>",
+     "requested_data": "<runtime: Attribute(value=Name(id='request', ctx=Load()), attr='data', ctx=Load())>",
+     "slug": "<runtime: Name(id='slug', ctx=Load())>"
+    },
+    "line": 439,
+    "task": "model_activity"
+   }
+  ],
+  "transfer_util": [
+   {
+    "kwargs": {
+     "actor_id": "<runtime: Call(func=Name(id='str', ctx=Load()), args=[Name(id='user_id', ctx=Load())], keywords=[])>",
+     "current_instance": "<runtime: Call(func=Attribute(value=Name(id='json', ctx=Load()), attr='dumps', ctx=Load()), args=[Dict(keys=[Constant(value='updated_cycle_issues'), C>",
+     "epoch": "<runtime: Call(func=Name(id='int', ctx=Load()), args=[Call(func=Attribute(value=Call(func=Attribute(value=Name(id='timezone', ctx=Load()), attr='now',>",
+     "issue_id": null,
+     "notification": true,
+     "origin": "<runtime: Call(func=Name(id='base_host', ctx=Load()), args=[], keywords=[keyword(arg='request', value=Name(id='request', ctx=Load())), keyword(arg='is>",
+     "project_id": "<runtime: Call(func=Name(id='str', ctx=Load()), args=[Name(id='project_id', ctx=Load())], keywords=[])>",
+     "requested_data": "<runtime: Call(func=Attribute(value=Name(id='json', ctx=Load()), attr='dumps', ctx=Load()), args=[Dict(keys=[Constant(value='cycles_list')], values=[L>",
+     "type": "cycle.activity.created"
+    },
+    "line": 462,
+    "task": "issue_activity"
+   }
+  ]
+ },
+ "fixture": "FX-CYCMOD-07",
+ "trace": [
+  "model_activity sites views/cycle.py:338-346 (create), :549-557 (update)",
+  "model_activity sites views/module.py:229-237 (create), :439-447 (update)",
+  "issue_activity sites views/cycle.py:594-608 (delete, delay :594), :987-1002 (issue add/move, delay :990), :1086-1114 (issue remove, delay :1100)",
+  "issue_activity sites views/module.py:512-527 (delete), :714-728 (issue add/move), :879-887 (issue remove)",
+  "issue_activity site utils/cycle_transfer_issues.py:462-478 (transfer)"
+ ]
+}

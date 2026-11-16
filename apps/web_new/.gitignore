@@ -1,0 +1,9 @@
+
+# Generated parity seed facts (never committed; one per namespace, NEWFRONT-132)
+e2e/parity/.seed*.json
+# Cloud-oracle overlay staging (never committed; proprietary files copied in
+# at bring-up and removed at teardown, NEWFRONT-436)
+e2e/parity/stack/.cloud-staging/
+test-results/
+dist/
+/coverage/

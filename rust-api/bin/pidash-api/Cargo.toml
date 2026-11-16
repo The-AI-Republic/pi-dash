@@ -1,0 +1,75 @@
+[package]
+name = "pidash-api-bin"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "pidash-api"
+path = "src/main.rs"
+
+[dependencies]
+pidash-types = { path = "../../crates/types" }
+pidash-db = { path = "../../crates/db" }
+pidash-auth = { path = "../../crates/auth" }
+pidash-services = { path = "../../crates/services" }
+pidash-api = { path = "../../crates/api" }
+pidash-jobs = { path = "../../crates/jobs" }
+# D-37 ops CLI (PIDASHCONV-919): the ops command set lives in the shared
+# library crate so the cloud binary embeds the same argv/dispatch.
+pidash-ops = { path = "../../crates/ops" }
+axum = "0.8"
+# Model runtime (PIDASHCONV-866): GitHub contents payloads are base64.
+# Same locked base64 0.22.x as the workspace (no lock churn).
+base64 = "0.22"
+# Seam providers + model runtime (PIDASHCONV-859/832/866): Utc
+# timestamps. (The D-37 ops groups moved to pidash-ops with their own
+# pin.) Same locked chrono 0.4.x as pidash-db, so no lock churn;
+# features are the union the groups need.
+chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
+clap = { version = "4", features = ["derive"] }
+# Model runtime (PIDASHCONV-866): concurrent tool-call polling
+# (`FuturesUnordered`, first-completed error wins). Same locked
+# futures-util 0.3.x as the workspace (no lock churn).
+futures-util = { version = "0.3", default-features = false }
+# Model runtime (PIDASHCONV-866): GitHub App JWT (RS256).
+# Same locked jsonwebtoken 9.x as the workspace (no lock churn).
+jsonwebtoken = "9"
+# Runner seam providers (PIDASHCONV-859) + D-08 issue_activity wiring
+# (PIDASHCONV-836): the shared Redis client the providers multiplex over,
+# and the sync `OriginRedis` adapter's blocking client (same locked
+# redis 1.x as pidash-db, no lock churn beyond the edge; features are
+# the union the groups need).
+redis = { version = "1", default-features = false, features = ["tokio-rustls-comp", "tls-rustls-webpki-roots", "tls-rustls-insecure"] }
+# Model runtime (PIDASHCONV-866): genai-prices provider URL patterns.
+# Same locked regex 1.x as pidash-jobs/pidash-services (no lock churn).
+regex = "1"
+# Assistant turn MCP client (PIDASHCONV-1112): output-schema validation
+# for tools/call results (the mcp SDK's _validate_tool_result). No default
+# features: no resolve-http/resolve-file (remote $refs fail closed like
+# Python's empty referencing registry) and no aws-lc-rs (ring only).
+jsonschema = { version = "0.59", default-features = false }
+# (PIDASHCONV-1112 adds "stream": incremental SSE reads for MCP responses;
+# same feature pidash-api already enables, so no lock churn.)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "stream"] }
+# TLS provider select (PIDASHCONV-1269): both `ring` (via reqwest) and
+# `aws-lc-rs` (via mongodb) are enabled in this binary, so rustls cannot
+# pick a process-level CryptoProvider by itself and `ClientConfig::builder`
+# (which redis uses for `rediss://`) panics. `main` installs ring
+# explicitly. Same locked rustls 0.23.x as the workspace, no lock churn.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# Model runtime (PIDASHCONV-866): JWT claims struct.
+# Same locked serde 1.x as the workspace (no lock churn).
+serde = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Seam-provider + model-runtime ids (PIDASHCONV-859/832/866):
+# same locked uuid 1.x as pidash-db/pidash-services (no lock churn);
+# features are the union of the groups' needs. (The D-37 ops groups
+# moved to pidash-ops with their own pin.)
+uuid = { version = "1", features = ["serde", "v4", "v7"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

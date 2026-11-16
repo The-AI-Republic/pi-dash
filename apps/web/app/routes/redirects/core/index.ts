@@ -20,7 +20,7 @@ export const coreRedirectRoutes: RouteConfigEntry[] = [
   route(":workspaceSlug/analytics", "routes/redirects/core/analytics.tsx"),
 
   // API tokens redirect: /:workspaceSlug/settings/api-tokens
-  // → /settings/profile/api-tokens
+  // → /:workspaceSlug/settings/account/api-tokens
   route(":workspaceSlug/settings/api-tokens", "routes/redirects/core/api-tokens.tsx"),
 
   // Inbox redirect: /:workspaceSlug/projects/:projectId/inbox

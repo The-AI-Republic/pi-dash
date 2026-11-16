@@ -25,7 +25,6 @@ from django.utils import timezone
 from pi_dash.core.agent_execution import (
     MACHINE_EXECUTORS,
     AgentExecutorKind,
-    effective_executor_for_issue,
 )
 
 from pi_dash.runner.models import (
@@ -93,20 +92,16 @@ def select_runner_in_pod(pod: Pod) -> Optional[Runner]:
     row-level lock (``SELECT … FOR UPDATE SKIP LOCKED``) so concurrent drains
     can't both pick the same runner.
     """
-    from pi_dash.runner.models import RunnerProvisioning
+    from pi_dash.runner.models import RunnerPodDispatch
 
-    alive_threshold = timezone.now() - HEARTBEAT_GRACE
     return (
         Runner.objects.select_for_update(skip_locked=True)
-        .filter(
-            pod=pod,
-            status=RunnerStatus.ONLINE,
-            last_heartbeat_at__gte=alive_threshold,
-        )
-        # Desktop-bundled runners serve only work pinned to them. Handing them
-        # unpinned pod work would make one person's laptop the team's build
-        # server, and it would vanish when they close the lid.
-        .exclude(provisioning=RunnerProvisioning.DESKTOP_BUNDLED)
+        .assignable()
+        .filter(pod=pod)
+        # Only pod members take unpinned pod work. Engines start
+        # ``pinned_only`` (their work spends the owner's wallet) until the
+        # owner adds them to the pod; then they rank equally (PO-4).
+        .exclude(pod_dispatch=RunnerPodDispatch.PINNED_ONLY)
         .exclude(agent_runs__status__in=BUSY_STATUSES)
         # An active chat no longer excludes a runner from issue assignment:
         # chat and issue runs are concurrent (design §3.4). BUSY_STATUSES still
@@ -114,7 +109,7 @@ def select_runner_in_pod(pod: Pod) -> Optional[Runner]:
         # The worktree pool is retired (PDASHOSS01-137): there is no per-runner
         # desk capacity to prefer, so among equally-eligible idle runners the
         # only ranking left is freshest heartbeat (``-last_heartbeat_at``,
-        # newest first). ``Runner.free_worktrees`` is no longer written or read.
+        # newest first). The retired per-runner capacity hint is gone.
         .order_by("-last_heartbeat_at")
         .first()
     )
@@ -144,6 +139,28 @@ def next_queued_run_for_pod(pod: Pod) -> Optional[AgentRun]:
     )
 
 
+def _last_served_dedicated(runner: Runner) -> bool:
+    """True when ``runner``'s most recent assigned run was dedicated (design §10.2).
+
+    Derived, not stored: the latest run by ``assigned_at`` (NULLs excluded)
+    with a ``pinned_runner`` and ``pin_kind = dedicated``. A runner with no
+    assigned runs counts as ``false``. When ``next_for_runner`` runs the
+    runner is idle, so that run is terminal or paused.
+    """
+    from pi_dash.runner.models import PinKind
+
+    last = (
+        AgentRun.objects.filter(runner=runner, assigned_at__isnull=False)
+        .order_by("-assigned_at")
+        .first()
+    )
+    return bool(
+        last is not None
+        and last.pinned_runner_id is not None
+        and last.pin_kind == PinKind.DEDICATED
+    )
+
+
 def next_for_runner(runner: Runner) -> Optional[AgentRun]:
     """Return the next QUEUED run this runner should take.
 
@@ -153,42 +170,77 @@ def next_for_runner(runner: Runner) -> Optional[AgentRun]:
     ``FOR UPDATE SKIP LOCKED`` so concurrent drains don't double-assign.
 
     Must be called inside a ``transaction.atomic()`` block.
+
+    What a runner may take (``built_engine_as_runner`` design §7, §13, §23.1):
+
+    - an own-agent runner takes ``local_runner`` runs pinned to it for repo
+      locality and, as a ``pod_member``, the unpinned pod queue (today's
+      behaviour);
+    - an engine takes locality pins to itself and the unpinned pod queue
+      only while it is a ``pod_member`` and its machine's engine is not
+      paused (it then ranks equally with ordinary runners, PO-4);
+    - an engine, ``pinned_only`` or not, takes ``local_runner`` runs pinned
+      to it with ``pin_kind = dedicated`` whatever its ``pod_dispatch``
+      (§23.1); ``pinned_only`` drops the unpinned tier for every other
+      run, including the shared run it owes and the ``pinned_only`` own-
+      agent runner as well;
+    - an engine, ``pinned_only`` or not, still takes the legacy queued
+      ``managed_runner`` runs pinned to it. No new run has that kind.
+
+    Tier order follows §10.2: locality pins always first (0); unpinned
+    shared work second (1); dedicated pins first (0) when the runner's
+    last run was not dedicated, demoted to last (2) when it was. Locality
+    pins and ``pod_once`` runs count as shared work.
+
+    All of it must also pass the usage rule
+    (:func:`~pi_dash.runner.services.permissions.filter_runs_usable_by_runner`).
     """
+    from pi_dash.runner.models import PinKind, RunnerPodDispatch
+    from pi_dash.runner.services.dispatch_rules import engine_takes_pod_work
+
+    local = Q(executor_kind=AgentExecutorKind.LOCAL_RUNNER)
+    dedicated_mine = local & Q(pinned_runner=runner, pin_kind=PinKind.DEDICATED)
+    locality_mine = local & Q(pinned_runner=runner, pin_kind=PinKind.LOCALITY)
+    shared = Q(pinned_runner__isnull=True)
+    if runner.is_engine:
+        eligible = Q(executor_kind=AgentExecutorKind.MANAGED_RUNNER, pinned_runner=runner)
+        # §23.1: a dedicated pin is served whatever pod_dispatch.
+        eligible |= dedicated_mine
+        if engine_takes_pod_work(runner):
+            eligible |= local & (Q(pinned_runner=runner) | shared)
+    else:
+        eligible = dedicated_mine | locality_mine
+        if runner.pod_dispatch == RunnerPodDispatch.POD_MEMBER:
+            eligible |= local & shared
     qs = (
         AgentRun.objects.select_for_update(skip_locked=True)
         .filter(
             pod=runner.pod,
             status=AgentRunStatus.QUEUED,
             # Both machine executors run through this daemon path; a
-            # managed run is a local run whose install Pi Dash owns.
+            # legacy managed run is a local run whose install Pi Dash owns.
             executor_kind__in=MACHINE_EXECUTORS,
         )
-        .filter(
-            Q(pinned_runner=runner) | Q(pinned_runner__isnull=True),
-        )
+        .filter(eligible)
     )
     qs = filter_runs_usable_by_runner(qs, runner)
-    from pi_dash.runner.models import RunnerProvisioning
-
-    if runner.provisioning == RunnerProvisioning.DESKTOP_BUNDLED:
-        qs = qs.filter(executor_kind=AgentExecutorKind.MANAGED_RUNNER, pinned_runner=runner)
-    else:
-        qs = qs.filter(executor_kind=AgentExecutorKind.LOCAL_RUNNER)
-    return (
-        qs
-        # Pinned-to-me sorts before unpinned via an integer rank: 0 for the
-        # personal queue, 1 for the pod queue. ``order_by`` on the rank then
-        # ``created_at`` gives FIFO inside each tier.
-        .annotate(
-            _is_mine=models.Case(
-                models.When(pinned_runner=runner, then=models.Value(0)),
-                default=models.Value(1),
-                output_field=models.IntegerField(),
-            )
+    last_dedicated = _last_served_dedicated(runner)
+    if last_dedicated:
+        rank = models.Case(
+            models.When(pinned_runner=runner, pin_kind=PinKind.LOCALITY, then=models.Value(0)),
+            models.When(pinned_runner=runner, pin_kind=PinKind.DEDICATED, then=models.Value(2)),
+            default=models.Value(1),
+            output_field=models.IntegerField(),
         )
-        .order_by("_is_mine", "created_at")
-        .first()
-    )
+    else:
+        # Identical to today's ``_is_mine`` annotation for a pod with no
+        # dedicated issues.
+        rank = models.Case(
+            models.When(pinned_runner=runner, then=models.Value(0)),
+            default=models.Value(1),
+            output_field=models.IntegerField(),
+        )
+    return qs.annotate(_is_mine=rank).order_by("_is_mine", "created_at").first()
 
 
 def drain_pod(pod: Pod) -> int:
@@ -205,16 +257,12 @@ def drain_pod(pod: Pod) -> int:
     """
     from pi_dash.runner.services.pubsub import send_to_runner
 
-    alive_threshold = timezone.now() - HEARTBEAT_GRACE
     assignments: list[tuple[Runner, AgentRun]] = []
     with transaction.atomic():
         idle_runners = list(
             Runner.objects.select_for_update(skip_locked=True)
-            .filter(
-                pod=pod,
-                status=RunnerStatus.ONLINE,
-                last_heartbeat_at__gte=alive_threshold,
-            )
+            .assignable()
+            .filter(pod=pod)
             .exclude(agent_runs__status__in=BUSY_STATUSES)
             # An active chat no longer excludes a runner from issue assignment:
             # chat and issue runs are concurrent (design §3.4). BUSY_STATUSES
@@ -259,18 +307,14 @@ def drain_for_runner(runner: Runner) -> bool:
     """
     from pi_dash.runner.services.pubsub import send_to_runner
 
-    alive_threshold = timezone.now() - HEARTBEAT_GRACE
     assignment: Optional[tuple[Runner, AgentRun]] = None
     with transaction.atomic():
         # Re-select the runner under lock so two concurrent drain calls
         # for the same runner can't both assign it.
         locked = (
             Runner.objects.select_for_update(skip_locked=True)
-            .filter(
-                pk=runner.pk,
-                status=RunnerStatus.ONLINE,
-                last_heartbeat_at__gte=alive_threshold,
-            )
+            .assignable()
+            .filter(pk=runner.pk)
             .exclude(agent_runs__status__in=BUSY_STATUSES)
             # An active chat no longer excludes a runner from issue assignment:
             # chat and issue runs are concurrent (design §3.4). BUSY_STATUSES
@@ -301,6 +345,148 @@ def drain_for_runner_by_id(runner_id) -> bool:
     if runner is None:
         return False
     return drain_for_runner(runner)
+
+
+def release_runner_if_idle(runner_id) -> bool:
+    """Flip a BUSY runner back to ONLINE once no run occupies it.
+
+    The matcher only ever assigns ONLINE runners, and the poll self-report
+    is the only regular ONLINE writer — so a runner whose run was finalized
+    outside the normal lifecycle (daemon-shutdown failure, replayed
+    RunFailed, heartbeat reap) stays BUSY forever while heartbeating, and
+    runs pinned to it queue indefinitely (PDASHOSS01-231). Every
+    run-finalization path calls this before draining so the release happens
+    with the same signal that frees the capacity.
+
+    Strictly BUSY → ONLINE: OFFLINE and REVOKED are stronger states owned
+    by their own transitions, and a runner still holding a BUSY_STATUSES
+    run keeps its status. A daemon that is genuinely mid-wind-down and
+    re-reports ``busy`` on its next poll simply flips back; the
+    ``assign_rejected_busy`` NACK path already covers an assign that lands
+    in that window. Returns True when a row was updated.
+    """
+    return bool(
+        Runner.objects.filter(pk=runner_id, status=RunnerStatus.BUSY)
+        .exclude(agent_runs__status__in=BUSY_STATUSES)
+        .update(status=RunnerStatus.ONLINE)
+    )
+
+
+def reconcile_unsatisfiable_pins(pod: Optional[Pod] = None) -> set:
+    """Recover QUEUED runs whose ``pinned_runner`` cannot take work.
+
+    A pin (session-resume affinity) is normally served as soon as its
+    runner finishes the previous run — but a runner that wedged BUSY, went
+    offline, or died silently never takes it, and the run queues forever
+    while the rest of the pod idles (PDASHOSS01-231's 47-minute incident).
+    Two remedies, mildest first (PDASHOSS01-233):
+
+    1. Pinned runner BUSY with a fresh heartbeat but no busy-status run —
+       the wedge that :func:`release_runner_if_idle` normally clears at
+       finalization; re-applied here so the matcher self-heals if a
+       release was ever missed. The pin is kept: once ONLINE, the runner
+       serves its own pinned run on the next drain. A *dead* wedged runner
+       (stale heartbeat) is deliberately left alone — the BUSY-but-dead
+       sweeper flips it OFFLINE rather than resurrecting it to ONLINE.
+
+    2. Pin held past ``RUNNER_PIN_AUTO_RELEASE_SECS`` (measured from the
+       run's ``created_at`` — every requeue path that resets a run also
+       clears its pin, so a QUEUED pinned run has been waiting since
+       creation) while the runner is neither assignable (ONLINE + fresh
+       heartbeat) nor legitimately working (BUSY + fresh heartbeat + a
+       busy-status run): clear the pin so any eligible runner serves the
+       run. This is the release-pin escape hatch made automatic and
+       bounded. Restricted to LOCAL_RUNNER runs — a managed
+       (desktop-bundled) run without its pin is unservable by
+       construction (see :func:`next_for_runner`).
+
+    Returns the ids of pods whose queue or capacity changed; callers
+    should drain those pods.
+    """
+    from django.conf import settings
+
+    now = timezone.now()
+    alive_threshold = now - HEARTBEAT_GRACE
+    affected_pod_ids: set = set()
+
+    # (1) Wedged-busy pinned runners that are still alive: release them.
+    wedged = (
+        AgentRun.objects.filter(
+            status=AgentRunStatus.QUEUED,
+            executor_kind__in=MACHINE_EXECUTORS,
+            pinned_runner__status=RunnerStatus.BUSY,
+            pinned_runner__last_heartbeat_at__gte=alive_threshold,
+        )
+        .values_list("pinned_runner_id", "pod_id")
+        .distinct()
+    )
+    if pod is not None:
+        wedged = wedged.filter(pod=pod)
+    for runner_id, pod_id in wedged:
+        if release_runner_if_idle(runner_id):
+            logger.info(
+                "reconcile_unsatisfiable_pins: released wedged busy runner %s",
+                runner_id,
+            )
+            if pod_id is not None:
+                affected_pod_ids.add(pod_id)
+
+    # (2) Bounded pin auto-release.
+    bound_secs = int(getattr(settings, "RUNNER_PIN_AUTO_RELEASE_SECS", 600))
+    if bound_secs > 0:
+        with transaction.atomic():
+            stale_qs = (
+                AgentRun.objects.select_for_update(skip_locked=True)
+                .filter(
+                    status=AgentRunStatus.QUEUED,
+                    executor_kind=AgentExecutorKind.LOCAL_RUNNER,
+                    pinned_runner__isnull=False,
+                    created_at__lt=now - timedelta(seconds=bound_secs),
+                )
+                # A dedicated pin is owned by the issue, not the queue: it is
+                # never released to the pod (dedicated-runner design §12.1,
+                # H-13). The dedicated-runner sweeps own those runs.
+                .exclude(pin_kind="dedicated")
+                # Assignable (``RunnerQuerySet.assignable``): the pin will be
+                # served as soon as the runner picks work up — leave it. A
+                # paused runner is not assignable; its pins are released here
+                # as well as by ``release_pins_on_offline_runners``.
+                .exclude(
+                    pinned_runner__status=RunnerStatus.ONLINE,
+                    pinned_runner__last_heartbeat_at__gte=alive_threshold,
+                    pinned_runner__paused_at__isnull=True,
+                )
+                # Legitimately working: an alive BUSY runner still serving a
+                # busy-status run frees itself on finalization — leave it.
+                .exclude(
+                    pinned_runner__status=RunnerStatus.BUSY,
+                    pinned_runner__last_heartbeat_at__gte=alive_threshold,
+                    pinned_runner__agent_runs__status__in=BUSY_STATUSES,
+                )
+            )
+            if pod is not None:
+                stale_qs = stale_qs.filter(pod=pod)
+            stale = list(stale_qs.values_list("id", "pinned_runner_id", "pod_id"))
+            if stale:
+                stale_ids = [run_id for run_id, _, _ in stale]
+                AgentRun.objects.filter(id__in=stale_ids).update(pinned_runner=None)
+                # Same as the manual release-pin endpoint: whichever runner
+                # takes the run next has no session of the parent's to
+                # resume against, so drop the resume hint.
+                AgentRun.objects.filter(
+                    id__in=AgentRun.objects.filter(id__in=stale_ids).values("parent_run_id")
+                ).exclude(thread_id="").update(thread_id="")
+        for run_id, runner_id, pod_id in stale:
+            logger.info(
+                "reconcile_unsatisfiable_pins: auto-released pin run=%s runner=%s after %ss bound",
+                run_id,
+                runner_id,
+                bound_secs,
+            )
+            if pod_id is not None:
+                affected_pod_ids.add(pod_id)
+
+    return affected_pod_ids
 
 
 def _build_assign_msg(run: AgentRun) -> dict:
@@ -342,15 +528,10 @@ def select_runner_for_run(run: AgentRun) -> Optional[Runner]:
     instead. This function filters by ``owner=run.owner``, which was the old
     access-gating rule. Phase 3 migrates callers.
     """
-    alive_threshold = timezone.now() - HEARTBEAT_GRACE
     return (
         Runner.objects.select_for_update(skip_locked=True)
-        .filter(
-            owner=run.owner,
-            workspace=run.workspace,
-            status=RunnerStatus.ONLINE,
-            last_heartbeat_at__gte=alive_threshold,
-        )
+        .assignable()
+        .filter(owner=run.owner, workspace=run.workspace)
         .exclude(agent_runs__status__in=BUSY_STATUSES)
         # An active chat no longer excludes a runner from issue assignment:
         # chat and issue runs are concurrent (design §3.4). BUSY_STATUSES still
@@ -363,16 +544,17 @@ def select_runner_for_run(run: AgentRun) -> Optional[Runner]:
 def can_register_another(user_id, workspace_id) -> bool:
     """Enforce the per-user runner cap.
 
-    Desktop-bundled runners are provisioned by Pi Dash, one per project the
-    user opens, and are capped separately by
-    ``MANAGED_RUNNER_MAX_PER_USER_PROJECT``. Counting them here would let the
-    desktop silently consume a user's allowance for machines they installed
-    themselves.
+    Built-in engine runners are not counted: there is at most one per
+    machine and project (built_engine_as_runner §5), and counting them would
+    let turning the engine on consume a user's allowance for runners they
+    set up themselves.
     """
     return count_active(user_id, workspace_id) < Runner.MAX_PER_USER
 
 
-def pod_has_runner_for_issue_principal(pod, issue, run_creator_id) -> bool:
+def pod_has_runner_for_issue_principal(
+    pod, issue, run_creator_id, *, human: bool = True, pod_once: bool = False
+) -> bool:
     """Does ``pod`` contain any registered runner whose owner could serve a
     run on ``issue`` triggered by ``run_creator_id``?
 
@@ -392,10 +574,10 @@ def pod_has_runner_for_issue_principal(pod, issue, run_creator_id) -> bool:
     dispatch gate it shadows (``filter_runs_usable_by_runner``) applies the
     same ``deleted_at`` condition, so preflight and dispatch stay consistent.
 
-    Transient status is **deliberately ignored** — OFFLINE / BUSY runners
-    still count as "registered" because the owner can flip them back on and
-    ``drain_pod`` re-fires on heartbeat. REVOKED runners, however, are
-    **permanent** — a revoked runner can never be un-revoked and
+    Transient status is **deliberately ignored** — OFFLINE / BUSY / paused
+    runners still count as "registered" because the owner can flip them back
+    on and ``drain_pod`` re-fires on heartbeat or resume. REVOKED runners,
+    however, are **permanent** — a revoked runner can never be un-revoked and
     ``drain_pod`` only ever assigns ONLINE runners, so a REVOKED-only match
     would let the run be created and then jam in QUEUED forever (the exact
     silent-jam this preflight exists to prevent). They are therefore
@@ -404,48 +586,72 @@ def pod_has_runner_for_issue_principal(pod, issue, run_creator_id) -> bool:
     serve this" case, not transient unavailability. See
     ``.ai_design/issue_runner/design.md`` §6.6.
 
-    For ``managed_runner`` issues the eligibility set is narrower: a managed
-    run is pinned to its creator's own desktop, so only a desktop-bundled
-    runner owned by the run creator could ever serve it. Transient status is
-    ignored here for the same reason as above — a closed laptop is not a
-    structural failure, and the creation path (§8.5) decides whether to wait.
+    Built-in engines (``built_engine_as_runner`` design §8, §9): an engine
+    counts only as a ``pod_member``, and only for its owner's own work: runs
+    its owner starts, automatic runs (``human`` is False) on the owner's
+    issues, or any such run when the owner opted in to teammates' runs
+    (``DevMachine.engine_team_runs``). An offline or paused pod-member engine
+    still counts (transient), so its owner's run waits in the pod rather than
+    bouncing. ``pinned_only`` runners of either kind never take unpinned work
+    and are not counted, so a pod whose only engine is ``pinned_only``
+    bounces.
+
+    ``human`` defaults to True (the stricter engine rule) for callers that do
+    not know the trigger.
+
+    A dedicated issue (§9.4) is served only by its assigned runner, so the
+    check reduces to that runner: not revoked, in the run's pod, and
+    ``runner_may_take`` for the run's creator/trigger — the Python form of
+    the usage rule, which covers own-agent runners and engines alike and
+    cannot disagree with the dispatch gate it shadows. ``pod_dispatch`` is
+    ignored in this branch: a ``pinned_only`` runner takes the runs
+    dedicated to it (§23.1). Offline and paused are transient and still
+    count (the run waits or is refused at creation, §11); only the usage
+    rule is structural here.
     """
     from pi_dash.db.models.issue import IssueAssignee
-    from pi_dash.runner.models import RunnerProvisioning
+    from pi_dash.runner.models import RunnerPodDispatch, RunnerProvisioning
+    from pi_dash.runner.services.dispatch_rules import runner_may_take
 
-    if effective_executor_for_issue(issue) == AgentExecutorKind.MANAGED_RUNNER:
-        if run_creator_id is None:
-            return False
-        return (
-            Runner.objects.filter(
-                pod=pod,
-                owner_id=run_creator_id,
-                provisioning=RunnerProvisioning.DESKTOP_BUNDLED,
-            )
-            .exclude(status=RunnerStatus.REVOKED)
-            .exists()
-        )
-
-    eligible_owner_ids: set = set()
+    issue_people: set = set()
+    if issue.created_by_id is not None:
+        issue_people.add(issue.created_by_id)
+    issue_people.update(IssueAssignee.objects.filter(issue=issue).values_list("assignee_id", flat=True))
+    issue_people.discard(None)
+    eligible_owner_ids = set(issue_people)
     if run_creator_id is not None:
         eligible_owner_ids.add(run_creator_id)
-    if issue.created_by_id is not None:
-        eligible_owner_ids.add(issue.created_by_id)
-    eligible_owner_ids.update(
-        IssueAssignee.objects.filter(issue=issue).values_list("assignee_id", flat=True)
-    )
-    eligible_owner_ids.discard(None)
     if not eligible_owner_ids:
         return False
-    return (
-        Runner.objects.filter(
-            pod=pod,
-            owner_id__in=eligible_owner_ids,
+    assigned_id = getattr(issue, "assigned_runner_id", None)
+    # pod_once (§23.3) runs in the pod's shared queue, so the pod branch
+    # applies even on a dedicated issue.
+    if assigned_id is not None and not pod_once:
+        assigned = (
+            Runner.objects.select_related("dev_machine")
+            .filter(pk=assigned_id, pod=pod, owner_id__in=eligible_owner_ids)
+            .exclude(status=RunnerStatus.REVOKED)
+            .first()
         )
+        if assigned is None:
+            return False
+        # Dedicated branch (§9.4): the usage rule, not pod work. A paused
+        # pinned_only engine still counts here (its runs wait / are refused
+        # at creation); only a usage-rule exclusion bounces.
+        return runner_may_take(assigned, created_by_id=run_creator_id, human=human, issue=issue)
+    candidates = (
+        Runner.objects.filter(pod=pod, owner_id__in=eligible_owner_ids)
         .exclude(status=RunnerStatus.REVOKED)
-        .exclude(provisioning=RunnerProvisioning.DESKTOP_BUNDLED)
-        .exists()
+        .exclude(pod_dispatch=RunnerPodDispatch.PINNED_ONLY)
     )
+    if candidates.exclude(provisioning=RunnerProvisioning.DESKTOP_BUNDLED).exists():
+        return True
+    # Engines: owner-only work unless the owner opted in (PO-3).
+    engine_owner_q = Q(owner_id=run_creator_id) if run_creator_id is not None else Q(pk__isnull=True)
+    if not human:
+        engine_owner_q |= Q(owner_id__in=issue_people)
+    engine_owner_q |= Q(dev_machine__engine_team_runs=True)
+    return candidates.filter(provisioning=RunnerProvisioning.DESKTOP_BUNDLED).filter(engine_owner_q).exists()
 
 
 def count_active(user_id, workspace_id) -> int:
@@ -462,4 +668,4 @@ def count_active(user_id, workspace_id) -> int:
 
 def eligible_for_assignment(runner: Runner) -> Q:
     """Convenience predicate for assertions/tests."""
-    return Q(pk=runner.pk, status=RunnerStatus.ONLINE)
+    return Q(pk=runner.pk, status=RunnerStatus.ONLINE, paused_at__isnull=True)

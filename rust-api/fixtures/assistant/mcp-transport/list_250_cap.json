@@ -1,0 +1,5104 @@
+{
+  "trace": "apps/api/pi_dash/assistant/runtime/mcp.py + pydantic-ai-slim==1.107.0/fastmcp==3.4.4/mcp==1.30.0",
+  "ported_from": "d656243d3700dd5ff749f1bfeb2bc74c918a33ba",
+  "case": "list_250_cap",
+  "stack": {
+    "pydantic_ai_slim": "1.107.0",
+    "fastmcp": "3.4.4",
+    "mcp": "1.30.0",
+    "python": "3.12"
+  },
+  "toolset": {
+    "timeout": 10.0,
+    "read_timeout": 5.0,
+    "prefix": "mcp_probe",
+    "auth": false,
+    "server_name": "probe",
+    "url_path": "/mcp"
+  },
+  "flow": [
+    "enter",
+    "list"
+  ],
+  "call": null,
+  "stub": {
+    "framing": "json",
+    "pages": [
+      [
+        {
+          "name": "t0",
+          "description": "tool 0",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t1",
+          "description": "tool 1",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t2",
+          "description": "tool 2",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t3",
+          "description": "tool 3",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t4",
+          "description": "tool 4",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t5",
+          "description": "tool 5",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t6",
+          "description": "tool 6",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t7",
+          "description": "tool 7",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t8",
+          "description": "tool 8",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t9",
+          "description": "tool 9",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t10",
+          "description": "tool 10",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t11",
+          "description": "tool 11",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t12",
+          "description": "tool 12",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t13",
+          "description": "tool 13",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t14",
+          "description": "tool 14",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t15",
+          "description": "tool 15",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t16",
+          "description": "tool 16",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t17",
+          "description": "tool 17",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t18",
+          "description": "tool 18",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t19",
+          "description": "tool 19",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t20",
+          "description": "tool 20",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t21",
+          "description": "tool 21",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t22",
+          "description": "tool 22",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t23",
+          "description": "tool 23",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t24",
+          "description": "tool 24",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t25",
+          "description": "tool 25",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t26",
+          "description": "tool 26",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t27",
+          "description": "tool 27",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t28",
+          "description": "tool 28",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t29",
+          "description": "tool 29",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t30",
+          "description": "tool 30",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t31",
+          "description": "tool 31",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t32",
+          "description": "tool 32",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t33",
+          "description": "tool 33",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t34",
+          "description": "tool 34",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t35",
+          "description": "tool 35",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t36",
+          "description": "tool 36",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t37",
+          "description": "tool 37",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t38",
+          "description": "tool 38",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t39",
+          "description": "tool 39",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t40",
+          "description": "tool 40",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t41",
+          "description": "tool 41",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t42",
+          "description": "tool 42",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t43",
+          "description": "tool 43",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t44",
+          "description": "tool 44",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t45",
+          "description": "tool 45",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t46",
+          "description": "tool 46",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t47",
+          "description": "tool 47",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t48",
+          "description": "tool 48",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t49",
+          "description": "tool 49",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t50",
+          "description": "tool 50",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t51",
+          "description": "tool 51",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t52",
+          "description": "tool 52",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t53",
+          "description": "tool 53",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t54",
+          "description": "tool 54",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t55",
+          "description": "tool 55",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t56",
+          "description": "tool 56",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t57",
+          "description": "tool 57",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t58",
+          "description": "tool 58",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t59",
+          "description": "tool 59",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t60",
+          "description": "tool 60",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t61",
+          "description": "tool 61",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t62",
+          "description": "tool 62",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t63",
+          "description": "tool 63",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t64",
+          "description": "tool 64",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t65",
+          "description": "tool 65",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t66",
+          "description": "tool 66",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t67",
+          "description": "tool 67",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t68",
+          "description": "tool 68",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t69",
+          "description": "tool 69",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t70",
+          "description": "tool 70",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t71",
+          "description": "tool 71",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t72",
+          "description": "tool 72",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t73",
+          "description": "tool 73",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t74",
+          "description": "tool 74",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t75",
+          "description": "tool 75",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t76",
+          "description": "tool 76",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t77",
+          "description": "tool 77",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t78",
+          "description": "tool 78",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t79",
+          "description": "tool 79",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t80",
+          "description": "tool 80",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t81",
+          "description": "tool 81",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t82",
+          "description": "tool 82",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t83",
+          "description": "tool 83",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t84",
+          "description": "tool 84",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t85",
+          "description": "tool 85",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t86",
+          "description": "tool 86",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t87",
+          "description": "tool 87",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t88",
+          "description": "tool 88",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t89",
+          "description": "tool 89",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t90",
+          "description": "tool 90",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t91",
+          "description": "tool 91",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t92",
+          "description": "tool 92",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t93",
+          "description": "tool 93",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t94",
+          "description": "tool 94",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t95",
+          "description": "tool 95",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t96",
+          "description": "tool 96",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t97",
+          "description": "tool 97",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t98",
+          "description": "tool 98",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t99",
+          "description": "tool 99",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t100",
+          "description": "tool 100",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t101",
+          "description": "tool 101",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t102",
+          "description": "tool 102",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t103",
+          "description": "tool 103",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t104",
+          "description": "tool 104",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t105",
+          "description": "tool 105",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t106",
+          "description": "tool 106",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t107",
+          "description": "tool 107",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t108",
+          "description": "tool 108",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t109",
+          "description": "tool 109",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t110",
+          "description": "tool 110",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t111",
+          "description": "tool 111",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t112",
+          "description": "tool 112",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t113",
+          "description": "tool 113",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t114",
+          "description": "tool 114",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t115",
+          "description": "tool 115",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t116",
+          "description": "tool 116",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t117",
+          "description": "tool 117",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t118",
+          "description": "tool 118",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t119",
+          "description": "tool 119",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t120",
+          "description": "tool 120",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t121",
+          "description": "tool 121",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t122",
+          "description": "tool 122",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t123",
+          "description": "tool 123",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t124",
+          "description": "tool 124",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t125",
+          "description": "tool 125",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t126",
+          "description": "tool 126",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t127",
+          "description": "tool 127",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t128",
+          "description": "tool 128",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t129",
+          "description": "tool 129",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t130",
+          "description": "tool 130",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t131",
+          "description": "tool 131",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t132",
+          "description": "tool 132",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t133",
+          "description": "tool 133",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t134",
+          "description": "tool 134",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t135",
+          "description": "tool 135",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t136",
+          "description": "tool 136",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t137",
+          "description": "tool 137",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t138",
+          "description": "tool 138",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t139",
+          "description": "tool 139",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t140",
+          "description": "tool 140",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t141",
+          "description": "tool 141",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t142",
+          "description": "tool 142",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t143",
+          "description": "tool 143",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t144",
+          "description": "tool 144",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t145",
+          "description": "tool 145",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t146",
+          "description": "tool 146",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t147",
+          "description": "tool 147",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t148",
+          "description": "tool 148",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t149",
+          "description": "tool 149",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t150",
+          "description": "tool 150",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t151",
+          "description": "tool 151",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t152",
+          "description": "tool 152",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t153",
+          "description": "tool 153",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t154",
+          "description": "tool 154",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t155",
+          "description": "tool 155",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t156",
+          "description": "tool 156",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t157",
+          "description": "tool 157",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t158",
+          "description": "tool 158",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t159",
+          "description": "tool 159",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t160",
+          "description": "tool 160",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t161",
+          "description": "tool 161",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t162",
+          "description": "tool 162",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t163",
+          "description": "tool 163",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t164",
+          "description": "tool 164",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t165",
+          "description": "tool 165",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t166",
+          "description": "tool 166",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t167",
+          "description": "tool 167",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t168",
+          "description": "tool 168",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t169",
+          "description": "tool 169",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t170",
+          "description": "tool 170",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t171",
+          "description": "tool 171",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t172",
+          "description": "tool 172",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t173",
+          "description": "tool 173",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t174",
+          "description": "tool 174",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t175",
+          "description": "tool 175",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t176",
+          "description": "tool 176",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t177",
+          "description": "tool 177",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t178",
+          "description": "tool 178",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t179",
+          "description": "tool 179",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t180",
+          "description": "tool 180",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t181",
+          "description": "tool 181",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t182",
+          "description": "tool 182",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t183",
+          "description": "tool 183",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t184",
+          "description": "tool 184",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t185",
+          "description": "tool 185",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t186",
+          "description": "tool 186",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t187",
+          "description": "tool 187",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t188",
+          "description": "tool 188",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t189",
+          "description": "tool 189",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t190",
+          "description": "tool 190",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t191",
+          "description": "tool 191",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t192",
+          "description": "tool 192",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t193",
+          "description": "tool 193",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t194",
+          "description": "tool 194",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t195",
+          "description": "tool 195",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t196",
+          "description": "tool 196",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t197",
+          "description": "tool 197",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t198",
+          "description": "tool 198",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t199",
+          "description": "tool 199",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t200",
+          "description": "tool 200",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t201",
+          "description": "tool 201",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t202",
+          "description": "tool 202",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t203",
+          "description": "tool 203",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t204",
+          "description": "tool 204",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t205",
+          "description": "tool 205",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t206",
+          "description": "tool 206",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t207",
+          "description": "tool 207",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t208",
+          "description": "tool 208",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t209",
+          "description": "tool 209",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t210",
+          "description": "tool 210",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t211",
+          "description": "tool 211",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t212",
+          "description": "tool 212",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t213",
+          "description": "tool 213",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t214",
+          "description": "tool 214",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t215",
+          "description": "tool 215",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t216",
+          "description": "tool 216",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t217",
+          "description": "tool 217",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t218",
+          "description": "tool 218",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t219",
+          "description": "tool 219",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t220",
+          "description": "tool 220",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t221",
+          "description": "tool 221",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t222",
+          "description": "tool 222",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t223",
+          "description": "tool 223",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t224",
+          "description": "tool 224",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t225",
+          "description": "tool 225",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t226",
+          "description": "tool 226",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t227",
+          "description": "tool 227",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t228",
+          "description": "tool 228",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t229",
+          "description": "tool 229",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t230",
+          "description": "tool 230",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t231",
+          "description": "tool 231",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t232",
+          "description": "tool 232",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t233",
+          "description": "tool 233",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t234",
+          "description": "tool 234",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t235",
+          "description": "tool 235",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t236",
+          "description": "tool 236",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t237",
+          "description": "tool 237",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t238",
+          "description": "tool 238",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t239",
+          "description": "tool 239",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t240",
+          "description": "tool 240",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t241",
+          "description": "tool 241",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t242",
+          "description": "tool 242",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t243",
+          "description": "tool 243",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t244",
+          "description": "tool 244",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t245",
+          "description": "tool 245",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t246",
+          "description": "tool 246",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t247",
+          "description": "tool 247",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t248",
+          "description": "tool 248",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t249",
+          "description": "tool 249",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ],
+      [
+        {
+          "name": "t250",
+          "description": "tool 250",
+          "inputSchema": {
+            "type": "object"
+          }
+        }
+      ]
+    ]
+  },
+  "wire": [
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json"
+      },
+      "body": "{\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"mcp\",\"version\":\"0.1.0\"}},\"jsonrpc\":\"2.0\",\"id\":0}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"notifications/initialized\",\"jsonrpc\":\"2.0\"}"
+    },
+    {
+      "method": "GET",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": ""
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"jsonrpc\":\"2.0\",\"id\":1}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c1\"},\"jsonrpc\":\"2.0\",\"id\":2}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c2\"},\"jsonrpc\":\"2.0\",\"id\":3}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c3\"},\"jsonrpc\":\"2.0\",\"id\":4}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c4\"},\"jsonrpc\":\"2.0\",\"id\":5}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c5\"},\"jsonrpc\":\"2.0\",\"id\":6}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c6\"},\"jsonrpc\":\"2.0\",\"id\":7}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c7\"},\"jsonrpc\":\"2.0\",\"id\":8}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c8\"},\"jsonrpc\":\"2.0\",\"id\":9}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c9\"},\"jsonrpc\":\"2.0\",\"id\":10}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c10\"},\"jsonrpc\":\"2.0\",\"id\":11}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c11\"},\"jsonrpc\":\"2.0\",\"id\":12}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c12\"},\"jsonrpc\":\"2.0\",\"id\":13}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c13\"},\"jsonrpc\":\"2.0\",\"id\":14}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c14\"},\"jsonrpc\":\"2.0\",\"id\":15}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c15\"},\"jsonrpc\":\"2.0\",\"id\":16}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c16\"},\"jsonrpc\":\"2.0\",\"id\":17}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c17\"},\"jsonrpc\":\"2.0\",\"id\":18}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c18\"},\"jsonrpc\":\"2.0\",\"id\":19}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c19\"},\"jsonrpc\":\"2.0\",\"id\":20}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c20\"},\"jsonrpc\":\"2.0\",\"id\":21}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c21\"},\"jsonrpc\":\"2.0\",\"id\":22}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c22\"},\"jsonrpc\":\"2.0\",\"id\":23}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c23\"},\"jsonrpc\":\"2.0\",\"id\":24}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c24\"},\"jsonrpc\":\"2.0\",\"id\":25}"
+    },
+    {
+      "method": "GET",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": ""
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c25\"},\"jsonrpc\":\"2.0\",\"id\":26}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c26\"},\"jsonrpc\":\"2.0\",\"id\":27}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c27\"},\"jsonrpc\":\"2.0\",\"id\":28}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c28\"},\"jsonrpc\":\"2.0\",\"id\":29}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c29\"},\"jsonrpc\":\"2.0\",\"id\":30}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c30\"},\"jsonrpc\":\"2.0\",\"id\":31}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c31\"},\"jsonrpc\":\"2.0\",\"id\":32}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c32\"},\"jsonrpc\":\"2.0\",\"id\":33}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c33\"},\"jsonrpc\":\"2.0\",\"id\":34}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c34\"},\"jsonrpc\":\"2.0\",\"id\":35}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c35\"},\"jsonrpc\":\"2.0\",\"id\":36}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c36\"},\"jsonrpc\":\"2.0\",\"id\":37}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c37\"},\"jsonrpc\":\"2.0\",\"id\":38}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c38\"},\"jsonrpc\":\"2.0\",\"id\":39}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c39\"},\"jsonrpc\":\"2.0\",\"id\":40}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c40\"},\"jsonrpc\":\"2.0\",\"id\":41}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c41\"},\"jsonrpc\":\"2.0\",\"id\":42}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c42\"},\"jsonrpc\":\"2.0\",\"id\":43}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c43\"},\"jsonrpc\":\"2.0\",\"id\":44}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c44\"},\"jsonrpc\":\"2.0\",\"id\":45}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c45\"},\"jsonrpc\":\"2.0\",\"id\":46}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c46\"},\"jsonrpc\":\"2.0\",\"id\":47}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c47\"},\"jsonrpc\":\"2.0\",\"id\":48}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c48\"},\"jsonrpc\":\"2.0\",\"id\":49}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c49\"},\"jsonrpc\":\"2.0\",\"id\":50}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c50\"},\"jsonrpc\":\"2.0\",\"id\":51}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c51\"},\"jsonrpc\":\"2.0\",\"id\":52}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c52\"},\"jsonrpc\":\"2.0\",\"id\":53}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c53\"},\"jsonrpc\":\"2.0\",\"id\":54}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c54\"},\"jsonrpc\":\"2.0\",\"id\":55}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c55\"},\"jsonrpc\":\"2.0\",\"id\":56}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c56\"},\"jsonrpc\":\"2.0\",\"id\":57}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c57\"},\"jsonrpc\":\"2.0\",\"id\":58}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c58\"},\"jsonrpc\":\"2.0\",\"id\":59}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c59\"},\"jsonrpc\":\"2.0\",\"id\":60}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c60\"},\"jsonrpc\":\"2.0\",\"id\":61}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c61\"},\"jsonrpc\":\"2.0\",\"id\":62}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c62\"},\"jsonrpc\":\"2.0\",\"id\":63}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c63\"},\"jsonrpc\":\"2.0\",\"id\":64}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c64\"},\"jsonrpc\":\"2.0\",\"id\":65}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c65\"},\"jsonrpc\":\"2.0\",\"id\":66}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c66\"},\"jsonrpc\":\"2.0\",\"id\":67}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c67\"},\"jsonrpc\":\"2.0\",\"id\":68}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c68\"},\"jsonrpc\":\"2.0\",\"id\":69}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c69\"},\"jsonrpc\":\"2.0\",\"id\":70}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c70\"},\"jsonrpc\":\"2.0\",\"id\":71}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c71\"},\"jsonrpc\":\"2.0\",\"id\":72}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c72\"},\"jsonrpc\":\"2.0\",\"id\":73}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c73\"},\"jsonrpc\":\"2.0\",\"id\":74}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c74\"},\"jsonrpc\":\"2.0\",\"id\":75}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c75\"},\"jsonrpc\":\"2.0\",\"id\":76}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c76\"},\"jsonrpc\":\"2.0\",\"id\":77}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c77\"},\"jsonrpc\":\"2.0\",\"id\":78}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c78\"},\"jsonrpc\":\"2.0\",\"id\":79}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c79\"},\"jsonrpc\":\"2.0\",\"id\":80}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c80\"},\"jsonrpc\":\"2.0\",\"id\":81}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c81\"},\"jsonrpc\":\"2.0\",\"id\":82}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c82\"},\"jsonrpc\":\"2.0\",\"id\":83}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c83\"},\"jsonrpc\":\"2.0\",\"id\":84}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c84\"},\"jsonrpc\":\"2.0\",\"id\":85}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c85\"},\"jsonrpc\":\"2.0\",\"id\":86}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c86\"},\"jsonrpc\":\"2.0\",\"id\":87}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c87\"},\"jsonrpc\":\"2.0\",\"id\":88}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c88\"},\"jsonrpc\":\"2.0\",\"id\":89}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c89\"},\"jsonrpc\":\"2.0\",\"id\":90}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c90\"},\"jsonrpc\":\"2.0\",\"id\":91}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c91\"},\"jsonrpc\":\"2.0\",\"id\":92}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c92\"},\"jsonrpc\":\"2.0\",\"id\":93}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c93\"},\"jsonrpc\":\"2.0\",\"id\":94}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c94\"},\"jsonrpc\":\"2.0\",\"id\":95}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c95\"},\"jsonrpc\":\"2.0\",\"id\":96}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c96\"},\"jsonrpc\":\"2.0\",\"id\":97}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c97\"},\"jsonrpc\":\"2.0\",\"id\":98}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c98\"},\"jsonrpc\":\"2.0\",\"id\":99}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c99\"},\"jsonrpc\":\"2.0\",\"id\":100}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c100\"},\"jsonrpc\":\"2.0\",\"id\":101}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c101\"},\"jsonrpc\":\"2.0\",\"id\":102}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c102\"},\"jsonrpc\":\"2.0\",\"id\":103}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c103\"},\"jsonrpc\":\"2.0\",\"id\":104}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c104\"},\"jsonrpc\":\"2.0\",\"id\":105}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c105\"},\"jsonrpc\":\"2.0\",\"id\":106}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c106\"},\"jsonrpc\":\"2.0\",\"id\":107}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c107\"},\"jsonrpc\":\"2.0\",\"id\":108}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c108\"},\"jsonrpc\":\"2.0\",\"id\":109}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c109\"},\"jsonrpc\":\"2.0\",\"id\":110}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c110\"},\"jsonrpc\":\"2.0\",\"id\":111}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c111\"},\"jsonrpc\":\"2.0\",\"id\":112}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c112\"},\"jsonrpc\":\"2.0\",\"id\":113}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c113\"},\"jsonrpc\":\"2.0\",\"id\":114}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c114\"},\"jsonrpc\":\"2.0\",\"id\":115}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c115\"},\"jsonrpc\":\"2.0\",\"id\":116}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c116\"},\"jsonrpc\":\"2.0\",\"id\":117}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c117\"},\"jsonrpc\":\"2.0\",\"id\":118}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c118\"},\"jsonrpc\":\"2.0\",\"id\":119}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c119\"},\"jsonrpc\":\"2.0\",\"id\":120}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c120\"},\"jsonrpc\":\"2.0\",\"id\":121}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c121\"},\"jsonrpc\":\"2.0\",\"id\":122}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c122\"},\"jsonrpc\":\"2.0\",\"id\":123}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c123\"},\"jsonrpc\":\"2.0\",\"id\":124}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c124\"},\"jsonrpc\":\"2.0\",\"id\":125}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c125\"},\"jsonrpc\":\"2.0\",\"id\":126}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c126\"},\"jsonrpc\":\"2.0\",\"id\":127}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c127\"},\"jsonrpc\":\"2.0\",\"id\":128}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c128\"},\"jsonrpc\":\"2.0\",\"id\":129}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c129\"},\"jsonrpc\":\"2.0\",\"id\":130}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c130\"},\"jsonrpc\":\"2.0\",\"id\":131}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c131\"},\"jsonrpc\":\"2.0\",\"id\":132}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c132\"},\"jsonrpc\":\"2.0\",\"id\":133}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c133\"},\"jsonrpc\":\"2.0\",\"id\":134}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c134\"},\"jsonrpc\":\"2.0\",\"id\":135}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c135\"},\"jsonrpc\":\"2.0\",\"id\":136}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c136\"},\"jsonrpc\":\"2.0\",\"id\":137}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c137\"},\"jsonrpc\":\"2.0\",\"id\":138}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c138\"},\"jsonrpc\":\"2.0\",\"id\":139}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c139\"},\"jsonrpc\":\"2.0\",\"id\":140}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c140\"},\"jsonrpc\":\"2.0\",\"id\":141}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c141\"},\"jsonrpc\":\"2.0\",\"id\":142}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c142\"},\"jsonrpc\":\"2.0\",\"id\":143}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c143\"},\"jsonrpc\":\"2.0\",\"id\":144}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c144\"},\"jsonrpc\":\"2.0\",\"id\":145}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c145\"},\"jsonrpc\":\"2.0\",\"id\":146}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c146\"},\"jsonrpc\":\"2.0\",\"id\":147}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c147\"},\"jsonrpc\":\"2.0\",\"id\":148}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c148\"},\"jsonrpc\":\"2.0\",\"id\":149}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c149\"},\"jsonrpc\":\"2.0\",\"id\":150}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c150\"},\"jsonrpc\":\"2.0\",\"id\":151}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c151\"},\"jsonrpc\":\"2.0\",\"id\":152}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c152\"},\"jsonrpc\":\"2.0\",\"id\":153}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c153\"},\"jsonrpc\":\"2.0\",\"id\":154}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c154\"},\"jsonrpc\":\"2.0\",\"id\":155}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c155\"},\"jsonrpc\":\"2.0\",\"id\":156}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c156\"},\"jsonrpc\":\"2.0\",\"id\":157}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c157\"},\"jsonrpc\":\"2.0\",\"id\":158}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c158\"},\"jsonrpc\":\"2.0\",\"id\":159}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c159\"},\"jsonrpc\":\"2.0\",\"id\":160}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c160\"},\"jsonrpc\":\"2.0\",\"id\":161}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c161\"},\"jsonrpc\":\"2.0\",\"id\":162}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c162\"},\"jsonrpc\":\"2.0\",\"id\":163}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c163\"},\"jsonrpc\":\"2.0\",\"id\":164}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c164\"},\"jsonrpc\":\"2.0\",\"id\":165}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c165\"},\"jsonrpc\":\"2.0\",\"id\":166}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c166\"},\"jsonrpc\":\"2.0\",\"id\":167}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c167\"},\"jsonrpc\":\"2.0\",\"id\":168}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c168\"},\"jsonrpc\":\"2.0\",\"id\":169}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c169\"},\"jsonrpc\":\"2.0\",\"id\":170}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c170\"},\"jsonrpc\":\"2.0\",\"id\":171}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c171\"},\"jsonrpc\":\"2.0\",\"id\":172}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c172\"},\"jsonrpc\":\"2.0\",\"id\":173}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c173\"},\"jsonrpc\":\"2.0\",\"id\":174}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c174\"},\"jsonrpc\":\"2.0\",\"id\":175}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c175\"},\"jsonrpc\":\"2.0\",\"id\":176}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c176\"},\"jsonrpc\":\"2.0\",\"id\":177}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c177\"},\"jsonrpc\":\"2.0\",\"id\":178}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c178\"},\"jsonrpc\":\"2.0\",\"id\":179}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c179\"},\"jsonrpc\":\"2.0\",\"id\":180}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c180\"},\"jsonrpc\":\"2.0\",\"id\":181}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c181\"},\"jsonrpc\":\"2.0\",\"id\":182}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c182\"},\"jsonrpc\":\"2.0\",\"id\":183}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c183\"},\"jsonrpc\":\"2.0\",\"id\":184}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c184\"},\"jsonrpc\":\"2.0\",\"id\":185}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c185\"},\"jsonrpc\":\"2.0\",\"id\":186}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c186\"},\"jsonrpc\":\"2.0\",\"id\":187}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c187\"},\"jsonrpc\":\"2.0\",\"id\":188}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c188\"},\"jsonrpc\":\"2.0\",\"id\":189}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c189\"},\"jsonrpc\":\"2.0\",\"id\":190}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c190\"},\"jsonrpc\":\"2.0\",\"id\":191}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c191\"},\"jsonrpc\":\"2.0\",\"id\":192}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c192\"},\"jsonrpc\":\"2.0\",\"id\":193}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c193\"},\"jsonrpc\":\"2.0\",\"id\":194}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c194\"},\"jsonrpc\":\"2.0\",\"id\":195}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c195\"},\"jsonrpc\":\"2.0\",\"id\":196}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c196\"},\"jsonrpc\":\"2.0\",\"id\":197}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c197\"},\"jsonrpc\":\"2.0\",\"id\":198}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c198\"},\"jsonrpc\":\"2.0\",\"id\":199}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c199\"},\"jsonrpc\":\"2.0\",\"id\":200}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c200\"},\"jsonrpc\":\"2.0\",\"id\":201}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c201\"},\"jsonrpc\":\"2.0\",\"id\":202}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c202\"},\"jsonrpc\":\"2.0\",\"id\":203}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c203\"},\"jsonrpc\":\"2.0\",\"id\":204}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c204\"},\"jsonrpc\":\"2.0\",\"id\":205}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c205\"},\"jsonrpc\":\"2.0\",\"id\":206}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c206\"},\"jsonrpc\":\"2.0\",\"id\":207}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c207\"},\"jsonrpc\":\"2.0\",\"id\":208}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c208\"},\"jsonrpc\":\"2.0\",\"id\":209}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c209\"},\"jsonrpc\":\"2.0\",\"id\":210}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c210\"},\"jsonrpc\":\"2.0\",\"id\":211}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c211\"},\"jsonrpc\":\"2.0\",\"id\":212}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c212\"},\"jsonrpc\":\"2.0\",\"id\":213}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c213\"},\"jsonrpc\":\"2.0\",\"id\":214}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c214\"},\"jsonrpc\":\"2.0\",\"id\":215}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c215\"},\"jsonrpc\":\"2.0\",\"id\":216}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c216\"},\"jsonrpc\":\"2.0\",\"id\":217}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c217\"},\"jsonrpc\":\"2.0\",\"id\":218}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c218\"},\"jsonrpc\":\"2.0\",\"id\":219}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c219\"},\"jsonrpc\":\"2.0\",\"id\":220}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c220\"},\"jsonrpc\":\"2.0\",\"id\":221}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c221\"},\"jsonrpc\":\"2.0\",\"id\":222}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c222\"},\"jsonrpc\":\"2.0\",\"id\":223}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c223\"},\"jsonrpc\":\"2.0\",\"id\":224}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c224\"},\"jsonrpc\":\"2.0\",\"id\":225}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c225\"},\"jsonrpc\":\"2.0\",\"id\":226}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c226\"},\"jsonrpc\":\"2.0\",\"id\":227}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c227\"},\"jsonrpc\":\"2.0\",\"id\":228}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c228\"},\"jsonrpc\":\"2.0\",\"id\":229}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c229\"},\"jsonrpc\":\"2.0\",\"id\":230}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c230\"},\"jsonrpc\":\"2.0\",\"id\":231}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c231\"},\"jsonrpc\":\"2.0\",\"id\":232}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c232\"},\"jsonrpc\":\"2.0\",\"id\":233}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c233\"},\"jsonrpc\":\"2.0\",\"id\":234}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c234\"},\"jsonrpc\":\"2.0\",\"id\":235}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c235\"},\"jsonrpc\":\"2.0\",\"id\":236}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c236\"},\"jsonrpc\":\"2.0\",\"id\":237}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c237\"},\"jsonrpc\":\"2.0\",\"id\":238}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c238\"},\"jsonrpc\":\"2.0\",\"id\":239}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c239\"},\"jsonrpc\":\"2.0\",\"id\":240}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c240\"},\"jsonrpc\":\"2.0\",\"id\":241}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c241\"},\"jsonrpc\":\"2.0\",\"id\":242}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c242\"},\"jsonrpc\":\"2.0\",\"id\":243}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c243\"},\"jsonrpc\":\"2.0\",\"id\":244}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c244\"},\"jsonrpc\":\"2.0\",\"id\":245}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c245\"},\"jsonrpc\":\"2.0\",\"id\":246}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c246\"},\"jsonrpc\":\"2.0\",\"id\":247}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c247\"},\"jsonrpc\":\"2.0\",\"id\":248}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c248\"},\"jsonrpc\":\"2.0\",\"id\":249}"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": "{\"method\":\"tools/list\",\"params\":{\"cursor\":\"c249\"},\"jsonrpc\":\"2.0\",\"id\":250}"
+    },
+    {
+      "method": "DELETE",
+      "path": "/mcp",
+      "headers": {
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-session-id": "probe-session-1",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": ""
+    }
+  ],
+  "expect": {
+    "tools": {},
+    "call": null,
+    "failures": {
+      "after_enter": null,
+      "after_list": "RuntimeError",
+      "after_call": null,
+      "at_exit": "RuntimeError"
+    },
+    "delete_seen": true
+  }
+}
