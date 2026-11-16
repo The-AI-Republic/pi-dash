@@ -93,6 +93,7 @@
 //!   decoded), `description_stripped` via Django's `strip_tags`
 //!   (entities verbatim). Both are computed, exactly as saved.
 
+pub mod capacity;
 pub mod chat;
 pub mod failure_effects;
 pub mod finalization;
