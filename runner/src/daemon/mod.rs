@@ -1,5 +1,8 @@
 mod activity_watchdog;
 pub mod drain_journal;
+pub mod engine_ops;
+pub(crate) mod engine_reconcile;
+pub mod execution;
 pub mod pidash_agent_ops;
 pub(crate) mod pidash_agent_reconcile;
 pub mod machine_control;
