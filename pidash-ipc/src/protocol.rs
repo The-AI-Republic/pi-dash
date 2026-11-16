@@ -1013,6 +1013,7 @@ mod tests {
                 connected: true,
                 uptime_secs: 42,
                 update: None,
+                run_queue: None,
             },
             runners: vec![RunnerStatusSnapshot {
                 runner_id: Uuid::new_v4(),
@@ -1158,6 +1159,7 @@ mod tests {
                 connected: true,
                 uptime_secs: 1,
                 update: None,
+                run_queue: None,
             },
             runners: vec![RunnerStatusSnapshot {
                 runner_id: Uuid::new_v4(),
@@ -1244,6 +1246,7 @@ mod tests {
                 connected: false,
                 uptime_secs: 0,
                 update: None,
+                run_queue: None,
             },
             runners: vec![
                 RunnerStatusSnapshot {
@@ -1583,7 +1586,7 @@ mod tests {
 
     #[test]
     fn v6_engine_requests_have_the_documented_wire_shape() {
-        assert_eq!(IPC_VERSION, 6);
+        assert_eq!(IPC_VERSION, 7);
         assert_eq!(
             serde_json::to_value(Request::EngineModelToken).unwrap(),
             serde_json::json!({"method": "engine_model_token"})
