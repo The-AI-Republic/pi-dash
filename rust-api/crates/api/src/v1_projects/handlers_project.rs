@@ -834,6 +834,7 @@ const READ_FIELD_ORDER: &[&str] = &[
     "agent_ticking_enabled",
     "default_agent_executor",
     "dedicated_runner_lost_action",
+    "settings",
     "created_by",
     "updated_by",
     "workspace",
@@ -842,7 +843,6 @@ const READ_FIELD_ORDER: &[&str] = &[
     "cover_image_asset",
     "estimate",
     "default_state",
-    "settings",
 ];
 
 /// Annotation values for one project row. `sort_order` is `Some` only on
@@ -1172,6 +1172,12 @@ pub async fn render_project(
         "dedicated_runner_lost_action",
         Value::String(row_string(row, "dedicated_runner_lost_action")?),
     );
+    // NEWPIDASH-278: validated settings with defaults filled in.
+    let settings_raw: Value = row.try_get("", "settings").map_err(|_| Denial::ServerError)?;
+    let settings = pidash_services::domain::project_settings::parse_row_settings(&settings_raw)
+        .map(|parsed| pidash_services::domain::project_settings::render(&parsed.settings))
+        .map_err(|_| Denial::ServerError)?;
+    put(&mut map, "settings", settings);
     put(
         &mut map,
         "created_by",
@@ -1207,14 +1213,6 @@ pub async fn render_project(
         "default_state",
         render_uuid_opt(&row_uuid_opt(row, "default_state_id")?),
     );
-    // NEWPIDASH-278: validated settings with defaults filled in.
-    let settings_raw: Value = row
-        .try_get("", "settings")
-        .map_err(|_| Denial::ServerError)?;
-    let settings = pidash_services::domain::project_settings::parse_row_settings(&settings_raw)
-        .map(|parsed| pidash_services::domain::project_settings::render(&parsed.settings))
-        .map_err(|_| Denial::ServerError)?;
-    put(&mut map, "settings", settings);
 
     // `BaseSerializer.to_representation` expand (`serializers/base.py:71+`):
     // gated on `expand in self.fields` — the fields-filtered serializer
@@ -4394,7 +4392,7 @@ mod tests {
             &["created_at", "updated_at", "deleted_at", "name",]
         );
         assert_eq!(
-            &READ_FIELD_ORDER[READ_FIELD_ORDER.len() - 9..],
+            &READ_FIELD_ORDER[READ_FIELD_ORDER.len() - 8..],
             &[
                 "created_by",
                 "updated_by",
@@ -4404,9 +4402,16 @@ mod tests {
                 "cover_image_asset",
                 "estimate",
                 "default_state",
-                "settings",
             ]
         );
+        // `settings` (NEWPIDASH-278): Django renders it after
+        // `default_work_type` (which the Rust render does not carry);
+        // here it follows `dedicated_runner_lost_action`.
+        let settings_at = READ_FIELD_ORDER
+            .iter()
+            .position(|key| *key == "settings")
+            .expect("settings");
+        assert_eq!(READ_FIELD_ORDER[settings_at - 1], "dedicated_runner_lost_action");
         assert_eq!(ALLOWED_SUMMARY_FIELDS.len(), 8);
     }
 

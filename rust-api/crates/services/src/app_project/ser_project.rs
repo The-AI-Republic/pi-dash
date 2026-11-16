@@ -1001,6 +1001,7 @@ pub const PROJECT_KEY_ORDER: &[&str] = &[
     "agent_ticking_enabled",
     "default_agent_executor",
     "default_work_type",
+    "settings",
     "created_by",
     "updated_by",
     "workspace",
@@ -1010,7 +1011,6 @@ pub const PROJECT_KEY_ORDER: &[&str] = &[
     "estimate",
     "default_state",
     "dedicated_runner_lost_action",
-    "settings",
 ];
 
 /// `ProjectListSerializer` wire order (`:136-168` over `fields =
@@ -1065,6 +1065,7 @@ pub const PROJECT_LIST_KEY_ORDER: &[&str] = &[
     "agent_ticking_enabled",
     "default_agent_executor",
     "default_work_type",
+    "settings",
     "created_by",
     "updated_by",
     "workspace",
@@ -1074,7 +1075,6 @@ pub const PROJECT_LIST_KEY_ORDER: &[&str] = &[
     "estimate",
     "default_state",
     "dedicated_runner_lost_action",
-    "settings",
 ];
 
 /// `ProjectLiteSerializer.Meta.fields` (`:123-132`), in list order (also
@@ -1141,6 +1141,7 @@ pub const PROJECT_DETAIL_KEY_ORDER: &[&str] = &[
     "agent_ticking_enabled",
     "default_agent_executor",
     "default_work_type",
+    "settings",
     "created_by",
     "updated_by",
     "workspace",
@@ -1148,7 +1149,6 @@ pub const PROJECT_DETAIL_KEY_ORDER: &[&str] = &[
     "estimate",
     "default_state",
     "dedicated_runner_lost_action",
-    "settings",
 ];
 
 /// `DeployBoardSerializer.Meta.read_only_fields` (`:266`).
@@ -1281,6 +1281,10 @@ pub struct ProjectRead {
     pub default_agent_executor: String,
     /// `CharField(max_length=32, blank=True)` (PDASHOSS01-234).
     pub default_work_type: String,
+    /// Typed settings bag (NEWPIDASH-278): `projects.settings` with
+    /// defaults filled in (`__all__` renders it after
+    /// `default_work_type`).
+    pub settings: Value,
     /// Audit FK (`PrimaryKeyRelatedField`).
     pub created_by: Option<String>,
     /// Audit FK (`PrimaryKeyRelatedField`).
@@ -1300,9 +1304,6 @@ pub struct ProjectRead {
     /// Dedicated-runner lost-runner handling (`__all__` last field).
     /// Non-Option per Django (a choice with a default).
     pub dedicated_runner_lost_action: String,
-    /// Typed settings bag (NEWPIDASH-278): `projects.settings` with
-    /// defaults filled in. `__all__` renders it after the model order.
-    pub settings: Value,
 }
 
 /// `ProjectListSerializer` read shape (`:136-168`,
@@ -1417,6 +1418,10 @@ pub struct ProjectListRead {
     pub default_agent_executor: String,
     /// `CharField(max_length=32, blank=True)` (PDASHOSS01-234).
     pub default_work_type: String,
+    /// Typed settings bag (NEWPIDASH-278): `projects.settings` with
+    /// defaults filled in (`__all__` renders it after
+    /// `default_work_type`).
+    pub settings: Value,
     /// Audit FK.
     pub created_by: Option<String>,
     /// Audit FK.
@@ -1435,9 +1440,6 @@ pub struct ProjectListRead {
     pub default_state: Option<String>,
     /// Dedicated-runner lost-runner handling (`__all__` last field).
     pub dedicated_runner_lost_action: String,
-    /// Typed settings bag (NEWPIDASH-278): `projects.settings` with
-    /// defaults filled in. `__all__` renders it after the model order.
-    pub settings: Value,
 }
 
 /// `ProjectLiteSerializer` read shape (`:120-133`,
@@ -1569,6 +1571,10 @@ pub struct ProjectDetailRead {
     pub default_agent_executor: String,
     /// `CharField(max_length=32, blank=True)` (PDASHOSS01-234).
     pub default_work_type: String,
+    /// Typed settings bag (NEWPIDASH-278): `projects.settings` with
+    /// defaults filled in (`__all__` renders it after
+    /// `default_work_type`).
+    pub settings: Value,
     /// Audit FK.
     pub created_by: Option<String>,
     /// Audit FK.
@@ -1583,9 +1589,6 @@ pub struct ProjectDetailRead {
     pub default_state: Option<String>,
     /// Dedicated-runner lost-runner handling (`__all__` last field).
     pub dedicated_runner_lost_action: String,
-    /// Typed settings bag (NEWPIDASH-278): `projects.settings` with
-    /// defaults filled in. `__all__` renders it after the model order.
-    pub settings: Value,
 }
 
 /// `DeployBoardSerializer` read shape (`:259-266`,
