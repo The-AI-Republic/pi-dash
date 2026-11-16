@@ -1411,6 +1411,8 @@ pub struct RedeliverAssignFacts {
     pub work_item_id: Option<Uuid>,
     pub prompt: String,
     pub run_config: Map<String, Value>,
+    pub assignment_token: Option<Uuid>,
+    pub assignment_protocol: i16,
 }
 
 /// Pick the session-open redeliver payload (`:431-451`): the
@@ -1424,12 +1426,18 @@ pub fn plan_redeliver(facts: &RedeliverFacts) -> Option<Map<String, Value>> {
     }
     let assign = facts.assign_run.as_ref()?;
     let work_item_id = assign.work_item_id.map(|id| id.to_string());
-    Some(envelopes::build_assign_msg(
+    let mut msg = envelopes::build_assign_msg(
         &assign.run_id.to_string(),
         work_item_id.as_deref(),
         &assign.prompt,
         &assign.run_config,
-    ))
+    );
+    // T1: redelivery preserves the attempt token/protocol (never mints).
+    if let Some(tok) = assign.assignment_token {
+        msg.insert("assignment_token".to_string(), Value::String(tok.to_string()));
+    }
+    msg.insert("assignment_protocol".to_string(), Value::from(assign.assignment_protocol));
+    Some(msg)
 }
 
 /// Resume-ack run lookup (`:482`, `resume_ack_live.sql[0]`):
@@ -3063,6 +3071,8 @@ mod tests {
                     ),
                     prompt: "do the thing".to_string(),
                     run_config,
+                    assignment_token: None,
+                    assignment_protocol: 0,
                 }),
             })
             .map(Value::Object),

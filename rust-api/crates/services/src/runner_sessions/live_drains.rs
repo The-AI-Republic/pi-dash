@@ -283,16 +283,16 @@ async fn mint_attempt(
         .await
         .map_err(DrainError::from)
         .unwrap_or_default();
-    // Active sessions newest-first; take the first with a capabilities field
-    // that advertises machine_run_queue_v1. Use capacity helper.
-    let mut protocol = crate::runner_runs::capacity::PROTOCOL_LEGACY;
+    // Centralized helper: first active session with queue capability wins,
+    // otherwise legacy. Fresh UUID minted unconditionally.
+    let mut caps_value = serde_json::json!([]);
     for session in caps {
         if crate::runner_runs::capacity::supports_machine_queue(&session.capabilities) {
-            protocol = crate::runner_runs::capacity::PROTOCOL_MACHINE_QUEUE;
+            caps_value = session.capabilities.clone();
             break;
         }
     }
-    Ok((Uuid::new_v4(), protocol))
+    Ok(crate::runner_runs::capacity::mint_for_capabilities(&caps_value))
 }
 
 async fn write_assignment(

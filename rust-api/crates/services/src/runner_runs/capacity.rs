@@ -47,6 +47,18 @@ pub fn protocol_for_capabilities(capabilities: &Value) -> i16 {
     }
 }
 
+/// Mint a fresh attempt token (UUIDv4) for a new assignment.
+/// Centralized helper for pod drain, dedicated/direct, requeue/reassignment.
+pub fn mint_attempt_token() -> Uuid {
+    Uuid::new_v4()
+}
+
+/// Create a fresh attempt (token + protocol) from session capabilities.
+/// All new assignments call this; redelivery preserves the stored token instead.
+pub fn mint_for_capabilities(capabilities: &Value) -> (Uuid, i16) {
+    (mint_attempt_token(), protocol_for_capabilities(capabilities))
+}
+
 /// u64 revision or None when invalid. Rejects bools, floats,
 /// negatives, overflow and non-ints.
 pub fn parse_revision(value: &Value) -> Option<u64> {
