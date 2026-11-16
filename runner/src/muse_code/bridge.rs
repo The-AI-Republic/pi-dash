@@ -40,19 +40,13 @@ use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 
 use crate::agent::{
-    AgentProcessHandle, BridgeEvent, ExitSnapshot, RunPayload, STDERR_RING_LINES, StderrBuffer,
-    StderrRing, StderrSnapshot,
+    AgentProcessHandle, BridgeEvent, ENGINE_STARTUP_TIMEOUT, ExitSnapshot, RunPayload,
+    STDERR_RING_LINES, StderrBuffer, StderrRing, StderrSnapshot,
 };
 use crate::cloud::protocol::{ApprovalDecision, FailureReason};
 use crate::muse_code::process::{MuseProcess, PromptFile};
 use crate::muse_code::schema::{Record, StreamEvent};
 use crate::util::shell::login_shell_command;
-
-/// How long to wait for `muse exec`'s `run.lifecycle.started` record before
-/// giving up on the run setup. Generous: the CLI can take several seconds to
-/// authenticate against the Meta Model API and emit its first event when
-/// starting cold.
-const INIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Record that marks the run as started (preceded by bookkeeping records:
 /// `runtime.command.accepted`, `session.run.linked`, `run.model.configured`,
@@ -224,7 +218,7 @@ impl Bridge {
             .proc
             .as_mut()
             .context("muse exec process not spawned")?;
-        let deadline = tokio::time::Instant::now() + INIT_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + ENGINE_STARTUP_TIMEOUT;
         let mut session_id: Option<String> = None;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());

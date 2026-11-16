@@ -28,6 +28,7 @@ fn setup(root: &Path) -> Paths {
         data_dir: root.join("data"),
         runtime_dir: root.join("runtime"),
         ipc_socket: None,
+        machine_context_dir: root.join("config"),
     };
     paths.ensure().unwrap();
     let config: Config = serde_json::from_value(serde_json::json!({
@@ -93,6 +94,7 @@ fn configures_every_supported_protocol_without_changing_other_runner_fields() {
             AgentKind::OpenClaw => expected.openclaw.binary = binary,
             AgentKind::Grok => expected.grok.binary = binary,
             AgentKind::MuseCode => expected.muse_code.binary = binary,
+            AgentKind::Engine => unreachable!("the engine is not an agent package"),
         }
         package.apply_to_runner(&mut actual).unwrap();
         assert_eq!(

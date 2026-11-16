@@ -1,0 +1,32 @@
+-- queries/archive_cte.sql
+-- Archive / unarchive recursive CTE record: DB before/after over a 3-level hierarchy.
+-- Sources: app/views/page/base.py:59-72 (CTE), :308-366 (archive/unarchive).
+-- Ported-from: 01a93e17216faea7bfc156b0f864cbbe420d1c52.
+--
+-- CTE verbatim (:61-68):
+--   WITH RECURSIVE descendants AS (
+--       SELECT id FROM pages WHERE id = %s
+--       UNION ALL
+--       SELECT pages.id FROM pages, descendants WHERE pages.parent_id = descendants.id
+--   )
+--   UPDATE pages SET archived_at = %s WHERE id IN (SELECT id FROM descendants);
+-- Params: [page_id, archived_at] (:72). archived_at = datetime.now() on
+-- archive (:335), None on unarchive (:364).
+--
+-- BEFORE (3-level hierarchy, all archived_at NULL):
+--   root (id=R, parent NULL) | child (id=C, parent R) | grandchild (id=G, parent C)
+-- ARCHIVE root (POST .../pages/R/archive/):
+--   favorites deleted first (:328-333: entity_type='page', entity_identifier=R,
+--     project_id, workspace__slug); then CTE with archived_at=<now> (:335).
+-- AFTER: R.archived_at=<now1>, C.archived_at=<now1>, G.archived_at=<now1>.
+-- Response: {"archived_at": str(datetime.now())} 200 (:337) — SECOND now()
+--   call, so the body timestamp may differ from the DB value by microseconds
+--   (double-now behaviour — PORT).
+-- UNARCHIVE child (DELETE .../pages/C/archive/) when root still archived:
+--   detach-when-parent-archived (:360-362): C.parent_id non-null and
+--   parent.archived_at non-null -> C.parent=None + save(update_fields=['parent'])
+--   (save() recomputes description_stripped — PORT); then CTE with NULL (:364)
+--   clears C and G only. AFTER: R.archived_at=<now1> (still), C.archived_at=NULL,
+--   C.parent_id=NULL, G.archived_at=NULL.
+-- Guard (both): owner-or-admin — member with role<=15 who is NOT the owner is
+--   denied (:317-326 archive, :348-357 unarchive); unarchive returns 204 (:366).

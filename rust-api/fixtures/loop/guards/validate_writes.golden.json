@@ -1,0 +1,305 @@
+{
+ "create_vectors": [
+  {
+   "input": {
+    "name": "New",
+    "prompt": "p",
+    "public_name": "NP",
+    "rrule": "FREQ=DAILY;BYHOUR=2",
+    "slug": "new-job"
+   },
+   "output": {
+    "cleaned": {
+     "name": "New",
+     "prompt": "p",
+     "public_name": "NP",
+     "rrule": "FREQ=DAILY;BYHOUR=2",
+     "slug": "new-job"
+    },
+    "ok": true
+   }
+  },
+  {
+   "input": {
+    "name": "n",
+    "prompt": "p",
+    "public_name": "n",
+    "rrule": "FREQ=DAILY",
+    "slug": "Bad Slug"
+   },
+   "output": {
+    "body": {
+     "error": "invalid_slug"
+    },
+    "ok": false,
+    "status": 400
+   }
+  },
+  {
+   "input": {
+    "name": "n",
+    "prompt": "p",
+    "public_name": "n",
+    "rrule": "FREQ=DAILY",
+    "slug": "UPPER"
+   },
+   "output": {
+    "body": {
+     "error": "invalid_slug"
+    },
+    "ok": false,
+    "status": 400
+   }
+  },
+  {
+   "input": {
+    "min_role": 99,
+    "name": "n",
+    "prompt": "p",
+    "public_name": "n",
+    "rrule": "FREQ=DAILY",
+    "slug": "ok"
+   },
+   "output": {
+    "body": {
+     "error": "invalid_min_role"
+    },
+    "ok": false,
+    "status": 400
+   }
+  },
+  {
+   "input": {
+    "min_role": 15,
+    "name": "n",
+    "prompt": "p",
+    "public_name": "n",
+    "rrule": "FREQ=DAILY",
+    "slug": "ok"
+   },
+   "output": {
+    "cleaned": {
+     "min_role": 15,
+     "name": "n",
+     "prompt": "p",
+     "public_name": "n",
+     "rrule": "FREQ=DAILY",
+     "slug": "ok"
+    },
+    "ok": true
+   }
+  },
+  {
+   "input": {
+    "name": "F",
+    "prompt": "p",
+    "public_name": "F",
+    "rrule": "FREQ=MINUTELY",
+    "slug": "fast"
+   },
+   "output": {
+    "body": {
+     "error": "rrule_too_frequent"
+    },
+    "ok": false,
+    "status": 400
+   }
+  },
+  {
+   "input": {
+    "name": "F",
+    "prompt": "p",
+    "public_name": "F",
+    "rrule": "FREQ=SECONDLY",
+    "slug": "sec"
+   },
+   "output": {
+    "body": {
+     "detail": "FREQ=SECONDLY is not allowed (allowed: ['DAILY', 'HOURLY', 'MINUTELY', 'MONTHLY', 'WEEKLY', 'YEARLY'])",
+     "error": "invalid_rrule"
+    },
+    "ok": false,
+    "status": 400
+   }
+  },
+  {
+   "input": {
+    "name": "F",
+    "prompt": "p",
+    "public_name": "F",
+    "rrule": "",
+    "slug": "empty"
+   },
+   "output": {
+    "body": {
+     "detail": "rrule is required",
+     "error": "invalid_rrule"
+    },
+    "ok": false,
+    "status": 400
+   }
+  },
+  {
+   "input": {
+    "name": "F",
+    "prompt": "p",
+    "public_name": "F",
+    "rrule": "FREQ=DAILY;BYHOUR=xx",
+    "slug": "bad"
+   },
+   "output": {
+    "body": {
+     "detail": "invalid RRULE: invalid 'BYHOUR': XX",
+     "error": "invalid_rrule"
+    },
+    "ok": false,
+    "status": 400
+   }
+  },
+  {
+   "input": {
+    "name": "F",
+    "prompt": "p",
+    "public_name": "F",
+    "rrule": "BYHOUR=3",
+    "slug": "nofreq"
+   },
+   "output": {
+    "body": {
+     "detail": "invalid RRULE: rrule.__init__() missing 1 required positional argument: 'freq'",
+     "error": "invalid_rrule"
+    },
+    "ok": false,
+    "status": 400
+   }
+  },
+  {
+   "input": {
+    "slug": "only-slug"
+   },
+   "output": {
+    "body": {
+     "detail": [
+      "name",
+      "prompt",
+      "public_name",
+      "rrule"
+     ],
+     "error": "missing_fields"
+    },
+    "ok": false,
+    "status": 400
+   }
+  },
+  {
+   "input": {
+    "bogus": 1,
+    "id": "x",
+    "is_builtin": false,
+    "name": "n",
+    "prompt": "p",
+    "public_name": "n",
+    "rrule": "FREQ=DAILY",
+    "slug": "ign"
+   },
+   "output": {
+    "cleaned": {
+     "name": "n",
+     "prompt": "p",
+     "public_name": "n",
+     "rrule": "FREQ=DAILY",
+     "slug": "ign"
+    },
+    "ok": true
+   }
+  },
+  {
+   "input": {
+    "min_role": "abc",
+    "name": "n",
+    "prompt": "p",
+    "public_name": "n",
+    "rrule": "FREQ=DAILY",
+    "slug": "m"
+   },
+   "output": {
+    "note": "BUG-LOOP-1: int() at admin_views.py:82 is unguarded; DRF returns 500. Port as-is.",
+    "ok": false,
+    "raises": "ValueError: invalid literal for int() with base 10: 'abc'"
+   }
+  },
+  {
+   "input": {
+    "min_role": "15",
+    "name": "n",
+    "prompt": "p",
+    "public_name": "n",
+    "rrule": "FREQ=DAILY",
+    "slug": "m"
+   },
+   "output": {
+    "note": "numeric strings pass and stay strings in cleaned (no coercion).",
+    "ok": true
+   }
+  }
+ ],
+ "method": "Ran _validate_writes() under settings.test (no DB). rrule branch runs the real validate_rrule_string (dateutil).",
+ "notes": [
+  "unknown/read-only keys dropped (:75-78); missing_fields detail sorted (:103); admin POST defaults dtstart=now (:121-122)."
+ ],
+ "partial_vectors": [
+  {
+   "input": {
+    "enabled": false,
+    "is_builtin": false
+   },
+   "output": {
+    "cleaned": {
+     "enabled": false
+    },
+    "ok": true
+   }
+  },
+  {
+   "input": {
+    "enabled": "x"
+   },
+   "output": {
+    "cleaned": {
+     "enabled": "x"
+    },
+    "ok": true
+   }
+  },
+  {
+   "input": {
+    "min_role": 5
+   },
+   "output": {
+    "cleaned": {
+     "min_role": 5
+    },
+    "ok": true
+   }
+  },
+  {
+   "input": {},
+   "output": {
+    "cleaned": {},
+    "ok": true
+   }
+  },
+  {
+   "input": {
+    "rrule": "FREQ=HOURLY"
+   },
+   "output": {
+    "cleaned": {
+     "rrule": "FREQ=HOURLY"
+    },
+    "ok": true
+   }
+  }
+ ],
+ "source": "apps/api/pi_dash/loop/admin_views.py:27-40 (_SLUG_RE/_VALID_ROLES/_WRITABLE), 62-69 (_hourly_floor_ok), 72-105 (_validate_writes); rrule grammar bgtasks/_rrule.py:218-263"
+}

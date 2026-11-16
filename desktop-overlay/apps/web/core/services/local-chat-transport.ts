@@ -30,10 +30,15 @@
  * `chat_message_completed`.
  *
  * Registered desktop-only via [`registerLocalChatTransport`], called from the
- * overlay boot seam. The shared cloud web app never imports this module.
+ * overlay boot seam, behind a [`RoutingChatTransport`]: only the "This
+ * computer" contact (the built-in engine of this computer's daemon) is served
+ * locally; every other runner — an own-agent runner here, any runner or engine
+ * on another computer — keeps the cloud transport (design §12.1,
+ * PIDESKAPP-62). The shared cloud web app never imports this module.
  */
 
 import {
+  getChatTransport,
   getRunnerDetailFetcher,
   setChatTransport,
   setRunnerDetailFetcher,
@@ -52,9 +57,17 @@ import type {
   TApprovalDecision,
   TApprovalMode,
 } from "@pi-dash/types";
-import { ensureChatRuntime, getAgentAccount, isDesktop } from "@/services/agent-runtime";
+import {
+  ensureChatRuntime,
+  getAgentAccount,
+  getModelTopUpUrl,
+  isDesktop,
+  refreshModelCredential,
+} from "@/services/agent-runtime";
 
-/** Synthetic runner id for the bundled built-in engine (see the picker seam). */
+/** Synthetic runner id of the "This computer" contact: this computer's
+ * built-in engine, reached over the daemon's local socket (see the picker
+ * seam). */
 export const BUILTIN_RUNNER_ID = "pidash-builtin";
 
 /** Tauri event carrying one streamed `Response::Chat*` frame (see `chat.rs`). */
@@ -146,6 +159,23 @@ interface FrameClosed {
   closed_at: string;
 }
 
+/**
+ * `chat_failed` codes the daemon sets when the model gateway refuses a request
+ * outright (`runner/src/ipc/chat.rs`). It stops the turn on the first refusal;
+ * `detail` is the gateway's own text.
+ */
+const MODEL_CREDIT_EXHAUSTED = "model_credit_exhausted";
+const MODEL_AUTH_FAILED = "model_auth_failed";
+
+const SIGN_IN_AGAIN =
+  "The model gateway did not accept this sign-in. Sign out and sign in again, then resend your message.";
+
+/** What the transcript says when a turn ends because the account has no credit. */
+function creditNote(detail: string | undefined, topUpUrl: string): string {
+  const text = detail?.trim() || "Your model credit has run out.";
+  return topUpUrl ? `${text}\nAdd credit: ${topUpUrl}` : text;
+}
+
 /** The chat-session id a frame belongs to, for routing to the right stream. */
 function frameSessionId(frame: ChatFrame): string {
   return frame.data.chat_session_id;
@@ -186,18 +216,35 @@ export interface TauriBridge {
   /** The signed-in account id that scopes local history. */
   getAccount(): string;
   /**
-   * Make the bundled daemon ready to serve this chat: enrol the machine if
-   * needed, write the engine config and model credential, and start the
-   * daemon. Without it a chat opened straight after sign-in has nothing to
-   * talk to, and the send fails at "connecting to managed daemon".
+   * Make this computer's daemon ready to serve the chat: set it up when there
+   * is none (the user is asked first), and renew the engine's sign-in when
+   * that may be done silently. Rejects with the reason when it is not ready.
    */
   ensureRuntime(): Promise<void>;
   /**
-   * Workspace slug. The daemon runs per workspace and binds its control
-   * socket under that workspace's data dir, so every chat command carries the
-   * slug — without it the host resolves a socket nothing is listening on.
+   * Get the engine a working model credential after the gateway refused one.
+   * The daemon owns model tokens; the app can only renew the engine sign-in.
+   * Rejects when that cannot be done without the user.
    */
-  workspaceSlug(): string;
+  refreshModelCredential(): Promise<void>;
+  /** Where the user adds model credit; empty when the server names no place. */
+  topUpUrl(): string;
+}
+
+/** A turn in flight: what was asked, so it can be submitted once more. */
+interface ActiveTurn {
+  /** The daemon message id of the current submission. */
+  messageId: string;
+  content: string;
+  /** Set once the turn has been resubmitted with a new model credential. */
+  authRetried: boolean;
+  /** Set when the user stopped the turn; it is not submitted again. */
+  stopped?: boolean;
+}
+
+interface FrameSubscriber {
+  onFrame(frame: ChatFrame): void;
+  onError(error: Error): void;
 }
 
 /**
@@ -369,49 +416,139 @@ export class LocalChatTransport implements ChatTransport {
   }
 
   /**
-   * Turns in flight, as session id → the daemon message id of the turn. The
-   * local store has no notion of an active turn, and `chat_send` resolves as
-   * soon as the turn is submitted, so without this the composer re-enabled
-   * mid-turn and a second send cut the first one off. Set on send, cleared by
-   * the turn's terminal frame or a transport error. In-memory: after a webview
-   * reload the host's own refusal of an overlapping `chat_send` is the backstop.
+   * Turns in flight, by session id. The local store has no notion of an active
+   * turn, and `chat_send` resolves as soon as the turn is submitted, so without
+   * this the composer re-enabled mid-turn and a second send cut the first one
+   * off. Set on send, cleared by the turn's terminal frame or a transport
+   * error. In-memory: after a webview reload the host's own refusal of an
+   * overlapping `chat_send` is the backstop.
    */
-  private readonly activeTurns = new Map<string, string>();
-  private turnWatchStarted = false;
+  private readonly activeTurns = new Map<string, ActiveTurn>();
+  private readonly subscribers = new Map<string, Set<FrameSubscriber>>();
+  private listening = false;
 
   /**
-   * Listen for turn ends for as long as the transport lives, not just while a
+   * Listen to the host for as long as the transport lives, not just while a
    * session is on screen: `subscribeChatEvents` unsubscribes when the user
    * switches session, and a turn that finishes meanwhile must still release
-   * its session.
+   * its session — or be retried, or leave its failure in the transcript.
    */
-  private watchTurnEnds(): void {
-    if (this.turnWatchStarted) return;
-    this.turnWatchStarted = true;
-    void this.bridge.listen<ChatFrame>(CHAT_FRAME_EVENT, (frame) => {
-      if (isTerminalFrame(frame)) this.activeTurns.delete(frameSessionId(frame));
-    });
-    void this.bridge.listen<{ chat_session_id: string }>(CHAT_ERROR_EVENT, (payload) => {
+  private listenToHost(): void {
+    if (this.listening) return;
+    this.listening = true;
+    void this.bridge.listen<ChatFrame>(CHAT_FRAME_EVENT, (frame) => this.routeFrame(frame));
+    void this.bridge.listen<{ chat_session_id: string; message: string }>(CHAT_ERROR_EVENT, (payload) => {
       this.activeTurns.delete(payload.chat_session_id);
+      const error = new Error(payload.message);
+      for (const subscriber of this.subscribers.get(payload.chat_session_id) ?? []) subscriber.onError(error);
     });
+  }
+
+  private deliver(frame: ChatFrame): void {
+    for (const subscriber of this.subscribers.get(frameSessionId(frame)) ?? []) subscriber.onFrame(frame);
+  }
+
+  private routeFrame(frame: ChatFrame): void {
+    const sessionId = frameSessionId(frame);
+    const refusal = frame.result === "chat_failed" ? frame.data : null;
+    if (refusal?.code === MODEL_AUTH_FAILED) {
+      const turn = this.activeTurns.get(sessionId);
+      if (turn && !turn.authRetried && !turn.stopped) {
+        // Still the same turn as far as the page is concerned: it stays busy
+        // and hears nothing unless the second attempt fails too.
+        turn.authRetried = true;
+        void this.retryWithNewCredential(sessionId, turn, frame);
+        return;
+      }
+    }
+    // Release the session before the page hears about the turn's end: it
+    // refetches sessions on that event and must not read a stale turn.
+    if (isTerminalFrame(frame)) this.activeTurns.delete(sessionId);
+    if (refusal?.code === MODEL_CREDIT_EXHAUSTED) {
+      void this.failWithNote(frame, creditNote(refusal.detail, this.bridge.topUpUrl()));
+    } else if (refusal?.code === MODEL_AUTH_FAILED) {
+      void this.failWithNote(frame, SIGN_IN_AGAIN);
+    } else {
+      this.deliver(frame);
+    }
+  }
+
+  /**
+   * Put `note` in the transcript, then let the page hear that the turn failed.
+   * In that order because the page refetches history on the failure event, and
+   * history is the only place it reads the reason from.
+   */
+  private async failWithNote(frame: ChatFrame, note: string): Promise<void> {
+    await this.bridge
+      .invoke<StoredEvent>("chat_append_event", {
+        account: this.bridge.getAccount(),
+        sessionId: frameSessionId(frame),
+        event: { role: "system", content: note },
+      })
+      .catch(() => {});
+    this.deliver(frame);
+  }
+
+  /**
+   * The gateway refused the engine's credential: mint a new one and submit the
+   * turn again, once. The user's message is already in history. If no new
+   * credential can be had, the turn ends with the reason and a request to sign
+   * in — in the transcript.
+   */
+  private async retryWithNewCredential(sessionId: string, turn: ActiveTurn, refused: ChatFrame): Promise<void> {
+    let minted = false;
+    try {
+      await this.bridge.refreshModelCredential();
+      minted = true;
+      // Closed, or failed over the transport, while the credential was minted.
+      if (this.activeTurns.get(sessionId) !== turn) return;
+      if (turn.stopped) {
+        // Stopped while the credential was minted: the daemon had no turn to
+        // cancel, so end it here instead of starting it over.
+        this.activeTurns.delete(sessionId);
+        this.deliver(refused);
+        return;
+      }
+      const session = await this.bridge.invoke<StoredSession | null>("chat_get_session", {
+        account: this.bridge.getAccount(),
+        sessionId,
+      });
+      turn.messageId = crypto.randomUUID();
+      await this.submitToDaemon(sessionId, turn.messageId, turn.content, session);
+    } catch (error) {
+      if (this.activeTurns.get(sessionId) !== turn) return;
+      this.activeTurns.delete(sessionId);
+      const reason = error instanceof Error ? error.message : "";
+      // Without a new credential the refused one is all there is, so the way
+      // out is to sign in, whatever kept the new one from being minted.
+      const note = minted ? reason || SIGN_IN_AGAIN : [reason, SIGN_IN_AGAIN].filter(Boolean).join("\n");
+      await this.failWithNote(refused, note);
+    }
   }
 
   private toChatSession(s: StoredSession, account: string): IAgentChatSession {
-    return storedSessionToChatSession(s, account, this.activeTurns.get(s.id) ?? null);
+    return storedSessionToChatSession(s, account, this.activeTurns.get(s.id)?.messageId ?? null);
   }
 
-  // No `runner` selector is sent with any chat request. The daemon's selector
-  // is a *runner name* from its own config (`resolve_runner`, runner/src/ipc/
-  // server.rs); the id this transport knows is the synthetic route id
-  // `pidash-builtin`, which no daemon is configured under — passing it fails
-  // every request with `no runner named "pidash-builtin"`. Omitting it lets
-  // the daemon resolve its single managed runner, which is what the desktop
-  // bundle always hosts.
+  // No `runner` selector is sent with any chat request: local chat runs on the
+  // daemon's machine-level engine profile with an absolute chat folder, not
+  // on a project's runner (design §12.1, PO-8). The id this transport knows is
+  // the synthetic route id `pidash-builtin`, which is no daemon runner name.
 
   private account(): string {
     const account = this.bridge.getAccount();
     if (!account) throw new Error("Local chat requires a signed-in account.");
     return account;
+  }
+
+  /** Whether `sessionId` is a local chat on this computer. */
+  async hasSession(sessionId: string): Promise<boolean> {
+    const account = this.bridge.getAccount();
+    if (!account) return false;
+    const row = await this.bridge
+      .invoke<StoredSession | null>("chat_get_session", { account, sessionId })
+      .catch(() => null);
+    return Boolean(row);
   }
 
   async listChatSessions(workspaceId: string, runnerId?: string): Promise<IAgentChatSession[]> {
@@ -459,14 +596,14 @@ export class LocalChatTransport implements ChatTransport {
     if (this.activeTurns.has(sessionId)) {
       throw new Error("A response is still in progress. Wait for it to finish, or stop it first.");
     }
-    const messageId = crypto.randomUUID();
-    this.watchTurnEnds();
-    this.activeTurns.set(sessionId, messageId);
+    const turn: ActiveTurn = { messageId: crypto.randomUUID(), content, authRetried: false };
+    this.listenToHost();
+    this.activeTurns.set(sessionId, turn);
     try {
-      return await this.submitTurn(account, sessionId, messageId, content);
+      return await this.submitTurn(account, sessionId, turn.messageId, content);
     } catch (error) {
       // Nothing was submitted, so no terminal frame will ever release it.
-      if (this.activeTurns.get(sessionId) === messageId) this.activeTurns.delete(sessionId);
+      if (this.activeTurns.get(sessionId) === turn) this.activeTurns.delete(sessionId);
       throw error;
     }
   }
@@ -491,10 +628,21 @@ export class LocalChatTransport implements ChatTransport {
     // The daemon owns the engine, so it has to be up before the turn is
     // submitted. Idempotent once it is.
     await this.bridge.ensureRuntime();
-    // Streaming happens over `chat://frame`; the command returns once the turn
-    // has been submitted.
+    await this.submitToDaemon(sessionId, messageId, content, session);
+    return storedEventToMessage(stored);
+  }
+
+  /**
+   * Hand a turn to the daemon. Streaming happens over `chat://frame`; the
+   * command returns once the turn has been submitted.
+   */
+  private async submitToDaemon(
+    sessionId: string,
+    messageId: string,
+    content: string,
+    session: StoredSession | null
+  ): Promise<void> {
     await this.bridge.invoke<void>("chat_send", {
-      workspace: this.bridge.workspaceSlug(),
       chatSessionId: sessionId,
       messageId,
       content,
@@ -502,7 +650,6 @@ export class LocalChatTransport implements ChatTransport {
       mode: this.getApprovalMode(sessionId),
       localThreadId: session?.engine_thread_id ?? undefined,
     });
-    return storedEventToMessage(stored);
   }
 
   async warmChatSession(sessionId: string): Promise<{ ok: boolean; skipped?: string }> {
@@ -513,7 +660,6 @@ export class LocalChatTransport implements ChatTransport {
     });
     await this.bridge.ensureRuntime();
     await this.bridge.invoke<void>("chat_warm", {
-      workspace: this.bridge.workspaceSlug(),
       chatSessionId: sessionId,
       cwd: session?.working_dir,
       mode: this.getApprovalMode(sessionId),
@@ -525,8 +671,9 @@ export class LocalChatTransport implements ChatTransport {
   async cancelChat(sessionId: string, reason?: string): Promise<{ ok: boolean }> {
     // No session lookup: cancel carries only the session id now that the
     // runner selector is gone, and the daemon resolves its own runner.
+    const turn = this.activeTurns.get(sessionId);
+    if (turn) turn.stopped = true;
     await this.bridge.invoke<void>("chat_cancel", {
-      workspace: this.bridge.workspaceSlug(),
       chatSessionId: sessionId,
       reason,
     });
@@ -540,7 +687,6 @@ export class LocalChatTransport implements ChatTransport {
       sessionId,
     });
     await this.bridge.invoke<void>("chat_close", {
-      workspace: this.bridge.workspaceSlug(),
       chatSessionId: sessionId,
     });
     // Closing aborts the host's reader, so a turn it cut short sends no
@@ -561,7 +707,6 @@ export class LocalChatTransport implements ChatTransport {
    */
   async decideChatApproval(sessionId: string, localApprovalId: string, decision: TApprovalDecision): Promise<void> {
     await this.bridge.invoke<void>("chat_decide", {
-      workspace: this.bridge.workspaceSlug(),
       chatSessionId: sessionId,
       localApprovalId,
       decision,
@@ -580,18 +725,8 @@ export class LocalChatTransport implements ChatTransport {
     // `assistant_message` is empty (the engine's done payload didn't carry text
     // under a key the daemon recognises) can still be persisted from the deltas.
     let assistantAccum = "";
-    let cancelled = false;
-    const unlisteners: Array<() => void> = [];
-    const track = (promise: Promise<() => void>) => {
-      void promise.then((unlisten) => (cancelled ? unlisten() : void unlisteners.push(unlisten)));
-    };
-
-    track(
-      this.bridge.listen<ChatFrame>(CHAT_FRAME_EVENT, (frame) => {
-        if (frameSessionId(frame) !== sessionId) return;
-        // Release the session before the page hears about the turn's end: it
-        // refetches sessions on that event and must not read a stale turn.
-        if (isTerminalFrame(frame)) this.activeTurns.delete(sessionId);
+    const subscriber: FrameSubscriber = {
+      onFrame: (frame) => {
         if (frame.result === "chat_message_started") {
           assistantAccum = "";
         } else if (frame.result === "chat_event" && frame.data.kind === "assistant_delta") {
@@ -614,19 +749,16 @@ export class LocalChatTransport implements ChatTransport {
         void this.persistFromFrame(account, sessionId, frame, "").catch(() => {});
         const event = translator.translate(frame);
         if (event) onEvent(event);
-      })
-    );
-    track(
-      this.bridge.listen<{ chat_session_id: string; message: string }>(CHAT_ERROR_EVENT, (payload) => {
-        if (payload.chat_session_id !== sessionId) return;
-        this.activeTurns.delete(sessionId);
-        onError?.(new Error(payload.message));
-      })
-    );
+      },
+      onError: (error) => onError?.(error),
+    };
+    this.listenToHost();
+    const subscribers = this.subscribers.get(sessionId) ?? new Set<FrameSubscriber>();
+    this.subscribers.set(sessionId, subscribers.add(subscriber));
 
     return () => {
-      cancelled = true;
-      for (const unlisten of unlisteners.splice(0)) unlisten();
+      subscribers.delete(subscriber);
+      if (!subscribers.size && this.subscribers.get(sessionId) === subscribers) this.subscribers.delete(sessionId);
     };
   }
 
@@ -675,31 +807,159 @@ function tauriBridge(): TauriBridge {
   const tauri = (window as unknown as { __TAURI__: TauriGlobal }).__TAURI__;
   return {
     invoke: (command, args) => tauri.core.invoke(command, args),
-    listen: (event, handler) => tauri.event.listen(event, (e) => handler(e.payload)),
+    listen: <T>(event: string, handler: (payload: T) => void) =>
+      tauri.event.listen<T>(event, (e) => handler(e.payload)),
     getAccount: () => getAgentAccount(),
     // The workspace slug is the first path segment of every in-app route
-    // (`/:workspaceSlug/...`); the chat page has no other handle on it, and
-    // enrolment is keyed by slug rather than by the workspace id the chat
-    // session stores.
+    // (`/:workspaceSlug/...`); set-up signs the daemon in to that workspace.
     ensureRuntime: () => ensureChatRuntime(workspaceSlugFromLocation()),
-    workspaceSlug: workspaceSlugFromLocation,
+    refreshModelCredential: () => refreshModelCredential(),
+    topUpUrl: () => getModelTopUpUrl(),
   };
 }
 
-/**
- * The workspace slug is the first path segment of every in-app route
- * (`/:workspaceSlug/...`). The chat session stores the workspace *id*, which
- * is not what the daemon's per-workspace tree is keyed by.
- */
 function workspaceSlugFromLocation(): string {
   return decodeURIComponent(window.location.pathname.split("/")[1] ?? "");
 }
 
-/** A synthetic runner so the shared chat page renders the built-in engine. */
+type Owner = "local" | "cloud";
+
+/**
+ * Routes each chat to the transport that owns it (design §12.1): the "This
+ * computer" contact to {@link LocalChatTransport} (the daemon, over the local
+ * socket), every other runner to the cloud transport. Session-scoped calls
+ * resolve the owner from the session — remembered when it was listed or
+ * created, else looked up in the local store. Approvals follow the same
+ * split: only a local session's approvals are decided here; a cloud runner's
+ * go through its Approvals page, as on the web.
+ */
+export class RoutingChatTransport implements ChatTransport {
+  private readonly owners = new Map<string, Owner>();
+
+  constructor(
+    private readonly local: LocalChatTransport,
+    private readonly cloud: ChatTransport
+  ) {}
+
+  /** Whether chats with `runnerId` are served locally. */
+  isLocalRunner(runnerId?: string | null): boolean {
+    return runnerId === BUILTIN_RUNNER_ID;
+  }
+
+  /** The chat page asks this before offering inline approvals and modes. */
+  supportsLocalApprovals(runnerId?: string | null): boolean {
+    return this.isLocalRunner(runnerId);
+  }
+
+  private remember(sessions: IAgentChatSession[], owner: Owner): IAgentChatSession[] {
+    for (const session of sessions) this.owners.set(session.id, owner);
+    return sessions;
+  }
+
+  private async ownerOf(sessionId: string): Promise<Owner> {
+    const known = this.owners.get(sessionId);
+    if (known) return known;
+    const owner: Owner = (await this.local.hasSession(sessionId)) ? "local" : "cloud";
+    this.owners.set(sessionId, owner);
+    return owner;
+  }
+
+  private async transportOf(sessionId: string): Promise<ChatTransport> {
+    return (await this.ownerOf(sessionId)) === "local" ? this.local : this.cloud;
+  }
+
+  async listChatSessions(workspaceId: string, runnerId?: string): Promise<IAgentChatSession[]> {
+    if (this.isLocalRunner(runnerId)) {
+      return this.remember(await this.local.listChatSessions(workspaceId, runnerId), "local");
+    }
+    if (runnerId) return this.remember(await this.cloud.listChatSessions(workspaceId, runnerId), "cloud");
+    const [local, cloud] = await Promise.all([
+      this.local.listChatSessions(workspaceId).catch(() => [] as IAgentChatSession[]),
+      this.cloud.listChatSessions(workspaceId),
+    ]);
+    return [...this.remember(local, "local"), ...this.remember(cloud, "cloud")];
+  }
+
+  async createChatSession(input: {
+    workspace: string;
+    runner: string;
+    model?: string;
+    cwd?: string;
+  }): Promise<IAgentChatSession> {
+    const owner: Owner = this.isLocalRunner(input.runner) ? "local" : "cloud";
+    const session = await (owner === "local" ? this.local : this.cloud).createChatSession(input);
+    this.owners.set(session.id, owner);
+    return session;
+  }
+
+  async listChatMessages(sessionId: string): Promise<IAgentChatMessage[]> {
+    return (await this.transportOf(sessionId)).listChatMessages(sessionId);
+  }
+
+  async sendChatMessage(sessionId: string, content: string): Promise<IAgentChatMessage> {
+    return (await this.transportOf(sessionId)).sendChatMessage(sessionId, content);
+  }
+
+  async warmChatSession(sessionId: string): Promise<{ ok: boolean; skipped?: string }> {
+    return (await this.transportOf(sessionId)).warmChatSession(sessionId);
+  }
+
+  async cancelChat(sessionId: string, reason?: string): Promise<{ ok: boolean }> {
+    return (await this.transportOf(sessionId)).cancelChat(sessionId, reason);
+  }
+
+  async closeChat(sessionId: string): Promise<IAgentChatSession> {
+    return (await this.transportOf(sessionId)).closeChat(sessionId);
+  }
+
+  subscribeChatEvents(
+    sessionId: string,
+    after: number,
+    onEvent: ChatEventHandler,
+    onError?: ChatEventErrorHandler
+  ): ChatEventUnsubscribe {
+    const known = this.owners.get(sessionId);
+    if (known) {
+      return (known === "local" ? this.local : this.cloud).subscribeChatEvents(sessionId, after, onEvent, onError);
+    }
+    // Not known yet (a deep link straight to a session): resolve, then
+    // subscribe, unless the caller unsubscribed meanwhile.
+    let unsubscribe: ChatEventUnsubscribe | null = null;
+    let cancelled = false;
+    void this.transportOf(sessionId).then(
+      (transport) => {
+        if (!cancelled) unsubscribe = transport.subscribeChatEvents(sessionId, after, onEvent, onError);
+        return unsubscribe;
+      },
+      (error: unknown) => onError?.(error)
+    );
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
+  }
+
+  setApprovalMode(sessionId: string, mode: TApprovalMode): void {
+    this.local.setApprovalMode(sessionId, mode);
+  }
+
+  getApprovalMode(sessionId: string): TApprovalMode {
+    return this.local.getApprovalMode(sessionId);
+  }
+
+  async decideChatApproval(sessionId: string, localApprovalId: string, decision: TApprovalDecision): Promise<void> {
+    if ((await this.ownerOf(sessionId)) !== "local") {
+      throw new Error("This runner's approvals are decided on its Approvals page.");
+    }
+    await this.local.decideChatApproval(sessionId, localApprovalId, decision);
+  }
+}
+
+/** A synthetic runner so the shared chat page renders this computer's engine. */
 function builtinRunner(): IRunner {
   return {
     id: BUILTIN_RUNNER_ID,
-    name: "Built-in agent",
+    name: "This computer",
     status: "online",
   } as IRunner;
 }
@@ -707,14 +967,16 @@ function builtinRunner(): IRunner {
 let registered = false;
 
 /**
- * Register the local chat transport and a runner-detail shim for the built-in
- * agent id. Desktop-only and idempotent (registering twice would chain the
- * runner-detail fetcher onto itself); a no-op off the desktop app.
+ * Install the routing transport — local for this computer's engine, cloud for
+ * every other runner — and a runner-detail shim for the built-in id, in place
+ * of a global swap to local chat. Desktop-only and idempotent (registering
+ * twice would chain the fetcher and the router onto themselves); a no-op off
+ * the desktop app.
  */
 export function registerLocalChatTransport(): void {
   if (!isDesktop() || registered) return;
   registered = true;
-  setChatTransport(new LocalChatTransport(tauriBridge()));
+  setChatTransport(new RoutingChatTransport(new LocalChatTransport(tauriBridge()), getChatTransport()));
   const previous: RunnerDetailFetcher = getRunnerDetailFetcher();
   setRunnerDetailFetcher((runnerId) =>
     runnerId === BUILTIN_RUNNER_ID ? Promise.resolve(builtinRunner()) : previous(runnerId)

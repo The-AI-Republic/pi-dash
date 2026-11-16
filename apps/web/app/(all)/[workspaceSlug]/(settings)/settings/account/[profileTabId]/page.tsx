@@ -1,0 +1,48 @@
+/**
+ * Copyright (c) 2023-present Pi Dash Software, Inc. and contributors
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * See the LICENSE file for details.
+ */
+
+import { observer } from "mobx-react";
+// pi dash imports
+import { PROFILE_SETTINGS_TABS } from "@pi-dash/constants";
+import { useTranslation } from "@pi-dash/i18n";
+import type { TProfileSettingsTabs } from "@pi-dash/types";
+// components
+import { LogoSpinner } from "@/components/common/logo-spinner";
+import { PageHead } from "@/components/core/page-title";
+import { ProfileSettingsContent } from "@/components/settings/profile/content";
+// hooks
+import { useUser } from "@/hooks/store/user";
+// local imports
+import type { Route } from "./+types/page";
+
+function AccountSettingsPage(props: Route.ComponentProps) {
+  const { profileTabId } = props.params;
+  // store hooks
+  const { data: currentUser } = useUser();
+  // translation
+  const { t } = useTranslation();
+  // derived values
+  const isAValidTab = PROFILE_SETTINGS_TABS.includes(profileTabId as TProfileSettingsTabs);
+
+  if (!currentUser || !isAValidTab)
+    return (
+      <div className="grid size-full place-items-center px-4">
+        <LogoSpinner />
+      </div>
+    );
+
+  return (
+    <>
+      <PageHead title={`${t("Profile")} - ${t("General settings")}`} />
+      <ProfileSettingsContent
+        activeTab={profileTabId as TProfileSettingsTabs}
+        className="mx-auto w-fit max-w-225 grow px-page-x py-20"
+      />
+    </>
+  );
+}
+
+export default observer(AccountSettingsPage);

@@ -86,7 +86,7 @@ export const NotificationsRoot = observer(function NotificationsRoot({ workspace
   return (
     <div className={cn("h-full w-full overflow-hidden", isWorkItem && "overflow-y-auto")}>
       {!currentSelectedNotificationId ? (
-        <div className="flex size-full items-center justify-center">
+        <div className="flex size-full items-center justify-center" data-testid="notifications-detail-placeholder">
           <EmptyStateCompact assetKey="unknown" assetClassName="size-20" />
         </div>
       ) : (
@@ -94,7 +94,10 @@ export const NotificationsRoot = observer(function NotificationsRoot({ workspace
           {is_inbox_issue === true && workspace_slug && project_id && issue_id ? (
             <>
               {projectMemberInfoLoader ? (
-                <div className="flex h-full w-full items-center justify-center">
+                <div
+                  className="flex h-full w-full items-center justify-center"
+                  data-testid="notifications-detail-loading"
+                >
                   <LogoSpinner />
                 </div>
               ) : (

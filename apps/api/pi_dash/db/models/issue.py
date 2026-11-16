@@ -210,6 +210,18 @@ class Issue(ProjectBaseModel):
         on_delete=models.PROTECT,
         related_name="assigned_issues",
     )
+    # One runner inside ``assigned_pod`` this issue is dedicated to. NULL means
+    # pod assignment (any eligible runner in the pod takes the run). SET_NULL
+    # is the safety net only: ``Runner.revoke()`` clears the assignment first
+    # (dedicated_runner_assignment §6.3, §13.1). See design §6.1/§6.2 (I1).
+    assigned_runner = models.ForeignKey(
+        "runner.Runner",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        db_index=False,  # replaced by the partial index in db 0173
+        related_name="dedicated_issues",
+    )
     # Per-issue execution target override. NULL means "inherit the project's
     # ``default_agent_executor``" — the state every issue starts in, so the
     # project-level default keeps working untouched and this field is purely
@@ -225,6 +237,17 @@ class Issue(ProjectBaseModel):
         null=True,
         blank=True,
     )
+    # Per-issue work-type override — which per-work-type prompt guidance fills
+    # the stage recipes' slots (prompting/work_types.py). NULL means "inherit
+    # the project's ``default_work_type``" — the state every issue starts in,
+    # so the project-level default keeps working untouched and this field is
+    # purely additive for existing rows. Resolved by
+    # ``prompting.work_types.effective_work_type``; validated against the
+    # work-type registry at the serializer boundary (no model choices, so a
+    # new work type needs no migration). Once the issue enters a ticking
+    # stage, only a human may change it (enforced in the PATCH views), so
+    # review/test always match what was built.
+    work_type = models.CharField(max_length=32, null=True, blank=True)
 
     issue_objects = IssueManager()
 
@@ -261,6 +284,22 @@ class Issue(ProjectBaseModel):
             GinIndex(
                 SearchVector("name", "description_stripped", config="english"),
                 name="issues_fts_idx",
+            ),
+            # Dedicated issues only (design §6.5): the hook the lost-runner
+            # lifecycle iterates and the partial index replaces the FK's
+            # plain db_index. Built concurrently in db 0173.
+            models.Index(
+                fields=["assigned_runner"],
+                name="issues_assigned_runner_idx",
+                condition=Q(assigned_runner__isnull=False),
+            ),
+        ]
+        constraints = [
+            # I1's "pod is set" (design §6.2/§6.5): pod equality itself is
+            # enforced by the shared service (§7.3) and lifecycle hooks (§13).
+            models.CheckConstraint(
+                check=Q(assigned_runner__isnull=True) | Q(assigned_pod__isnull=False),
+                name="issues_dedicated_runner_needs_pod",
             ),
         ]
 

@@ -58,6 +58,7 @@ export const NotificationSidebarHeaderOptions = observer(function NotificationSi
         <IconButton
           size="base"
           variant="ghost"
+          data-testid="notifications-mark-all-read"
           icon={loader === ENotificationLoader.MARK_ALL_AS_READY ? Spinner : CheckCheck}
           onClick={() => {
             handleMarkAllNotificationsAsRead();
@@ -70,6 +71,7 @@ export const NotificationSidebarHeaderOptions = observer(function NotificationSi
         <IconButton
           size="base"
           variant="ghost"
+          data-testid="notifications-refresh"
           icon={RefreshCw}
           className={loader === ENotificationLoader.MUTATION_LOADER ? "animate-spin" : ""}
           onClick={refreshNotifications}

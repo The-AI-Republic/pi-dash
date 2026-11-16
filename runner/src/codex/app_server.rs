@@ -12,7 +12,7 @@ use crate::agent::{
     AgentProcessHandle, ExitSnapshot, STDERR_RING_LINES, StderrBuffer, StderrRing, StderrSnapshot,
 };
 use crate::codex::jsonrpc::Incoming;
-use crate::util::shell::{is_benign_login_shell_warning, login_shell_command_with_env, AgentEnv};
+use crate::util::shell::{AgentEnv, is_benign_login_shell_warning, login_shell_command_with_env};
 
 /// Handles the `codex app-server` subprocess lifecycle + JSON-RPC wire.
 ///

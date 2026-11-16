@@ -67,6 +67,9 @@ pub enum CommentCommand {
     },
     /// Edit an existing comment owned by this user. Requires the issue
     /// identifier because the REST URL is project-scoped.
+    ///
+    /// Refuses an empty or whitespace-only body unless `--allow-empty` is
+    /// passed, so an accidental empty file cannot wipe the comment.
     Update {
         /// Work item identifier the comment lives on, e.g. `ENG-42`.
         identifier: String,
@@ -74,6 +77,10 @@ pub enum CommentCommand {
         comment_id: String,
         #[command(flatten)]
         comment_body: CommentBodyArgs,
+        /// Allow an empty or whitespace-only body to clear the comment.
+        /// Without this flag an empty body is rejected.
+        #[arg(long = "allow-empty")]
+        allow_empty: bool,
     },
 }
 
@@ -100,7 +107,8 @@ pub async fn run(args: CommentArgs, paths: &crate::util::paths::Paths) -> i32 {
             identifier,
             comment_id,
             comment_body,
-        } => cmd_update(&client, &identifier, &comment_id, comment_body).await,
+            allow_empty,
+        } => cmd_update(&client, &identifier, &comment_id, comment_body, allow_empty).await,
     };
     match result {
         Ok(()) => 0,
@@ -376,8 +384,10 @@ async fn cmd_update(
     identifier: &str,
     comment_id: &str,
     comment_body: CommentBodyArgs,
+    allow_empty: bool,
 ) -> Result<(), CliError> {
     let body = load_comment_body(comment_body)?;
+    check_comment_body(&body, allow_empty)?;
     let issue = resolve_issue(client, identifier).await?;
     let path = format!(
         "workspaces/{}/projects/{}/work-items/{}/comments/{}/",
@@ -424,6 +434,19 @@ fn load_comment_body(args: CommentBodyArgs) -> Result<String, CliError> {
     })
 }
 
+/// Refuse an empty or whitespace-only comment body unless `--allow-empty`.
+/// Mirrors the workpad guard: an accidental empty file must not wipe a
+/// comment.
+fn check_comment_body(body: &str, allow_empty: bool) -> Result<(), CliError> {
+    if !allow_empty && body.trim().is_empty() {
+        return Err(CliError::new(
+            EXIT_INVALID,
+            "comment body is empty (empty or whitespace-only); pass --allow-empty to clear intentionally and do not upload an empty file when a get failed (e.g. 429)",
+        ));
+    }
+    Ok(())
+}
+
 fn display_path(path: &Path) -> String {
     path.display().to_string()
 }
@@ -438,8 +461,8 @@ mod tests {
 
     use super::{
         CommentBodyArgs, CommentSpeakerArgs, PreparedImage, add_fold_label, add_speaker_metadata,
-        compose_comment_html, image_component_html, image_mime_type, load_comment_body,
-        load_comment_body_opt,
+        check_comment_body, compose_comment_html, image_component_html, image_mime_type,
+        load_comment_body, load_comment_body_opt,
     };
 
     #[derive(Debug, Parser)]
@@ -560,7 +583,10 @@ mod tests {
     #[test]
     fn compose_comment_html_joins_body_and_images() {
         let node = image_component_html("abc");
-        assert_eq!(compose_comment_html(Some("<p>hi</p>"), &node), format!("<p>hi</p>{node}"));
+        assert_eq!(
+            compose_comment_html(Some("<p>hi</p>"), &node),
+            format!("<p>hi</p>{node}")
+        );
         assert_eq!(compose_comment_html(None, &node), node);
         assert_eq!(compose_comment_html(Some("only text"), ""), "only text");
     }
@@ -570,7 +596,10 @@ mod tests {
         assert_eq!(image_mime_type(Path::new("a.png")).unwrap(), "image/png");
         assert_eq!(image_mime_type(Path::new("a.JPG")).unwrap(), "image/jpeg");
         assert_eq!(image_mime_type(Path::new("a.jpeg")).unwrap(), "image/jpeg");
-        assert_eq!(image_mime_type(Path::new("dir/b.WebP")).unwrap(), "image/webp");
+        assert_eq!(
+            image_mime_type(Path::new("dir/b.WebP")).unwrap(),
+            "image/webp"
+        );
         assert_eq!(image_mime_type(Path::new("a.gif")).unwrap(), "image/gif");
     }
 
@@ -616,7 +645,11 @@ mod tests {
         let batch: Result<Vec<_>, _> = [good, bad].iter().map(|p| PreparedImage::load(p)).collect();
         let err = batch.expect_err("a .txt anywhere in the batch fails the batch");
         assert_eq!(err.exit_code, crate::api_client::EXIT_INVALID);
-        assert!(err.message.contains("unsupported image type"), "{}", err.message);
+        assert!(
+            err.message.contains("unsupported image type"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]
@@ -631,6 +664,66 @@ mod tests {
                 assert_eq!(image.len(), 2);
             }
             _ => panic!("expected comment add"),
+        }
+    }
+
+    #[test]
+    fn empty_comment_body_is_rejected_without_allow_empty() {
+        use crate::api_client::EXIT_INVALID;
+
+        for body in ["", "   ", "\n\t"] {
+            let err = check_comment_body(body, false).expect_err("empty must be rejected");
+            assert_eq!(err.exit_code, EXIT_INVALID);
+            assert!(err.message.contains("--allow-empty"));
+        }
+    }
+
+    #[test]
+    fn empty_comment_body_is_allowed_with_allow_empty() {
+        for body in ["", "   "] {
+            check_comment_body(body, true).expect("allow-empty passes");
+        }
+    }
+
+    #[test]
+    fn non_empty_comment_body_passes() {
+        check_comment_body("hello", false).expect("non-empty passes");
+    }
+
+    #[test]
+    fn update_parses_allow_empty_flag() {
+        let parsed = TestCli::try_parse_from([
+            "pidash",
+            "update",
+            "ENG-42",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--body",
+            "hi",
+            "--allow-empty",
+        ])
+        .expect("parse update allow-empty");
+
+        match parsed.comments.command {
+            super::CommentCommand::Update { allow_empty, .. } => assert!(allow_empty),
+            _ => panic!("expected comment update"),
+        }
+    }
+
+    #[test]
+    fn update_defaults_to_not_allow_empty() {
+        let parsed = TestCli::try_parse_from([
+            "pidash",
+            "update",
+            "ENG-42",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--body",
+            "hi",
+        ])
+        .expect("parse update default");
+
+        match parsed.comments.command {
+            super::CommentCommand::Update { allow_empty, .. } => assert!(!allow_empty),
+            _ => panic!("expected comment update"),
         }
     }
 }

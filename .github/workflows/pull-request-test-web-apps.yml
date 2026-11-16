@@ -96,8 +96,9 @@ jobs:
       - name: Run tests
         # On a pull_request, scope to affected packages (base SHA available).
         # On push to main there is no PR base SHA, so run the full suite as a
-        # complete post-merge validation of main.
-        run: pnpm turbo run test ${{ github.event_name == 'pull_request' && '--affected' || '' }}
+        # complete post-merge validation of main. The web-new workflow and the
+        # NEWFRONT full-suite scheduler own the new frontend's tests.
+        run: pnpm turbo run test --filter='!web_new' --filter='!@pidash/kit' --filter='!@pidash/api-client' ${{ github.event_name == 'pull_request' && '--affected' || '' }}
 
       - name: Save Turbo cache
         uses: actions/cache/save@v5

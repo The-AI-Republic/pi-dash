@@ -1,0 +1,177 @@
+{
+ "columns": [
+  {
+   "blank": true,
+   "name": "created_at",
+   "nullable": false,
+   "type": "timestamp with time zone"
+  },
+  {
+   "blank": true,
+   "name": "updated_at",
+   "nullable": false,
+   "type": "timestamp with time zone"
+  },
+  {
+   "blank": false,
+   "column": "created_by_id",
+   "fk_to": "db.User",
+   "name": "created_by",
+   "nullable": true,
+   "on_delete": "SET_NULL",
+   "related_name": "looptarget_created_by",
+   "type": "uuid"
+  },
+  {
+   "blank": false,
+   "column": "updated_by_id",
+   "fk_to": "db.User",
+   "name": "updated_by",
+   "nullable": true,
+   "on_delete": "SET_NULL",
+   "related_name": "looptarget_updated_by",
+   "type": "uuid"
+  },
+  {
+   "blank": true,
+   "name": "deleted_at",
+   "nullable": true,
+   "type": "timestamp with time zone"
+  },
+  {
+   "blank": false,
+   "default": "uuid4 (callable, per-row)",
+   "name": "id",
+   "nullable": false,
+   "pk": true,
+   "type": "uuid"
+  },
+  {
+   "blank": false,
+   "column": "job_id",
+   "fk_to": "db.LoopJob",
+   "name": "job",
+   "nullable": false,
+   "on_delete": "CASCADE",
+   "related_name": "targets",
+   "type": "uuid"
+  },
+  {
+   "blank": false,
+   "column": "workspace_id",
+   "fk_to": "db.Workspace",
+   "name": "workspace",
+   "nullable": false,
+   "on_delete": "CASCADE",
+   "related_name": "loop_targets",
+   "type": "uuid"
+  },
+  {
+   "blank": false,
+   "column": "user_id",
+   "fk_to": "db.User",
+   "name": "user",
+   "nullable": false,
+   "on_delete": "CASCADE",
+   "related_name": "loop_targets",
+   "type": "uuid"
+  },
+  {
+   "blank": true,
+   "column": "thread_id",
+   "fk_to": "assistant.AssistantThread",
+   "name": "thread",
+   "nullable": true,
+   "on_delete": "SET_NULL",
+   "related_name": "+",
+   "type": "uuid"
+  },
+  {
+   "blank": true,
+   "name": "next_run_at",
+   "nullable": true,
+   "type": "timestamp with time zone"
+  },
+  {
+   "blank": true,
+   "column": "last_run_id",
+   "fk_to": "assistant.AssistantTurn",
+   "name": "last_run",
+   "nullable": true,
+   "on_delete": "SET_NULL",
+   "related_name": "+",
+   "type": "uuid"
+  },
+  {
+   "blank": true,
+   "name": "last_skipped_at",
+   "nullable": true,
+   "type": "timestamp with time zone"
+  },
+  {
+   "blank": true,
+   "choices": [
+    [
+     "user_disabled",
+     "User disabled this job"
+    ],
+    [
+     "master_paused",
+     "User paused all Auto PM"
+    ],
+    [
+     "min_role",
+     "Below the job's minimum role"
+    ],
+    [
+     "llm_config_missing",
+     "No usable LLM credentials"
+    ],
+    [
+     "membership_gone",
+     "No active workspace membership"
+    ],
+    [
+     "turn_active",
+     "Previous run still in flight"
+    ],
+    [
+     "dispatch_error",
+     "Unexpected error creating the turn"
+    ]
+   ],
+   "default": "",
+   "max_length": 64,
+   "name": "last_skip_reason",
+   "nullable": false,
+   "type": "varchar(64)"
+  }
+ ],
+ "constraints": [
+  {
+   "condition": "(AND: ('deleted_at__isnull', True))",
+   "fields": [
+    "job",
+    "workspace",
+    "user"
+   ],
+   "name": "loop_target_unique_edge_when_active",
+   "type": "UniqueConstraint"
+  }
+ ],
+ "db_table": "loop_targets",
+ "indexes": [
+  {
+   "fields": [
+    "next_run_at"
+   ],
+   "name": "loop_target_due_idx"
+  }
+ ],
+ "method": "Ran model _meta introspection under pi_dash.settings.test (no DB).",
+ "model": "LoopTarget",
+ "ordering": [
+  "-created_at"
+ ],
+ "source": "apps/api/pi_dash/db/models/loop.py:84-140 (Meta 125-137, loop_target_due_idx :137); FK targets db/models/workspace.py, assistant/models.py"
+}

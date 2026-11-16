@@ -26,6 +26,7 @@ from pi_dash.db.models import (
     IssueLink,
     ModuleIssue,
     Project,
+    ProjectMember,
     CycleIssue,
 )
 from pi_dash.utils.grouper import (
@@ -92,7 +93,7 @@ class ModuleIssueViewSet(BaseViewSet):
         ).distinct()
 
     @method_decorator(gzip_page)
-    @allow_permission([ROLE.ADMIN, ROLE.MEMBER])
+    @allow_permission([ROLE.ADMIN, ROLE.MEMBER, ROLE.GUEST])
     def list(self, request, slug, project_id, module_id):
         filters = issue_filters(request.query_params, "GET")
         issue_queryset = self.get_queryset()
@@ -122,6 +123,21 @@ class ModuleIssueViewSet(BaseViewSet):
 
         # issue queryset
         issue_queryset = issue_queryset_grouper(queryset=issue_queryset, group_by=group_by, sub_group_by=sub_group_by)
+
+        # Guests without the view-all flag only see the work items they created (issue-list rule)
+        project = Project.objects.get(pk=project_id, workspace__slug=slug)
+        if (
+            ProjectMember.objects.filter(
+                workspace__slug=slug,
+                project_id=project_id,
+                member=request.user,
+                role=5,
+                is_active=True,
+            ).exists()
+            and not project.guest_view_all_features
+        ):
+            issue_queryset = issue_queryset.filter(created_by=request.user)
+            total_issue_queryset = total_issue_queryset.filter(created_by=request.user)
 
         if group_by:
             # Check group and sub group value paginate

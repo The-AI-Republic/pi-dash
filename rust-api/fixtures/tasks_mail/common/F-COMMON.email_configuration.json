@@ -1,0 +1,30 @@
+{
+  "_fixture": "F-COMMON",
+  "_method": "source-derived (EMAIL_* keys are db-sourced, so live resolution needs DB; mapping + defaults transcribed). Resolution semantics executed upstream in D-01 license fixtures (configuration_value goldens).",
+  "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "_sources": [
+    "apps/api/pi_dash/license/utils/instance_value.py:28-74 (get_configuration_value)",
+    "apps/api/pi_dash/license/utils/instance_value.py:57-74 (get_email_configuration)",
+    "apps/api/pi_dash/config/registry.py:82-88 (EMAIL_* source=db)"
+  ],
+  "defaults": {
+    "EMAIL_FROM": "os.environ.get('EMAIL_FROM', 'Team Pi Dash <team@airepublic.com>')",
+    "EMAIL_HOST": "os.environ.get('EMAIL_HOST') (None if unset)",
+    "EMAIL_HOST_PASSWORD": "os.environ.get('EMAIL_HOST_PASSWORD')",
+    "EMAIL_HOST_USER": "os.environ.get('EMAIL_HOST_USER')",
+    "EMAIL_PORT": "os.environ.get('EMAIL_PORT', 587) (int 587, NOT '587')",
+    "EMAIL_USE_SSL": "os.environ.get('EMAIL_USE_SSL', '0')",
+    "EMAIL_USE_TLS": "os.environ.get('EMAIL_USE_TLS', '1')"
+  },
+  "keys_in_order": [
+    "EMAIL_HOST",
+    "EMAIL_HOST_USER",
+    "EMAIL_HOST_PASSWORD",
+    "EMAIL_PORT",
+    "EMAIL_USE_TLS",
+    "EMAIL_USE_SSL",
+    "EMAIL_FROM"
+  ],
+  "resolution": "per-key registry source; db-sourced keys read InstanceConfiguration(key__in).values(key,value,is_encrypted): missing row -> default; is_encrypted -> decrypt_data(value); else raw value. env-sourced -> os.environ.get(name, default) AT CALL TIME (call-time os.environ.get defaults in get_email_configuration are re-read per call, so env changes apply without restart)",
+  "smtp_mapping": "port=int(EMAIL_PORT); use_tls=(EMAIL_USE_TLS == \"1\") STRING compare; use_ssl=(EMAIL_USE_SSL == \"1\"); from_email=EMAIL_FROM. Identical call in all 11 live mail sends."
+}
