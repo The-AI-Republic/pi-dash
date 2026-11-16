@@ -301,6 +301,14 @@ pub enum ServerMsg {
         expected_codex_model: Option<String>,
         approval_policy_overrides: Option<BTreeMap<String, serde_json::Value>>,
         deadline: Option<DateTime<Utc>>,
+        /// Attempt identity minted by the Rust matcher (NEWPIDASH-241):
+        /// the daemon echoes it on capacity/lifecycle/poll calls.
+        /// `None` from old servers; old daemons ignore the additive fields.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assignment_token: Option<Uuid>,
+        /// `0` legacy, `1` machine queue.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assignment_protocol: Option<u16>,
     },
     Cancel {
         run_id: Uuid,
@@ -678,6 +686,8 @@ mod tests {
             expected_codex_model: None,
             approval_policy_overrides: None,
             deadline: None,
+            assignment_token: None,
+            assignment_protocol: None,
         };
         let env = Envelope::new(msg);
         let s = serde_json::to_string(&env).unwrap();

@@ -95,6 +95,7 @@ impl Coordinator {
         &self,
         runner_id: Uuid,
         run_id: Uuid,
+        assignment_token: Option<Uuid>,
         payload: Vec<u8>,
     ) -> Result<(), String> {
         let sequence = self.store.allocate_sequence()?;
@@ -103,7 +104,7 @@ impl Coordinator {
             cloud_origin: "cloud".to_string(),
             runner_id,
             run_id,
-            assignment_token: None,
+            assignment_token,
             sequence,
             queued_at: now,
             phase: "waiting".to_string(),
@@ -114,6 +115,43 @@ impl Coordinator {
             pending_terminal_message_id: None,
         };
         self.enqueue(entry)
+    }
+
+    /// Attempt token for a held run (waiting or admitted), for poll.
+    pub fn held_token(&self, run_id: Uuid) -> Option<Uuid> {
+        let inner = self.inner.lock().ok()?;
+        if let Some(e) = inner.active.get(&run_id) {
+            return e.assignment_token;
+        }
+        inner
+            .entries
+            .iter()
+            .find(|e| e.run_id == run_id)
+            .and_then(|e| e.assignment_token)
+    }
+
+    /// Held phase for poll: `waiting` (blocked) vs `starting` (admitted).
+    pub fn held_phase(&self, run_id: Uuid) -> Option<&'static str> {
+        let inner = self.inner.lock().ok()?;
+        if inner.active.contains_key(&run_id) {
+            return Some("starting");
+        }
+        if inner.entries.iter().any(|e| e.run_id == run_id) {
+            return Some("waiting");
+        }
+        None
+    }
+
+    /// Queued-at as RFC3339 for poll capacity snapshots.
+    pub fn queued_at_rfc3339(&self, run_id: Uuid) -> Option<String> {
+        let inner = self.inner.lock().ok()?;
+        let ms = inner
+            .entries
+            .iter()
+            .find(|e| e.run_id == run_id)
+            .or_else(|| inner.active.get(&run_id))
+            .map(|e| e.queued_at)?;
+        chrono::DateTime::from_timestamp_millis(ms).map(|dt| dt.to_rfc3339())
     }
 
     pub fn cancel_waiting(&self, run_id: Uuid) -> Result<bool, String> {
@@ -429,6 +467,37 @@ mod tests {
         assert_eq!(snap.waiting, 1);
         assert_eq!(snap.held, 2);
         assert!(snap.revision > 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn held_helpers_for_poll() {
+        let dir = std::env::temp_dir().join(format!("coord_held_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let coord = Coordinator::new(dir.clone(), 2).expect("coord");
+        let tok = Uuid::new_v4();
+        let e1 = QueueEntry {
+            cloud_origin: "cloud".to_string(),
+            runner_id: Uuid::new_v4(),
+            run_id: Uuid::new_v4(),
+            assignment_token: Some(tok),
+            sequence: 1,
+            queued_at: 1_700_000_000_000,
+            phase: "waiting".to_string(),
+            assignment_payload: vec![],
+            report_revision: 0,
+            process_scope_id: None,
+            pending_terminal_payload: None,
+            pending_terminal_message_id: None,
+        };
+        coord.enqueue(e1.clone()).unwrap();
+        assert_eq!(coord.held_token(e1.run_id), Some(tok));
+        assert_eq!(coord.held_phase(e1.run_id), Some("waiting"));
+        let q = coord.queued_at_rfc3339(e1.run_id).unwrap();
+        assert!(q.contains("2023-11-14"), "queued_at RFC3339: {q}");
+        assert!(coord.admit(e1.run_id).unwrap());
+        assert_eq!(coord.held_phase(e1.run_id), Some("starting"));
+        assert_eq!(coord.held_token(e1.run_id), Some(tok));
         std::fs::remove_dir_all(&dir).ok();
     }
 

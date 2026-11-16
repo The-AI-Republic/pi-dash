@@ -1185,7 +1185,8 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
         .with_state(inst.state.clone())
         .with_teardown_rx(inst.remove_tx.subscribe())
         .with_reconnect_kick(inst.state.reconnect_notified())
-        .with_receipt_store(ctx.run_receipt.clone());
+        .with_receipt_store(ctx.run_receipt.clone())
+        .with_coordinator(ctx.run_coordinator.clone());
         let close_client = client.clone();
         let local_state = inst.state.clone();
         let daemon_state = ctx.daemon_state.clone();
@@ -2112,6 +2113,7 @@ impl RunnerLoop {
                     prompt,
                     repo_url,
                     expected_codex_model,
+                    assignment_token,
                     ..
                 } => {
                     // Cross-lane exclusion: a runner has one working dir shared
@@ -2189,9 +2191,12 @@ impl RunnerLoop {
                             "expected_codex_model": expected_codex_model,
                         }))
                         .unwrap_or_default();
-                        if let Err(e) =
-                            coord.enqueue_assign(self.runner_paths.runner_id, run_id, payload)
-                        {
+                        if let Err(e) = coord.enqueue_assign(
+                            self.runner_paths.runner_id,
+                            run_id,
+                            assignment_token,
+                            payload,
+                        ) {
                             tracing::error!(%run_id, error = %e, "durable enqueue failed; rejecting");
                             self.nack_assign(
                                 run_id,
