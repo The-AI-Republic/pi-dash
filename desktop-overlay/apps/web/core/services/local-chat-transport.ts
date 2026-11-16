@@ -428,10 +428,25 @@ export class LocalChatTransport implements ChatTransport {
   private listening = false;
 
   /**
+   * The account each session was last used under. History is keyed by
+   * account, and a frame can arrive after the view that knew it has gone.
+   */
+  private readonly sessionAccounts = new Map<string, string>();
+
+  /**
+   * Streamed assistant text per in-flight turn, so a completed frame whose
+   * `assistant_message` is empty (the engine's done payload didn't carry text
+   * under a key the daemon recognises) can still be persisted from the deltas.
+   */
+  private readonly assistantAccum = new Map<string, string>();
+
+  /**
    * Listen to the host for as long as the transport lives, not just while a
    * session is on screen: `subscribeChatEvents` unsubscribes when the user
    * switches session, and a turn that finishes meanwhile must still release
    * its session — or be retried, or leave its failure in the transcript.
+   * History writes live here too, so the reply and thread id land in local
+   * history even with no view mounted.
    */
   private listenToHost(): void {
     if (this.listening) return;
@@ -439,8 +454,7 @@ export class LocalChatTransport implements ChatTransport {
     void this.bridge.listen<ChatFrame>(CHAT_FRAME_EVENT, (frame) => this.routeFrame(frame));
     void this.bridge.listen<{ chat_session_id: string; message: string }>(CHAT_ERROR_EVENT, (payload) => {
       this.activeTurns.delete(payload.chat_session_id);
-      const error = new Error(payload.message);
-      for (const subscriber of this.subscribers.get(payload.chat_session_id) ?? []) subscriber.onError(error);
+      this.reportError(payload.chat_session_id, new Error(payload.message));
     });
   }
 
@@ -466,11 +480,65 @@ export class LocalChatTransport implements ChatTransport {
     if (isTerminalFrame(frame)) this.activeTurns.delete(sessionId);
     if (refusal?.code === MODEL_CREDIT_EXHAUSTED) {
       void this.failWithNote(frame, creditNote(refusal.detail, this.bridge.topUpUrl()));
-    } else if (refusal?.code === MODEL_AUTH_FAILED) {
-      void this.failWithNote(frame, SIGN_IN_AGAIN);
-    } else {
-      this.deliver(frame);
+      return;
     }
+    if (refusal?.code === MODEL_AUTH_FAILED) {
+      void this.failWithNote(frame, SIGN_IN_AGAIN);
+      return;
+    }
+    // History writes happen here, not in a subscriber, so they land even when
+    // no view is mounted: the listener that owns them is the transport's.
+    if (frame.result === "chat_message_started") {
+      this.assistantAccum.set(sessionId, "");
+    } else if (frame.result === "chat_event" && frame.data.kind === "assistant_delta") {
+      this.assistantAccum.set(
+        sessionId,
+        (this.assistantAccum.get(sessionId) ?? "") + assistantDeltaText(frame.data.payload)
+      );
+    }
+    const accum = this.assistantAccum.get(sessionId) ?? "";
+    if (isTerminalFrame(frame)) {
+      this.assistantAccum.delete(sessionId);
+    }
+
+    // A failed write is reported, not swallowed: history is the only copy of
+    // the reply, so losing it silently leaves a turn with no answer.
+    const report = (error: unknown) => {
+      const detail = error instanceof Error ? error.message : String(error);
+      this.reportError(sessionId, new Error(`Could not save this chat to local history: ${detail}`));
+    };
+    const persisted = this.persistFromFrame(sessionId, frame, accum);
+    if (frame.result === "chat_message_completed") {
+      // Persist the assistant reply (falling back to the accumulated deltas)
+      // *before* delivering `turn_completed`, because the page refetches
+      // history on that event and replaces the streamed reply with it — if the
+      // reply isn't in history yet it vanishes. A failure is reported *after*
+      // the delivery: the page clears its error on every event, so reporting
+      // first would have `turn_completed` wipe the message straight away.
+      void persisted.then(
+        () => this.deliver(frame),
+        (error: unknown) => {
+          this.deliver(frame);
+          report(error);
+        }
+      );
+      return;
+    }
+    void persisted.catch(report);
+    this.deliver(frame);
+  }
+
+  /**
+   * Tell the session's views about a failure. With no view mounted there is no
+   * one to tell, so it goes to the console rather than nowhere.
+   */
+  private reportError(sessionId: string, error: Error): void {
+    const subscribers = this.subscribers.get(sessionId);
+    if (!subscribers?.size) {
+      console.error(`Local chat ${sessionId}: ${error.message}`);
+      return;
+    }
+    for (const subscriber of subscribers) subscriber.onError(error);
   }
 
   /**
@@ -541,6 +609,17 @@ export class LocalChatTransport implements ChatTransport {
     return account;
   }
 
+  /**
+   * Open `sessionId` for live use: the signed-in account is remembered as its
+   * owner and the frame listener is running before any turn can stream.
+   */
+  private attach(sessionId: string): string {
+    const account = this.account();
+    this.sessionAccounts.set(sessionId, account);
+    this.listenToHost();
+    return account;
+  }
+
   /** Whether `sessionId` is a local chat on this computer. */
   async hasSession(sessionId: string): Promise<boolean> {
     const account = this.bridge.getAccount();
@@ -590,14 +669,13 @@ export class LocalChatTransport implements ChatTransport {
   }
 
   async sendChatMessage(sessionId: string, content: string): Promise<IAgentChatMessage> {
-    const account = this.account();
+    const account = this.attach(sessionId);
     // One turn at a time per session: the daemon refuses an overlapping send,
     // so don't persist a message that can never get a reply.
     if (this.activeTurns.has(sessionId)) {
       throw new Error("A response is still in progress. Wait for it to finish, or stop it first.");
     }
     const turn: ActiveTurn = { messageId: crypto.randomUUID(), content, authRetried: false };
-    this.listenToHost();
     this.activeTurns.set(sessionId, turn);
     try {
       return await this.submitTurn(account, sessionId, turn.messageId, content);
@@ -653,7 +731,7 @@ export class LocalChatTransport implements ChatTransport {
   }
 
   async warmChatSession(sessionId: string): Promise<{ ok: boolean; skipped?: string }> {
-    const account = this.account();
+    const account = this.attach(sessionId);
     const session = await this.bridge.invoke<StoredSession | null>("chat_get_session", {
       account,
       sessionId,
@@ -719,40 +797,15 @@ export class LocalChatTransport implements ChatTransport {
     onEvent: ChatEventHandler,
     onError?: ChatEventErrorHandler
   ): ChatEventUnsubscribe {
-    const account = this.account();
+    this.attach(sessionId);
     const translator = new ChatFrameTranslator(sessionId);
-    // Accumulate streamed assistant text per turn so a completed frame whose
-    // `assistant_message` is empty (the engine's done payload didn't carry text
-    // under a key the daemon recognises) can still be persisted from the deltas.
-    let assistantAccum = "";
     const subscriber: FrameSubscriber = {
       onFrame: (frame) => {
-        if (frame.result === "chat_message_started") {
-          assistantAccum = "";
-        } else if (frame.result === "chat_event" && frame.data.kind === "assistant_delta") {
-          assistantAccum += assistantDeltaText(frame.data.payload);
-        }
-        if (frame.result === "chat_message_completed") {
-          // Persist the assistant reply (falling back to the accumulated
-          // deltas) *before* dispatching `turn_completed`, because the page
-          // refetches history on that event and replaces the streamed reply
-          // with it — if the reply isn't in history yet it vanishes.
-          const accum = assistantAccum;
-          void (async () => {
-            await this.persistFromFrame(account, sessionId, frame, accum).catch(() => {});
-            const event = translator.translate(frame);
-            if (event) onEvent(event);
-          })();
-          return;
-        }
-        // Persist the durable parts of the turn as they stream.
-        void this.persistFromFrame(account, sessionId, frame, "").catch(() => {});
         const event = translator.translate(frame);
         if (event) onEvent(event);
       },
       onError: (error) => onError?.(error),
     };
-    this.listenToHost();
     const subscribers = this.subscribers.get(sessionId) ?? new Set<FrameSubscriber>();
     this.subscribers.set(sessionId, subscribers.add(subscriber));
 
@@ -769,12 +822,8 @@ export class LocalChatTransport implements ChatTransport {
    * used when present, else `fallbackAssistant` (the accumulated deltas) — so a
    * reply the engine streamed but didn't echo in its done payload is never lost.
    */
-  private async persistFromFrame(
-    account: string,
-    sessionId: string,
-    frame: ChatFrame,
-    fallbackAssistant: string
-  ): Promise<void> {
+  private async persistFromFrame(sessionId: string, frame: ChatFrame, fallbackAssistant: string): Promise<void> {
+    const account = this.sessionAccounts.get(sessionId) ?? this.account();
     if (frame.result === "chat_started" && frame.data.local_thread_id) {
       await this.bridge.invoke<void>("chat_set_thread_id", {
         account,
