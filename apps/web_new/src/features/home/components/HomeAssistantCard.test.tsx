@@ -307,6 +307,22 @@ describe("HomeAssistantCard", () => {
     expect(screen.getByRole("textbox", { name: "Ask the assistant" })).toHaveValue("first");
   });
 
+  it("grows the composer with its content up to the max height", async () => {
+    renderCard({ threads: [], config: CONFIGURED });
+    const input = (await screen.findByRole("textbox", { name: "Ask the assistant" })) as HTMLTextAreaElement;
+    // jsdom has no layout, so fake scrollHeight to observe the capped
+    // growth (NEWPIDASH-301): 64px content -> 64px box, 500px content ->
+    // COMPOSER_MAX_HEIGHT (200px) box.
+    let fakeHeight = 0;
+    Object.defineProperty(input, "scrollHeight", { configurable: true, get: () => fakeHeight });
+    fakeHeight = 64;
+    fireEvent.change(input, { target: { value: "line" } });
+    await waitFor(() => expect(input.style.height).toBe("64px"));
+    fakeHeight = 500;
+    fireEvent.change(input, { target: { value: "line\nline" } });
+    await waitFor(() => expect(input.style.height).toBe("200px"));
+  });
+
   it("hides the recent-conversations section when there are none", async () => {
     renderCard({ threads: [], config: CONFIGURED });
     await screen.findByRole("region", { name: "Assistant" });
