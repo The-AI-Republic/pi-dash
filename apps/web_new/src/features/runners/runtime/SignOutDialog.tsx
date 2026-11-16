@@ -80,7 +80,9 @@ export function RuntimeSignOutDialog(): React.ReactElement {
           />
           <div className="flex flex-col">
             <span className="text-body text-(--text)">Also delete chat history</span>
-            <span className="text-caption text-(--text-muted)">Task folders are kept.</span>
+            <span className="text-caption text-(--text-muted)">
+              Your chats are removed; files the agent created are kept.
+            </span>
           </div>
         </div>
         {offerComputer ? (

@@ -412,21 +412,23 @@ pub async fn chat_working_dir<R: Runtime>(
 // Internals
 // ---------------------------------------------------------------------------
 
-/// Remove an account's entire chat tree (DB, WAL, working copies) and the
-/// engine's copy of its conversations.
+/// Remove an account's chat history — the history DB and its WAL/SHM sidecars —
+/// and the engine's copy of its conversations.
 ///
 /// Not a Tauri command itself — `app_clear_account_history` calls this when the user
 /// asked to delete history on sign-out, and [`chat_clear_history`] wraps it for
-/// the in-app "clear all" action. Removing the whole directory rather than just
-/// deleting rows also reclaims the working copies and leaves no WAL/journal
-/// behind for a later reader.
+/// the in-app "clear all" action. The chat working folders
+/// (`chat/<account>/workdirs/`) are deliberately kept: they hold the files the
+/// agent created or edited, which the sign-out dialog promises to keep
+/// ("Task folders are kept"). Only the history database itself (and its
+/// sidecars) is removed, so a later reader sees an empty history.
 ///
 /// A legacy engine home goes as a whole for the same reason: its transcripts
 /// are not only session rollouts but `history.jsonl`, thread, log and memory
 /// databases and attachments, so deleting selected files would leave copies
 /// behind. Both removals are attempted even if the first fails.
 pub fn clear_account_history(paths: &AppPaths, account: &str) -> Result<(), String> {
-    let chat = remove_tree(&account_dir(paths, account)?, "chat history");
+    let chat = remove_history_db(&account_dir(paths, account)?);
     let engine = remove_tree(&paths.legacy_engine_home(account)?, "engine history");
     chat.and(engine)
 }
@@ -443,6 +445,28 @@ fn remove_tree(dir: &Path, what: &str) -> Result<(), String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(format!("removing {what} {}: {e}", dir.display())),
     }
+}
+
+fn remove_history_db(account_dir: &Path) -> Result<(), String> {
+    let mut result: Result<(), String> = Ok(());
+    let db_path = account_dir.join("history.db");
+    for suffix in ["", "-wal", "-shm"] {
+        let mut path = db_path.clone().into_os_string();
+        path.push(suffix);
+        let path = std::path::PathBuf::from(path);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                let err = format!("removing chat history {}: {e}", path.display());
+                result = match result {
+                    Ok(()) => Err(err),
+                    Err(existing) => Err(format!("{existing}; {err}")),
+                };
+            }
+        }
+    }
+    result
 }
 
 /// Open (creating if needed) the account's history database.
@@ -863,6 +887,41 @@ mod tests {
         assert_eq!(list_sessions(&paths, "user-2").len(), 1);
         // Clearing an account with no history is a no-op, not an error.
         clear_account_history(&paths, "never-signed-in").unwrap();
+    }
+
+    #[test]
+    fn clear_history_keeps_working_folders_and_their_files() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = paths(root.path());
+        // A chat whose working folder holds work the agent produced.
+        let session = create(&paths, "user-1", new_session());
+        let workdir = PathBuf::from(&session.working_dir);
+        let artefact = workdir.join("note.md");
+        std::fs::write(&artefact, "hello from the agent").unwrap();
+        let account_base = account_dir(&paths, "user-1").unwrap();
+        let db = account_base.join("history.db");
+        assert!(db.exists(), "history DB should exist before clear");
+        assert!(workdir.exists(), "working dir should exist before clear");
+
+        clear_account_history(&paths, "user-1").unwrap();
+
+        assert!(!db.exists(), "history DB must be gone after clear");
+        assert!(
+            !account_base.join("history.db-wal").exists(),
+            "WAL sidecar must be gone after clear"
+        );
+        assert!(
+            !account_base.join("history.db-shm").exists(),
+            "SHM sidecar must be gone after clear"
+        );
+        assert!(workdir.exists(), "clear must keep the working folder");
+        assert_eq!(
+            std::fs::read_to_string(&artefact).unwrap(),
+            "hello from the agent",
+            "clear must keep files the agent created"
+        );
+        // A fresh read sees an empty history, not the old rows.
+        assert_eq!(list_sessions(&paths, "user-1").len(), 0);
     }
 
     #[test]
