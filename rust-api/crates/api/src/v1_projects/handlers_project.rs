@@ -1173,7 +1173,9 @@ pub async fn render_project(
         Value::String(row_string(row, "dedicated_runner_lost_action")?),
     );
     // NEWPIDASH-278: validated settings with defaults filled in.
-    let settings_raw: Value = row.try_get("", "settings").map_err(|_| Denial::ServerError)?;
+    let settings_raw: Value = row
+        .try_get("", "settings")
+        .map_err(|_| Denial::ServerError)?;
     let settings = pidash_services::domain::project_settings::parse_row_settings(&settings_raw)
         .map(|parsed| pidash_services::domain::project_settings::render(&parsed.settings))
         .map_err(|_| Denial::ServerError)?;
@@ -4411,7 +4413,10 @@ mod tests {
             .iter()
             .position(|key| *key == "settings")
             .expect("settings");
-        assert_eq!(READ_FIELD_ORDER[settings_at - 1], "dedicated_runner_lost_action");
+        assert_eq!(
+            READ_FIELD_ORDER[settings_at - 1],
+            "dedicated_runner_lost_action"
+        );
         assert_eq!(ALLOWED_SUMMARY_FIELDS.len(), 8);
     }
 
@@ -4546,7 +4551,10 @@ mod live_tests {
         );
         sel.expr_as(Expr::value(true), Alias::new("agent_ticking_enabled"));
         sel.expr_as(Expr::value("codex"), Alias::new("default_agent_executor"));
-        sel.expr_as(Expr::value("fail_to_backlog"), Alias::new("dedicated_runner_lost_action"));
+        sel.expr_as(
+            Expr::value("fail_to_backlog"),
+            Alias::new("dedicated_runner_lost_action"),
+        );
         sel.expr_as(Expr::value(None::<uuid::Uuid>), Alias::new("created_by_id"));
         sel.expr_as(Expr::value(None::<uuid::Uuid>), Alias::new("updated_by_id"));
         sel.expr_as(Expr::value(ws_id), Alias::new("workspace_id"));
