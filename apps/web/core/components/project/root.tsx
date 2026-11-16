@@ -19,7 +19,7 @@ import { useProjectFilter } from "@/hooks/store/use-project-filter";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 // local imports
 import { ProjectAppliedFiltersList } from "./applied-filters";
-import { ProjectCardList } from "./card-list";
+import { ProjectsList } from "./list";
 
 export const ProjectRoot = observer(function ProjectRoot() {
   const { currentWorkspace } = useWorkspace();
@@ -94,7 +94,7 @@ export const ProjectRoot = observer(function ProjectRoot() {
             alwaysAllowEditing
           />
         )}
-        <ProjectCardList />
+        <ProjectsList />
       </div>
     </>
   );
