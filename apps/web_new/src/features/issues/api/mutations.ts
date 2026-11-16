@@ -12,9 +12,11 @@ import {
   isApiError,
   updateIssue,
   type ApiClient,
+  type GroupedIssueListResponse,
   type Issue,
   type IssueListResponse,
   type IssuePatch,
+  type SubGroupedIssueListResponse,
 } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
@@ -89,21 +91,25 @@ export function applyIssuePatchLite(
   };
 }
 
+/** Any envelope the "list" cache subtree holds: flat, grouped, or sub-grouped. */
+export type CachedIssueListResponse = IssueListResponse | GroupedIssueListResponse | SubGroupedIssueListResponse;
+
 /**
  * Next list page with the patched row fields painted on. The "list"
  * cache holds flat pages and grouped/sub-grouped envelopes (results is
  * a bucket map there), so the paint goes through withIssueFields, which
- * handles every shape and re-buckets a row whose group value changed.
+ * handles every shape. A grouped page re-buckets a row whose group value
+ * changed; a sub-grouped page paints the row in place until the refetch.
  */
-export function applyIssuePatchList(
-  previous: IssueListResponse | undefined,
+export function applyIssuePatchList<T extends CachedIssueListResponse>(
+  previous: T | undefined,
   issueId: string,
   patch: IssuePatch
-): IssueListResponse | undefined {
+): T | undefined {
   if (previous === undefined) return previous;
   const painted = pickRowPatch(patch);
   if (Object.keys(painted).length === 0) return previous;
-  return withIssueFields(previous, issueId, painted) as IssueListResponse;
+  return withIssueFields(previous, issueId, painted) as T;
 }
 
 /**
@@ -119,19 +125,17 @@ export function paintIssuePatch(
   const detailKey = issueKeys.detail(workspaceSlug, issueId);
   const browsePrefix = [...issueKeys.all(workspaceSlug), "browse"];
   const listPrefix = [...issueKeys.all(workspaceSlug), "list"];
-  const snapshots = [
-    ...snapshotQueries(queryClient, detailKey),
-    ...snapshotQueries(queryClient, browsePrefix),
-    ...snapshotQueries(queryClient, listPrefix),
-  ];
+  const browseSnapshots = snapshotQueries(queryClient, browsePrefix);
+  const listSnapshots = snapshotQueries(queryClient, listPrefix);
+  const snapshots = [...snapshotQueries(queryClient, detailKey), ...browseSnapshots, ...listSnapshots];
   queryClient.setQueryData<Issue | undefined>(detailKey, (previous) => applyIssuePatchDetail(previous, patch));
-  for (const snapshot of snapshotQueries(queryClient, browsePrefix)) {
+  for (const snapshot of browseSnapshots) {
     queryClient.setQueryData<LiteResolution | undefined>(snapshot.queryKey, (previous) =>
       applyIssuePatchLite(previous, issueId, patch)
     );
   }
-  for (const snapshot of snapshotQueries(queryClient, listPrefix)) {
-    queryClient.setQueryData<IssueListResponse | undefined>(snapshot.queryKey, (previous) =>
+  for (const snapshot of listSnapshots) {
+    queryClient.setQueryData<CachedIssueListResponse | undefined>(snapshot.queryKey, (previous) =>
       applyIssuePatchList(previous, issueId, patch)
     );
   }
@@ -154,7 +158,13 @@ export function useUpdateIssue(scope: UpdateIssueScope) {
     mutationFn: async (patch: IssuePatch) =>
       updateIssue(client, scope.workspaceSlug, scope.projectId, scope.issueId, patch),
     onMutate: async (patch) => {
-      await queryClient.cancelQueries({ queryKey: issueKeys.detail(scope.workspaceSlug, scope.issueId) });
+      // Cancel every cache the paint touches, so an in-flight read cannot
+      // land after the paint and overwrite it with the pre-write row.
+      await Promise.all([
+        queryClient.cancelQueries({ queryKey: issueKeys.detail(scope.workspaceSlug, scope.issueId) }),
+        queryClient.cancelQueries({ queryKey: [...issueKeys.all(scope.workspaceSlug), "browse"] }),
+        queryClient.cancelQueries({ queryKey: [...issueKeys.all(scope.workspaceSlug), "list"] }),
+      ]);
       return paintIssuePatch(queryClient, scope.workspaceSlug, scope.issueId, patch);
     },
     onError: (error: Error, _patch, snapshots) => {

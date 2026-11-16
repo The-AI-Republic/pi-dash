@@ -110,13 +110,13 @@ function moveWithinBuckets(
     else remaining.push(row);
   }
   const source = buckets[sourceKey] as Record<string, unknown>;
-  if (remaining.length === 0) delete next[sourceKey];
+  const sourceTotal = Math.max(0, Number(source.total_results ?? 1) - 1);
+  // Drop the bucket only when the group is truly empty server-side; a
+  // paginated group whose loaded rows ran out still has unseen rows and
+  // keeps its section, count, and load-more.
+  if (remaining.length === 0 && sourceTotal === 0) delete next[sourceKey];
   else {
-    next[sourceKey] = {
-      ...source,
-      results: remaining,
-      total_results: Math.max(0, Number(source.total_results ?? 1) - 1),
-    };
+    next[sourceKey] = { ...source, results: remaining, total_results: sourceTotal };
   }
   const previous = isRecord(next[target]) ? (next[target] as Record<string, unknown>) : null;
   const rows = previous !== null && Array.isArray(previous.results) ? previous.results : [];
