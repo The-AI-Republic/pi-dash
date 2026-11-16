@@ -189,7 +189,10 @@ const SESSION_CHANGED: &str = "session changed during request";
 // outlive spawn scheduling under load.
 const PRE_CANCEL_TTL: Duration = Duration::from_secs(10);
 
-async fn within<T>(deadline: Option<Instant>, work: impl std::future::Future<Output = T>) -> Result<T, String> {
+async fn within<T>(
+    deadline: Option<Instant>,
+    work: impl std::future::Future<Output = T>,
+) -> Result<T, String> {
     match deadline {
         Some(deadline) => tokio::time::timeout_at(deadline.into(), work)
             .await
@@ -385,19 +388,32 @@ async fn check_session(state: &DesktopHttp, generation: u64) -> Result<(), Strin
     Ok(())
 }
 
-/// One fetch with redirect following and cookie persistence. The request
-/// already has its Origin header; `method`/`url`/`headers`/`body` are mutable
-/// for the redirect chain.
+/// A request ready to send. `fetch_once` rewrites it while following
+/// redirects; it already carries its Origin header.
+#[derive(Clone)]
+struct Outgoing {
+    method: Method,
+    url: Url,
+    headers: header::HeaderMap,
+    body: Option<Vec<u8>>,
+}
+
+/// One fetch with redirect following and cookie persistence. Cookies are read
+/// and written only while `generation` is still current, so a response from a
+/// session that has since been signed out is discarded.
 async fn fetch_once(
     window: &tauri::WebviewWindow,
     state: &DesktopHttp,
     generation: u64,
-    mut method: Method,
-    mut url: Url,
-    mut headers: header::HeaderMap,
-    mut body: Option<Vec<u8>>,
+    request: Outgoing,
     deadline: Option<Instant>,
 ) -> Result<reqwest::Response, String> {
+    let Outgoing {
+        mut method,
+        mut url,
+        mut headers,
+        mut body,
+    } = request;
     for _ in 0..10 {
         let mut request = state
             .client
@@ -480,69 +496,34 @@ async fn fetch_once(
     Err("too many API redirects".into())
 }
 
+/// Refresh the session once for every request that saw a 401 since refresh
+/// epoch `seen`; a request whose epoch has already moved shares the outcome
+/// of the refresh that moved it.
 async fn refresh_session(
     window: tauri::WebviewWindow,
     state: &DesktopHttp,
     generation: u64,
-    refresh_url: Url,
-    origin: String,
+    request: Outgoing,
     seen: u64,
 ) -> Refresh {
     let mut guard = state.refresh.clone().lock_owned().await;
     if guard.epoch != seen {
         return guard.last;
     }
-    let client = state.client.clone();
-    let refresh_timeout = state.refresh_timeout;
-    let api_url = state.api_url.clone();
-    let deadline = Instant::now() + refresh_timeout;
+    let deadline = Instant::now() + state.refresh_timeout;
+    // Run on its own task, holding the guard, so a caller that gives up
+    // (deadline or cancel) cannot abandon the refresh half done: whoever is
+    // waiting on the guard still gets its outcome.
     tauri::async_runtime::spawn(async move {
-        // Check generation before sending; if it changed the session was
-        // cleared and this refresh is stale.
-        // We do not have a direct generation lock here because state was
-        // borrowed; the caller checks generation after we return.
-        _ = generation;
-        _ = api_url;
-        let mut headers = header::HeaderMap::new();
-        if let Ok(value) = origin.parse::<header::HeaderValue>() {
-            headers.insert(header::ORIGIN, value);
-        }
-        let outcome = {
-            let mut request = client.request(Method::POST, refresh_url.clone()).headers(headers);
-            if let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
-                request = request.timeout(remaining);
-            }
-            // Attach cookies for the refresh path.
-            if let Ok(cookies) = window.cookies() {
-                if let Some(cookies) = cookie_header(cookies, &refresh_url) {
-                    request = request.header(header::COOKIE, cookies);
-                }
-            }
-            match request.send().await {
-                Ok(response) => {
-                    let status = response.status();
-                    // Write cookies back even on rejection.
-                    for h in response.headers().get_all(header::SET_COOKIE) {
-                        if let Ok(s) = h.to_str() {
-                            if let Some(cookie) = response_cookie(s, &refresh_url) {
-                                if cookie_expired(&cookie) {
-                                    let _ = window.delete_cookie(cookie);
-                                } else {
-                                    let _ = window.set_cookie(cookie);
-                                }
-                            }
-                        }
-                    }
-                    if status.is_success() {
-                        Refresh::Rotated
-                    } else if matches!(status.as_u16(), 401 | 403) {
-                        Refresh::Rejected
-                    } else {
-                        Refresh::Failed
-                    }
-                }
-                Err(_) => Refresh::Failed,
-            }
+        let state = window.state::<DesktopHttp>();
+        // fetch_once checks the session generation before sending and before
+        // writing cookies, so a refresh that races sign-out cannot sign the
+        // user back in; it reports Failed and the caller sees the session
+        // change.
+        let outcome = match fetch_once(&window, &state, generation, request, Some(deadline)).await {
+            Ok(response) if response.status().is_success() => Refresh::Rotated,
+            Ok(response) if matches!(response.status().as_u16(), 401 | 403) => Refresh::Rejected,
+            _ => Refresh::Failed,
         };
         guard.epoch += 1;
         guard.last = outcome;
@@ -609,28 +590,34 @@ async fn send(
     // Capture the refresh epoch before sending so concurrent 401s share one
     // refresh. Waits out any refresh already in flight rather than racing it.
     let seen = within(deadline, state.refresh.lock()).await?.epoch;
-    let response = fetch_once(
-        window,
-        state,
-        generation,
-        method.clone(),
-        url.clone(),
-        headers.clone(),
-        body.clone(),
-        deadline,
-    )
-    .await?;
+    let outgoing = Outgoing {
+        method,
+        url,
+        headers,
+        body,
+    };
+    let response = fetch_once(window, state, generation, outgoing.clone(), deadline).await?;
     let Some(refresh_url) = state.refresh_url.as_ref().filter(|refresh| {
-        response.status() == reqwest::StatusCode::UNAUTHORIZED && refresh.path() != url.path()
+        response.status() == reqwest::StatusCode::UNAUTHORIZED
+            && refresh.path() != outgoing.url.path()
     }) else {
         return Ok((response, generation));
     };
-    let refresh_url = refresh_url.clone();
-    let origin = origin.clone();
-    let refresh = refresh_session(window.clone(), state, generation, refresh_url, origin, seen);
+    let mut refresh_headers = header::HeaderMap::new();
+    refresh_headers.insert(
+        header::ORIGIN,
+        origin.parse().map_err(|_| "invalid origin")?,
+    );
+    let refresh_request = Outgoing {
+        method: Method::POST,
+        url: refresh_url.clone(),
+        headers: refresh_headers,
+        body: None,
+    };
+    let refresh = refresh_session(window.clone(), state, generation, refresh_request, seen);
     match within(deadline, refresh).await? {
         Refresh::Rotated => {
-            let response = fetch_once(window, state, generation, method, url, headers, body, deadline).await?;
+            let response = fetch_once(window, state, generation, outgoing, deadline).await?;
             Ok((response, generation))
         }
         Refresh::Rejected => Ok((response, generation)),
@@ -1122,9 +1109,24 @@ mod tests {
         let http = http.with_session_refresh("/api/auth/refresh/").unwrap();
         assert!(http.refreshes_session());
         assert!(http.refresh_url.as_ref().unwrap().path() == "/api/auth/refresh/");
-        assert!(DesktopHttp::new(api()).unwrap().with_session_refresh("/bad").is_err());
-        assert!(DesktopHttp::new(api()).unwrap().with_session_refresh("api/auth/refresh/").is_err());
-        assert!(DesktopHttp::new(api()).unwrap().with_session_refresh("/auth/refresh/").is_ok());
+        assert!(
+            DesktopHttp::new(api())
+                .unwrap()
+                .with_session_refresh("/bad")
+                .is_err()
+        );
+        assert!(
+            DesktopHttp::new(api())
+                .unwrap()
+                .with_session_refresh("api/auth/refresh/")
+                .is_err()
+        );
+        assert!(
+            DesktopHttp::new(api())
+                .unwrap()
+                .with_session_refresh("/auth/refresh/")
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1139,18 +1141,33 @@ mod tests {
         let connect_str = if let Some(s) = connect_val.as_str() {
             s.to_owned()
         } else if let Some(arr) = connect_val.as_array() {
-            arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(" ")
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
         } else {
             panic!("connect-src must be string or array, got {connect_val}");
         };
         // No production API host in the shipped policy.
-        assert!(!connect_str.contains("apipidash"), "csp lets page reach API: {connect_str}");
-        assert!(connect_str.contains("ipc:"), "IPC scheme missing: {connect_str}");
-        assert!(connect_str.contains("'self'"), "'self' missing: {connect_str}");
+        assert!(
+            !connect_str.contains("apipidash"),
+            "csp lets page reach API: {connect_str}"
+        );
+        assert!(
+            connect_str.contains("ipc:"),
+            "IPC scheme missing: {connect_str}"
+        );
+        assert!(
+            connect_str.contains("'self'"),
+            "'self' missing: {connect_str}"
+        );
         // Storage upload path is allowlisted via the runtime; the file itself
         // only names the static defaults. The important invariant is the API
         // origin is absent.
         let csp_str = serde_json::to_string(csp).unwrap();
-        assert!(!csp_str.contains("apipidash.airepublic.com"), "csp leaks API: {csp_str}");
+        assert!(
+            !csp_str.contains("apipidash.airepublic.com"),
+            "csp leaks API: {csp_str}"
+        );
     }
 }

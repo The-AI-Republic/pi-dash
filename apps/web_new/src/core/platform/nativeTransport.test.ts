@@ -7,8 +7,12 @@ import { DesktopTransportError } from "./tauri.js";
 import { platform as desktopPlatform } from "./tauri.js";
 
 function stubDesktop(origin = "https://api.test", session?: { refresh?: boolean; strict?: boolean }) {
+  const location = { href: "tauri://localhost/", origin: "tauri://localhost" };
+  // The transport resolves request URLs against `globalThis.location`, which
+  // is `window.location` in the webview but undefined in this node test env.
+  vi.stubGlobal("location", location);
   vi.stubGlobal("window", {
-    location: { href: "tauri://localhost/", origin: "tauri://localhost" },
+    location,
     __PIDASH_NATIVE_HTTP__: origin,
     __PIDASH_NATIVE_SESSION__: session ?? { refresh: false, strict: true },
     __TAURI__: {
@@ -48,7 +52,7 @@ describe("DesktopTransportError in strict bundled mode", () => {
       expect(e.message).toContain("https://api.test");
     }
     // No request leaves through the webview.
-    expect(fetch).not.toHaveBeenCalled;
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("throws for a credentialed same-origin path outside the API allowlist", async () => {

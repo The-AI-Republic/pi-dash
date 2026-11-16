@@ -310,7 +310,8 @@ function desktopFetch(input: RequestInfo | URL, init?: DesktopRequestInit): Prom
     // out without cookies and 401 unexplained: fail loudly.
     const credentials = init?.credentials ?? request?.credentials;
     if (credentials === "include" && native.session.strict) {
-      throw new DesktopTransportError(target.toString(), native.origin);
+      // Reject rather than throw: fetch's contract is a promise.
+      return Promise.reject(new DesktopTransportError(target.toString(), native.origin));
     }
     return globalThis.fetch(input, init as RequestInit);
   }

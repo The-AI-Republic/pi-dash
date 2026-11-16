@@ -171,7 +171,10 @@ fn storage_connect_sources(api: &Url, configured: Option<&str>) -> Result<Vec<St
 fn allow_connect_sources(config: &mut tauri::Config, sources: Vec<String>) -> Result<(), String> {
     match &mut config.app.security.csp {
         Some(tauri::utils::config::Csp::DirectiveMap(policy)) => {
-            policy.entry("connect-src".into()).or_default().extend(sources);
+            policy
+                .entry("connect-src".into())
+                .or_default()
+                .extend(sources);
             Ok(())
         }
         // The bundle's inline scripts are only hashed into the policy when
@@ -1349,7 +1352,11 @@ mod tests {
             vec!["https://*.amazonaws.com".to_string()]
         );
         assert_eq!(
-            storage_connect_sources(&api, Some("https://storage.example.com https://cdn.example.com")).unwrap(),
+            storage_connect_sources(
+                &api,
+                Some("https://storage.example.com https://cdn.example.com")
+            )
+            .unwrap(),
             vec![
                 "https://storage.example.com".to_string(),
                 "https://cdn.example.com".to_string(),
@@ -1377,6 +1384,8 @@ mod tests {
         let api = Url::parse("https://apipidash.airepublic.com").unwrap();
         // The API host itself is allowed when it does not cover /api/ or /auth/.
         // /uploads is the default storage proxy on the API origin.
-        assert!(storage_connect_sources(&api, Some("https://apipidash.airepublic.com/uploads")).is_ok());
+        assert!(
+            storage_connect_sources(&api, Some("https://apipidash.airepublic.com/uploads")).is_ok()
+        );
     }
 }
