@@ -136,7 +136,6 @@ impl AppTransitionHook {
         });
         let deps = HookDeps {
             pool: self.pool.clone(),
-            cloud: settings.cloud_agent.clone(),
             managed: settings.managed_runner.clone(),
             redis: client_from_settings(settings),
             runner: settings.runner.clone(),

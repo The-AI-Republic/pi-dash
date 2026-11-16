@@ -31,7 +31,6 @@ pub(crate) async fn complete_project_move_handoff(
 ) -> Result<Option<Uuid>, ()> {
     let settings = state.settings();
     let deps = pidash_jobs::orchestration::HandoffInlineDeps {
-        cloud: settings.cloud_agent.clone(),
         managed: settings.managed_runner.clone(),
         redis: client_from_settings(state.settings()),
         runner: settings.runner.clone(),

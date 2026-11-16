@@ -33,7 +33,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
+use pidash_db::config::{ManagedRunnerSettings, RunnerSettings};
 use pidash_db::dispatch::status::AgentRunStatus;
 use pidash_db::entity::{
     agent_run, issue_agent_ticker, issues, pod, scheduler_bindings, schedulers, workspaces,
@@ -645,7 +645,6 @@ where
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
-    let cloud = deps.cloud.clone();
     let tx = Transaction::begin(pool).await?;
     let mut store = LiveCreationStore::new(tx, pool, deps);
     let outcome =
@@ -667,7 +666,7 @@ where
     }
     let (tx, pool, dispatches, terminal_effects) = store.into_parts();
     tx.commit().await?;
-    let dispatch_decisions = drain_dispatch(pool, &cloud, dispatches, now).await?;
+    let dispatch_decisions = drain_dispatch(pool, dispatches, now).await?;
     let dispatched = dispatch_decisions.iter().map(|(id, _)| *id).collect();
     Ok(DispatchOutcome {
         outcome,
@@ -726,7 +725,6 @@ fn to_dispatch_result(
 /// outside the `(run, fail_reason)` contract is `Err` (task failure).
 pub fn live_scheduler_dispatch(
     pool: PgPool,
-    cloud: CloudAgentSettings,
     managed: ManagedRunnerSettings,
     redis: Option<redis::Client>,
     runner: RunnerSettings,
@@ -734,7 +732,6 @@ pub fn live_scheduler_dispatch(
 ) -> SchedulerDispatch {
     Arc::new(move |binding: BindingForDispatch| {
         let pool = pool.clone();
-        let cloud = cloud.clone();
         let managed = managed.clone();
         let redis = redis.clone();
         let runner = runner.clone();
@@ -755,7 +752,6 @@ pub fn live_scheduler_dispatch(
             );
             let verdicts = Arc::new(gate_verdicts(&assistant_seam, &presence).await);
             let deps = StoreDeps {
-                cloud,
                 managed,
                 has_usable_llm_config: gate_fn(verdicts),
                 llm_profile: profile_fn(presence),
@@ -907,7 +903,6 @@ mod tests {
     fn test_deps() -> StoreDeps<fn(Uuid) -> bool, fn(Option<Uuid>) -> LlmProfile> {
         let settings = pidash_db::config::Settings::test_defaults();
         StoreDeps {
-            cloud: settings.cloud_agent,
             managed: settings.managed_runner,
             has_usable_llm_config: |_| false,
             llm_profile: |_| LlmProfile {

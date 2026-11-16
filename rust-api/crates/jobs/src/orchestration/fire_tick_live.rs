@@ -23,7 +23,7 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
+use pidash_db::config::{ManagedRunnerSettings, RunnerSettings};
 use pidash_db::entity::agent_run;
 use pidash_db::orchestration::runs::ACTIVE_STATUSES;
 use pidash_db::orm_tx::into_sqlx;
@@ -50,7 +50,6 @@ use crate::tasks_ticker::fire_tick::{FireTickSeam, ProjectTickCols};
 /// is passed in from the claim read (live, never cached).
 pub struct LiveFireTickSeam {
     pool: PgPool,
-    cloud: CloudAgentSettings,
     managed: ManagedRunnerSettings,
     redis: Option<redis::Client>,
     runner: RunnerSettings,
@@ -60,7 +59,6 @@ pub struct LiveFireTickSeam {
 impl LiveFireTickSeam {
     pub fn new(
         pool: PgPool,
-        cloud: CloudAgentSettings,
         managed: ManagedRunnerSettings,
         redis: Option<redis::Client>,
         runner: RunnerSettings,
@@ -68,7 +66,6 @@ impl LiveFireTickSeam {
     ) -> Self {
         Self {
             pool,
-            cloud,
             managed,
             redis,
             runner,
@@ -138,7 +135,6 @@ impl FireTickSeam for LiveFireTickSeam {
         actor: Option<Uuid>,
     ) -> Pin<Box<dyn Future<Output = Result<Option<Uuid>, sqlx::Error>> + Send + '_>> {
         let pool = self.pool.clone();
-        let cloud = self.cloud.clone();
         let managed = self.managed.clone();
         let redis = self.redis.clone();
         let runner = self.runner.clone();
@@ -150,7 +146,6 @@ impl FireTickSeam for LiveFireTickSeam {
             let presence = Arc::new(fetch_presence(&pool, &universe).await?);
             let verdicts = Arc::new(gate_verdicts(&assistant_seam, &presence).await);
             let deps = StoreDeps {
-                cloud,
                 managed,
                 has_usable_llm_config: gate_fn(verdicts),
                 llm_profile: profile_fn(presence),
@@ -231,7 +226,6 @@ mod tests {
         let settings = pidash_db::config::Settings::test_defaults();
         LiveFireTickSeam::new(
             pool,
-            settings.cloud_agent,
             settings.managed_runner,
             None,
             settings.runner,

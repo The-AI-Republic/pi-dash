@@ -51,7 +51,6 @@ pub use execution::ExecutionInputs;
 pub use execution::ProjectScope;
 pub use execution::WORKSPACE_LOCK_SQL;
 pub use policy::agent_executor_options;
-pub use policy::cloud_agent_is_configured;
 pub use policy::effective_executor_for_issue;
 pub use policy::local_runner_available_exists;
 pub use policy::local_runner_exists;
