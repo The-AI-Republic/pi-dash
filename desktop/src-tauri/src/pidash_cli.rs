@@ -333,11 +333,11 @@ pub struct SemVer {
     pub pre: Option<String>,
 }
 
-impl SemVer {
-    fn to_string(&self) -> String {
+impl std::fmt::Display for SemVer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.pre {
-            Some(pre) => format!("{}.{}.{}-{}", self.major, self.minor, self.patch, pre),
-            None => format!("{}.{}.{}", self.major, self.minor, self.patch),
+            Some(pre) => write!(f, "{}.{}.{}-{}", self.major, self.minor, self.patch, pre),
+            None => write!(f, "{}.{}.{}", self.major, self.minor, self.patch),
         }
     }
 }
@@ -495,7 +495,8 @@ pub(crate) fn bundled_version<R: Runtime>(app: &AppHandle<R>) -> Option<String> 
 
 /// The bundled version parsed as semver.
 pub(crate) fn bundled_version_parsed<R: Runtime>(app: &AppHandle<R>) -> Option<SemVer> {
-    bundled_version(app).and_then(|s| parse_semver(&s))
+    let path = bundled_version_path(app)?;
+    bundled_version_from_path(&path)
 }
 
 /// Testable helper: parse a version file's contents without an `AppHandle`.
@@ -1616,5 +1617,12 @@ mod version_tests {
         let installed = parse_version_string("pidash 0.1.23-rc.7").unwrap();
         let bundled = parse_semver("0.1.30").unwrap();
         assert_eq!(decide_update(true, Some(installed), Some(bundled)), UpdateDecision::Update);
+    }
+
+    #[test]
+    fn semver_display_round_trips() {
+        assert_eq!(v("0.1.30").to_string(), "0.1.30");
+        assert_eq!(v("0.1.23-rc.7").to_string(), "0.1.23-rc.7");
+        assert_eq!(v("1.2.3+build.5").to_string(), "1.2.3");
     }
 }

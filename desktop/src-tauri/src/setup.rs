@@ -424,12 +424,11 @@ pub async fn daemon_maybe_update_cli<R: Runtime>(app: AppHandle<R>) -> Result<bo
     let bundled = bundled_path.unwrap();
     let dir = cli.parent().ok_or("the installed CLI has no directory")?.to_path_buf();
     let installed_display = cli.clone();
-    let updated = blocking(move || {
+    blocking(move || {
         log(&app_clone, format!("Auto-updating {}", installed_display.display()));
         pidash_cli::copy_bundled_cli(&bundled, &dir).map(|_| ())
     })
     .await?;
-    let _ = updated;
     if !daemon_is_idle().await {
         log(
             &app,

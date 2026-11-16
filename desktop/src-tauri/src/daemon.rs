@@ -439,10 +439,6 @@ fn dir_writable(dir: &Path) -> bool {
     std::fs::metadata(dir).is_ok_and(|m| !m.permissions().readonly())
 }
 
-pub(crate) fn cli_info() -> CliInfo {
-    cli_info_with_bundled(None)
-}
-
 pub(crate) fn cli_info_with_bundled(bundled_version: Option<String>) -> CliInfo {
     let status = crate::pidash_cli::detect_pidash_cli_sync();
     let (updatable, update_hint) = cli_update_offer(status.path.as_deref());
