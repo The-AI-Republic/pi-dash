@@ -556,6 +556,16 @@ pub async fn engine_profile(State(state): State<AppState>, headers: HeaderMap) -
         "top_up_url".to_owned(),
         serde_json::Value::String(profile.top_up_url.clone()),
     );
+    // Real limits for the catalog writer (NEWPIDASH-247). CE always answers
+    // null here; the cloud overlay fills it from the OpenHub catalog.
+    match profile.context_window {
+        Some(window) => {
+            body.insert("context_window".to_owned(), serde_json::json!(window));
+        }
+        None => {
+            body.insert("context_window".to_owned(), serde_json::Value::Null);
+        }
+    }
     for (key, value) in payload_map(
         &machine.engine_sign_in_state,
         machine

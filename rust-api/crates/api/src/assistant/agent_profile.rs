@@ -578,6 +578,7 @@ mod live_tests {
                     model: "hub-default".to_owned(),
                     reason_code: String::new(),
                     top_up_url: "https://gateway.example.com/account/credits".to_owned(),
+                    context_window: None,
                 }
             })
         }

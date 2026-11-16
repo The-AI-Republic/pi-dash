@@ -117,6 +117,13 @@ pub struct PidashAgentProfile {
     pub reason_code: String,
     #[serde(default, deserialize_with = "lenient_sign_in_state")]
     pub engine_sign_in_state: Option<EngineSignInState>,
+    /// Real context window for `model` when the server knows it (NEWPIDASH-247).
+    /// `None` means the server has no extra metadata; the engine's built-in
+    /// catalog (if any) decides. Never `model_context_window`: that config
+    /// key is clamped to the fallback's 272k maximum (see
+    /// `codex_config::render_engine_config`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
 }
 
 /// `POST /api/v1/runner/engine/model-token/`.
@@ -323,7 +330,10 @@ impl PidashAgentApi {
     }
 
     /// The model profile, with the daemon (machine) credential.
-    pub async fn profile(&self, machine_token: &str) -> Result<PidashAgentProfile, PidashAgentApiError> {
+    pub async fn profile(
+        &self,
+        machine_token: &str,
+    ) -> Result<PidashAgentProfile, PidashAgentApiError> {
         let resp = self
             .http
             .get(self.url(PROFILE_PATH))
@@ -471,8 +481,9 @@ mod tests {
         .unwrap_err();
         let msg = unparsable(&e);
         assert!(!msg.contains("ec_do_not_print"), "{msg}");
-        let e = serde_json::from_str::<PidashAgentGrantResponse>(r#"{"engine_credential": "ec_x"}"#)
-            .unwrap_err();
+        let e =
+            serde_json::from_str::<PidashAgentGrantResponse>(r#"{"engine_credential": "ec_x"}"#)
+                .unwrap_err();
         assert!(!unparsable(&e).contains("ec_x"));
 
         let p: PidashAgentProfile =
