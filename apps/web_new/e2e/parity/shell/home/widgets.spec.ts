@@ -10,6 +10,11 @@
 // dialog lists every surfaced widget with a toggle plus drag handles,
 // changes confirm with a notice, and the retired stickies key stays
 // invisible everywhere.
+// NEWPIDASH-301 (DIFF-38): the new home drops the all-off illustration —
+// an all-widgets-off home shows only the composer while Manage widgets
+// stays reachable — so the all-off step below asserts per target: the
+// oracle shows its guidance illustration (old behavior), the new home
+// shows none and keeps Manage reachable (DIFF-38).
 import { test, expect } from "../../fixtures";
 import type { ParityDriver } from "../../drivers/parity-driver";
 import {
@@ -190,22 +195,39 @@ test(
           { timeout: 30_000 }
         )
         .toBe(true);
-      // A failed preferences fetch leaves the previous stack painted with
-      // no retry, so reconcile with fresh loads before asserting.
-      let offShown = false;
-      for (let round = 0; round < 3 && !offShown; round += 1) {
+      if (driver.target === "web_new") {
+        // NEWPIDASH-301 (DIFF-38): no all-off illustration on the new
+        // home, but the Manage widgets control stays reachable so
+        // widgets can be turned back on.
         await driver.homeReload();
-        try {
-          await expect.poll(() => driver.homeAllOffVisible(), { timeout: 20_000 }).toBe(true);
-          offShown = true;
-        } catch {
-          // Stale render: another fresh load.
+        await expect.poll(() => driver.homeAllOffVisible(), { timeout: 30_000 }).toBe(false);
+        await driver.homeOpenManageWidgets();
+        const names = await driver.homeManageWidgetNames();
+        expect(names.join("\n")).toContain("Quicklinks");
+        expect(names.join("\n")).toContain("Recents");
+        await driver.homeCloseManageWidgets();
+      } else {
+        // A failed preferences fetch leaves the previous stack painted with
+        // no retry, so reconcile with fresh loads before asserting.
+        let offShown = false;
+        for (let round = 0; round < 3 && !offShown; round += 1) {
+          await driver.homeReload();
+          try {
+            await expect.poll(() => driver.homeAllOffVisible(), { timeout: 20_000 }).toBe(true);
+            offShown = true;
+          } catch {
+            // Stale render: another fresh load.
+          }
         }
+        expect(offShown).toBe(true);
       }
-      expect(offShown).toBe(true);
       await serverSetWidget(seed.workspaceSlug, session, visible[0]?.key ?? "recents", { is_enabled: true });
       await driver.homeReload();
       await expect.poll(() => driver.homeAllOffVisible(), { timeout: 60_000 }).toBe(false);
+      if (driver.target === "web_new") {
+        // The re-enabled widget renders again on the new home.
+        await expect.poll(async () => (await driver.homeWidgetTitles()).length, { timeout: 60_000 }).toBeGreaterThan(0);
+      }
     });
 
     await restoreWidgets(seed.workspaceSlug, session, snapshot);
