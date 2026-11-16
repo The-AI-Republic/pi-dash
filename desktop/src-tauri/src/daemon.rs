@@ -29,6 +29,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use pidash_ipc::dto::RunnerStatus;
 use pidash_ipc::protocol::{
     EngineRunnerInfo, EngineSettings, EngineStatusInfo, HelloAccount, HelloInfo, Request, Response,
     RunnerChanges, StatusSnapshot,
@@ -244,6 +245,10 @@ pub struct CliInfo {
     pub installed: bool,
     pub path: Option<PathBuf>,
     pub version: Option<String>,
+    /// The version of the CLI the app bundles (`bin/pidash.version`), if it
+    /// carries one. `None` for a dev build without a bundled CLI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundled_version: Option<String>,
     /// Whether the app can replace the installed CLI with the copy it
     /// carries ("Update Pi Dash on this computer"). `false` for an install
     /// under a system location (an MSI under `Program Files`, `/usr/…`).
@@ -251,6 +256,11 @@ pub struct CliInfo {
     /// Why it cannot, in the user's words.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub update_hint: Option<String>,
+    /// Whether the installed CLI is older than the bundled one and the app
+    /// may replace it. `false` when same/newer, unknown, missing, or not
+    /// updatable (in which case `update_hint` explains the manual path).
+    #[serde(default)]
+    pub update_available: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -373,6 +383,16 @@ pub fn same_account(app: &AppIdentity, daemon: &HelloAccount) -> bool {
     }
 }
 
+/// Whether every runner on this machine is idle (no run in flight and no
+/// approval pending). `pidash restart` stops any agent run in progress, so
+/// an auto-update defers the restart until this is true and retries at the
+/// next launch or idle point (PIDESKAPP-137 default).
+pub fn is_idle(snapshot: &StatusSnapshot) -> bool {
+    snapshot.runners.iter().all(|r| {
+        r.status == RunnerStatus::Idle && r.current_run.is_none() && r.approvals_pending == 0
+    })
+}
+
 /// Whether the app may replace the CLI at `cli`: a user-writable directory
 /// that is not a system location.
 pub fn cli_update_offer(cli: Option<&Path>) -> (bool, Option<String>) {
@@ -419,15 +439,25 @@ fn dir_writable(dir: &Path) -> bool {
     std::fs::metadata(dir).is_ok_and(|m| !m.permissions().readonly())
 }
 
-fn cli_info() -> CliInfo {
+pub(crate) fn cli_info_with_bundled(bundled_version: Option<String>) -> CliInfo {
     let status = crate::pidash_cli::detect_pidash_cli_sync();
     let (updatable, update_hint) = cli_update_offer(status.path.as_deref());
+    let installed_ver = status.version.as_deref().and_then(crate::pidash_cli::parse_version_string);
+    let bundled_ver = bundled_version.as_deref().and_then(crate::pidash_cli::parse_semver);
+    let update_available = updatable
+        && crate::pidash_cli::decide_update(
+            status.installed,
+            installed_ver,
+            bundled_ver,
+        ) == crate::pidash_cli::UpdateDecision::Update;
     CliInfo {
         installed: status.installed,
         path: status.path,
         version: status.version,
+        bundled_version,
         updatable,
         update_hint,
+        update_available,
     }
 }
 
@@ -496,10 +526,15 @@ pub async fn check_login_allowed(force: bool) -> Result<(), String> {
 
 /// Find the computer's daemon and say whether the app can work with it.
 #[tauri::command]
-pub async fn daemon_discover(app_identity: AppIdentity) -> Result<Discovery, String> {
+pub async fn daemon_discover(
+    app: tauri::AppHandle,
+    app_identity: AppIdentity,
+) -> Result<Discovery, String> {
     remember_app_identity(&app_identity);
     let probe = probe_hello(&socket()?).await;
-    let cli = tauri::async_runtime::spawn_blocking(cli_info)
+    // Read the bundled version before the blocking pool (needs the resource dir).
+    let bundled = crate::pidash_cli::bundled_version(&app);
+    let cli = tauri::async_runtime::spawn_blocking(move || cli_info_with_bundled(bundled))
         .await
         .map_err(|e| format!("detecting the CLI: {e}"))?;
     Ok(evaluate(probe, &app_identity, cli))
@@ -1169,5 +1204,68 @@ mod tests {
             reconnect_at(&err).await,
             Err(CallError::Failed(_))
         ));
+    }
+
+    fn snap_with(rid: uuid::Uuid, status: RunnerStatus, run: Option<usize>, approvals: usize) -> StatusSnapshot {
+        use pidash_ipc::protocol::{CurrentRunSummary, DaemonInfo, RunnerStatusSnapshot as RS};
+        let current_run = run.map(|_| CurrentRunSummary {
+            run_id: uuid::Uuid::new_v4(),
+            thread_id: None,
+            status: "running".into(),
+            started_at: chrono::Utc::now(),
+            events: 0,
+        });
+        StatusSnapshot {
+            daemon: DaemonInfo { cloud_url: "https://x".into(), connected: true, uptime_secs: 0, update: None },
+            runners: vec![RS {
+                runner_id: rid,
+                name: "r".into(),
+                project_slug: None,
+                pod_id: None,
+                status,
+                connected: true,
+                current_run,
+                approvals_pending: approvals,
+                last_heartbeat: None,
+                last_session_open: None,
+                consecutive_bootstrap_failures: 0,
+                next_retry_at: None,
+                disconnect_reason: None,
+                cloud_deleted_confirmations: 0,
+                workspace_signed_out: false,
+                observability: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn idle_means_every_runner_is_idle_with_no_run_or_pending() {
+        // No runners → idle
+        let empty = StatusSnapshot { daemon: pidash_ipc::protocol::DaemonInfo { cloud_url: "".into(), connected: true, uptime_secs: 0, update: None }, runners: vec![] };
+        assert!(is_idle(&empty));
+        // One idle runner, no run, no approvals → idle
+        assert!(is_idle(&snap_with(uuid::Uuid::new_v4(), RunnerStatus::Idle, None, 0)));
+        // Busy runner → not idle
+        assert!(!is_idle(&snap_with(uuid::Uuid::new_v4(), RunnerStatus::Busy, None, 0)));
+        // Reconnecting is not idle (still settling)
+        assert!(!is_idle(&snap_with(uuid::Uuid::new_v4(), RunnerStatus::Reconnecting, None, 0)));
+        // Idle status but a run is still attached → not idle
+        assert!(!is_idle(&snap_with(uuid::Uuid::new_v4(), RunnerStatus::Idle, Some(1), 0)));
+        // Idle but pending approvals → not idle
+        assert!(!is_idle(&snap_with(uuid::Uuid::new_v4(), RunnerStatus::Idle, None, 1)));
+    }
+
+    #[test]
+    fn system_installs_are_never_offered_for_update() {
+        for p in [
+            "/usr/bin/pidash",
+            "/usr/local/bin/pidash",
+            "/opt/homebrew/bin/pidash",
+            "/home/linuxbrew/.linuxbrew/bin/pidash",
+            r"C:/Program Files/pidash/pidash.exe",
+        ] {
+            let (ok, _) = cli_update_offer(Some(Path::new(p)));
+            assert!(!ok, "{p} should be a system location");
+        }
     }
 }

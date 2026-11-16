@@ -69,6 +69,80 @@ class BundleAgentTests(unittest.TestCase):
                     self.assertNotEqual(repo, "openai/codex")
                     self.assertNotIn("agent-engine", destination)
 
+    def test_targets_support_new_platforms_and_normalize_macos(self):
+        self.assertEqual(bundle.targets("aarch64-unknown-linux-gnu"), ["aarch64-unknown-linux-gnu"])
+        self.assertEqual(bundle.targets("aarch64-apple-darwin"), ["aarch64-apple-darwin"])
+        self.assertEqual(bundle.normalize_target("aarch64-apple-darwin"), "universal-apple-darwin")
+        self.assertEqual(bundle.normalize_target("x86_64-apple-darwin"), "universal-apple-darwin")
+        self.assertEqual(bundle.normalize_target("x86_64-unknown-linux-gnu"), "x86_64-unknown-linux-gnu")
+
+    def test_version_from_tag_strips_prefix(self):
+        self.assertEqual(bundle.version_from_tag("pidash-v0.1.30"), "0.1.30")
+        self.assertEqual(bundle.version_from_tag("pidash-v0.1.23-rc.7"), "0.1.23-rc.7")
+        self.assertEqual(bundle.version_from_tag("v0.1.30"), "0.1.30")
+        with self.assertRaises(ValueError):
+            bundle.version_from_tag("not-a-tag")
+        with self.assertRaises(ValueError):
+            bundle.version_from_tag("pidash-vgarbage")
+
+    def test_parse_tag_version(self):
+        self.assertEqual(bundle.parse_tag_version("pidash-v0.1.30"), (0, 1, 30, ""))
+        self.assertEqual(bundle.parse_tag_version("pidash-v0.1.23-rc.7"), (0, 1, 23, "rc.7"))
+        self.assertIsNone(bundle.parse_tag_version("v0.1.30"))
+        self.assertIsNone(bundle.parse_tag_version("pidash-vbad"))
+
+    def test_write_version_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            v = bundle.write_version_file(d, "pidash-v0.1.30")
+            self.assertEqual(v, "0.1.30")
+            self.assertEqual((Path(d) / "pidash.version").read_text().strip(), "0.1.30")
+
+    def test_resolve_latest_stable_picks_newest_stable(self):
+        payload = json.dumps([
+            {"tagName": "pidash-v0.1.30", "isDraft": False, "isPrerelease": False},
+            {"tagName": "pidash-v0.1.23-rc.7", "isDraft": False, "isPrerelease": True},
+            {"tagName": "pidash-v0.1.29", "isDraft": False, "isPrerelease": False},
+            {"tagName": "other-v1", "isDraft": False, "isPrerelease": False},
+            {"tagName": "pidash-v0.1.31-draft", "isDraft": True, "isPrerelease": False},
+        ])
+        with patch.object(bundle.subprocess, "check_output", return_value=payload):
+            self.assertEqual(bundle.resolve_latest_stable_tag(), "pidash-v0.1.30")
+
+    def test_resolve_latest_stable_excludes_prerelease(self):
+        payload = json.dumps([
+            {"tagName": "pidash-v0.1.30-rc.1", "isDraft": False, "isPrerelease": True},
+            {"tagName": "pidash-v0.1.29", "isDraft": False, "isPrerelease": False},
+        ])
+        with patch.object(bundle.subprocess, "check_output", return_value=payload):
+            self.assertEqual(bundle.resolve_latest_stable_tag(), "pidash-v0.1.29")
+
+    def test_resolve_runner_tag_prefers_pin_over_latest(self):
+        with patch.object(bundle.subprocess, "check_output") as mock:
+            mock.return_value = json.dumps([
+                {"tagName": "pidash-v0.1.30", "isDraft": False, "isPrerelease": False},
+            ])
+            self.assertEqual(bundle.resolve_runner_tag("pidash-v0.1.29"), "pidash-v0.1.29")
+            mock.assert_not_called()
+
+    def test_resolve_runner_tag_falls_back_to_env(self):
+        import os
+        with patch.object(bundle.subprocess, "check_output", return_value=json.dumps([
+            {"tagName": "pidash-v0.1.30", "isDraft": False, "isPrerelease": False},
+        ])) as mock:
+            with patch.dict(os.environ, {"PIDASH_BUNDLE_VERSION": "pidash-v0.1.28"}, clear=False):
+                self.assertEqual(bundle.resolve_runner_tag(None), "pidash-v0.1.28")
+                mock.assert_not_called()
+            with patch.dict(os.environ, {}, clear=False):
+                # Remove the pin for the next call
+                os.environ.pop("PIDASH_BUNDLE_VERSION", None)
+                # Now resolve should call gh
+                self.assertEqual(bundle.resolve_runner_tag(None), "pidash-v0.1.30")
+                mock.assert_called()
+
+    def test_resolve_runner_tag_normalizes_bare_versions(self):
+        self.assertEqual(bundle.resolve_runner_tag("0.1.29"), "pidash-v0.1.29")
+        self.assertEqual(bundle.resolve_runner_tag("v0.1.29"), "pidash-v0.1.29")
+
     def test_all_targets_produce_exact_native_filenames_and_mac_slices(self):
         for target in (
             "universal-apple-darwin",
@@ -112,12 +186,14 @@ class BundleAgentTests(unittest.TestCase):
                     patch.object(bundle, "download", side_effect=download),
                     patch.object(bundle.subprocess, "run", side_effect=lipo),
                 ):
-                    bundle.stage(target, "pidash-test", directory)
+                    v = bundle.stage(target, "pidash-v0.1.30", directory)
+                self.assertEqual(v, "0.1.30")
                 suffix = ".exe" if "windows" in target else ""
-                self.assertEqual(
-                    {p.name for p in Path(directory).iterdir()},
-                    {f"pidash{suffix}"},
-                )
+                names = {p.name for p in Path(directory).iterdir()}
+                self.assertIn(f"pidash{suffix}", names)
+                self.assertIn("pidash.version", names)
+                # version file matches tag
+                self.assertEqual((Path(directory) / "pidash.version").read_text().strip(), "0.1.30")
                 self.assertEqual(len(downloads), 2 if target.startswith("universal") else 1)
                 self.assertEqual(len(lipo_calls), 2 if target.startswith("universal") else 0)
 

@@ -13,19 +13,147 @@ import argparse
 import hashlib
 import io
 import json
-from pathlib import Path, PurePosixPath
+import os
+import re
 import subprocess
+import sys
 import tarfile
 import tempfile
 import zipfile
+from pathlib import Path, PurePosixPath
+
+REPO = "The-AI-Republic/pi-dash"
+TAG_PREFIX = "pidash-v"
 
 
 def targets(target):
     if target == "universal-apple-darwin":
         return ["aarch64-apple-darwin", "x86_64-apple-darwin"]
-    if target in ("x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"):
+    if target in (
+        "x86_64-pc-windows-msvc",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "aarch64-unknown-linux-musl",
+        "x86_64-unknown-linux-musl",
+    ):
         return [target]
     raise ValueError(f"Unsupported bundle target: {target}")
+
+
+def normalize_target(target):
+    """macOS builds ship universal; normalize single-arch mac triples."""
+    if target in ("aarch64-apple-darwin", "x86_64-apple-darwin"):
+        return "universal-apple-darwin"
+    return target
+
+
+def parse_tag_version(tag):
+    """Return (major, minor, patch, prerelease) for a pidash-v* tag."""
+    if not tag.startswith(TAG_PREFIX):
+        return None
+    ver = tag[len(TAG_PREFIX) :]
+    # allow leading v as well
+    if ver.startswith("v"):
+        ver = ver[1:]
+    m = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:-(.+))?$", ver)
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4) or "")
+
+
+def version_from_tag(tag):
+    """Bare version without the pidash-v prefix, e.g. 0.1.30."""
+    if tag.startswith(TAG_PREFIX):
+        ver = tag[len(TAG_PREFIX) :]
+    elif tag.startswith("v"):
+        ver = tag[1:]
+    else:
+        ver = tag
+    # validate semver-ish
+    if not re.match(r"^\d+\.\d+\.\d+(?:-.+)?$", ver):
+        raise ValueError(f"Invalid version tag: {tag}")
+    return ver
+
+
+def resolve_latest_stable_tag(repo=REPO):
+    """Newest non-draft, non-prerelease pidash-v* tag, resolved at build time."""
+    # Prefer `gh release list` (respects the repo's draft/prerelease flags and
+    # lets GitHub order newest-first); fall back to the API when that subcommand
+    # is unavailable (older gh).
+    candidates = []
+    try:
+        out = subprocess.check_output(
+            [
+                "gh",
+                "release",
+                "list",
+                "--repo",
+                repo,
+                "--exclude-drafts",
+                "--exclude-pre-releases",
+                "--limit",
+                "50",
+                "--json",
+                "tagName,isDraft,isPrerelease",
+            ],
+            text=True,
+            stderr=subprocess.STDOUT,
+        )
+        releases = json.loads(out)
+        for r in releases:
+            name = r.get("tagName") or r.get("tag_name") or ""
+            if not name.startswith(TAG_PREFIX):
+                continue
+            if r.get("isDraft") or r.get("isPrerelease"):
+                continue
+            pv = parse_tag_version(name)
+            if pv is None:
+                continue
+            candidates.append((pv, name))
+    except Exception:
+        candidates = []
+    if not candidates:
+        # Fallback: raw API list
+        try:
+            out = subprocess.check_output(
+                ["gh", "api", f"repos/{repo}/releases?per_page=100"],
+                text=True,
+                stderr=subprocess.STDOUT,
+            )
+            releases = json.loads(out)
+            for r in releases:
+                name = r.get("tag_name") or ""
+                if not name.startswith(TAG_PREFIX):
+                    continue
+                if r.get("draft") or r.get("prerelease"):
+                    continue
+                pv = parse_tag_version(name)
+                if pv is None:
+                    continue
+                candidates.append((pv, name))
+        except Exception:
+            pass
+    if not candidates:
+        raise ValueError(f"No stable {TAG_PREFIX}* release found in {repo}")
+    # Newest by semver triple, then pre-release bit (release > prerelease for same triple)
+    def key(item):
+        (maj, minor, patch, pre), _ = item
+        # prerelease sorts *below* the release for the same triple: use
+        # (0 if pre else 1) so release wins
+        return (maj, minor, patch, 0 if pre else 1)
+    candidates.sort(key=key, reverse=True)
+    return candidates[0][1]
+
+
+def write_version_file(output, runner_tag):
+    """Record the bundled CLI version for runtime comparison."""
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    version = version_from_tag(runner_tag)
+    (output / "pidash.version").write_text(version + "\n", encoding="utf-8")
+    return version
 
 
 def assets(target):
@@ -106,6 +234,7 @@ def executable_bytes(payload, archive, member):
 def stage(target, runner_tag, output):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
+    target = normalize_target(target)
     with tempfile.TemporaryDirectory(prefix="pidash-agent-slices-") as directory:
         slices = {}
         for architecture in targets(target):
@@ -130,15 +259,51 @@ def stage(target, runner_tag, output):
             else:
                 destination.write_bytes(paths[0].read_bytes())
             destination.chmod(0o755)
+    version = write_version_file(output, runner_tag)
+    print(f"[bundle-agents] bundled {runner_tag} ({version}) for target {target} -> {output}")
+    # In GitHub Actions, surface the resolved tag in the job summary.
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        try:
+            with open(summary, "a", encoding="utf-8") as fh:
+                fh.write(f"**Bundled pidash CLI**: `{runner_tag}` (`{version}`) for `{target}`\n")
+        except OSError:
+            pass
+    return version
+
+
+def resolve_runner_tag(pinned, repo=REPO):
+    """Explicit pin wins; otherwise resolve latest stable at build time."""
+    raw = pinned or os.environ.get("PIDASH_BUNDLE_VERSION") or ""
+    raw = raw.strip()
+    if raw:
+        # Allow bare version or tag; normalize to pidash-v* for the API
+        if raw.startswith(TAG_PREFIX):
+            tag = raw
+        elif raw.startswith("v"):
+            tag = TAG_PREFIX + raw[1:]
+        elif re.match(r"^\d+\.\d+\.\d+", raw):
+            tag = TAG_PREFIX + raw
+        else:
+            tag = raw
+        return tag
+    return resolve_latest_stable_tag(repo=repo)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", required=True)
-    parser.add_argument("--runner-tag", required=True)
+    parser.add_argument("--runner-tag", required=False, default=None)
+    parser.add_argument("--repo", default=REPO)
     parser.add_argument("--output", type=Path, default=Path("bin"))
     args = parser.parse_args()
-    stage(args.target, args.runner_tag, args.output)
+    try:
+        runner_tag = resolve_runner_tag(args.runner_tag, repo=args.repo)
+    except ValueError as e:
+        print(f"[bundle-agents] ERROR: {e}", file=sys.stderr)
+        raise SystemExit(1) from e
+    print(f"[bundle-agents] resolved runner tag: {runner_tag} (target {args.target})")
+    stage(args.target, runner_tag, args.output)
 
 
 if __name__ == "__main__":
