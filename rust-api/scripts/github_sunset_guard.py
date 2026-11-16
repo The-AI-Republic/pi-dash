@@ -15,25 +15,18 @@ below. "Production" means test code (#[cfg(test)] items and their sibling
 files) and comments are masked out, the same way write_guard.py lexes; string
 contents stay visible, so a raw-SQL literal naming a legacy table still fails.
 
-Two coordination lists live in this file:
-
-* EXCLUDED_358 -- files owned by PDASHOSS01-358 (PR #3041), which deletes
-  the legacy poller and stops project-bind legacy writes. They are skipped
-  entirely while that PR is in flight; when it lands and cleans them, the
-  guard prints a notice so a follow-up can drop the entries. Never add to
-  this list to silence a hit -- the file belongs here only because 358
-  edits it in the same window.
-
-* scripts/github_sunset_allowlist.txt -- files that keep a legacy mention on
-  purpose, one per line as `path | reason`. A file with hits that is not on
-  the list fails; a list entry with no hits fails too, so the list only
-  shrinks. Current entries: the cascade-deletion sweep (which must still
-  delete legacy rows until the drop-tables follow-up), the OpenAPI schema
-  name (wire compatibility, not table access), the app_issues PR-link
-  list/destroy reads (deliberate NEWPIDASH-227 coexistence revert: the
-  generic read breaks contract parity while Django still dual-writes,
-  removed with PDASHOSS01-359), and the model-definition files slated for
-  deletion in NEWPIDASH-210 part 3 (after PDASHOSS01-358 merges).
+One coordination list lives in scripts/github_sunset_allowlist.txt --
+files that keep a legacy mention on purpose, one per line as
+`path | reason`. A file with hits that is not on the list fails; a list
+entry with no hits fails too, so the list only shrinks. Current entries:
+the cascade-deletion sweep (which must still delete legacy rows until
+the drop-tables follow-up), the OpenAPI schema name (wire compatibility,
+not table access), and the app_issues PR-link list/destroy reads
+(deliberate NEWPIDASH-227 coexistence revert: the generic read breaks
+contract parity while Django still dual-writes, removed with
+PDASHOSS01-359). PDASHOSS01-358 (PR #3041) and NEWPIDASH-210 part 3
+have both landed: every other file is clean, so the EXCLUDED_358
+coordination list is gone.
 
 Entity definitions (crates/db/src/entity/) and anything under a migrations/
 directory are never scanned.
@@ -105,18 +98,6 @@ PATTERN = re.compile(
     )
 )
 
-# Files owned by PDASHOSS01-358 (PR #3041). Skipped, not allowlisted: that
-# PR removes their legacy hits, and a stale allowlist entry would fail on
-# main at its merge. Remove each entry here when the file no longer has
-# legacy hits (the guard warns until then).
-EXCLUDED_358 = frozenset({
-    "crates/api/src/app_integrations/handlers_git_repo.rs",
-    "crates/api/src/app_integrations/handlers_github_proj.rs",
-    "crates/jobs/src/integrations/github_sync.rs",
-    "crates/services/src/integrations/code_reviews.rs",
-    "crates/services/src/integrations/repositories.rs",
-})
-
 ENTITY_PREFIX = "crates/db/src/entity/"
 SKIP_SEGMENT = "/migrations/"
 SCAN_ROOTS = ("crates", "bin")
@@ -138,7 +119,6 @@ def iter_rs_files(root):
 
 def collect_hits(root):
     hits = {}  # rel -> list of "rel:line: match"
-    clean_excluded = []
     skip_files = set()
     files = []
     for path, rel in iter_rs_files(root):
@@ -152,24 +132,10 @@ def collect_hits(root):
     for path, rel, masked in files:
         if path in skip_files:
             continue
-        if rel in EXCLUDED_358:
-            continue
         for m in PATTERN.finditer(masked):
             line = masked.count("\n", 0, m.start()) + 1
             hits.setdefault(rel, []).append("%s:%d: %s" % (rel, line, m.group(0)))
-    # Notice for excluded files that are already clean: a follow-up can
-    # shrink EXCLUDED_358. Never fails the check.
-    for rel in sorted(EXCLUDED_358):
-        target = root / rel
-        if not target.exists():
-            clean_excluded.append("%s (missing)" % rel)
-            continue
-        src = target.read_text(encoding="utf-8")
-        code, spans = lex(src)
-        masked, _ = mask_cfg_test(code, spans)
-        if not PATTERN.search(masked):
-            clean_excluded.append(rel)
-    return hits, clean_excluded
+    return hits
 
 
 def read_allowlist(path):
@@ -202,7 +168,7 @@ def main(argv=None):
     root = Path(args.root) if args.root else Path(__file__).resolve().parent.parent
     allow_path = (Path(args.allowlist) if args.allowlist
                   else root / "scripts" / "github_sunset_allowlist.txt")
-    hits, clean_excluded = collect_hits(root)
+    hits = collect_hits(root)
 
     if args.seed:
         for rel in sorted(hits):
@@ -215,10 +181,6 @@ def main(argv=None):
     total = sum(len(v) for v in hits.values())
     print("github_sunset_guard: %d hit(s) in %d file(s), %d allowlisted"
           % (total, len(hits), len(allowed)))
-    if clean_excluded:
-        print("github_sunset_guard: excluded (PDASHOSS01-358) files already clean")
-        for rel in clean_excluded:
-            print("  notice: %s" % rel)
     if not new and not stale:
         print("github_sunset_guard: OK -- no unallowlisted legacy mentions")
         return 0
