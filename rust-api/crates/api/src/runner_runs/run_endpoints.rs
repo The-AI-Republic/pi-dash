@@ -2536,6 +2536,7 @@ async fn run_failed_agent_auth_missing(
             &Value::Null,
             &Value::Null,
             &Value::Null,
+            &Value::Null,
         )
         .await
         {
