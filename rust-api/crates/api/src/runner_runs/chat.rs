@@ -29,8 +29,9 @@
 //!   dereferences `auth_runner.id` with no `None` guard —
 //!   unauthenticated daemon chat POSTs answer 500, not 401/403.
 //! * BUG-offline-fanout-500 (`chat.py:380-425,457-510`): close/decide
-//!   send inside `on_commit`; for an offline runner the 500 carries a
-//!   persisted close/decision.
+//!   were deliberately fixed by NEWPIDASH-259 (DIFF-25) — the sends
+//!   swallow `RunnerOfflineError` and return success with the persisted
+//!   write, so Rust no longer reproduces the 500.
 //!
 //! # Documented gaps and approximations
 //!
@@ -89,7 +90,7 @@ use super::run_endpoints::{idempotency_key as daemon_idempotency_key, FrameError
 use super::{
     authenticate_daemon, frame_text, is_uuid_path_segment, json_response, pool_of,
     publish_chat_event, py_truthy, read_request_data, server_error, truncate_chars, DaemonRunner,
-    LivePorts, RunnerPorts,
+    LivePorts, PortError, RunnerPorts,
 };
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
@@ -798,7 +799,7 @@ impl RunnerDetailOwned {
             name: &self.name,
             status: &self.status,
             host_label: &self.host_label,
-            is_engine: self.is_engine,
+            is_pidash_agent: self.is_engine,
             engine_paused: self.engine_paused,
             dispatch_paused: self.dispatch_paused,
             machine_display_name: &self.machine_display_name,
@@ -894,7 +895,7 @@ pub async fn fetch_runner_detail(
                     expires_at,
                 )) => {
                     let derived =
-                        pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                        pidash_services::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
                             &stored_state,
                             expires_at,
                             Utc::now(),
@@ -1786,9 +1787,9 @@ pub async fn drain_chat_effects(
 
 /// The endpoint-local control sends that are not L5 service effects:
 /// cancel, close, and decide each send one frame directly from
-/// `on_commit` (`chat.py:415-425,493-510,705-720`). Every failure
-/// propagates (BUG-offline-fanout-500: the 500 carries the persisted
-/// write).
+/// `on_commit` (`chat.py:415-425,493-510,705-720`). After NEWPIDASH-259
+/// (DIFF-25) `RunnerOfflineError` is swallowed with a log and the
+/// persisted write is returned; other transport failures still 500.
 pub enum DirectSend {
     Cancel {
         runner_id: Uuid,
@@ -1854,17 +1855,32 @@ impl DirectSend {
     }
 }
 
-/// Drain [`DirectSend`]s after commit, in order, propagating every
-/// failure to the 500 the source's `on_commit` raises.
+/// Drain [`DirectSend`]s after commit, in order.
+///
+/// Offline fan-out is swallowed with a warn log and the persisted
+/// write is returned (NEWPIDASH-259, DIFF-25): `chat_close`,
+/// `chat_decide` and the active-turn `chat_cancel` types are in
+/// `OFFLINE_REJECT` and `RunnerOfflineError` used to propagate to a 500
+/// after the row committed. Other transport failures still 500.
 pub async fn drain_direct_sends(
     ports: &impl RunnerPorts,
     sends: Vec<DirectSend>,
 ) -> Result<(), Response> {
     for send in sends {
-        ports
-            .send_to_runner(send.runner_id(), send.frame())
-            .await
-            .map_err(|_| server_error())?;
+        let runner_id = send.runner_id();
+        match ports.send_to_runner(runner_id, send.frame()).await {
+            Ok(()) => {}
+            Err(PortError::Offline {
+                runner_id: rid,
+                message_type,
+            }) => {
+                tracing::warn!(%rid, %message_type, "chat direct send to offline runner; persisted write kept");
+            }
+            Err(PortError::Transport(detail)) => {
+                tracing::error!(%detail, %runner_id, "chat direct send transport failed");
+                return Err(server_error());
+            }
+        }
     }
     Ok(())
 }
@@ -2700,8 +2716,8 @@ pub async fn chat_message_create(
 
 /// `POST /api/runners/chat/sessions/<id>/cancel/` (`chat.py:380-397`):
 /// an inactive session noops (without touching the body); an active
-/// one sends `chat_cancel` after commit (unisolated — 500 on
-/// offline, with nothing persisted either way).
+/// one sends `chat_cancel` after commit. Offline dispatch is swallowed
+/// (DIFF-25), with nothing persisted either way.
 pub async fn chat_session_cancel(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
@@ -2774,8 +2790,8 @@ pub async fn chat_session_cancel(
 /// `POST /api/runners/chat/sessions/<id>/close/` (`chat.py:400-425`):
 /// an active session marks `close_requested` and sends
 /// `chat_cancel` (the runner closes on turn end); an idle one closes
-/// now with `chat_closed` and `chat_close`. Both sends are
-/// unisolated (BUG-offline-fanout-500).
+/// now with `chat_closed` and `chat_close`. Both sends swallow offline
+/// `RunnerOfflineError` (DIFF-25) and return the persisted write.
 pub async fn chat_session_close(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
@@ -3037,8 +3053,8 @@ pub async fn chat_approvals_list(
 /// `POST /api/runners/chat/approvals/<id>/decide/` (`chat.py:463-510`):
 /// validate the decision (400s before the transaction), lock the
 /// approval, decide it, append `approval_decided`, and send
-/// `chat_decide` after commit (unisolated — 500 on offline, with the
-/// decision persisted).
+/// `chat_decide` after commit. Offline dispatch is swallowed with the
+/// decision persisted (DIFF-25).
 pub async fn chat_approval_decide(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,

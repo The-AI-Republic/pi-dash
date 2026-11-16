@@ -608,24 +608,20 @@ pub fn mirror_state(link: &PrLinkRow) -> String {
     }
 }
 
-/// Merged mirror metadata (`:88-91`): the existing metadata (or `{}`)
-/// plus the legacy link id. `metadata` is never NULL
-#[allow(dead_code)]
+/// Preserved mirror metadata: the existing metadata (or `{}`) passes
+/// through untouched. After the generic cutover (PDASHOSS01-355) there
+/// is no legacy link id to stash — the generic row *is* the link, and
+/// writing a self-pointer would forge a sunset artifact Django
+/// removes in 6/6 (PDASHOSS01-359). `metadata` is never NULL
 /// (`JSONField(default=dict)`); a non-object value passes through
-/// untouched and the legacy key is still added — matching `{**meta,
-/// ...}` for every dict and degrading gracefully otherwise. (Python
-/// would crash unpacking a non-dict; unreachable for rows this service
-/// writes.)
-fn merged_metadata(existing: Option<&Value>, link_id: &Uuid) -> Value {
-    let mut map = match existing {
-        Some(Value::Object(map)) => map.clone(),
-        _ => Map::new(),
-    };
-    map.insert(
-        "legacy_github_pull_request_link_id".to_owned(),
-        Value::String(link_id.to_string()),
-    );
-    Value::Object(map)
+/// untouched. (Python would merge the legacy key here; unreachable
+/// for rows this service writes.)
+fn merged_metadata(existing: Option<&Value>, _link_id: &Uuid) -> Value {
+    match existing {
+        Some(Value::Object(map)) => Value::Object(map.clone()),
+        Some(other) => other.clone(),
+        None => Value::Object(Map::new()),
+    }
 }
 
 /// The mirror overwrite fields for a link (`fields`, `:79-92`).
@@ -668,10 +664,10 @@ impl From<PullRequestAlreadyLinked> for AttachError {
     }
 }
 
-/// `_ensure_code_review_link` (`:76-109`): create the mirror, or #[allow(dead_code)]
+/// `_ensure_code_review_link` (`:76-109`): create the mirror, or
 /// overwrite it when it already exists on the same issue; a mirror on
-/// another issue raises [`PullRequestAlreadyLinked`].
-#[allow(dead_code)]
+/// another issue raises [`PullRequestAlreadyLinked`]. Called from the
+/// relink arms of [`attach_pull_request`] to stamp the audit columns.
 async fn ensure_code_review_link<S: PrLinksStore>(
     store: &S,
     link: &PrLinkRow,
@@ -793,6 +789,11 @@ pub async fn attach_pull_request<S: PrLinksStore, C: GithubClient>(
             }
             .into());
         }
+        // Django re-saves the generic mirror on relink (`:145`), stamping
+        // updated_at/updated_by_id via BaseModel.save
+        // (NEWPIDASH-229); mirror the audit stamp so relink is not a
+        // silent no-op.
+        ensure_code_review_link(store, &existing, now, actor_id).await?;
         return Ok(AttachOutcome {
             link: existing,
             created: false,
@@ -854,6 +855,8 @@ pub async fn attach_pull_request<S: PrLinksStore, C: GithubClient>(
                         }
                         .into());
                     }
+                    // Same re-save as the idempotent arm above (`:173`).
+                    ensure_code_review_link(store, &link, now, actor_id).await?;
                     Ok(AttachOutcome {
                         link,
                         created: false,
@@ -1437,7 +1440,18 @@ mod tests {
         store
             .links
             .insert(("octo".to_owned(), "repo".to_owned(), 7), link_row(issue));
-        // Same issue → idempotent (link, False) via generic only.
+        // The generic row is also the review mirror (same table): mirror
+        // the production lookups so ensure's update arm fires.
+        store.reviews.insert(
+            ("octo".to_owned(), "repo".to_owned(), "7".to_owned()),
+            ReviewLinkRow {
+                id: uuid(0x11),
+                issue_id: issue,
+                metadata: serde_json::json!({}),
+            },
+        );
+        // Same issue → idempotent (link, False) + NEWPIDASH-229 audit
+        // re-save (update, never create).
         let out = attach_pull_request::<FakeStore, ScriptedClient>(
             &store,
             project,
@@ -1451,11 +1465,11 @@ mod tests {
         .expect("re-attaches");
         assert!(!out.created);
         assert_eq!(out.link.id, uuid(0x11));
-        // PDASHOSS01-355: no review mirror created for idempotent path.
         assert!(!store
             .calls
             .borrow()
             .contains(&"create_review_link".to_owned()));
+        assert_eq!(store.updated_reviews.borrow().len(), 1);
 
         // Other issue → AlreadyLinked(existing.issue_id).
         let err = attach_pull_request::<FakeStore, ScriptedClient>(
@@ -1614,9 +1628,13 @@ mod tests {
         .await
         .expect("re-attaches");
         assert!(!out.created);
-        // PDASHOSS01-355: no separate mirror to update; generic row is the link.
+        // NEWPIDASH-229: relink re-saves the (generic) mirror so the
+        // audit columns stamp like Django's _ensure + save() — one
+        // update, metadata preserved (no legacy self-pointer).
         let updated = store.updated_reviews.borrow();
-        assert_eq!(updated.len(), 0, "no mirror update after generic cutover");
+        assert_eq!(updated.len(), 1, "relink re-saves the mirror");
+        assert_eq!(updated[0].0, uuid(0x41));
+        assert_eq!(updated[0].1.metadata, serde_json::json!({"keep": "me"}));
     }
 
     #[tokio::test]

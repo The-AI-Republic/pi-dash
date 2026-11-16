@@ -242,11 +242,11 @@ def _seed_followup(conn) -> None:
             """
             INSERT INTO agent_run
                (id, status, prompt, run_config, required_capabilities, thread_id,
-                error_details, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
+                error_details, failure_reason, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
                 trigger, executor_kind, dispatch_attempts,
                 cancel_reason, tool_plan, phase_kind, agent_metadata,
                 usage, pin_kind, created_at)
-            VALUES (%s,'running','contract prompt','{}','{}','contract-thread','{}',
+            VALUES (%s,'running','contract prompt','{}','{}','contract-thread','{}','',
                     %s,%s,%s,%s,'contract-model', 'human', 'local_runner', 0,
                     '', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', 'locality', now())
             """,
@@ -259,11 +259,11 @@ def _seed_followup(conn) -> None:
             """
             INSERT INTO agent_run
                (id, status, prompt, run_config, required_capabilities, thread_id,
-                error_details, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
+                error_details, failure_reason, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
                 trigger, executor_kind, dispatch_attempts,
                 cancel_reason, tool_plan, phase_kind, agent_metadata,
                 usage, pin_kind, created_at)
-            VALUES (%s,'running','contract prompt','{}','{}','contract-thread','{}',
+            VALUES (%s,'running','contract prompt','{}','{}','contract-thread','{}','',
                     %s,%s,%s,%s,'contract-model', 'human', 'local_runner', 0,
                     '', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', 'locality', now())
             """,
@@ -304,11 +304,40 @@ SESSIONS = (
                 ("args/2", "labels"),
             ],
         },
+        # Sunset 2/6 (PDASHOSS01-355): Django dual-writes
+        # github_pull_request_links + git_code_review_links (metadata
+        # legacy_github_pull_request_link_id), Rust writes only generic
+        # with {} metadata. Legacy table diverges until Django 6/6
+        # PDASHOSS01-359 removes legacy. Skip legacy table; the
+        # metadata divergence is pinned via known_cell_diffs so the
+        # generic row still compares otherwise.
+        skip_tables={
+            "github_pull_request_links": "sunset 2/6 legacy: Django dual-writes, Rust generic-only (PDASHOSS01-355)",
+        },
         # PR-link create also writes the legacy link row and stashes its
         # id in the new row's metadata (github_pr_links.py:_ensure...).
+        # Rust after PDASHOSS01-355 writes only generic with {} — the
+        # blanked Django pointer vs {} is pinned below.
         db_cell_refs=[
             ("git_code_review_links", "metadata", "github_pull_request_links",
              "legacy_github_pull_request_link_id"),
+        ],
+        # Django metadata legacy pointer vs Rust {} on PR-link rows.
+        # After db_cell_refs blanking the Django pointer is the stub
+        # {row:github_pull_request_links}; Rust is {}. Pin the blanked
+        # stub so the generic row otherwise compares. The match is
+        # the work item plus external_iid (normalised {wi}); the
+        # volatile id ({"id": "{pr}"}) never matches after blanking,
+        # which is why the 207 pin was dead (NEWPIDASH-229).
+        known_cell_diffs=[
+            (
+                "git_code_review_links",
+                "NEWPIDASH-207",
+                {"issue_id": "{wi}", "external_iid": "424242"},
+                "metadata",
+                {"legacy_github_pull_request_link_id": "{row:github_pull_request_links}"},
+                {},
+            ),
         ],
         requests=(
             Request(
@@ -430,6 +459,52 @@ SESSIONS = (
                 "DELETE", _WI + "github/pull-requests/{pr}/",
                 route="/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/github/pull-requests/{link_id}/",
                 auth="api_key", expect_status=204,
+                # Sunset 2/6 (PDASHOSS01-355, NEWPIDASH-229): Django's
+                # detach deletes the legacy row AND its generic mirror;
+                # Rust deletes generic only. The legacy pk is the
+                # captured {pr} (attach returns the legacy id), so the
+                # extra pin names the capture, not a row stub.
+                known_django_extra_jobs=[
+                    (
+                        "pi_dash.bgtasks.deletion_task.soft_delete_related_objects",
+                        "NEWPIDASH-229",
+                        {
+                            "task": "pi_dash.bgtasks.deletion_task.soft_delete_related_objects",
+                            "args": ["db", "githubpullrequestlink", "{pr}"],
+                            "kwargs": {"using": None},
+                            "eta": None,
+                            "retries": 0,
+                            "queue": "celery",
+                        },
+                    ),
+                ],
+                # The shared generic job's pk is a different
+                # backend-local row per side (Django's {pr} is the
+                # legacy id, Rust's is the generic id): row-blanked on
+                # Django, capture-substituted on Rust.
+                known_job_shapes=[
+                    (
+                        "pi_dash.bgtasks.deletion_task.soft_delete_related_objects",
+                        "NEWPIDASH-229",
+                        {
+                            "task": "pi_dash.bgtasks.deletion_task.soft_delete_related_objects",
+                            "args": ["db", "gitcodereviewlink",
+                                     "{row:git_code_review_links}"],
+                            "kwargs": {"using": None},
+                            "eta": None,
+                            "retries": 0,
+                            "queue": "celery",
+                        },
+                        {
+                            "task": "pi_dash.bgtasks.deletion_task.soft_delete_related_objects",
+                            "args": ["db", "gitcodereviewlink", "{pr}"],
+                            "kwargs": {"using": None},
+                            "eta": None,
+                            "retries": 0,
+                            "queue": "celery",
+                        },
+                    ),
+                ],
             ),
             Request(
                 "DELETE", _WI + "links/{link}/",
@@ -506,6 +581,13 @@ SESSIONS = (
                 ("args/2", "github_pull_request_links"),
                 ("args/2", "intake_issues"),
             ],
+        },
+        # Sunset 2/6 (PDASHOSS01-355): code-review attach for github
+        # dual-writes legacy via _ensure_github_legacy_link in Django
+        # (integrations/git/code_reviews.py), Rust writes only generic.
+        # Legacy table diverges until Django 6/6 PDASHOSS01-359.
+        skip_tables={
+            "github_pull_request_links": "sunset 2/6 legacy: Django dual-writes, Rust generic-only (PDASHOSS01-355)",
         },
         # process_logs now compares exactly (868/920/937 all landed); only the now() stamps above still blank.
         requests=(
@@ -639,6 +721,24 @@ SESSIONS = (
                 "DELETE", _WB + "/code-reviews/{cr}/",
                 route="/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{pk}/code-reviews/{review_id}/",
                 auth="api_key", expect_status=204,
+                # Sunset 2/6 (PDASHOSS01-355, NEWPIDASH-229): Django's
+                # code-review attach dual-wrote the legacy link, so this
+                # detach deletes legacy AND generic; Rust generic only.
+                known_django_extra_jobs=[
+                    (
+                        "pi_dash.bgtasks.deletion_task.soft_delete_related_objects",
+                        "NEWPIDASH-229",
+                        {
+                            "task": "pi_dash.bgtasks.deletion_task.soft_delete_related_objects",
+                            "args": ["db", "githubpullrequestlink",
+                                     "{row:github_pull_request_links}"],
+                            "kwargs": {"using": None},
+                            "eta": None,
+                            "retries": 0,
+                            "queue": "celery",
+                        },
+                    ),
+                ],
             ),
             # Pages: patch without a doc service is a 503 both sides;
             # archive + unarchive round-trip.

@@ -69,13 +69,36 @@ describe("runner model catalog contracts", () => {
   it("reads the public catalog from the signed-in path", async () => {
     const calls: Call[] = [];
     const client = stubClient(
-      new Map([["/api/runners/model-catalog/", grouped({ codex: [row()], "open-claw": [] })]]),
+      new Map([["/api/runners/model-catalog/", grouped({ codex: [row()], "open-claw": [], openhub: [] })]]),
       calls
     );
     const catalog = await getModelCatalog(client);
     expect(calls[0]?.url).toBe("/api/runners/model-catalog/");
     expect(catalog.agents["codex"]?.[0]?.model).toBe("gpt-5.5");
     expect(catalog.agents["open-claw"]).toEqual([]);
+    expect(catalog.agents["openhub"]).toEqual([]);
+  });
+
+  it("carries the openhub assistant group with slug, label and default", async () => {
+    const calls: Call[] = [];
+    const openhubRow = row({
+      agent: "openhub",
+      model: "openhub_free_llm",
+      label: "OpenHub free model",
+      reasoning_efforts: [],
+      is_preselected: true,
+    });
+    const client = stubClient(new Map([["/api/runners/model-catalog/", grouped({ openhub: [openhubRow] })]]), calls);
+    const catalog = await getModelCatalog(client);
+    const rows = catalog.agents["openhub"] ?? [];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      agent: "openhub",
+      model: "openhub_free_llm",
+      label: "OpenHub free model",
+      reasoning_efforts: [],
+      is_preselected: true,
+    });
   });
 
   it("lists the admin catalog from the admin path", async () => {

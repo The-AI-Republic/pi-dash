@@ -12,7 +12,7 @@
 //! * [`querysets`] — `core/querysets.py` whole plus the role-fact SQL
 //!   of `core/permissions.py` (decisions stay in the F-06 kernel).
 //!
-//! Reads reuse the D-11 [`dispatch`](crate::dispatch) `AgentRun`
+//! Reads reuse the D-11 [`dispatch`](crate::agent_runs) `AgentRun`
 //! shape + `AgentRunStatus` and the L1
 //! [`pidash_types::orchestration`] parser — never re-ported. All
 //! queries are SeaORM statements over a [`ConnectionTrait`]

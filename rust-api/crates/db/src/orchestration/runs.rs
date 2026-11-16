@@ -13,16 +13,16 @@
 //!   parser and persist the outcome onto the run with a single `UPDATE`.
 //!
 //! Rows reuse the D-11 [`AgentRun`] read shape and [`AgentRunStatus`]
-//! (`pidash_db::dispatch`, never re-ported): the lookup `SELECT`s
+//! (`pidash_db::agent_runs`, never re-ported): the lookup `SELECT`s
 //! project [`READ_COLUMNS`] (22 columns) where Django selects the full
 //! 39-column row — same row-selection semantics, narrower projection.
 //! The fixture (`active_run.sql`) pins the 39-column Django text; the
 //! tests pin our projection against [`READ_COLUMNS`] and the
 //! `WHERE`/`ORDER BY`/`LIMIT` tails against the fixture.
 //!
-//! [`AgentRun`]: crate::dispatch::agent_run::AgentRun
-//! [`AgentRunStatus`]: crate::dispatch::status::AgentRunStatus
-//! [`READ_COLUMNS`]: crate::dispatch::agent_run::READ_COLUMNS
+//! [`AgentRun`]: crate::agent_runs::agent_run::AgentRun
+//! [`AgentRunStatus`]: crate::agent_runs::status::AgentRunStatus
+//! [`READ_COLUMNS`]: crate::agent_runs::agent_run::READ_COLUMNS
 //!
 //! Fixture: `rust-api/fixtures/orchestration/fx02_reads/` (FX-ORCH-02:
 //! `active_run.sql`, `active_run.rows.json`, `latest_prior_run.sql`,
@@ -38,12 +38,12 @@ use sea_orm::{
 };
 use serde_json::Value;
 
-use crate::dispatch::agent_run::{AgentRun, READ_COLUMNS};
-use crate::dispatch::status::AgentRunStatus;
+use crate::agent_runs::agent_run::{AgentRun, READ_COLUMNS};
+use crate::agent_runs::status::AgentRunStatus;
 use crate::entity::agent_run;
 use crate::orm_tx;
 use crate::runner_runs::agent_run::merge_error_details;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::orchestration::{parse, DoneSignal};
 
 /// The 7 statuses that occupy the single-active-run slot
@@ -248,23 +248,27 @@ pub async fn latest_prior_run(
 
 /// State [`ingest_into_run`] re-reads: Python holds the run instance
 /// in memory (`done_signal.py:141`), so it issues only the `UPDATE`;
-/// the stateless port re-reads the three columns the decision needs
-/// (`error_details` is merged, not overwritten — PDASHOSS01-187).
+/// the stateless port re-reads the decision columns (`error_details`
+/// is merged, not overwritten — PDASHOSS01-187; `failure_reason` since
+/// PDASHOSS01-183).
 #[derive(Debug, Clone, FromQueryResult)]
 struct IngestState {
     status: String,
     ended_at: Option<DateTimeWithTimeZone>,
     error_details: Value,
+    failure_reason: String,
 }
 
 /// The pure half of [`ingest_into_run`]: the parsed signal (if any)
-/// plus the four columns the `UPDATE` writes.
+/// plus the columns the `UPDATE` writes. `failure_reason` is `Some`
+/// exactly on the parse-error path.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IngestPlan {
     pub signal: Option<DoneSignal>,
     pub status: AgentRunStatus,
     pub done_payload: Option<Value>,
     pub error_details: Value,
+    pub failure_reason: Option<String>,
     pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -284,28 +288,37 @@ pub fn plan_ingest(
     current_status: AgentRunStatus,
     current_ended_at: Option<chrono::DateTime<chrono::Utc>>,
     current_error_details: &Value,
+    current_failure_reason: &str,
     text: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> IngestPlan {
     let signal = match parse(text) {
         Err(err) => {
+            let status = if is_terminal_status(current_status) {
+                current_status
+            } else {
+                AgentRunStatus::Failed
+            };
+            let error = format!("done-signal parse error: {err}");
+            let failure_reason =
+                if status == AgentRunStatus::Failed && current_failure_reason.is_empty() {
+                    pidash_types::runner_runs::classify_failure(&error, "", "")
+                        .value()
+                        .to_owned()
+                } else {
+                    current_failure_reason.to_owned()
+                };
             return IngestPlan {
                 signal: None,
-                status: if is_terminal_status(current_status) {
-                    current_status
-                } else {
-                    AgentRunStatus::Failed
-                },
+                status,
                 done_payload: None,
                 error_details: merge_error_details(
                     current_error_details,
-                    &[(
-                        "error",
-                        Value::String(format!("done-signal parse error: {err}")),
-                    )],
+                    &[("error", Value::String(error))],
                 ),
+                failure_reason: Some(failure_reason),
                 ended_at: Some(now),
-            }
+            };
         }
         Ok(signal) => signal,
     };
@@ -326,6 +339,7 @@ pub fn plan_ingest(
             current_error_details,
             &[("error", Value::String(String::new()))],
         ),
+        failure_reason: None,
         ended_at,
         signal: Some(signal),
     }
@@ -351,6 +365,7 @@ pub async fn ingest_into_run(
             agent_run::Column::Status,
             agent_run::Column::EndedAt,
             agent_run::Column::ErrorDetails,
+            agent_run::Column::FailureReason,
         ])
         .into_model::<IngestState>()
         .one(db)
@@ -368,10 +383,11 @@ pub async fn ingest_into_run(
         current,
         state.ended_at.map(|at| at.with_timezone(&chrono::Utc)),
         &state.error_details,
+        &state.failure_reason,
         text,
         now,
     );
-    agent_run::Entity::update_many()
+    let mut update = agent_run::Entity::update_many()
         .col_expr(agent_run::Column::Status, Expr::value(plan.status.value()))
         .col_expr(
             agent_run::Column::DonePayload,
@@ -384,7 +400,14 @@ pub async fn ingest_into_run(
         .col_expr(
             agent_run::Column::EndedAt,
             Expr::value(plan.ended_at.map(|at| at.fixed_offset())),
-        )
+        );
+    if let Some(reason) = &plan.failure_reason {
+        update = update.col_expr(
+            agent_run::Column::FailureReason,
+            Expr::value(reason.clone()),
+        );
+    }
+    update
         .filter(agent_run::Column::Id.eq(run_id))
         .exec(db)
         .await
@@ -537,6 +560,7 @@ mod tests {
             AgentRunStatus::Running,
             Some(prior),
             &serde_json::json!({}),
+            "",
             "x\n```pi-dash-done\n{\"status\": \"paused\", \"autonomy\": {\"question_for_human\": \"q?\"}}\n```\n",
             now,
         );
@@ -572,6 +596,10 @@ mod tests {
                 before_status,
                 fixture_time(&case["before"]["ended_at"]),
                 &case["before"]["error_details"],
+                case["before"]
+                    .get("failure_reason")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(""),
                 case["input_text"].as_str().expect("input_text"),
                 now,
             );
@@ -598,6 +626,14 @@ mod tests {
                 plan.error_details, case["after"]["error_details"],
                 "{name}: error_details"
             );
+            // PDASHOSS01-183: `Some` exactly on the parse-error path
+            // (the classified reason, or the kept current value when
+            // the status was already terminal).
+            if plan.signal.is_none() {
+                assert!(plan.failure_reason.is_some(), "{name}: failure_reason");
+            } else {
+                assert_eq!(plan.failure_reason, None, "{name}: no failure_reason");
+            }
             assert_eq!(
                 plan.ended_at,
                 fixture_time(&case["after"]["ended_at"]),

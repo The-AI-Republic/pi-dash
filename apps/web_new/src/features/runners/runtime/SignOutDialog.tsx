@@ -4,7 +4,7 @@
 // The desktop's sign-out confirmation.
 //
 // Signing out of the app signs out only the app (design §4.6): Pi Dash on
-// this computer — the daemon, the built-in engine and every runner — stays
+// this computer — the daemon, the Pi Dash Agent and every runner — stays
 // signed in, because it does not depend on the app. Two opt-ins, both
 // unticked every time the dialog opens:
 //
@@ -53,7 +53,7 @@ export function RuntimeSignOutDialog(): React.ReactElement {
   return (
     <Dialog
       title="Sign out?"
-      description="Signing out removes this account's credentials from this computer. Its chats with the built-in agent stay on this computer, hidden until the account signs in again."
+      description="Signing out removes this account's credentials from this computer. Its chats with the Pi Dash Agent stay on this computer, hidden until the account signs in again."
       open={isOpen}
       onOpenChange={() => settle(null)}
       actions={

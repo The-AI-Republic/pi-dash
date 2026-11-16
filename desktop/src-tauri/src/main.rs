@@ -530,7 +530,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             pidash_cli::detect_pidash_cli,
             pidash_cli::install_pidash_cli,
             pidash_cli::pidash_cli_login,
-            // Direct local chat with the built-in engine (PDASHOSS01-159):
+            // Direct local chat with the Pi Dash Agent (PDASHOSS01-159):
             // these reach the daemon over its IPC socket and stream Chat*
             // frames back to the webview as `chat://frame` events — never via
             // the Pi Dash cloud chat relay.
@@ -553,6 +553,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             daemon::daemon_engine_runner_rebind,
             daemon::daemon_runners,
             daemon::daemon_credentials_reload,
+            daemon::daemon_reconnect,
             // Set-up, update and sign-in, each through the installed CLI and
             // only on the user's say-so.
             setup::daemon_install_service,

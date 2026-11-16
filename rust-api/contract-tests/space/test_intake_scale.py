@@ -27,7 +27,7 @@ ROW_KEYS = frozenset(
         "parent", "point", "priority", "project", "project_detail",
         "sequence_id", "sort_order", "start_date", "state", "state_detail",
         "sub_issues_count", "target_date", "type", "updated_at", "updated_by",
-        "workspace",
+        "work_type", "workspace",
     ]
 )
 

@@ -24,6 +24,7 @@ import { needsLaneSetup } from "../lib/gate.js";
 import { notifyError } from "../../../shared/shell/index.js";
 import { appendDictation } from "../../../shared/dictation/index.js";
 import { Composer } from "./Composer.js";
+import { OpenHubModelPicker } from "./OpenHubModelPicker.js";
 import { SetupCard } from "./SetupCard.js";
 
 export interface AssistantLandingProps {
@@ -88,6 +89,7 @@ export function AssistantLanding({ workspaceSlug }: AssistantLandingProps): Reac
               starting={start.isPending}
               bordered={false}
               dictation={dictation}
+              modelPicker={<OpenHubModelPicker workspaceSlug={workspaceSlug} config={config.data} />}
             />
           </>
         )}

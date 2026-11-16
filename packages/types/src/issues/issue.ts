@@ -78,6 +78,11 @@ export type TBaseIssue = {
   // "cloud_agent" has no pod. Changing it is rejected by the backend once the
   // issue has an active run, same as the pod.
   agent_executor?: "local_runner" | "cloud_agent" | "managed_runner" | null;
+  // Per-issue work-type override (PDASHOSS01-234). Null inherits the
+  // project's `default_work_type`. Selects which per-work-type guidance the
+  // agent prompts carry; the backend locks it to humans once the issue is in
+  // a started/review/test group.
+  work_type?: string | null;
 
   created_at: string;
   updated_at: string;
@@ -143,10 +148,13 @@ export type TIssueAgentTicker = {
     | "pool_spent"
     | "terminal_signal"
     | "stop_signal"
-    | "user_disabled";
+    | "user_disabled"
+    | "failure_needs_human"
+    | "repeated_failure";
   /** True only when re-ticking would actually do something: the issue is
-   * still in a ticking state (In Progress / In Review / In Test) AND its
-   * pool is spent. Gates the "re-tick" button so it never appears when the
+   * in a ticking state (In Progress / In Review / In Test) or Paused, AND
+   * either its pool is spent or the failure policy stopped the clock
+   * (`failure_needs_human` / `repeated_failure`). Gates the "re-tick" button so it never appears when the
    * server would no-op. */
   can_re_tick?: boolean;
 };
@@ -184,6 +192,8 @@ export type TIssueAgentRunSummary = {
   done_payload: Record<string, unknown> | null;
   error: string;
   error_code: string;
+  /** Canonical failure taxonomy value; empty for non-failed runs. */
+  failure_reason?: string;
   error_diagnostic: IAgentRunErrorDiagnostic | null;
   llm_model: string;
   input_tokens: number | null;

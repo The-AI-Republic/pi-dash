@@ -20,7 +20,7 @@ import { registerSetUpPrompt, type SetUpRequest } from "./setupPrompt.js";
 export const SETUP_TITLE = "Set up Pi Dash on this computer?";
 
 const REASON_TEXT: Record<SetUpRequest["reason"], string> = {
-  chat: "Chatting with the built-in engine needs Pi Dash on this computer.",
+  chat: "Chatting with the Pi Dash Agent needs Pi Dash on this computer.",
   engine: "Running work on this computer needs Pi Dash on this computer.",
 };
 
@@ -31,7 +31,7 @@ export const SETUP_STEP_TEXT: Record<DaemonSetUpStep, string> = {
   install_cli: "Installing the command-line tool…",
   sign_in: "Signing it in…",
   service: "Starting the background service…",
-  engine: "Installing the built-in engine…",
+  engine: "Installing the Pi Dash Agent…",
   done: "Pi Dash is set up on this computer.",
 };
 

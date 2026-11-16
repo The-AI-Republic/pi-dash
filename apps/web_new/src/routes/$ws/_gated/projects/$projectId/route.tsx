@@ -5,8 +5,9 @@
 // through the project access gate: members see the page, everyone else
 // gets the join, no-access, or not-found screen keyed off the
 // details-fetch status plus admin standing. Members also get the
-// project tab strip above the page in tabbed mode, and the views and
-// modules palette entries (VIEW-042, MOD-037) on every project page.
+// project tab strip above the page in tabbed mode, and the views,
+// modules and cycles palette entries (VIEW-042, MOD-037, CYC-014) on
+// every project page.
 
 import { createFileRoute, Outlet, useRouterState } from "@tanstack/react-router";
 import * as React from "react";
@@ -29,6 +30,13 @@ const ViewsPaletteEntries = React.lazy(() =>
 const ModulePaletteEntries = React.lazy(() =>
   import("../../../../../features/modules/palette/ModulePaletteEntries.js").then((module) => ({
     default: module.ModulePaletteEntries,
+  }))
+);
+// Same shape for the cycles entries: they register one command, and
+// the create dialog they can open stays in its own chunk.
+const CyclesPaletteEntries = React.lazy(() =>
+  import("../../../../../features/cycles/palette/CyclesPaletteEntries.js").then((module) => ({
+    default: module.CyclesPaletteEntries,
   }))
 );
 
@@ -61,6 +69,9 @@ function ProjectLayoutComponent(): React.ReactElement {
       </React.Suspense>
       <React.Suspense fallback={null}>
         <ModulePaletteEntries workspaceSlug={ws} projectId={projectId} />
+      </React.Suspense>
+      <React.Suspense fallback={null}>
+        <CyclesPaletteEntries workspaceSlug={ws} projectId={projectId} />
       </React.Suspense>
       {fullHeightPage ? (
         <div data-testid="project-full-height-page" className="flex h-full min-h-0 flex-col">

@@ -456,9 +456,9 @@ pub fn module_base_to_representation<'a>(row: &'a ModuleBaseRow<'a>) -> ModuleBa
 /// The app `IssueStateSerializer` key set (`issue.py:1004-1020`), in live
 /// DRF order: `id`, the 7 declared nests/counters (in declaration order),
 /// then every `Issue` column except `workpad` — concrete columns first
-/// (`created_at` … `agent_executor`, `db/models/issue.py:115-228`), then
+/// (`created_at` … `work_type`, `db/models/issue.py:115-239`), then
 /// the forward relations trailing (`created_by` … `labels`, M2M last).
-pub const ISSUE_STATE_FIELDS: [&str; 42] = [
+pub const ISSUE_STATE_FIELDS: [&str; 43] = [
     "id",
     "label_details",
     "state_detail",
@@ -490,6 +490,7 @@ pub const ISSUE_STATE_FIELDS: [&str; 42] = [
     "git_work_branch",
     "created_via",
     "agent_executor",
+    "work_type",
     "created_by",
     "updated_by",
     "project",
@@ -543,6 +544,7 @@ pub struct IssueStateRow<'a> {
     pub git_work_branch: &'a str,
     pub created_via: Option<&'a str>,
     pub agent_executor: Option<&'a str>,
+    pub work_type: Option<&'a str>,
     pub created_by: Option<&'a str>,
     pub updated_by: Option<&'a str>,
     pub project: &'a str,
@@ -596,6 +598,7 @@ pub struct IssueStateView<'a> {
     pub git_work_branch: &'a str,
     pub created_via: Option<&'a str>,
     pub agent_executor: Option<&'a str>,
+    pub work_type: Option<&'a str>,
     pub created_by: Option<&'a str>,
     pub updated_by: Option<&'a str>,
     pub project: &'a str,
@@ -654,6 +657,7 @@ pub fn issue_state_to_representation<'a>(row: &'a IssueStateRow<'a>) -> IssueSta
         git_work_branch: row.git_work_branch,
         created_via: row.created_via,
         agent_executor: row.agent_executor,
+        work_type: row.work_type,
         created_by: row.created_by,
         updated_by: row.updated_by,
         project: row.project,
@@ -1274,6 +1278,7 @@ mod tests {
             git_work_branch: "pi-dash/probe",
             created_via: Some("assistant"),
             agent_executor: Some("local_runner"),
+            work_type: Some("software"),
             created_by: Some(U1),
             updated_by: Some(U2),
             project: PROJ,
@@ -1349,6 +1354,7 @@ mod tests {
              \"is_draft\":false,\"external_source\":\"gh\",\"external_id\":\"i-9\",\
              \"git_work_branch\":\"pi-dash/probe\",\"created_via\":\"assistant\",\
              \"agent_executor\":\"local_runner\",\
+             \"work_type\":\"software\",\
              \"created_by\":\"919f5c25-56d5-44a8-9ef5-ff72e1e29cf2\",\
              \"updated_by\":\"7a62ed71-155e-4e65-a7eb-6853cf7b6261\",\
              \"project\":\"22e00942-19b1-45b1-b388-438f37942205\",\
@@ -1399,6 +1405,7 @@ mod tests {
             git_work_branch: "",
             created_via: None,
             agent_executor: None,
+            work_type: None,
             created_by: None,
             updated_by: None,
             project: PROJ,
@@ -1434,7 +1441,7 @@ mod tests {
              \"sequence_id\":2,\"sort_order\":75535.0,\
              \"completed_at\":null,\"archived_at\":null,\"is_draft\":false,\
              \"external_source\":null,\"external_id\":null,\"git_work_branch\":\"\",\
-             \"created_via\":null,\"agent_executor\":null,\
+             \"created_via\":null,\"agent_executor\":null,\"work_type\":null,\
              \"created_by\":null,\"updated_by\":null,\
              \"project\":\"22e00942-19b1-45b1-b388-438f37942205\",\
              \"workspace\":\"994cc638-306d-4305-ad86-c4e87f829cb4\",\
@@ -1512,6 +1519,7 @@ mod tests {
             git_work_branch: "",
             created_via: None,
             agent_executor: None,
+            work_type: None,
             created_by: None,
             updated_by: None,
             project: PROJ,
@@ -1544,7 +1552,7 @@ mod tests {
              \"sequence_id\":3,\"sort_order\":85535.0,\
              \"completed_at\":null,\"archived_at\":\"2026-07-08\",\"is_draft\":false,\
              \"external_source\":null,\"external_id\":null,\"git_work_branch\":\"\",\
-             \"created_via\":null,\"agent_executor\":null,\
+             \"created_via\":null,\"agent_executor\":null,\"work_type\":null,\
              \"created_by\":null,\"updated_by\":null,\
              \"project\":\"22e00942-19b1-45b1-b388-438f37942205\",\
              \"workspace\":\"994cc638-306d-4305-ad86-c4e87f829cb4\",\

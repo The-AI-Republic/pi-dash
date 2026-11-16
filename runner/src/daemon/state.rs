@@ -608,6 +608,7 @@ impl StateHandle {
             connected,
             uptime_secs: uptime,
             update,
+            run_queue: None,
         }
     }
 

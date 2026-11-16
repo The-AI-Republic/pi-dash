@@ -15,6 +15,11 @@ pub struct Model {
     // Not `unique`: the generator reads a partial unique index as a
     // column constraint (see the module doc in `mod.rs`).
     pub runner_id: Uuid,
+    // Dev-machine run queue T1 (NEWPIDASH-241): negotiated capabilities.
+    // Non-null JSONB default '[]'; capability machine_run_queue_v1
+    // means the daemon supports protocol 1. Native SeaORM migration DB.
+    #[sea_orm(column_type = "JsonBinary")]
+    pub capabilities: Json,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

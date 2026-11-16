@@ -30,7 +30,7 @@ function lastSeen(at: string | null): string {
 
 function resultText(outcome: ReplaceOutcome): string {
   const parts: string[] = [];
-  if (outcome.restored.length) parts.push(`The built-in engine is back on for ${outcome.restored.join(", ")}.`);
+  if (outcome.restored.length) parts.push(`The Pi Dash Agent is back on for ${outcome.restored.join(", ")}.`);
   if (outcome.ownAgentRunners) {
     parts.push(
       `${outcome.ownAgentRunners} runner${outcome.ownAgentRunners === 1 ? "" : "s"} with your own agent stay offline until you set them up again on this computer or remove them.`
@@ -140,15 +140,14 @@ export function ReplaceMachineDialog(): React.ReactElement {
         ) : (
           <p className="text-body text-(--text)">
             Pi Dash on this computer signed in as a new machine. If this is the same computer as {name}, replace it: its
-            runners, pins and pods move here, and the built-in engine picks up its projects again. If it is a different
+            runners, pins and pods move here, and the Pi Dash Agent picks up its projects again. If it is a different
             computer, keep it.
           </p>
         )}
         {outcome?.failed.length ? (
           <p className="text-caption text-(--danger)">
-            Could not turn the built-in engine back on for{" "}
-            {outcome.failed.map((f) => `${f.project} (${f.error})`).join(", ")}. Turn it on from Built-in engine
-            settings.
+            Could not turn the Pi Dash Agent back on for{" "}
+            {outcome.failed.map((f) => `${f.project} (${f.error})`).join(", ")}. Turn it on from Pi Dash Agent settings.
           </p>
         ) : null}
         {error ? <p className="text-caption text-(--danger)">Replacing it did not finish: {error}</p> : null}

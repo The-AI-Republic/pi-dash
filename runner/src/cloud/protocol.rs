@@ -301,6 +301,14 @@ pub enum ServerMsg {
         expected_codex_model: Option<String>,
         approval_policy_overrides: Option<BTreeMap<String, serde_json::Value>>,
         deadline: Option<DateTime<Utc>>,
+        /// Attempt identity minted by the Rust matcher (NEWPIDASH-241):
+        /// the daemon echoes it on capacity/lifecycle/poll calls.
+        /// `None` from old servers; old daemons ignore the additive fields.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assignment_token: Option<Uuid>,
+        /// `0` legacy, `1` machine queue.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assignment_protocol: Option<u16>,
     },
     Cancel {
         run_id: Uuid,
@@ -453,16 +461,16 @@ pub struct CreateRunnerCmd {
 pub struct MachinePollBody {
     /// Stream ids of the messages handled since the last poll.
     pub ack: Vec<String>,
-    /// The machine's built-in engine state (PIDESKAPP-121, design §8): the
+    /// The machine's Pi Dash Agent state (PIDESKAPP-121, design §8): the
     /// server sets `DevMachine.engine_auto_pause_reason` from it. Absent
     /// from daemons before the engine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub engine_state: Option<EngineStateReport>,
+    pub engine_state: Option<PidashAgentStateReport>,
 }
 
 /// `engine_state` in [`MachinePollBody`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EngineStateReport {
+pub struct PidashAgentStateReport {
     /// `available` / `signed_out` / `expiring` / `unavailable`.
     pub state: pidash_ipc::protocol::EngineState,
     /// Why it is not available (`engine_sign_in_required`,
@@ -476,7 +484,7 @@ pub struct EngineStateReport {
     pub credential_expires_at: Option<DateTime<Utc>>,
 }
 
-impl From<&pidash_ipc::protocol::EngineStatusInfo> for EngineStateReport {
+impl From<&pidash_ipc::protocol::EngineStatusInfo> for PidashAgentStateReport {
     fn from(s: &pidash_ipc::protocol::EngineStatusInfo) -> Self {
         Self {
             state: s.state,
@@ -526,6 +534,13 @@ pub enum FailureReason {
     /// the run to FAILED via a deliberate signal instead of inferring it
     /// from the heartbeat reaper after the next reconnect.
     DaemonRestart,
+    /// The model declined the task (e.g. an ACP `stopReason: "refusal"`).
+    /// The wire string `"refusal"` is a cross-language contract: current
+    /// clouds route it to a terminal REFUSED status with a queryable
+    /// `refusal_category` instead of a generic FAILED; older clouds fall
+    /// back to FAILED, which is the same place these landed before this
+    /// variant existed (as `AgentCrash`). See PDASHOSS01-183.
+    Refusal,
     /// The runner rejected an `Assign` because it already has a run in
     /// flight (or an active chat turn). The cloud considers a runner free
     /// the moment its previous run goes terminal in the database — which
@@ -573,6 +588,17 @@ mod tests {
         let back: FailureReason =
             serde_json::from_value(serde_json::json!("agent_auth_missing")).unwrap();
         assert_eq!(back, FailureReason::AgentAuthMissing);
+    }
+
+    /// The cloud's RunFailed endpoint branches on the literal string
+    /// `"refusal"` to record a REFUSED run instead of a FAILED one — the
+    /// wire name is a cross-language contract, not an implementation detail.
+    #[test]
+    fn refusal_wire_name_is_stable() {
+        let json = serde_json::to_value(FailureReason::Refusal).unwrap();
+        assert_eq!(json, serde_json::json!("refusal"));
+        let back: FailureReason = serde_json::from_value(serde_json::json!("refusal")).unwrap();
+        assert_eq!(back, FailureReason::Refusal);
     }
 
     #[test]
@@ -681,6 +707,8 @@ mod tests {
             expected_codex_model: None,
             approval_policy_overrides: None,
             deadline: None,
+            assignment_token: None,
+            assignment_protocol: None,
         };
         let env = Envelope::new(msg);
         let s = serde_json::to_string(&env).unwrap();
@@ -749,7 +777,7 @@ mod tests {
     fn machine_poll_body_carries_the_engine_state() {
         let body = MachinePollBody {
             ack: vec!["1-0".into()],
-            engine_state: Some(EngineStateReport {
+            engine_state: Some(PidashAgentStateReport {
                 state: pidash_ipc::protocol::EngineState::SignedOut,
                 reason_code: Some("engine_sign_in_required".into()),
                 sign_in_state: pidash_ipc::protocol::EngineSignInState::Expired,

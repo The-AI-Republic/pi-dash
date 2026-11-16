@@ -12,14 +12,14 @@ import { Bot, LayoutDashboard } from "lucide-react";
 import * as React from "react";
 
 import type { Runner } from "@pidash/api-client";
-import type { LocalContact } from "../chat/localContact.js";
+import type { PidashAgentContact } from "../chat/localContact.js";
 import { runnersBase, type RunnersScopeInput } from "../scope.js";
 import { runnerDisplayStatus } from "../status.js";
 import { RunnerStatusDot } from "./RunnerStatusBadge.js";
 
 /** Rail header: the canonical area name (D27, RUN-004/RUN-005). */
 export const RAIL_HEADER = "AI Workers";
-export const BUILTIN_SECTION_HEADER = "Built-in";
+export const PIDASH_AGENT_SECTION_HEADER = "Built-in";
 
 /** Chat address for one runner; plain string per the router's Link typing. */
 export function chatHref(base: string, runnerId: string): string {
@@ -32,7 +32,7 @@ export interface RunnersRailProps {
   /** Project scope picks the narrower empty-state sentence. */
   isProjectScope: boolean;
   /** The built-in local contact (desktop only; empty elsewhere). */
-  localContacts?: readonly LocalContact[];
+  localContacts?: readonly PidashAgentContact[];
 }
 
 export function RunnersRail({
@@ -68,7 +68,7 @@ export function RunnersRail({
         {localContacts.length === 0 ? null : (
           <>
             <div className="text-meta mt-(--space-2) px-(--space-2) font-semibold tracking-wide text-(--text-muted) uppercase">
-              {BUILTIN_SECTION_HEADER}
+              {PIDASH_AGENT_SECTION_HEADER}
             </div>
             {localContacts.map((contact) =>
               contact.unavailableReason === null ? (

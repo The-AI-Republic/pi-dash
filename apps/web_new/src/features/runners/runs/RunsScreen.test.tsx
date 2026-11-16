@@ -203,7 +203,7 @@ describe("detail states", () => {
     expect(screen.getByTestId("run-scheduler-link")).toHaveAttribute("href", "/acme/projects/p-1/schedulers/b-1");
   });
 
-  it("labels a run on a built-in engine by its machine", () => {
+  it("labels a run on a Pi Dash Agent by its machine", () => {
     runnerMocks.useRunners.mockReturnValue({
       data: [
         {
@@ -234,7 +234,7 @@ describe("detail states", () => {
       },
     });
     renderScreen(1, "11111111-2222-3333-4444-555555555555");
-    expect(screen.getByTestId("run-executor")).toHaveTextContent("Built-in engine · Work laptop");
+    expect(screen.getByTestId("run-executor")).toHaveTextContent("Pi Dash Agent · Work laptop");
   });
 });
 

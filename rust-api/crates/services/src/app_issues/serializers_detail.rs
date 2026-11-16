@@ -86,9 +86,11 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use pidash_db::tasks_ticker::IssueAgentTicker;
+use pidash_db::tasks_ticker::{IssueAgentTicker, TickerDisarmReason};
 use pidash_types::orchestration::{is_ticking_state, StateRef};
-use pidash_types::runner_runs::{classify_run_error, flat_token_fields, RunErrorDiagnostic};
+use pidash_types::runner_runs::{
+    classify_run_error_for_reason, flat_token_fields, RunErrorDiagnostic,
+};
 
 use super::serializers_links::{user_lite_to_representation, UserLiteRow, UserLiteView};
 use super::serializers_refs::{
@@ -125,9 +127,9 @@ pub fn serialize_drf_datetime(value: DateTime<Utc>) -> String {
 }
 
 /// App `IssueSerializer` wire keys (`issue.py:1071-1103`), in
-/// `Meta.fields` order: the 31-key base every detail response starts with.
-/// Count the list: 31.
-pub const ISSUE_DETAIL_BASE_FIELDS: [&str; 32] = [
+/// `Meta.fields` order: the 32-key base every detail response starts with.
+/// Count the list: 32.
+pub const ISSUE_DETAIL_BASE_FIELDS: [&str; 33] = [
     "id",
     "name",
     "state_id",
@@ -147,6 +149,7 @@ pub const ISSUE_DETAIL_BASE_FIELDS: [&str; 32] = [
     "assigned_pod_id",
     "assigned_runner_id",
     "agent_executor",
+    "work_type",
     "module_ids",
     "label_ids",
     "assignee_ids",
@@ -200,6 +203,7 @@ pub struct IssueDetailBaseRow<'a> {
     pub assigned_pod_id: Option<&'a str>,
     pub assigned_runner_id: Option<&'a str>,
     pub agent_executor: Option<&'a str>,
+    pub work_type: Option<&'a str>,
     pub module_ids: Option<Vec<&'a str>>,
     pub label_ids: Option<Vec<&'a str>>,
     pub assignee_ids: Option<Vec<&'a str>>,
@@ -244,6 +248,7 @@ pub struct IssueDetailBaseView<'a> {
     pub assigned_pod_id: Option<&'a str>,
     pub assigned_runner_id: Option<&'a str>,
     pub agent_executor: Option<&'a str>,
+    pub work_type: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub module_ids: Option<Vec<&'a str>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -290,6 +295,7 @@ pub fn issue_detail_base_to_representation<'a>(
         assigned_pod_id: row.assigned_pod_id,
         assigned_runner_id: row.assigned_runner_id,
         agent_executor: row.agent_executor,
+        work_type: row.work_type,
         module_ids: row.module_ids.clone(),
         label_ids: row.label_ids.clone(),
         assignee_ids: row.assignee_ids.clone(),
@@ -350,8 +356,9 @@ pub struct AgentTickerView<'a> {
 /// `ticker` is the issue's `agent_ticker` row (`None` at the call boundary
 /// renders `None`, `:1275-1281`); `policy` carries the project pool +
 /// cadence columns; `state` is the issue's current state for
-/// `can_re_tick` (`(is_ticking_state or is_paused_state) and cap_reached`,
-/// `:1296`) and the stage interval. Pool math, predicates and interval all
+/// `can_re_tick` (`(is_ticking_state or is_paused_state) and
+/// (cap_reached or failure_stopped)`, `:1296`, PDASHOSS01-183) and the
+/// stage interval. Pool math, predicates and interval all
 /// run through the merged D-10/D-12 ports.
 pub fn agent_ticker_to_representation<'a>(
     ticker: &'a IssueAgentTicker,
@@ -359,8 +366,16 @@ pub fn agent_ticker_to_representation<'a>(
     state: Option<&StateRef<'_>>,
 ) -> AgentTickerView<'a> {
     let pool = pool_size(policy);
-    let can_re_tick =
-        (is_ticking_state(state) || is_paused_state(state)) && ticker.cap_reached(pool);
+    // Besides a spent pool, the failure policy's stops (needs-human /
+    // repeated failure, PDASHOSS01-183) also honour Re-tick — it re-arms
+    // the clock without granting, mirroring `_on_retick`.
+    let failure_stopped = !ticker.enabled
+        && ticker
+            .disarm_reason
+            .parse::<TickerDisarmReason>()
+            .is_ok_and(TickerDisarmReason::is_failure_stop);
+    let can_re_tick = (is_ticking_state(state) || is_paused_state(state))
+        && (ticker.cap_reached(pool) || failure_stopped);
     AgentTickerView {
         enabled: ticker.enabled,
         user_disabled: ticker.user_disabled,
@@ -468,9 +483,10 @@ pub fn agent_live_state_to_representation<'a>(
 }
 
 /// `_serialize_agent_run` wire keys (`issue.py:1352-1371`), in dict order:
-/// 20 (PDASHOSS01-351 adds `cancel_requested_at` / `cancel_reason` so the
-/// issue card can show Stopping for cloud RUNNING).
-pub const AGENT_RUN_FIELDS: [&str; 20] = [
+/// 21 (`failure_reason` since PDASHOSS01-183; PDASHOSS01-351 adds
+/// `cancel_requested_at` / `cancel_reason` so the issue card can show
+/// Stopping for cloud RUNNING).
+pub const AGENT_RUN_FIELDS: [&str; 21] = [
     "id",
     "status",
     "executor_kind",
@@ -485,6 +501,7 @@ pub const AGENT_RUN_FIELDS: [&str; 20] = [
     "done_payload",
     "error",
     "error_code",
+    "failure_reason",
     "error_diagnostic",
     "llm_model",
     "input_tokens",
@@ -519,6 +536,7 @@ pub struct AgentRunDetailRow<'a> {
     pub done_payload: Option<&'a serde_json::Value>,
     pub error: &'a str,
     pub error_code: &'a str,
+    pub failure_reason: &'a str,
     pub llm_model: &'a str,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
@@ -527,7 +545,8 @@ pub struct AgentRunDetailRow<'a> {
 }
 
 /// `_serialize_agent_run` output (`issue.py:1339-1371`), in dict order.
-/// `error_diagnostic` is the merged `classify_run_error` verdict.
+/// `error_diagnostic` is the merged `classify_run_error(error,
+/// failure_reason=…)` verdict (PDASHOSS01-183).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AgentRunView<'a> {
     pub id: &'a str,
@@ -544,6 +563,7 @@ pub struct AgentRunView<'a> {
     pub done_payload: Option<&'a serde_json::Value>,
     pub error: &'a str,
     pub error_code: &'a str,
+    pub failure_reason: &'a str,
     pub error_diagnostic: Option<RunErrorDiagnostic>,
     pub llm_model: &'a str,
     pub input_tokens: Option<i64>,
@@ -591,7 +611,8 @@ pub fn agent_run_to_representation<'a>(
         done_payload: run.done_payload,
         error: run.error,
         error_code: run.error_code,
-        error_diagnostic: classify_run_error(Some(run.error)),
+        failure_reason: run.failure_reason,
+        error_diagnostic: classify_run_error_for_reason(Some(run.error), Some(run.failure_reason)),
         llm_model: run.llm_model,
         input_tokens: run.input_tokens,
         output_tokens: run.output_tokens,
@@ -665,10 +686,10 @@ pub fn has_open_blockers_field(summary: &RelationsSummary) -> bool {
 }
 
 /// `IssueDetailSerializer` wire keys (`issue.py:1237-1245`), in
-/// `Meta.fields` order: the 32 base keys plus the 8 added keys. 40.
+/// `Meta.fields` order: the 33 base keys plus the 8 added keys. 41.
 /// (`assigned_runner_id` sits after `assigned_pod_id` in the base keys;
 /// `assigned_runner_detail` is the last key, design §14.1.)
-pub const ISSUE_DETAIL_FIELDS: [&str; 40] = [
+pub const ISSUE_DETAIL_FIELDS: [&str; 41] = [
     "id",
     "name",
     "state_id",
@@ -688,6 +709,7 @@ pub const ISSUE_DETAIL_FIELDS: [&str; 40] = [
     "assigned_pod_id",
     "assigned_runner_id",
     "agent_executor",
+    "work_type",
     "module_ids",
     "label_ids",
     "assignee_ids",
@@ -713,9 +735,9 @@ pub const ISSUE_DETAIL_FIELDS: [&str; 40] = [
 
 /// The retrieve key set: [`ISSUE_DETAIL_FIELDS`] minus `is_intake`, which
 /// that view does not annotate, so DRF's `SkipField` omits the key
-/// (`base.py:486-618`). 39. (Archive retrieve is a different, 32-key shape
+/// (`base.py:486-618`). 40. (Archive retrieve is a different, 33-key shape
 /// — see [`ISSUE_DETAIL_ARCHIVE_FIELDS`].)
-pub const ISSUE_DETAIL_RETRIEVE_FIELDS: [&str; 39] = [
+pub const ISSUE_DETAIL_RETRIEVE_FIELDS: [&str; 40] = [
     "id",
     "name",
     "state_id",
@@ -735,6 +757,7 @@ pub const ISSUE_DETAIL_RETRIEVE_FIELDS: [&str; 39] = [
     "assigned_pod_id",
     "assigned_runner_id",
     "agent_executor",
+    "work_type",
     "module_ids",
     "label_ids",
     "assignee_ids",
@@ -760,8 +783,8 @@ pub const ISSUE_DETAIL_RETRIEVE_FIELDS: [&str; 39] = [
 /// The archive-retrieve key set: [`ISSUE_DETAIL_FIELDS`] minus the eight
 /// unannotated keys — the seven annotation-driven base fields plus
 /// `is_intake` — which DRF's `SkipField` omits (`archive.py:222-255`
-/// annotates only `is_subscribed`). 32.
-pub const ISSUE_DETAIL_ARCHIVE_FIELDS: [&str; 32] = [
+/// annotates only `is_subscribed`). 33.
+pub const ISSUE_DETAIL_ARCHIVE_FIELDS: [&str; 33] = [
     "id",
     "name",
     "state_id",
@@ -780,6 +803,7 @@ pub const ISSUE_DETAIL_ARCHIVE_FIELDS: [&str; 32] = [
     "assigned_pod_id",
     "assigned_runner_id",
     "agent_executor",
+    "work_type",
     "created_at",
     "updated_at",
     "created_by",
@@ -1133,7 +1157,7 @@ pub const ERROR_DIAGNOSTIC_FIELDS: [&str; 5] =
 /// The eight `AgentRunStatus` values that gate the active run
 /// (`issue.py:1386-1402`): `WAITING_FOR_WORKTREE` is retired but historical
 /// rows still gate. Each literal equals the merged
-/// `pidash_db::dispatch::AgentRunStatus` value (pinned by test).
+/// `pidash_db::agent_runs::AgentRunStatus` value (pinned by test).
 pub const ACTIVE_RUN_STATUSES: [&str; 8] = [
     "queued",
     "assigned",
@@ -1148,8 +1172,9 @@ pub const ACTIVE_RUN_STATUSES: [&str; 8] = [
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pidash_db::dispatch::AgentRunStatus;
+    use pidash_db::agent_runs::AgentRunStatus;
     use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker as TickerRowCheck;
+    use pidash_types::runner_runs::classify_run_error;
 
     fn serialized_keys<T: serde::Serialize>(value: &T) -> Vec<String> {
         let rendered = serde_json::to_string(value).expect("serializes");
@@ -1216,6 +1241,7 @@ mod tests {
             assigned_pod_id: None,
             assigned_runner_id: None,
             agent_executor: None,
+            work_type: None,
             module_ids: Some(vec![]),
             label_ids: Some(vec![]),
             assignee_ids: Some(vec![USER]),
@@ -1310,6 +1336,7 @@ mod tests {
             done_payload: None,
             error: "",
             error_code: "",
+            failure_reason: "",
             llm_model: "m",
             input_tokens: Some(100),
             output_tokens: Some(20),
@@ -1343,7 +1370,7 @@ mod tests {
              \"complexity_score\":4,\"start_date\":\"2026-10-01\",\"target_date\":null,\
              \"sequence_id\":639,\"project_id\":\"22222222-2222-2222-2222-222222222222\",\
              \"parent_id\":null,\"cycle_id\":null,\"type_id\":\"77777777-7777-7777-7777-777777777777\",\"is_epic\":true,\"assigned_pod_id\":null,\"assigned_runner_id\":null,\
-             \"agent_executor\":null,\"module_ids\":[],\"label_ids\":[],\
+             \"agent_executor\":null,\"work_type\":null,\"module_ids\":[],\"label_ids\":[],\
              \"assignee_ids\":[\"44444444-4444-4444-4444-444444444444\"],\
              \"sub_issues_count\":2,\"created_at\":\"2026-10-02T21:42:34.824827Z\",\
              \"updated_at\":\"2026-10-04T03:57:29.850339Z\",\
@@ -1549,7 +1576,7 @@ mod tests {
              \"started_at\":\"2026-10-03T10:00:02+00:00\",\"ended_at\":null,\
              \"cancel_requested_at\":null,\"cancel_reason\":\"\",\
              \"done_payload\":{\"signal\":\"done\"},\"error\":\"boom\\nsecond line\",\
-             \"error_code\":\"E1\",\"error_diagnostic\":{\"source\":\"unknown\",\
+             \"error_code\":\"E1\",\"failure_reason\":\"\",\"error_diagnostic\":{\"source\":\"unknown\",\
              \"source_label\":\"Unknown\",\"kind\":\"unknown\",\"summary\":\"boom\",\
              \"action\":\"\"},\"llm_model\":\"m\",\"input_tokens\":100,\
              \"output_tokens\":20,\"total_tokens\":120,\

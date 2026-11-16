@@ -141,4 +141,24 @@ describe("RichTextView", () => {
     expect(seen).toHaveBeenCalledTimes(2);
     unsubscribe();
   });
+
+  it("renders raw markdown wrapped in <p> via the markdown fallback (NEWPIDASH-232)", () => {
+    render(<RichTextView html="<p>## Summary</p><p>Hello **world**</p>" label="Description" />);
+    const region = screen.getByRole("region", { name: "Description" });
+    // Should render as heading and strong, not literal markers
+    expect(region.querySelector("h2")).toBeTruthy();
+    expect(region).toHaveTextContent("Summary");
+    expect(region.querySelector("strong")).toBeTruthy();
+    expect(region).not.toHaveTextContent("## Summary");
+    expect(region).not.toHaveTextContent("**world**");
+  });
+
+  it("renders a code fence stored as raw markdown", () => {
+    render(<RichTextView html="<p>```python<br>print(1)<br>```</p>" label="Body" />);
+    const region = screen.getByRole("region", { name: "Body" });
+    const pre = region.querySelector("pre");
+    expect(pre).toBeTruthy();
+    expect(pre?.textContent).toContain("print(1)");
+    expect(region).not.toHaveTextContent("```");
+  });
 });

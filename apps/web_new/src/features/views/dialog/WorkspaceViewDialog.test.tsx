@@ -567,7 +567,7 @@ describe("WorkspaceViewDialog edit", () => {
       name: "Alpha Renamed",
       description: "After desc",
       rich_filters: { priority__in: "high" },
-      display_filters: expect.objectContaining({ layout: "spreadsheet", group_by: "priority" }),
+      display_filters: expect.objectContaining({ layout: "list", group_by: "priority" }),
       display_properties: { priority: true },
     });
     expect(patch.body).not.toHaveProperty("access");
@@ -592,6 +592,23 @@ describe("WorkspaceViewDialog edit", () => {
     await user.click(screen.getByRole("button", { name: "Update View" }));
     await waitFor(() => expect(notify.notifySuccess).toHaveBeenCalled());
     expect(calls[0]!.body).toMatchObject({ description: "" });
+  });
+
+  it("preserves a stored list layout when only the title changes (NEWPIDASH-200)", async () => {
+    const user = userEvent.setup();
+    seedSession();
+    const calls = transport(() => ({ status: 200, body: STORED }));
+    renderDialog({ mode: "edit", view: STORED });
+    await screen.findByTestId("rich-filter-row");
+    await user.clear(screen.getByPlaceholderText("Title"));
+    await user.type(screen.getByPlaceholderText("Title"), "Only title changed");
+    await user.click(screen.getByRole("button", { name: "Update View" }));
+    await waitFor(() => expect(notify.notifySuccess).toHaveBeenCalledWith("View updated successfully"));
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.body).toMatchObject({
+      name: "Only title changed",
+      display_filters: expect.objectContaining({ layout: "list" }),
+    });
   });
 
   it("fires an error notice on failure and keeps the dialog open (NEWFRONT-232)", async () => {

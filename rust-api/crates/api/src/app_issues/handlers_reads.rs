@@ -1866,6 +1866,7 @@ async fn render_full(
         assigned_pod_id: get_str(row, "i_assigned_pod_id"),
         assigned_runner_id: get_str(row, "i_assigned_runner_id"),
         agent_executor: get_str(row, "i_agent_executor"),
+        work_type: get_str(row, "i_work_type"),
         module_ids: Some(str_refs(&module_ids)),
         label_ids: Some(str_refs(&label_ids)),
         assignee_ids: Some(str_refs(&assignee_ids)),
@@ -2033,7 +2034,9 @@ async fn sub_issues_get_inner(
             render_sub_grouped_assignees_str(&rows, &shaped)
         }
         Some(param) => {
-            if !queries_core::SUB_ISSUES_KEYS.contains(&param.as_str()) {
+            // Django only raises KeyError when indexing a row; an empty
+            // page (cursor past the end) yields an empty grouped payload.
+            if !rows.is_empty() && !queries_core::SUB_ISSUES_KEYS.contains(&param.as_str()) {
                 return Err(
                     Denial::BadError("The required key does not exist.".to_owned()).into_response(),
                 );
@@ -2066,9 +2069,8 @@ async fn sub_issues_get_inner(
 
 /// `ORDER BY` for the sub-issue list: `order_issue_queryset` through the
 /// merged `order_sql`, resolved like pilot-2's flat path. An empty param
-/// skips the port explicitly and falls back to the model ordering
-/// (`-created_at` — the same statement); an unknown field is Django's
-/// `FieldError` → generic 500. The priority/state `CASE`s sort ascending
+/// reaches the paginator as `F("")` → Django's `FieldError` → generic 500;
+/// an unknown field is the same. The priority/state `CASE`s sort ascending
 /// then `issue.created_at DESC`; the list annotates `Coalesce(..., 0)`
 /// counts, so count keys order `0`-style; the cycle-name key joins a fresh
 /// cycle bridge (adding its fan-out joins to the statement).
@@ -2084,8 +2086,7 @@ pub(super) fn sub_issues_order(
         );
     };
     if order_by_param.is_empty() {
-        created_desc(stmt);
-        return Ok(());
+        return Err(Denial::ServerError);
     }
     let spec = order_sql(order_by_param, "state.\"group\"", |name| {
         format!("min_{}", name.replace("__", "_"))
@@ -2602,6 +2603,7 @@ async fn render_post_row(
         assigned_pod_id: get_str(row, "assigned_pod_id"),
         assigned_runner_id: get_str(row, "assigned_runner_id"),
         agent_executor: get_str(row, "agent_executor"),
+        work_type: get_str(row, "work_type"),
         module_ids: None,
         label_ids: None,
         assignee_ids: None,
@@ -2844,9 +2846,7 @@ mod tests {
                 .map(|()| stmt.to_string(sea_orm::sea_query::PostgresQueryBuilder))
         };
         let _ = DbBackend::Postgres;
-        assert!(built("")
-            .unwrap()
-            .ends_with(r#"ORDER BY "issue"."created_at" DESC"#));
+        assert!(built("").is_err());
         assert!(built("-created_at")
             .unwrap()
             .ends_with(r#"ORDER BY "issue"."created_at" DESC"#));

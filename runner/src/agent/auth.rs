@@ -254,7 +254,7 @@ pub fn has_credentials(kind: AgentKind) -> bool {
         AgentKind::CursorAgent => has_cursor_credentials(),
         AgentKind::Grok => has_grok_credentials(),
         AgentKind::MuseCode => has_muse_credentials(),
-        AgentKind::OpenClaw | AgentKind::Engine => true,
+        AgentKind::OpenClaw | AgentKind::PidashAgent => true,
     }
 }
 
@@ -268,7 +268,7 @@ pub fn fix_hint(kind: AgentKind) -> &'static str {
         AgentKind::Grok => GROK_FIX_HINT,
         AgentKind::MuseCode => MUSE_FIX_HINT,
         AgentKind::OpenClaw => OPENCLAW_FIX_HINT,
-        AgentKind::Engine => "run `pidash login --engine` for the daemon's environment",
+        AgentKind::PidashAgent => "run `pidash login --engine` for the daemon's environment",
     }
 }
 
@@ -432,7 +432,7 @@ mod tests {
     #[test]
     fn openclaw_and_engine_are_always_allowed() {
         assert!(has_credentials(AgentKind::OpenClaw));
-        assert!(has_credentials(AgentKind::Engine));
+        assert!(has_credentials(AgentKind::PidashAgent));
     }
 
     #[test]

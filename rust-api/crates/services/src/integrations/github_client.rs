@@ -762,43 +762,49 @@ impl PrLinksStore for PoolPrStore {
         workspace_slug: &str,
         owner: &str,
     ) -> Result<Option<InstallationRow>, StoreError> {
-        // `INSTALLATION_LOOKUP_SQL`: live installation joined through the
-        // integration to the workspace, case-folded login, newest first.
-        use pidash_db::entity::{github_app_installations, workspace_integrations, workspaces};
+        // `INSTALLATION_LOOKUP_SQL`: live github_app account on the
+        // workspace, case-folded login, newest first (NEWPIDASH-210:
+        // reads git_provider_accounts since the sunset, not the legacy
+        // github_app_installations table).
+        use pidash_db::entity::{git_provider_accounts, workspaces};
         use sea_orm::sea_query::{Expr, Func};
         use sea_orm::{
             ColumnTrait as _, EntityTrait as _, JoinType, QueryFilter as _, QueryOrder as _,
             QuerySelect as _, RelationTrait as _,
         };
         let db = pidash_db::pool::sea_orm_connection(&self.pool);
-        let row: Option<(Uuid, i64)> = github_app_installations::Entity::find()
+        let row: Option<(Uuid, String)> = git_provider_accounts::Entity::find()
             .select_only()
-            .column(github_app_installations::Column::Id)
-            .column(github_app_installations::Column::InstallationId)
+            .column(git_provider_accounts::Column::Id)
+            .column(git_provider_accounts::Column::ExternalAccountId)
             .join(
                 JoinType::InnerJoin,
-                github_app_installations::Relation::WorkspaceIntegrations.def(),
+                git_provider_accounts::Relation::Workspaces.def(),
             )
-            .join(
-                JoinType::InnerJoin,
-                workspace_integrations::Relation::Workspaces.def(),
-            )
-            .filter(github_app_installations::Column::DeletedAt.is_null())
+            .filter(git_provider_accounts::Column::DeletedAt.is_null())
+            .filter(git_provider_accounts::Column::Provider.eq("github"))
+            .filter(git_provider_accounts::Column::HostUrl.eq("https://github.com"))
+            .filter(git_provider_accounts::Column::AuthType.eq("github_app"))
             .filter(workspaces::Column::Slug.eq(workspace_slug))
             .filter(
                 Expr::expr(Func::lower(Expr::col((
-                    github_app_installations::Entity,
-                    github_app_installations::Column::AccountLogin,
+                    git_provider_accounts::Entity,
+                    git_provider_accounts::Column::ExternalAccountLogin,
                 ))))
                 .eq(Func::lower(Expr::value(owner))),
             )
-            .order_by_desc(github_app_installations::Column::CreatedAt)
+            .order_by_desc(git_provider_accounts::Column::CreatedAt)
             .limit(1)
-            .into_tuple::<(Uuid, i64)>()
+            .into_tuple::<(Uuid, String)>()
             .one(&db)
             .await
             .map_err(|error| pr_store_error("installation lookup", error))?;
-        row.map(|(id, installation_id)| {
+        row.map(|(id, external_account_id)| {
+            let installation_id = external_account_id.parse::<i64>().map_err(|_| {
+                StoreError(format!(
+                    "installation lookup: invalid external_account_id {external_account_id:?}"
+                ))
+            })?;
             Ok(InstallationRow {
                 id,
                 installation_id,
@@ -1174,48 +1180,47 @@ mod tests {
 
     #[test]
     fn installation_lookup_join_shape() {
-        // `INSTALLATION_LOOKUP_SQL`: live installation joined through the
-        // integration to the workspace, case-folded login, newest first.
-        use pidash_db::entity::{github_app_installations, workspace_integrations, workspaces};
+        // `INSTALLATION_LOOKUP_SQL`: live github_app account on the
+        // workspace, case-folded login, newest first (NEWPIDASH-210:
+        // generic table, never the legacy github_app_installations).
+        use pidash_db::entity::{git_provider_accounts, workspaces};
         use sea_orm::sea_query::{Expr, Func};
         use sea_orm::{
             ColumnTrait, DbBackend, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect,
             QueryTrait, RelationTrait,
         };
-        let sql = github_app_installations::Entity::find()
+        let sql = git_provider_accounts::Entity::find()
             .select_only()
-            .column(github_app_installations::Column::Id)
-            .column(github_app_installations::Column::InstallationId)
+            .column(git_provider_accounts::Column::Id)
+            .column(git_provider_accounts::Column::ExternalAccountId)
             .join(
                 JoinType::InnerJoin,
-                github_app_installations::Relation::WorkspaceIntegrations.def(),
+                git_provider_accounts::Relation::Workspaces.def(),
             )
-            .join(
-                JoinType::InnerJoin,
-                workspace_integrations::Relation::Workspaces.def(),
-            )
-            .filter(github_app_installations::Column::DeletedAt.is_null())
+            .filter(git_provider_accounts::Column::DeletedAt.is_null())
+            .filter(git_provider_accounts::Column::Provider.eq("github"))
+            .filter(git_provider_accounts::Column::HostUrl.eq("https://github.com"))
+            .filter(git_provider_accounts::Column::AuthType.eq("github_app"))
             .filter(workspaces::Column::Slug.eq("ws"))
             .filter(
                 Expr::expr(Func::lower(Expr::col((
-                    github_app_installations::Entity,
-                    github_app_installations::Column::AccountLogin,
+                    git_provider_accounts::Entity,
+                    git_provider_accounts::Column::ExternalAccountLogin,
                 ))))
                 .eq(Func::lower(Expr::val("owner"))),
             )
-            .order_by_desc(github_app_installations::Column::CreatedAt)
+            .order_by_desc(git_provider_accounts::Column::CreatedAt)
             .limit(1)
             .build(DbBackend::Postgres)
             .to_string();
         assert!(
             sql.contains(
-                "INNER JOIN \"workspace_integrations\" ON \"github_app_installations\".\"workspace_integration_id\" = \"workspace_integrations\".\"id\""
+                "INNER JOIN \"workspaces\" ON \"git_provider_accounts\".\"workspace_id\" = \"workspaces\".\"id\""
             ) && sql.contains(
-                "INNER JOIN \"workspaces\" ON \"workspace_integrations\".\"workspace_id\" = \"workspaces\".\"id\""
-            ) && sql.contains(
-                "LOWER(\"github_app_installations\".\"account_login\") = LOWER('owner')"
-            ) && sql.contains("ORDER BY \"github_app_installations\".\"created_at\" DESC")
-                && sql.contains("LIMIT 1"),
+                "LOWER(\"git_provider_accounts\".\"external_account_login\") = LOWER('owner')"
+            ) && sql.contains("ORDER BY \"git_provider_accounts\".\"created_at\" DESC")
+                && sql.contains("LIMIT 1")
+                && !sql.contains("github_app_installations"),
             "installation lookup shape: {sql}"
         );
     }
@@ -1356,7 +1361,8 @@ mod tests {
         let store = PoolPrStore::new(pool.clone(), PrLinksSurface::Relations);
 
         // Chain for `installation_for_account`: integration + api token
-        // + workspace integration + installation (mixed-case login).
+        // + workspace integration + github_app account (mixed-case login,
+        // NEWPIDASH-210: generic git_provider_accounts).
         let integration_id = Uuid::new_v4();
         let token_id = Uuid::new_v4();
         let workspace_integration_id = Uuid::new_v4();
@@ -1417,18 +1423,20 @@ mod tests {
             (hasher.finish() % 1_000_000 + 1).try_into().unwrap()
         };
         sqlx::query(
-            "INSERT INTO github_app_installations (id, created_at, updated_at, \
-             installation_id, account_login, account_type, repository_selection, \
-             repository_count, permissions, events, last_check_error, \
-             workspace_integration_id) VALUES ($1, now(), now(), $3, 'AcMe', 'User', 'all', \
-             1, '{}', '{}', '', $2)",
+            "INSERT INTO git_provider_accounts (id, created_at, updated_at, \
+             workspace_id, provider, host_url, auth_type, external_account_id, \
+             external_account_login, display_name, capabilities, credential_config, \
+             workspace_integration_id, status, verified_at, last_check_error, metadata) \
+             VALUES ($1, now(), now(), $2, 'github', 'https://github.com', 'github_app', \
+             $3, 'AcMe', 'AcMe', '{}', '{}', $4, 'connected', now(), '', '{}')",
         )
         .bind(installation_id)
+        .bind(world.workspace_id)
+        .bind(installation_number.to_string())
         .bind(workspace_integration_id)
-        .bind(installation_number)
         .execute(&pool)
         .await
-        .expect("seed installation");
+        .expect("seed installation account");
 
         let hit = store
             .installation_for_account(&world.workspace_slug, "acme")

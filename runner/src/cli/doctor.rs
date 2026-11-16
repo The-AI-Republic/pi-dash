@@ -152,9 +152,9 @@ pub async fn execute(paths: &Paths, runner_filter: Option<&str>) -> Result<Repor
         if cfg
             .runners
             .iter()
-            .any(|r| r.agent.kind == crate::config::schema::AgentKind::Engine)
+            .any(|r| r.agent.kind == crate::config::schema::AgentKind::PidashAgent)
         {
-            match crate::engine::locate::resolve(&cfg.engine) {
+            match crate::pidash_agent::locate::resolve(&cfg.engine) {
                 Ok(engine) => checks.push(Check {
                     name: "engine".to_string(),
                     ok: true,
@@ -428,7 +428,7 @@ async fn run_agent_checks(
         }
         // Checked once per daemon in `execute` (the binary and sign-in are
         // machine-level, not per runner).
-        crate::config::schema::AgentKind::Engine => {}
+        crate::config::schema::AgentKind::PidashAgent => {}
     }
 }
 
@@ -539,6 +539,7 @@ mod tests {
                 agent_observability_v1: false,
                 agent_watchdog: Default::default(),
                 auto_update: true,
+                max_concurrent_agent_runs: 3,
             },
             runners,
             cli: None,

@@ -16,7 +16,7 @@
 // - keeping the engine signed in: renewed silently only when the daemon
 //   reports `expiring` or `expired`; `never`, `signed_out` and `revoked`
 //   need an explicit sign-in (§4.3, §4.6);
-// - "Run on this computer": turning the built-in engine on for a project
+// - "Run on this computer": turning the Pi Dash Agent on for a project
 //   the first time a run uses it (§5, enrol on use);
 // - the app half of a sign-out: approval modes stashed, chat history
 //   deleted only when asked; the daemon stays signed in.
@@ -26,7 +26,7 @@
 
 import {
   approveDeviceCode,
-  getAgentProfile,
+  getPidashAgentProfile,
   getIssue,
   getProject,
   startDeviceGrant,
@@ -37,8 +37,8 @@ import type {
   AgentRuntimeApi,
   CliSetupApi,
   DaemonDiscovery,
-  DaemonEngineRunner,
-  DaemonEngineSignInState,
+  DaemonPidashAgentRunner,
+  DaemonPidashAgentSignInState,
   DaemonHello,
   DaemonLocalRunner,
   LocalChatApi,
@@ -48,8 +48,8 @@ import { agentReasonMessage } from "../../../shared/lib/agentReasons.js";
 import { restoreApprovalModes, stashApprovalModes } from "./approvalModes.js";
 import { requestDaemonSetup, type SetUpReason } from "./setupPrompt.js";
 
-/** Server executor kind for the built-in engine. */
-export const MANAGED_RUNNER_KIND = "managed_runner";
+/** Server executor kind for the Pi Dash Agent. */
+export const PIDASH_AGENT_EXECUTOR_KIND = "managed_runner";
 
 /** Heartbeat wait after preparing a run: attempts and pause between them. */
 export const HEARTBEAT_POLL_ATTEMPTS = 30;
@@ -58,18 +58,23 @@ export const HEARTBEAT_POLL_INTERVAL_MS = 1000;
 /** A failed silent renewal is retried after this pause, not on every check. */
 export const SILENT_RENEW_RETRY_MS = 10 * 60 * 1000;
 
-export const ENGINE_TURN_ON_TEXT = "Turn on the built-in engine in Built-in engine settings to chat with it.";
-export const ENGINE_SIGNED_OUT_TEXT = "The built-in engine is signed out. Sign it in from Built-in engine settings.";
-export const ENGINE_STILL_CONNECTING_TEXT =
-  "The built-in engine on this computer has not connected yet. Try Run again shortly.";
+/** Most often the daemon may be woken for a reconnect: focus events and the
+ * minute tick would otherwise retry a dead cloud connection on every wake
+ * during a long outage, defeating the daemon's backoff. */
+export const RECONNECT_MIN_INTERVAL_MS = 30_000;
+
+export const PIDASH_AGENT_TURN_ON_TEXT = "Turn on the Pi Dash Agent in Pi Dash Agent settings to chat with it.";
+export const PIDASH_AGENT_SIGNED_OUT_TEXT = "The Pi Dash Agent is signed out. Sign it in from Pi Dash Agent settings.";
+export const PIDASH_AGENT_STILL_CONNECTING_TEXT =
+  "The Pi Dash Agent on this computer has not connected yet. Try Run again shortly.";
 
 /** The daemon reports the engine unavailable; carries its reason code. */
-export class EngineUnavailableError extends Error {
+export class PidashAgentUnavailableError extends Error {
   readonly code: string;
 
   constructor(code: string) {
     super(agentReasonMessage(code));
-    this.name = "EngineUnavailableError";
+    this.name = "PidashAgentUnavailableError";
     this.code = code;
   }
 }
@@ -107,6 +112,8 @@ interface RuntimeState {
   discovery: DaemonDiscovery | null;
   lastSilentAttempt: number;
   silentInFlight: Promise<boolean> | null;
+  /** Last reconnect wake, in epoch milliseconds (`Date.now()` basis). */
+  lastReconnectWake: number;
   /** Where the user adds model credit, from the last agent profile the server read. */
   topUpUrl: string;
 }
@@ -117,6 +124,7 @@ const state: RuntimeState = {
   discovery: null,
   lastSilentAttempt: 0,
   silentInFlight: null,
+  lastReconnectWake: 0,
   topUpUrl: "",
 };
 
@@ -127,7 +135,21 @@ export function resetRuntimeServiceForTests(): void {
   state.discovery = null;
   state.lastSilentAttempt = 0;
   state.silentInFlight = null;
+  state.lastReconnectWake = 0;
   state.topUpUrl = "";
+}
+
+/**
+ * Wake the daemon's cloud connections, rate-limited (PIDESKAPP-181). After a
+ * long outage the daemon's retry backoff can be hours long; a user action
+ * (focus, network recovery, Run) cuts it short so the built-in agent comes
+ * back within seconds. Best-effort: never throws.
+ */
+function wakeDaemonForReconnect(runtime: AgentRuntimeApi): void {
+  const now = Date.now();
+  if (now - state.lastReconnectWake < RECONNECT_MIN_INTERVAL_MS) return;
+  state.lastReconnectWake = now;
+  void runtime.requestReconnect().catch(() => undefined);
 }
 
 /**
@@ -152,7 +174,7 @@ async function refreshTopUpUrl(deps: RuntimeDeps): Promise<void> {
   const { client, runtime } = deps;
   if (!runtime || !state.identity) return;
   try {
-    const profile = await getAgentProfile(client);
+    const profile = await getPidashAgentProfile(client);
     state.topUpUrl = profile.top_up_url ?? "";
   } catch {
     // Keep what we had.
@@ -191,7 +213,7 @@ export function discoveryProblem(discovery: DaemonDiscovery | null): string | nu
     case "no_daemon":
       return "Pi Dash is not set up on this computer yet.";
     case "too_old":
-      return "Pi Dash on this computer is too old for this app. Update it to use the built-in engine.";
+      return "Pi Dash on this computer is too old for this app. Update it to use the Pi Dash Agent.";
     case "app_too_old":
       return `Pi Dash on this computer (${discovery.daemon_version}) is newer than this app understands. Update the app.`;
     case "not_answering":
@@ -209,9 +231,9 @@ export function discoveryProblem(discovery: DaemonDiscovery | null): string | nu
  * "Turn on", `signed_out`/`revoked` an explicit sign-in, anything else
  * nothing.
  */
-export type EngineAction = "renew_silently" | "turn_on" | "sign_in" | "none";
+export type PidashAgentAction = "renew_silently" | "turn_on" | "sign_in" | "none";
 
-export function engineActionFor(signIn: DaemonEngineSignInState | undefined): EngineAction {
+export function pidashAgentActionFor(signIn: DaemonPidashAgentSignInState | undefined): PidashAgentAction {
   switch (signIn) {
     case "expiring":
     case "expired":
@@ -226,7 +248,7 @@ export function engineActionFor(signIn: DaemonEngineSignInState | undefined): En
   }
 }
 
-function engineSignInState(hello: DaemonHello | null): DaemonEngineSignInState | undefined {
+function pidashAgentSignInState(hello: DaemonHello | null): DaemonPidashAgentSignInState | undefined {
   return hello?.engine_detail?.sign_in_state;
 }
 
@@ -254,18 +276,18 @@ async function rediscover(runtime: AgentRuntimeApi): Promise<DaemonDiscovery | n
 }
 
 /** Start an engine-only grant and approve it with the app's session. */
-async function approveEngineGrant(client: ApiClient, interactive: boolean): Promise<string> {
+async function approvePidashAgentGrant(client: ApiClient, interactive: boolean): Promise<string> {
   const grant = await startDeviceGrant(client, { scope: "engine" });
   await approveDeviceCode(client, grant.user_code, { interactive });
   return grant.device_code;
 }
 
-async function signInEngine(
+async function signInPidashAgent(
   deps: { client: ApiClient; runtime: AgentRuntimeApi },
   interactive: boolean
 ): Promise<void> {
-  const deviceCode = await approveEngineGrant(deps.client, interactive);
-  await deps.runtime.engineLogin(deviceCode);
+  const deviceCode = await approvePidashAgentGrant(deps.client, interactive);
+  await deps.runtime.pidashAgentLogin(deviceCode);
   await rediscover(deps.runtime);
 }
 
@@ -275,14 +297,15 @@ async function signInEngine(
  * Never throws: a failed renewal leaves the engine as it was and is retried
  * after a pause rather than on every check.
  */
-export function renewEngineIfAllowed(deps: RuntimeDeps, now: number = Date.now()): Promise<boolean> {
+export function renewPidashAgentIfAllowed(deps: RuntimeDeps, now: number = Date.now()): Promise<boolean> {
   const { client, runtime } = deps;
   if (!runtime) return Promise.resolve(false);
-  if (engineActionFor(engineSignInState(compatibleHello())) !== "renew_silently") return Promise.resolve(false);
+  if (pidashAgentActionFor(pidashAgentSignInState(compatibleHello())) !== "renew_silently")
+    return Promise.resolve(false);
   if (state.silentInFlight) return state.silentInFlight;
   if (now - state.lastSilentAttempt < SILENT_RENEW_RETRY_MS) return Promise.resolve(false);
   state.lastSilentAttempt = now;
-  const attempt = signInEngine({ client, runtime }, false)
+  const attempt = signInPidashAgent({ client, runtime }, false)
     .then(
       () => true,
       () => false
@@ -322,15 +345,16 @@ export function resumeRuntime(
 }
 
 /**
- * Re-check the daemon and keep the engine signed in: called on resume, on
- * focus and every minute. Silent renewal happens only in the two states
- * that allow it. Never throws.
+ * Re-check the daemon, wake its cloud connections, and keep the engine signed
+ * in: called on resume, on focus, on network recovery and every minute.
+ * Silent renewal happens only in the two states that allow it. Never throws.
  */
 export async function refreshRuntime(deps: RuntimeDeps): Promise<void> {
   const { runtime } = deps;
   if (!runtime || !state.identity) return;
   await rediscover(runtime);
-  await renewEngineIfAllowed(deps);
+  wakeDaemonForReconnect(runtime);
+  await renewPidashAgentIfAllowed(deps);
   await refreshTopUpUrl(deps);
 }
 
@@ -370,7 +394,7 @@ export async function setUpDaemon(
   onStep("service");
   await runtime.installService();
   onStep("engine");
-  await runtime.ensureEngine();
+  await runtime.ensurePidashAgent();
   await discoverDaemon(runtime);
   onStep("done");
 }
@@ -420,13 +444,13 @@ export async function ensureDaemon(
 }
 
 /** Refuse when the engine cannot take work, with the sentence the user needs. */
-function assertEngineUsable(hello: DaemonHello): void {
+function assertPidashAgentUsable(hello: DaemonHello): void {
   if (hello.engine === "unavailable") {
-    throw new EngineUnavailableError(hello.engine_detail?.reason_code ?? "");
+    throw new PidashAgentUnavailableError(hello.engine_detail?.reason_code ?? "");
   }
-  const action = engineActionFor(engineSignInState(hello));
-  if (action === "turn_on") throw new Error(ENGINE_TURN_ON_TEXT);
-  if (action === "sign_in") throw new Error(ENGINE_SIGNED_OUT_TEXT);
+  const action = pidashAgentActionFor(pidashAgentSignInState(hello));
+  if (action === "turn_on") throw new Error(PIDASH_AGENT_TURN_ON_TEXT);
+  if (action === "sign_in") throw new Error(PIDASH_AGENT_SIGNED_OUT_TEXT);
 }
 
 /**
@@ -438,10 +462,10 @@ export async function ensureChatRuntime(input: { workspaceSlug: string } & Runti
   const { runtime, workspaceSlug } = input;
   if (!runtime) return;
   await ensureDaemon("chat", workspaceSlug, input);
-  await renewEngineIfAllowed(input);
+  await renewPidashAgentIfAllowed(input);
   const hello = compatibleHello();
   if (!hello) throw new Error(discoveryProblem(state.discovery) ?? "Pi Dash is not set up on this computer.");
-  assertEngineUsable(hello);
+  assertPidashAgentUsable(hello);
 }
 
 /**
@@ -454,11 +478,11 @@ export async function refreshModelCredential(deps: RuntimeDeps): Promise<void> {
   const { runtime } = deps;
   if (!runtime) return;
   await rediscover(runtime);
-  if (!(await renewEngineIfAllowed(deps))) throw new Error("The built-in engine needs a new sign-in.");
+  if (!(await renewPidashAgentIfAllowed(deps))) throw new Error("The Pi Dash Agent needs a new sign-in.");
 }
 
 /** The engine runner this computer has for a project, if any. */
-export async function localEngineRunner(
+export async function localPidashAgentRunner(
   runtime: AgentRuntimeApi,
   workspaceSlug: string,
   project: string
@@ -470,23 +494,25 @@ export async function localEngineRunner(
 }
 
 /**
- * Turn the built-in engine on for a project on this computer, unless it
+ * Turn the Pi Dash Agent on for a project on this computer, unless it
  * already is (design §5). Sets the daemon up first when there is none.
  */
-export async function turnOnEngineForProject(
+export async function turnOnPidashAgentForProject(
   input: { workspaceSlug: string; project: string; workingDir?: string | undefined } & RuntimeDeps
-): Promise<DaemonEngineRunner | DaemonLocalRunner> {
+): Promise<DaemonPidashAgentRunner | DaemonLocalRunner> {
   const { runtime, workspaceSlug, project, workingDir } = input;
   if (!runtime) throw new Error("Pi Dash is not available on this build.");
   await ensureDaemon("engine", workspaceSlug, input);
-  const existing = await localEngineRunner(runtime, workspaceSlug, project);
+  const existing = await localPidashAgentRunner(runtime, workspaceSlug, project);
   if (existing) return existing;
-  return runtime.addEngineRunner({ workspace: workspaceSlug, project, workingDir });
+  return runtime.addPidashAgentRunner({ workspace: workspaceSlug, project, workingDir });
 }
 
 /**
  * Prepare a user-triggered agent run. Only when the work item targets the
- * built-in engine (explicit pin, else the project default): turn the
+ * Pi Dash Agent (explicit pin, else the project default): wake the
+ * daemon's cloud connections (PIDESKAPP-181 — the Run click is a user
+ * action, so an outage's multi-hour backoff must not outlast it), turn the
  * engine on for that project on this computer — the first run is what
  * enrols it — and wait briefly for the server to see it online. Any
  * other executor is left alone; selection is never mutated here.
@@ -501,19 +527,22 @@ export async function prepareAgentRun(
     getIssue(client, workspaceSlug, projectId, issueId),
     getProject(client, workspaceSlug, projectId),
   ]);
-  if ((issue.agent_executor ?? project.default_agent_executor) !== MANAGED_RUNNER_KIND) return;
-  await turnOnEngineForProject({ client, runtime, workspaceSlug, project: project.identifier });
+  if ((issue.agent_executor ?? project.default_agent_executor) !== PIDASH_AGENT_EXECUTOR_KIND) return;
+  wakeDaemonForReconnect(runtime);
+  await turnOnPidashAgentForProject({ client, runtime, workspaceSlug, project: project.identifier });
   const attempts = input.heartbeatPoll?.maxAttempts ?? HEARTBEAT_POLL_ATTEMPTS;
   const intervalMs = input.heartbeatPoll?.intervalMs ?? HEARTBEAT_POLL_INTERVAL_MS;
   const sleep = input.heartbeatPoll?.sleep ?? defaultSleep;
   for (let attempt = 0; attempt < attempts; attempt++) {
     const current = await getProject(client, workspaceSlug, projectId);
-    if (current.agent_executor_options.some((option) => option.kind === MANAGED_RUNNER_KIND && option.available)) {
+    if (
+      current.agent_executor_options.some((option) => option.kind === PIDASH_AGENT_EXECUTOR_KIND && option.available)
+    ) {
       return;
     }
     await sleep(intervalMs);
   }
-  throw new Error(ENGINE_STILL_CONNECTING_TEXT);
+  throw new Error(PIDASH_AGENT_STILL_CONNECTING_TEXT);
 }
 
 function defaultSleep(ms: number): Promise<void> {

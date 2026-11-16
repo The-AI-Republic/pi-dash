@@ -8,7 +8,7 @@
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
 import { dateTime, nullableDateTime, nullableUuid, uuid } from "./fields.js";
-import { DispatchWait, RunErrorDiagnostic } from "./issue-agent.js";
+import { CapacityWait, DispatchWait, RunErrorDiagnostic } from "./issue-agent.js";
 import { PodMini } from "./pods.js";
 
 export const RUN_STATUSES = [
@@ -103,6 +103,7 @@ export const AgentRun = z.object({
   pinned_runner_name: z.optional(z.nullable(z.string())),
   pin_kind: z.optional(z.string()),
   dispatch_wait: z.optional(z.nullable(DispatchWait)),
+  capacity_wait: z.optional(z.nullable(CapacityWait)),
   scheduler_binding: nullableUuid(),
   scheduler_binding_detail: z.nullable(RunSchedulerBinding),
   pod: uuid(),

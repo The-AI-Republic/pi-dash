@@ -4,7 +4,7 @@
 // Execution target and automated-run policy
 // (parity/specs/project-settings-general.md §PSET-009). There is no
 // executor picker: projects run on runners and the default pod decides who
-// runs the work (built-in engine design §6), so the section only says so.
+// runs the work (Pi Dash Agent design §6), so the section only says so.
 // The master switch leaves the budget and cadence visible but inert while off.
 // The budget keeps whole numbers with a native floor of one and a no-cap
 // toggle that remembers the typed cap; the cadence picker lists the presets

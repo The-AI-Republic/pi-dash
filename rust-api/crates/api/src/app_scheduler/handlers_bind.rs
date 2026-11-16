@@ -2353,6 +2353,7 @@ fn binding_list_statement(
         .column_as(agent_run::Column::Trigger, "r_trigger")
         .column_as(agent_run::Column::PromptManifest, "r_prompt_manifest")
         .column_as(agent_run::Column::PhaseKind, "r_phase_kind")
+        .column_as(agent_run::Column::WorkType, "r_work_type")
         .column_as(agent_run::Column::RunConfig, "r_run_config")
         .column_as(
             agent_run::Column::RequiredCapabilities,
@@ -2628,6 +2629,7 @@ struct BindingListDecoded {
     r_trigger: Option<String>,
     r_prompt_manifest: Option<serde_json::Value>,
     r_phase_kind: Option<String>,
+    r_work_type: Option<String>,
     r_run_config: Option<serde_json::Value>,
     r_required_capabilities: Option<serde_json::Value>,
     r_thread_id: Option<String>,
@@ -2682,6 +2684,7 @@ impl BindingListDecoded {
             r_trigger,
             r_prompt_manifest,
             r_phase_kind,
+            r_work_type,
             r_run_config,
             r_required_capabilities,
             r_thread_id,
@@ -2777,6 +2780,7 @@ impl BindingListDecoded {
                 trigger: r_trigger.ok_or(Denial::ServerError)?,
                 prompt_manifest: r_prompt_manifest,
                 phase_kind: r_phase_kind.ok_or(Denial::ServerError)?,
+                work_type: r_work_type.ok_or(Denial::ServerError)?,
                 run_config: r_run_config.ok_or(Denial::ServerError)?,
                 required_capabilities: r_required_capabilities.ok_or(Denial::ServerError)?,
                 thread_id: r_thread_id.ok_or(Denial::ServerError)?,
