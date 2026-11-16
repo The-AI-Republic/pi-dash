@@ -117,6 +117,35 @@ impl Coordinator {
         self.enqueue(entry)
     }
 
+    /// All waiting entries in FIFO order (for restart reconciliation).
+    pub fn waiting_entries(&self) -> Vec<QueueEntry> {
+        self.inner
+            .lock()
+            .map(|g| g.entries.clone())
+            .unwrap_or_default()
+    }
+
+    /// Oldest waiting entry for one runner (restart re-hydration).
+    pub fn waiting_for(&self, runner_id: Uuid) -> Option<QueueEntry> {
+        let inner = self.inner.lock().ok()?;
+        inner
+            .entries
+            .iter()
+            .find(|e| e.runner_id == runner_id)
+            .cloned()
+    }
+
+    /// True when this runner already holds a nonterminal attempt
+    /// (waiting or admitted) — a fresh Assign must NACK, not enqueue twice.
+    pub fn runner_held(&self, runner_id: Uuid) -> bool {
+        let inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        inner.entries.iter().any(|e| e.runner_id == runner_id)
+            || inner.active.values().any(|e| e.runner_id == runner_id)
+    }
+
     /// Attempt token for a held run (waiting or admitted), for poll.
     pub fn held_token(&self, run_id: Uuid) -> Option<Uuid> {
         let inner = self.inner.lock().ok()?;
@@ -498,6 +527,28 @@ mod tests {
         assert!(coord.admit(e1.run_id).unwrap());
         assert_eq!(coord.held_phase(e1.run_id), Some("starting"));
         assert_eq!(coord.held_token(e1.run_id), Some(tok));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn waiting_for_and_runner_held_for_restore() {
+        let dir = std::env::temp_dir().join(format!("coord_restore_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let coord = Coordinator::new(dir.clone(), 3).expect("coord");
+        let r1 = Uuid::new_v4();
+        let e1 = entry(r1, 1);
+        let e2 = entry(Uuid::new_v4(), 2);
+        coord.enqueue(e1.clone()).unwrap();
+        coord.enqueue(e2.clone()).unwrap();
+        // Re-hydration finds the runner's oldest waiting entry.
+        assert_eq!(coord.waiting_for(r1).map(|e| e.run_id), Some(e1.run_id));
+        assert!(coord.runner_held(r1));
+        assert!(coord.admit(e1.run_id).unwrap());
+        // Admitted still counts as held; after complete it does not.
+        assert!(coord.runner_held(r1));
+        coord.complete(e1.run_id).unwrap();
+        assert!(!coord.runner_held(r1));
+        assert_eq!(coord.waiting_for(r1).map(|e| e.run_id), None);
         std::fs::remove_dir_all(&dir).ok();
     }
 

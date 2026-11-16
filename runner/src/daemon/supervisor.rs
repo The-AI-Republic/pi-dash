@@ -277,6 +277,20 @@ impl Supervisor {
             let tasks = spawn_instance_tasks(inst, &spawn_ctx).await;
             spawn_ctx.register_tasks(inst.runner_id, tasks);
         }
+        // Restart orphan sweep (NEWPIDASH-241 T6): waiting entries whose
+        // runner no longer exists can never be re-hydrated — durable-cancel
+        // them so they cannot block the FIFO forever. The cloud re-queues
+        // the run through the reaper.
+        if let Some(coord) = run_coordinator.as_ref() {
+            let live: std::collections::HashSet<uuid::Uuid> =
+                instances.iter().map(|i| i.runner_id).collect();
+            for entry in coord.waiting_entries() {
+                if !live.contains(&entry.runner_id) {
+                    tracing::warn!(run_id=%entry.run_id, "waiting entry for removed runner; durable cancel");
+                    let _ = coord.cancel_waiting(entry.run_id);
+                }
+            }
+        }
 
         // Machine-level control session: lets the cloud push
         // machine-scoped commands (``create_runner``) down to this
@@ -1994,7 +2008,112 @@ impl RunnerLoop {
         tx
     }
 
+    /// Reserve this runner for a run and spawn its worker. Shared by the
+    /// Assign arm and restart re-hydration so outer-loop semantics (early
+    /// `in_flight` stamp, single-tenant guard, completion wakeup) cannot
+    /// diverge between the two paths.
+    async fn reserve_and_spawn(
+        &mut self,
+        run_id: uuid::Uuid,
+        prompt: String,
+        repo_url: Option<String>,
+        expected_codex_model: Option<String>,
+    ) {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (done_tx, done_rx) = oneshot::channel();
+        self.current_run = Some(CurrentRun {
+            run_id,
+            cancel: cancel.clone(),
+            done_rx,
+        });
+        self.state
+            .set_current_run(Some(CurrentRunSummary {
+                run_id,
+                thread_id: None,
+                status: "preparing".to_string(),
+                started_at: Utc::now(),
+                events: 0,
+            }))
+            .await;
+        let runner_paths = self.runner_paths.clone();
+        let daemon_paths = self.paths.clone();
+        let runner_config = self.runner_config.clone();
+        let state = self.state.clone();
+        let approvals = self.approvals.clone();
+        let out = self.out.clone();
+        let engine = self.engine.clone();
+        let coordinator = self.coordinator.clone();
+        let queue_blocked = self.queue_blocked;
+        tokio::spawn(async move {
+            let mut worker = AssignWorker {
+                runner_paths,
+                daemon_paths,
+                runner_config,
+                state,
+                approvals,
+                out,
+                cancel,
+                engine,
+                coordinator,
+                queue_blocked,
+            };
+            if let Err(e) = worker
+                .run(run_id, prompt, repo_url, expected_codex_model)
+                .await
+            {
+                tracing::error!("run {run_id} failed: {e:#}");
+                let _ = worker
+                    .out
+                    .send(ClientMsg::RunFailed {
+                        run_id,
+                        reason: FailureReason::Internal,
+                        detail: Some(format!("{e:#}")),
+                        ended_at: Utc::now(),
+                        tokens: None,
+                        model: None,
+                    })
+                    .await;
+                worker.state.set_current_run(None).await;
+            }
+            let _ = done_tx.send(());
+        });
+    }
+
     async fn run(mut self) -> Result<()> {
+        // Restart re-hydration (NEWPIDASH-241 T6): awaiting entries that
+        // survived a crash become this loop's current run again — the
+        // worker blocks oldest-first and never replays started work
+        // (non-waiting phases never load). Malformed payloads fail closed
+        // (durable cancel, no execution).
+        if let Some(coord) = self.coordinator.as_ref()
+            && let Some(entry) = coord.waiting_for(self.runner_paths.runner_id)
+        {
+                let parsed: Result<serde_json::Value, _> =
+                    serde_json::from_slice(&entry.assignment_payload);
+                match parsed {
+                    Ok(v) if v.get("prompt").and_then(|p| p.as_str()).is_some() => {
+                        let prompt = v
+                            .get("prompt")
+                            .and_then(|p| p.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        let repo_url = v
+                            .get("repo_url")
+                            .and_then(|r| r.as_str())
+                            .map(|s| s.to_string());
+                        let model = v
+                            .get("expected_codex_model")
+                            .and_then(|m| m.as_str())
+                            .map(|s| s.to_string());
+                        self.reserve_and_spawn(entry.run_id, prompt, repo_url, model)
+                            .await;
+                    }
+                    _ => {
+                        tracing::error!(run_id=%entry.run_id, "waiting payload unparsable; durable cancel, no execution");
+                        let _ = coord.cancel_waiting(entry.run_id);
+                    }
+                }
+        }
         loop {
             let frame = {
                 let inbound = self.inbound.recv();
@@ -2170,6 +2289,19 @@ impl RunnerLoop {
                         );
                         continue;
                     }
+                    // Durable held check: covers the startup window before
+                    // re-hydration reserves the runner (current_run is still
+                    // None while the waiting entry already exists).
+                    if let Some(coord) = self.coordinator.as_ref()
+                        && coord.runner_held(self.runner_paths.runner_id)
+                    {
+                        tracing::warn!(%run_id, "assign while runner already holds an attempt; rejecting");
+                        self.nack_assign(
+                            run_id,
+                            "assign rejected: runner already holds an attempt".to_string(),
+                        );
+                        continue;
+                    }
                     // Machine FIFO (NEWPIDASH-241): storage failure fails
                     // closed — NACK so the cloud re-queues, never execute.
                     if self.queue_blocked {
@@ -2205,76 +2337,8 @@ impl RunnerLoop {
                             continue;
                         }
                     }
-                    let cancel = tokio_util::sync::CancellationToken::new();
-                    let (done_tx, done_rx) = oneshot::channel();
-                    self.current_run = Some(CurrentRun {
-                        run_id,
-                        cancel: cancel.clone(),
-                        done_rx,
-                    });
-                    // Stamp ``rx_in_flight = Some(run_id)`` synchronously, before
-                    // the worker does anything slow. The cloud put this run
-                    // into a BUSY status the moment it sent the Assign;
-                    // ``reap_stale_busy_runs`` (services/session_service.py)
-                    // will fail any BUSY run whose runner Hellos with
-                    // ``in_flight_run=null``. Without this early stamp, a
-                    // session reconnect during workspace setup (which can
-                    // take 30s+ for a fresh clone) reports null truthfully
-                    // and the run gets reaped before it ever starts.
-                    // The worker re-stamps a fuller summary at the
-                    // ``set_current_run`` site below; same run_id, so the
-                    // watch channel doesn't toggle in/out of None.
-                    self.state
-                        .set_current_run(Some(CurrentRunSummary {
-                            run_id,
-                            thread_id: None,
-                            status: "preparing".to_string(),
-                            started_at: Utc::now(),
-                            events: 0,
-                        }))
+                    self.reserve_and_spawn(run_id, prompt, repo_url, expected_codex_model)
                         .await;
-                    let runner_paths = self.runner_paths.clone();
-                    let daemon_paths = self.paths.clone();
-                    let runner_config = self.runner_config.clone();
-                    let state = self.state.clone();
-                    let approvals = self.approvals.clone();
-                    let out = self.out.clone();
-                    let engine = self.engine.clone();
-                    let coordinator = self.coordinator.clone();
-                    let queue_blocked = self.queue_blocked;
-                    tokio::spawn(async move {
-                        let mut worker = AssignWorker {
-                            runner_paths,
-                            daemon_paths,
-                            runner_config,
-                            state,
-                            approvals,
-                            out,
-                            cancel,
-                            engine,
-                            coordinator,
-                            queue_blocked,
-                        };
-                        if let Err(e) = worker
-                            .run(run_id, prompt, repo_url, expected_codex_model)
-                            .await
-                        {
-                            tracing::error!("run {run_id} failed: {e:#}");
-                            let _ = worker
-                                .out
-                                .send(ClientMsg::RunFailed {
-                                    run_id,
-                                    reason: FailureReason::Internal,
-                                    detail: Some(format!("{e:#}")),
-                                    ended_at: Utc::now(),
-                                    tokens: None,
-                                    model: None,
-                                })
-                                .await;
-                            worker.state.set_current_run(None).await;
-                        }
-                        let _ = done_tx.send(());
-                    });
                 }
                 ServerMsg::Cancel { run_id, reason } => {
                     tracing::info!(%run_id, ?reason, "cancel received");
