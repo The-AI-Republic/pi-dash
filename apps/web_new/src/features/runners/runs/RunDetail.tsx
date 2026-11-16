@@ -30,8 +30,6 @@ export const RUN_DETAIL_LOADING_TEXT = "Fetching this run’s transcript…";
 export const RUN_DETAIL_UNAVAILABLE_TEXT =
   "No run with this id is reachable here. Check the address, or pick another run from the list.";
 export const RUN_CANCEL_TITLE = "Cancel run?";
-export const RUN_CANCEL_CLOUD_BODY =
-  "The cloud agent stops at its next safe interruption point, so it may take a moment to finish.";
 export const RUN_CANCEL_LOCAL_BODY =
   "The runner receives a stop request and ends the run as soon as it can acknowledge it.";
 export const RUN_CANCEL_FAILED_TITLE = "Couldn't cancel run";
@@ -40,11 +38,6 @@ export const RUN_CANCEL_FAILED = "The run is still active. Try again.";
 /** Cancelling makes sense until the run settles or a request already exists. */
 export function canCancelRun(run: Pick<AgentRun, "status">): boolean {
   return !isTerminalRun(run.status) && run.status !== "cancel_requested";
-}
-
-/** Executor-specific consequence copy for the confirmation. */
-export function cancelBodyKind(kind: AgentRun["executor_kind"]): string {
-  return kind === "cloud_agent" ? RUN_CANCEL_CLOUD_BODY : RUN_CANCEL_LOCAL_BODY;
 }
 
 export interface RunDetailProps {
@@ -314,7 +307,7 @@ export function RunDetail({
         }
       >
         <div data-testid="run-cancel-body">
-          <p className="text-body text-(--text-muted)">{cancelBodyKind(run.executor_kind)}</p>
+          <p className="text-body text-(--text-muted)">{RUN_CANCEL_LOCAL_BODY}</p>
         </div>
       </Dialog>
     </div>

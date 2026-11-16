@@ -21208,7 +21208,7 @@ export async function cloudProjectRaw(
 }
 
 /** Raw desktop-engine model profile read (CLOUD-040). */
-export async function cloudAgentProfileRaw(
+export async function pidashAgentProfileRaw(
   sessionCookie: string,
   apiBase: string = apiBaseFromEnv()
 ): Promise<CloudAssistantAnswer> {
@@ -21216,7 +21216,7 @@ export async function cloudAgentProfileRaw(
 }
 
 /** Raw desktop-engine credential mint (CLOUD-040). */
-export async function cloudAgentTokenRaw(
+export async function pidashAgentTokenRaw(
   sessionCookie: string,
   apiBase: string = apiBaseFromEnv()
 ): Promise<CloudAssistantAnswer> {

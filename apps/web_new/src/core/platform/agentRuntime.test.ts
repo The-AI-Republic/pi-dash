@@ -74,8 +74,8 @@ describe("desktop agent runtime", () => {
       working_dir: "/t",
     }));
     installBridge(invoke);
-    await platform.agentRuntime?.addEngineRunner({ workspace: "ws", project: "P" });
-    await platform.agentRuntime?.addEngineRunner({ workspace: "ws", project: "P", workingDir: "/w" });
+    await platform.agentRuntime?.addPidashAgentRunner({ workspace: "ws", project: "P" });
+    await platform.agentRuntime?.addPidashAgentRunner({ workspace: "ws", project: "P", workingDir: "/w" });
     expect(invoke).toHaveBeenCalledWith("daemon_engine_runner_add", {
       workspace: "ws",
       project: "P",
@@ -92,8 +92,8 @@ describe("desktop agent runtime", () => {
     const invoke = vi.fn(async () => undefined);
     installBridge(invoke);
     await platform.agentRuntime?.installService();
-    await platform.agentRuntime?.ensureEngine();
-    await platform.agentRuntime?.engineLogin("dev-code");
+    await platform.agentRuntime?.ensurePidashAgent();
+    await platform.agentRuntime?.pidashAgentLogin("dev-code");
     await platform.agentRuntime?.reloadCredentials();
     expect(invoke.mock.calls).toEqual([
       ["daemon_install_service", undefined],
@@ -161,7 +161,7 @@ describe("desktop agent runtime", () => {
     await expect(platform.agentRuntime?.discover({ userId: "u1", cloudUrl: "https://c.test" })).rejects.toThrow(
       "daemon_discover needs the native bridge"
     );
-    await expect(platform.agentRuntime?.engineLogin("d")).rejects.toThrow(
+    await expect(platform.agentRuntime?.pidashAgentLogin("d")).rejects.toThrow(
       "pidash_cli_engine_login needs the native bridge"
     );
     await expect(platform.agentRuntime?.requestReconnect()).rejects.toThrow("daemon_reconnect needs the native bridge");

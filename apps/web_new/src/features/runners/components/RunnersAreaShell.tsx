@@ -15,7 +15,7 @@ import * as React from "react";
 
 import type { Runner } from "@pidash/api-client";
 
-import type { LocalContact } from "../chat/localContact.js";
+import type { PidashAgentContact } from "../chat/localContact.js";
 import type { RunnersAccess } from "../access.js";
 import type { RunnersScopeInput } from "../scope.js";
 import { RunnersNotAuthorized } from "./NotAuthorizedView.js";
@@ -31,7 +31,7 @@ export interface RunnersAreaShellProps {
   /** Project chrome (breadcrumb header) rendered above the area. */
   chrome?: React.ReactNode;
   /** The built-in local contact; absent on cloud and web (RUN-033). */
-  localContacts?: readonly LocalContact[];
+  localContacts?: readonly PidashAgentContact[];
   children: React.ReactNode;
 }
 
