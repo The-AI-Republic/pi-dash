@@ -258,6 +258,39 @@ async fn open_in_browser(app: tauri::AppHandle, url: String) -> Result<(), Strin
         .map_err(|e| e.to_string())
 }
 
+/// Log-safe summary of an incoming deep link: scheme, host and path only.
+///
+/// The query carries the one-time authorization `code`, `state` and the
+/// provider's `error_description`. Rejection logging must never echo any
+/// of it (PIDESKAPP-238): a callback that misses the exact structural
+/// match by a trailing slash would otherwise write its live code to the
+/// process log. The happy path never logs the URL at all; this is only
+/// for the two rejection shapes, so maintainers can still see what the OS
+/// handed us. Query and fragment are dropped, and unparseable input
+/// collapses to its scheme prefix — never the raw string.
+fn deep_link_log_target(url: &str) -> String {
+    let head = url.split(['?', '#']).next().unwrap_or("");
+    if let Ok(parsed) = Url::parse(head) {
+        return format!(
+            "{}://{}{}",
+            parsed.scheme(),
+            parsed.host_str().unwrap_or(""),
+            parsed.path()
+        );
+    }
+    match head.split("://").next() {
+        Some(scheme)
+            if !scheme.is_empty()
+                && scheme
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) =>
+        {
+            format!("{scheme}://…")
+        }
+        _ => "<unparseable>".to_string(),
+    }
+}
+
 /// Process an incoming `pidash://auth/callback?code=<>&state=<>` deep link.
 ///
 /// The identity provider redirected the system browser directly to this
@@ -271,14 +304,17 @@ async fn open_in_browser(app: tauri::AppHandle, url: String) -> Result<(), Strin
 /// ever putting a session token in a URL.
 fn handle_deep_link(app: &tauri::AppHandle, url: &str) {
     let Ok(parsed) = Url::parse(url) else {
-        eprintln!("deep-link: invalid URL: {url}");
+        eprintln!("deep-link: invalid URL ({})", deep_link_log_target(url));
         return;
     };
     if parsed.scheme() != "pidash"
         || parsed.host_str() != Some("auth")
         || parsed.path() != "/callback"
     {
-        eprintln!("deep-link: ignoring unrecognized URL: {url}");
+        eprintln!(
+            "deep-link: ignoring unrecognized URL: {}",
+            deep_link_log_target(url)
+        );
         return;
     }
     let mut code: Option<String> = None;
@@ -1232,6 +1268,95 @@ mod tests {
         assert!(
             tail.contains("handle_deep_link"),
             "launch URLs must be passed to handle_deep_link"
+        );
+    }
+
+    #[test]
+    fn deep_link_rejection_logs_never_echo_the_raw_url() {
+        // PIDESKAPP-238: the incoming URL carries the live one-time auth
+        // `code`/`state` in the query. Both rejection eprintln!s formatted
+        // it verbatim, so a near-miss callback (one trailing slash away)
+        // wrote its code to the process log. The happy path never logs;
+        // only this fallthrough did — exactly the path read during incidents.
+        let src = include_str!("main.rs");
+        let production = src.split("\nmod tests {").next().unwrap_or(src);
+        for line in production.lines() {
+            if line.contains("eprintln!") && line.contains("deep-link") {
+                assert!(
+                    !line.contains("{url}"),
+                    "deep-link rejection logging must not echo the raw URL: {line}"
+                );
+            }
+        }
+        // Both rejection paths route through the safe formatter.
+        assert!(
+            production.matches("deep_link_log_target").count() >= 2,
+            "both deep-link rejection logs must use deep_link_log_target"
+        );
+    }
+
+    #[test]
+    fn deep_link_log_target_strips_the_query_and_fragment() {
+        // PIDESKAPP-238: rejection logging shows structure only. Every
+        // value that can ride along in the query or fragment — code,
+        // state, error_description — must be gone from the log target.
+        let cases = [
+            (
+                "pidash://auth/callback/?code=SECRETCODE&state=SECRETSTATE",
+                "pidash://auth/callback/",
+            ),
+            (
+                "pidash://auth/callback?code=SECRETCODE&state=SECRETSTATE",
+                "pidash://auth/callback",
+            ),
+            (
+                "pidash://evil/callback?code=SECRETCODE",
+                "pidash://evil/callback",
+            ),
+            (
+                "pidash://auth/callback?error=access_denied&error_description=SECRETDETAIL",
+                "pidash://auth/callback",
+            ),
+            (
+                "pidash://auth/callback#code=SECRETCODE",
+                "pidash://auth/callback",
+            ),
+        ];
+        for (input, expected) in cases {
+            let logged = deep_link_log_target(input);
+            assert_eq!(logged, expected, "{input}");
+            for secret in [
+                "SECRETCODE",
+                "SECRETSTATE",
+                "SECRETDETAIL",
+                "code=",
+                "state=",
+                "error_description=",
+            ] {
+                assert!(!logged.contains(secret), "{input} -> {logged}");
+            }
+        }
+    }
+
+    #[test]
+    fn deep_link_log_target_never_echoes_unparseable_input() {
+        // Even when the URL cannot be parsed (so no scheme/host/path is
+        // available), the log line must not echo the query bytes.
+        for input in [
+            "pidash://auth:badport/callback?code=SECRETCODE",
+            "not a url?code=SECRETCODE",
+            "???",
+            "",
+        ] {
+            let logged = deep_link_log_target(input);
+            assert!(
+                !logged.contains("SECRETCODE") && !logged.contains("code="),
+                "{input} -> {logged}"
+            );
+        }
+        assert_eq!(
+            deep_link_log_target("not a url?code=SECRETCODE"),
+            "<unparseable>"
         );
     }
 }
