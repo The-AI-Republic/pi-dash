@@ -573,7 +573,11 @@ mod tests {
         assert!(!is_fresh_capacity_wait(&stale_old, Some(tok), now));
         // Wrong-token report is never protected, even when fresh.
         let other = Uuid::parse_str("00000000-0000-0000-0000-000000000014").unwrap();
-        assert!(!is_fresh_capacity_wait(&healthy_beyond_180, Some(other), now));
+        assert!(!is_fresh_capacity_wait(
+            &healthy_beyond_180,
+            Some(other),
+            now
+        ));
         // Null token (legacy) never matches a stored token.
         assert!(!is_fresh_capacity_wait(&healthy_beyond_180, None, now));
     }
