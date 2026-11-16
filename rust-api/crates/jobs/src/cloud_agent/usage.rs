@@ -23,8 +23,7 @@ use serde_json::{Map, Value};
 /// the run plan's `limits` first, falling back to the setting. `None` is
 /// an explicit plan `null` — pydantic's unlimited.
 ///
-/// Moved here from `dispatch::execute` in P2; `dispatch_execute` and
-/// `dispatch::execute` re-export it for remaining readers until P3.
+/// Moved here from `dispatch::execute` in P2 of the agent naming work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UsageLimits {
     pub request_limit: Option<i64>,

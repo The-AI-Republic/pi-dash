@@ -1237,21 +1237,9 @@ pub async fn dispatch_scheduler_run<S: EntriesSeam>(
     };
     let admission_error = execution.cloud_admission_error.clone();
 
-    // Permanent misconfiguration — refuse BEFORE creating a run so a
-    // broken binding writes last_error once instead of minting a FAILED
-    // AgentRun on every scheduler firing. Note the execution's executor
-    // kind, not the project default.
-    if execution.executor_kind == AgentExecutorKind::CloudAgent
-        && binding.outcome_mode != OUTCOME_MODE_CREATE_ISSUE
-    {
-        return Ok(SchedulerOutcome {
-            run: None,
-            error: Some(SCHEDULER_OUTCOME_MODE_REFUSAL.to_owned()),
-        });
-    }
-
-    // Admission stays as recorded on the execution fields (P3 step B:
-    // the capacity gate's seam call is gone).
+    // P3 step C: the cloud misconfiguration arm died with the
+    // retired plane. Admission stays as recorded on the execution
+    // fields (P3 step B: the capacity gate's seam call is gone).
     let run_id = Uuid::new_v4();
     let run = seam
         .insert_scheduler_run(&NewSchedulerRun {
@@ -3583,44 +3571,6 @@ mod tests {
         let run = seam.runs.get(&run_id).expect("run stored");
         assert_eq!(run.created_by_id, uid(0x43));
         assert_eq!(seam.dispatched, vec![run_id]);
-    }
-
-    #[tokio::test]
-    async fn s6_cloud_outcome_mode_refusal_before_insert() {
-        let case = scheduler_case("S6_outcome_mode_refusal");
-        let now = frozen_now();
-        let mut seam = scheduler_seam();
-        cloud_project(&mut seam);
-        role_pass(&mut seam, uid(0x40));
-        seam.llm.insert(uid(0x40), true);
-        seam.execution = Some(Ok(ExecutionFields {
-            executor_kind: AgentExecutorKind::CloudAgent,
-            tool_plan: json!({}),
-            pinned_runner_entry: Some(None),
-            error_code: None,
-            cloud_admission_error: None,
-        }));
-        seam.bindings
-            .get_mut(&uid(0x80))
-            .expect("binding")
-            .outcome_mode = "apply_fix".to_owned();
-        let outcome = dispatch_scheduler_run(
-            &mut seam,
-            &SchedulerRequest {
-                binding_id: uid(0x80),
-                now,
-            },
-        )
-        .await
-        .expect("scheduler runs");
-        assert!(outcome.run.is_none());
-        assert_eq!(outcome.error.as_deref(), case["returned"]["error"].as_str());
-        assert_eq!(
-            outcome.error.as_deref(),
-            Some(SCHEDULER_OUTCOME_MODE_REFUSAL)
-        );
-        assert!(seam.scheduler_runs.is_empty());
-        assert!(seam.dispatched.is_empty());
     }
 
     #[tokio::test]
