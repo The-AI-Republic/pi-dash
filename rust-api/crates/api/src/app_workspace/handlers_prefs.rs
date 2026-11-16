@@ -3416,9 +3416,13 @@ async fn home_prefs_get(
     // one insert per missing key in plan order, each with its own clock
     // read (the `-created_at` response order depends on it).
     for (key, sort_order) in queries_extras::home_autocreate_plan(&borrowed) {
-        // `bulk_create` binds every column: `is_enabled`/`config` ride the
-        // Python-side field defaults (`True`/`{}`, `workspace.py:457-458`),
-        // which have no DB-level DEFAULT — omitting them violates NOT NULL.
+        // `bulk_create` binds every column: `config` rides the Python-side
+        // field default (`{}`, `workspace.py:458`), which has no DB-level
+        // DEFAULT — omitting it violates NOT NULL. `is_enabled` rides
+        // NEWPIDASH-301 (DIFF-38): `quick_links`/`recents` are created
+        // disabled for a chat-first first home, `my_stickies` keeps the
+        // Django column default (`True`, `workspace.py:457`). Only new rows
+        // use this; existing rows are never rewritten.
         // `bulk_create` skips `save()`, so `created_by`/`updated_by` stay
         // NULL (matching the omitted columns here).
         workspace_home_preferences::Entity::insert(workspace_home_preferences::ActiveModel {
@@ -3429,7 +3433,7 @@ async fn home_prefs_get(
             user_id: Set(user_id),
             workspace_id: Set(workspace_id),
             sort_order: Set(f64::from(sort_order)),
-            is_enabled: Set(true),
+            is_enabled: Set(queries_extras::home_pref_autocreate_is_enabled(key)),
             config: Set(Value::Object(Map::new())),
             ..Default::default()
         })

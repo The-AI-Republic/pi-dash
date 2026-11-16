@@ -867,6 +867,15 @@ pub fn home_autocreate_plan<'a>(existing: &[&'a str]) -> Vec<HomePrefRow<'a>> {
     inserted
 }
 
+/// R10 autocreate `is_enabled` default per key (NEWPIDASH-301, DIFF-38):
+/// `quick_links` and `recents` are created disabled so a first-time home is
+/// the chat composer with no widget clutter; `my_stickies` keeps the Django
+/// column default (`workspace.py:457`, `default=True`). Only newly autocreated
+/// rows use this — existing rows are never rewritten.
+pub fn home_pref_autocreate_is_enabled(key: &str) -> bool {
+    !matches!(key, "quick_links" | "recents")
+}
+
 /// R10 bulk insert (`:45-57`): `INSERT ... ON CONFLICT DO NOTHING` over the
 /// alive `(workspace, user, key)` partial unique
 /// (`db/models/workspace.py:461-467`). `is_enabled`/`config` ride their
@@ -1490,6 +1499,10 @@ mod tests {
             home_autocreate_plan(&["quick_links"]),
             vec![("recents", 999), ("my_stickies", 998)]
         );
+        // NEWPIDASH-301 (DIFF-38): chat-first defaults.
+        assert!(!home_pref_autocreate_is_enabled("quick_links"));
+        assert!(!home_pref_autocreate_is_enabled("recents"));
+        assert!(home_pref_autocreate_is_enabled("my_stickies"));
         let insert = home_pref_insert_sql();
         assert!(insert.contains("INSERT INTO workspace_home_preferences"));
         assert!(insert.ends_with("ON CONFLICT DO NOTHING"));

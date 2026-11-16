@@ -3,8 +3,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Dashboard assistant card (NEWFRONT-603, parity/specs/agents.md §9
-// AGT-048): quick entry with suggestions and recent conversations, the
-// keyless refusal notice, and the guest absence.
+// AGT-048; chat-first composer per NEWPIDASH-301): quick entry with
+// suggestions and recent conversations as their own section, the keyless
+// refusal notice, and the guest absence.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   createMemoryHistory,
@@ -180,8 +181,16 @@ describe("HomeAssistantCard", () => {
     renderCard({ threads: [ARCHIVED_THREAD, ...threads], config: CONFIGURED });
     const card = await screen.findByRole("region", { name: "Assistant" });
     expect(card).toHaveAttribute("data-assistant-state", "ready");
+    // Chat-first (NEWPIDASH-301): no visible Assistant title; the section
+    // keeps its accessible name, and recents are their own section.
+    expect(screen.queryByRole("heading", { name: "Assistant" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Recent conversations" })).toBeInTheDocument();
+    expect(card.contains(screen.getByTestId("home-recent-conversations"))).toBe(false);
     const input = screen.getByRole("textbox", { name: "Ask the assistant" });
     expect(input).toHaveValue("");
+    expect(input.tagName).toBe("TEXTAREA");
+    // The send control sits inside the composer box.
+    expect(screen.getByTestId("assistant-card-entry").contains(screen.getByRole("button", { name: "Ask" }))).toBe(true);
     expect(screen.getByRole("button", { name: "Ask" })).toBeDisabled();
     for (const chip of ["What's assigned to me?", "Create an issue in…", "Summarize open issues in…"]) {
       expect(screen.getByRole("button", { name: chip })).toBeInTheDocument();
@@ -268,8 +277,8 @@ describe("HomeAssistantCard", () => {
     fireEvent.change(input, { target: { value: "first" } });
     expect(screen.getByRole("button", { name: "Ask" })).toBeEnabled();
     fireEvent.keyDown(input, { key: "Enter" });
-    // The Ask button is disabled while starting, but the single-line input
-    // still takes keys; a second Enter must be absorbed, not start again.
+    // The Ask button is disabled while starting, but the composer still
+    // takes keys; a second Enter must be absorbed, not start again.
     fireEvent.change(input, { target: { value: "second" } });
     fireEvent.keyDown(input, { key: "Enter" });
     release(makeThread({ id: "44444444-4444-4444-8444-444444444444" }));
@@ -282,9 +291,27 @@ describe("HomeAssistantCard", () => {
     fireEvent.change(input, { target: { value: "chord" } });
     fireEvent.keyDown(input, { key: "Enter", ctrlKey: true });
     fireEvent.keyDown(input, { key: "Enter", metaKey: true });
+    fireEvent.keyDown(input, { key: "Enter", altKey: true });
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(calls.filter((call) => call.method === "POST")).toEqual([]);
     expect(routerRef?.state.location.pathname).toBe("/acme");
+  });
+
+  it("lets Shift+Enter break the line without sending", async () => {
+    renderCard({ threads: [], config: CONFIGURED });
+    const input = await screen.findByRole("textbox", { name: "Ask the assistant" });
+    fireEvent.change(input, { target: { value: "first" } });
+    fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(calls.filter((call) => call.method === "POST")).toEqual([]);
+    expect(screen.getByRole("textbox", { name: "Ask the assistant" })).toHaveValue("first");
+  });
+
+  it("hides the recent-conversations section when there are none", async () => {
+    renderCard({ threads: [], config: CONFIGURED });
+    await screen.findByRole("region", { name: "Assistant" });
+    expect(screen.queryByRole("region", { name: "Recent conversations" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("home-recent-conversations")).not.toBeInTheDocument();
   });
 
   it("shows the start failure detail in the notice", async () => {
