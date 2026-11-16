@@ -1,0 +1,187 @@
+"""Stickies viewset: create/list/retrieve/partial-update/destroy.
+
+``StickyViewSet`` (``/api/v1/workspaces/<slug>/stickies/`` + ``<pk>/``) is
+gated by ``WorkspaceUserPermission`` — any active workspace member (admin,
+member or guest) may use every action. Rows are additionally owner-scoped:
+``get_queryset`` filters ``owner=request.user``, so a member only ever sees
+their own stickies. List is ``-created_at`` ordered with ``?query=`` matched
+against ``description_stripped``.
+"""
+
+STICKY_KEYS = {
+    "background_color", "color", "created_at", "created_by", "deleted_at",
+    "description", "description_binary", "description_html",
+    "description_stripped", "id", "logo_props", "name", "owner",
+    "sort_order", "updated_at", "updated_by", "workspace",
+}
+
+LIST_KEYS = {
+    "count", "extra_stats", "grouped_by", "next_cursor", "next_page_results",
+    "prev_cursor", "prev_page_results", "results", "sub_grouped_by",
+    "total_count", "total_pages", "total_results",
+}
+
+
+def _base(org):
+    return f"/api/v1/workspaces/{org.workspace['slug']}/stickies/"
+
+
+def _create(org, role="admin", **overrides):
+    payload = {"name": "note", "description_html": "<p>hello world</p>", **overrides}
+    r = org.request("POST", _base(org), role, json=payload)
+    assert r.status_code == 201, r.text[:500]
+    return r.json()
+
+
+def test_sticky_create_shape(org):
+    body = _create(org)
+    assert set(body) == STICKY_KEYS
+    assert body["name"] == "note"
+    assert body["description_html"] == "<p>hello world</p>"
+    assert body["description_stripped"] == "hello world"
+    assert body["workspace"] == org.workspace["id"]
+    assert body["owner"] == org.admin["id"]
+    assert body["sort_order"] == 65535.0
+
+
+def test_sticky_list_shape_and_order(org):
+    first = _create(org, name="first")
+    second = _create(org, name="second")
+    r = org.request("GET", _base(org), "admin")
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) == LIST_KEYS
+    assert body["total_count"] == 2
+    assert [row["id"] for row in body["results"]] == [second["id"], first["id"]]
+    for row in body["results"]:
+        assert set(row) == STICKY_KEYS
+
+
+def test_sticky_list_query_filters_description(org):
+    _create(org, name="alpha", description_html="<p>pineapple notes</p>")
+    _create(org, name="beta", description_html="<p>unrelated</p>")
+    r = org.request("GET", _base(org), "admin", params={"query": "pineapple"})
+    assert r.status_code == 200
+    results = r.json()["results"]
+    assert [row["name"] for row in results] == ["alpha"]
+
+
+def test_sticky_retrieve_shape(org):
+    created = _create(org)
+    r = org.request("GET", f"{_base(org)}{created['id']}/", "admin")
+    assert r.status_code == 200
+    assert r.json() == created
+
+
+def test_sticky_partial_update(org):
+    created = _create(org)
+    r = org.request(
+        "PATCH", f"{_base(org)}{created['id']}/", "admin",
+        json={"name": "renamed", "color": "#ff0000"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) == STICKY_KEYS
+    assert body["name"] == "renamed"
+    assert body["color"] == "#ff0000"
+    assert body["description_html"] == "<p>hello world</p>"
+
+
+def test_sticky_delete(org):
+    created = _create(org)
+    r = org.request("DELETE", f"{_base(org)}{created['id']}/", "admin")
+    assert r.status_code == 204
+    assert r.text == ""
+    r = org.request("GET", f"{_base(org)}{created['id']}/", "admin")
+    assert r.status_code == 404
+    assert r.json() == {"detail": "No Sticky matches the given query."}
+
+
+def test_sticky_list_owner_scoped(org):
+    _create(org, role="admin", name="admin-note")
+    r = org.request("GET", _base(org), "member")
+    assert r.status_code == 200
+    assert r.json()["results"] == []
+    mine = _create(org, role="member", name="member-note")
+    r = org.request("GET", _base(org), "member")
+    assert [row["id"] for row in r.json()["results"]] == [mine["id"]]
+
+
+def test_sticky_retrieve_other_owners_404(org):
+    created = _create(org, role="admin")
+    r = org.request("GET", f"{_base(org)}{created['id']}/", "member")
+    assert r.status_code == 404
+    assert r.json() == {"detail": "No Sticky matches the given query."}
+
+
+def test_sticky_guest_may_create(org):
+    body = _create(org, role="guest", name="guest-note")
+    assert body["owner"] == org.guest["id"]
+
+
+def _bare(org):
+    return _base(org).rstrip("/")
+
+
+# Django answers every sticky format-suffix URL with its generic 500: the
+# viewset actions declare explicit params, so the router's `format` kwarg
+# raises TypeError. Rust proxies these spellings, so the bug shines through
+# byte for byte (PIDASHCONV-828 G3/G5).
+SUFFIX_500 = {"error": "Something went wrong please try again later"}
+
+
+def test_sticky_list_format_suffix_json(org):
+    _create(org, name="suffixed")
+    for path in (_bare(org) + ".json", _bare(org) + ".json/"):
+        r = org.request("GET", path, "admin")
+        assert r.status_code == 500, r.text[:500]
+        assert r.json() == SUFFIX_500
+
+
+def test_sticky_detail_format_suffix_json(org):
+    created = _create(org, name="suffixed-detail")
+    # G5: the dotted spelling reaches Django (500), never the detail handler
+    # on a garbage pk (which would 404 here).
+    for path in (f"{_bare(org)}/{created['id']}.json", f"{_bare(org)}/{created['id']}.json/"):
+        r = org.request("GET", path, "admin")
+        assert r.status_code == 500, r.text[:500]
+        assert r.json() == SUFFIX_500
+
+
+def test_sticky_detail_format_suffix_patch(org):
+    created = _create(org, name="before")
+    # PATCH rides the proxy with its real body; Django still 500s on the
+    # `format` kwarg before touching anything, so the sticky is unchanged.
+    r = org.request("PATCH", f"{_bare(org)}/{created['id']}.json/", "admin",
+                    json={"name": "after"})
+    assert r.status_code == 500, r.text[:500]
+    assert r.json() == SUFFIX_500
+    r = org.request("GET", f"{_base(org)}{created['id']}/", "admin")
+    assert r.json()["name"] == "before"
+
+
+# PIDASHCONV-1331: ammonia's default per-tag attributes (align, scope,
+# hreflang, cite, datetime, ...) must be stripped like nh3 does — Django
+# passes ATTRIBUTES as the complete per-tag table, so anything outside it
+# goes. Expected output captured from nh3 0.2.18 via validate_html_content.
+SANITIZER_PROBE_HTML = (
+    '<table><tr><th align="left" scope="col">a</th>'
+    '<td align="right">b</td></tr></table>'
+    '<a href="https://x" hreflang="en">l</a>'
+    '<blockquote cite="https://c">q</blockquote>'
+    '<img src="https://i" align="left">'
+    '<ins datetime="2020">i</ins>'
+)
+SANITIZER_PROBE_CLEAN = (
+    '<table><tbody><tr><th>a</th><td>b</td></tr></tbody></table>'
+    '<a href="https://x" rel="noopener noreferrer">l</a>'
+    '<blockquote>q</blockquote><img src="https://i"><ins>i</ins>'
+)
+
+
+def test_sticky_create_strips_ammonia_default_tag_attributes(org):
+    body = _create(org, name="sanitized", description_html=SANITIZER_PROBE_HTML)
+    assert body["description_html"] == SANITIZER_PROBE_CLEAN
+    r = org.request("GET", f"{_base(org)}{body['id']}/", "admin")
+    assert r.status_code == 200
+    assert r.json()["description_html"] == SANITIZER_PROBE_CLEAN

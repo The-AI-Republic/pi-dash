@@ -82,10 +82,8 @@ impl<'a> Policy<'a> {
                     return Decision::AutoAccept;
                 }
             }
-            ApprovalKind::NetworkAccess => {
-                if self.config.auto_approve_network {
-                    return Decision::AutoAccept;
-                }
+            ApprovalKind::NetworkAccess if self.config.auto_approve_network => {
+                return Decision::AutoAccept;
             }
             _ => {}
         }
@@ -373,7 +371,11 @@ mod tests {
                 ApprovalKind::CommandExecution,
                 &serde_json::json!({ "command": "sudo rm -rf /var" }),
             );
-            assert_eq!(d, Decision::AutoDecline, "mode {mode:?} must refuse denylist");
+            assert_eq!(
+                d,
+                Decision::AutoDecline,
+                "mode {mode:?} must refuse denylist"
+            );
         }
     }
 }

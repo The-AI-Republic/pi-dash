@@ -1,0 +1,75 @@
+{
+  "bugs": [],
+  "data": {
+    "catalog": {
+      "builtin_count": 2,
+      "builtins": [
+        {
+          "description": "Scans the project for common security vulnerabilities and files Pi Dash issues for any new findings.",
+          "name": "Security Audit",
+          "prompt_len": 634,
+          "prompt_sha256": "6cba8b5a8c04221b8dfdc4a23a8de31c60abe14ec6e1483d7e814a39ff35376f",
+          "slug": "security-audit"
+        },
+        {
+          "description": "Comprehensive Fable-powered audit: scans the project for security vulnerabilities and correctness bugs and files Pi Dash issues for new findings.",
+          "name": "Claude Mythos/Fable System Security Audit",
+          "prompt_len": 2962,
+          "prompt_sha256": "63a696e7115b1724dd72b30ef575e76e4603a14c482aacdb48bef5f89f3b5b36",
+          "slug": "fable-security-audit"
+        }
+      ],
+      "ensure_semantics": "select-then-insert on (workspace, slug, deleted_at IS NULL); existing -> repaint name/description/prompt/source + updated_at; missing -> create source=builtin; IntegrityError -> refetch + repaint; returns touched count (one per builtin incl. already-current)",
+      "signal": "post_save Workspace dispatch_uid=scheduler.seed_builtins_on_workspace_create; created=False -> return; exceptions swallowed via logger.exception (workspace creation never blocked)",
+      "trace": "scheduler/builtins/__init__.py:21-28 (BuiltinScheduler), 31-98 (prompts), 101-121 (BUILTINS), 124-188 (ensure_builtin_schedulers); scheduler/signals.py:28-39 (post_save receiver)"
+    },
+    "db": {
+      "ensure_count_unchanged": true,
+      "ensure_repaints_stale": {
+        "name": true,
+        "prompt": true,
+        "source": "builtin",
+        "touched": 2
+      },
+      "ensure_second_run_touched": 2,
+      "ensure_select_sql": "SELECT \"schedulers\".\"created_at\", \"schedulers\".\"updated_at\", \"schedulers\".\"created_by_id\", \"schedulers\".\"updated_by_id\", \"schedulers\".\"deleted_at\", \"schedulers\".\"id\", \"schedulers\".\"workspace_id\", \"schedulers\".\"slug\", \"schedulers\".\"name\", \"schedulers\".\"description\", \"schedulers\".\"prompt\", \"schedulers\".\"source\", \"schedulers\".\"is_enabled\", \"schedulers\".\"color\" FROM \"schedulers\" WHERE (\"schedulers\".\"deleted_at\" IS NULL AND \"schedulers\".\"deleted_at\" IS NULL AND \"schedulers\".\"slug\" = security-audit AND \"schedulers\".\"workspace_id\" = 204fd67f-6485-47a0-98e2-079bd6b34202) ORDER BY \"schedulers\".\"created_at\" DESC",
+      "outcome_modes": ["create_issue", "apply_fix", "fix_and_review"],
+      "scheduler_columns": [
+        "created_at",
+        "updated_at",
+        "created_by",
+        "updated_by",
+        "deleted_at",
+        "id",
+        "workspace",
+        "slug",
+        "name",
+        "description",
+        "prompt",
+        "source",
+        "is_enabled",
+        "color"
+      ],
+      "scheduler_source_values": ["builtin", "manifest"],
+      "signal_auto_seed": {
+        "builtin_slugs_seeded_by_signal": ["fable-security-audit", "security-audit"],
+        "scheduler_rows_after_workspace_create": 2,
+        "scheduler_rows_before_workspace_create": 0
+      },
+      "trace": "scheduler/builtins/__init__.py:142-148 (_apply_defaults repaint), 158-187 (select-then-insert + IntegrityError retry, touched+=1 per builtin); signals.py:28-39 (post_save auto-seed); Scheduler model db/models/scheduler.py"
+    },
+    "fable_audit_prompt": "You are performing a scheduled, read-only security and correctness audit of this\nrepository. Run autonomously to completion \u2014 no human is available to answer\nquestions, so make reasonable assumptions and note them rather than stopping.\n\nScope: the entire repository at the current working directory \u2014 application code,\nconfiguration, infrastructure-as-code, dependency manifests, and CI/CD\ndefinitions. This is authorized defensive review of the project owner's own code.\n\nFind:\n1. Security vulnerabilities \u2014 injection (SQL, command, XSS, SSRF, path traversal,\n   template, deserialization); broken authn/authz (missing checks, IDOR,\n   privilege escalation, weak sessions); secrets committed or logged;\n   cryptographic misuse; insecure configuration (permissive CORS, verbose prod\n   errors, open cloud resources, unauthenticated endpoints); vulnerable or\n   outdated dependencies with known CVEs (read manifests + lockfiles; if a\n   scanner such as npm audit / pip-audit / osv-scanner / trivy is available, run\n   it and fold in the results); unsafe file handling and redirects.\n2. Correctness bugs \u2014 logic errors that could cause wrong behavior, data loss,\n   crashes, race conditions, or resource leaks, traced through real data flow\n   (not lint-level nits).\n\nMethod: work at high thoroughness. Trace data from untrusted inputs to sensitive\nsinks and reason about WHY each finding is exploitable or wrong, not just whether\na pattern matches. Read the actual code paths. Where deterministic tooling exists\nin the repo (SAST, dependency scanners, type checkers, the test suite), run it\nand incorporate the output. Do NOT modify code, commit, or open PRs \u2014 read-only.\n\nReport EVERY issue you find, including uncertain or low-severity ones; do not\nfilter while finding. For each finding capture: a short specific title, the file\npath and line range, category (security|correctness) and a specific subtype,\nseverity (high|medium|low), confidence (high|medium|low), a 1-3 sentence\nexplanation of the exploit path or failure mode, and a concrete fix.\n\nFor each NEW finding, create a Pi Dash issue with the `pi-dash` CLI. Use the\ntitle prefix \"[fable-security]\" for security findings and \"[fable-bug]\" for\ncorrectness findings (a dedicated namespace so this audit does not collide with\nthe basic \"[security]\" Security Audit scheduler):\n    pi-dash issue create \\\n      --title \"[fable-security] <short summary>\" \\\n      --description \"<file path + line range, category/subtype, severity,\n                     confidence, explanation, and suggested fix>\"\n\nBefore creating an issue, list existing open issues with the \"[fable-security]\"\nor \"[fable-bug]\" title prefix and skip any finding that already has a\ncorresponding open issue (de-dupe by file + subtype, not by exact title). Never\nrefile duplicates.\n\nEnd with a one-line summary: issues filed, duplicates skipped, breakdown by\nseverity. If there are no new findings, file nothing and report \"No new findings\".\n",
+    "security_audit_prompt": "Scan this project's source code for potential security vulnerabilities\n(injection, auth bypass, secret leakage, unsafe deserialization, SSRF,\ninsecure defaults).\n\nFor each finding, create a Pi Dash issue using the `pi-dash` CLI:\n    pi-dash issue create \\\n      --title \"[security] <short summary>\" \\\n      --description \"<file path, line range, vulnerable snippet,\n                     severity (high|medium|low), and suggested fix>\"\n\nBefore creating an issue, list existing open issues with the\n\"[security]\" title prefix and skip any finding that already has a\ncorresponding open issue (de-dupe by file + rule, not by exact title).\n"
+  },
+  "fixture_id": "FIX-scheduler",
+  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world).",
+  "notes": [
+    "ensure returns touched-per-builtin (2 even when idempotent). Emitted SQL doubles 'deleted_at IS NULL' (default manager + explicit filter) \u2014 port semantics as emitted. Signal swallows all exceptions (workspace creation never blocked)."
+  ],
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "trace": [
+    "scheduler/builtins/__init__.py:21-28 (BuiltinScheduler), 31-98 (SECURITY_AUDIT_PROMPT/FABLE_AUDIT_PROMPT), 101-121 (BUILTINS), 124-188 (ensure_builtin_schedulers)",
+    "scheduler/signals.py:28-39 (post_save Workspace receiver)",
+    "scheduler/__init__.py:1-8 (re-export docstring only)"
+  ]
+}

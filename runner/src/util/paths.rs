@@ -1,17 +1,32 @@
 use anyhow::{Context, Result};
-use directories::ProjectDirs;
+use directories::{BaseDirs, ProjectDirs};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
+
+use crate::util::fs::create_dir_all_private;
 
 const QUALIFIER: &str = "so";
 const ORG: &str = "pidash";
 const APP: &str = "pidash";
+
+/// Files the macOS service supervisor (launchd) writes daemon stdout/stderr
+/// into, under [`Paths::logs_dir`]. Pre-created by [`Paths::ensure`] so
+/// they are never world-readable.
+pub(crate) const SERVICE_OUT_LOG: &str = "runner.out.log";
+pub(crate) const SERVICE_ERR_LOG: &str = "runner.err.log";
 
 #[derive(Debug, Clone)]
 pub struct Paths {
     pub config_dir: PathBuf,
     pub data_dir: PathBuf,
     pub runtime_dir: PathBuf,
+    /// Directory holding the machine-level `context.md` (all projects in every
+    /// bound workspace). Follows `PIDASH_CONFIG_DIR` / `--config-dir` when an
+    /// override is set, otherwise `~/.pidash`. A hardcoded `~/.pidash` would be
+    /// a second, non-overridable location; the desktop app and CI both run
+    /// isolated installs that pass an override and must not write into the real
+    /// home directory.
+    pub machine_context_dir: PathBuf,
 }
 
 /// Per-instance filesystem paths under `data_dir/runners/<runner_id>/`. Each
@@ -24,6 +39,25 @@ pub struct RunnerPaths {
     base_dir: PathBuf,
 }
 
+/// Compare two paths for identity, resolving symlinks where possible.
+/// `canonicalize` fails on paths that don't exist yet (a fresh install's
+/// data dir, most test paths), so fall back to the raw path — `Path`
+/// equality still normalises `.` components and repeated separators.
+fn same_path(a: &Path, b: &Path) -> bool {
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    canon(a) == canon(b)
+}
+
+/// Decide whether a data-dir override marks this daemon as an isolated
+/// install (own PID file + IPC socket under `<data_dir>/runtime/`).
+/// Only an override that names a *different* directory than the platform
+/// default counts: service units used to export the default as
+/// `PIDASH_DATA_DIR`, which moved the daemon's socket away from where an
+/// override-less CLI resolves it (PDASHOSS01-230).
+fn is_isolated(data_override: Option<&Path>, default_data_dir: &Path) -> bool {
+    data_override.is_some_and(|dir| !same_path(dir, default_data_dir))
+}
+
 impl Paths {
     pub fn resolve(
         config_override: Option<PathBuf>,
@@ -31,12 +65,27 @@ impl Paths {
     ) -> Result<Self> {
         let dirs = ProjectDirs::from(QUALIFIER, ORG, APP)
             .context("unable to resolve XDG project directories")?;
-        let config_dir = config_override.unwrap_or_else(|| dirs.config_dir().to_path_buf());
+        let config_dir = config_override
+            .clone()
+            .unwrap_or_else(|| dirs.config_dir().to_path_buf());
+        // Machine-context location (D1): an explicit override wins so isolated
+        // installs (desktop, CI) stay self-contained; otherwise the real home
+        // directory's `.pidash`; and if the home directory can't be resolved,
+        // fall back to the config directory rather than an unwritable path.
+        let machine_context_dir = match config_override {
+            Some(dir) => dir,
+            None => BaseDirs::new()
+                .map(|base| base.home_dir().join(".pidash"))
+                .unwrap_or_else(|| config_dir.clone()),
+        };
         // An isolated daemon must also get an isolated PID and IPC socket.
         // Otherwise the desktop and a personal installation claim the same
         // XDG runtime path even though their configuration and data differ.
-        let isolated = data_override.is_some();
-        let data_dir = data_override.unwrap_or_else(|| dirs.data_dir().to_path_buf());
+        // See `is_isolated` for why an override naming the default data dir
+        // does NOT count as isolated.
+        let default_data_dir = dirs.data_dir().to_path_buf();
+        let isolated = is_isolated(data_override.as_deref(), &default_data_dir);
+        let data_dir = data_override.unwrap_or(default_data_dir);
         let runtime_dir = if isolated {
             data_dir.join("runtime")
         } else {
@@ -48,11 +97,31 @@ impl Paths {
             config_dir,
             data_dir,
             runtime_dir,
+            machine_context_dir,
         })
+    }
+
+    /// True when this instance's data dir is the platform-default
+    /// (`ProjectDirs`) data directory rather than a genuine override.
+    /// Service installers use this to leave `PIDASH_DATA_DIR` out of the
+    /// unit they write: baking the default into the unit made the daemon
+    /// look like an isolated install and moved its IPC socket away from
+    /// where an override-less CLI expects it (PDASHOSS01-230).
+    pub fn data_dir_is_default(&self) -> bool {
+        ProjectDirs::from(QUALIFIER, ORG, APP)
+            .map(|dirs| same_path(&self.data_dir, dirs.data_dir()))
+            .unwrap_or(false)
     }
 
     pub fn config_path(&self) -> PathBuf {
         self.config_dir.join("config.toml")
+    }
+
+    /// Machine-level `context.md`: the workspace-wide lookup table listing every
+    /// project in every bound workspace. See `machine_context_dir` for the
+    /// location rule.
+    pub fn machine_context_path(&self) -> PathBuf {
+        self.machine_context_dir.join("context.md")
     }
 
     pub fn credentials_path(&self) -> PathBuf {
@@ -80,6 +149,16 @@ impl Paths {
         self.runtime_dir.join("pidash.sock")
     }
 
+    /// The `<data_dir>/runtime` socket a pre-PDASHOSS01-230 daemon used when
+    /// its service unit exported the default data dir, or `None` when that
+    /// is already `ipc_socket_path()` (isolated installs, hosts without an
+    /// XDG runtime dir). Only for diagnosing a daemon not yet restarted onto
+    /// the current binary.
+    pub fn legacy_ipc_socket_path(&self) -> Option<PathBuf> {
+        let legacy = self.data_dir.join("runtime").join("pidash.sock");
+        (legacy != self.ipc_socket_path()).then_some(legacy)
+    }
+
     pub fn default_working_dir(&self) -> PathBuf {
         let base = std::env::var("TMPDIR")
             .map(PathBuf::from)
@@ -101,15 +180,88 @@ impl Paths {
     }
 
     pub fn ensure(&self) -> Result<()> {
+        // Owner-only when the daemon creates them: the data dir holds engine
+        // homes, runner histories and service logs. Existing directories
+        // keep their mode.
         for dir in [
             &self.config_dir,
             &self.data_dir,
             &self.runtime_dir,
             &self.logs_dir(),
         ] {
-            std::fs::create_dir_all(dir).with_context(|| format!("creating {dir:?}"))?;
+            create_dir_all_private(dir).with_context(|| format!("creating {dir:?}"))?;
+        }
+        // An install made before the daemon created its home owner-only
+        // still has a 0755 data dir, and every engine task folder and runner
+        // history under it stays readable. The data dir is the daemon's own
+        // (never a user-chosen working dir), so tighten it here; that covers
+        // the whole tree beneath it without touching anything the user owns.
+        tighten_daemon_dir(&self.data_dir);
+        for name in [SERVICE_OUT_LOG, SERVICE_ERR_LOG] {
+            ensure_service_log(&self.logs_dir().join(name))?;
         }
         Ok(())
+    }
+}
+
+/// Drop group/other access from a daemon-owned directory that predates
+/// owner-only creation. Best effort: a directory owned by another user, or
+/// a chmod the filesystem refuses, is logged and left alone so the daemon
+/// still starts.
+fn tighten_daemon_dir(dir: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let Ok(meta) = std::fs::metadata(dir) else {
+            return;
+        };
+        if meta.mode() & 0o077 == 0 || meta.uid() != nix::unistd::getuid().as_raw() {
+            return;
+        }
+        let mut perm = meta.permissions();
+        perm.set_mode(meta.mode() & 0o700);
+        if let Err(e) = std::fs::set_permissions(dir, perm) {
+            tracing::warn!(dir = ?dir, error = %e, "could not make daemon dir owner-only");
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+}
+
+/// Ensure a service log file exists and is owner-only (0600 on Unix).
+///
+/// launchd opens these files at exec time with the default umask, before
+/// the daemon's first line runs, so the mode of a file that already exists
+/// is enforced here rather than only applied at creation.
+fn ensure_service_log(path: &Path) -> Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true).truncate(false);
+    set_private_open_mode(&mut options);
+    options
+        .open(path)
+        .with_context(|| format!("creating service log {path:?}"))?;
+    set_service_log_permissions(path)?;
+    Ok(())
+}
+
+fn set_service_log_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        // Enforced on every `ensure`, not only at creation: same precedent
+        // as `config::file`'s credential files.
+        let mut perm = std::fs::metadata(path)?.permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perm.set_mode(0o600);
+        std::fs::set_permissions(path, perm)?;
+    }
+    Ok(())
+}
+
+fn set_private_open_mode(options: &mut std::fs::OpenOptions) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
 }
 
@@ -149,10 +301,11 @@ impl RunnerPaths {
         self.base_dir.join("credentials.toml")
     }
 
-    /// Create the runner's directory tree on disk.
+    /// Create the runner's directory tree on disk (owner-only when created;
+    /// existing directories keep their mode).
     pub fn ensure(&self) -> Result<()> {
         for dir in [&self.base_dir, &self.runs_dir(), &self.logs_dir()] {
-            std::fs::create_dir_all(dir).with_context(|| format!("creating {dir:?}"))?;
+            create_dir_all_private(dir).with_context(|| format!("creating {dir:?}"))?;
         }
         Ok(())
     }
@@ -161,6 +314,88 @@ impl RunnerPaths {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_data_override_keeps_the_shared_socket_path() {
+        // Regression for PDASHOSS01-230: service units written by
+        // `pidash install` exported PIDASH_DATA_DIR=<default>, which made
+        // the daemon resolve an "isolated" socket under <data>/runtime/
+        // while the CLI (no override) looked in the XDG runtime dir.
+        // An override that *is* the default must resolve identically to
+        // no override at all.
+        let default_data_dir = ProjectDirs::from(QUALIFIER, ORG, APP)
+            .unwrap()
+            .data_dir()
+            .to_path_buf();
+        let plain = Paths::resolve(None, None).unwrap();
+        let defaulted = Paths::resolve(None, Some(default_data_dir)).unwrap();
+        assert_eq!(defaulted.ipc_socket_path(), plain.ipc_socket_path());
+        assert_eq!(defaulted.pid_path(), plain.pid_path());
+        assert_eq!(defaulted.runtime_dir, plain.runtime_dir);
+    }
+
+    #[test]
+    fn is_isolated_only_for_a_genuinely_different_override() {
+        // Deterministic core of the PDASHOSS01-230 regression: the
+        // resolve-level test above can't tell old from new behavior on a
+        // host without XDG_RUNTIME_DIR (both branches fall back to
+        // <data>/runtime there), so pin the decision itself.
+        let tmp = tempfile::tempdir().unwrap();
+        let default = tmp.path().join("default-data");
+        assert!(!is_isolated(None, &default));
+        assert!(
+            !is_isolated(Some(&default), &default),
+            "an override naming the default data dir must not isolate the socket"
+        );
+        assert!(is_isolated(Some(&tmp.path().join("app-data")), &default));
+        // A symlinked spelling of the default is still the default.
+        std::fs::create_dir(&default).unwrap();
+        let link = tmp.path().join("default-link");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&default, &link).unwrap();
+            assert!(!is_isolated(Some(&link), &default));
+        }
+    }
+
+    #[test]
+    fn same_path_sees_through_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = tmp.path().join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        #[cfg(unix)]
+        assert!(same_path(&link, &real));
+        // Non-existent paths fall back to lexical comparison.
+        let ghost = tmp.path().join("ghost");
+        assert!(same_path(&ghost, &ghost.clone()));
+        assert!(!same_path(&ghost, &real));
+    }
+
+    #[test]
+    fn data_dir_is_default_distinguishes_override_from_default() {
+        let plain = Paths::resolve(None, None).unwrap();
+        assert!(plain.data_dir_is_default());
+        let tmp = tempfile::tempdir().unwrap();
+        let isolated = Paths::resolve(None, Some(tmp.path().join("app-data"))).unwrap();
+        assert!(!isolated.data_dir_is_default());
+    }
+
+    #[test]
+    fn legacy_socket_is_only_reported_when_it_differs() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Isolated install: the legacy location *is* the live socket.
+        let isolated = Paths::resolve(None, Some(tmp.path().join("app-data"))).unwrap();
+        assert_eq!(isolated.legacy_ipc_socket_path(), None);
+        // Shared install with an XDG runtime dir: point at <data>/runtime.
+        let shared = paths_at(tmp.path());
+        assert_eq!(
+            shared.legacy_ipc_socket_path(),
+            Some(tmp.path().join("data/runtime/pidash.sock"))
+        );
+    }
 
     #[test]
     fn data_override_isolates_daemon_socket_and_pid() {
@@ -181,7 +416,32 @@ mod tests {
             config_dir: base.join("config"),
             data_dir: base.join("data"),
             runtime_dir: base.join("runtime"),
+            machine_context_dir: base.join("config"),
         }
+    }
+
+    #[test]
+    fn machine_context_dir_follows_config_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let override_dir = tmp.path().join("isolated-config");
+        let paths = Paths::resolve(Some(override_dir.clone()), None).unwrap();
+        assert_eq!(paths.machine_context_dir, override_dir);
+        assert_eq!(
+            paths.machine_context_path(),
+            override_dir.join("context.md")
+        );
+    }
+
+    #[test]
+    fn machine_context_dir_defaults_to_home_pidash() {
+        // No override: the machine file lives in the real home directory's
+        // `.pidash`, not the XDG config dir.
+        let paths = Paths::resolve(None, None).unwrap();
+        let expected = BaseDirs::new()
+            .map(|base| base.home_dir().join(".pidash"))
+            .unwrap_or_else(|| paths.config_dir.clone());
+        assert_eq!(paths.machine_context_dir, expected);
+        assert_eq!(paths.machine_context_path(), expected.join("context.md"));
     }
 
     #[test]
@@ -231,6 +491,83 @@ mod tests {
         assert!(rp.runs_dir().is_dir(), "runs dir should be created");
         assert!(rp.logs_dir().is_dir(), "logs dir should be created");
         assert!(rp.base_dir().is_dir(), "base dir should be created");
+    }
+
+    /// The daemon's home tree is owner-only: the data dir holds engine
+    /// homes, runner histories and service logs, all of which outlive the
+    /// config's 0600 files.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_creates_owner_only_dirs_and_service_logs() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let p = paths_at(tmp.path());
+        p.ensure().unwrap();
+        for dir in [&p.config_dir, &p.data_dir, &p.runtime_dir, &p.logs_dir()] {
+            let mode = std::fs::metadata(dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode,
+                0o700,
+                "created dir {} must be owner-only",
+                dir.display()
+            );
+        }
+        for name in [SERVICE_OUT_LOG, SERVICE_ERR_LOG] {
+            let file = p.logs_dir().join(name);
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode,
+                0o600,
+                "service log {} must be owner-only",
+                file.display()
+            );
+        }
+    }
+
+    /// launchd opens the service log files at exec time with the default
+    /// umask, before the daemon's first line runs, so `ensure` must tighten
+    /// the files it finds rather than only ones it creates.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_tightens_an_existing_service_log() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let p = paths_at(tmp.path());
+        std::fs::create_dir_all(p.logs_dir()).unwrap();
+        let file = p.logs_dir().join(SERVICE_OUT_LOG);
+        std::fs::write(&file, b"x").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        p.ensure().unwrap();
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "existing service log must be tightened to 0600"
+        );
+    }
+
+    /// An upgraded install's data dir was created 0755 by an older daemon;
+    /// `ensure` tightens it (the daemon owns it) so the engine task folders
+    /// and histories already under it stop being readable by other users.
+    /// What lies beneath keeps its mode: the data dir alone gates access.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_tightens_an_existing_data_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let p = paths_at(tmp.path());
+        let task = p.data_dir.join("engine/workdirs/acme/WEB");
+        std::fs::create_dir_all(&task).unwrap();
+        for dir in [&p.data_dir, &task] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        p.ensure().unwrap();
+        let mode = |d: &Path| std::fs::metadata(d).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode(&p.data_dir),
+            0o700,
+            "existing data dir must be tightened"
+        );
+        assert_eq!(mode(&task), 0o755, "contents are not chmodded");
     }
 
     #[test]

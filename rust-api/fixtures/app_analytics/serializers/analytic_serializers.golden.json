@@ -1,0 +1,48 @@
+{
+  "fixture": "FX-A-SER-01",
+  "source": "app/serializers/analytic.py:10-31",
+  "serializer": "AnalyticViewSerializer",
+  "meta": {
+    "model": "AnalyticView",
+    "fields": "__all__",
+    "read_only_fields": ["workspace", "query"],
+    "base": "BaseSerializer (id = PrimaryKeyRelatedField read_only)"
+  },
+  "create": {
+    "code": "query_params = validated_data.get(\"query_dict\", {}); if bool(query_params): validated_data[\"query\"] = issue_filters(query_params, \"POST\") else: validated_data[\"query\"] = {}; return AnalyticView.objects.create(**validated_data)",
+    "cases": [
+      {
+        "name": "query_dict with one filter translates via issue_filters POST",
+        "input": {"name": "AV-CRUD", "description": "roundtrip", "query_dict": {"priority": "high"}},
+        "output": {"name": "AV-CRUD", "query_dict": {"priority": "high"}, "query": {"priority__in": "high"}},
+        "oracle": "contract-tests/app_analytics/test_analytic_shapes.py::test_analytic_view_crud (lines 93-103)"
+      },
+      {
+        "name": "empty query_dict stores empty query object",
+        "input": {"name": "GX", "description": "", "query_dict": {}},
+        "output": {"name": "GX", "query_dict": {}, "query": {}},
+        "note": "bool({}) is False so the else branch stores {} verbatim"
+      }
+    ]
+  },
+  "update": {
+    "code": "query_params = validated_data.get(\"query_data\", {}); if bool(query_params): validated_data[\"query\"] = issue_filters(query_params, \"POST\") else: validated_data[\"query\"] = {}; validated_data[\"query\"] = issue_filters(query_params, \"PATCH\"); return super().update(instance, validated_data)",
+    "cases": [
+      {
+        "name": "name-only patch still recomputes query from empty query_data",
+        "input": {"name": "AV-CRUD2"},
+        "output": {"name": "AV-CRUD2", "query": "issue_filters({}, \"PATCH\")"},
+        "oracle": "contract-tests/app_analytics/test_analytic_shapes.py::test_analytic_view_crud (lines 110-114)"
+      }
+    ],
+    "ported_bugs": [
+      "BUG-1 (key asymmetry): create reads validated_data[\"query_dict\"] but update reads validated_data[\"query_data\"]; a PATCH body carrying query_dict is ignored by update. Port as-is.",
+      "BUG-2 (dead branch): line 30 runs unconditionally, so the if/else on lines 26-29 is dead — query is always issue_filters(query_params, \"PATCH\"). Port as-is."
+    ]
+  },
+  "response_shape": {
+    "detail_keys_include": ["id", "name", "description", "query", "query_dict", "workspace"],
+    "workspace": "workspace id (perform_create saves workspace_id from slug lookup; contract pins view[\"workspace\"] == seed ws id)",
+    "query_json_passthrough": "query and query_dict render byte-identical to the stored JSON (no normalization)"
+  }
+}

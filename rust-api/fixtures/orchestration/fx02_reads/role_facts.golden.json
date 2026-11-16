@@ -1,0 +1,109 @@
+{
+  "_trace": "core/permissions.py:23-25 (ROLE_*), :28-70 (workspace facts), :73-119 (check_project_role)",
+  "_method": "live permission-fact calls on pidash_524_scratch",
+  "ROLE_ADMIN": 20,
+  "ROLE_MEMBER": 15,
+  "ROLE_GUEST": 5,
+  "workspace_seeds": [
+    {
+      "actor": "admin20",
+      "role": 20,
+      "is_active": true
+    },
+    {
+      "actor": "member15",
+      "role": 15,
+      "is_active": true
+    },
+    {
+      "actor": "guest5",
+      "role": 5,
+      "is_active": true
+    },
+    {
+      "actor": "inactive15",
+      "role": 15,
+      "is_active": false
+    },
+    {
+      "actor": "outsider",
+      "role": null,
+      "is_active": null
+    }
+  ],
+  "project_seeds_FX2": [
+    {
+      "actor": "member15",
+      "role": 15,
+      "is_active": true
+    },
+    {
+      "actor": "admin20",
+      "role": 5,
+      "is_active": true
+    },
+    {
+      "actor": "guest5",
+      "role": 5,
+      "is_active": true
+    }
+  ],
+  "matrix": {
+    "is_workspace_member": {
+      "admin20": true,
+      "member15": true,
+      "guest5": true,
+      "inactive15": false,
+      "outsider": false,
+      "anonymous": false,
+      "none": false
+    },
+    "workspace_role": {
+      "admin20": 20,
+      "member15": 15,
+      "guest5": 5,
+      "inactive15": null,
+      "outsider": null,
+      "anonymous": null,
+      "none": null
+    },
+    "workspace_role_by_slug": {
+      "admin20": 20,
+      "member15": 15,
+      "guest5": 5,
+      "inactive15": null,
+      "outsider": null,
+      "anonymous": null,
+      "none": null
+    },
+    "is_workspace_admin": {
+      "admin20": true,
+      "member15": false,
+      "guest5": false,
+      "inactive15": false,
+      "outsider": false,
+      "anonymous": false,
+      "none": false
+    },
+    "is_at_least_member": {
+      "admin20": true,
+      "member15": true,
+      "guest5": false,
+      "inactive15": false,
+      "outsider": false,
+      "anonymous": false,
+      "none": false
+    }
+  },
+  "check_project_role": {
+    "member15 allowed=[15]": true,
+    "member15 allowed=[20]": false,
+    "member15 allowed=[20] no-bypass": false,
+    "admin5 allowed=[15] bypass": true,
+    "admin5 allowed=[15] no-bypass": false,
+    "guest5 allowed=[15,20] bypass": false,
+    "outsider allowed=[5,15,20]": false,
+    "anonymous allowed=[15]": false,
+    "none allowed=[15]": false
+  }
+}

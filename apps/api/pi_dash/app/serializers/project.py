@@ -58,6 +58,18 @@ class ProjectSerializer(BaseSerializer):
         fields = "__all__"
         read_only_fields = ["workspace", "deleted_at"]
 
+    def validate_default_work_type(self, default_work_type):
+        # Same rule as the external serializers: a registered key or blank
+        # (``Project.save`` resolves the default at creation). Without this,
+        # the web settings form could store any string and every inheriting
+        # issue would silently compose with the fallback work type.
+        if default_work_type:
+            from pi_dash.prompting.work_types import WORK_TYPES
+
+            if default_work_type not in WORK_TYPES:
+                raise serializers.ValidationError(f"unknown work type; expected one of {sorted(WORK_TYPES)}")
+        return default_work_type
+
     def validate_name(self, name):
         project_id = self.instance.id if self.instance else None
         workspace_id = self.context["workspace_id"]
@@ -119,13 +131,13 @@ class ProjectSerializer(BaseSerializer):
         return _validate_cadence_seconds(interval)
 
     def validate(self, data):
-        if data.get("default_agent_executor") == "cloud_agent":
-            from pi_dash.core.agent_execution import cloud_agent_is_configured
+        # Runner is the only executor (built_engine_as_runner §6). Older
+        # clients still send ``cloud_agent`` / ``managed_runner``; store
+        # ``local_runner`` and let the project's default pod decide who runs.
+        if "default_agent_executor" in data:
+            from pi_dash.core.agent_execution import normalize_executor_write
 
-            if not cloud_agent_is_configured():
-                from pi_dash.cloud_agent.api import CloudAgentUnavailableAPI
-
-                raise CloudAgentUnavailableAPI()
+            data["default_agent_executor"] = normalize_executor_write(data["default_agent_executor"])
         if self.instance and self.instance.is_default and data.get("is_default") is False:
             raise serializers.ValidationError(
                 "Default project cannot be unset without assigning another default project."

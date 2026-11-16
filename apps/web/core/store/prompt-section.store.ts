@@ -14,6 +14,7 @@ import type {
   IPromptSectionUpsertPayload,
   TPromptKind,
   TPromptScope,
+  TWorkTypeKey,
 } from "@pi-dash/types";
 import { PromptSectionService } from "@pi-dash/services";
 // store
@@ -21,8 +22,18 @@ import type { CoreRootStore } from "./root.store";
 
 export interface IPromptSectionStore {
   // actions
-  fetchSections: (workspaceSlug: string, kind: TPromptKind, scope: TPromptScope) => Promise<IPromptSectionListResponse>;
-  fetchCompiled: (workspaceSlug: string, kind: TPromptKind, scope: TPromptScope) => Promise<IPromptCompiledResponse>;
+  fetchSections: (
+    workspaceSlug: string,
+    kind: TPromptKind,
+    scope: TPromptScope,
+    workType: TWorkTypeKey
+  ) => Promise<IPromptSectionListResponse>;
+  fetchCompiled: (
+    workspaceSlug: string,
+    kind: TPromptKind,
+    scope: TPromptScope,
+    workType: TWorkTypeKey
+  ) => Promise<IPromptCompiledResponse>;
   upsertSection: (
     workspaceSlug: string,
     sectionKey: string,
@@ -54,14 +65,16 @@ export class PromptSectionStore implements IPromptSectionStore {
   fetchSections = async (
     workspaceSlug: string,
     kind: TPromptKind,
-    scope: TPromptScope
-  ): Promise<IPromptSectionListResponse> => this.promptSectionService.list(workspaceSlug, kind, scope);
+    scope: TPromptScope,
+    workType: TWorkTypeKey
+  ): Promise<IPromptSectionListResponse> => this.promptSectionService.list(workspaceSlug, kind, scope, workType);
 
   fetchCompiled = async (
     workspaceSlug: string,
     kind: TPromptKind,
-    scope: TPromptScope
-  ): Promise<IPromptCompiledResponse> => this.promptSectionService.compiled(workspaceSlug, kind, scope);
+    scope: TPromptScope,
+    workType: TWorkTypeKey
+  ): Promise<IPromptCompiledResponse> => this.promptSectionService.compiled(workspaceSlug, kind, scope, workType);
 
   upsertSection = async (
     workspaceSlug: string,

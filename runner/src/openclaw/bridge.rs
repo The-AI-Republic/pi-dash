@@ -39,18 +39,13 @@ use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 
 use crate::agent::{
-    AgentProcessHandle, BridgeEvent, ExitSnapshot, RunPayload, STDERR_RING_LINES, StderrBuffer,
-    StderrRing, StderrSnapshot,
+    AgentProcessHandle, BridgeEvent, ENGINE_STARTUP_TIMEOUT, ExitSnapshot, RunPayload,
+    STDERR_RING_LINES, StderrBuffer, StderrRing, StderrSnapshot,
 };
 use crate::cloud::protocol::{ApprovalDecision, FailureReason};
 use crate::openclaw::process::OpenClawProcess;
 use crate::openclaw::schema::AcpMessage;
 use crate::util::shell::login_shell_command;
-
-/// How long to wait for `acpx` to emit its first ACP frame carrying a
-/// `sessionId` before giving up on run setup. Generous: acpx has to perform
-/// the ACP handshake and OpenClaw may take several seconds to spin a session.
-const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct Bridge {
     binary: String,
@@ -190,7 +185,7 @@ impl Bridge {
     /// `next_events` re-emits it. Mirrors cursor-agent's `wait_for_init`.
     async fn wait_for_session(&mut self, run_id: Uuid) -> Result<String> {
         let proc = self.proc.as_mut().context("acpx process not spawned")?;
-        let deadline = tokio::time::Instant::now() + SESSION_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + ENGINE_STARTUP_TIMEOUT;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             let recv = tokio::time::timeout(remaining, proc.inbound.recv())
@@ -332,10 +327,10 @@ impl BridgeCursor {
                 match result.get("stopReason").and_then(|s| s.as_str()) {
                     Some(stop_reason) => {
                         self.terminal = true;
-                        if is_failure_stop_reason(stop_reason) {
+                        if let Some(reason) = failure_stop_reason(stop_reason) {
                             vec![BridgeEvent::Failed {
                                 run_id: self.run_id,
-                                reason: FailureReason::AgentCrash,
+                                reason,
                                 detail: Some(format!("openclaw stopReason: {stop_reason}")),
                             }]
                         } else {
@@ -379,12 +374,18 @@ impl BridgeCursor {
     }
 }
 
-/// ACP `stopReason` values that mean the turn did not complete its work:
-/// `cancelled` (interrupted) and `refusal` (the model declined). Everything
-/// else (`end_turn`, `max_tokens`, `max_turn_requests`) is a natural end and
-/// maps to `Completed` with the reason recorded as the conclusion.
-fn is_failure_stop_reason(stop_reason: &str) -> bool {
-    matches!(stop_reason, "cancelled" | "refusal")
+/// ACP `stopReason` values that mean the turn did not complete its work,
+/// mapped to the specific `FailureReason` instead of a blanket
+/// `AgentCrash` (PDASHOSS01-183): `cancelled` (interrupted) and `refusal`
+/// (the model declined — current clouds record it as REFUSED). Everything
+/// else (`end_turn`, `max_tokens`, `max_turn_requests`) is a natural end
+/// and maps to `Completed` with the reason recorded as the conclusion.
+fn failure_stop_reason(stop_reason: &str) -> Option<FailureReason> {
+    match stop_reason {
+        "cancelled" => Some(FailureReason::Cancelled),
+        "refusal" => Some(FailureReason::Refusal),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -475,10 +476,29 @@ mod tests {
     }
 
     #[test]
-    fn stop_reason_cancelled_fails() {
+    fn stop_reason_cancelled_fails_as_cancelled() {
         let mut c = cursor();
         let out = c.translate(msg(r#"{"id":3,"result":{"stopReason":"cancelled"}}"#));
-        assert!(matches!(out[0], BridgeEvent::Failed { .. }));
+        assert!(matches!(
+            out[0],
+            BridgeEvent::Failed {
+                reason: FailureReason::Cancelled,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn stop_reason_refusal_fails_as_refusal() {
+        let mut c = cursor();
+        let out = c.translate(msg(r#"{"id":3,"result":{"stopReason":"refusal"}}"#));
+        assert!(matches!(
+            out[0],
+            BridgeEvent::Failed {
+                reason: FailureReason::Refusal,
+                ..
+            }
+        ));
     }
 
     #[test]

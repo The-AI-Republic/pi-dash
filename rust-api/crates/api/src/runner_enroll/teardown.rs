@@ -1,0 +1,3616 @@
+//! Refresh + revoke teardown endpoints (D-13 handlers-C, PIDASHCONV-592).
+//!
+//! Ports `runner/views/enrollment.py:380-476` (`RunnerRefreshEndpoint`),
+//! `:503-534` (`RunnerSelfRevokeEndpoint`), `runner/views/runners.py:173-208`
+//! (`DevMachineRevokeEndpoint`), `:211-246` (`DevMachineRotateEndpoint`),
+//! and `:455-492` (`RunnerRevokeEndpoint`):
+//!
+//! * `POST /api/v1/runner/runners/<rid>/refresh/` — refresh-token parse
+//!   auth, current-vs-previous match (previous ⇒ revoke +
+//!   `refresh_token_replayed`), membership-or-revoke, atomic rotation,
+//!   access mint, force-refresh clear.
+//! * `DELETE /api/v1/runner/runners/<rid>/` — runner self-deletion:
+//!   id match, revoke + revoke frame + session close + row delete.
+//! * `POST /api/runners/dev-machines/<mid>/revoke/` — machine + token
+//!   revoke, per-runner revoke frames + `Runner.revoke` + session close.
+//! * `POST /api/runners/dev-machines/<mid>/rotate/` — token revoke +
+//!   revoke frames + session closes; runner rows untouched (port as-is).
+//! * `POST /api/runners/<rid>/revoke/` — row-locked read, view/manage
+//!   gates, idempotent 200 (no re-emit when already revoked).
+//! * `POST /api/runners/<rid>/pause/` (`09738d222`) — stamp the pause,
+//!   release pins, return the runner plus `in_flight_runs`.
+//! * `POST /api/runners/<rid>/resume/` (`09738d222`) — clear the pause,
+//!   drain queued work to the runner, return the runner.
+//!
+//! Fixture ids D13-F3 (`tokens/tokens.golden.json`: rotation mints),
+//! D13-F5 (`queries/*.sql`: refresh/revoke/cascade SQL), D13-F6
+//! (`services/flows.golden.json`: cascade order, reasons, tx boundaries),
+//! D13-F7 (`handlers/endpoints.golden.json`: endpoint bodies), D13-F8
+//! (`external/wire_pins.json`: provider call shapes — called, never
+//! inlined).
+//!
+//! # Execution model
+//!
+//! * Daemon routes authenticate through the merged [`auth`](super::auth)
+//!   resolvers (refresh-token parse, access-token `mt_` + JWT); web routes
+//!   through the session preamble (the `manage.rs` `web_actor` shape,
+//!   restated — sibling handler modules are not imported).
+//! * SQL text comes from the merged builders (`enroll_reads` E3/E4/E5,
+//!   `manage_reads` M4-M7, `revoke` S1-S4, `delete` collector,
+//!   `finalization`, `catalog_reads` pod/project); the five statements
+//!   with no builder (membership `EXISTS`, locked runner read,
+//!   refresh re-read, lazy pod/machine loads) are handler-owned SQL,
+//!   Django-probed (see the `SQL` section).
+//! * This module is the first pool-backed consumer of the
+//!   [`RevokeStore`](pidash_services::runner_enroll::revoke::RevokeStore)
+//!   and [`PubsubStore`](pidash_services::runner_sessions::pubsub::PubsubStore)
+//!   seams: the jobs revoke service runs the drivers on a sqlx
+//!   transaction, commits, then fires the collected post-commit effects
+//!   in Python's registration order (per-run publish pairs → handoffs →
+//!   drains → cleanup).
+//! * Post-commit providers are all called, never inlined: D-15
+//!   finalization builders + `drain_lifecycle_effects`, the D-14 drain
+//!   executor recipe (`drain.rs` docs), the shared D-12 handoff entry
+//!   (`crate::project_move_handoff`, PIDASHCONV-785: the pool-backed twin
+//!   of `jobs::LiveCreationStore` lives there), and the D-14 outbox
+//!   cleanup call.
+//!
+//! # Ported bugs and quirks (translate, don't redesign; also in the PR)
+//!
+//! * QUIRK-rotate-keeps-runners (`runners.py:237-244`): rotate closes
+//!   sessions and emits revoke frames but never revokes the runner rows.
+//! * QUIRK-replay-commits (`enrollment.py:429-434,441-446`): the replay
+//!   and membership 401s return from inside the outer `atomic`, so the
+//!   nested revoke COMMITS and its post-commit effects fire.
+//! * QUIRK-unreachable-idempotency (`enrollment.py:525-527` + F7):
+//!   `revoke()` no-op tolerance for already-revoked rows is unreachable —
+//!   auth 401s (`runner_revoked`) before the view runs. Ported as written.
+//! * QUIRK-workspace-or-chain (`runners.py:128-129`): body/query `or`
+//!   tests the RAW value, then strips — a whitespace-only body value
+//!   yields `""` WITHOUT consulting the query param.
+//! * QUIRK-m5-fallback (`runners.py:170`): a vanished serialize row falls
+//!   back to the unannotated instance (counts omitted, `control_online`
+//!   false).
+//!
+//! # Documented approximations
+//!
+//! * Unhandled failures answer the JSON 500 (`SERVER_ERROR_BODY`): Django
+//!   renders its HTML error page here, so only the status is
+//!   contract-pinned (the `manage.rs` position).
+//! * Non-canonical path segments fall through to Django, which renders
+//!   its own framework 404: Django's `<uuid:…>` converter 404s at
+//!   URL-resolve with its HTML page, before auth runs (the `enroll.rs`
+//!   `strict_uuid` position, PIDASHCONV-798).
+//! * `.get()`/lazy single-row reads emit `LIMIT 1`, omitting Django's
+//!   `LIMIT 21` multi-row probe (the queries-A precedent —
+//!   behaviorally identical for PK lookups).
+//! * The member gate collapses Django's membership `EXISTS` + role
+//!   `SELECT` into one `SELECT` where both facts are needed (the
+//!   `manage.rs` `workspace_role` position); the refresh path keeps the
+//!   exact `EXISTS` (only membership is read there).
+//! * `updated_at`/`created_at` binds are this request's microsecond
+//!   `now()`s, like Django's view-`now()` + `auto_now` calls (two
+//!   separate samples where the source makes two).
+
+// Every handler returns a fully-rendered `Response` by design (the
+// `manage.rs` precedent, which carries the same allow).
+#![allow(clippy::result_large_err)]
+
+use axum::extract::{Extension, Path, Request, State};
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::Router;
+use chrono::{DateTime, Utc};
+use http_body_util::BodyExt as _;
+use pidash_db::entity::{agent_run, dev_machine, pod, runner, workspace_members};
+use pidash_db::orm_tx::{into_sqlx, TxConn};
+use sea_orm::sea_query::{Alias, Expr, Keyword, LockType, SimpleExpr};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect,
+    QueryTrait,
+};
+use serde_json::{Map, Value};
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use pidash_auth::permissions::membership;
+use pidash_auth::permissions::runner as runner_perm;
+use pidash_auth::scope::TenantScope;
+use pidash_db::redis::client_from_settings;
+use pidash_services::runner_enroll::queries::{catalog_reads, enroll_reads, manage_reads};
+use pidash_services::runner_enroll::revoke as revoke_kernel;
+use pidash_services::runner_enroll::serializers::shapes;
+use pidash_services::runner_enroll::tokens as enroll_tokens;
+use pidash_services::runner_sessions::pubsub as pubsub_kernel;
+use pidash_types::{UserId, WorkspaceId};
+
+use super::auth as enroll_auth;
+use crate::middleware::SessionHandle;
+use crate::runner_runs::{json_response, pool_of, server_error};
+use crate::state::AppState;
+use crate::v1_cycles_modules::json::{self, JObject, JVal, JsonFail};
+
+// ---------------------------------------------------------------------------
+// Error bodies (D13-F7 `handlers/endpoints.golden.json`, key order verbatim)
+// ---------------------------------------------------------------------------
+
+/// 401 `missing_refresh_token` (`enrollment.py:397-400`): no Bearer
+/// credential — answered by the VIEW, not the auth class (F7).
+pub const MISSING_REFRESH_TOKEN_BODY: &str = r#"{"error":"missing_refresh_token"}"#;
+/// 401 `invalid_refresh_token` (`:406-409,436-439`): runner miss OR hash
+/// matches neither current nor previous — same body, no leak (F7).
+pub const INVALID_REFRESH_TOKEN_BODY: &str = r#"{"error":"invalid_refresh_token"}"#;
+/// 401 `runner_revoked` (`:410-414`): revoked runner on the refresh path
+/// (401 here, not 409 — F7).
+pub const RUNNER_REVOKED_BODY: &str = r#"{"error":"runner_revoked"}"#;
+/// 401/409 `dev_machine_revoked` (`:421-425`, `runners.py:231-235`): one
+/// body, two statuses — 401 on refresh, 409 on rotate (F7).
+pub const DEV_MACHINE_REVOKED_BODY: &str = r#"{"error":"dev_machine_revoked"}"#;
+/// 401 `refresh_token_replayed` (`:429-434`): presented == previous hash —
+/// `revoke("refresh_token_replayed")` runs first, then this body (F7).
+pub const REFRESH_TOKEN_REPLAYED_BODY: &str = r#"{"error":"refresh_token_replayed"}"#;
+/// 401 `membership_revoked` (`:441-446`): owner no longer a member —
+/// `revoke("membership_revoked")` runs first, then this body (F7).
+pub const MEMBERSHIP_REVOKED_BODY: &str = r#"{"error":"membership_revoked"}"#;
+/// 403 `runner_id_mismatch` (`:519-523`): `auth_runner` missing (including
+/// the anonymous case — `permission_classes` is empty so no DRF gate runs)
+/// or different from the URL id (F7).
+pub const RUNNER_ID_MISMATCH_BODY: &str = r#"{"error":"runner_id_mismatch"}"#;
+
+// ---------------------------------------------------------------------------
+// Revoke + frame reasons (F6 `flows.golden.json` / F8 `wire_pins.json`)
+// ---------------------------------------------------------------------------
+
+/// `Runner.revoke` reasons, one per call site (`models.py:542-596` +
+/// F6 `revoke_cascade_steps.s1.reasons`).
+pub const REVOKE_REASON_REFRESH_REPLAYED: &str = "refresh_token_replayed";
+pub const REVOKE_REASON_MEMBERSHIP: &str = "membership_revoked";
+pub const REVOKE_REASON_SELF: &str = "self_revoked";
+pub const REVOKE_REASON_DEV_MACHINE: &str = "dev_machine_revoked";
+pub const REVOKE_REASON_MANUAL: &str = "manual_revoke";
+
+/// Revoke-frame reasons, one per emit site (`pubsub.py` + F8).
+pub const FRAME_REASON_SELF: &str = "self_revoked";
+pub const FRAME_REASON_DEV_MACHINE: &str = "dev machine revoked";
+pub const FRAME_REASON_ROTATE: &str = "machine token rotated";
+pub const FRAME_REASON_RUNNER_REVOKE: &str = "revoked by user";
+
+/// The self-revoke frame input (`enrollment.py:528`): exactly
+/// `{type: revoke, reason}` — the driver envelopes it (F8).
+fn revoke_frame(reason: &str) -> Map<String, Value> {
+    let mut frame = Map::new();
+    frame.insert("type".to_owned(), Value::String("revoke".to_owned()));
+    frame.insert("reason".to_owned(), Value::String(reason.to_owned()));
+    frame
+}
+// The web bodies live on the sibling `manage` module (already `pub` —
+// same file family, same F7 source): workspace-required 400, forbidden
+// 403, not-found 404.
+use super::manage::{FORBIDDEN_BODY, NOT_FOUND_BODY, WORKSPACE_REQUIRED_BODY};
+
+fn bad_request(body: &str) -> Response {
+    json_response(StatusCode::BAD_REQUEST, body.to_owned())
+}
+
+fn forbidden() -> Response {
+    json_response(StatusCode::FORBIDDEN, FORBIDDEN_BODY.to_owned())
+}
+
+fn not_found() -> Response {
+    json_response(StatusCode::NOT_FOUND, NOT_FOUND_BODY.to_owned())
+}
+
+fn conflict(body: &str) -> Response {
+    json_response(StatusCode::CONFLICT, body.to_owned())
+}
+
+fn unauthorized(body: &str) -> Response {
+    json_response(StatusCode::UNAUTHORIZED, body.to_owned())
+}
+
+// ---------------------------------------------------------------------------
+// Clocks (the `manage.rs` / `enroll.rs` positions)
+// ---------------------------------------------------------------------------
+
+/// `timezone.now()` truncated to microseconds (Django datetimes are
+/// microsecond-exact; Postgres would round stored nanos).
+fn now_micros() -> DateTime<Utc> {
+    let now = Utc::now();
+    DateTime::from_timestamp_micros(now.timestamp_micros()).expect("micros in range")
+}
+
+/// `int(time.time())` for JWT `iat` (the `enroll.rs` `unix_now_secs`
+/// position).
+fn unix_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// Preamble (the `manage.rs` web / `machine.rs` daemon positions, restated)
+// ---------------------------------------------------------------------------
+
+/// Session → `(pool, user_id)`: anonymous answers the DRF
+/// `NotAuthenticated` 401, pool/db failures the JSON 500.
+async fn web_actor(
+    state: &AppState,
+    extension: Option<Extension<SessionHandle>>,
+) -> Result<(PgPool, Uuid), Response> {
+    let pool = pool_of(state)?.clone();
+    let secret = state.settings().secret_key.clone();
+    let actor = crate::license::resolve_actor(&pool, secret.as_bytes(), extension)
+        .await
+        .map_err(|_| server_error())?;
+    let Some(actor) = actor else {
+        return Err(json_response(
+            StatusCode::UNAUTHORIZED,
+            crate::license::UNAUTHENTICATED_BODY.to_owned(),
+        ));
+    };
+    Ok((pool, actor.id))
+}
+
+/// `workspace_role` (`core/permissions.py:37-45`): the caller's active
+/// role, or `None`. `WorkspaceMember.objects` is the
+/// `SoftDeletionManager`, so tombstones do not count; `Meta.ordering`
+/// is `-created_at` with `.first()` → `LIMIT 1`.
+async fn workspace_role(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> Result<Option<i32>, Response> {
+    workspace_role_in(
+        &pidash_db::pool::sea_orm_connection(pool),
+        workspace_id,
+        user_id,
+    )
+    .await
+}
+
+/// The active, non-soft-deleted membership's role (`WorkspaceMember`
+/// default manager + `is_active`), newest first; `None` without one.
+async fn workspace_role_in(
+    db: &impl ConnectionTrait,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> Result<Option<i32>, Response> {
+    let role: Option<i16> = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Role)
+        .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .order_by_desc(workspace_members::Column::CreatedAt)
+        .into_tuple()
+        .one(db)
+        .await
+        .map_err(|_| server_error())?;
+    Ok(role.map(i32::from))
+}
+
+/// UUID-typed query/body strings: Django's `UUIDField.get_prep_value`
+/// raises `ValidationError` (an unhandled 500) on garbage.
+fn parse_uuid(raw: &str) -> Result<Uuid, Response> {
+    raw.parse().map_err(|_| server_error())
+}
+
+/// Django's `<uuid:>` converter (`[0-9a-f]{8}-...`, lowercase-only):
+/// the only segment form that reaches the view. `Uuid::parse_str`
+/// alone also accepts uppercase/braced/simple forms, which Django
+/// 404s before auth runs; comparing against the canonical lowercase
+/// form reproduces the converter exactly (neither side checks
+/// version bits). The `enroll.rs` position (PIDASHCONV-791), twinned —
+/// the sibling's helper is private.
+fn strict_uuid(segment: &str) -> Option<Uuid> {
+    match segment.parse::<Uuid>() {
+        Ok(id) if id.hyphenated().to_string() == segment => Some(id),
+        _ => None,
+    }
+}
+
+/// Read `request.data` for a POST body: content-length 0 validates as
+/// `{}` with the body ignored; a non-JSON content type proxies to Django
+/// (form posts stay on the Python plane); unparsable JSON 400s with
+/// DRF's `ParseError` Detail; past the depth cap is Django's JSON 500.
+async fn read_request_data(state: &AppState, req: Request) -> Result<JVal, Response> {
+    let content_length = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    if content_length == 0 {
+        return Ok(JVal::Object(JObject::new()));
+    }
+    let raw_type = req
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    // `parse_header_parameters`: the main type lowercases; parameters
+    // are ignored for parser selection (`_MediaType.match`).
+    let main = raw_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    if main != "application/json" {
+        return Err(crate::edge::proxy(State(state.clone()), req).await);
+    }
+    let (_parts, body) = req.into_parts();
+    let bytes = body
+        .collect()
+        .await
+        .map(|collected| collected.to_bytes())
+        .map_err(|_| server_error())?;
+    match json::parse_request_data(&bytes) {
+        Ok(value) => Ok(value),
+        Err(JsonFail::Message(detail)) => Err(json_response(
+            StatusCode::BAD_REQUEST,
+            parse_error_body(&detail),
+        )),
+        Err(JsonFail::Recursion) => Err(server_error()),
+    }
+}
+
+/// DRF `ParseError` body (`rest_framework/parsers.py`): lowercase
+/// `detail`, the `JSON parse error - ` prefix, CPython's message.
+fn parse_error_body(detail: &str) -> String {
+    format!(
+        "{{\"detail\":{}}}",
+        serde_json::to_string(&format!("{}{detail}", json::JSON_PARSE_PREFIX))
+            .expect("json string")
+    )
+}
+
+/// Python truthiness over a parsed value (`None`/`False`/`0`/`""`/`[]`/`{}`
+/// are falsy; everything else is truthy).
+fn j_truthy(value: &JVal) -> bool {
+    match value {
+        JVal::Null => false,
+        JVal::Bool(flag) => *flag,
+        JVal::Num(number) => !number.is_zero(),
+        JVal::Str(text) => !text.is_empty(),
+        JVal::Array(items) => !items.is_empty(),
+        JVal::Object(map) => !map.is_empty(),
+    }
+}
+
+/// `request.data.get(key)`: dict lookup — `None` for a missing key; any
+/// non-object is Python's `AttributeError` → 500.
+fn data_get<'a>(data: &'a JVal, key: &str) -> Result<Option<&'a JVal>, Response> {
+    match data {
+        JVal::Object(map) => Ok(map.get(key)),
+        JVal::Null | JVal::Bool(_) | JVal::Num(_) | JVal::Str(_) | JVal::Array(_) => {
+            Err(server_error())
+        }
+    }
+}
+
+/// The body's `workspace` leg of `_request_workspace_id`
+/// (`runners.py:128-129`), as the raw string: falsy/missing maps to
+/// `None` (the kernel falls through to the query leg), truthy strings
+/// pass through UNstripped (QUIRK-workspace-or-chain — the `or` tests
+/// the raw value, the strip runs after), truthy non-strings are the
+/// source's `AttributeError` → 500.
+fn body_workspace(data: &JVal) -> Result<Option<String>, Response> {
+    let value = data_get(data, "workspace")?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if !j_truthy(value) {
+        return Ok(None);
+    }
+    match value {
+        JVal::Str(text) => Ok(Some(text.to_lossy_string())),
+        JVal::Null | JVal::Bool(_) | JVal::Num(_) | JVal::Array(_) | JVal::Object(_) => {
+            Err(server_error())
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `POST /api/v1/runner/runners/<rid>/refresh/` (`enrollment.py:380-476`)
+// ---------------------------------------------------------------------------
+
+/// `access.expires_at.isoformat()` (`:473`): whole-seconds UTC renders
+/// `+00:00` with no fraction (the `machine.rs` `django_isoformat`
+/// position — `expires_at` is always whole seconds).
+fn render_expires_at(expires_at: &DateTime<Utc>) -> String {
+    expires_at.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false)
+}
+
+/// The 200 body (`:469-476`), in dict order.
+fn refresh_ok_body(
+    refresh_token: &str,
+    access_token: &str,
+    access_token_expires_at: &str,
+    refresh_token_generation: i32,
+) -> String {
+    serde_json::json!({
+        "refresh_token": refresh_token,
+        "access_token": access_token,
+        "access_token_expires_at": access_token_expires_at,
+        "refresh_token_generation": refresh_token_generation,
+    })
+    .to_string()
+}
+
+/// `POST /api/v1/runner/runners/<runner_id>/refresh/`
+/// (`enrollment.py:394-476`): parse-only Bearer [REDACTED] the row-locked
+/// rotation. QUIRK-replay-commits: the replay and membership 401s commit
+/// their nested revoke (the `return` exits the outer `atomic` normally)
+/// and fire its post-commit effects before answering. A non-canonical
+/// segment falls through to Django (which renders its own 404) before
+/// auth runs.
+pub async fn runner_refresh(
+    State(state): State<AppState>,
+    Path(raw_id): Path<String>,
+    headers: HeaderMap,
+    req: Request,
+) -> Response {
+    let Some(runner_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool.clone(),
+        Err(response) => return response,
+    };
+    let secret = state.settings().secret_key.clone();
+    let raw = match enroll_auth::parse_refresh_token(&headers) {
+        Ok(raw) => raw,
+        Err(response) => return response,
+    };
+    let Some(raw) = raw else {
+        return unauthorized(MISSING_REFRESH_TOKEN_BODY);
+    };
+    let presented_hash = pidash_auth::token::hash_token(&raw, secret.as_bytes());
+
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return server_error(),
+    };
+    // E3 — locked runner + workspace (`:403-404`).
+    let runner = match enroll_reads::refresh_locked_runner(&TxConn::new(&mut tx), runner_id).await {
+        Ok(row) => row,
+        Err(_) => return server_error(),
+    };
+    let Some(runner) = runner else {
+        return unauthorized(INVALID_REFRESH_TOKEN_BODY);
+    };
+    if runner.revoked_at.is_some() {
+        return unauthorized(RUNNER_REVOKED_BODY);
+    }
+    // E4 — dev-machine revoked probe, only when linked (`:415-425`).
+    if let Some(dev_machine_id) = runner.dev_machine_id {
+        let hit = match enroll_reads::dev_machine_is_revoked(&TxConn::new(&mut tx), dev_machine_id)
+            .await
+        {
+            Ok(hit) => hit,
+            Err(_) => return server_error(),
+        };
+        if hit {
+            return unauthorized(DEV_MACHINE_REVOKED_BODY);
+        }
+    }
+
+    // Current-vs-previous match (`:427-439`).
+    if presented_hash == runner.refresh_token_hash {
+        // Happy path — fall through to the membership check.
+    } else if !runner.previous_refresh_token_hash.is_empty()
+        && presented_hash == runner.previous_refresh_token_hash
+    {
+        let now = now_micros();
+        let bundle = match revoke_runner_on_tx(
+            &mut tx,
+            &pool,
+            &state,
+            runner_id,
+            runner.revoked_at,
+            REVOKE_REASON_REFRESH_REPLAYED,
+            now,
+        )
+        .await
+        {
+            Ok(bundle) => bundle,
+            Err(_) => return server_error(),
+        };
+        if tx.commit().await.is_err() {
+            return server_error();
+        }
+        if fire_bundle(&pool, &state, bundle, Some(runner.owner_id))
+            .await
+            .is_err()
+        {
+            return server_error();
+        }
+        return unauthorized(REFRESH_TOKEN_REPLAYED_BODY);
+    } else {
+        return unauthorized(INVALID_REFRESH_TOKEN_BODY);
+    }
+
+    // Live membership re-check (`:441-446`).
+    let member = match enroll_reads::is_active_member(
+        &TxConn::new(&mut tx),
+        runner.workspace_id,
+        runner.owner_id,
+    )
+    .await
+    {
+        Ok(member) => member,
+        Err(_) => return server_error(),
+    };
+    if !member {
+        let now = now_micros();
+        let bundle = match revoke_runner_on_tx(
+            &mut tx,
+            &pool,
+            &state,
+            runner_id,
+            runner.revoked_at,
+            REVOKE_REASON_MEMBERSHIP,
+            now,
+        )
+        .await
+        {
+            Ok(bundle) => bundle,
+            Err(_) => return server_error(),
+        };
+        if tx.commit().await.is_err() {
+            return server_error();
+        }
+        if fire_bundle(&pool, &state, bundle, Some(runner.owner_id))
+            .await
+            .is_err()
+        {
+            return server_error();
+        }
+        return unauthorized(MEMBERSHIP_REVOKED_BODY);
+    }
+
+    // E5 — atomic rotation (`:448-460`): `$1` new hash, `$2` new
+    // fingerprint, `$3` new generation (old + 1), `$4` previous hash (the
+    // OLD current hash — a Python-computed bind, not a column ref), `$5`
+    // runner.
+    let new_refresh = enroll_tokens::mint_refresh_token(&secret);
+    let new_generation = runner.refresh_token_generation + 1;
+    if enroll_reads::rotate_refresh_token(
+        &TxConn::new(&mut tx),
+        runner_id,
+        &new_refresh.hashed,
+        &new_refresh.fingerprint,
+        new_generation,
+        &runner.refresh_token_hash,
+    )
+    .await
+    .is_err()
+    {
+        return server_error();
+    }
+    let runner_id_str = runner_id.to_string();
+    let owner_id_str = runner.owner_id.to_string();
+    let workspace_id_str = runner.workspace_id.to_string();
+    let new_access = match enroll_tokens::mint_access_token_with_keys(
+        &enroll_tokens::MintParams {
+            runner_id: &runner_id_str,
+            user_id: &owner_id_str,
+            workspace_id: &workspace_id_str,
+            rtg: i64::from(new_generation),
+            ttl_secs: None,
+            default_ttl_secs: state.settings().runner.access_token_ttl_secs,
+            now_unix: unix_now_secs(),
+        },
+        &[],
+        &secret,
+    ) {
+        Ok(access) => access,
+        Err(_) => return server_error(),
+    };
+    // Force-refresh clear, still inside the tx (`:467`).
+    if enroll_reads::clear_force_refresh(&TxConn::new(&mut tx), runner_id)
+        .await
+        .is_err()
+    {
+        return server_error();
+    }
+    if tx.commit().await.is_err() {
+        return server_error();
+    }
+    let expires_at = render_expires_at(&new_access.expires_at);
+    json_response(
+        StatusCode::OK,
+        refresh_ok_body(
+            &new_refresh.raw,
+            &new_access.raw,
+            &expires_at,
+            new_generation,
+        ),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// `DELETE /api/v1/runner/runners/<rid>/` (`enrollment.py:503-534`)
+// ---------------------------------------------------------------------------
+
+/// `DELETE /api/v1/runner/runners/<runner_id>/` (`:517-534`): runner
+/// self-deletion. Anonymous (or a mismatched id) answers the view's 403 —
+/// `permission_classes` is empty, so no DRF gate runs first. The revoke
+/// runs on its own transaction (its post-commit effects fire before the
+/// frame); the frame, close, and collector delete run outside any tx. A
+/// non-canonical segment falls through to Django (which renders its
+/// own 404) before auth runs.
+pub async fn runner_self_revoke(
+    State(state): State<AppState>,
+    Path(raw_id): Path<String>,
+    headers: HeaderMap,
+    req: Request,
+) -> Response {
+    let Some(runner_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool.clone(),
+        Err(response) => return response,
+    };
+    let secret = state.settings().secret_key.clone();
+    // Stock settings carry no `RUNNER_ACCESS_TOKEN_KEYS` (`[]`, both
+    // planes), so the ring is always the derived dev key (the `enroll.rs`
+    // `&[]` position).
+    let ring = enroll_tokens::build_key_ring(&[], &secret);
+    let auth = match enroll_auth::authenticate_access_token(
+        &pool,
+        secret.as_bytes(),
+        &ring,
+        &headers,
+        Some(&raw_id),
+        enroll_auth::ALLOW_DELETE,
+    )
+    .await
+    {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
+    let Some(auth) = auth else {
+        return json_response(StatusCode::FORBIDDEN, RUNNER_ID_MISMATCH_BODY.to_owned());
+    };
+    if auth.runner.id != runner_id {
+        return json_response(StatusCode::FORBIDDEN, RUNNER_ID_MISMATCH_BODY.to_owned());
+    }
+
+    let runner_pk = auth.runner.id;
+    let revoked_at = auth.runner.revoked_at;
+    // `revoke()` opens its own atomic; the post-commit bundle fires on
+    // its commit, before the frame below (`:527` + `models.py:597-685`).
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return server_error(),
+    };
+    let bundle = {
+        match revoke_runner_on_tx(
+            &mut tx,
+            &pool,
+            &state,
+            runner_pk,
+            revoked_at,
+            REVOKE_REASON_SELF,
+            now_micros(),
+        )
+        .await
+        {
+            Ok(bundle) => bundle,
+            Err(_) => return server_error(),
+        }
+    };
+    if tx.commit().await.is_err() {
+        return server_error();
+    }
+    if fire_bundle(&pool, &state, bundle, Some(auth.runner.owner_id))
+        .await
+        .is_err()
+    {
+        return server_error();
+    }
+
+    // Revoke frame + session close + row delete, outside any tx (`:528-533`).
+    let pubsub = PoolPubsubStore::new(&pool, &state);
+    let frame = revoke_frame(FRAME_REASON_SELF);
+    match pubsub_kernel::send_to_runner(&pubsub, runner_pk, &frame).await {
+        Ok(outcome) => {
+            for warning in &outcome.warnings {
+                tracing::warn!("{warning}");
+            }
+        }
+        // `revoke` is offline-allowed, so this arm cannot fire in
+        // practice; Python has no `try` here, so a failure 500s.
+        Err(_) => return server_error(),
+    }
+    if pubsub_kernel::close_runner_session(
+        &pubsub,
+        runner_pk,
+        pubsub_kernel::CLOSE_RUNNER_SESSION_DEFAULT_CODE,
+    )
+    .await
+    .is_err()
+    {
+        return server_error();
+    }
+    if delete_collected_runner(&pool, runner_pk).await.is_err() {
+        return server_error();
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+// ---------------------------------------------------------------------------
+// `POST /api/runners/dev-machines/<mid>/revoke/` (`runners.py:173-208`)
+// ---------------------------------------------------------------------------
+
+/// The M6 locked row facts the revoke/rotate views read, plus the
+/// render fields for the QUIRK-m5-fallback path (the unannotated
+/// in-memory instance).
+use manage_reads::LockedMachineRow as LockedMachine;
+
+/// `_machine_is_in_workspace_scope` (`runners.py:132-147`): the kernel
+/// view check plus the M4a/M4b `EXISTS` probes (runner-or-token link).
+async fn machine_in_workspace_scope(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    machine: &LockedMachine,
+    user_id: Uuid,
+    workspace_id: Uuid,
+) -> Result<bool, Response> {
+    // `can_view_dev_machine` (`permissions.py:57-64`): identical body to
+    // `can_view_runner` (private + owner) — the same kernel answers it.
+    let can_view = runner_perm::can_view_runner(&runner_perm::RunnerFacts {
+        workspace: WorkspaceId::from(workspace_id.to_string()),
+        authenticated: true,
+        visibility: i32::from(machine.visibility),
+        owned_by_requester: machine.owner_id == user_id,
+    });
+    if !can_view {
+        return Ok(false);
+    }
+    let conn = TxConn::new(tx);
+    if manage_reads::machine_scope_runner_exists(&conn, machine.id, user_id, workspace_id)
+        .await
+        .map_err(|_| server_error())?
+    {
+        return Ok(true);
+    }
+    manage_reads::machine_scope_token_exists(&conn, machine.id, user_id, workspace_id)
+        .await
+        .map_err(|_| server_error())
+}
+
+/// Resolve the `workspace` gate shared by the machine endpoints
+/// (`runners.py:180-187,218-225`): body-or-query id (400 when empty),
+/// UUID parse (500 on garbage), member gate (403).
+async fn machine_workspace_gate(
+    pool: &PgPool,
+    user_id: Uuid,
+    data: &JVal,
+    params: &crate::license::QueryMap,
+) -> Result<Uuid, Response> {
+    let body_ws = body_workspace(data)?;
+    let query_ws = crate::license::query_last(params, "workspace");
+    let workspace_raw = manage_reads::request_workspace_id(body_ws.as_deref(), query_ws.as_deref());
+    if workspace_raw.is_empty() {
+        return Err(bad_request(WORKSPACE_REQUIRED_BODY));
+    }
+    let workspace_id = parse_uuid(&workspace_raw)?;
+    let role = workspace_role(pool, workspace_id, user_id).await?;
+    if !membership::is_workspace_member(role) {
+        return Err(forbidden());
+    }
+    Ok(workspace_id)
+}
+
+/// `POST /api/runners/dev-machines/<machine_id>/revoke/`
+/// (`runners.py:179-208`): machine + token revoke, then per-runner
+/// revoke frames (all frames first) + `Runner.revoke` + session close —
+/// everything inside one atomic (QUIRK-machine-tx). Answers the M5
+/// machine serialization.
+pub async fn dev_machine_revoke(
+    State(state): State<AppState>,
+    extension: Option<Extension<SessionHandle>>,
+    Path(raw_id): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<crate::license::QueryMap>,
+    req: Request,
+) -> Response {
+    let Some(machine_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
+    let (pool, user_id) = match web_actor(&state, extension).await {
+        Ok(preamble) => preamble,
+        Err(response) => return response,
+    };
+    let data = match read_request_data(&state, req).await {
+        Ok(data) => data,
+        Err(response) => return response,
+    };
+    let workspace_id = match machine_workspace_gate(&pool, user_id, &data, &params).await {
+        Ok(workspace_id) => workspace_id,
+        Err(response) => return response,
+    };
+
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return server_error(),
+    };
+    // M6 — locked machine read (`:190`).
+    let machine = match manage_reads::lock_machine(&TxConn::new(&mut tx), machine_id).await {
+        Ok(machine) => machine,
+        Err(_) => return server_error(),
+    };
+    let Some(machine) = machine else {
+        return not_found();
+    };
+    match machine_in_workspace_scope(&mut tx, &machine, user_id, workspace_id).await {
+        Ok(true) => {}
+        Ok(false) => return not_found(),
+        Err(response) => return response,
+    };
+
+    // Conditional machine write (`:194-197`): `$1` is the view's `now()`,
+    // `$2` the `auto_now` `pre_save` value (a fresh sample at save time).
+    // The stamped pair feeds the QUIRK-m5-fallback render.
+    let now = now_micros();
+    let mut stamped: Option<(DateTime<Utc>, DateTime<Utc>)> = None;
+    if machine.revoked_at.is_none() {
+        let auto_now = now_micros();
+        if manage_reads::revoke_machine(&TxConn::new(&mut tx), machine_id, now, auto_now)
+            .await
+            .is_err()
+        {
+            return server_error();
+        }
+        stamped = Some((now, auto_now));
+    }
+    // Token revoke-all (`:198`).
+    if pidash_services::domain::tokens::revoke_tokens_for_dev_machine(
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
+        machine_id,
+        now,
+    )
+    .await
+    .is_err()
+    {
+        return server_error();
+    }
+    // The engine credential goes with the machine (`:207`, #2910):
+    // revoking the machine signs the engine out with it.
+    let revoke_effects = match pidash_services::domain::engine_credential::revoke_engine_credential(
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
+        machine_id,
+        "machine_removed",
+        now,
+    )
+    .await
+    {
+        Ok((_revoked, effects)) => effects,
+        Err(_) => return server_error(),
+    };
+    // Locked active-runner list (`:199`).
+    let runner_rows =
+        match manage_reads::lock_live_machine_runners(&TxConn::new(&mut tx), machine_id).await {
+            Ok(rows) => rows,
+            Err(_) => return server_error(),
+        };
+    let (runner_ids, runner_revoked): (Vec<Uuid>, Vec<Option<DateTime<Utc>>>) =
+        runner_rows.into_iter().unzip();
+    {
+        let pubsub = TxPubsub::new(&mut tx, &state);
+        for runner_id in &runner_ids {
+            let outcome =
+                pubsub_kernel::send_runner_revoke(&pubsub, *runner_id, FRAME_REASON_DEV_MACHINE)
+                    .await;
+            for warning in &outcome.warnings {
+                tracing::warn!("{warning}");
+            }
+        }
+    }
+    // Per-runner revoke + close (`:204-206`), collecting one
+    // post-commit bundle per runner, in loop order. Each `revoke()`
+    // samples its own `now()` (`models.py:598`).
+    let mut bundles = Vec::with_capacity(runner_ids.len());
+    for (index, runner_id) in runner_ids.iter().enumerate() {
+        bundles.push(
+            match revoke_runner_on_tx(
+                &mut tx,
+                &pool,
+                &state,
+                *runner_id,
+                runner_revoked[index],
+                REVOKE_REASON_DEV_MACHINE,
+                now_micros(),
+            )
+            .await
+            {
+                Ok(bundle) => bundle,
+                Err(_) => return server_error(),
+            },
+        );
+        let pubsub = TxPubsub::new(&mut tx, &state);
+        if pubsub_kernel::close_runner_session(
+            &pubsub,
+            *runner_id,
+            pubsub_kernel::CLOSE_RUNNER_SESSION_DEFAULT_CODE,
+        )
+        .await
+        .is_err()
+        {
+            return server_error();
+        }
+    }
+    if tx.commit().await.is_err() {
+        return server_error();
+    }
+    // Post-commit: the revoke's pause flip drains pods (Django on_commit).
+    if !revoke_effects.drain_pod_ids.is_empty() || !revoke_effects.drain_runner_ids.is_empty() {
+        let redis = pidash_db::redis::client_from_settings(state.settings());
+        for pod_id in &revoke_effects.drain_pod_ids {
+            let _ = pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+                &pool,
+                redis.as_ref(),
+                &state.settings().runner,
+                *pod_id,
+            )
+            .await;
+        }
+        for runner_id in &revoke_effects.drain_runner_ids {
+            let _ = pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+                &pool,
+                redis.as_ref(),
+                &state.settings().runner,
+                *runner_id,
+            )
+            .await;
+        }
+    }
+    for bundle in bundles {
+        if fire_bundle(&pool, &state, bundle, Some(user_id))
+            .await
+            .is_err()
+        {
+            return server_error();
+        }
+    }
+    match serialize_machine(&pool, &machine, user_id, workspace_id, stamped).await {
+        Ok(body) => json_response(StatusCode::OK, body),
+        Err(response) => response,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `POST /api/runners/dev-machines/<mid>/engine-sign-out/`
+// (`machines.py:231-257`, #2910)
+// ---------------------------------------------------------------------------
+
+/// `POST /api/runners/dev-machines/<machine_id>/engine-sign-out/`
+/// (`machines.py:231-257`): revoke the machine's engine credential only
+/// (state `signed_out`). The machine must be the caller's; an optional
+/// workspace must contain it. Both misses answer the same 404. The
+/// answer is the M5 serialization when a workspace is in scope, else
+/// the plain serializer body.
+pub async fn dev_machine_engine_sign_out(
+    State(state): State<AppState>,
+    extension: Option<Extension<SessionHandle>>,
+    Path(raw_id): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<crate::license::QueryMap>,
+    req: Request,
+) -> Response {
+    let Some(machine_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
+    let (pool, user_id) = match web_actor(&state, extension).await {
+        Ok(preamble) => preamble,
+        Err(response) => return response,
+    };
+    let data = match read_request_data(&state, req).await {
+        Ok(data) => data,
+        Err(response) => return response,
+    };
+    let body_ws = match body_workspace(&data) {
+        Ok(body_ws) => body_ws,
+        Err(response) => return response,
+    };
+    let query_ws = crate::license::query_last(&params, "workspace");
+    let workspace_raw = manage_reads::request_workspace_id(body_ws.as_deref(), query_ws.as_deref());
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return server_error(),
+    };
+    let machine = match manage_reads::lock_machine(&TxConn::new(&mut tx), machine_id).await {
+        Ok(machine) => machine,
+        Err(_) => return server_error(),
+    };
+    // The machine must be the caller's (`machines.py:244`).
+    let Some(machine) = machine else {
+        return not_found();
+    };
+    if machine.owner_id != user_id {
+        return not_found();
+    }
+    let workspace_id = if workspace_raw.is_empty() {
+        None
+    } else {
+        let workspace_id = match parse_uuid(&workspace_raw) {
+            Ok(workspace_id) => workspace_id,
+            Err(_) => return server_error(),
+        };
+        match machine_in_workspace_scope(&mut tx, &machine, user_id, workspace_id).await {
+            Ok(true) => Some(workspace_id),
+            Ok(false) => return not_found(),
+            Err(response) => return response,
+        }
+    };
+    let revoke_effects = match pidash_services::domain::engine_credential::revoke_engine_credential(
+        &TxConn::new(&mut tx),
+        machine_id,
+        "signed_out",
+        now_micros(),
+    )
+    .await
+    {
+        Ok((_revoked, effects)) => effects,
+        Err(_) => return server_error(),
+    };
+    // `refresh_from_db`: re-read the row so the render sees the
+    // sign-in state's new value.
+    let Some(machine) = (match manage_reads::lock_machine(&TxConn::new(&mut tx), machine_id).await {
+        Ok(machine) => machine,
+        Err(_) => return server_error(),
+    }) else {
+        return not_found();
+    };
+    if tx.commit().await.is_err() {
+        return server_error();
+    }
+    // Post-commit drains for the pause flip.
+    if !revoke_effects.drain_pod_ids.is_empty() || !revoke_effects.drain_runner_ids.is_empty() {
+        let redis = pidash_db::redis::client_from_settings(state.settings());
+        for pod_id in &revoke_effects.drain_pod_ids {
+            let _ = pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+                &pool,
+                redis.as_ref(),
+                &state.settings().runner,
+                *pod_id,
+            )
+            .await;
+        }
+        for runner_id in &revoke_effects.drain_runner_ids {
+            let _ = pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+                &pool,
+                redis.as_ref(),
+                &state.settings().runner,
+                *runner_id,
+            )
+            .await;
+        }
+    }
+    // The engine keys ride the serializers (`DevMachineSerializer`'s
+    // `engine_sign_in_state` + `engine_credential_expires_at`, folded
+    // into the shared machine renders by NEWPIDASH-52); the locked
+    // row does not carry them, so a full re-read feeds the fallback
+    // render here.
+    let engine_full = {
+        use pidash_db::entity::dev_machine;
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        dev_machine::Entity::find_by_id(machine_id)
+            .one(&db)
+            .await
+            .ok()
+            .flatten()
+    };
+    match workspace_id {
+        Some(workspace_id) => {
+            match serialize_machine(&pool, &machine, user_id, workspace_id, None).await {
+                Ok(body) => json_response(StatusCode::OK, body),
+                Err(response) => response,
+            }
+        }
+        None => {
+            // `DevMachineSerializer(machine).data` on the refreshed
+            // instance: the embedded annotations are absent, so the
+            // count/heartbeat keys are omitted (DRF `SkipField`) and
+            // `control_online` defaults false — the fallback render.
+            MachineRender {
+                id: machine.id.to_string(),
+                host_label: machine.host_label.clone(),
+                label: machine.label.clone(),
+                visibility: i64::from(machine.visibility),
+                provisioning: engine_full
+                    .as_ref()
+                    .map(|row| row.provisioning.clone())
+                    .unwrap_or_default(),
+                runner_count: None,
+                online_runner_count: None,
+                control_online: None,
+                engine_paused_by_owner: engine_full
+                    .as_ref()
+                    .map(|row| row.engine_paused_by_owner)
+                    .unwrap_or_default(),
+                engine_auto_pause_reason: engine_full
+                    .as_ref()
+                    .map(|row| row.engine_auto_pause_reason.clone())
+                    .unwrap_or_default(),
+                engine_team_runs: engine_full
+                    .as_ref()
+                    .map(|row| row.engine_team_runs)
+                    .unwrap_or_default(),
+                engine_sign_in_state: engine_full
+                    .as_ref()
+                    .map(|row| row.engine_sign_in_state.clone())
+                    .unwrap_or_default(),
+                engine_credential_expires_at: engine_full
+                    .as_ref()
+                    .and_then(|row| row.engine_credential_expires_at)
+                    .map(|dt| crate::serializer::render_datetime(&dt.with_timezone(&chrono::Utc))),
+                engine_state: engine_full
+                    .as_ref()
+                    .map(|row| row.engine_state.clone())
+                    .unwrap_or_else(|| serde_json::Value::Object(Default::default())),
+                engine_state_reported_at: engine_full
+                    .as_ref()
+                    .and_then(|row| row.engine_state_reported_at)
+                    .map(|dt| crate::serializer::render_datetime(&dt.with_timezone(&chrono::Utc))),
+                merged_into: engine_full
+                    .as_ref()
+                    .and_then(|row| row.merged_into_id)
+                    .map(|id| id.to_string()),
+                last_seen_at: machine
+                    .last_seen_at
+                    .as_ref()
+                    .map(crate::serializer::render_datetime),
+                last_heartbeat_at: None,
+                revoked_at: machine
+                    .revoked_at
+                    .as_ref()
+                    .map(crate::serializer::render_datetime),
+                created_at: crate::serializer::render_datetime(&machine.created_at),
+                updated_at: crate::serializer::render_datetime(&machine.updated_at),
+            }
+            .to_json()
+            .map(|body| json_response(StatusCode::OK, body))
+            .unwrap_or_else(|response| response)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `POST /api/runners/dev-machines/<mid>/rotate/` (`runners.py:211-246`)
+// ---------------------------------------------------------------------------
+
+/// `POST /api/runners/dev-machines/<machine_id>/rotate/`
+/// (`runners.py:217-246`): token revoke + per-runner revoke frames +
+/// session closes inside one atomic. QUIRK-rotate-keeps-runners: the
+/// runner ROWS are untouched (no `Runner.revoke`, no bundles). Answers
+/// the M5 machine serialization.
+pub async fn dev_machine_rotate(
+    State(state): State<AppState>,
+    extension: Option<Extension<SessionHandle>>,
+    Path(raw_id): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<crate::license::QueryMap>,
+    req: Request,
+) -> Response {
+    let Some(machine_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
+    let (pool, user_id) = match web_actor(&state, extension).await {
+        Ok(preamble) => preamble,
+        Err(response) => return response,
+    };
+    let data = match read_request_data(&state, req).await {
+        Ok(data) => data,
+        Err(response) => return response,
+    };
+    let workspace_id = match machine_workspace_gate(&pool, user_id, &data, &params).await {
+        Ok(workspace_id) => workspace_id,
+        Err(response) => return response,
+    };
+
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return server_error(),
+    };
+    // M6 — locked machine read (`:228`).
+    let machine = match manage_reads::lock_machine(&TxConn::new(&mut tx), machine_id).await {
+        Ok(machine) => machine,
+        Err(_) => return server_error(),
+    };
+    let Some(machine) = machine else {
+        return not_found();
+    };
+    match machine_in_workspace_scope(&mut tx, &machine, user_id, workspace_id).await {
+        Ok(true) => {}
+        Ok(false) => return not_found(),
+        Err(response) => return response,
+    };
+    // Revoke-after-revoke guard (`:231-235`), before any write.
+    if machine.revoked_at.is_some() {
+        return conflict(DEV_MACHINE_REVOKED_BODY);
+    }
+
+    // Token revoke-all (`:238`).
+    let now = now_micros();
+    if pidash_services::domain::tokens::revoke_tokens_for_dev_machine(
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
+        machine_id,
+        now,
+    )
+    .await
+    .is_err()
+    {
+        return server_error();
+    }
+    // Active-runner ids (`:239-241`).
+    let runner_ids =
+        match manage_reads::live_machine_runner_ids(&TxConn::new(&mut tx), machine_id).await {
+            Ok(ids) => ids,
+            Err(_) => return server_error(),
+        };
+    // Per id: revoke frame + session close (`:242-244`). No row writes.
+    {
+        let pubsub = TxPubsub::new(&mut tx, &state);
+        for runner_id in &runner_ids {
+            let outcome =
+                pubsub_kernel::send_runner_revoke(&pubsub, *runner_id, FRAME_REASON_ROTATE).await;
+            for warning in &outcome.warnings {
+                tracing::warn!("{warning}");
+            }
+            if pubsub_kernel::close_runner_session(
+                &pubsub,
+                *runner_id,
+                pubsub_kernel::CLOSE_RUNNER_SESSION_DEFAULT_CODE,
+            )
+            .await
+            .is_err()
+            {
+                return server_error();
+            }
+        }
+    }
+    if tx.commit().await.is_err() {
+        return server_error();
+    }
+    match serialize_machine(&pool, &machine, user_id, workspace_id, None).await {
+        Ok(body) => json_response(StatusCode::OK, body),
+        Err(response) => response,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `POST /api/runners/<rid>/revoke/` (`runners.py:455-492`)
+// ---------------------------------------------------------------------------
+
+/// `POST /api/runners/<runner_id>/revoke/` (`:471-492`): the row lock
+/// spans the read-then-revoke window; view/manage gates; idempotent 200
+/// (an already-revoked row returns its current state with no frame, no
+/// close, no bundle). The frame + close + re-read run OUTSIDE the tx. A
+/// non-canonical segment falls through to Django (which renders its
+/// own 404) before auth runs.
+pub async fn runner_revoke(
+    State(state): State<AppState>,
+    extension: Option<Extension<SessionHandle>>,
+    Path(raw_id): Path<String>,
+    req: Request,
+) -> Response {
+    let Some(runner_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
+    let (pool, user_id) = match web_actor(&state, extension).await {
+        Ok(preamble) => preamble,
+        Err(response) => return response,
+    };
+
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return server_error(),
+    };
+    let runner = match lock_runner(&mut tx, runner_id).await {
+        Ok(runner) => runner,
+        Err(response) => return response,
+    };
+    let Some(runner) = runner else {
+        return not_found();
+    };
+    // View gate → 404 (`:479-480`).
+    let can_view = runner_perm::can_view_runner(&runner_perm::RunnerFacts {
+        workspace: WorkspaceId::from(runner.workspace_id.to_string()),
+        authenticated: true,
+        visibility: i32::from(runner.visibility),
+        owned_by_requester: runner.owner_id == user_id,
+    });
+    if !can_view {
+        return not_found();
+    }
+    // Manage gate → 403 (`:481-482`): the kernel takes the admin fact
+    // precomputed, so the role read stays lazy exactly like Python
+    // (private non-owners never query).
+    if runner.visibility == runner_perm::VISIBILITY_PRIVATE as i16 {
+        if runner.owner_id != user_id {
+            return forbidden();
+        }
+    } else {
+        let role =
+            match workspace_role_in(&TxConn::new(&mut tx), runner.workspace_id, user_id).await {
+                Ok(role) => role,
+                Err(response) => return response,
+            };
+        let workspace = WorkspaceId::from(runner.workspace_id.to_string());
+        let scope = TenantScope::new(workspace.clone());
+        let manageable = runner_perm::can_manage_runner(
+            &scope,
+            &runner_perm::ManageFacts {
+                workspace,
+                requester: Some(UserId::from(user_id.to_string())),
+                visibility: i32::from(runner.visibility),
+                owned_by_requester: runner.owner_id == user_id,
+                is_workspace_admin: membership::is_workspace_admin(role),
+            },
+        );
+        if !manageable {
+            return forbidden();
+        }
+    }
+
+    let already_revoked = runner.revoked_at.is_some();
+    let mut bundle = None;
+    if !already_revoked {
+        bundle = Some(
+            match revoke_runner_on_tx(
+                &mut tx,
+                &pool,
+                &state,
+                runner_id,
+                runner.revoked_at,
+                REVOKE_REASON_MANUAL,
+                now_micros(),
+            )
+            .await
+            {
+                Ok(bundle) => bundle,
+                Err(_) => return server_error(),
+            },
+        );
+    }
+    if tx.commit().await.is_err() {
+        return server_error();
+    }
+    // The frame + close run OUTSIDE the tx, only on a fresh revoke
+    // (`:488-490`); the re-read + serialize run in both arms (`:491-492`).
+    if let Some(bundle) = bundle {
+        if fire_bundle(&pool, &state, bundle, Some(user_id))
+            .await
+            .is_err()
+        {
+            return server_error();
+        }
+        let pubsub = PoolPubsubStore::new(&pool, &state);
+        let outcome =
+            pubsub_kernel::send_runner_revoke(&pubsub, runner_id, FRAME_REASON_RUNNER_REVOKE).await;
+        for warning in &outcome.warnings {
+            tracing::warn!("{warning}");
+        }
+        if pubsub_kernel::close_runner_session(
+            &pubsub,
+            runner_id,
+            pubsub_kernel::CLOSE_RUNNER_SESSION_DEFAULT_CODE,
+        )
+        .await
+        .is_err()
+        {
+            return server_error();
+        }
+    }
+    match render_toggled_runner(&pool, runner_id).await {
+        Ok(body) => json_response(StatusCode::OK, body),
+        Err(response) => response,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Renders (owned strings borrowed into the `shapes` kernels)
+// ---------------------------------------------------------------------------
+
+/// Owned render buffer for one dev machine + its M5 annotations.
+struct MachineRender {
+    id: String,
+    host_label: String,
+    label: String,
+    visibility: i64,
+    provisioning: String,
+    runner_count: Option<i64>,
+    online_runner_count: Option<i64>,
+    control_online: Option<bool>,
+    engine_paused_by_owner: bool,
+    engine_auto_pause_reason: String,
+    engine_team_runs: bool,
+    engine_sign_in_state: String,
+    engine_credential_expires_at: Option<String>,
+    engine_state: Value,
+    engine_state_reported_at: Option<String>,
+    merged_into: Option<String>,
+    last_seen_at: Option<String>,
+    last_heartbeat_at: Option<Option<String>>,
+    revoked_at: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+impl MachineRender {
+    fn to_json(&self) -> Result<String, Response> {
+        let row = shapes::DevMachineRow {
+            id: &self.id,
+            host_label: &self.host_label,
+            label: &self.label,
+            visibility: self.visibility,
+            provisioning: &self.provisioning,
+            runner_count: self.runner_count,
+            online_runner_count: self.online_runner_count,
+            control_online: self.control_online,
+            engine_paused_by_owner: self.engine_paused_by_owner,
+            engine_auto_pause_reason: &self.engine_auto_pause_reason,
+            engine_team_runs: self.engine_team_runs,
+            engine_sign_in_state: &self.engine_sign_in_state,
+            engine_credential_expires_at: self.engine_credential_expires_at.as_deref(),
+            engine_state: &self.engine_state,
+            engine_state_reported_at: self.engine_state_reported_at.as_deref(),
+            merged_into: self.merged_into.as_deref(),
+            last_seen_at: self.last_seen_at.as_deref(),
+            last_heartbeat_at: self
+                .last_heartbeat_at
+                .as_ref()
+                .map(|inner| inner.as_deref()),
+            revoked_at: self.revoked_at.as_deref(),
+            created_at: &self.created_at,
+            updated_at: &self.updated_at,
+        };
+        serde_json::to_string(&shapes::dev_machine_to_representation(&row))
+            .map_err(|_| server_error())
+    }
+}
+
+/// `_serialize_dev_machine` (`runners.py:150-170`): the M5 annotated
+/// re-read (post-commit, with a fresh presence cutoff), or the
+/// unannotated in-memory instance when the row vanished
+/// (QUIRK-m5-fallback — `stamped` carries the revoke write's
+/// `(revoked_at, updated_at)` when it ran).
+async fn serialize_machine(
+    pool: &PgPool,
+    machine: &LockedMachine,
+    user_id: Uuid,
+    workspace_id: Uuid,
+    stamped: Option<(DateTime<Utc>, DateTime<Utc>)>,
+) -> Result<String, Response> {
+    let visibility: i16 = runner_perm::VISIBILITY_PRIVATE as i16;
+    let cutoff =
+        now_micros() - chrono::Duration::seconds(manage_reads::CONTROL_PRESENCE_WINDOW_SECS);
+    let row = manage_reads::machine_serialize(
+        &pidash_db::pool::sea_orm_connection(pool),
+        machine.id,
+        user_id,
+        workspace_id,
+        visibility,
+        cutoff,
+    )
+    .await
+    .map_err(|_| server_error())?;
+    let Some(row) = row else {
+        // QUIRK-m5-fallback: counts omitted, `control_online` false,
+        // model fields from the in-memory instance (stamped when the
+        // revoke write ran).
+        let (revoked_at, updated_at) = match stamped {
+            Some((revoked_at, updated_at)) => (Some(revoked_at), updated_at),
+            None => (machine.revoked_at, machine.updated_at),
+        };
+        let fallback_state =
+            pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                &machine.engine_sign_in_state,
+                machine.engine_credential_expires_at,
+                Utc::now(),
+            );
+        return MachineRender {
+            id: machine.id.to_string(),
+            host_label: machine.host_label.clone(),
+            label: machine.label.clone(),
+            visibility: i64::from(machine.visibility),
+            provisioning: machine.provisioning.clone(),
+            runner_count: None,
+            online_runner_count: None,
+            control_online: None,
+            engine_paused_by_owner: machine.engine_paused_by_owner,
+            engine_auto_pause_reason: machine.engine_auto_pause_reason.clone(),
+            engine_team_runs: machine.engine_team_runs,
+            engine_sign_in_state: fallback_state,
+            engine_credential_expires_at: machine
+                .engine_credential_expires_at
+                .as_ref()
+                .map(crate::serializer::render_datetime),
+            engine_state: machine.engine_state.clone(),
+            engine_state_reported_at: machine
+                .engine_state_reported_at
+                .as_ref()
+                .map(crate::serializer::render_datetime),
+            merged_into: machine.merged_into_id.map(|id| id.to_string()),
+            last_seen_at: machine
+                .last_seen_at
+                .as_ref()
+                .map(crate::serializer::render_datetime),
+            last_heartbeat_at: None,
+            revoked_at: revoked_at.as_ref().map(crate::serializer::render_datetime),
+            created_at: crate::serializer::render_datetime(&machine.created_at),
+            updated_at: crate::serializer::render_datetime(&updated_at),
+        }
+        .to_json();
+    };
+    let sign_in_state = pidash_services::domain::engine_credential::current_engine_sign_in_state(
+        &row.engine_sign_in_state,
+        row.engine_credential_expires_at,
+        Utc::now(),
+    );
+    MachineRender {
+        id: machine.id.to_string(),
+        host_label: row.host_label,
+        label: row.label,
+        visibility: i64::from(machine.visibility),
+        provisioning: row.provisioning,
+        runner_count: Some(row.runner_count),
+        online_runner_count: Some(row.online_runner_count),
+        control_online: Some(row.control_online),
+        engine_paused_by_owner: row.engine_paused_by_owner,
+        engine_auto_pause_reason: row.engine_auto_pause_reason,
+        engine_team_runs: row.engine_team_runs,
+        engine_sign_in_state: sign_in_state,
+        engine_credential_expires_at: row
+            .engine_credential_expires_at
+            .as_ref()
+            .map(crate::serializer::render_datetime),
+        engine_state: row.engine_state,
+        engine_state_reported_at: row
+            .engine_state_reported_at
+            .as_ref()
+            .map(crate::serializer::render_datetime),
+        merged_into: row.merged_into_id.map(|id| id.to_string()),
+        last_seen_at: row
+            .last_seen_at
+            .as_ref()
+            .map(crate::serializer::render_datetime),
+        last_heartbeat_at: Some(
+            row.last_heartbeat_at
+                .as_ref()
+                .map(crate::serializer::render_datetime),
+        ),
+        revoked_at: row
+            .revoked_at
+            .as_ref()
+            .map(crate::serializer::render_datetime),
+        created_at: crate::serializer::render_datetime(&row.created_at),
+        updated_at: crate::serializer::render_datetime(&row.updated_at),
+    }
+    .to_json()
+}
+
+/// Owned `runner` row for gates + full rendering (token internals
+/// skipped — never serialized here).
+struct FullRunner {
+    id: Uuid,
+    owner_id: Uuid,
+    workspace_id: Uuid,
+    dev_machine_id: Option<Uuid>,
+    pod_id: Uuid,
+    name: String,
+    host_label: String,
+    provisioning: String,
+    pod_dispatch: String,
+    visibility: i16,
+    enrolled_at: Option<DateTime<Utc>>,
+    capabilities: Value,
+    status: String,
+    os: String,
+    arch: String,
+    runner_version: String,
+    dev_metadata: Value,
+    protocol_version: i32,
+    last_heartbeat_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    revoked_at: Option<DateTime<Utc>>,
+    revoked_reason: String,
+    paused_at: Option<DateTime<Utc>>,
+    paused_by_id: Option<Uuid>,
+}
+
+impl From<runner::Model> for FullRunner {
+    fn from(row: runner::Model) -> Self {
+        let at = |at: sea_orm::prelude::DateTimeWithTimeZone| at.with_timezone(&Utc);
+        Self {
+            id: row.id,
+            owner_id: row.owner_id,
+            workspace_id: row.workspace_id,
+            dev_machine_id: row.dev_machine_id,
+            pod_id: row.pod_id,
+            name: row.name,
+            host_label: row.host_label,
+            provisioning: row.provisioning,
+            pod_dispatch: row.pod_dispatch,
+            visibility: row.visibility,
+            enrolled_at: row.enrolled_at.map(at),
+            capabilities: row.capabilities,
+            status: row.status,
+            os: row.os,
+            arch: row.arch,
+            runner_version: row.runner_version,
+            dev_metadata: row.dev_metadata,
+            protocol_version: row.protocol_version,
+            last_heartbeat_at: row.last_heartbeat_at.map(at),
+            created_at: at(row.created_at),
+            updated_at: at(row.updated_at),
+            revoked_at: row.revoked_at.map(at),
+            revoked_reason: row.revoked_reason,
+            paused_at: row.paused_at.map(at),
+            paused_by_id: row.paused_by_id,
+        }
+    }
+}
+
+/// Locked runner read (`runners.py:476`):
+/// `Runner.objects.select_for_update().filter(pk).first()` inside
+/// `transaction.atomic()`: full row (plain `Manager`, no scope),
+/// `Meta.ordering`, first, `FOR UPDATE`.
+async fn lock_runner(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    runner_id: Uuid,
+) -> Result<Option<FullRunner>, Response> {
+    let row = runner::Entity::find_by_id(runner_id)
+        .order_by_desc(runner::Column::LastHeartbeatAt)
+        .order_by_desc(runner::Column::CreatedAt)
+        .lock_exclusive()
+        .one(&TxConn::new(tx))
+        .await
+        .map_err(|_| server_error())?;
+    Ok(row.map(FullRunner::from))
+}
+
+/// Owned pod mini (`serializers.py:133-142`).
+struct PodMiniOwned {
+    id: String,
+    name: String,
+    is_default: bool,
+    project_id: Uuid,
+}
+
+/// Owned `dev_machine` mini (`serializers.py:145-153` + #2910 trio).
+struct DevMachineMiniOwned {
+    id: String,
+    host_label: String,
+    label: String,
+    engine_paused_by_owner: bool,
+    engine_auto_pause_reason: String,
+    engine_team_runs: bool,
+    engine_sign_in_state: String,
+    engine_credential_expires_at: Option<DateTime<Utc>>,
+}
+
+/// Owned live-state snapshot (`RunnerLiveState`, `models.py:1504-1558`).
+struct LiveStateOwned {
+    observed_run_id: Option<String>,
+    last_event_at: Option<String>,
+    last_event_kind: Option<String>,
+    last_event_summary: Option<String>,
+    agent_pid: Option<i64>,
+    agent_subprocess_alive: Option<bool>,
+    approvals_pending: Option<i64>,
+    usage: Value,
+    llm_model: Option<String>,
+    turn_count: Option<i64>,
+    agent_health: Option<String>,
+    agent_last_activity_at: Option<String>,
+    updated_at: String,
+}
+
+/// The reverse one-to-one `runner.live_state` read: `None` when the row
+/// is missing (pre-flag runners render `live_state: null`).
+async fn fetch_live_state(
+    pool: &PgPool,
+    runner_id: Uuid,
+) -> Result<Option<LiveStateOwned>, Response> {
+    let row =
+        manage_reads::runner_live_state(&pidash_db::pool::sea_orm_connection(pool), runner_id)
+            .await
+            .map_err(|_| server_error())?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let render = |at: &sea_orm::prelude::DateTimeWithTimeZone| {
+        crate::serializer::render_datetime(&at.with_timezone(&Utc))
+    };
+    Ok(Some(LiveStateOwned {
+        observed_run_id: row.observed_run_id.map(|id| id.to_string()),
+        last_event_at: row.last_event_at.as_ref().map(render),
+        last_event_kind: row.last_event_kind,
+        last_event_summary: row.last_event_summary,
+        agent_pid: row.agent_pid.map(i64::from),
+        agent_subprocess_alive: row.agent_subprocess_alive,
+        approvals_pending: row.approvals_pending.map(i64::from),
+        usage: row.usage,
+        llm_model: row.llm_model,
+        turn_count: row.turn_count.map(i64::from),
+        agent_health: row.agent_health,
+        agent_last_activity_at: row.agent_last_activity_at.as_ref().map(render),
+        updated_at: render(&row.updated_at),
+    }))
+}
+
+/// Owned render buffer for one runner + its pod/dev-machine minis.
+struct RunnerRender {
+    id: String,
+    name: String,
+    status: String,
+    host_label: String,
+    is_engine: bool,
+    engine_paused: bool,
+    dispatch_paused: bool,
+    machine_display_name: String,
+    provisioning: String,
+    pod_dispatch: String,
+    os: String,
+    arch: String,
+    runner_version: String,
+    dev_metadata: Value,
+    protocol_version: i64,
+    capabilities: Value,
+    last_heartbeat_at: Option<String>,
+    owner: String,
+    dev_machine: Option<String>,
+    dev_machine_detail: Option<DevMachineMiniOwned>,
+    visibility: i64,
+    pod: String,
+    pod_detail: PodMiniOwned,
+    pod_identifier: String,
+    live_state: Option<LiveStateOwned>,
+    enrolled_at: Option<String>,
+    revoked_at: Option<String>,
+    revoked_reason: String,
+    paused_at: Option<String>,
+    paused_by: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+impl RunnerRender {
+    fn to_json(&self) -> Result<String, Response> {
+        let project_id = self.pod_detail.project_id.to_string();
+        let pod = shapes::PodMiniRow {
+            id: &self.pod_detail.id,
+            name: &self.pod_detail.name,
+            is_default: self.pod_detail.is_default,
+            project: &project_id,
+            project_identifier: &self.pod_identifier,
+        };
+        let now = Utc::now();
+        let dev_mini_state;
+        let dev_mini_expires;
+        let dev_machine = match self.dev_machine_detail.as_ref() {
+            Some(detail) => {
+                dev_mini_state =
+                    pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                        &detail.engine_sign_in_state,
+                        detail.engine_credential_expires_at,
+                        now,
+                    );
+                dev_mini_expires = detail
+                    .engine_credential_expires_at
+                    .as_ref()
+                    .map(crate::serializer::render_datetime);
+                Some(shapes::DevMachineMiniRow {
+                    id: &detail.id,
+                    host_label: &detail.host_label,
+                    label: &detail.label,
+                    engine_paused_by_owner: detail.engine_paused_by_owner,
+                    engine_auto_pause_reason: &detail.engine_auto_pause_reason,
+                    engine_team_runs: detail.engine_team_runs,
+                    engine_sign_in_state: &dev_mini_state,
+                    engine_credential_expires_at: dev_mini_expires.as_deref(),
+                })
+            }
+            None => None,
+        };
+        let live_state = self.live_state.as_ref().map(|live| shapes::LiveStateRow {
+            observed_run_id: live.observed_run_id.as_deref(),
+            last_event_at: live.last_event_at.as_deref(),
+            last_event_kind: live.last_event_kind.as_deref(),
+            last_event_summary: live.last_event_summary.as_deref(),
+            agent_pid: live.agent_pid,
+            agent_subprocess_alive: live.agent_subprocess_alive,
+            approvals_pending: live.approvals_pending,
+            usage: &live.usage,
+            llm_model: live.llm_model.as_deref(),
+            turn_count: live.turn_count,
+            agent_health: live.agent_health.as_deref(),
+            agent_last_activity_at: live.agent_last_activity_at.as_deref(),
+            updated_at: &live.updated_at,
+        });
+        let row = shapes::RunnerRow {
+            id: &self.id,
+            name: &self.name,
+            status: &self.status,
+            host_label: &self.host_label,
+            is_engine: self.is_engine,
+            engine_paused: self.engine_paused,
+            dispatch_paused: self.dispatch_paused,
+            machine_display_name: &self.machine_display_name,
+            provisioning: &self.provisioning,
+            pod_dispatch: &self.pod_dispatch,
+            os: &self.os,
+            arch: &self.arch,
+            runner_version: &self.runner_version,
+            dev_metadata: &self.dev_metadata,
+            protocol_version: self.protocol_version,
+            capabilities: &self.capabilities,
+            last_heartbeat_at: self.last_heartbeat_at.as_deref(),
+            owner: &self.owner,
+            dev_machine: self.dev_machine.as_deref(),
+            dev_machine_detail: dev_machine,
+            visibility: self.visibility,
+            pod: &self.pod,
+            pod_detail: pod,
+            live_state,
+            enrolled_at: self.enrolled_at.as_deref(),
+            revoked_at: self.revoked_at.as_deref(),
+            revoked_reason: &self.revoked_reason,
+            paused_at: self.paused_at.as_deref(),
+            paused_by: self.paused_by.as_deref(),
+            created_at: &self.created_at,
+            updated_at: &self.updated_at,
+            assignable: None,
+            not_assignable_code: None,
+            is_busy: None,
+            queue_depth: None,
+        };
+        serde_json::to_string(&shapes::runner_to_representation(&row)).map_err(|_| server_error())
+    }
+}
+
+/// Serialize the re-read runner for the revoke/pause/resume 200s
+/// (revoke `:491-492`; pause/resume `_serialize_toggled_runner`,
+/// `runners.py:596-601`): the refresh row plus the serializer's lazy
+/// loads (pod, dev-machine mini, project identifier, live state).
+/// Same body as the `select_related` re-read — the joins only change
+/// the query shape, never the bytes. A vanished row is the source's
+/// `DoesNotExist` → 500.
+async fn render_toggled_runner(pool: &PgPool, runner_id: Uuid) -> Result<String, Response> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    // `runner.refresh_from_db()`: the plain-manager row by pk.
+    let runner = runner::Entity::find_by_id(runner_id)
+        .one(&db)
+        .await
+        .map_err(|_| server_error())?
+        .map(FullRunner::from)
+        .ok_or_else(server_error)?;
+    // Lazy `runner.pod`: a forward-FK read through `Pod._base_manager`, so
+    // a tombstoned pod still renders (vanished row 500s).
+    let pod_row = pod::Entity::find_by_id(runner.pod_id)
+        .one(&db)
+        .await
+        .map_err(|_| server_error())?
+        .ok_or_else(server_error)?;
+    let project_id = pod_row.project_id;
+    let pod = PodMiniOwned {
+        id: pod_row.id.to_string(),
+        name: pod_row.name,
+        is_default: pod_row.is_default,
+        project_id,
+    };
+    // Lazy `runner.dev_machine` (only when linked; vanished row 500s).
+    let mut dev_machine_detail = None;
+    if let Some(dev_machine_id) = runner.dev_machine_id {
+        let machine = dev_machine::Entity::find_by_id(dev_machine_id)
+            .one(&db)
+            .await
+            .map_err(|_| server_error())?
+            .ok_or_else(server_error)?;
+        dev_machine_detail = Some(DevMachineMiniOwned {
+            id: machine.id.to_string(),
+            host_label: machine.host_label.clone(),
+            label: machine.label.clone(),
+            engine_paused_by_owner: machine.engine_paused_by_owner,
+            engine_auto_pause_reason: machine.engine_auto_pause_reason.clone(),
+            engine_team_runs: machine.engine_team_runs,
+            engine_sign_in_state: machine.engine_sign_in_state.clone(),
+            engine_credential_expires_at: machine
+                .engine_credential_expires_at
+                .map(|at| at.with_timezone(&Utc)),
+        });
+    }
+    let is_engine = runner.provisioning == "desktop_bundled";
+    let engine_paused = match &dev_machine_detail {
+        Some(machine) if is_engine => {
+            machine.engine_paused_by_owner || !machine.engine_auto_pause_reason.is_empty()
+        }
+        _ => false,
+    };
+    let machine_display_name = match &dev_machine_detail {
+        Some(machine) => {
+            if !machine.label.is_empty() {
+                machine.label.clone()
+            } else if !machine.host_label.is_empty() {
+                machine.host_label.clone()
+            } else {
+                "This computer".to_owned()
+            }
+        }
+        None => {
+            if !runner.host_label.is_empty() {
+                runner.host_label.clone()
+            } else {
+                runner.name.clone()
+            }
+        }
+    };
+    // Lazy `pod.project.identifier`: a forward-FK read through
+    // `Project._base_manager`, so a tombstoned project still renders.
+    let (_, pod_identifier) = catalog_reads::project_facts(&db, project_id, false)
+        .await
+        .map_err(|_| server_error())?
+        .ok_or_else(server_error)?;
+    let live_state = fetch_live_state(pool, runner_id).await?;
+    RunnerRender {
+        id: runner.id.to_string(),
+        name: runner.name.clone(),
+        status: runner.status.clone(),
+        host_label: runner.host_label.clone(),
+        is_engine,
+        engine_paused,
+        dispatch_paused: runner.paused_at.is_some(),
+        machine_display_name,
+        provisioning: runner.provisioning.clone(),
+        pod_dispatch: runner.pod_dispatch.clone(),
+        os: runner.os.clone(),
+        arch: runner.arch.clone(),
+        runner_version: runner.runner_version.clone(),
+        dev_metadata: runner.dev_metadata.clone(),
+        protocol_version: i64::from(runner.protocol_version),
+        capabilities: runner.capabilities.clone(),
+        last_heartbeat_at: runner
+            .last_heartbeat_at
+            .as_ref()
+            .map(crate::serializer::render_datetime),
+        owner: runner.owner_id.to_string(),
+        dev_machine: runner.dev_machine_id.map(|id| id.to_string()),
+        dev_machine_detail,
+        visibility: i64::from(runner.visibility),
+        pod: runner.pod_id.to_string(),
+        pod_detail: pod,
+        pod_identifier,
+        live_state,
+        enrolled_at: runner
+            .enrolled_at
+            .as_ref()
+            .map(crate::serializer::render_datetime),
+        revoked_at: runner
+            .revoked_at
+            .as_ref()
+            .map(crate::serializer::render_datetime),
+        revoked_reason: runner.revoked_reason.clone(),
+        paused_at: runner
+            .paused_at
+            .as_ref()
+            .map(crate::serializer::render_datetime),
+        paused_by: runner.paused_by_id.map(|id| id.to_string()),
+        created_at: crate::serializer::render_datetime(&runner.created_at),
+        updated_at: crate::serializer::render_datetime(&runner.updated_at),
+    }
+    .to_json()
+}
+
+// ---------------------------------------------------------------------------
+// `POST /api/runners/<rid>/pause|resume/` (`runners.py:495-601`, `09738d222`)
+// ---------------------------------------------------------------------------
+
+use pidash_db::runner_enroll::columns::enums as runner_enums;
+use pidash_services::runner_sessions::guards::BUSY_STATUSES;
+
+/// `{"error": ..., "code": "runner_revoked"}` 409
+/// (`_lock_manageable_runner`, `runners.py:507-522`): the operator
+/// toggle refuses revoked runners — resume cannot un-revoke.
+pub const RUNNER_REVOKED_CONFLICT_BODY: &str =
+    r#"{"error":"runner is revoked","code":"runner_revoked"}"#;
+
+/// `runner.save(update_fields=["paused_at", "paused_by", "updated_at"])`
+/// on pause (`runners.py:544`): both stamps plus `updated_at`, one
+/// `now`.
+fn pause_runner_statement(
+    runner_id: Uuid,
+    user_id: Uuid,
+    now: DateTime<Utc>,
+) -> sea_orm::UpdateMany<runner::Entity> {
+    runner::Entity::update_many()
+        .col_expr(runner::Column::PausedAt, Expr::value(now))
+        .col_expr(runner::Column::PausedById, Expr::value(user_id))
+        .col_expr(runner::Column::UpdatedAt, Expr::value(now))
+        .filter(runner::Column::Id.eq(runner_id))
+}
+
+/// The same `save(update_fields=...)` on resume (`runners.py:587`),
+/// clearing the stamps.
+fn resume_runner_statement(
+    runner_id: Uuid,
+    now: DateTime<Utc>,
+) -> sea_orm::UpdateMany<runner::Entity> {
+    runner::Entity::update_many()
+        .col_expr(runner::Column::PausedAt, SimpleExpr::Keyword(Keyword::Null))
+        .col_expr(
+            runner::Column::PausedById,
+            SimpleExpr::Keyword(Keyword::Null),
+        )
+        .col_expr(runner::Column::UpdatedAt, Expr::value(now))
+        .filter(runner::Column::Id.eq(runner_id))
+}
+
+/// In-flight runs for the pause body
+/// (`AgentRun.objects.filter(runner=runner,
+/// status__in=BUSY_STATUSES).values_list("id", "status")`,
+/// `runners.py:552-554`), newest first.
+fn in_flight_runs_select(
+    runner_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<(Uuid, String)>> {
+    agent_run::Entity::find()
+        .select_only()
+        .columns([agent_run::Column::Id, agent_run::Column::Status])
+        .filter(agent_run::Column::RunnerId.eq(runner_id))
+        .filter(agent_run::Column::Status.is_in(BUSY_STATUSES.iter().map(AgentRunStatus::value)))
+        .order_by_desc(agent_run::Column::CreatedAt)
+        .into_tuple()
+}
+
+// Pin release (`release_pins_for_paused_runner`, `tasks.py:184-219`) on
+// SeaORM: twins of the `offline_recovery` text builders this handler
+// drove (`paused_runner_pin_ids_select`, `paused_runner_pin_lock_select`,
+// `clear_parent_thread_sql`, `clear_pin_sql`), spelled here so the
+// shared kernel file stays untouched while pi-dash#2953 reworks it.
+
+/// `agent_run.pinned_runner_id -> runner.id` (trimmed from the entity).
+fn pinned_runner_rel() -> sea_orm::RelationDef {
+    agent_run::Entity::belongs_to(runner::Entity)
+        .from(agent_run::Column::PinnedRunnerId)
+        .to(runner::Column::Id)
+        .into()
+}
+
+/// Paused-runner candidate ids: every QUEUED `local_runner` run pinned
+/// to the just-paused runner, whatever its age; no `LIMIT`.
+fn paused_runner_pin_ids_select(
+    runner_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<Uuid>> {
+    agent_run::Entity::find()
+        .select_only()
+        .column(agent_run::Column::Id)
+        .filter(agent_run::Column::ExecutorKind.eq(AgentExecutorKind::LocalRunner.value()))
+        .filter(agent_run::Column::PinnedRunnerId.is_not_null())
+        .filter(agent_run::Column::Status.eq(AgentRunStatus::Queued.value()))
+        .filter(agent_run::Column::PinnedRunnerId.eq(runner_id))
+        .filter(agent_run::Column::PinKind.ne("dedicated"))
+        .order_by_desc(agent_run::Column::CreatedAt)
+        .into_tuple()
+}
+
+/// The re-locked pin candidate: its pod, its parent and the parent's
+/// `thread_id` (the `select_related` leg, null without a parent).
+#[derive(Debug, Clone, PartialEq, Eq, sea_orm::FromQueryResult)]
+struct PausedPinRow {
+    pod_id: Uuid,
+    parent_run_id: Option<Uuid>,
+    parent_thread_id: Option<String>,
+}
+
+/// The parent self-join alias (Django's `T3`).
+const PARENT_ALIAS: &str = "T3";
+
+/// Paused-runner re-check lock: the candidate back under `FOR UPDATE
+/// OF "agent_run"` with the still-paused predicate re-applied (the
+/// runner may have been resumed since the list was read), plus the
+/// parent row.
+fn paused_runner_pin_lock_select(
+    run_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectModel<PausedPinRow>> {
+    let mut select = agent_run::Entity::find()
+        .select_only()
+        .columns([agent_run::Column::PodId, agent_run::Column::ParentRunId])
+        .expr_as(
+            Expr::col((Alias::new(PARENT_ALIAS), agent_run::Column::ThreadId)),
+            "parent_thread_id",
+        )
+        .join(JoinType::InnerJoin, pinned_runner_rel())
+        .join_as(
+            JoinType::LeftJoin,
+            agent_run::Entity::belongs_to(agent_run::Entity)
+                .from(agent_run::Column::ParentRunId)
+                .to(agent_run::Column::Id)
+                .into(),
+            Alias::new(PARENT_ALIAS),
+        )
+        .filter(agent_run::Column::Id.eq(run_id))
+        .filter(agent_run::Column::PinnedRunnerId.is_not_null())
+        .filter(agent_run::Column::Status.eq(AgentRunStatus::Queued.value()))
+        .filter(agent_run::Column::PinKind.ne("dedicated"))
+        .filter(runner::Column::PausedAt.is_not_null())
+        .order_by_desc(agent_run::Column::CreatedAt)
+        .limit(1);
+    QueryTrait::query(&mut select).lock_with_tables(LockType::Update, [agent_run::Entity]);
+    select.into_model()
+}
+
+/// Parent `thread_id` clear (`parent.save(update_fields=["thread_id"])`
+/// after stamping `""`).
+fn clear_parent_thread_statement(parent_id: Uuid) -> sea_orm::UpdateMany<agent_run::Entity> {
+    agent_run::Entity::update_many()
+        .col_expr(agent_run::Column::ThreadId, Expr::value(String::new()))
+        .filter(agent_run::Column::Id.eq(parent_id))
+}
+
+/// Pin clear (`run.save(update_fields=["pinned_runner"])` after
+/// stamping `None`).
+fn clear_pin_statement(run_id: Uuid) -> sea_orm::UpdateMany<agent_run::Entity> {
+    agent_run::Entity::update_many()
+        .col_expr(
+            agent_run::Column::PinnedRunnerId,
+            SimpleExpr::Keyword(Keyword::Null),
+        )
+        .filter(agent_run::Column::Id.eq(run_id))
+}
+
+/// `_lock_manageable_runner` (`runners.py:495-522`): lock the row, 404
+/// when missing or invisible, 403 when unmanageable. The caller checks
+/// revocation and writes. (The revoke handler keeps its own copy of
+/// this preamble; this one serves the pause/resume pair.)
+async fn lock_manageable_runner(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    runner_id: Uuid,
+    user_id: Uuid,
+) -> Result<FullRunner, Response> {
+    let Some(runner) = lock_runner(tx, runner_id).await? else {
+        return Err(not_found());
+    };
+    // View gate → 404 (`:499-500`).
+    let can_view = runner_perm::can_view_runner(&runner_perm::RunnerFacts {
+        workspace: WorkspaceId::from(runner.workspace_id.to_string()),
+        authenticated: true,
+        visibility: i32::from(runner.visibility),
+        owned_by_requester: runner.owner_id == user_id,
+    });
+    if !can_view {
+        return Err(not_found());
+    }
+    // Manage gate → 403 (`:501-502`): the private fast path skips the
+    // role read exactly like Python (private non-owners never query).
+    if runner.visibility == runner_perm::VISIBILITY_PRIVATE as i16 {
+        if runner.owner_id != user_id {
+            return Err(forbidden());
+        }
+    } else {
+        let role = workspace_role_in(&TxConn::new(tx), runner.workspace_id, user_id).await?;
+        let workspace = WorkspaceId::from(runner.workspace_id.to_string());
+        let scope = TenantScope::new(workspace.clone());
+        let manageable = runner_perm::can_manage_runner(
+            &scope,
+            &runner_perm::ManageFacts {
+                workspace,
+                requester: Some(UserId::from(user_id.to_string())),
+                visibility: i32::from(runner.visibility),
+                owned_by_requester: runner.owner_id == user_id,
+                is_workspace_admin: membership::is_workspace_admin(role),
+            },
+        );
+        if !manageable {
+            return Err(forbidden());
+        }
+    }
+    Ok(runner)
+}
+
+/// `POST /api/runners/<runner_id>/pause/` (`runners.py:525-561`):
+/// stamp the pause (idempotent — an already-paused row keeps its
+/// stamps with no release and no drain), commit, release the
+/// runner's pins, and return the runner plus `in_flight_runs`.
+/// Revoked (either marker) → 409. A non-canonical segment falls
+/// through to Django (which renders its own 404) before auth runs.
+pub async fn runner_pause(
+    State(state): State<AppState>,
+    extension: Option<Extension<SessionHandle>>,
+    Path(raw_id): Path<String>,
+    req: Request,
+) -> Response {
+    let Some(runner_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
+    let (pool, user_id) = match web_actor(&state, extension).await {
+        Ok(preamble) => preamble,
+        Err(response) => return response,
+    };
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return server_error(),
+    };
+    let runner = match lock_manageable_runner(&mut tx, runner_id, user_id).await {
+        Ok(runner) => runner,
+        Err(response) => return response,
+    };
+    if runner.revoked_at.is_some() || runner.status == runner_enums::RUNNER_STATUS_REVOKED {
+        let _ = tx.rollback().await;
+        return conflict(RUNNER_REVOKED_CONFLICT_BODY);
+    }
+    let transition = runner.paused_at.is_none();
+    if transition {
+        let now = now_micros();
+        if pause_runner_statement(runner_id, user_id, now)
+            .exec(&TxConn::new(&mut tx))
+            .await
+            .is_err()
+        {
+            return server_error();
+        }
+    }
+    if tx.commit().await.is_err() {
+        return server_error();
+    }
+    if transition {
+        // The `on_commit` release (`:548-549`): pins drop and affected
+        // pods drain before the body renders.
+        if release_pins_for_paused_runner(&pool, &state, runner_id)
+            .await
+            .is_err()
+        {
+            return server_error();
+        }
+    }
+    let in_flight = match fetch_in_flight_runs(&pool, runner_id).await {
+        Ok(json) => json,
+        Err(response) => return response,
+    };
+    let runner_json = match render_toggled_runner(&pool, runner_id).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    json_response(StatusCode::OK, pause_body(&runner_json, &in_flight))
+}
+
+/// `POST /api/runners/<runner_id>/resume/` (`runners.py:564-601`):
+/// clear the stamps (a no-op when unpaused, with no drain), commit,
+/// drain queued work to the runner, and return the runner. Revoked
+/// (either marker) → 409. A non-canonical segment falls through to
+/// Django (which renders its own 404) before auth runs.
+pub async fn runner_resume(
+    State(state): State<AppState>,
+    extension: Option<Extension<SessionHandle>>,
+    Path(raw_id): Path<String>,
+    req: Request,
+) -> Response {
+    let Some(runner_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
+    let (pool, user_id) = match web_actor(&state, extension).await {
+        Ok(preamble) => preamble,
+        Err(response) => return response,
+    };
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return server_error(),
+    };
+    let runner = match lock_manageable_runner(&mut tx, runner_id, user_id).await {
+        Ok(runner) => runner,
+        Err(response) => return response,
+    };
+    if runner.revoked_at.is_some() || runner.status == runner_enums::RUNNER_STATUS_REVOKED {
+        let _ = tx.rollback().await;
+        return conflict(RUNNER_REVOKED_CONFLICT_BODY);
+    }
+    let transition = runner.paused_at.is_some();
+    if transition
+        && resume_runner_statement(runner_id, now_micros())
+            .exec(&TxConn::new(&mut tx))
+            .await
+            .is_err()
+    {
+        return server_error();
+    }
+    if tx.commit().await.is_err() {
+        return server_error();
+    }
+    if transition {
+        // The `on_commit` drain (`:591-592`).
+        if drain_runner_by_id(&pool, &state, runner_id).await.is_err() {
+            return server_error();
+        }
+    }
+    let runner_json = match render_toggled_runner(&pool, runner_id).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    json_response(StatusCode::OK, runner_json)
+}
+
+/// In-flight `{"id", "status"}` rows for the pause body
+/// (`runners.py:552-554`), newest first, as a JSON array string.
+async fn fetch_in_flight_runs(pool: &PgPool, runner_id: Uuid) -> Result<String, Response> {
+    let rows: Vec<(Uuid, String)> = in_flight_runs_select(runner_id)
+        .all(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+        .map_err(|_| server_error())?;
+    let items: Vec<Value> = rows
+        .into_iter()
+        .map(|(id, status)| serde_json::json!({"id": id.to_string(), "status": status}))
+        .collect();
+    serde_json::to_string(&items).map_err(|_| server_error())
+}
+
+/// `{**runner, "in_flight_runs": [...]}` (`runners.py:556-561`): the
+/// runner keys keep their order, the new key trails.
+fn pause_body(runner_json: &str, in_flight_json: &str) -> String {
+    let mut body = runner_json.to_owned();
+    assert_eq!(body.pop(), Some('}'));
+    body.push_str(",\"in_flight_runs\":");
+    body.push_str(in_flight_json);
+    body.push('}');
+    body
+}
+
+/// `release_pins_for_paused_runner` (`tasks.py:184-219`): send every
+/// QUEUED `local_runner` run pinned to a just-paused runner back to
+/// its pod queue, then drain each affected pod — each drain isolated,
+/// so one failed drain never skips the rest. Called from the pause
+/// commit hook (not a celery task).
+async fn release_pins_for_paused_runner(
+    pool: &PgPool,
+    state: &AppState,
+    runner_id: Uuid,
+) -> Result<(), ()> {
+    let pinned: Vec<Uuid> = paused_runner_pin_ids_select(runner_id)
+        .all(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+        .map_err(|_| ())?;
+    let mut released = 0usize;
+    let mut pod_ids: Vec<Uuid> = Vec::new();
+    for run_id in pinned {
+        // One atomic block per run (`_release_pins`, `tasks.py:148-180`):
+        // re-lock the still-paused pin, clear the parent thread, clear
+        // the pin. A lock miss rolls back the empty tx.
+        let mut tx = pool.begin().await.map_err(|_| ())?;
+        let conn = TxConn::new(&mut tx);
+        let row = paused_runner_pin_lock_select(run_id)
+            .one(&conn)
+            .await
+            .map_err(|_| ())?;
+        let Some(row) = row else {
+            tx.rollback().await.map_err(|_| ())?;
+            continue;
+        };
+        // Parent write first, pin write second (source order).
+        if let Some(parent_id) = row.parent_run_id.filter(|_| {
+            row.parent_thread_id
+                .as_deref()
+                .is_some_and(|t| !t.is_empty())
+        }) {
+            clear_parent_thread_statement(parent_id)
+                .exec(&conn)
+                .await
+                .map_err(|_| ())?;
+        }
+        clear_pin_statement(run_id)
+            .exec(&conn)
+            .await
+            .map_err(|_| ())?;
+        tx.commit().await.map_err(|_| ())?;
+        released += 1;
+        if !pod_ids.contains(&row.pod_id) {
+            pod_ids.push(row.pod_id);
+        }
+    }
+    for pod_id in pod_ids {
+        if drain_pod_by_id(pool, state, pod_id).await.is_err() {
+            tracing::error!("release pins: drain failed for pod {pod_id}");
+        }
+    }
+    if released > 0 {
+        tracing::info!(
+            "release_pins_for_paused_runner runner={runner_id} unpinned {released} run(s)"
+        );
+    }
+    Ok(())
+}
+
+/// `drain_for_runner_by_id` (`matcher.py:253-264`): runner lookup
+/// (miss ⇒ `Ok(false)`, no tx), else the re-lock/next/assign/send
+/// recipe. A dispatch failure propagates — the row stays `ASSIGNED`
+/// while the caller observes the failure. Thin caller of the public
+/// executor (OVL-06); the local copy is deleted.
+async fn drain_runner_by_id(pool: &PgPool, state: &AppState, runner_id: Uuid) -> Result<bool, ()> {
+    let redis = client_from_settings(state.settings());
+    pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+        pool,
+        redis.as_ref(),
+        &state.settings().runner,
+        runner_id,
+    )
+    .await
+    .map_err(|_| ())
+}
+
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Executors (F6/F8: called, never inlined)
+// ---------------------------------------------------------------------------
+
+use pidash_db::runner_sessions::outbox as session_outbox;
+use pidash_db::runner_sessions::outbox::OutboxError as SessionOutboxError;
+use pidash_db::runner_sessions::RunnerSession as DbRunnerSession;
+use pidash_jobs::runner_enroll::{
+    fire_revoke_bundle, revoke, RevokeBundle, RevokeCtx, RevokeScope,
+};
+use pidash_services::runner_enroll::delete as delete_kernel;
+use pidash_services::runner_runs::LifecycleEffect;
+use pidash_services::runner_sessions::pubsub::PubsubStore;
+use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::runner_runs::AgentRunStatus;
+
+// Executors: the first pool-backed `PubsubStore`s (F8: called, never inlined)
+// ---------------------------------------------------------------------------
+
+/// Pool-backed [`PubsubStore`] for the out-of-tx frames and closes
+/// (post-commit paths): each statement autocommits, like the source
+/// paths that run outside any `atomic`.
+struct PoolPubsubStore<'p, 's> {
+    pool: &'p PgPool,
+    state: &'s AppState,
+}
+
+impl<'p, 's> PoolPubsubStore<'p, 's> {
+    fn new(pool: &'p PgPool, state: &'s AppState) -> Self {
+        Self { pool, state }
+    }
+}
+
+impl PubsubStore for PoolPubsubStore<'_, '_> {
+    async fn enqueue_for_runner(
+        &self,
+        runner_id: Uuid,
+        message: &Map<String, Value>,
+    ) -> Result<Option<String>, SessionOutboxError> {
+        let redis = client_from_settings(self.state.settings());
+        session_outbox::enqueue_for_runner(
+            redis.as_ref(),
+            self.pool,
+            &self.state.settings().runner,
+            runner_id,
+            message,
+        )
+        .await
+    }
+
+    async fn enqueue_for_machine(
+        &self,
+        dev_machine_id: Uuid,
+        message: &Map<String, Value>,
+    ) -> Result<Option<String>, pidash_db::runner_sessions::machine_outbox::MachineOutboxError>
+    {
+        let redis = client_from_settings(self.state.settings());
+        pidash_db::runner_sessions::machine_outbox::enqueue_for_machine(
+            redis.as_ref(),
+            self.pool,
+            &self.state.settings().runner,
+            dev_machine_id,
+            message,
+        )
+        .await
+    }
+
+    async fn active_runner_sessions(
+        &self,
+        runner_id: Uuid,
+    ) -> Result<Vec<DbRunnerSession>, SessionOutboxError> {
+        pubsub_kernel::active_runner_sessions(
+            &pidash_db::pool::sea_orm_connection(self.pool),
+            runner_id,
+        )
+        .await
+        .map_err(|error| SessionOutboxError::Db(into_sqlx(error)))
+    }
+
+    async fn revoke_runner_session(
+        &self,
+        session_id: Uuid,
+        reason: &str,
+    ) -> Result<(), SessionOutboxError> {
+        pidash_services::domain::tokens::revoke_runner_session(
+            &pidash_db::pool::sea_orm_connection(self.pool),
+            session_id,
+            now_micros(),
+            reason,
+        )
+        .await
+        .map_err(SessionOutboxError::Db)?;
+        Ok(())
+    }
+
+    async fn clear_session_marker(&self, session_id: Uuid) -> Result<(), SessionOutboxError> {
+        let redis = client_from_settings(self.state.settings());
+        session_outbox::clear_session_marker(redis.as_ref(), &session_id.to_string()).await
+    }
+
+    async fn publish_session_eviction(
+        &self,
+        runner_id: Uuid,
+        old_session_id: Uuid,
+        new_session_id: &str,
+    ) -> Result<(), SessionOutboxError> {
+        let redis = client_from_settings(self.state.settings());
+        let runner_id = runner_id.to_string();
+        let old = old_session_id.to_string();
+        session_outbox::publish_session_eviction(
+            redis.as_ref(),
+            &runner_id,
+            Some(&old),
+            new_session_id,
+        )
+        .await
+    }
+}
+
+/// Tx-backed [`PubsubStore`] for the in-tx frames and closes (machine
+/// revoke/rotate run inside one atomic — QUIRK-machine-tx). The
+/// transaction sits behind an async mutex: the `&self` driver methods
+/// lock it per call (the drivers never re-enter the store, so the
+/// lock is uncontended), keeping the handler future `Send` with no
+/// `unsafe`.
+struct TxPubsub<'t, 'p, 's> {
+    tx: tokio::sync::Mutex<&'t mut sqlx::Transaction<'p, sqlx::Postgres>>,
+    state: &'s AppState,
+}
+
+impl<'t, 'p, 's> TxPubsub<'t, 'p, 's> {
+    fn new(tx: &'t mut sqlx::Transaction<'p, sqlx::Postgres>, state: &'s AppState) -> Self {
+        Self {
+            tx: tokio::sync::Mutex::new(tx),
+            state,
+        }
+    }
+}
+
+impl PubsubStore for TxPubsub<'_, '_, '_> {
+    async fn enqueue_for_runner(
+        &self,
+        runner_id: Uuid,
+        message: &Map<String, Value>,
+    ) -> Result<Option<String>, SessionOutboxError> {
+        let mut guard = self.tx.lock().await;
+        let tx: &mut sqlx::Transaction<'_, sqlx::Postgres> = &mut guard;
+        let redis = client_from_settings(self.state.settings());
+        session_outbox::enqueue_for_runner(
+            redis.as_ref(),
+            &mut **tx,
+            &self.state.settings().runner,
+            runner_id,
+            message,
+        )
+        .await
+    }
+
+    async fn enqueue_for_machine(
+        &self,
+        dev_machine_id: Uuid,
+        message: &Map<String, Value>,
+    ) -> Result<Option<String>, pidash_db::runner_sessions::machine_outbox::MachineOutboxError>
+    {
+        let mut guard = self.tx.lock().await;
+        let tx: &mut sqlx::Transaction<'_, sqlx::Postgres> = &mut guard;
+        let redis = client_from_settings(self.state.settings());
+        pidash_db::runner_sessions::machine_outbox::enqueue_for_machine(
+            redis.as_ref(),
+            &mut **tx,
+            &self.state.settings().runner,
+            dev_machine_id,
+            message,
+        )
+        .await
+    }
+
+    async fn active_runner_sessions(
+        &self,
+        runner_id: Uuid,
+    ) -> Result<Vec<DbRunnerSession>, SessionOutboxError> {
+        let mut guard = self.tx.lock().await;
+        let tx: &mut sqlx::Transaction<'_, sqlx::Postgres> = &mut guard;
+        pubsub_kernel::active_runner_sessions(&TxConn::new(tx), runner_id)
+            .await
+            .map_err(|error| SessionOutboxError::Db(into_sqlx(error)))
+    }
+
+    async fn revoke_runner_session(
+        &self,
+        session_id: Uuid,
+        reason: &str,
+    ) -> Result<(), SessionOutboxError> {
+        let mut guard = self.tx.lock().await;
+        let tx: &mut sqlx::Transaction<'_, sqlx::Postgres> = &mut guard;
+        pidash_services::domain::tokens::revoke_runner_session(
+            &pidash_db::orm_tx::TxConn::new(tx),
+            session_id,
+            now_micros(),
+            reason,
+        )
+        .await
+        .map_err(SessionOutboxError::Db)?;
+        Ok(())
+    }
+
+    async fn clear_session_marker(&self, session_id: Uuid) -> Result<(), SessionOutboxError> {
+        let redis = client_from_settings(self.state.settings());
+        session_outbox::clear_session_marker(redis.as_ref(), &session_id.to_string()).await
+    }
+
+    async fn publish_session_eviction(
+        &self,
+        runner_id: Uuid,
+        old_session_id: Uuid,
+        new_session_id: &str,
+    ) -> Result<(), SessionOutboxError> {
+        let redis = client_from_settings(self.state.settings());
+        let runner_id = runner_id.to_string();
+        let old = old_session_id.to_string();
+        session_outbox::publish_session_eviction(
+            redis.as_ref(),
+            &runner_id,
+            Some(&old),
+            new_session_id,
+        )
+        .await
+    }
+}
+
+/// Run one bare `Runner.revoke()` on the caller's tx and collect its
+/// post-commit bundle, logging the driver's warnings (the executor
+/// owns them per `revoke.rs`). The caller commits its tx, then fires
+/// the bundle with [`fire_bundle`].
+async fn revoke_runner_on_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    pool: &PgPool,
+    state: &AppState,
+    runner_id: Uuid,
+    revoked_at: Option<DateTime<Utc>>,
+    reason: &str,
+    now: DateTime<Utc>,
+) -> Result<RevokeBundle, ()> {
+    let collected = revoke(
+        &revoke_ctx(pool, state),
+        tx,
+        RevokeScope::Runner {
+            runner_id,
+            revoked_at,
+            reason,
+            now,
+        },
+    )
+    .await
+    .map_err(|_| ())?;
+    for warning in &collected.warnings {
+        tracing::warn!("{warning}");
+    }
+    Ok(collected.bundle)
+}
+
+/// The revoke runtime facts: the pool, the api-owned Redis client,
+/// and runner settings. Bare revokes register no frames (the machine
+/// flow sends its own outside the driver), so the effect placement
+/// never applies.
+fn revoke_ctx(pool: &PgPool, state: &AppState) -> RevokeCtx {
+    RevokeCtx {
+        pool: pool.clone(),
+        redis: client_from_settings(state.settings()),
+        runner: state.settings().runner.clone(),
+        atomic_effects: false,
+    }
+}
+
+/// Fire one revoke's post-commit bundle (`models.py:597-685`): publish
+/// effects isolated each, handoffs isolated each (swallowed after the
+/// failure log), drains and cleanup propagating (the source registers
+/// them bare, and a raise stops Django's `on_commit` chain).
+/// `terminal_created_by` is the ambient crum request user for the
+/// inline terminal effects (runner owner on daemon paths, web
+/// requester on web paths).
+async fn fire_bundle(
+    pool: &PgPool,
+    state: &AppState,
+    bundle: RevokeBundle,
+    terminal_created_by: Option<Uuid>,
+) -> Result<(), ()> {
+    let ports = crate::runner_runs::LivePorts::new(pool.clone(), state);
+    fire_revoke_bundle(
+        &revoke_ctx(pool, state),
+        bundle,
+        |run_id| {
+            pidash_jobs::orchestration::drain_publish_effects(
+                vec![LifecycleEffect::PublishTerminalEffects { run_id }],
+                |one| {
+                    crate::runner_runs::run_endpoints::drain_lifecycle_effects(
+                        pool,
+                        &ports,
+                        vec![one],
+                        terminal_created_by,
+                    )
+                },
+            )
+        },
+        |run_id| {
+            pidash_jobs::orchestration::drain_publish_effects(
+                vec![LifecycleEffect::ApplyTerminalEffectsInline { run_id }],
+                |one| {
+                    crate::runner_runs::run_endpoints::drain_lifecycle_effects(
+                        pool,
+                        &ports,
+                        vec![one],
+                        terminal_created_by,
+                    )
+                },
+            )
+        },
+        |runner_id, run_id| async move {
+            if crate::project_move_handoff::complete_project_move_handoff(
+                pool,
+                state,
+                run_id,
+                terminal_created_by,
+            )
+            .await
+            .is_err()
+            {
+                tracing::warn!(
+                    "{}",
+                    revoke_kernel::handoff_failure_log(&runner_id, &run_id)
+                );
+            }
+        },
+        // §13.1: the ticking-issue bounce for a lost runner (Django
+        // `_bounce_issue_no_eligible_runner` on the revoke commit).
+        // Actor nil: the bounce is system-driven (Django `actor=None`
+        // → `get_agent_system_user()`); presence gating is inert for
+        // runner reasons.
+        |issue_id, runner_name, reason, triggered_by| async move {
+            let name = runner_name.unwrap_or_else(|| "the dedicated runner".to_owned());
+            let now = Utc::now();
+            match crate::v1_work_items::handlers_actions::dispatch_deps_for_ids(
+                state,
+                pool,
+                Uuid::nil(),
+                issue_id,
+                now.timestamp(),
+            )
+            .await
+            {
+                Ok((deps, _)) => {
+                    if let Err(error) = pidash_jobs::orchestration::bounce_issue_no_eligible_runner(
+                        pool,
+                        deps,
+                        now,
+                        0.0,
+                        issue_id,
+                        &triggered_by,
+                        &reason,
+                        &name,
+                    )
+                    .await
+                    {
+                        tracing::error!(%error, %issue_id, "dedicated-runner bounce failed");
+                    }
+                }
+                Err(_) => {
+                    tracing::error!(%issue_id, "dedicated-runner bounce: dispatch deps failed");
+                }
+            }
+        },
+        // §13.1 `fall_back` step 2: recreate the cancelled run in
+        // the default pod (Django `_create_and_dispatch_run`).
+        |issue_id, _pod_id, trigger, creator| async move {
+            let now = Utc::now();
+            match crate::v1_work_items::handlers_actions::dispatch_deps_for_ids(
+                state,
+                pool,
+                creator.unwrap_or(Uuid::nil()),
+                issue_id,
+                now.timestamp(),
+            )
+            .await
+            {
+                Ok((deps, matcher)) => {
+                    if let Err(error) = pidash_jobs::orchestration::dispatch_continuation_run(
+                        pool, deps, &matcher, now, 0.0, issue_id, &trigger, creator, false, false,
+                    )
+                    .await
+                    {
+                        tracing::error!(%error, %issue_id, "dedicated-runner recreate failed");
+                    }
+                }
+                Err(_) => {
+                    tracing::error!(%issue_id, "dedicated-runner recreate: dispatch deps failed");
+                }
+            }
+        },
+    )
+    .await
+    .map_err(|_| ())
+}
+
+/// The self-revoke row delete (`enrollment.py:533`):
+/// `Runner.objects.filter(pk).delete()` runs Django's collector over the
+/// one row — same sequence as `delete_collected_runner_rows` (restated
+/// order, shared builders). Like `QuerySet.delete()`, the whole cascade
+/// runs inside one transaction: `Collector.delete` wraps every
+/// cascade/SET_NULL/delete statement in `transaction.atomic(using,
+/// savepoint=False)` (`django/db/models/deletion.py`), so a failure on any
+/// statement rolls the lot back. Running the statements autocommit on the
+/// pool left partial deletes committed when a later one failed.
+async fn delete_collected_runner(pool: &PgPool, runner_id: Uuid) -> Result<(), ()> {
+    let mut tx = pool.begin().await.map_err(|_| ())?;
+    let runners = [runner_id];
+    {
+        let conn = TxConn::new(&mut tx);
+        if !delete_kernel::runner_exists(&conn, runner_id)
+            .await
+            .map_err(|_| ())?
+        {
+            return Ok(());
+        }
+        let chat_ids = delete_kernel::chat_ids_for_runners(&conn, &runners)
+            .await
+            .map_err(|_| ())?;
+        let mut message_ids: Vec<Uuid> = Vec::new();
+        if !chat_ids.is_empty() {
+            message_ids = delete_kernel::message_ids_for_chats(&conn, &chat_ids)
+                .await
+                .map_err(|_| ())?;
+            delete_kernel::delete_chat_events(&conn, &chat_ids)
+                .await
+                .map_err(|_| ())?;
+            delete_kernel::delete_chat_approvals(&conn, &chat_ids)
+                .await
+                .map_err(|_| ())?;
+            delete_kernel::delete_chat_dedupes(&conn, &chat_ids)
+                .await
+                .map_err(|_| ())?;
+        }
+        pidash_services::domain::tokens::delete_runner_sessions_for_runners(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            &runners,
+        )
+        .await
+        .map_err(|_| ())?;
+        let conn = TxConn::new(&mut tx);
+        delete_kernel::delete_force_refresh(&conn, &runners)
+            .await
+            .map_err(|_| ())?;
+        delete_kernel::delete_live_state(&conn, &runners)
+            .await
+            .map_err(|_| ())?;
+        delete_kernel::null_run_runners(&conn, &runners)
+            .await
+            .map_err(|_| ())?;
+        delete_kernel::null_run_pins(&conn, &runners)
+            .await
+            .map_err(|_| ())?;
+        if !message_ids.is_empty() {
+            delete_kernel::null_event_messages(&conn, &message_ids)
+                .await
+                .map_err(|_| ())?;
+            delete_kernel::delete_chat_messages(&conn, &message_ids)
+                .await
+                .map_err(|_| ())?;
+        }
+        if !chat_ids.is_empty() {
+            delete_kernel::delete_chat_sessions(&conn, &chat_ids)
+                .await
+                .map_err(|_| ())?;
+        }
+        delete_kernel::delete_runner_rows(&conn, &runners)
+            .await
+            .map_err(|_| ())?;
+    }
+    if tx.commit().await.is_err() {
+        return Err(());
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Executors: the `drain_pod_by_id` loop (the `drain.rs` recipe, verbatim)
+// ---------------------------------------------------------------------------
+
+/// `drain_pod_by_id` (`matcher.py:242-251`): pod lookup (miss ⇒
+/// `Ok`, no tx), else the drain loop. Thin caller of the public
+/// executor (OVL-06); the local copy is deleted. The executor's
+/// sends-then-log order also fixes PIDASHCONV-1561 (this twin logged
+/// first).
+pub(crate) async fn drain_pod_by_id(
+    pool: &PgPool,
+    state: &AppState,
+    pod_id: Uuid,
+) -> Result<(), ()> {
+    let redis = client_from_settings(state.settings());
+    pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+        pool,
+        redis.as_ref(),
+        &state.settings().runner,
+        pod_id,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|_| ())
+}
+
+// ---------------------------------------------------------------------------
+// Routes (merged at the F-10 seam in `overlay.rs`)
+// ---------------------------------------------------------------------------
+
+/// Attach the proxy passthrough for a path's unowned methods (the
+/// `manage.rs`/`enroll.rs` `owned` position): unowned methods stay on
+/// the Python plane.
+fn owned(
+    handler: axum::routing::MethodRouter<AppState>,
+    unowned: &[&str],
+) -> axum::routing::MethodRouter<AppState> {
+    let mut router = handler;
+    for method in unowned {
+        router = match *method {
+            "POST" => router.post(crate::edge::proxy),
+            "PUT" => router.put(crate::edge::proxy),
+            "PATCH" => router.patch(crate::edge::proxy),
+            "DELETE" => router.delete(crate::edge::proxy),
+            "OPTIONS" => router.options(crate::edge::proxy),
+            _ => router.get(crate::edge::proxy),
+        };
+    }
+    router
+}
+
+/// Register the daemon teardown routes (`runner/urls.py`:
+/// `runners/<uuid>/refresh/`, `runners/<uuid>/`). Merged under
+/// `RouteGroup::Runner` at the F-10 seam; sibling handler issues extend
+/// the merge, keeping both sides.
+pub fn daemon_routes() -> Router<AppState> {
+    use axum::routing::{delete, post};
+    const POST_ONLY: &[&str] = &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"];
+    const DELETE_ONLY: &[&str] = &["GET", "POST", "PUT", "PATCH", "OPTIONS"];
+    Router::new()
+        .route(
+            "/api/v1/runner/runners/{runner_id}/refresh/",
+            owned(post(runner_refresh), POST_ONLY),
+        )
+        .route(
+            "/api/v1/runner/runners/{runner_id}/",
+            owned(delete(runner_self_revoke), DELETE_ONLY),
+        )
+}
+
+/// Register the web teardown routes (`runner/web_urls.py`:
+/// `dev-machines/<uuid>/revoke|rotate/`, `runners/<uuid>/revoke/`).
+/// Merged under `RouteGroup::RunnerWeb` at the F-10 seam.
+pub fn web_routes() -> Router<AppState> {
+    use axum::routing::post;
+    const POST_ONLY: &[&str] = &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"];
+    Router::new()
+        .route(
+            "/api/runners/dev-machines/{machine_id}/engine-sign-out/",
+            owned(post(dev_machine_engine_sign_out), POST_ONLY),
+        )
+        .route(
+            "/api/runners/dev-machines/{machine_id}/revoke/",
+            owned(post(dev_machine_revoke), POST_ONLY),
+        )
+        .route(
+            "/api/runners/dev-machines/{machine_id}/rotate/",
+            owned(post(dev_machine_rotate), POST_ONLY),
+        )
+        .route(
+            "/api/runners/{runner_id}/revoke/",
+            owned(post(runner_revoke), POST_ONLY),
+        )
+        .route(
+            "/api/runners/{runner_id}/pause/",
+            owned(post(runner_pause), POST_ONLY),
+        )
+        .route(
+            "/api/runners/{runner_id}/resume/",
+            owned(post(runner_resume), POST_ONLY),
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runner_enroll::manage::{FORBIDDEN_BODY, NOT_FOUND_BODY, WORKSPACE_REQUIRED_BODY};
+
+    // -- UUID path gating (PIDASHCONV-798) --
+
+    #[test]
+    fn strict_uuid_pins_django_converter() {
+        let lower = "12345678-1234-abcd-ef01-234567890abc";
+        assert_eq!(
+            strict_uuid(lower)
+                .expect("lowercase")
+                .hyphenated()
+                .to_string(),
+            lower
+        );
+        // Django's `<uuid:>` converter 404s every one of these
+        // (several of which `Uuid::parse_str` would accept), so the
+        // gate rejects them.
+        for rejected in [
+            lower.to_uppercase(),
+            "not-a-uuid".to_owned(),
+            "123".to_owned(),
+            format!("{{{lower}}}"),
+            lower.replace('-', ""),
+            format!("urn:uuid:{lower}"),
+            format!("{lower}/"),
+        ] {
+            assert!(strict_uuid(&rejected).is_none(), "{rejected}");
+        }
+    }
+    use pidash_db::runner_enroll::columns::revoke_reasons::KNOWN_REVOKE_REASONS;
+    use pidash_services::runner_enroll::queries::{enroll_reads, manage_reads};
+    use pidash_services::runner_enroll::revoke::check_revoke_reason;
+    use pidash_services::runner_enroll::tokens::{mint_refresh_token, REFRESH_TOKEN_PREFIX};
+
+    const FIXTURE_ENDPOINTS: &str =
+        include_str!("../../../../fixtures/runner_enroll/handlers/endpoints.golden.json");
+    const FIXTURE_TOKENS: &str =
+        include_str!("../../../../fixtures/runner_enroll/tokens/tokens.golden.json");
+    const FIXTURE_WIRE: &str =
+        include_str!("../../../../fixtures/runner_enroll/external/wire_pins.json");
+    const FIXTURE_ENROLL_REFRESH_SQL: &str =
+        include_str!("../../../../fixtures/runner_enroll/queries/enroll_refresh.sql");
+
+    fn daemon_fixture(key: &str) -> serde_json::Value {
+        let fixture: serde_json::Value = serde_json::from_str(FIXTURE_ENDPOINTS).unwrap();
+        fixture["daemon"][key].clone()
+    }
+
+    fn web_fixture(key: &str) -> serde_json::Value {
+        let fixture: serde_json::Value = serde_json::from_str(FIXTURE_ENDPOINTS).unwrap();
+        fixture["web"][key].clone()
+    }
+
+    /// Every recorded `errors[]` entry must equal one `(body, status)`
+    /// pair byte-for-byte (the `to_string` pins key order too), and
+    /// every pair must be hit — both directions, no orphans.
+    fn assert_errors_match(entry: &serde_json::Value, pairs: &[(&str, u16)]) {
+        let errors = entry["errors"].as_array().unwrap();
+        assert!(!errors.is_empty(), "fixture records no errors");
+        assert_eq!(
+            errors.len(),
+            pairs.len(),
+            "fixture error count drifted: {} vs {} pairs",
+            errors.len(),
+            pairs.len()
+        );
+        let mut hits = vec![false; pairs.len()];
+        for error in errors {
+            let rendered = serde_json::to_string(&error["body"]).unwrap();
+            let status = error["status"].as_u64().unwrap() as u16;
+            let slot = pairs
+                .iter()
+                .position(|(body, code)| *body == rendered && *code == status)
+                .unwrap_or_else(|| {
+                    panic!("fixture error {status} {rendered} matches no const pair")
+                });
+            hits[slot] = true;
+        }
+        assert!(hits.iter().all(|hit| *hit), "a const pair is unhit");
+    }
+
+    fn normalize_sql(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    // ---- D13-F7: endpoint bodies -------------------------------------
+
+    #[test]
+    fn f7_refresh_errors_match_consts() {
+        assert_errors_match(
+            &daemon_fixture("POST_runners_refresh"),
+            &[
+                (MISSING_REFRESH_TOKEN_BODY, 401),
+                (INVALID_REFRESH_TOKEN_BODY, 401),
+                (RUNNER_REVOKED_BODY, 401),
+                (DEV_MACHINE_REVOKED_BODY, 401),
+                (REFRESH_TOKEN_REPLAYED_BODY, 401),
+                (MEMBERSHIP_REVOKED_BODY, 401),
+            ],
+        );
+    }
+
+    #[test]
+    fn f7_self_revoke_errors_match_consts() {
+        let entry = daemon_fixture("DELETE_runners_rid");
+        let errors = entry["errors"].as_array().unwrap();
+        assert_eq!(errors.len(), 2);
+        // The 403 is view-owned (this module); the 401 `detail` is
+        // auth-class-owned (589, pinned there) — presence only here.
+        assert_errors_match(
+            &serde_json::json!({"errors": [errors[0].clone()]}),
+            &[(RUNNER_ID_MISMATCH_BODY, 403)],
+        );
+        assert_eq!(errors[1]["status"], 401);
+        assert!(errors[1]["body"].get("detail").is_some());
+    }
+
+    #[test]
+    fn f7_web_errors_match_consts() {
+        assert_errors_match(
+            &web_fixture("POST_dev_machines_revoke"),
+            &[
+                (WORKSPACE_REQUIRED_BODY, 400),
+                (FORBIDDEN_BODY, 403),
+                (NOT_FOUND_BODY, 404),
+            ],
+        );
+        assert_errors_match(
+            &web_fixture("POST_dev_machines_rotate"),
+            &[
+                (WORKSPACE_REQUIRED_BODY, 400),
+                (FORBIDDEN_BODY, 403),
+                (NOT_FOUND_BODY, 404),
+                (DEV_MACHINE_REVOKED_BODY, 409),
+            ],
+        );
+        assert_errors_match(
+            &web_fixture("POST_runners_revoke"),
+            &[(NOT_FOUND_BODY, 404), (FORBIDDEN_BODY, 403)],
+        );
+    }
+
+    #[test]
+    fn f7_refresh_ok_key_order() {
+        // Fixture `ok` prose order: refresh_token, access_token,
+        // access_token_expires_at, refresh_token_generation.
+        assert_eq!(
+            refresh_ok_body("rt_new", "jwt.at", "2026-10-04T00:00:00Z", 7),
+            r#"{"refresh_token":"rt_new","access_token":"jwt.at","access_token_expires_at":"2026-10-04T00:00:00Z","refresh_token_generation":7}"#
+        );
+    }
+
+    #[test]
+    fn f7_revoke_reasons_are_known() {
+        for reason in [
+            REVOKE_REASON_REFRESH_REPLAYED,
+            REVOKE_REASON_MEMBERSHIP,
+            REVOKE_REASON_SELF,
+            REVOKE_REASON_DEV_MACHINE,
+            REVOKE_REASON_MANUAL,
+        ] {
+            assert!(
+                KNOWN_REVOKE_REASONS.contains(&reason),
+                "{reason} must stay in the canonical set"
+            );
+        }
+    }
+
+    #[test]
+    fn f7_frame_reasons_match_fixture_prose() {
+        let delete_ok = daemon_fixture("DELETE_runners_rid")["ok"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(
+            delete_ok.contains(&format!("reason:{FRAME_REASON_SELF}")),
+            "self-revoke frame reason drifted: {delete_ok}"
+        );
+        let revoke_ok = web_fixture("POST_runners_revoke")["ok"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(
+            revoke_ok.contains(FRAME_REASON_RUNNER_REVOKE),
+            "runner-revoke frame reason drifted: {revoke_ok}"
+        );
+        // Machine reasons are prose-absent in F7; pinned against
+        // `runners.py:203,243` (verified this run).
+        assert_eq!(FRAME_REASON_DEV_MACHINE, "dev machine revoked");
+        assert_eq!(FRAME_REASON_ROTATE, "machine token rotated");
+    }
+
+    // ---- D13-F3: rotation mints --------------------------------------
+
+    #[test]
+    fn f3_hash_vectors_recompute() {
+        use hmac::{Hmac, Mac};
+        use sha2::{Digest, Sha256};
+
+        let fixture: serde_json::Value = serde_json::from_str(FIXTURE_TOKENS).unwrap();
+        let secret = fixture["fixed_secret_key"].as_str().unwrap();
+        assert_eq!(
+            REFRESH_TOKEN_PREFIX,
+            fixture["prefixes_ttls"]["REFRESH_TOKEN_PREFIX"]
+                .as_str()
+                .unwrap()
+        );
+        let mut pepper_hasher = Sha256::new();
+        pepper_hasher.update(format!("runner/pepper/{secret}"));
+        let pepper = pepper_hasher.finalize();
+        for vector in fixture["hash_vectors"].as_array().unwrap() {
+            let raw = vector["raw"].as_str().unwrap();
+            let mut raw_hasher = Sha256::new();
+            raw_hasher.update(raw.as_bytes());
+            let fingerprint = hex(&raw_hasher.finalize())[..12].to_owned();
+            assert_eq!(fingerprint, vector["fingerprint"].as_str().unwrap());
+            let mut mac = Hmac::<Sha256>::new_from_slice(&pepper).unwrap();
+            mac.update(raw.as_bytes());
+            assert_eq!(
+                hex(&mac.finalize().into_bytes()),
+                vector["hash"].as_str().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn f3_minted_refresh_token_shape() {
+        // `minted_shapes.mint_refresh_token`: `rt_` + urlsafe(32);
+        // hash + fingerprint recompute under the F3 formulas.
+        use hmac::{Hmac, Mac};
+        use sha2::{Digest, Sha256};
+
+        let secret = "d13-fixture-secret-key";
+        let minted = mint_refresh_token(secret);
+        assert!(minted.raw.starts_with(REFRESH_TOKEN_PREFIX));
+        assert_eq!(minted.raw.len(), REFRESH_TOKEN_PREFIX.len() + 43);
+        let mut raw_hasher = Sha256::new();
+        raw_hasher.update(minted.raw.as_bytes());
+        assert_eq!(hex(&raw_hasher.finalize())[..12], minted.fingerprint);
+        let mut pepper_hasher = Sha256::new();
+        pepper_hasher.update(format!("runner/pepper/{secret}"));
+        let pepper = pepper_hasher.finalize();
+        let mut mac = Hmac::<Sha256>::new_from_slice(&pepper).unwrap();
+        mac.update(minted.raw.as_bytes());
+        assert_eq!(hex(&mac.finalize().into_bytes()), minted.hashed);
+    }
+
+    // ---- Operator pause/resume SQL + bodies (`09738d222`) -------------------
+
+    fn pg_update<E: EntityTrait>(update: sea_orm::UpdateMany<E>) -> String {
+        update.build(sea_orm::DbBackend::Postgres).to_string()
+    }
+
+    fn pg_selector<S: sea_orm::SelectorTrait>(selector: sea_orm::Selector<S>) -> String {
+        selector
+            .into_statement(sea_orm::DbBackend::Postgres)
+            .to_string()
+    }
+
+    #[test]
+    fn pause_resume_statements_match_django_saves() {
+        let now: DateTime<Utc> = "2026-01-02T03:04:05Z".parse().expect("ts");
+        let user = Uuid::new_v4();
+        // SET order follows `update_fields`, not the model.
+        assert_eq!(
+            pg_update(pause_runner_statement(Uuid::nil(), user, now)),
+            format!(
+                "UPDATE \"runner\" SET \"paused_at\" = '2026-01-02 03:04:05.000000 +00:00', \
+                 \"paused_by_id\" = '{user}', \"updated_at\" = '2026-01-02 03:04:05.000000 +00:00' \
+                 WHERE \"runner\".\"id\" = '00000000-0000-0000-0000-000000000000'"
+            )
+        );
+        assert_eq!(
+            pg_update(resume_runner_statement(Uuid::nil(), now)),
+            "UPDATE \"runner\" SET \"paused_at\" = NULL, \"paused_by_id\" = NULL, \
+             \"updated_at\" = '2026-01-02 03:04:05.000000 +00:00' \
+             WHERE \"runner\".\"id\" = '00000000-0000-0000-0000-000000000000'"
+        );
+    }
+
+    #[test]
+    fn in_flight_select_lists_busy_statuses_in_order() {
+        let want: Vec<String> = BUSY_STATUSES
+            .iter()
+            .map(|status| format!("'{}'", status.value()))
+            .collect();
+        let sql = pg_selector(in_flight_runs_select(Uuid::nil()));
+        assert!(sql.starts_with(
+            "SELECT \"agent_run\".\"id\", \"agent_run\".\"status\" FROM \"agent_run\" WHERE"
+        ));
+        assert!(sql.contains(&format!("IN ({})", want.join(", "))), "{sql}");
+        assert!(
+            sql.contains("\"agent_run\".\"runner_id\" = '00000000-0000-0000-0000-000000000000'"),
+            "{sql}"
+        );
+        assert!(
+            sql.ends_with("ORDER BY \"agent_run\".\"created_at\" DESC"),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn paused_pin_statements_shape() {
+        let ids = pg_selector(paused_runner_pin_ids_select(Uuid::nil()));
+        assert!(ids.starts_with("SELECT \"agent_run\".\"id\" FROM \"agent_run\" WHERE"));
+        assert!(ids.contains("\"agent_run\".\"executor_kind\" = 'local_runner'"));
+        assert!(ids.contains("\"agent_run\".\"pinned_runner_id\" IS NOT NULL"));
+        assert!(ids.contains("\"agent_run\".\"status\" = 'queued'"));
+        assert!(ids.contains("\"agent_run\".\"pin_kind\" <> 'dedicated'"));
+        assert!(ids.ends_with("ORDER BY \"agent_run\".\"created_at\" DESC"));
+        assert!(!ids.contains("LIMIT"));
+        let lock = pg_selector(paused_runner_pin_lock_select(Uuid::nil()));
+        assert!(
+            lock.starts_with(
+                "SELECT \"agent_run\".\"pod_id\", \"agent_run\".\"parent_run_id\", \
+                 \"T3\".\"thread_id\" AS \"parent_thread_id\" FROM \"agent_run\" \
+                 INNER JOIN \"runner\" ON \"agent_run\".\"pinned_runner_id\" = \"runner\".\"id\" \
+                 LEFT JOIN \"agent_run\" AS \"T3\" ON \"agent_run\".\"parent_run_id\" = \"T3\".\"id\""
+            ),
+            "{lock}"
+        );
+        assert!(lock.contains("\"runner\".\"paused_at\" IS NOT NULL"));
+        assert!(lock.contains("\"agent_run\".\"pin_kind\" <> 'dedicated'"));
+        assert!(
+            lock.ends_with(
+                "ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1 FOR UPDATE OF \"agent_run\""
+            ),
+            "{lock}"
+        );
+        assert_eq!(
+            pg_update(clear_parent_thread_statement(Uuid::nil())),
+            "UPDATE \"agent_run\" SET \"thread_id\" = '' WHERE \"agent_run\".\"id\" = \
+             '00000000-0000-0000-0000-000000000000'"
+        );
+        assert_eq!(
+            pg_update(clear_pin_statement(Uuid::nil())),
+            "UPDATE \"agent_run\" SET \"pinned_runner_id\" = NULL WHERE \"agent_run\".\"id\" = \
+             '00000000-0000-0000-0000-000000000000'"
+        );
+    }
+
+    #[test]
+    fn pause_body_appends_in_flight_runs_last() {
+        assert_eq!(
+            pause_body(r#"{"a":1}"#, r#"[{"id":"x","status":"running"}]"#),
+            r#"{"a":1,"in_flight_runs":[{"id":"x","status":"running"}]}"#
+        );
+        assert_eq!(
+            pause_body(r#"{"a":1}"#, "[]"),
+            r#"{"a":1,"in_flight_runs":[]}"#
+        );
+    }
+
+    #[test]
+    fn revoked_conflict_body_shape() {
+        assert_eq!(
+            RUNNER_REVOKED_CONFLICT_BODY,
+            r#"{"error":"runner is revoked","code":"runner_revoked"}"#
+        );
+    }
+
+    // ---- D13-F5: refresh/revoke SQL ----------------------------------
+
+    #[test]
+    fn f5_refresh_path_sql_cores() {
+        // E3 lock read: the row predicate + FOR UPDATE tail.
+        let locked = normalize_sql(&enroll_reads::refresh_locked_read_sql());
+        assert!(locked.contains(r#"WHERE "runner"."id" = $1"#), "{locked}");
+        assert!(locked.contains("FOR UPDATE"), "{locked}");
+        assert!(
+            normalize_sql(FIXTURE_ENROLL_REFRESH_SQL).contains(r#"WHERE r."id" = $1 FOR UPDATE"#),
+            "E3 fixture drifted"
+        );
+        // E4 dev-machine revoked probe: separate EXISTS, literal 1.
+        let probe = normalize_sql(&enroll_reads::dev_machine_revoked_probe_sql());
+        assert!(probe.contains(r#"FROM "dev_machine""#), "{probe}");
+        assert!(probe.contains(r#""revoked_at" IS NOT NULL"#), "{probe}");
+        // E5 rotation: `save(update_fields=[previous, hash,
+        // fingerprint, generation])` renders client-side binds (Django
+        // never emits the fixture's `generation + 1` / column-ref
+        // shorthand — the E5 text abbreviates the ORM call, and the
+        // call site binds old-hash-then-old-plus-1 to match).
+        // updated_at untouched; force-refresh row cleared in-tx.
+        let rotate = normalize_sql(&enroll_reads::refresh_rotate_sql());
+        assert!(
+            rotate.contains(
+                r#"SET "refresh_token_hash" = $1, "refresh_token_fingerprint" = $2, "refresh_token_generation" = $3, "previous_refresh_token_hash" = $4 WHERE "runner"."id" = $5"#
+            ),
+            "{rotate}"
+        );
+        assert!(
+            !rotate.contains("updated_at"),
+            "E5 must not bump updated_at"
+        );
+        let clear = normalize_sql(&enroll_reads::force_refresh_clear_sql());
+        assert!(
+            clear.contains(
+                r#"DELETE FROM "runner_force_refresh" WHERE "runner_force_refresh"."runner_id" = $1"#
+            ),
+            "{clear}"
+        );
+    }
+
+    #[test]
+    fn f5_machine_tx_sql_cores() {
+        // M6 cores, executed in-tx by the machine endpoints.
+        let locked = normalize_sql(&manage_reads::machine_locked_read_sql());
+        assert!(locked.contains(r#"FROM "dev_machine""#), "{locked}");
+        assert!(locked.contains("FOR UPDATE"), "{locked}");
+        let revoke = normalize_sql(&manage_reads::machine_revoke_sql());
+        assert!(revoke.contains(r#"SET "revoked_at" = "#), "{revoke}");
+        // (The token-revoke core moved to
+        // `pidash_services::domain::tokens::revoke_tokens_for_dev_machine`,
+        // whose test carries the pin.)
+    }
+
+    // ---- D13-F6: revoke cascade --------------------------------------
+
+    #[test]
+    fn f6_reason_handling() {
+        // Known + short: as-is, silent.
+        let (stored, warnings) = check_revoke_reason(REVOKE_REASON_SELF);
+        assert_eq!(stored, REVOKE_REASON_SELF);
+        assert!(warnings.is_empty());
+        // Over 32 code points: truncate + warn (plus the
+        // unknown-reason warning — the long form is not canonical).
+        let long = format!("{}_with_a_long_suffix_past_32_chars", REVOKE_REASON_SELF);
+        assert!(long.chars().count() > 32);
+        let (stored, warnings) = check_revoke_reason(&long);
+        assert_eq!(stored.chars().count(), 32);
+        assert_eq!(warnings.len(), 2);
+        // Unknown: warn + proceed (no raise).
+        let (stored, warnings) = check_revoke_reason("not_a_real_reason");
+        assert_eq!(stored, "not_a_real_reason");
+        assert_eq!(warnings.len(), 1);
+    }
+
+    // ---- D13-F8: pubsub wire pins ------------------------------------
+
+    #[test]
+    fn f8_revoke_frame_bytes() {
+        let wire: serde_json::Value = serde_json::from_str(FIXTURE_WIRE).unwrap();
+        let frame_note = wire["pubsub_verbs"]["send_runner_revoke"]["frame"]
+            .as_str()
+            .unwrap();
+        assert!(frame_note.contains("'type': 'revoke'"), "{frame_note}");
+        assert!(frame_note.contains("NO runner_id"), "{frame_note}");
+        // The self-revoke `send_to_runner` input this module builds:
+        // exactly {type, reason}, insertion order, no runner_id.
+        let rendered = serde_json::Value::Object(revoke_frame(FRAME_REASON_SELF)).to_string();
+        assert_eq!(rendered, r#"{"type":"revoke","reason":"self_revoked"}"#);
+        // The `send_runner_revoke` call-site reasons are all distinct,
+        // non-empty, and prose-verified where the fixtures pin them.
+        let reasons = [
+            FRAME_REASON_SELF,
+            FRAME_REASON_DEV_MACHINE,
+            FRAME_REASON_ROTATE,
+            FRAME_REASON_RUNNER_REVOKE,
+        ];
+        for reason in reasons {
+            assert!(!reason.is_empty());
+        }
+        let mut deduped = reasons.to_vec();
+        deduped.sort_unstable();
+        deduped.dedup();
+        assert_eq!(deduped.len(), reasons.len());
+    }
+
+    /// Pause/resume + pin-release against temp copies on one transaction
+    /// (`TxConn`): the pause stamp, the in-flight body read, the pin
+    /// ids + re-lock + clears, and the resume stamp.
+    #[tokio::test]
+    async fn live_pause_resume_on_temp_tables() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect");
+        let mut tx = pool.begin().await.expect("begin");
+        for table in ["runner", "agent_run"] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} ON COMMIT DROP AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&mut *tx)
+            .await
+            .expect("temp table");
+        }
+        let (runner_id, pod_id, user_id, ws, creator, busy_id, pin_id, parent_id) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let now = chrono::Utc::now();
+        sqlx::query(&format!(
+            "INSERT INTO runner (id, name, capabilities, status, os, arch, runner_version, protocol_version, created_at, updated_at, owner_id, workspace_id, pod_id, host_label, refresh_token_hash, refresh_token_fingerprint, refresh_token_generation, previous_refresh_token_hash, access_token_signing_key_version, enrollment_token_hash, enrollment_token_fingerprint, revoked_reason, visibility, dev_metadata, provisioning) \
+             VALUES ('{runner_id}', 'r', '{{}}', 'online', '', '', '', 4, now(), now(), '{user_id}', '{ws}', '{pod_id}', '', '', '', 0, '', 1, '', '', '', 0, '{{}}', 'manual')"
+        ))
+        .execute(&mut *tx).await.expect("seed runner");
+        sqlx::query(&format!(
+            "INSERT INTO agent_run (id, status, prompt, run_config, required_capabilities, thread_id, created_at, assigned_at, workspace_id, runner_id, pod_id, created_by_id, llm_model, trigger, executor_kind, dispatch_attempts, cancel_reason, tool_plan, phase_kind, agent_metadata, usage, error_details) \
+             VALUES ('{busy_id}', 'running', '', '{{}}', '{{}}', '', now(), now(), '{ws}', '{runner_id}', '{pod_id}', '{creator}', '', 'manual', 'local_runner', 0, '', '{{}}', 'main', '{{}}', '{{}}', '{{}}')"
+        ))
+        .execute(&mut *tx).await.expect("seed busy run");
+        sqlx::query(&format!(
+            "INSERT INTO agent_run (id, status, prompt, run_config, required_capabilities, thread_id, created_at, assigned_at, workspace_id, pod_id, created_by_id, llm_model, trigger, executor_kind, dispatch_attempts, cancel_reason, tool_plan, phase_kind, agent_metadata, usage, error_details, parent_run_id) \
+             VALUES ('{parent_id}', 'completed', '', '{{}}', '{{}}', 'parent-thread', now(), NULL, '{ws}', '{pod_id}', '{creator}', '', 'manual', 'local_runner', 0, '', '{{}}', 'main', '{{}}', '{{}}', '{{}}', NULL)"
+        ))
+        .execute(&mut *tx).await.expect("seed parent run");
+        sqlx::query(&format!(
+            "INSERT INTO agent_run (id, status, prompt, run_config, required_capabilities, thread_id, created_at, assigned_at, workspace_id, pod_id, created_by_id, llm_model, trigger, executor_kind, dispatch_attempts, cancel_reason, tool_plan, phase_kind, agent_metadata, usage, error_details, pinned_runner_id, parent_run_id) \
+             VALUES ('{pin_id}', 'queued', '', '{{}}', '{{}}', '', now(), now(), '{ws}', '{pod_id}', '{creator}', '', 'manual', 'local_runner', 0, '', '{{}}', 'main', '{{}}', '{{}}', '{{}}', '{runner_id}', '{parent_id}')"
+        ))
+        .execute(&mut *tx).await.expect("seed pinned run");
+        {
+            let conn = TxConn::new(&mut tx);
+            // Pause stamps the runner and the in-flight read sees the busy run.
+            assert_eq!(
+                pause_runner_statement(runner_id, user_id, now)
+                    .exec(&conn)
+                    .await
+                    .expect("pause")
+                    .rows_affected,
+                1
+            );
+            let inflight: Vec<(Uuid, String)> = in_flight_runs_select(runner_id)
+                .all(&conn)
+                .await
+                .expect("in-flight");
+            assert_eq!(inflight, vec![(busy_id, "running".to_owned())]);
+            // Pin ids, re-lock with the parent's thread, then the clears.
+            let ids: Vec<Uuid> = paused_runner_pin_ids_select(runner_id)
+                .all(&conn)
+                .await
+                .expect("pin ids");
+            assert_eq!(ids, vec![pin_id]);
+            let row = paused_runner_pin_lock_select(pin_id)
+                .one(&conn)
+                .await
+                .expect("pin lock")
+                .expect("row");
+            assert_eq!(row.pod_id, pod_id);
+            assert_eq!(row.parent_run_id, Some(parent_id));
+            assert_eq!(row.parent_thread_id.as_deref(), Some("parent-thread"));
+            assert_eq!(
+                clear_parent_thread_statement(parent_id)
+                    .exec(&conn)
+                    .await
+                    .expect("clear parent")
+                    .rows_affected,
+                1
+            );
+            assert_eq!(
+                clear_pin_statement(pin_id)
+                    .exec(&conn)
+                    .await
+                    .expect("clear pin")
+                    .rows_affected,
+                1
+            );
+            assert!(paused_runner_pin_ids_select(runner_id)
+                .all(&conn)
+                .await
+                .expect("pin ids after")
+                .is_empty());
+            // Resume clears the stamps.
+            assert_eq!(
+                resume_runner_statement(runner_id, now)
+                    .exec(&conn)
+                    .await
+                    .expect("resume")
+                    .rows_affected,
+                1
+            );
+        }
+        tx.rollback().await.expect("rollback");
+    }
+}

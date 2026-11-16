@@ -1,0 +1,13 @@
+{
+ "all_new_after_now": true,
+ "created": 1,
+ "job_next_fire": "2026-09-29T03:00:09+00:00",
+ "method": "Ran _reconcile_targets() on pidash_loop_fx (LOOP_RECONCILE_EVERY_MINUTES=1); real next_fire_from_rrule.",
+ "new_target": {
+  "next_run_at": "2026-09-29T03:06:09+00:00",
+  "user_email": "fxloop-edge@e.com"
+ },
+ "second_run_creates": 0,
+ "source": "apps/api/pi_dash/bgtasks/loop.py:62-108 (throttle :69-71, next fire :75, edge anti-join :80-93, bulk_create ignore_conflicts :104)",
+ "targets_before": 3
+}

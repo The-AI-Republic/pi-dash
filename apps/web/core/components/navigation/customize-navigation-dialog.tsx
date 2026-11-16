@@ -24,8 +24,11 @@ type TCustomizeNavigationDialogProps = {
   onClose: () => void;
 };
 
+// "Your work" is deliberately absent: it lives in the user menu popup (see
+// user-menu-root.tsx) rather than the sidebar, so it can no longer be pinned or
+// reordered. Its stored preference key survives in TPersonalNavigationItemKey
+// but is simply never read.
 const PERSONAL_ITEMS: Array<{ key: TPersonalNavigationItemKey; labelTranslationKey: string }> = [
-  { key: "your_work", labelTranslationKey: "Your work" },
   { key: "drafts", labelTranslationKey: "Drafts" },
 ];
 

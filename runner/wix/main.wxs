@@ -56,6 +56,17 @@
     <?define PlatformProgramFilesFolder = "ProgramFilesFolder" ?>
 <?endif ?>
 
+<!--
+  Built-in engine (design .ai_design/built_engine_as_runner §4.5). Defines
+  EngineVersion, generated from runner/ENGINE_VERSION by
+  runner/scripts/stage_engine.py, which the release workflow runs before
+  `cargo dist build`; the same script stages the files the Engine components
+  below pick up. Building the MSI without staging first fails here, on
+  purpose: a release MSI must never ship without its engine.
+-->
+<?include ..\dist-engine\engine.wxi ?>
+<?define EngineStageDir = "$(sys.SOURCEFILEDIR)..\dist-engine\engine\$(var.EngineVersion)" ?>
+
 <Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
 
     <Product
@@ -152,6 +163,66 @@
                                 Source='$(sys.SOURCEFILEDIR)pidash-setup.cmd'
                                 KeyPath='yes'/>
                         </Component>
+
+                        <!--
+                          The built-in engine: bin\engine\<version>\, beside
+                          pidash.exe but not on PATH (only [Bin] is). The
+                          daemon finds it relative to pidash.exe
+                          (runner/src/engine/locate.rs). Codex is Apache-2.0,
+                          so its LICENSE and NOTICE ship with it.
+                        -->
+                        <Directory Id='EngineRoot' Name='engine'>
+                            <Directory Id='EngineVersionDir' Name='$(var.EngineVersion)'>
+                                <Component Id='engineBinary' Guid='*'>
+                                    <File
+                                        Id='engineExe'
+                                        Name='pidash-agent-engine.exe'
+                                        DiskId='1'
+                                        Source='$(var.EngineStageDir)\pidash-agent-engine.exe'
+                                        KeyPath='yes'/>
+                                </Component>
+                                <Component Id='engineCommandRunner' Guid='*'>
+                                    <File
+                                        Id='engineCommandRunnerExe'
+                                        Name='codex-command-runner.exe'
+                                        DiskId='1'
+                                        Source='$(var.EngineStageDir)\codex-command-runner.exe'
+                                        KeyPath='yes'/>
+                                </Component>
+                                <Component Id='engineSandboxSetup' Guid='*'>
+                                    <File
+                                        Id='engineSandboxSetupExe'
+                                        Name='codex-windows-sandbox-setup.exe'
+                                        DiskId='1'
+                                        Source='$(var.EngineStageDir)\codex-windows-sandbox-setup.exe'
+                                        KeyPath='yes'/>
+                                </Component>
+                                <Component Id='engineLicense' Guid='*'>
+                                    <File
+                                        Id='engineLicenseFile'
+                                        Name='LICENSE'
+                                        DiskId='1'
+                                        Source='$(var.EngineStageDir)\LICENSE'
+                                        KeyPath='yes'/>
+                                </Component>
+                                <Component Id='engineNotice' Guid='*'>
+                                    <File
+                                        Id='engineNoticeFile'
+                                        Name='NOTICE'
+                                        DiskId='1'
+                                        Source='$(var.EngineStageDir)\NOTICE'
+                                        KeyPath='yes'/>
+                                </Component>
+                                <Component Id='engineReadme' Guid='*'>
+                                    <File
+                                        Id='engineReadmeFile'
+                                        Name='README.txt'
+                                        DiskId='1'
+                                        Source='$(var.EngineStageDir)\README.txt'
+                                        KeyPath='yes'/>
+                                </Component>
+                            </Directory>
+                        </Directory>
                     </Directory>
                 </Directory>
             </Directory>
@@ -213,6 +284,12 @@
             <!--<ComponentRef Id='License'/>-->
 
             <ComponentRef Id='binary0'/>
+            <ComponentRef Id='engineBinary'/>
+            <ComponentRef Id='engineCommandRunner'/>
+            <ComponentRef Id='engineSandboxSetup'/>
+            <ComponentRef Id='engineLicense'/>
+            <ComponentRef Id='engineNotice'/>
+            <ComponentRef Id='engineReadme'/>
             <ComponentRef Id='setupCmd'/>
             <ComponentRef Id='StartMenuShortcut'/>
 

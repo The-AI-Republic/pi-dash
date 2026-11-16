@@ -29,6 +29,7 @@ from .integration import (
     GithubRepository,
     GithubRepositorySync,
     GitProviderAccount,
+    GitProviderInstallSession,
     GitRepository,
     GitRepositoryBinding,
     GitIssueSync,
@@ -109,3 +110,5 @@ from .issue_agent_ticker import IssueAgentTicker
 from .scheduler import Scheduler, SchedulerBinding, SchedulerSource
 
 from .loop import LoopJob, LoopTarget, LoopUserPreference, SkipReason
+
+from .worklog import IssueWorklog

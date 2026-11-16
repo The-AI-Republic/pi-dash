@@ -1,0 +1,133 @@
+{
+  "_trace": "orchestration/blockers.py:23-35 (edge rules); rows seeded via IssueRelation.objects.create",
+  "_method": "live rows on pidash_524_scratch; dependent D=FX3A seq of FX3A-1",
+  "dependent": "FX3A-1",
+  "edges": [
+    {
+      "label": "fwd-open",
+      "issue": "FX3A-1",
+      "related_issue": "FX3A-2",
+      "relation_type": "blocked_by",
+      "deleted": null,
+      "included": true,
+      "why": "open"
+    },
+    {
+      "label": "fwd-resolved",
+      "issue": "FX3A-1",
+      "related_issue": "FX3A-3",
+      "relation_type": "blocked_by",
+      "deleted": null,
+      "included": true,
+      "why": "resolved"
+    },
+    {
+      "label": "stored-reversed-open",
+      "issue": "FX3A-4",
+      "related_issue": "FX3A-1",
+      "relation_type": "blocking",
+      "deleted": null,
+      "included": true,
+      "why": "open"
+    },
+    {
+      "label": "stored-reversed-resolved",
+      "issue": "FX3A-5",
+      "related_issue": "FX3A-1",
+      "relation_type": "blocking",
+      "deleted": null,
+      "included": true,
+      "why": "resolved"
+    },
+    {
+      "label": "self-edge",
+      "issue": "FX3A-1",
+      "related_issue": "FX3A-1",
+      "relation_type": "blocked_by",
+      "deleted": null,
+      "included": false,
+      "why": "self-edge excluded"
+    },
+    {
+      "label": "soft-deleted",
+      "issue": "FX3A-1",
+      "related_issue": "FX3A-6",
+      "relation_type": "blocked_by",
+      "deleted": "2026-10-03T12:00:00+00:00",
+      "included": false,
+      "why": "soft-deleted row ignored"
+    },
+    {
+      "label": "x-workspace",
+      "issue": "FX3A-1",
+      "related_issue": "FX3X-1",
+      "relation_type": "blocked_by",
+      "deleted": null,
+      "included": false,
+      "why": "target workspace != relation workspace"
+    },
+    {
+      "label": "cross-project",
+      "issue": "FX3A-1",
+      "related_issue": "FX3B-1",
+      "relation_type": "blocked_by",
+      "deleted": null,
+      "included": true,
+      "why": "open"
+    },
+    {
+      "label": "test-state-open",
+      "issue": "FX3A-1",
+      "related_issue": "FX3B-2",
+      "relation_type": "blocked_by",
+      "deleted": null,
+      "included": true,
+      "why": "open"
+    },
+    {
+      "label": "archived-target",
+      "issue": "FX3A-1",
+      "related_issue": "FX3A-7",
+      "relation_type": "blocked_by",
+      "deleted": null,
+      "included": false,
+      "why": "not a live work item (archived)"
+    },
+    {
+      "label": "draft-target",
+      "issue": "FX3A-1",
+      "related_issue": "FX3A-8",
+      "relation_type": "blocked_by",
+      "deleted": null,
+      "included": false,
+      "why": "not a live work item (draft)"
+    },
+    {
+      "label": "triage-target",
+      "issue": "FX3A-1",
+      "related_issue": "FX3A-9",
+      "relation_type": "blocked_by",
+      "deleted": null,
+      "included": false,
+      "why": "not a live work item (triage)"
+    },
+    {
+      "label": "deleted-target",
+      "issue": "FX3A-1",
+      "related_issue": "FX3A-10",
+      "relation_type": "blocked_by",
+      "deleted": null,
+      "included": false,
+      "why": "not a live work item (soft-deleted)"
+    },
+    {
+      "label": "no-state-open",
+      "issue": "FX3A-1",
+      "related_issue": "FX3A-11",
+      "relation_type": "blocked_by",
+      "deleted": null,
+      "included": true,
+      "why": "open"
+    }
+  ]
+}
