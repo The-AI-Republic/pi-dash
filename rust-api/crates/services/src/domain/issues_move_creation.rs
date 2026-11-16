@@ -385,40 +385,6 @@ impl CreationSeam for SeaHandoffStore<'_> {
             .map_err(twin_map_execution_error)
     }
 
-    async fn lock_cloud_creation_capacity(
-        &mut self,
-        workspace_id: Uuid,
-        executor_kind: AgentExecutorKind,
-        automatic: bool,
-    ) -> Result<Option<ServiceAdmissionError>, CreationError> {
-        // The relocated `lock_cloud_creation_capacity` needs the span's
-        // sqlx transaction, which the SeaORM transaction cannot lend, so
-        // the twin runs its three steps here: the workspace lock, the
-        // queued count, and the shared `quota_verdict`.
-        use crate::dispatch::execution::{
-            queued_cloud_count_select, quota_verdict, workspace_lock_select,
-        };
-        if executor_kind != AgentExecutorKind::CloudAgent {
-            return Ok(None);
-        }
-        query_one(&self.conn, &workspace_lock_select(workspace_id))
-            .await?
-            .ok_or_else(|| expected_row("workspace lock"))?;
-        let row = query_one(&self.conn, &queued_cloud_count_select(workspace_id))
-            .await?
-            .ok_or_else(|| expected_row("queued cloud count"))?;
-        let queued: i64 = get(&row, "n")?;
-        match quota_verdict(
-            queued,
-            self.cloud.max_queued_per_workspace,
-            self.cloud.dispatch_scan_interval_secs,
-            automatic,
-        ) {
-            Ok(deferred) => Ok(deferred.map(twin_map_admission_error)),
-            Err(exc) => Err(CreationError::CapacityRefused(exc.detail().to_owned())),
-        }
-    }
-
     fn dispatch_after_commit(&mut self, run_id: Uuid) {
         // `jobs::dispatch_after_commit` only invokes the collector.
         self.dispatches.push(run_id);
@@ -685,25 +651,6 @@ impl FinalizeAgentRunSeam for SeaHandoffStore<'_> {
             ),
         )
         .await?;
-        let locked = locked.map(|row| twin_map_run_view(&row)).transpose()?;
-        if locked.is_some_and(|run| run.executor_kind == AgentExecutorKind::CloudAgent) {
-            let row = query_one(&self.conn, &orm::terminal_event_exists_select(run_id))
-                .await?
-                .ok_or_else(|| expected_row("terminal event probe"))?;
-            let exists: bool = get(&row, "exists")?;
-            if !exists {
-                let row = query_one(&self.conn, &orm::terminal_event_seq_select(run_id))
-                    .await?
-                    .ok_or_else(|| expected_row("terminal event seq"))?;
-                let seq: i32 = get(&row, "seq")?;
-                let payload = serde_json::json!({"status": "failed", "error_code": error_code});
-                execute(
-                    &self.conn,
-                    &orm::terminal_event_insert(run_id, seq, &payload, now),
-                )
-                .await?;
-            }
-        }
         // The `on_commit` lambda (`_publish_effects`): captured for the
         // handoff drain below (the jobs twin returns it pending for D-15;
         // the api twin can drain it directly).
@@ -846,7 +793,6 @@ fn twin_map_execution_error(error: ExecutionFieldsError) -> ExecutionError {
         ExecutionFieldsError::Db(error) => {
             ExecutionError::Store(CreationError::Db(error.to_string()))
         }
-        ExecutionFieldsError::Admission(exc) => ExecutionError::Refused(exc.detail().to_owned()),
         other => ExecutionError::Refused(other.to_string()),
     }
 }
@@ -1706,52 +1652,16 @@ mod tests {
             json!({ERROR_DETAILS_CODE: "c", ERROR_DETAILS_MESSAGE: "m"})
         );
 
-        // Terminal event: absent -> seq 1 -> present -> seq 2.
-        assert!(!terminal_event_exists(&conn, run_id).await);
-        assert_eq!(terminal_event_seq(&conn, run_id).await, 1);
-        exec(
-            &conn,
-            &orm::terminal_event_insert(run_id, 1, &json!({"status": "failed"}), now),
-        )
-        .await;
-        assert!(terminal_event_exists(&conn, run_id).await);
-        assert_eq!(terminal_event_seq(&conn, run_id).await, 2);
-        let event = one(
-            &conn,
-            &sea_orm::sea_query::Query::select()
-                .columns([
-                    pidash_db::entity::agent_run_event::Column::Kind,
-                    pidash_db::entity::agent_run_event::Column::Payload,
-                    pidash_db::entity::agent_run_event::Column::AgentRunId,
-                ])
-                .from(pidash_db::entity::agent_run_event::Entity)
-                .to_owned(),
-        )
-        .await
-        .expect("event row");
-        assert_eq!(col::<String>(&event, "kind"), "terminal");
-        assert_eq!(col::<Value>(&event, "payload"), json!({"status": "failed"}));
-        assert_eq!(col::<Uuid>(&event, "agent_run_id"), run_id);
-
-        // The workspace mutex: live row locks, soft-deleted row misses;
-        // the queued-cloud count sees the one queued cloud run left.
-        use crate::dispatch::execution::{queued_cloud_count_select, workspace_lock_select};
+        // The workspace mutex: live row locks, soft-deleted row misses.
+        // (P3 step B: the queued-cloud count died with the cloud
+        // creation path.)
+        use crate::dispatch::execution::workspace_lock_select;
         assert!(one(&conn, &workspace_lock_select(uid(0x10)))
             .await
             .is_some());
         assert!(one(&conn, &workspace_lock_select(uid(0x11)))
             .await
             .is_none());
-        exec(&conn, &orm::run_insert(&new_run(uid(0xA2), issue, now))).await;
-        assert_eq!(
-            col::<i64>(
-                &one(&conn, &queued_cloud_count_select(uid(0x10)))
-                    .await
-                    .expect("count row"),
-                "n"
-            ),
-            1
-        );
         tx.rollback().await.expect("rollback");
     }
 
@@ -2371,26 +2281,6 @@ mod tests {
             "`user_id = NULL` never matches"
         );
         tx.rollback().await.expect("rollback");
-    }
-
-    /// [`orm::terminal_event_exists_select`]'s `exists` bit.
-    async fn terminal_event_exists(conn: &TxConn<'_>, run_id: Uuid) -> bool {
-        col(
-            &one(conn, &orm::terminal_event_exists_select(run_id))
-                .await
-                .expect("probe row"),
-            "exists",
-        )
-    }
-
-    /// [`orm::terminal_event_seq_select`]'s next `seq`.
-    async fn terminal_event_seq(conn: &TxConn<'_>, run_id: Uuid) -> i32 {
-        col(
-            &one(conn, &orm::terminal_event_seq_select(run_id))
-                .await
-                .expect("seq row"),
-            "seq",
-        )
     }
 
     /// [`orm::bundle_labels_select`] names, in order.

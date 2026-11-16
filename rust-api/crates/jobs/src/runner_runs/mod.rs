@@ -23,6 +23,7 @@ pub mod offline_recovery;
 pub mod sweeps_chat;
 pub mod sweeps_runs;
 pub mod unsatisfiable_pins;
+pub mod waiting_expiry;
 
 pub use engine_pause::{register_engine_pause_tasks, PAUSE_ENGINES_TASK};
 pub use offline_recovery::{

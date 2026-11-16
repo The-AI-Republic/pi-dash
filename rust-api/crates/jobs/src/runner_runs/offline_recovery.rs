@@ -46,7 +46,6 @@ use pidash_services::runner_runs::finalization;
 use pidash_services::runner_runs::{LifecycleEffect, SetValue};
 use pidash_services::runner_sessions::offline_recovery as kernel;
 use pidash_services::runner_sessions::session_service::RUNNER_OFFLINE_ERROR_CODE;
-use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::runner_runs::AgentRunStatus;
 
 use super::sweeps_chat::{
@@ -273,23 +272,13 @@ async fn finalize_offline_run(
     )
     .map_err(|_| SweepError::BadRow("finalize plan"))?;
     let conn = TxConn::new(tx);
-    let Some(locked) =
+    let Some(_locked) =
         finalization::lock_run_for_finalize(&conn, *run_id, Some(*runner_id), None).await?
     else {
         return Ok(false);
     };
     let now = Utc::now();
     finalization::finalize_update(&conn, &values, *run_id, now).await?;
-    if AgentExecutorKind::from_value(&locked.executor_kind) == Some(AgentExecutorKind::CloudAgent) {
-        finalization::append_terminal_event_once(
-            &conn,
-            *run_id,
-            AgentRunStatus::Failed,
-            &finalization::finalize_error_code(&values),
-            now,
-        )
-        .await?;
-    }
     Ok(true)
 }
 

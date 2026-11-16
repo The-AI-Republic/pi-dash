@@ -30,10 +30,10 @@ use pidash_compat::datetime::render_isoformat as twin_render_isoformat;
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
 use pidash_db::dispatch::status::AgentRunStatus as DbAgentRunStatus;
 use pidash_db::entity::{
-    agent_run, agent_run_event, assistant_user_llm_config, dev_machine, git_code_review_links,
-    git_repositories, git_repository_bindings, issue_agent_ticker, issue_assignees, issue_comments,
-    issue_labels, issue_relations, issues, labels, pod, projects, prompt_section_override, runner,
-    states, users, workspaces,
+    agent_run, assistant_user_llm_config, dev_machine, git_code_review_links, git_repositories,
+    git_repository_bindings, issue_agent_ticker, issue_assignees, issue_comments, issue_labels,
+    issue_relations, issues, labels, pod, projects, prompt_section_override, runner, states, users,
+    workspaces,
 };
 use pidash_db::orm_tx::TxConn;
 use pidash_db::pool::sea_orm_connection;
@@ -60,9 +60,8 @@ use pidash_types::dispatch::AgentExecutorKind;
 
 use crate::dispatch::{
     dispatch_after_commit as collect_dispatch, dispatch_agent_run,
-    execution_fields as resolve_execution_fields, lock_cloud_creation_capacity as lock_capacity,
-    ActorScope, DeferredAdmissionError, DispatchDecision, ExecutionFieldsError, ExecutionInputs,
-    ExecutionSeams, ProjectScope,
+    execution_fields as resolve_execution_fields, ActorScope, DeferredAdmissionError,
+    DispatchDecision, ExecutionFieldsError, ExecutionInputs, ExecutionSeams, ProjectScope,
 };
 
 /// `timezone.now()` truncated to microseconds (Django datetimes are
@@ -985,32 +984,6 @@ impl CreationSeam for HandoffStore<'_, '_> {
             .map_err(twin_map_execution_error)
     }
 
-    async fn lock_cloud_creation_capacity(
-        &mut self,
-        workspace_id: Uuid,
-        executor_kind: AgentExecutorKind,
-        automatic: bool,
-    ) -> Result<Option<ServiceAdmissionError>, CreationError> {
-        let outcome = lock_capacity(
-            &mut self.tx,
-            workspace_id,
-            &executor_kind,
-            automatic,
-            &self.cloud,
-        )
-        .await;
-        match outcome {
-            Ok(deferred) => Ok(deferred.map(twin_map_admission_error)),
-            Err(ExecutionFieldsError::Admission(exc)) => {
-                Err(CreationError::CapacityRefused(exc.detail().to_owned()))
-            }
-            Err(ExecutionFieldsError::Db(error)) => Err(CreationError::Db(error.to_string())),
-            // Unreachable: the lock path only locks, counts and
-            // verdicts (no resolve/LLM/tool gates).
-            Err(other) => Err(CreationError::Db(format!("unexpected lock error: {other}"))),
-        }
-    }
-
     fn dispatch_after_commit(&mut self, run_id: Uuid) {
         collect_dispatch(&mut |id| self.dispatches.push(id), run_id);
     }
@@ -1059,7 +1032,6 @@ fn twin_map_execution_error(error: ExecutionFieldsError) -> ExecutionError {
         ExecutionFieldsError::Db(error) => {
             ExecutionError::Store(CreationError::Db(error.to_string()))
         }
-        ExecutionFieldsError::Admission(exc) => ExecutionError::Refused(exc.detail().to_owned()),
         other => ExecutionError::Refused(other.to_string()),
     }
 }
@@ -2147,58 +2119,6 @@ impl FinalizeAgentRunSeam for HandoffStore<'_, '_> {
                 .exec(&conn)
                 .await
                 .map_err(twin_db)?;
-        }
-        if locked.executor_kind == AgentExecutorKind::CloudAgent {
-            let exists_count = {
-                let conn = TxConn::new(self.tx.inner());
-                agent_run_event::Entity::find()
-                    .filter(agent_run_event::Column::AgentRunId.eq(run_id))
-                    .filter(agent_run_event::Column::Kind.eq("terminal"))
-                    .count(&conn)
-                    .await
-                    .map_err(twin_db)?
-            };
-            if exists_count == 0 {
-                let seq = {
-                    #[derive(Debug, FromQueryResult)]
-                    struct SeqRow {
-                        max_seq: Option<i32>,
-                    }
-                    let conn = TxConn::new(self.tx.inner());
-                    agent_run_event::Entity::find()
-                        .select_only()
-                        .expr_as(
-                            Func::max(Expr::col((
-                                agent_run_event::Entity,
-                                agent_run_event::Column::Seq,
-                            ))),
-                            "max_seq",
-                        )
-                        .filter(agent_run_event::Column::AgentRunId.eq(run_id))
-                        .into_model::<SeqRow>()
-                        .one(&conn)
-                        .await
-                        .map_err(twin_db)?
-                        .and_then(|row| row.max_seq)
-                        .map(|max| max + 1)
-                        .unwrap_or(1)
-                };
-                let payload = serde_json::json!({"status": "failed", "error_code": error_code});
-                {
-                    let conn = TxConn::new(self.tx.inner());
-                    agent_run_event::ActiveModel {
-                        seq: Set(seq),
-                        kind: Set("terminal".to_owned()),
-                        payload: Set(payload),
-                        created_at: Set(now.into()),
-                        agent_run_id: Set(run_id),
-                        ..Default::default()
-                    }
-                    .insert(&conn)
-                    .await
-                    .map_err(twin_db)?;
-                }
-            }
         }
         // The `on_commit` lambda (`_publish_effects`): captured for the
         // handoff drain below (the jobs twin returns it pending for D-15;

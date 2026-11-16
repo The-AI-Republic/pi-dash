@@ -50,10 +50,9 @@ use uuid::Uuid;
 use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
 use pidash_db::dispatch::status::AgentRunStatus;
 use pidash_db::entity::{
-    agent_run, agent_run_event, dev_machine, git_code_review_links, git_repositories,
-    git_repository_bindings, issue_agent_ticker, issue_assignees, issue_comments, issue_labels,
-    issue_relations, issues, labels, pod, projects, prompt_section_override, runner, states, users,
-    workspaces,
+    agent_run, dev_machine, git_code_review_links, git_repositories, git_repository_bindings,
+    issue_agent_ticker, issue_assignees, issue_comments, issue_labels, issue_relations, issues,
+    labels, pod, projects, prompt_section_override, runner, states, users, workspaces,
 };
 use pidash_db::orchestration::runs::ACTIVE_STATUSES;
 use pidash_db::orm_tx::{self, TxConn};
@@ -76,8 +75,7 @@ use pidash_services::prompting::{composer, context};
 use pidash_types::dispatch::AgentExecutorKind;
 
 use crate::dispatch::{
-    dispatch_after_commit as collect_dispatch, dispatch_agent_run,
-    lock_cloud_creation_capacity as lock_capacity, ActorScope, DispatchDecision,
+    dispatch_after_commit as collect_dispatch, dispatch_agent_run, ActorScope, DispatchDecision,
     ExecutionFieldsError, ExecutionInputs, ExecutionSeams, ProjectScope,
 };
 use crate::dispatch::{execution_fields as resolve_execution_fields, DeferredAdmissionError};
@@ -163,10 +161,6 @@ impl<'c, C, H, P> LiveCreationStore<'c, C, H, P> {
             self.deferred,
             self.terminal_effects,
         )
-    }
-
-    fn db(error: sqlx::Error) -> CreationError {
-        CreationError::Db(error.to_string())
     }
 
     // -- L8 dispatch sharing -------------------------------------------------
@@ -971,32 +965,6 @@ where
             .map_err(map_execution_error)
     }
 
-    async fn lock_cloud_creation_capacity(
-        &mut self,
-        workspace_id: Uuid,
-        executor_kind: AgentExecutorKind,
-        automatic: bool,
-    ) -> Result<Option<ServiceAdmissionError>, CreationError> {
-        let outcome = lock_capacity(
-            &mut self.tx,
-            workspace_id,
-            &executor_kind,
-            automatic,
-            &self.cloud,
-        )
-        .await;
-        match outcome {
-            Ok(deferred) => Ok(deferred.map(map_admission_error)),
-            Err(ExecutionFieldsError::Admission(exc)) => {
-                Err(CreationError::CapacityRefused(exc.detail().to_owned()))
-            }
-            Err(ExecutionFieldsError::Db(error)) => Err(Self::db(error)),
-            // Unreachable: the lock path only locks, counts and
-            // verdicts (no resolve/LLM/tool gates).
-            Err(other) => Err(CreationError::Db(format!("unexpected lock error: {other}"))),
-        }
-    }
-
     fn dispatch_after_commit(&mut self, run_id: Uuid) {
         collect_dispatch(&mut |id| self.dispatches.push(id), run_id);
     }
@@ -1102,7 +1070,6 @@ fn map_execution_error(error: ExecutionFieldsError) -> ExecutionError {
         ExecutionFieldsError::Db(error) => {
             ExecutionError::Store(CreationError::Db(error.to_string()))
         }
-        ExecutionFieldsError::Admission(exc) => ExecutionError::Refused(exc.detail().to_owned()),
         other => ExecutionError::Refused(other.to_string()),
     }
 }
@@ -2101,7 +2068,7 @@ where
                 ("error", patch_text(error)),
             ],
         );
-        let locked = map_run_row(locked_row)?;
+        let _locked = map_run_row(locked_row)?;
         {
             let conn = TxConn::new(self.tx.inner());
             let ended_at: sea_orm::prelude::DateTimeWithTimeZone = now.into();
@@ -2125,47 +2092,6 @@ where
                 .exec(&conn)
                 .await
                 .map_err(sea_db)?;
-        }
-        if locked.executor_kind == AgentExecutorKind::CloudAgent {
-            let exists = {
-                let conn = TxConn::new(self.tx.inner());
-                agent_run_event::Entity::find()
-                    .filter(agent_run_event::Column::AgentRunId.eq(run_id))
-                    .filter(agent_run_event::Column::Kind.eq("terminal"))
-                    .count(&conn)
-                    .await
-                    .map_err(sea_db)?
-                    > 0
-            };
-            if !exists {
-                let seq = {
-                    let conn = TxConn::new(self.tx.inner());
-                    agent_run_event::Entity::find()
-                        .select_only()
-                        .column(agent_run_event::Column::Seq)
-                        .filter(agent_run_event::Column::AgentRunId.eq(run_id))
-                        .order_by_desc(agent_run_event::Column::Seq)
-                        .limit(1)
-                        .into_tuple::<i32>()
-                        .one(&conn)
-                        .await
-                        .map_err(sea_db)?
-                        .unwrap_or(0)
-                        + 1
-                };
-                let payload = serde_json::json!({"status": "failed", "error_code": error_code});
-                let created_at: sea_orm::prelude::DateTimeWithTimeZone = now.into();
-                let event = agent_run_event::ActiveModel {
-                    id: ActiveValue::NotSet,
-                    agent_run_id: Set(run_id),
-                    seq: Set(seq),
-                    kind: Set("terminal".to_owned()),
-                    payload: Set(payload),
-                    created_at: Set(created_at),
-                };
-                let conn = TxConn::new(self.tx.inner());
-                event.insert(&conn).await.map_err(sea_db)?;
-            }
         }
         // The `on_commit` lambda (`_publish_effects`): captured, never
         // executed — the celery delay + terminal hooks are D-15's
@@ -2336,7 +2262,6 @@ where
 mod tests {
     use super::*;
     use pidash_db::dispatch::status::AgentRunTrigger;
-    use pidash_services::dispatch::CloudAgentAdmissionError;
     use pidash_services::orchestration::creation::{
         ContinuationRequest, CreateDispatchRequest, HandoffCreateRequest,
     };
@@ -2393,14 +2318,7 @@ mod tests {
 
     #[test]
     fn execution_error_routing() {
-        // Refusals surface `str(exc)` for the catch …
-        let refused = map_execution_error(ExecutionFieldsError::Admission(
-            CloudAgentAdmissionError::new("run_quota_exceeded", "Cloud Agent queue is full", None),
-        ));
-        assert!(
-            matches!(refused, ExecutionError::Refused(message) if message == "Cloud Agent queue is full")
-        );
-        // … while database failures propagate.
+        // Database failures propagate as store errors.
         let db = map_execution_error(ExecutionFieldsError::Db(sqlx::Error::RowNotFound));
         assert!(matches!(db, ExecutionError::Store(CreationError::Db(_))));
     }

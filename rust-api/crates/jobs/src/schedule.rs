@@ -354,27 +354,16 @@ pub fn literal_schedule() -> Vec<BeatEntry> {
     ]
 }
 
-/// Defaults for the 4 settings-backed entries registered in
+/// Defaults for the 2 settings-backed entries registered in
 /// `_register_settings_backed_beat_entries` (from `settings/common.py`).
-pub const DEFAULT_CLOUD_AGENT_DISPATCH_SECS: u64 = 10;
-pub const DEFAULT_CLOUD_AGENT_SWEEP_SECS: u64 = 30;
 pub const DEFAULT_MANAGED_RUNNER_SWEEP_SECS: u64 = 300;
 pub const DEFAULT_AGENT_RUN_TERMINAL_RECONCILE_SECS: u64 = 30;
 
-/// The 4 settings-backed entries with Django defaults. The scheduler loop
+/// The 2 settings-backed entries with Django defaults (the retired
+/// cloud scan/sweep entries died in P3 step A). The scheduler loop
 /// applies environment overrides on top via [`beat_schedule`].
 pub fn settings_backed_schedule() -> Vec<BeatEntry> {
     vec![
-        BeatEntry {
-            name: "cloud-agent-scan-queued-runs",
-            task: "cloud_agent.scan_queued_runs",
-            cadence: Cadence::IntervalSecs(DEFAULT_CLOUD_AGENT_DISPATCH_SECS),
-        },
-        BeatEntry {
-            name: "cloud-agent-sweep-stale-runs",
-            task: "cloud_agent.sweep_stale_runs",
-            cadence: Cadence::IntervalSecs(DEFAULT_CLOUD_AGENT_SWEEP_SECS),
-        },
         BeatEntry {
             name: "managed-runner-expire-waiting-runs",
             task: "managed_runner.expire_waiting_runs",
@@ -396,11 +385,9 @@ fn env_secs(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-/// The full schedule: the 24 literal entries plus the 4 settings-backed
+/// The full schedule: the 28 literal entries plus the 2 settings-backed
 /// entries with their Django-setting environment overrides applied
-/// (`CLOUD_AGENT_DISPATCH_SCAN_INTERVAL_SECONDS`,
-/// `CLOUD_AGENT_SWEEP_INTERVAL_SECONDS`,
-/// `MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS`,
+/// (`MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS`,
 /// `AGENT_RUN_TERMINAL_RECONCILE_INTERVAL_SECONDS` — same names as
 /// `settings/common.py`).
 pub fn beat_schedule() -> Vec<BeatEntry> {
@@ -411,8 +398,6 @@ pub fn beat_schedule() -> Vec<BeatEntry> {
             continue;
         };
         let env_name = match entry.name {
-            "cloud-agent-scan-queued-runs" => "CLOUD_AGENT_DISPATCH_SCAN_INTERVAL_SECONDS",
-            "cloud-agent-sweep-stale-runs" => "CLOUD_AGENT_SWEEP_INTERVAL_SECONDS",
             "managed-runner-expire-waiting-runs" => "MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS",
             "agent-run-reconcile-terminal-effects" => {
                 "AGENT_RUN_TERMINAL_RECONCILE_INTERVAL_SECONDS"
@@ -562,29 +547,19 @@ mod tests {
     }
 
     #[test]
-    fn full_schedule_adds_four_settings_backed_entries() {
+    fn full_schedule_adds_two_settings_backed_entries() {
         // Defaults only: a developer shell exporting the Django interval
         // names must not change what this asserts (overrides are covered
         // by `env_secs` fallback behavior, not here).
         for var in [
-            "CLOUD_AGENT_DISPATCH_SCAN_INTERVAL_SECONDS",
-            "CLOUD_AGENT_SWEEP_INTERVAL_SECONDS",
             "MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS",
             "AGENT_RUN_TERMINAL_RECONCILE_INTERVAL_SECONDS",
         ] {
             std::env::remove_var(var);
         }
         let schedule = beat_schedule();
-        assert_eq!(schedule.len(), 32);
+        assert_eq!(schedule.len(), 30);
         let find = |name: &str| schedule.iter().find(|e| e.name == name).expect(name);
-        assert_eq!(
-            find("cloud-agent-scan-queued-runs").cadence,
-            Cadence::IntervalSecs(10)
-        );
-        assert_eq!(
-            find("cloud-agent-sweep-stale-runs").cadence,
-            Cadence::IntervalSecs(30)
-        );
         assert_eq!(
             find("managed-runner-expire-waiting-runs").cadence,
             Cadence::IntervalSecs(300)
