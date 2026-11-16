@@ -21,9 +21,11 @@
 //! [`super::event::AgentRunEvent`] and
 //! [`super::tool_call::AgentRunToolCall`].
 //!
-//! Every application-level default below is Django-side (the live
-//! table carries no `column_default` for these); Rust inserts — owned
-//! by D-13…D-15, not here — must supply these values explicitly.
+//! Every application-level default below is Django-side; Rust inserts —
+//! owned by D-13…D-15, not here — must supply these values explicitly.
+//! The live table carries a `column_default` only where a migration set
+//! one for old writers (`pin_kind` via db/0174; `work_type` and
+//! `failure_reason` via db/0181), so don't infer from it.
 //!
 //! Fixture: `rust-api/fixtures/dispatch/fx-disp-02-models.golden.json`
 //! (`dispatch_touched_subset.agent_run`, `agent_run_columns`,
