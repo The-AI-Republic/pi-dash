@@ -26,6 +26,9 @@ pub struct CoordinatorState {
 pub struct Coordinator {
     store: Arc<Store>,
     inner: Mutex<Inner>,
+    /// Woken when capacity frees (complete / set_limit increase / cancel)
+    /// so the oldest waiting worker can claim the slot.
+    admission: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Debug)]
@@ -72,6 +75,7 @@ impl Coordinator {
         Ok(Self {
             store,
             inner: Mutex::new(inner),
+            admission: Arc::new(tokio::sync::Notify::new()),
         })
     }
 
@@ -82,6 +86,34 @@ impl Coordinator {
         inner.revision += 1;
         self.store.insert(&entry)?;
         Ok(())
+    }
+
+    /// Enqueue a fresh assignment durably: allocate the durable sequence,
+    /// persist the payload, then hold as waiting until admitted. Called by
+    /// RunnerLoop the moment an Assign lands, before any workspace prep.
+    pub fn enqueue_assign(
+        &self,
+        runner_id: Uuid,
+        run_id: Uuid,
+        payload: Vec<u8>,
+    ) -> Result<(), String> {
+        let sequence = self.store.allocate_sequence()?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let entry = QueueEntry {
+            cloud_origin: "cloud".to_string(),
+            runner_id,
+            run_id,
+            assignment_token: None,
+            sequence,
+            queued_at: now,
+            phase: "waiting".to_string(),
+            assignment_payload: payload,
+            report_revision: 0,
+            process_scope_id: None,
+            pending_terminal_payload: None,
+            pending_terminal_message_id: None,
+        };
+        self.enqueue(entry)
     }
 
     pub fn cancel_waiting(&self, run_id: Uuid) -> Result<bool, String> {
@@ -98,12 +130,17 @@ impl Coordinator {
             .unwrap_or_else(|| "unknown".to_string());
         self.store.delete_waiting(run_id)?;
         let _ = self.store.insert_tombstone(run_id, &origin, now);
-        if let Some(pos) = inner.entries.iter().position(|e| e.run_id == run_id) {
+        let removed = if let Some(pos) = inner.entries.iter().position(|e| e.run_id == run_id) {
             inner.entries.remove(pos);
             inner.revision += 1;
-            return Ok(true);
-        }
-        Ok(false)
+            true
+        } else {
+            false
+        };
+        drop(inner);
+        // Wake the next oldest waiter (its turn may now be next).
+        self.admission.notify_waiters();
+        Ok(removed)
     }
 
     pub fn counts(&self) -> CoordinatorState {
@@ -153,6 +190,9 @@ impl Coordinator {
         inner.revision += 1;
         // Blocked reason cleared; drain naturally (active > limit drains)
         inner.blocked_reason = None;
+        drop(inner);
+        // Increases admit more live without daemon restart.
+        self.admission.notify_waiters();
         Ok(())
     }
 
@@ -165,26 +205,90 @@ impl Coordinator {
     }
 
     pub fn admit(&self, run_id: Uuid) -> Result<bool, String> {
-        let mut inner = self.inner.lock().map_err(|_| "poison".to_string())?;
+        Ok(self.try_admit_fifo(run_id))
+    }
+
+    /// FIFO admission: only the oldest waiting entry is eligible when at
+    /// least one machine slot is free, and `starting` is persisted before
+    /// the caller launches the worker.
+    pub fn try_admit_fifo(&self, run_id: Uuid) -> bool {
+        let mut inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
         if (inner.active.len() as u16) >= inner.limit {
-            return Ok(false);
+            return false;
         }
-        if let Some(pos) = inner.entries.iter().position(|e| e.run_id == run_id) {
-            let e = inner.entries.remove(pos);
-            inner.active.insert(run_id, e);
+        // Strict FIFO: only the oldest waiting entry may claim a slot.
+        let Some(first) = inner.entries.first() else {
+            return false;
+        };
+        if first.run_id != run_id {
+            return false;
+        }
+        let e = inner.entries.remove(0);
+        inner.active.insert(run_id, e);
+        inner.revision += 1;
+        // Persist starting before launch so a crash cannot replay it.
+        // Failure here fails closed: drop the admission.
+        let admitted = self.store.update_phase(run_id, "starting");
+        if admitted.is_err() {
+            inner.active.remove(&run_id);
             inner.revision += 1;
-            return Ok(true);
+            return false;
         }
-        Ok(false)
+        true
+    }
+
+    /// Block until this run is admitted (oldest-first) or cancelled.
+    /// Returns true when admitted, false when cancelled while waiting.
+    /// Caller (AssignWorker) must not start workspace prep on false.
+    pub async fn admit_blocking(
+        &self,
+        run_id: Uuid,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<bool, String> {
+        loop {
+            if self.try_admit_fifo(run_id) {
+                return Ok(true);
+            }
+            // If the entry is gone (cancel_waiting ran), stop waiting.
+            {
+                let inner = self.inner.lock().map_err(|_| "poison".to_string())?;
+                let still_queued = inner.entries.iter().any(|e| e.run_id == run_id);
+                let already_active = inner.active.contains_key(&run_id);
+                if already_active {
+                    return Ok(true);
+                }
+                if !still_queued {
+                    return Ok(false);
+                }
+            }
+            tokio::select! {
+                _ = cancel.cancelled() => return Ok(false),
+                _ = self.admission.notified() => {}
+            }
+        }
     }
 
     pub fn complete(&self, run_id: Uuid) -> Result<bool, String> {
         let mut inner = self.inner.lock().map_err(|_| "poison".to_string())?;
-        if inner.active.remove(&run_id).is_some() {
+        let removed = if inner.active.remove(&run_id).is_some() {
             inner.revision += 1;
-            return Ok(true);
+            true
+        } else {
+            false
+        };
+        drop(inner);
+        if removed {
+            // Terminal: delete durably so restart never resurrects it.
+            // (Terminal-outbox exact-payload retry is ExecutionGate's
+            // layer; the coordinator's job is slot release, which must
+            // not wait on cloud acknowledgment.)
+            let _ = self.store.delete_entry(run_id);
+            self.admission.notify_waiters();
         }
-        Ok(false)
+        Ok(removed)
     }
 }
 
@@ -325,6 +429,50 @@ mod tests {
         assert_eq!(snap.waiting, 1);
         assert_eq!(snap.held, 2);
         assert!(snap.revision > 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn fifo_rejects_out_of_order_admit() {
+        let dir = std::env::temp_dir().join(format!("coord_fifo_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let coord = Coordinator::new(dir.clone(), 3).expect("coord");
+        let e1 = entry(Uuid::new_v4(), 1);
+        let e2 = entry(Uuid::new_v4(), 2);
+        coord.enqueue(e1.clone()).unwrap();
+        coord.enqueue(e2.clone()).unwrap();
+        // Newer entry cannot jump ahead of the oldest.
+        assert!(!coord.admit(e2.run_id).unwrap());
+        assert!(coord.admit(e1.run_id).unwrap());
+        assert!(coord.admit(e2.run_id).unwrap());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn blocking_admit_wakes_oldest_first() {
+        let dir = std::env::temp_dir().join(format!("coord_block_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let coord = Arc::new(Coordinator::new(dir.clone(), 1).expect("coord"));
+        let e1 = entry(Uuid::new_v4(), 1);
+        let e2 = entry(Uuid::new_v4(), 2);
+        coord.enqueue(e1.clone()).unwrap();
+        coord.enqueue(e2.clone()).unwrap();
+        let _cancel1 = tokio_util::sync::CancellationToken::new();
+        let cancel2 = tokio_util::sync::CancellationToken::new();
+        // Fill the single slot with e1; e2 must block.
+        assert!(coord.admit(e1.run_id).unwrap());
+        let c2 = coord.clone();
+        let run2 = e2.run_id;
+        let blocked = tokio::spawn(async move { c2.admit_blocking(run2, &cancel2).await });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!blocked.is_finished(), "second waiter must block at limit");
+        coord.complete(e1.run_id).unwrap();
+        let admitted = tokio::time::timeout(std::time::Duration::from_secs(2), blocked)
+            .await
+            .expect("blocked admit should resolve")
+            .expect("join should succeed")
+            .expect("blocked admit inner");
+        assert!(admitted);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

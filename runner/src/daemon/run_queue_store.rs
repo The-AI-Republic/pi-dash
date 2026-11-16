@@ -190,6 +190,20 @@ impl Store {
         Ok(())
     }
 
+    /// Persist a phase transition (waiting -> starting -> executing).
+    /// Restart reconciliation never replays non-waiting phases, so admission
+    /// must persist `starting` before the worker launches.
+    pub fn update_phase(&self, run_id: Uuid, phase: &str) -> Result<usize, String> {
+        let conn = self.conn.lock().map_err(|_| "poison".to_string())?;
+        let n = conn
+            .execute(
+                "UPDATE queue_entries SET phase = ?1 WHERE run_id = ?2",
+                rusqlite::params![phase, run_id.to_string()],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(n)
+    }
+
     /// Durable cancel: delete the waiting row and tombstone the attempt so
     /// a restart never resurrects canceled work. Returns rows deleted.
     pub fn delete_waiting(&self, run_id: Uuid) -> Result<usize, String> {

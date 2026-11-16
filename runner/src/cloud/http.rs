@@ -1627,6 +1627,16 @@ impl HttpLoop {
         self
     }
 
+    /// Attach the durable receipt store (NEWPIDASH-241 T4): every frame
+    /// is committed to SQLite before any HTTP ACK leaves.
+    pub fn with_receipt_store(
+        mut self,
+        receipt_store: Option<Arc<crate::daemon::receipt::ReceiptStore>>,
+    ) -> Self {
+        self.receipt_store = receipt_store;
+        self
+    }
+
     fn teardown_error() -> TransportError {
         TransportError::LocalTeardown("runner removed locally".into())
     }
