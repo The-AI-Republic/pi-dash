@@ -3164,10 +3164,11 @@ mod tests {
              guest_view_all_features, archive_in, close_in, logo_props, is_default, timezone, \
              repo_url, base_branch, agent_default_interval_seconds, agent_default_max_ticks, \
              agent_review_default_interval_seconds, agent_test_default_interval_seconds, \
-             agent_ticking_enabled, default_agent_executor, members_can_edit_states) \
+             agent_ticking_enabled, default_agent_executor, members_can_edit_states, \
+             dedicated_runner_lost_action, default_work_type, settings) \
              VALUES ($1, $2, $2, 'Bind', '', 2, $3, 'BIND', false, false, false, true, false, \
              false, false, false, 30, 30, '{}', false, 'UTC', $4, $5, 60, 10, 60, 60, true, \
-             'local_runner', true)",
+             'local_runner', true, 'fail_to_backlog', 'general', '{}')",
         )
         .bind(id)
         .bind(t0)
@@ -3275,7 +3276,9 @@ mod tests {
         agent_review_default_interval_seconds INTEGER NOT NULL,
         agent_test_default_interval_seconds INTEGER NOT NULL,
         agent_ticking_enabled BOOLEAN NOT NULL, default_agent_executor TEXT NOT NULL,
-        members_can_edit_states BOOLEAN NOT NULL)";
+        members_can_edit_states BOOLEAN NOT NULL,
+        dedicated_runner_lost_action TEXT NOT NULL, default_work_type TEXT NOT NULL,
+        settings JSONB NOT NULL)";
 
     const WORKSPACES_DDL: &str = "CREATE TEMPORARY TABLE workspaces (
         id UUID PRIMARY KEY, slug TEXT NOT NULL)";
