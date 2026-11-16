@@ -12,7 +12,8 @@
 // The OSS backend does not yet compute `agent_status.active_run.dispatch_wait`
 // (that is PDASHOSS01-297), so each scenario answers the issue-detail read
 // through the browser and leaves every other call live. Rows: ISS-239,
-// ISS-240.
+// ISS-240, ISS-244. ISS-244 is new-system-only (NEWPIDASH-241, DIFF-37):
+// `capacity_wait` is stubbed because the machine queue is new-system-only.
 import { test, expect, type Page } from "../fixtures";
 import { fetchIssue, serverCreateIssueFull, serverCleanupIssueWithSession, signInSession } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
@@ -31,6 +32,15 @@ interface WaitingStub {
   podId?: string;
   /** The run id the last answer carried, for endpoint assertions. */
   runId: string;
+  /** Machine capacity wait (NEWPIDASH-241 ISS-244): distinct from dispatch_wait. */
+  capacityWait?: {
+    phase: string;
+    queue_position: number | null;
+    queued_at: string | null;
+    reported_at: string | null;
+    active: number | null;
+    limit: number | null;
+  } | null;
 }
 
 /**
@@ -86,6 +96,7 @@ async function stubWaitingDetail(
           runs_ahead: stub.runsAhead ?? 0,
           releasable: stub.releasable ?? true,
         },
+        capacity_wait: stub.capacityWait ?? null,
         created_at: "2026-10-25T10:00:00Z",
         assigned_at: null,
         started_at: null,
@@ -209,6 +220,83 @@ test(
         await driver.page.reload();
         await expect.poll(() => driver.waitingBannerPresent(), { timeout: 60_000 }).toBe(false);
         expect(await driver.waitingBannerText()).toBeNull();
+      });
+    } finally {
+      await driver.page.unrouteAll({ behavior: "wait" }).catch(() => {});
+      await serverCleanupIssueWithSession(seed.workspaceSlug, seed.projectId, issue.id, session);
+    }
+  }
+);
+
+test(
+  specTitle(["ISS-244"], "machine capacity wait: position, counts, stale last-known"),
+  { tag: specTags(["ISS-244"]) },
+  async ({ driver, seed }, testInfo) => {
+    test.skip(testInfo.project.name !== "new", "machine capacity wait pins the web_new UI only");
+    const session = await signInSession(seed.email, seed.password);
+    const issue = await serverCreateIssueFull(
+      seed.workspaceSlug,
+      seed.projectId,
+      `Capacity wait ${Date.now()}`,
+      session
+    );
+    const detailPath = `/api/workspaces/${seed.workspaceSlug}/projects/${seed.projectId}/issues/${issue.id}/`;
+    const stub: WaitingStub = {
+      reason: "runner_busy",
+      runnerName: "parity-runner-capacity",
+      runsAhead: 1,
+      runId: "",
+      capacityWait: {
+        phase: "waiting_for_capacity",
+        queue_position: 3,
+        queued_at: "2026-10-25T10:00:00Z",
+        reported_at: new Date(Date.now() - 30_000).toISOString(),
+        active: 2,
+        limit: 3,
+      },
+    };
+    const base = await fetchIssue(seed.workspaceSlug, seed.projectId, issue.id, session);
+    try {
+      await stubWaitingDetail(driver.page, detailPath, base, stub);
+      await driver.openEntry();
+      await driver.signInWithPassword(seed.email, seed.password);
+      await driver.openIssueDetail(seed.workspaceSlug, seed.projectId, issue.id);
+
+      await test.step("fresh capacity wait names position and counts", async () => {
+        await expect.poll(() => driver.waitingBannerPresent(), { timeout: 60_000 }).toBe(true);
+        const cap = driver.page.getByTestId("capacity-waiting");
+        await expect(cap).toBeVisible({ timeout: 30_000 });
+        const text = (await cap.textContent()) ?? "";
+        expect(text).toContain("Waiting for machine capacity");
+        expect(text).toContain("position 3");
+        expect(text).toContain("2/3");
+        // Distinct from cloud dispatch_wait sentence above.
+        const banner = await driver.waitingBannerText();
+        expect(banner).toContain("Waiting for runner parity-runner-capacity");
+        expect(text).not.toContain("Waiting for runner");
+      });
+
+      await test.step("stale capacity report renders as last-known", async () => {
+        stub.capacityWait = {
+          phase: "waiting_for_capacity",
+          queue_position: 2,
+          queued_at: "2026-10-25T10:00:00Z",
+          reported_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+          active: 1,
+          limit: 3,
+        };
+        await driver.page.reload();
+        const cap = driver.page.getByTestId("capacity-waiting");
+        await expect.poll(async () => (await cap.textContent()) ?? "", { timeout: 60_000 }).toContain(
+          "last known"
+        );
+      });
+
+      await test.step("no capacity wait hides the capacity line", async () => {
+        stub.capacityWait = null;
+        await driver.page.reload();
+        await expect(driver.page.getByTestId("capacity-waiting")).toHaveCount(0, { timeout: 30_000 });
+        await expect.poll(() => driver.waitingBannerPresent(), { timeout: 60_000 }).toBe(true);
       });
     } finally {
       await driver.page.unrouteAll({ behavior: "wait" }).catch(() => {});

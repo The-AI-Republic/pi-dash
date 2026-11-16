@@ -16,6 +16,7 @@ import * as React from "react";
 import {
   PodPicker,
   executionTargetPatch,
+  formatRunnerSeenAgo,
   usePickerPods,
   type ExecutionSelection,
 } from "../../../../shared/pickers/index.js";
@@ -66,10 +67,26 @@ export function WaitingBanner({
     }
   }
 
-  const capacity = (waiting.run as { capacity_wait?: { phase: string; queue_position: number | null; queued_at: string | null; reported_at: string | null; active: number | null; limit: number | null } | null }).capacity_wait;
-  const capacityText = capacity && capacity.phase === "waiting_for_capacity"
-    ? `Waiting for machine capacity${capacity.queue_position ? ` — position ${capacity.queue_position}` : ""}${capacity.active != null && capacity.limit != null ? ` (${capacity.active}/${capacity.limit})` : ""}${capacity.reported_at ? ` — last updated ${capacity.reported_at}` : ""}`
-    : null;
+  // Machine-level capacity wait (NEWPIDASH-241 T7), distinct from the
+  // cloud dispatch_wait above. Typed via the shared `CapacityWait`
+  // contract — no inline cast. Stale reports (>90s, the server
+  // freshness window) render as last-known, never as live.
+  const capacity = waiting.run.capacity_wait ?? null;
+  let capacityText: string | null = null;
+  if (capacity !== null && capacity.phase === "waiting_for_capacity") {
+    const parts = ["Waiting for machine capacity"];
+    if (capacity.queue_position != null) parts.push(`position ${capacity.queue_position}`);
+    if (capacity.active != null && capacity.limit != null)
+      parts.push(`(${capacity.active}/${capacity.limit})`);
+    if (capacity.reported_at != null) {
+      const ago = formatRunnerSeenAgo(capacity.reported_at);
+      const elapsedMs = Date.now() - Date.parse(capacity.reported_at);
+      if (ago !== null) {
+        parts.push(elapsedMs > 90_000 ? `last known ${ago}` : `last updated ${ago}`);
+      }
+    }
+    capacityText = parts.join(" — ");
+  }
   return (
     <section
       aria-label="Waiting for runner"
