@@ -399,6 +399,38 @@ fn rfc3339_now_string_pub(now: DateTime<Utc>) -> String {
     now.to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
 }
 
+/// Fence protocol-1 attempt writes (Accept/Started/terminal).
+/// For protocol-1, require session (when require_session) and exact token.
+/// Returns Err(Response) with 400/409 as appropriate, Ok otherwise.
+/// Must be called inside Runner → Run locked transaction (no I/O).
+pub fn fence_attempt(
+    protocol: i16,
+    session_id: Option<Uuid>,
+    active_session_id: Option<Uuid>,
+    provided_token: Option<Uuid>,
+    stored_token: Option<Uuid>,
+    require_session: bool,
+) -> Result<(), String> {
+    if protocol != PROTOCOL_MACHINE_QUEUE {
+        return Ok(());
+    }
+    if require_session {
+        let Some(sid) = session_id else {
+            return Err("session_id_required".to_owned());
+        };
+        let Some(active) = active_session_id else {
+            return Err("session_evicted".to_owned());
+        };
+        if sid != active {
+            return Err("session_evicted".to_owned());
+        }
+    }
+    if !token_matches(stored_token, provided_token) {
+        return Err("stale_assignment".to_owned());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
