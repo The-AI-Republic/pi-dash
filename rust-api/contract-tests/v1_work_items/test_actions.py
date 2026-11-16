@@ -7,6 +7,8 @@ contract environment has none); that 409 shape is itself the contract.
 
 import pytest
 
+from _harness.diffs import is_rust
+
 from .conftest import issue_url
 
 pytestmark = pytest.mark.contract
@@ -64,6 +66,49 @@ def test_run_ai_no_runner_is_409(api, world):
     body = response.json()
     assert set(body) == {"error", "reason"}
     assert body["reason"] in ("active_run_exists", "no_pod", "no_eligible_runner")
+
+
+def test_run_ai_active_refusal_names_blocking_run(api, world, seeder):
+    """With a run occupying the slot, run-ai names it (DIFF-44).
+
+    Rust answers 409 active_run_exists with an active_run block;
+    Django stays bare {error, reason}.
+    """
+    pod = seeder.create_pod(world["workspace"]["id"], world["project"]["id"])
+    run = seeder.create_agent_run(
+        world["workspace"]["id"], world["owner"]["id"], pod["id"], world["issue"]["id"]
+    )
+    response = api.post(
+        issue_url(world, world["issue"]["id"]) + "run-ai/", json={"prompt": "do it"}
+    )
+    assert response.status_code == 409, response.text
+    body = response.json()
+    assert body["reason"] == "active_run_exists"
+    if is_rust():
+        block = body["active_run"]
+        assert block["id"] == run["id"]
+        assert block["status"] == "running"
+        assert block["age_seconds"] >= 0
+    else:
+        assert set(body) == {"error", "reason"}
+
+
+def test_issue_detail_carries_active_run(api, world, seeder):
+    """Issue detail carries the blocking run + heartbeat (DIFF-44)."""
+    pod = seeder.create_pod(world["workspace"]["id"], world["project"]["id"])
+    run = seeder.create_agent_run(
+        world["workspace"]["id"], world["owner"]["id"], pod["id"], world["issue"]["id"]
+    )
+    response = api.get(issue_url(world, world["issue"]["id"]))
+    assert response.status_code == 200, response.text
+    detail = response.json()
+    if is_rust():
+        block = detail["active_run"]
+        assert block["id"] == run["id"]
+        assert block["status"] == "running"
+        assert block["age_seconds"] >= 0
+    else:
+        assert "active_run" not in detail
 
 
 def test_run_ai_unknown_issue_is_404(api, world):
