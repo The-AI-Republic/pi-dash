@@ -138,14 +138,14 @@ def create_agent_run(
     seeder.db.execute(
         """INSERT INTO agent_run
            (id, status, prompt, run_config, required_capabilities, thread_id,
-            lease_expires_at, done_payload, error_details, created_at, assigned_at,
+            lease_expires_at, done_payload, error_details, failure_reason, created_at, assigned_at,
             started_at, ended_at, owner_id, workspace_id, runner_id, work_item_id,
             parent_run_id, pod_id, created_by_id, pinned_runner_id,
             scheduler_binding_id, llm_model,
             trigger, prompt_manifest, executor_kind, dispatch_attempts,
             cancel_requested_at, cancel_reason, tool_plan,
             terminal_hooks_applied_at, terminal_capacity_released_at,
-            phase_kind, agent_metadata, usage, pin_kind, failure_reason)
+            phase_kind, agent_metadata, usage, pin_kind)
            VALUES (%s,%s,%s,'{}','[]','',
                    %s,
                    NULL,'{}','',%s,NULL,
@@ -154,7 +154,7 @@ def create_agent_run(
                    'direct',NULL,%s,0,
                    %s,
                    %s,%s,
-                   NULL,NULL,'','{}','{}','locality','')""",
+                   NULL,NULL,'','{}','{}','locality')""",
         (
             run_id, status, prompt,
             now + timedelta(seconds=lease_in_seconds) if lease_in_seconds is not None else None,
