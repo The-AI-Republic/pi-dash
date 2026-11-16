@@ -601,7 +601,16 @@ mod tests {
         // Redirect the standard locations (the test host may really have a
         // `pidash` installed in its home) at a temp home and runtime dir.
         // The guard drops last, restoring every variable it touched.
-        let tmp = tempfile::tempdir().unwrap();
+        // The scratch lives directly under `/tmp`, not TMPDIR: the stub
+        // socket resolves through `DaemonPaths::standard`, which on macOS
+        // does not honour XDG_RUNTIME_DIR and appends
+        // `Library/Application Support/.../runtime` to HOME. Under a
+        // TMPDIR-backed tempdir that path exceeds SUN_LEN and the bind
+        // fails; under `/tmp` it fits.
+        let tmp = tempfile::Builder::new()
+            .prefix("pd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let home = tmp.path().join("home");
         let runtime_dir = tmp.path().join("runtime");
         std::fs::create_dir_all(&home).unwrap();
