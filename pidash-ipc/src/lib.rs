@@ -16,6 +16,8 @@
 
 pub mod client;
 pub mod dto;
+#[cfg(windows)]
+pub mod job;
 pub mod protocol;
 #[cfg(windows)]
 pub mod windows_pipe;

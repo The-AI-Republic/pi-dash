@@ -24,6 +24,10 @@ pub struct ScopeRecord {
     pub anchor_pid: u32,
     pub anchor_identity: Option<String>, // ticks/starttime string from /proc or sysctl
     pub group_id: Option<u32>,
+    /// Windows Job Object containing the anchor (kill-on-close).
+    /// `None` until the Job is created on this scope.
+    #[cfg(windows)]
+    pub job: Option<std::sync::Arc<pidash_ipc::job::JobHandle>>,
 }
 
 #[derive(Debug, Clone)]
@@ -74,6 +78,8 @@ impl ProcessGuard {
                 anchor_pid: pid,
                 anchor_identity: identity,
                 group_id: Some(pid),
+                #[cfg(windows)]
+                job: create_scope_job(pid),
             },
         );
         scope_id
@@ -134,8 +140,14 @@ impl ProcessGuard {
                 }
             }
         } else if cfg!(target_os = "windows") {
-            // Windows Job Object: would check handle via Job; stub to fail closed if unknown
-            "uncertain"
+            #[cfg(windows)]
+            {
+                windows_verdict(scope)
+            }
+            #[cfg(not(windows))]
+            {
+                "uncertain"
+            }
         } else {
             "uncertain"
         };
@@ -204,7 +216,11 @@ fn read_anchor_identity(pid: u32) -> Option<String> {
         let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if s.is_empty() { None } else { Some(s) }
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(target_os = "windows")]
+    {
+        pidash_ipc::job::process_identity(pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         None
     }
@@ -215,7 +231,11 @@ fn read_anchor_identity(pid: u32) -> Option<String> {
 /// the daemon pid only when spawning fails (caller still gets a
 /// fail-closed record via identity None on unsupported hosts).
 fn spawn_anchor() -> u32 {
-    #[cfg(unix)]
+    #[cfg(windows)]
+    {
+        return spawn_anchor_windows();
+    }
+    #[cfg(all(unix, not(windows)))]
     {
         // `setsid sleep 30`: setsid(1) creates a new session so
         // pgrp == pid for the anchor. Safe (no unsafe; the crate
@@ -236,11 +256,63 @@ fn spawn_anchor() -> u32 {
             std::mem::forget(c);
             return pid;
         }
+        return std::process::id();
+    }
+    #[allow(unreachable_code)]
+    {
+        // Non-Windows fallback (Unix spawn failure) and Windows
+        // early-return both reach here only via fallthrough above.
         std::process::id()
     }
-    #[cfg(not(unix))]
-    {
-        std::process::id()
+}
+
+/// Windows anchor: a long-lived `ping` process assigned to a Job.
+#[cfg(windows)]
+fn spawn_anchor_windows() -> u32 {
+    // `ping -n 30 127.0.0.1` sleeps ~29s; hidden stdout/stderr.
+    let child = std::process::Command::new("ping")
+        .args(["-n", "30", "127.0.0.1"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    if let Ok(c) = child {
+        let pid = c.id();
+        std::mem::forget(c);
+        return pid;
+    }
+    std::process::id()
+}
+
+/// Windows Job for one scope (kill-on-close containment).
+#[cfg(windows)]
+fn create_scope_job(pid: u32) -> Option<std::sync::Arc<pidash_ipc::job::JobHandle>> {
+    let job = pidash_ipc::job::create_job().ok()?;
+    job.assign(pid).ok()?;
+    Some(job)
+}
+
+#[cfg(windows)]
+fn windows_verdict(scope: &ScopeRecord) -> &'static str {
+    if scope.job.is_none() {
+        return "uncertain";
+    }
+    match read_anchor_identity(scope.anchor_pid) {
+        Some(current) if scope.anchor_identity.as_ref() == Some(&current) => {
+            if group_has_members(scope.anchor_pid) {
+                "uncertain"
+            } else {
+                "verified"
+            }
+        }
+        Some(_) => "uncertain",
+        None => {
+            if scope.anchor_identity.is_some() {
+                "verified"
+            } else {
+                "uncertain"
+            }
+        }
     }
 }
 
@@ -328,6 +400,8 @@ mod tests {
                 anchor_pid: 999999,
                 anchor_identity: Some("12345".to_string()),
                 group_id: None,
+                #[cfg(windows)]
+                job: None,
             },
         );
         let receipt = g.verify_teardown(scope).expect("verified");
