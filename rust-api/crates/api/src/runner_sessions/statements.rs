@@ -814,9 +814,11 @@ mod tests {
         assert!(!cancel.contains("<>"));
         let skip = Uuid::new_v4();
         let assign = pg_selector(redeliver_assign_select(Uuid::nil(), Some(skip)));
+        // NEWPIDASH-241 T1: redelivery carries attempt identity.
         assert!(assign.starts_with(
             "SELECT \"agent_run\".\"id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"prompt\", \
-             \"agent_run\".\"run_config\" FROM \"agent_run\" WHERE"
+             \"agent_run\".\"run_config\", \"agent_run\".\"assignment_token\", \
+             \"agent_run\".\"assignment_protocol\" FROM \"agent_run\" WHERE"
         ));
         assert!(assign.contains(&format!("\"agent_run\".\"id\" <> '{skip}'")));
         assert!(assign.contains("\"agent_run\".\"status\" IN ('assigned', 'waiting_for_worktree')"));

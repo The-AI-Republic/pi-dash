@@ -2503,9 +2503,10 @@ mod tests {
     fn run_select_list_covers_all_columns_once() {
         let list = run_select_list();
         assert_eq!(list.split(", ").count(), agent_run::COLUMNS.len());
-        assert_eq!(agent_run::COLUMNS.len(), 42);
+        // NEWPIDASH-241 T1: +assignment_token/+assignment_protocol/+capacity_wait.
+        assert_eq!(agent_run::COLUMNS.len(), 45);
         assert!(list.starts_with(r#""agent_run"."id""#));
-        assert!(list.ends_with(r#""agent_run"."ended_at""#));
+        assert!(list.ends_with(r#""agent_run"."capacity_wait""#));
     }
 
     #[test]
