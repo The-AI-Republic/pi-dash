@@ -10,9 +10,9 @@ import { useTranslation } from "@pi-dash/i18n";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import type { TIssueServiceType, TSubIssueOperations } from "@pi-dash/types";
 import { EIssueServiceType } from "@pi-dash/types";
-import { copyUrlToClipboard } from "@pi-dash/utils";
 // hooks
 import { useIssueDetail } from "@/hooks/store/use-issue-detail";
+import { copyShareUrl } from "@/utils/share-url";
 
 export const useSubIssueOperations = (issueServiceType: TIssueServiceType): TSubIssueOperations => {
   // translation
@@ -22,6 +22,7 @@ export const useSubIssueOperations = (issueServiceType: TIssueServiceType): TSub
     subIssues: { setSubIssueHelpers },
     createSubIssues,
     fetchSubIssues,
+    fetchNextSubIssues,
     updateSubIssue,
     deleteSubIssue,
     removeSubIssue,
@@ -30,7 +31,7 @@ export const useSubIssueOperations = (issueServiceType: TIssueServiceType): TSub
   const subIssueOperations: TSubIssueOperations = useMemo(
     () => ({
       copyLink: async (path) => {
-        await copyUrlToClipboard(path);
+        await copyShareUrl(path);
         setToast({
           type: TOAST_TYPE.SUCCESS,
           title: t("Link copied!"),
@@ -45,6 +46,22 @@ export const useSubIssueOperations = (issueServiceType: TIssueServiceType): TSub
       fetchSubIssues: async (workspaceSlug, projectId, parentIssueId) => {
         try {
           await fetchSubIssues(workspaceSlug, projectId, parentIssueId);
+        } catch {
+          setToast({
+            type: TOAST_TYPE.ERROR,
+            title: t("Error!"),
+            message: t("Error fetching {entity}", {
+              entity:
+                issueServiceType === EIssueServiceType.ISSUES
+                  ? t("Sub-work items", { count: 2 })
+                  : t("{count, plural, one {Work item} other {Work items}}", { count: 2 }),
+            }),
+          });
+        }
+      },
+      fetchNextSubIssues: async (workspaceSlug, projectId, parentIssueId) => {
+        try {
+          await fetchNextSubIssues(workspaceSlug, projectId, parentIssueId);
         } catch {
           setToast({
             type: TOAST_TYPE.ERROR,
@@ -161,6 +178,7 @@ export const useSubIssueOperations = (issueServiceType: TIssueServiceType): TSub
       createSubIssues,
       deleteSubIssue,
       fetchSubIssues,
+      fetchNextSubIssues,
       issueServiceType,
       removeSubIssue,
       setSubIssueHelpers,

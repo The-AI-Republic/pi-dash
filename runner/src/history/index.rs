@@ -55,7 +55,7 @@ impl RunsIndex {
 
     pub fn recent(&self, n: usize) -> Vec<RunSummary> {
         let mut v: Vec<_> = self.runs.values().cloned().collect();
-        v.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        v.sort_by_key(|run| std::cmp::Reverse(run.started_at));
         v.truncate(n);
         v
     }

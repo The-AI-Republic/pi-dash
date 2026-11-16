@@ -8,8 +8,9 @@ import { observer } from "mobx-react";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
 import type { TContextMenuItem } from "@pi-dash/ui";
 import { CustomMenu } from "@pi-dash/ui";
-import { copyUrlToClipboard, cn } from "@pi-dash/utils";
+import { cn } from "@pi-dash/utils";
 import { useLayoutMenuItems } from "@/components/common/quick-actions-helper";
+import { copyShareUrl } from "@/utils/share-url";
 import { Ellipsis } from "lucide-react";
 import { IconButton } from "@pi-dash/propel/icon-button";
 
@@ -25,7 +26,7 @@ export const LayoutQuickActions = observer(function LayoutQuickActions(props: Pr
   const layoutLink = `${workspaceSlug}/projects/${projectId}/${storeType === "EPIC" ? "epics" : "issues"}`;
 
   const handleCopyLink = () =>
-    copyUrlToClipboard(layoutLink).then(() => {
+    copyShareUrl(layoutLink).then(() => {
       setToast({
         type: TOAST_TYPE.SUCCESS,
         title: "Link copied",

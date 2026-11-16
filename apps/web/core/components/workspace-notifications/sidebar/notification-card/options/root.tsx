@@ -38,6 +38,7 @@ export const NotificationOption = observer(function NotificationOption(props: TN
 
   return (
     <div
+      data-testid="notifications-card-actions"
       className={cn("hidden flex-shrink-0 text-body-xs-medium group-hover:block", {
         block: isSnoozeStateModalOpen,
       })}

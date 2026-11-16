@@ -127,12 +127,18 @@ impl AddRunnerView {
             )
             .await
             {
-                Ok(_runner) => crate::service::reload::restart_and_verify(&paths).await,
+                // Activate in the running daemon (no restart, other
+                // runners keep running); start the service only when no
+                // daemon is running.
+                Ok(runner) => {
+                    crate::service::reload::activate_or_restart(&paths, &runner.name).await
+                }
                 Err(e) => crate::service::reload::ReloadOutcome {
                     ok: false,
                     summary: "add runner failed".into(),
                     detail: Some(e.to_string()),
                     service_state: "unknown".into(),
+                    warnings: None,
                 },
             };
             tx.send(AppEvent::ReloadOutcomeUpdated(outcome));
@@ -204,11 +210,7 @@ impl Renderable for AddRunnerView {
             )));
         }
         let p = Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Add runner "),
-            )
+            .block(Block::default().borders(Borders::ALL).title(" Add runner "))
             .wrap(Wrap { trim: false });
         p.render(modal, buf);
     }
@@ -225,9 +227,7 @@ impl View for AddRunnerView {
         }
 
         match (key.code, key.modifiers) {
-            (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
-                KeyHandled::NotConsumed
-            }
+            (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => KeyHandled::NotConsumed,
             (KeyCode::Esc, _) => {
                 self.complete = true;
                 self.completion = Some(ViewCompletion::Cancelled);
@@ -343,6 +343,7 @@ mod tests {
             config_dir: root.join("config"),
             data_dir: root.join("data"),
             runtime_dir: root.join("runtime"),
+            machine_context_dir: root.join("config"),
         }
     }
 

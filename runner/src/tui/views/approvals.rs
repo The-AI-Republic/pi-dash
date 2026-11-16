@@ -10,13 +10,15 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, StatefulWidget, Widget, Wrap};
+use ratatui::widgets::{
+    Block, Borders, List, ListItem, ListState, Paragraph, StatefulWidget, Widget, Wrap,
+};
 
 use super::super::app::AppData;
 use super::super::event::AppEvent;
-use super::super::view::focus::{border_style, is_focused, FocusNode, FocusPath};
-use super::super::view::tab::{Tab, TabCtx, TabKind};
 use super::super::view::KeyHandled;
+use super::super::view::focus::{FocusNode, FocusPath, border_style, is_focused};
+use super::super::view::tab::{Tab, TabCtx, TabKind};
 use super::super::widgets::SelectableList;
 use crate::approval::router::ApprovalRecord;
 
@@ -34,7 +36,11 @@ impl ApprovalsTab {
     }
 
     pub fn reconcile(&mut self, data: &AppData) {
-        let ids: Vec<String> = data.approvals.iter().map(|r| r.approval_id.clone()).collect();
+        let ids: Vec<String> = data
+            .approvals
+            .iter()
+            .map(|r| r.approval_id.clone())
+            .collect();
         self.list.reconcile(&ids);
     }
 

@@ -514,7 +514,7 @@ Envelope (matches `IAgentChatEvent` shape the kit consumes; `serialize_event`-st
 | `message_completed` | `{"turn_id", "message": {…full serialized message…}}`     | full row → UI replaces streaming stub without refetch                                           |
 | `tool_call`         | `{"turn_id", "message": {…tool_call row…}}`               |                                                                                                 |
 | `tool_result`       | `{"turn_id", "message": {…tool_result row incl. links…}}` |                                                                                                 |
-| `turn_completed`    | `{"turn_id", "usage": {...}}`                             |                                                                                                 |
+| `turn_completed`    | `{"turn_id", "usage": {...}}`                             | plus `"truncated": true` when the reply stopped at the output limit (see §9.3)                  |
 | `turn_cancelled`    | `{"turn_id"}`                                             |                                                                                                 |
 | `turn_failed`       | `{"turn_id", "error_code", "detail"}`                     | paired 1:1 with an `error` message row                                                          |
 
@@ -607,11 +607,27 @@ through the assistant's `renderMessage`):
 | `assistant_not_configured` | `503` on llm-config                                   | self-host: encryption key unset                                      |
 | `base_url_blocked`         | `400` on llm-config PUT/test                          | SSRF policy                                                          |
 | `provider_auth_failed`     | `turn_failed` event + `error` row; also test endpoint | "API key rejected by <host>"                                         |
+| `provider_session_expired` | 〃 (gateway connection)                               | gateway 401: "sign out and sign back in"                             |
+| `provider_out_of_credit`   | 〃                                                    | 402 / no credit; detail carries the provider's own text              |
+| `provider_rate_limited`    | 〃                                                    | 429: "wait a moment and try again"                                   |
 | `provider_unreachable`     | 〃                                                    | timeout/conn error                                                   |
-| `model_invalid`            | 〃                                                    | unknown model name                                                   |
+| `model_invalid`            | 〃                                                    | unknown model name (BYOK: the user typed it)                         |
+| `model_unavailable`        | 〃 (gateway connection)                               | catalog model no longer served: "pick another model"                 |
+| `response_truncated`       | 〃                                                    | output limit hit before any reply (mid-tool-call)                    |
 | `turn_timeout`             | 〃 (sweep or soft limit)                              | retry button                                                         |
 | `iteration_limit`          | 〃 (`UsageLimitExceeded`)                             | "request too complex"                                                |
 | `internal`                 | 〃                                                    | catch-all, logged                                                    |
 
 Rule: every `turn_failed` event is paired with exactly one `error` message row carrying the same
 code (the row is the durable record; the event is the live signal).
+
+Provider failures are classified from the HTTP status on the exception
+(`runtime/provider_errors.py`), never by finding "401"/"402" in its text. The wording depends on
+the connection kind — a key the user supplied (BYOK) or a metered gateway — which the `ee`
+model-provider seam picks in `turn_error_for_user(user, exc)`; an overlay returns its own
+`AssistantError` there to supply a code and detail. The turn runner tolerates an overlay that has
+no such function.
+
+A reply that ended with `finish_reason=length` is not a failure: the turn completes, the last
+assistant row gets `payload.truncated = true` (re-sent as `message_completed`), and
+`turn_completed` carries `truncated: true`.

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 240" role="img" aria-label="Illustration of an empty inbox tray with an envelope above it">
+  <rect x="96" y="56" width="128" height="88" rx="10" fill="none" stroke="#5b6b76" stroke-width="6"/>
+  <polyline points="96,66 160,108 224,66" fill="none" stroke="#5b6b76" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="160" cy="102" r="9" fill="#1f7a6b"/>
+  <path d="M64 168 L80 208 L240 208 L256 168 Z" fill="none" stroke="#5b6b76" stroke-width="6" stroke-linejoin="round"/>
+  <line x1="52" y1="168" x2="268" y2="168" stroke="#5b6b76" stroke-width="6" stroke-linecap="round"/>
+  <rect x="112" y="182" width="96" height="12" rx="6" fill="#c6d2d9"/>
+  <circle cx="76" cy="120" r="6" fill="#9fb0ba"/>
+  <circle cx="244" cy="120" r="6" fill="#9fb0ba"/>
+</svg>
