@@ -2128,7 +2128,6 @@ pub fn render_first_turn(
     bundle: &RenderBundle,
     kind: &str,
     run: &RunRenderRef,
-    extra_toolsets_schema_tool: &str,
 ) -> Result<RenderedTurn, String> {
     let issue = &bundle.issue;
     let project = &bundle.project;
@@ -2189,14 +2188,10 @@ pub fn render_first_turn(
             .get("unavailable_capabilities")
             .cloned()
             .unwrap_or(Value::Null),
-        extra_toolsets_enabled: run
-            .tool_plan
-            .get("extra_toolsets")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        // Named by the EE seam, consulted only when enabled
-        // (`context.py:514-517`); CE names none.
-        extra_toolsets_schema_tool: extra_toolsets_schema_tool.to_owned(),
+        // P4: extra toolsets died with the retired plane; the
+        // keys still render (always false/empty).
+        extra_toolsets_enabled: false,
+        extra_toolsets_schema_tool: String::new(),
         limits: run.tool_plan.get("limits").cloned().unwrap_or(Value::Null),
         tick: tick_value(
             bundle.ticker.as_ref(),
@@ -2348,10 +2343,7 @@ pub trait CreationSeam {
         trigger: &str,
         created_by_id: Uuid,
     ) -> Result<RenderBundle, CreationError>;
-    /// The EE schema-tool name (`extra_toolsets_schema_tool`,
-    /// `context.py:512-517`): consulted only when the run's plan
-    /// enables extra toolsets. CE names none.
-    fn extra_toolsets_schema_tool(&self) -> String;
+    /// (P4: the extra-toolsets schema tool died with the toolsets seam.)
     /// The dedicated-runner pin decision for one creation (design
     /// §9.1/§9.2 + §11.2/§23.3): the H-11/H-10 refusal answered in
     /// the same probe as the pin (Django `dedicated_run_refusal`
@@ -2504,17 +2496,7 @@ async fn render_new_run<C: CreationSeam>(
             run_ref.created_by_id,
         )
         .await?;
-    let schema_tool = if run_ref
-        .tool_plan
-        .get("extra_toolsets")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        seam.extra_toolsets_schema_tool()
-    } else {
-        String::new()
-    };
-    Ok(render_first_turn(&bundle, kind, run_ref, &schema_tool))
+    Ok(render_first_turn(&bundle, kind, run_ref))
 }
 
 /// Create a fresh `AgentRun` and dispatch it
@@ -3879,10 +3861,6 @@ mod tests {
                 .ok_or_else(|| CreationError::Db("no bundle".to_owned()))
         }
 
-        fn extra_toolsets_schema_tool(&self) -> String {
-            String::new()
-        }
-
         async fn dedicated_pin(
             &mut self,
             args: &DedicatedPinArgs<'_>,
@@ -4375,7 +4353,6 @@ mod tests {
                 tool_plan: json!({}),
                 created_by_id: uid(0x40),
             },
-            "",
         )
         .expect("renders");
         for marker in [
@@ -4418,7 +4395,6 @@ mod tests {
                 tool_plan: json!({}),
                 created_by_id: uid(0x40),
             },
-            "",
         )
         .expect("renders");
         assert!(turn.text.contains("You are reviewing"));

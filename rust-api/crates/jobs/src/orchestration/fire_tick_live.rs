@@ -28,7 +28,7 @@ use pidash_db::entity::agent_run;
 use pidash_db::orchestration::runs::ACTIVE_STATUSES;
 use pidash_db::orm_tx::into_sqlx;
 use pidash_db::pool::sea_orm_connection;
-use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
+use pidash_services::extensions::AssistantModelSeam;
 use pidash_services::runner_sessions::live_drains::{drain_pod_by_id, DrainError};
 
 use super::creation_jobs::StoreDeps;
@@ -39,7 +39,6 @@ use super::fire_tick_seam::{
 use super::live_inputs::{
     creator_universe, fetch_presence, gate_fn, gate_verdicts, profile_fn, JobsMatcher,
 };
-use crate::admission::RedisAdmissionCache;
 use crate::dispatch::DispatchDecision;
 use crate::tasks_ticker::fire_tick::{FireTickSeam, ProjectTickCols};
 
@@ -55,7 +54,6 @@ pub struct LiveFireTickSeam {
     managed: ManagedRunnerSettings,
     redis: Option<redis::Client>,
     runner: RunnerSettings,
-    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     assistant_seam: Arc<dyn AssistantModelSeam>,
 }
 
@@ -66,7 +64,6 @@ impl LiveFireTickSeam {
         managed: ManagedRunnerSettings,
         redis: Option<redis::Client>,
         runner: RunnerSettings,
-        toolsets: Arc<dyn CloudAgentToolsetsSeam>,
         assistant_seam: Arc<dyn AssistantModelSeam>,
     ) -> Self {
         Self {
@@ -75,7 +72,6 @@ impl LiveFireTickSeam {
             managed,
             redis,
             runner,
-            toolsets,
             assistant_seam,
         }
     }
@@ -146,7 +142,6 @@ impl FireTickSeam for LiveFireTickSeam {
         let managed = self.managed.clone();
         let redis = self.redis.clone();
         let runner = self.runner.clone();
-        let toolsets = self.toolsets.clone();
         let assistant_seam = self.assistant_seam.clone();
         let matcher = JobsMatcher::new(pool.clone());
         let triggered_by = triggered_by.to_owned();
@@ -157,11 +152,8 @@ impl FireTickSeam for LiveFireTickSeam {
             let deps = StoreDeps {
                 cloud,
                 managed,
-                cache: RedisAdmissionCache::from_env(),
                 has_usable_llm_config: gate_fn(verdicts),
-                toolsets,
                 llm_profile: profile_fn(presence),
-                now_unix_secs: Utc::now().timestamp(),
             };
             let now = Utc::now();
             // Continuation never retimes a clock (a bounce only
@@ -206,7 +198,6 @@ impl FireTickSeam for LiveFireTickSeam {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pidash_services::extensions::NoExtraToolsets;
 
     fn state(id: u128, name: &str, group: &str) -> StateView {
         StateView {
@@ -244,7 +235,6 @@ mod tests {
             settings.managed_runner,
             None,
             settings.runner,
-            Arc::new(NoExtraToolsets),
             Arc::new(DefaultSeam),
         )
     }

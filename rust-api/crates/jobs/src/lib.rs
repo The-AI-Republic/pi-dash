@@ -20,7 +20,6 @@
 //! this crate owns the mechanism, never task bodies.
 
 /// Redis-backed cloud-agent admission cache (PIDASHCONV-1487).
-pub mod admission;
 /// Page-view publish envelopes (D-30, PIDASHCONV-293).
 pub mod app_pages;
 /// Assistant turn pipeline + stale-turn sweep (D-06, PIDASHCONV-254).

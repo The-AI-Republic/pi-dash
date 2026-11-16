@@ -138,12 +138,8 @@ impl AppTransitionHook {
             pool: self.pool.clone(),
             cloud: settings.cloud_agent.clone(),
             managed: settings.managed_runner.clone(),
-            cache: pidash_services::dispatch::admission::RedisAdmissionCache::new(
-                client_from_settings(settings),
-            ),
             redis: client_from_settings(settings),
             runner: settings.runner.clone(),
-            toolsets: self.state.toolsets().clone(),
             assistant_seam: self.state.assistant_seam().clone(),
             publish: drains.clone(),
             pods: drains,
@@ -337,9 +333,6 @@ pub(crate) mod test_support {
             _c: Uuid,
         ) -> Result<RenderBundle, CreationError> {
             unreached()
-        }
-        fn extra_toolsets_schema_tool(&self) -> String {
-            String::new()
         }
     }
 
