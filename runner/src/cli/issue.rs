@@ -46,8 +46,15 @@ pub enum IssueCommand {
     /// the workspace default project from Pi Dash cloud.
     Create(CreateArgs),
     /// List work items in a project. Returns the server's paginated envelope
-    /// (`{count, next_cursor, prev_cursor, results: [...]}`) — pass `--cursor`
-    /// from a prior page to walk pages. Narrow the list with `--state`,
+    /// (`{grouped_by, sub_grouped_by, total_count, next_cursor, prev_cursor,
+    /// next_page_results, prev_page_results, count, total_pages,
+    /// total_results, extra_stats, results: [...]}`). One invocation fetches
+    /// one page — at most `per_page` items (server default and max: 1000) —
+    /// so `count` alone cannot tell a complete list from a truncated one:
+    /// when `next_page_results` is `true` the list is truncated at `count`
+    /// of `total_count` items, and passing `next_cursor` back via `--cursor`
+    /// fetches the next page. A note on stderr flags the truncation; stdout
+    /// stays the bare envelope. Narrow the list with `--state`,
     /// `--state-group`, `--parent`, `--label`, `--priority`; `--fields`
     /// trims each item.
     List(ListArgs),
@@ -294,7 +301,8 @@ pub struct ListArgs {
     #[arg(long)]
     pub cursor: Option<String>,
 
-    /// Items per page. Server-side default applies if omitted.
+    /// Items per page. The server default (1000) is also the maximum, so a
+    /// project with more items can only be read by walking `--cursor` pages.
     #[arg(long)]
     pub per_page: Option<u32>,
 
@@ -309,7 +317,12 @@ pub struct ListArgs {
     pub state: Option<String>,
 
     /// Only items in these state groups — comma-separated from `backlog`,
-    /// `unstarted`, `started`, `review`, `test`, `completed`, `cancelled`.
+    /// `unstarted`, `started`, `review`, `test`, `completed`, `cancelled`,
+    /// plus shortcuts `open` (`backlog,unstarted,started,review,test`),
+    /// `closed` (`completed,cancelled`) and `all` (no filter). Aliases may be
+    /// mixed with concrete groups, e.g. `open,completed`. Defaults to `open`
+    /// when neither `--state` nor `--state-group` is given. If `--state` or
+    /// `--state-group` is given, the default is disabled.
     #[arg(long)]
     pub state_group: Option<String>,
 
@@ -387,6 +400,7 @@ pub struct PatchArgs {
     #[arg(long, conflicts_with_all = ["add_label", "remove_label"])]
     pub clear_labels: bool,
 
+
     /// Record the git branch this issue's work lives on, so later agent runs
     /// check it out instead of cutting a new one. Set it only after the
     /// branch exists on the remote. `--git-work-branch ""` clears it.
@@ -411,6 +425,18 @@ pub struct PatchArgs {
     /// runner; with `--runner` the two must agree (server-validated).
     #[arg(long)]
     pub pod: Option<String>,
+
+    /// Work type for this issue (e.g. `software`, `general`) — selects which
+    /// per-work-type guidance the agent prompts carry. The server validates
+    /// the key and rejects agent-attributed changes while the issue is being
+    /// worked. Mutually exclusive with `--clear-work-type`.
+    #[arg(long = "work-type", conflicts_with = "clear_work_type")]
+    pub work_type: Option<String>,
+
+    /// Clear the per-issue work type, inheriting the project default (sends
+    /// `work_type: null`). Mutually exclusive with `--work-type`.
+    #[arg(long = "clear-work-type")]
+    pub clear_work_type: bool,
 }
 
 #[derive(Debug, Args)]
@@ -458,10 +484,15 @@ pub struct SearchArgs {
     #[arg(long)]
     pub project: Option<String>,
 
-    /// Filter by status: `open` (in progress), `closed` (completed or
-    /// cancelled), or `all` (default).
+    /// Filter by status: `open` (open), `closed` (completed/cancelled) or
+    /// `all` (default). Alias of `--state-group` for search.
     #[arg(long, default_value = "all")]
     pub status: String,
+
+    /// Alias of `--status` for consistency with `issue list` — `open`,
+    /// `closed` or `all`. When set, it takes precedence over `--status`.
+    #[arg(long = "state-group", value_name = "GROUP")]
+    pub state_group: Option<String>,
 
     /// Lower bound on `updated_at`, ISO 8601 (e.g. `2025-01-01T00:00:00Z`).
     #[arg(long)]
@@ -909,12 +940,170 @@ async fn cmd_list(client: &ApiClient, args: ListArgs) -> Result<(), CliError> {
         "{}",
         serde_json::to_string(&resp).expect("serialize JSON value")
     );
+    if let Some(note) = pagination_note(&resp) {
+        eprintln!("{note}");
+    }
     Ok(())
 }
 
+/// The truncation warning the list commands print to stderr when the server
+/// reports another page (`next_page_results: true`), so a caller piping
+/// stdout still learns the list is incomplete. Stdout stays the bare
+/// envelope. `None` on the final page — and on envelopes from servers old
+/// enough to omit the field, which cannot be told apart from complete ones.
+/// `pub(super)` so the sibling `page list` prints the same note.
+pub(super) fn pagination_note(resp: &Value) -> Option<String> {
+    if resp.get("next_page_results").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let shown = match (
+        resp.get("count").and_then(Value::as_u64),
+        resp.get("total_count").and_then(Value::as_u64),
+    ) {
+        (Some(count), Some(total)) => format!("{count} of {total} results"),
+        _ => "more results available".to_string(),
+    };
+    let more = match resp.get("next_cursor").and_then(Value::as_str) {
+        Some(cursor) if !cursor.is_empty() => format!("pass --cursor {cursor} for more"),
+        _ => "pass --cursor from next_cursor for more".to_string(),
+    };
+    Some(format!("note: {shown}; {more}"))
+}
+
+const OPEN_STATE_GROUPS: &[&str] = &["backlog", "unstarted", "started", "review", "test"];
+const CLOSED_STATE_GROUPS: &[&str] = &["completed", "cancelled"];
+const STATE_GROUP_ORDER: &[&str] = &[
+    "backlog",
+    "unstarted",
+    "started",
+    "review",
+    "test",
+    "completed",
+    "cancelled",
+];
+
+/// Expand a `--state-group` value into what the server expects.
+///
+/// Input is comma-separated tokens, case-insensitive, trimmed. Allowed
+/// tokens are the concrete groups (`backlog`, `unstarted`, `started`,
+/// `review`, `test`, `completed`, `cancelled`) and the shortcuts `open`,
+/// `closed`, `all`. `open` → `backlog,unstarted,started,review,test`,
+/// `closed` → `completed,cancelled`, `all` → `None` (no filter, today's
+/// behaviour). Mixed tokens expand and de-duplicate, ordered by
+/// `STATE_GROUP_ORDER`. If any token is `all`, the result is `None` — `all`
+/// wins over other tokens because it means "everything".
+fn expand_state_group_input(raw: &str) -> Result<Option<String>, CliError> {
+    let tokens: Vec<String> = raw
+        .split(',')
+        .map(|t| t.trim().to_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect();
+    if tokens.is_empty() {
+        return Err(CliError::new(
+            EXIT_INVALID,
+            "--state-group must not be empty",
+        ));
+    }
+    const CONCRETE: &[&str] = STATE_GROUP_ORDER;
+    for token in &tokens {
+        if token != "open"
+            && token != "closed"
+            && token != "all"
+            && !CONCRETE.contains(&token.as_str())
+        {
+            return Err(CliError::new(
+                EXIT_INVALID,
+                format!(
+                    "unknown state group '{token}' (valid: backlog, unstarted, started, review, test, completed, cancelled, open, closed, all)"
+                ),
+            ));
+        }
+    }
+    if tokens.iter().any(|t| t == "all") {
+        return Ok(None);
+    }
+    let mut expanded: Vec<String> = Vec::new();
+    for token in &tokens {
+        match token.as_str() {
+            "open" => {
+                for g in OPEN_STATE_GROUPS {
+                    if !expanded.iter().any(|e| e == g) {
+                        expanded.push((*g).to_string());
+                    }
+                }
+            }
+            "closed" => {
+                for g in CLOSED_STATE_GROUPS {
+                    if !expanded.iter().any(|e| e == g) {
+                        expanded.push((*g).to_string());
+                    }
+                }
+            }
+            other => {
+                if !expanded.iter().any(|e| e == other) {
+                    expanded.push(other.to_string());
+                }
+            }
+        }
+    }
+    expanded.sort_by(|a, b| {
+        let ia = STATE_GROUP_ORDER
+            .iter()
+            .position(|g| g == a)
+            .unwrap_or(usize::MAX);
+        let ib = STATE_GROUP_ORDER
+            .iter()
+            .position(|g| g == b)
+            .unwrap_or(usize::MAX);
+        ia.cmp(&ib)
+    });
+    Ok(Some(expanded.join(",")))
+}
+
+/// What the CLI prints as `state_group` to make the applied filter visible.
+/// `None` means no state-group filter was applied (e.g. `--state` alone or
+/// `--state-group all` — in the latter case the caller shows `"all"`).
+fn visible_state_group(args: &ListArgs) -> Option<String> {
+    // Default: no flags → open
+    if args.state.is_none() && args.state_group.is_none() {
+        return Some("open".to_string());
+    }
+    let raw = args.state_group.as_ref()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let tokens: Vec<String> = trimmed
+        .split(',')
+        .map(|t| t.trim().to_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect();
+    if tokens.is_empty() {
+        return None;
+    }
+    // If the value expands to no filter (contains `all`), show `all`
+    match expand_state_group_input(trimmed) {
+        Ok(None) => Some("all".to_string()),
+        Ok(Some(_expanded)) => {
+            // If the input was a single alias, show the alias; otherwise show
+            // the original token list so `open,completed` stays visible.
+            if tokens.len() == 1 {
+                Some(tokens[0].clone())
+            } else {
+                // Check if tokens are all concrete and just an identity list —
+                // still show the original order as given.
+                // If the input is pure concrete groups, show expanded (same).
+                // Otherwise preserve input for alias-mixed cases.
+                Some(tokens.join(","))
+            }
+        }
+        Err(_) => Some(tokens.join(",")),
+    }
+}
+
 /// Fetch one page of `pidash issue list`. Resolves `--parent PROJ-123` to a
-/// UUID client-side (like `create --parent`); every other filter is passed
-/// through and validated by the server.
+/// UUID client-side (like `create --parent`); state filters are expanded
+/// client-side and the `state_group` default is applied here.
 pub async fn list_issues(client: &ApiClient, args: &ListArgs) -> Result<Value, CliError> {
     if args.project.trim().is_empty() {
         return Err(CliError::new(EXIT_INVALID, "--project must not be empty"));
@@ -930,7 +1119,28 @@ pub async fn list_issues(client: &ApiClient, args: &ListArgs) -> Result<Value, C
         client.env.workspace_slug,
         args.project.trim()
     );
-    client.get(&path).await
+    let mut resp = client.get(&path).await?;
+    if let Some(obj) = resp.as_object_mut() {
+        if let Some(vis) = visible_state_group(args) {
+            obj.insert("state_group".into(), Value::String(vis));
+        } else {
+            // No state_group filter was applied (explicit --state or --state-group all)
+            // Show `all` for explicit all, otherwise omit? The spec example shows
+            // `"state_group": "open"` for the default; for explicit --state we
+            // keep the key absent so agents don't assume a state_group filter.
+            // For `--state-group all` we show `"all"` via visible_state_group.
+            // When visible is None due to explicit --state, don't insert.
+            if args
+                .state_group
+                .as_deref()
+                .map(|s| s.trim().eq_ignore_ascii_case("all"))
+                .unwrap_or(false)
+            {
+                obj.insert("state_group".into(), Value::String("all".to_string()));
+            }
+        }
+    }
+    Ok(resp)
 }
 
 fn is_null_parent(parent: &str) -> bool {
@@ -941,6 +1151,11 @@ fn is_null_parent(parent: &str) -> bool {
 /// Assemble the list query string from the args and the already-resolved
 /// parent (`"null"` or a UUID). Pure so the flag → query-param contract is
 /// unit-testable.
+///
+/// With neither `--state` nor `--state-group` the query filters to the open
+/// groups (`backlog,unstarted,started,review,test`). An explicit `--state`
+/// or `--state-group` disables that default and is applied verbatim (after
+/// alias expansion for `--state-group`).
 fn build_list_query(args: &ListArgs, parent: Option<String>) -> Result<String, CliError> {
     let mut params: Vec<(&str, String)> = Vec::new();
     if let Some(c) = args.cursor.as_ref() {
@@ -952,14 +1167,44 @@ fn build_list_query(args: &ListArgs, parent: Option<String>) -> Result<String, C
     if let Some(o) = args.order_by.as_ref() {
         params.push(("order_by", o.clone()));
     }
-    let filters = [
-        ("state", "--state", &args.state),
-        ("state_group", "--state-group", &args.state_group),
+
+    let has_explicit_filter = args.state.is_some() || args.state_group.is_some();
+    if let Some(v) = &args.state
+        && v.trim().is_empty()
+    {
+        return Err(CliError::new(EXIT_INVALID, "--state must not be empty"));
+    }
+    if let Some(v) = &args.state_group
+        && v.trim().is_empty()
+    {
+        return Err(CliError::new(
+            EXIT_INVALID,
+            "--state-group must not be empty",
+        ));
+    }
+
+    // Preserve original order: state, state_group, then the rest.
+    if let Some(v) = &args.state {
+        params.push(("state", v.trim().to_string()));
+    }
+    if !has_explicit_filter {
+        // Default: open only.
+        params.push(("state_group", OPEN_STATE_GROUPS.join(",")));
+    } else if let Some(raw) = &args.state_group {
+        match expand_state_group_input(raw)? {
+            Some(expanded) => params.push(("state_group", expanded)),
+            None => { /* `all` → no filter, omit param (today's behaviour) */ }
+        }
+    }
+    // When only `--state` is given (no `--state-group`), no state_group is sent —
+    // the explicit `--state` disables the default per proposal.
+
+    let rest_filters = [
         ("labels", "--label", &args.label),
         ("priority", "--priority", &args.priority),
         ("fields", "--fields", &args.fields),
     ];
-    for (key, flag, value) in filters {
+    for (key, flag, value) in rest_filters {
         if let Some(v) = value {
             let v = v.trim();
             if v.is_empty() {
@@ -971,6 +1216,7 @@ fn build_list_query(args: &ListArgs, parent: Option<String>) -> Result<String, C
             params.push((key, v.to_string()));
         }
     }
+
     if let Some(p) = parent {
         params.push(("parent", p));
     }
@@ -1062,6 +1308,16 @@ enum ParentPatch {
     Unchanged,
 }
 
+enum WorkTypePatch {
+    /// `--work-type` given; the work-type key (validated server-side).
+    Set(String),
+    /// `--clear-work-type` given; inherit the project default by sending
+    /// `work_type: null`.
+    Clear,
+    /// Neither flag given; leave the work type untouched.
+    Unchanged,
+}
+
 pub async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliError> {
     let description = load_description(&args.description, std::io::stdin())?;
     // Resolve issue first — we always need project_id for the mutating PATCH URL.
@@ -1083,6 +1339,7 @@ pub async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliErr
 
     let labels = resolve_label_patch(client, &issue, &args).await?;
 
+
     let runner = if args.clear_runner {
         RunnerPatch::Clear
     } else if let Some(ref runner) = args.runner {
@@ -1098,6 +1355,17 @@ pub async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliErr
         pod: assigned_pod,
         runner,
     };
+    let work_type = if args.clear_work_type {
+        WorkTypePatch::Clear
+    } else if let Some(ref key) = args.work_type {
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(CliError::new(EXIT_INVALID, "--work-type must not be empty"));
+        }
+        WorkTypePatch::Set(key.to_string())
+    } else {
+        WorkTypePatch::Unchanged
+    };
 
     let body = build_patch_body(
         args.title.as_deref(),
@@ -1108,6 +1376,7 @@ pub async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliErr
         labels,
         args.git_work_branch.as_deref(),
         execution_target,
+        work_type,
     )?;
 
     let path = format!(
@@ -1257,6 +1526,7 @@ fn build_patch_body(
     label_uuids: Option<Vec<String>>,
     git_work_branch: Option<&str>,
     execution_target: ExecutionTargetPatch,
+    work_type: WorkTypePatch,
 ) -> Result<Map<String, Value>, CliError> {
     let mut body: Map<String, Value> = Map::new();
 
@@ -1291,6 +1561,7 @@ fn build_patch_body(
     if let Some(uuids) = label_uuids {
         body.insert("labels".into(), label_array(uuids));
     }
+
     // An empty string is a real mutation too: it clears the recorded branch.
     if let Some(branch) = git_work_branch {
         body.insert("git_work_branch".into(), Value::String(branch.to_string()));
@@ -1314,11 +1585,20 @@ fn build_patch_body(
             }
         }
     }
+    match work_type {
+        WorkTypePatch::Set(key) => {
+            body.insert("work_type".into(), Value::String(key));
+        }
+        WorkTypePatch::Clear => {
+            body.insert("work_type".into(), Value::Null);
+        }
+        WorkTypePatch::Unchanged => {}
+    }
 
     if body.is_empty() {
         return Err(CliError::new(
             EXIT_INVALID,
-            "at least one of --state/--title/--description/--description-file/--priority/--parent/--clear-parent/--label/--add-label/--remove-label/--clear-labels/--git-work-branch/--runner/--clear-runner/--pod is required",
+            "at least one of --state/--title/--description/--description-file/--priority/--parent/--clear-parent/--label/--add-label/--remove-label/--clear-labels/--git-work-branch/--runner/--clear-runner/--pod/--work-type/--clear-work-type is required",
         ));
     }
 
@@ -1378,10 +1658,21 @@ fn build_search_params(args: &SearchArgs) -> Result<Vec<(&'static str, String)>,
     {
         params.push(("project", p.to_string()));
     }
-    // Send `status` only when it differs from the server default to keep
-    // the URL terse on the common path.
-    if args.status != "all" {
-        params.push(("status", args.status.clone()));
+    // `--state-group` is an alias for `--status` (consistency with `issue list`):
+    // `open|closed|all` map directly to the server's `status` param.
+    let effective_status = args
+        .state_group
+        .as_ref()
+        .map(|s| s.trim().to_lowercase())
+        .unwrap_or_else(|| args.status.clone());
+    if effective_status != "all" {
+        if effective_status != "open" && effective_status != "closed" && effective_status != "all" {
+            return Err(CliError::new(
+                EXIT_INVALID,
+                format!("unknown status '{effective_status}' (valid: open, closed, all)"),
+            ));
+        }
+        params.push(("status", effective_status));
     }
     if let Some(since) = args.since.as_ref() {
         params.push(("since", since.clone()));
@@ -1587,6 +1878,48 @@ mod tests {
         assert_eq!(build_query_string(&[]), "");
     }
 
+    // --- pagination note ---------------------------------------------------
+
+    #[test]
+    fn pagination_note_fires_only_when_the_server_reports_another_page() {
+        let truncated = json!({
+            "count": 1000, "total_count": 4200,
+            "next_cursor": "1000:1:0", "next_page_results": true,
+        });
+        assert_eq!(
+            pagination_note(&truncated).as_deref(),
+            Some("note: 1000 of 4200 results; pass --cursor 1000:1:0 for more")
+        );
+
+        let last_page = json!({
+            "count": 200, "total_count": 4200,
+            "next_cursor": "1000:5:0", "next_page_results": false,
+        });
+        assert_eq!(pagination_note(&last_page), None);
+    }
+
+    #[test]
+    fn pagination_note_stays_silent_when_the_field_is_absent() {
+        // Servers predating `next_page_results` in the envelope: a complete
+        // list and a truncated one are indistinguishable, so say nothing.
+        assert_eq!(pagination_note(&json!({"count": 1000, "results": []})), None);
+    }
+
+    #[test]
+    fn pagination_note_degrades_gracefully_on_partial_envelopes() {
+        let no_counts = json!({"next_page_results": true, "next_cursor": "1000:1:0"});
+        assert_eq!(
+            pagination_note(&no_counts).as_deref(),
+            Some("note: more results available; pass --cursor 1000:1:0 for more")
+        );
+
+        let no_cursor = json!({"next_page_results": true, "count": 1000, "total_count": 4200});
+        assert_eq!(
+            pagination_note(&no_cursor).as_deref(),
+            Some("note: 1000 of 4200 results; pass --cursor from next_cursor for more")
+        );
+    }
+
     // --- description source ----------------------------------------------
 
     const NO_STDIN: &[u8] = b"";
@@ -1699,6 +2032,7 @@ mod tests {
                 pod: None,
                 runner: RunnerPatch::Unchanged,
             },
+            WorkTypePatch::Unchanged,
         )
         .expect("description alone is a valid mutation");
         assert_eq!(
@@ -1722,6 +2056,7 @@ mod tests {
                 pod: None,
                 runner: RunnerPatch::Unchanged,
             },
+            WorkTypePatch::Unchanged,
         )
         .expect("a work branch alone is a valid mutation");
         assert_eq!(
@@ -1743,6 +2078,7 @@ mod tests {
                 pod: None,
                 runner: RunnerPatch::Unchanged,
             },
+            WorkTypePatch::Unchanged,
         )
         .expect("clearing is a valid mutation");
         assert_eq!(
@@ -1816,13 +2152,199 @@ mod tests {
     }
 
     #[test]
-    fn build_list_query_without_filters_is_unchanged() {
+    fn build_list_query_without_filters_defaults_to_open() {
         let args = ListArgs {
             project: "ENG".into(),
             per_page: Some(10),
             ..Default::default()
         };
-        assert_eq!(build_list_query(&args, None).unwrap(), "?per_page=10");
+        assert_eq!(
+            build_list_query(&args, None).unwrap(),
+            "?per_page=10&state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest"
+        );
+    }
+
+    #[test]
+    fn build_list_query_open_expands() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state_group: Some("open".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            build_list_query(&args, None).unwrap(),
+            "?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest"
+        );
+    }
+
+    #[test]
+    fn build_list_query_closed_expands() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state_group: Some("closed".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            build_list_query(&args, None).unwrap(),
+            "?state_group=completed%2Ccancelled"
+        );
+    }
+
+    #[test]
+    fn build_list_query_all_omits_filter() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state_group: Some("all".into()),
+            ..Default::default()
+        };
+        assert_eq!(build_list_query(&args, None).unwrap(), "");
+        // With an additional param, `all` still omits state_group.
+        let args = ListArgs {
+            project: "ENG".into(),
+            state_group: Some("all".into()),
+            per_page: Some(5),
+            ..Default::default()
+        };
+        assert_eq!(build_list_query(&args, None).unwrap(), "?per_page=5");
+    }
+
+    #[test]
+    fn build_list_query_mixed_alias_and_concrete_expands() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state_group: Some("open,completed".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            build_list_query(&args, None).unwrap(),
+            "?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest%2Ccompleted"
+        );
+    }
+
+    #[test]
+    fn build_list_query_mixed_open_closed_deduplicates() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state_group: Some("open,closed".into()),
+            ..Default::default()
+        };
+        // open + closed = all 7 concrete groups, canonical order.
+        assert_eq!(
+            build_list_query(&args, None).unwrap(),
+            "?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest%2Ccompleted%2Ccancelled"
+        );
+    }
+
+    #[test]
+    fn build_list_query_explicit_state_disables_default() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state: Some("Backlog".into()),
+            ..Default::default()
+        };
+        assert_eq!(build_list_query(&args, None).unwrap(), "?state=Backlog");
+    }
+
+    #[test]
+    fn build_list_query_explicit_state_group_disables_default() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state_group: Some("cancelled".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            build_list_query(&args, None).unwrap(),
+            "?state_group=cancelled"
+        );
+    }
+
+    #[test]
+    fn build_list_query_state_and_state_group_both_apply() {
+        // Explicit both: no default, state kept verbatim, state_group expanded.
+        let args = ListArgs {
+            project: "ENG".into(),
+            state: Some("Backlog".into()),
+            state_group: Some("open".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            build_list_query(&args, None).unwrap(),
+            "?state=Backlog&state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest"
+        );
+    }
+
+    #[test]
+    fn build_list_query_state_group_is_case_insensitive_and_trims() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state_group: Some("  OPEN , Completed ".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            build_list_query(&args, None).unwrap(),
+            "?state_group=backlog%2Cunstarted%2Cstarted%2Creview%2Ctest%2Ccompleted"
+        );
+    }
+
+    #[test]
+    fn build_list_query_all_with_other_tokens_still_omits() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state_group: Some("all,completed".into()),
+            ..Default::default()
+        };
+        assert_eq!(build_list_query(&args, None).unwrap(), "");
+    }
+
+    #[test]
+    fn build_list_query_unknown_state_group_is_invalid() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state_group: Some("bogus".into()),
+            ..Default::default()
+        };
+        let err = build_list_query(&args, None).unwrap_err();
+        assert_eq!(err.exit_code, EXIT_INVALID);
+        assert!(err.message.contains("bogus"));
+    }
+
+    #[test]
+    fn visible_state_group_default_is_open() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            ..Default::default()
+        };
+        assert_eq!(visible_state_group(&args).as_deref(), Some("open"));
+    }
+
+    #[test]
+    fn visible_state_group_explicit_alias() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state_group: Some("closed".into()),
+            ..Default::default()
+        };
+        assert_eq!(visible_state_group(&args).as_deref(), Some("closed"));
+    }
+
+    #[test]
+    fn visible_state_group_all_is_all() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state_group: Some("all".into()),
+            ..Default::default()
+        };
+        assert_eq!(visible_state_group(&args).as_deref(), Some("all"));
+    }
+
+    #[test]
+    fn visible_state_group_explicit_state_is_none() {
+        let args = ListArgs {
+            project: "ENG".into(),
+            state: Some("Backlog".into()),
+            ..Default::default()
+        };
+        assert_eq!(visible_state_group(&args), None);
     }
 
     #[test]
@@ -1867,6 +2389,7 @@ mod tests {
             query: query.to_string(),
             project: None,
             status: "all".to_string(),
+            state_group: None,
             since: None,
             limit: None,
             sort: None,
@@ -1905,6 +2428,7 @@ mod tests {
             query: "cache".to_string(),
             project: Some("ENG".to_string()),
             status: "closed".to_string(),
+            state_group: None,
             since: Some("2025-01-01T00:00:00Z".to_string()),
             limit: Some(5),
             sort: Some("-created".to_string()),
@@ -1933,6 +2457,7 @@ mod tests {
             query: "x".to_string(),
             project: None,
             status: "open".to_string(),
+            state_group: None,
             since: None,
             limit: Some(10),
             sort: None,
@@ -1940,6 +2465,53 @@ mod tests {
         let params = build_search_params(&args).expect("valid args");
         let query_string = build_query_string(&params);
         assert_eq!(query_string, "?q=x&status=open&limit=10");
+    }
+
+    #[test]
+    fn build_search_params_state_group_alias() {
+        let args = SearchArgs {
+            query: "x".to_string(),
+            project: None,
+            status: "all".to_string(),
+            state_group: Some("closed".to_string()),
+            since: None,
+            limit: None,
+            sort: None,
+        };
+        let params = build_search_params(&args).expect("valid");
+        assert_eq!(
+            params,
+            vec![("q", "x".to_string()), ("status", "closed".to_string())]
+        );
+    }
+
+    #[test]
+    fn build_search_params_state_group_all_omits_status() {
+        let args = SearchArgs {
+            query: "x".to_string(),
+            project: None,
+            status: "open".to_string(),
+            state_group: Some("all".to_string()),
+            since: None,
+            limit: None,
+            sort: None,
+        };
+        let params = build_search_params(&args).expect("valid");
+        assert_eq!(params, vec![("q", "x".to_string())]);
+    }
+
+    #[test]
+    fn build_search_params_unknown_state_group_is_invalid() {
+        let args = SearchArgs {
+            query: "x".to_string(),
+            project: None,
+            status: "all".to_string(),
+            state_group: Some("bogus".to_string()),
+            since: None,
+            limit: None,
+            sort: None,
+        };
+        assert!(build_search_params(&args).is_err());
     }
 
     #[test]
@@ -1951,6 +2523,7 @@ mod tests {
             query: "x".to_string(),
             project: Some("   ".to_string()),
             status: "all".to_string(),
+            state_group: None,
             since: None,
             limit: None,
             sort: None,
@@ -2009,6 +2582,7 @@ mod tests {
                 pod: None,
                 runner: RunnerPatch::Unchanged,
             },
+            WorkTypePatch::Unchanged,
         )
         .expect("parent is a valid mutation");
         assert_eq!(
@@ -2031,6 +2605,7 @@ mod tests {
                 pod: None,
                 runner: RunnerPatch::Unchanged,
             },
+            WorkTypePatch::Unchanged,
         )
         .expect("clear-parent is a valid mutation");
         // `--clear-parent` must emit an explicit JSON null (detach), not omit
@@ -2055,6 +2630,7 @@ mod tests {
                     pod: None,
                     runner: RunnerPatch::Unchanged
                 },
+                WorkTypePatch::Unchanged,
             )
             .is_ok()
         );
@@ -2070,7 +2646,8 @@ mod tests {
                 ExecutionTargetPatch {
                     pod: None,
                     runner: RunnerPatch::Unchanged
-                }
+                },
+                WorkTypePatch::Unchanged,
             )
             .is_ok()
         );
@@ -2090,6 +2667,7 @@ mod tests {
                 pod: None,
                 runner: RunnerPatch::Unchanged,
             },
+            WorkTypePatch::Unchanged,
         )
         .expect_err("no mutations must be rejected");
         assert_eq!(err.exit_code, EXIT_INVALID);
@@ -2137,6 +2715,97 @@ mod tests {
             PatchArgsHarness::try_parse_from(["patch", "PROJ-1", "--clear-parent"]).unwrap();
         assert!(parsed.args.clear_parent);
         assert!(parsed.args.parent.is_none());
+    }
+
+    #[test]
+    fn patch_work_type_and_clear_work_type_conflict() {
+        use clap::Parser;
+        let err = PatchArgsHarness::try_parse_from([
+            "patch",
+            "PROJ-1",
+            "--work-type",
+            "general",
+            "--clear-work-type",
+        ])
+        .expect_err("--work-type and --clear-work-type are mutually exclusive");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn patch_work_type_alone_parses() {
+        use clap::Parser;
+        let parsed =
+            PatchArgsHarness::try_parse_from(["patch", "PROJ-1", "--work-type", "software"])
+                .unwrap();
+        assert_eq!(parsed.args.work_type.as_deref(), Some("software"));
+        assert!(!parsed.args.clear_work_type);
+    }
+
+    #[test]
+    fn build_patch_body_sets_work_type() {
+        let body = build_patch_body(
+            None,
+            None,
+            None,
+            None,
+            ParentPatch::Unchanged,
+            None,
+            None,
+            ExecutionTargetPatch {
+                pod: None,
+                runner: RunnerPatch::Unchanged,
+            },
+            WorkTypePatch::Set("general".to_string()),
+        )
+        .expect("work type alone is a valid mutation");
+        assert_eq!(
+            body.get("work_type").and_then(Value::as_str),
+            Some("general")
+        );
+    }
+
+    #[test]
+    fn build_patch_body_clear_work_type_sends_null() {
+        // `--clear-work-type` must emit an explicit JSON null (inherit the
+        // project default), not omit the key — omitting it would leave the
+        // work type unchanged server-side.
+        let body = build_patch_body(
+            None,
+            None,
+            None,
+            None,
+            ParentPatch::Unchanged,
+            None,
+            None,
+            ExecutionTargetPatch {
+                pod: None,
+                runner: RunnerPatch::Unchanged,
+            },
+            WorkTypePatch::Clear,
+        )
+        .expect("clear-work-type is a valid mutation");
+        assert_eq!(body.get("work_type"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn build_patch_body_guard_advertises_the_work_type_flags() {
+        let err = build_patch_body(
+            None,
+            None,
+            None,
+            None,
+            ParentPatch::Unchanged,
+            None,
+            None,
+            ExecutionTargetPatch {
+                pod: None,
+                runner: RunnerPatch::Unchanged,
+            },
+            WorkTypePatch::Unchanged,
+        )
+        .expect_err("no mutations must be rejected");
+        assert!(err.message.contains("--work-type"));
+        assert!(err.message.contains("--clear-work-type"));
     }
 
     #[derive(Debug, clap::Parser)]
@@ -2307,6 +2976,7 @@ mod tests {
                 pod: None,
                 runner: RunnerPatch::Unchanged,
             },
+            WorkTypePatch::Unchanged,
         )
         .expect("labels alone is a valid mutation");
         assert_eq!(body.get("labels"), Some(&json!(["l-bug"])));
@@ -2328,6 +2998,7 @@ mod tests {
                 pod: None,
                 runner: RunnerPatch::Unchanged,
             },
+            WorkTypePatch::Unchanged,
         )
         .expect("clear-labels is a valid mutation");
         assert_eq!(body.get("labels"), Some(&json!([])));
@@ -2378,6 +3049,7 @@ mod tests {
                 pod: None,
                 runner: RunnerPatch::Set("runner-uuid".to_string()),
             },
+            WorkTypePatch::Unchanged,
         )
         .expect("runner alone is a valid mutation");
         assert_eq!(
@@ -2401,6 +3073,7 @@ mod tests {
                 pod: None,
                 runner: RunnerPatch::Clear,
             },
+            WorkTypePatch::Unchanged,
         )
         .expect("clear-runner alone is a valid mutation");
         assert_eq!(body.get("assigned_runner"), Some(&Value::Null));
@@ -2422,6 +3095,7 @@ mod tests {
                 pod: Some("pod-uuid".to_string()),
                 runner: RunnerPatch::Unchanged,
             },
+            WorkTypePatch::Unchanged,
         )
         .expect("pod alone is a valid mutation");
         assert_eq!(
@@ -2445,6 +3119,7 @@ mod tests {
                 pod: Some("pod-uuid".to_string()),
                 runner: RunnerPatch::Set("runner-uuid".to_string()),
             },
+            WorkTypePatch::Unchanged,
         )
         .expect("pod+runner is a valid mutation");
         assert_eq!(
@@ -2471,6 +3146,7 @@ mod tests {
                 pod: None,
                 runner: RunnerPatch::Unchanged,
             },
+            WorkTypePatch::Unchanged,
         )
         .expect("title alone is a valid mutation");
         assert!(!body.contains_key("assigned_pod"));
@@ -2598,6 +3274,7 @@ mod tests {
                 pod: None,
                 runner: RunnerPatch::Unchanged,
             },
+            WorkTypePatch::Unchanged,
         )
         .expect_err("no mutations must be rejected");
         for flag in ["--label", "--add-label", "--remove-label", "--clear-labels"] {

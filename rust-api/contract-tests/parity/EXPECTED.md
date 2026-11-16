@@ -22,7 +22,7 @@ Counts (2026-10-17, `pi_dash.settings.test`):
 - Routes: 528 Django rows — 521 OWNED, 7 MISSING (all listed below),
   9 Rust-only (all justified, in `RUST_ONLY_JUSTIFICATIONS`).
 - Jobs: 77 tasks — 77 OWNED, 0 PROXIED, 0 MISSING;
-  beat 28/28 OWNED (same task, same cadence on both sides).
+  beat 29/29 OWNED (same task, same cadence on both sides).
 
 ## Routes
 
@@ -220,17 +220,18 @@ stays reserved in `WIRE_GAPS`.
 
 ```
 
-### W-cloud-agent (0 rows; wired)
+### W-cloud-agent (3 rows; retired by the agent-naming P3)
 
-Fix: PIDASHCONV-832 (wired `register_execute_tasks` in `worker()`:
-scan/sweep/expire execute in Rust on bin-local live seams. The run
-handler is overridden with an explicit forward — the model runtime
-(pydantic-ai) has no Rust counterpart, so Python keeps executing
-runs; PIDASHCONV-866 tracks true run ownership. The `W-cloud-agent`
-gap id stays reserved in `WIRE_GAPS`).
+P3 (agent-naming spec §5.2) deleted the retired cloud plane: Rust no
+longer registers the three cloud tasks. Django still lists them, so
+they diff as MISSING under the reserved `W-cloud-agent` gap id.
+`managed_runner.expire_waiting_runs` is NOT in this list: it moved to
+`jobs/src/runner_runs/waiting_expiry.rs` and stays OWNED.
 
 ```expected-jobs
-
+W-cloud-agent :: cloud_agent.run_agent_run :: absent-from-rust-table
+W-cloud-agent :: cloud_agent.scan_queued_runs :: absent-from-rust-table
+W-cloud-agent :: cloud_agent.sweep_stale_runs :: absent-from-rust-table
 ```
 
 ### W-mail (0 rows; wired by PIDASHCONV-865)
@@ -292,14 +293,21 @@ inventory table), so they no longer appear as PROXIED rows:
 
 ## Beat
 
-28/28 entries OWNED: same task, same cadence on both sides (the four
+29/29 entries OWNED: 28 wit29/29 entries OWNED: same task, same cadence on both sides (the four
 settings-backed intervals match Django's `pi_dash.settings.test`
 values: 10/30/300/30s). No rust-ahead drift rows remain:
-PIDASHCONV-1063's two offline-runner sweeps
+`runner-reconcile-unsatisfiable-pins` (PDASHOSS01-233) is native on
+both sides since Python PR #541 merged to main.
+ne-runner sweeps
 (`runner-release-pins-on-offline-runners`,
 `runner-fail-runs-on-offline-runners`) exist natively on both sides
 since the PIDASHCONV-1055 main→rust-dev merge (2d029396);
-PIDASHCONV-1087 deleted the `RUST_AHEAD_BEAT_ENTRIES` rows.
+PIDASHCONV-1087 deleted their `RUST_AHEAD_BEAT_ENTRIES` rows.
 
 Any other beat drift fails the check structurally — there is no
-"expected beat miss" list.
+"expected beat miss" list. The one exception is `RETIRED_BEAT_ENTRIES`
+in `job_inventory.py`: the two cloud beat entries
+(`cloud-agent-scan-queued-runs`, `cloud-agent-sweep-stale-runs`) that the
+agent-naming P3 retired in Rust while Django still schedules them. They
+diff RETIRED under `W-cloud-agent`; the row must go once Django drops
+the entry.

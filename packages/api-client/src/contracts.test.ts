@@ -6762,7 +6762,7 @@ describe("free-quota contracts", () => {
     const transport = recordingTransport(() =>
       fakeResponse({
         body: JSON.stringify({
-          llm: { freeTokensUsed: 123, freeTokensLimit: 2_000_000, freeModels: ["deepseek/deepseek-v4.1-flash-1017"] },
+          llm: { freeTokensUsed: 123, freeTokensLimit: 2_000_000, freeModels: ["openhub_free_llm"] },
           resetsAt: "2026-11-10T00:00:00Z",
           plan: "free",
         }),
@@ -6771,7 +6771,7 @@ describe("free-quota contracts", () => {
     const client = createClient({ baseUrl: "https://api.test", transport });
     const quota = await getFreeQuota(client);
     expect(quota).toEqual({
-      freeModels: ["deepseek/deepseek-v4.1-flash-1017"],
+      freeModels: ["openhub_free_llm"],
       plan: "free",
       freeTokensUsed: 123,
       freeTokensLimit: 2_000_000,
@@ -6819,11 +6819,11 @@ describe("free-quota contracts", () => {
   });
 
   it("classifies models from the server list, never a hardcoded one", () => {
-    const freeModels = ["deepseek/deepseek-v4.1-flash-1017"];
-    expect(isFreeModel("deepseek/deepseek-v4.1-flash-1017", freeModels)).toBe(true);
-    expect(isFreeModel("  deepseek/deepseek-v4.1-flash-1017  ", freeModels)).toBe(true);
+    const freeModels = ["openhub_free_llm"];
+    expect(isFreeModel("openhub_free_llm", freeModels)).toBe(true);
+    expect(isFreeModel("  openhub_free_llm  ", freeModels)).toBe(true);
     expect(isFreeModel("moonshotai/kimi-k3", freeModels)).toBe(false);
-    expect(isModelSelectableForPlan("free", "deepseek/deepseek-v4.1-flash-1017", freeModels)).toBe(true);
+    expect(isModelSelectableForPlan("free", "openhub_free_llm", freeModels)).toBe(true);
     expect(isModelSelectableForPlan("free", "moonshotai/kimi-k3", freeModels)).toBe(false);
     expect(isModelSelectableForPlan("payg", "moonshotai/kimi-k3", freeModels)).toBe(true);
     expect(isModelSelectableForPlan("member", "moonshotai/kimi-k3", freeModels)).toBe(true);

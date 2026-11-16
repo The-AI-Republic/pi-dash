@@ -12,7 +12,10 @@
 //!   with `{error, reason}`, 403 from inside an agent run.
 //! * `AgentRunYieldAPIEndpoint.post` (`:1255-1327`, `3869a226`) — record the run outcome
 //!   plus the optional `stop_ticking` flag
-//!   (`RUN_OUTCOMES` / `normalize_outcome` + `done_payload` write).
+//!   (`RUN_OUTCOMES` / `normalize_outcome` + `done_payload` write). A run
+//!   with no work item (a scheduler run, or a direct run) yields too
+//!   (PDASHOSS01-276): `run_kind` says which, and `stop_ticking` is not
+//!   stored for it — it has no ticking clock.
 //!
 //! Registered by [`super::routes`] at the four
 //! `apps/api/pi_dash/api/urls/work_item.py:133-151` paths.
@@ -49,7 +52,6 @@
 //!   (`ee/cloud_agent/toolsets.py:23-32`).
 //! * The admission cache is the shared Redis (PIDASHCONV-1487): the
 //!   sync `AdmissionCache` trait opens a short sync connection per call
-//!   (the `project_move_handoff::RedisAdmissionCache` position), so the
 //!   per-user / per-workspace minute buckets match Django's exactly,
 //!   sequentially as well as under concurrent load. The drivers consult
 //!   it only when building a cloud-executor run, so every CE/local path
@@ -99,10 +101,8 @@ use pidash_db::entity::{
     workspaces,
 };
 use pidash_db::pool::sea_orm_connection;
-use pidash_db::redis::client_from_settings;
 use pidash_types::orchestration::{normalize_outcome, RUN_OUTCOMES};
 
-use crate::project_move_handoff::RedisAdmissionCache;
 use crate::state::AppState;
 
 use super::perms::{
@@ -245,11 +245,11 @@ fn db_error<E: std::fmt::Display>(error: E, site: &str) -> Denial {
 async fn drain_dispatch_decisions(
     pool: &PgPool,
     state: &AppState,
-    decisions: &[(Uuid, pidash_jobs::dispatch::DispatchDecision)],
+    decisions: &[(Uuid, pidash_jobs::run_dispatch::DispatchDecision)],
     site: &str,
 ) -> Result<(), Denial> {
     for (_, decision) in decisions {
-        if let pidash_jobs::dispatch::DispatchDecision::PodDrain { pod_id } = decision {
+        if let pidash_jobs::run_dispatch::DispatchDecision::PodDrain { pod_id } = decision {
             if crate::runner_sessions::runner_poll::drain_pod_by_id(pool, state, *pod_id)
                 .await
                 .is_err()
@@ -708,6 +708,8 @@ pub struct YieldRun {
     pub facts: RunFacts,
     pub workspace_id: Uuid,
     pub done_payload: Option<Value>,
+    /// `AgentRun.scheduler_binding_id` (nullable; set on scheduler runs).
+    pub scheduler_binding_id: Option<Uuid>,
 }
 
 async fn fetch_yield_run(
@@ -722,6 +724,7 @@ async fn fetch_yield_run(
         facts: row.facts(),
         workspace_id: row.workspace_id,
         done_payload: row.done_payload,
+        scheduler_binding_id: row.scheduler_binding_id,
     }))
 }
 
@@ -983,13 +986,13 @@ pub fn gate_fn(verdicts: Arc<HashMap<Uuid, bool>>) -> impl Fn(Uuid) -> bool + Cl
 /// The `managed_llm_profile` closure over pre-fetched presence.
 pub fn profile_fn(
     presence: Arc<HashMap<Uuid, bool>>,
-) -> impl Fn(Option<Uuid>) -> pidash_services::dispatch::LlmProfile + Clone + Send + Sync {
-    move |uid: Option<Uuid>| -> pidash_services::dispatch::LlmProfile {
+) -> impl Fn(Option<Uuid>) -> pidash_services::run_creation::LlmProfile + Clone + Send + Sync {
+    move |uid: Option<Uuid>| -> pidash_services::run_creation::LlmProfile {
         let key = uid
             .and_then(|uid| presence.get(&uid).copied())
             .unwrap_or(false);
-        let profile = pidash_services::assistant::seams::agent_model_profile_for_user(key);
-        pidash_services::dispatch::LlmProfile {
+        let profile = pidash_services::assistant::seams::pidash_agent_profile_for_user(key);
+        pidash_services::run_creation::LlmProfile {
             available: profile.available,
             reason_code: profile.reason_code,
         }
@@ -997,10 +1000,10 @@ pub fn profile_fn(
 }
 
 /// Live [`StoreDeps`](pidash_jobs::orchestration::StoreDeps): settings from
-/// the app state, LLM presence for the creator universe, the installed
-/// toolsets seam, and the shared Redis admission cache.
+/// the app state, LLM presence for the creator universe.
 /// Returns the opaque struct so each driver call site keeps its concrete
-/// closure types.
+/// closure types. (`_now_unix_secs` is retained for the callers'
+/// signature; the admission clock died with the cache family.)
 #[allow(clippy::too_many_arguments)]
 pub async fn dispatch_deps(
     state: &AppState,
@@ -1008,13 +1011,12 @@ pub async fn dispatch_deps(
     actor_id: Uuid,
     issue: &IssueRow,
     project: &ProjectRow,
-    now_unix_secs: i64,
+    _now_unix_secs: i64,
 ) -> Result<
     (
         pidash_jobs::orchestration::StoreDeps<
-            RedisAdmissionCache,
             impl Fn(Uuid) -> bool + Clone + Send + Sync,
-            impl Fn(Option<Uuid>) -> pidash_services::dispatch::LlmProfile + Clone + Send + Sync,
+            impl Fn(Option<Uuid>) -> pidash_services::run_creation::LlmProfile + Clone + Send + Sync,
         >,
         LiveMatcher,
     ),
@@ -1022,18 +1024,11 @@ pub async fn dispatch_deps(
 > {
     let presence = fetch_presence(pool, actor_id, issue, project).await?;
     let verdicts = Arc::new(gate_verdicts(state, &presence).await);
-    let cache = RedisAdmissionCache {
-        client: client_from_settings(state.settings()),
-    };
     Ok((
         pidash_jobs::orchestration::StoreDeps {
-            cloud: state.settings().cloud_agent.clone(),
-            managed: state.settings().managed_runner.clone(),
-            cache,
+            managed: state.settings().pidash_agent.clone(),
             has_usable_llm_config: gate_fn(verdicts),
-            toolsets: state.toolsets().clone(),
             llm_profile: profile_fn(presence),
-            now_unix_secs,
         },
         LiveMatcher::new(pool.clone()),
     ))
@@ -1048,13 +1043,12 @@ pub async fn dispatch_deps_for_ids(
     pool: &PgPool,
     actor_id: Uuid,
     issue_id: Uuid,
-    now_unix_secs: i64,
+    _now_unix_secs: i64,
 ) -> Result<
     (
         pidash_jobs::orchestration::StoreDeps<
-            RedisAdmissionCache,
             impl Fn(Uuid) -> bool + Clone + Send + Sync,
-            impl Fn(Option<Uuid>) -> pidash_services::dispatch::LlmProfile + Clone + Send + Sync,
+            impl Fn(Option<Uuid>) -> pidash_services::run_creation::LlmProfile + Clone + Send + Sync,
         >,
         LiveMatcher,
     ),
@@ -1063,18 +1057,11 @@ pub async fn dispatch_deps_for_ids(
     let universe = creator_universe_for_ids(pool, actor_id, issue_id).await?;
     let presence = Arc::new(fetch_llm_presence(pool, &universe).await?);
     let verdicts = Arc::new(gate_verdicts(state, &presence).await);
-    let cache = RedisAdmissionCache {
-        client: client_from_settings(state.settings()),
-    };
     Ok((
         pidash_jobs::orchestration::StoreDeps {
-            cloud: state.settings().cloud_agent.clone(),
-            managed: state.settings().managed_runner.clone(),
-            cache,
+            managed: state.settings().pidash_agent.clone(),
             has_usable_llm_config: gate_fn(verdicts),
-            toolsets: state.toolsets().clone(),
             llm_profile: profile_fn(presence),
-            now_unix_secs,
         },
         LiveMatcher::new(pool.clone()),
     ))
@@ -1315,23 +1302,78 @@ pub fn run_ai_created(run_id: Uuid, status: &str, executor_kind: &str) -> (Statu
     (StatusCode::CREATED, body)
 }
 
-/// The yield success (`:1318-1327`, `3869a226`):
-/// `{"ok","run_id","work_item_id","outcome","stop_ticking"}`. Always 200.
+/// Which sort of run yielded — the response's `run_kind`
+/// (`views/issue.py`, PDASHOSS01-276).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum YieldRunKind {
+    /// An issue run: the only kind with a ticking clock.
+    Issue(Uuid),
+    /// A scheduler run, carrying its `scheduler_binding_id`.
+    Scheduler(Uuid),
+    /// A run with neither a work item nor a scheduler binding.
+    Direct,
+}
+
+impl YieldRunKind {
+    /// `work_item_id` first, then `scheduler_binding_id`, as Python checks
+    /// `run.work_item_id is not None` before `run.scheduler_binding_id`.
+    pub fn of(work_item_id: Option<Uuid>, scheduler_binding_id: Option<Uuid>) -> Self {
+        match (work_item_id, scheduler_binding_id) {
+            (Some(work_item_id), _) => YieldRunKind::Issue(work_item_id),
+            (None, Some(binding_id)) => YieldRunKind::Scheduler(binding_id),
+            (None, None) => YieldRunKind::Direct,
+        }
+    }
+
+    /// Only an issue run has a ticker for `stop_ticking` to stop.
+    pub fn has_clock(self) -> bool {
+        matches!(self, YieldRunKind::Issue(_))
+    }
+}
+
+/// The yield success (`:1318-1346`, PDASHOSS01-276):
+/// `{"ok","run_id","work_item_id","outcome","stop_ticking","run_kind"}`,
+/// plus `scheduler_binding_id` for a scheduler run and a `detail` when a
+/// run without a clock was sent `stop_ticking: true`. Always 200.
 pub fn yield_response(
     run_id: Uuid,
-    work_item_id: Uuid,
+    kind: YieldRunKind,
     outcome: &str,
     stop_ticking: bool,
 ) -> (StatusCode, String) {
-    let mut map = serde_json::Map::with_capacity(5);
+    let mut map = serde_json::Map::with_capacity(8);
     map.insert("ok".to_owned(), Value::Bool(true));
     map.insert("run_id".to_owned(), Value::String(run_id.to_string()));
-    map.insert(
-        "work_item_id".to_owned(),
-        Value::String(work_item_id.to_string()),
-    );
+    let work_item_id = match kind {
+        YieldRunKind::Issue(work_item_id) => Value::String(work_item_id.to_string()),
+        _ => Value::Null,
+    };
+    map.insert("work_item_id".to_owned(), work_item_id);
     map.insert("outcome".to_owned(), Value::String(outcome.to_owned()));
-    map.insert("stop_ticking".to_owned(), Value::Bool(stop_ticking));
+    map.insert(
+        "stop_ticking".to_owned(),
+        Value::Bool(stop_ticking && kind.has_clock()),
+    );
+    let (run_kind, subject) = match kind {
+        YieldRunKind::Issue(_) => ("issue", None),
+        YieldRunKind::Scheduler(_) => ("scheduler", Some("scheduled runs have")),
+        YieldRunKind::Direct => ("direct", Some("a run without a work item has")),
+    };
+    map.insert("run_kind".to_owned(), Value::String(run_kind.to_owned()));
+    if let YieldRunKind::Scheduler(binding_id) = kind {
+        map.insert(
+            "scheduler_binding_id".to_owned(),
+            Value::String(binding_id.to_string()),
+        );
+    }
+    if let (Some(subject), true) = (subject, stop_ticking) {
+        map.insert(
+            "detail".to_owned(),
+            Value::String(format!(
+                "outcome recorded; {subject} no ticking clock, so stop_ticking was ignored"
+            )),
+        );
+    }
     let body = serde_json::to_string(&Value::Object(map)).expect("yield body");
     (StatusCode::OK, body)
 }
@@ -1848,7 +1890,6 @@ async fn yield_inner(
     }
     let run = fetch_yield_run(&pre.pool, slug, run_id)
         .await?
-        .filter(|run| run.facts.work_item_id.is_some())
         .ok_or(Denial::NotFoundError("run not found".to_owned()))?;
     if !is_workspace_member(&pre.pool, &pre.actor.id, &run.workspace_id).await? {
         return Err(Denial::NotFoundError("run not found".to_owned()));
@@ -1873,7 +1914,8 @@ async fn yield_inner(
             payload.insert("note".to_owned(), Value::String(note));
         }
     }
-    if let Some(stop_ticking) = stop_ticking {
+    let kind = YieldRunKind::of(run.facts.work_item_id, run.scheduler_binding_id);
+    if let (Some(stop_ticking), true) = (stop_ticking, kind.has_clock()) {
         payload.insert("stop_ticking".to_owned(), Value::Bool(stop_ticking));
     }
     write_done_payload(
@@ -1883,13 +1925,7 @@ async fn yield_inner(
     )
     .await
     .map_err(|error| db_error(error, "yield-write"))?;
-    let work_item_id = run.facts.work_item_id.expect("checked above");
-    let (status, body) = yield_response(
-        run.facts.id,
-        work_item_id,
-        outcome,
-        stop_ticking.unwrap_or(false),
-    );
+    let (status, body) = yield_response(run.facts.id, kind, outcome, stop_ticking.unwrap_or(false));
     Ok(json_response(status, body))
 }
 
@@ -1993,7 +2029,12 @@ mod tests {
         let work_item_id: Uuid = "a9b6c9f9-2817-4967-a501-1e26caf4abea"
             .parse()
             .expect("uuid");
-        let (status, body) = yield_response(run_id, work_item_id, "progressed", false);
+        let (status, body) = yield_response(
+            run_id,
+            YieldRunKind::Issue(work_item_id),
+            "progressed",
+            false,
+        );
         let (fx_status, fx_body) = call_body("yield_ok");
         assert_eq!(status.as_u16(), fx_status);
         assert_eq!(body, fx_body);
@@ -2007,10 +2048,67 @@ mod tests {
         let work_item_id: Uuid = "a9b6c9f9-2817-4967-a501-1e26caf4abea"
             .parse()
             .expect("uuid");
-        let (status, body) = yield_response(run_id, work_item_id, "done", true);
+        let (status, body) =
+            yield_response(run_id, YieldRunKind::Issue(work_item_id), "done", true);
         let (fx_status, fx_body) = call_body("yield_stop_true");
         assert_eq!(status.as_u16(), fx_status);
         assert_eq!(body, fx_body);
+    }
+
+    // Runs with no work item (PDASHOSS01-276): byte pins of the Django
+    // bodies (`views/issue.py` dict order: the base five keys, `run_kind`,
+    // then `scheduler_binding_id`, then `detail`).
+
+    #[test]
+    fn yield_scheduler_run_body() {
+        let run_id: Uuid = "640d8cdf-08fb-4772-82d3-2c693d0e105f"
+            .parse()
+            .expect("uuid");
+        let binding_id: Uuid = "427731d7-0000-4000-8000-000000000001"
+            .parse()
+            .expect("uuid");
+        let kind = YieldRunKind::of(None, Some(binding_id));
+        assert_eq!(kind, YieldRunKind::Scheduler(binding_id));
+        let (status, body) = yield_response(run_id, kind, "done", false);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            r#"{"ok":true,"run_id":"640d8cdf-08fb-4772-82d3-2c693d0e105f","work_item_id":null,"outcome":"done","stop_ticking":false,"run_kind":"scheduler","scheduler_binding_id":"427731d7-0000-4000-8000-000000000001"}"#
+        );
+        let (_, body) = yield_response(run_id, kind, "done", true);
+        assert_eq!(
+            body,
+            r#"{"ok":true,"run_id":"640d8cdf-08fb-4772-82d3-2c693d0e105f","work_item_id":null,"outcome":"done","stop_ticking":false,"run_kind":"scheduler","scheduler_binding_id":"427731d7-0000-4000-8000-000000000001","detail":"outcome recorded; scheduled runs have no ticking clock, so stop_ticking was ignored"}"#
+        );
+    }
+
+    #[test]
+    fn yield_direct_run_body() {
+        let run_id: Uuid = "640d8cdf-08fb-4772-82d3-2c693d0e105f"
+            .parse()
+            .expect("uuid");
+        let kind = YieldRunKind::of(None, None);
+        assert_eq!(kind, YieldRunKind::Direct);
+        assert!(!kind.has_clock());
+        let (_, body) = yield_response(run_id, kind, "progressed", false);
+        assert_eq!(
+            body,
+            r#"{"ok":true,"run_id":"640d8cdf-08fb-4772-82d3-2c693d0e105f","work_item_id":null,"outcome":"progressed","stop_ticking":false,"run_kind":"direct"}"#
+        );
+        let (_, body) = yield_response(run_id, kind, "progressed", true);
+        assert_eq!(
+            body,
+            r#"{"ok":true,"run_id":"640d8cdf-08fb-4772-82d3-2c693d0e105f","work_item_id":null,"outcome":"progressed","stop_ticking":false,"run_kind":"direct","detail":"outcome recorded; a run without a work item has no ticking clock, so stop_ticking was ignored"}"#
+        );
+    }
+
+    #[test]
+    fn yield_work_item_wins_over_binding() {
+        // `has_clock = run.work_item_id is not None` is checked first.
+        let work_item_id = Uuid::nil();
+        let kind = YieldRunKind::of(Some(work_item_id), Some(Uuid::nil()));
+        assert_eq!(kind, YieldRunKind::Issue(work_item_id));
+        assert!(kind.has_clock());
     }
 
     #[test]

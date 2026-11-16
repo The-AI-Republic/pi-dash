@@ -150,7 +150,10 @@ pub use issues::{
     comment_url, fetch_blocker_summary, fetch_workpad, fetch_workpad_by_id, resolve_workpad_state,
     workpad_stripped, WorkpadDbRow,
 };
-pub use pr_links::{fetch_pr_detail_row, fetch_pr_link_by_id, fetch_pr_link_list, PrLinkDbRow};
+pub use pr_links::{
+    fetch_pr_detail_row, fetch_pr_link_by_id, fetch_pr_link_list, PrLinkDbRow, PR_DETAIL_SQL,
+    PR_LINK_BY_ID_SQL, PR_LINK_LIST_SQL, PR_LIST_SQL,
+};
 pub use projects::{fetch_project_rows, fetch_state_columns};
 pub use relations::fetch_live_relation_ids;
 pub use render::{render_state, state_row_from, StateRow, StateRowTuple};
@@ -177,7 +180,7 @@ mod surface {
     // fails to compile if its home ever goes private again.
     use crate::app_issues::issue_move::MoveStore;
     use crate::app_issues::pr_links::PrLinksStore;
-    use crate::assistant::seams::{agent_model_profile_for_user, has_usable_llm_config};
+    use crate::assistant::seams::{has_usable_llm_config, pidash_agent_profile_for_user};
     use crate::integrations::adapters_github::GithubClient;
 
     #[test]
@@ -190,6 +193,6 @@ mod surface {
         // The assistant seams are callable pure decisions.
         assert!(has_usable_llm_config(true));
         assert!(!has_usable_llm_config(false));
-        let _ = agent_model_profile_for_user(true);
+        let _ = pidash_agent_profile_for_user(true);
     }
 }

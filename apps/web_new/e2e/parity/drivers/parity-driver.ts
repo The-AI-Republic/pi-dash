@@ -3065,7 +3065,10 @@ export interface ParityDriver {
   schedulerProjectRows(): Promise<SchedulerProjectRow[]>;
   /** Whether the install list shows its empty-state row. */
   schedulerProjectEmptyVisible(): Promise<boolean>;
-  /** Whether the list header offers the New Scheduler control. */
+  /**
+   * Whether the page offers the New Scheduler control anywhere: the section
+   * tab row on the project schedulers pages, the header on the settings variant.
+   */
   schedulerProjectNewVisible(): Promise<boolean>;
   /** Open an install's detail by clicking its list row; waits for the detail. */
   schedulerProjectRowOpen(handle: string): Promise<void>;
@@ -3298,6 +3301,13 @@ export interface ParityDriver {
   schedulerOpenProjectSection(workspaceSlug: string, projectId: string): Promise<void>;
   /** Section tabs with their highlight state, in display order. */
   schedulerSectionTabs(): Promise<{ label: string; active: boolean }[]>;
+  /**
+   * Where New Scheduler sits in the project schedulers section (PDASHOSS01-348):
+   * whether the List | Calendar tab row carries it, and how many visible
+   * New Scheduler buttons the page shows in total (1 means no second copy
+   * in the tab body).
+   */
+  schedulerSectionNewPlacement(): Promise<{ inTabRow: boolean; total: number }>;
   /** Follow one section tab; waits for its content to settle. */
   schedulerSectionOpenTab(tab: "List" | "Calendar"): Promise<void>;
   /** Open the project-settings schedulers variant. */
@@ -4029,6 +4039,8 @@ export interface ParityDriver {
   archivesCyclesGroupHeadings(): Promise<string[]>;
   /** Open the side peek for the named row; waits for the peek to show it. */
   archivesCyclesOpenPeek(name: string): Promise<void>;
+  /** Click the archived row's name/body to open its peek; waits for the peek panel. */
+  archivesCyclesClickRow(name: string): Promise<void>;
   /** Open the tab at a shared peek link without settling (fresh loads never settle). */
   archivesCyclesOpenPeekLink(workspaceSlug: string, projectId: string, cycleId: string): Promise<void>;
   /** Peek panel heading, or null when no peek is open. */
@@ -4649,6 +4661,16 @@ export interface ParityDriver {
   viewsDetailAddClick(): Promise<void>;
   /** Whether the detail body text currently contains `name`. */
   viewsDetailShowsIssue(name: string): Promise<boolean>;
+  /** Open the detail header's view overflow menu; resolves once items show. */
+  viewsDetailMenuOpen(): Promise<void>;
+  /** Visible entries of the open detail header menu in display order. */
+  viewsDetailMenuItems(): Promise<string[]>;
+  /** Pick an entry of the open detail header menu; resolves once it closes. */
+  viewsDetailMenuPick(item: string): Promise<void>;
+  /** Copy the detail view's link; resolves with the clipboard text. */
+  viewsDetailCopyLink(): Promise<string>;
+  /** Follow the detail menu's new-tab entry; resolves with the popup URL. */
+  viewsDetailMenuOpenNewTabHref(): Promise<string>;
   /** Custom workspace view names in list order. */
   wsViewsListNames(): Promise<string[]>;
   /** Static default view names in list order. */
@@ -6305,6 +6327,8 @@ export interface ParityDriver {
   cyclesHeroTapProgressGroup(group: string): Promise<void>;
   /** Click the indexed breakdown entry; waits for the detail navigation. */
   cyclesHeroClickBreakdownEntry(index: number): Promise<void>;
+  /** Click the breakdown entry carrying the text without waiting for navigation. */
+  cyclesHeroTapBreakdownEntryByText(entryText: string): Promise<void>;
   /** Open the workspace-level active-cycles page; waits until it settles. */
   cyclesHeroOpenWorkspaceActives(workspaceSlug: string): Promise<void>;
   /** Upsell banner heading, benefit-card count, and upgrade-link facts. */

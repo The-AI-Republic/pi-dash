@@ -2320,13 +2320,14 @@ const OPERATIONS_JSON: &str = r##"
           "schema": {
             "type": "integer"
           },
-          "description": "Number of results per page (default: 20, max: 100)",
+          "description": "Number of results per page (default: 1000, max: 1000). The default is also the maximum, so callers must follow next_cursor to read past the first page.",
           "examples": {
             "Default": {
-              "value": 20
+              "value": 1000
             },
-            "Maximum": {
-              "value": 100
+            "SmallerPage": {
+              "value": 100,
+              "summary": "Smaller page"
             }
           }
         },
@@ -2828,13 +2829,14 @@ const OPERATIONS_JSON: &str = r##"
           "schema": {
             "type": "integer"
           },
-          "description": "Number of results per page (default: 20, max: 100)",
+          "description": "Number of results per page (default: 1000, max: 1000). The default is also the maximum, so callers must follow next_cursor to read past the first page.",
           "examples": {
             "Default": {
-              "value": 20
+              "value": 1000
             },
-            "Maximum": {
-              "value": 100
+            "SmallerPage": {
+              "value": 100,
+              "summary": "Smaller page"
             }
           }
         },
@@ -3090,13 +3092,14 @@ const OPERATIONS_JSON: &str = r##"
           "schema": {
             "type": "integer"
           },
-          "description": "Number of results per page (default: 20, max: 100)",
+          "description": "Number of results per page (default: 1000, max: 1000). The default is also the maximum, so callers must follow next_cursor to read past the first page.",
           "examples": {
             "Default": {
-              "value": 20
+              "value": 1000
             },
-            "Maximum": {
-              "value": 100
+            "SmallerPage": {
+              "value": 100,
+              "summary": "Smaller page"
             }
           }
         },
@@ -3394,13 +3397,14 @@ const OPERATIONS_JSON: &str = r##"
           "schema": {
             "type": "integer"
           },
-          "description": "Number of results per page (default: 20, max: 100)",
+          "description": "Number of results per page (default: 1000, max: 1000). The default is also the maximum, so callers must follow next_cursor to read past the first page.",
           "examples": {
             "Default": {
-              "value": 20
+              "value": 1000
             },
-            "Maximum": {
-              "value": 100
+            "SmallerPage": {
+              "value": 100,
+              "summary": "Smaller page"
             }
           }
         },
@@ -3686,13 +3690,14 @@ const OPERATIONS_JSON: &str = r##"
           "schema": {
             "type": "integer"
           },
-          "description": "Number of results per page (default: 20, max: 100)",
+          "description": "Number of results per page (default: 1000, max: 1000). The default is also the maximum, so callers must follow next_cursor to read past the first page.",
           "examples": {
             "Default": {
-              "value": 20
+              "value": 1000
             },
-            "Maximum": {
-              "value": 100
+            "SmallerPage": {
+              "value": 100,
+              "summary": "Smaller page"
             }
           }
         },
@@ -4495,13 +4500,14 @@ const OPERATIONS_JSON: &str = r##"
           "schema": {
             "type": "integer"
           },
-          "description": "Number of results per page (default: 20, max: 100)",
+          "description": "Number of results per page (default: 1000, max: 1000). The default is also the maximum, so callers must follow next_cursor to read past the first page.",
           "examples": {
             "Default": {
-              "value": 20
+              "value": 1000
             },
-            "Maximum": {
-              "value": 100
+            "SmallerPage": {
+              "value": 100,
+              "summary": "Smaller page"
             }
           }
         },
@@ -5127,13 +5133,14 @@ const OPERATIONS_JSON: &str = r##"
           "schema": {
             "type": "integer"
           },
-          "description": "Number of results per page (default: 20, max: 100)",
+          "description": "Number of results per page (default: 1000, max: 1000). The default is also the maximum, so callers must follow next_cursor to read past the first page.",
           "examples": {
             "Default": {
-              "value": 20
+              "value": 1000
             },
-            "Maximum": {
-              "value": 100
+            "SmallerPage": {
+              "value": 100,
+              "summary": "Smaller page"
             }
           }
         },
@@ -5485,13 +5492,14 @@ const OPERATIONS_JSON: &str = r##"
           "schema": {
             "type": "integer"
           },
-          "description": "Number of results per page (default: 20, max: 100)",
+          "description": "Number of results per page (default: 1000, max: 1000). The default is also the maximum, so callers must follow next_cursor to read past the first page.",
           "examples": {
             "Default": {
-              "value": 20
+              "value": 1000
             },
-            "Maximum": {
-              "value": 100
+            "SmallerPage": {
+              "value": 100,
+              "summary": "Smaller page"
             }
           }
         },
@@ -5698,13 +5706,14 @@ const OPERATIONS_JSON: &str = r##"
           "schema": {
             "type": "integer"
           },
-          "description": "Number of results per page (default: 20, max: 100)",
+          "description": "Number of results per page (default: 1000, max: 1000). The default is also the maximum, so callers must follow next_cursor to read past the first page.",
           "examples": {
             "Default": {
-              "value": 20
+              "value": 1000
             },
-            "Maximum": {
-              "value": 100
+            "SmallerPage": {
+              "value": 100,
+              "summary": "Smaller page"
             }
           }
         },
@@ -5928,13 +5937,14 @@ const OPERATIONS_JSON: &str = r##"
           "schema": {
             "type": "integer"
           },
-          "description": "Number of results per page (default: 20, max: 100)",
+          "description": "Number of results per page (default: 1000, max: 1000). The default is also the maximum, so callers must follow next_cursor to read past the first page.",
           "examples": {
             "Default": {
-              "value": 20
+              "value": 1000
             },
-            "Maximum": {
-              "value": 100
+            "SmallerPage": {
+              "value": 100,
+              "summary": "Smaller page"
             }
           }
         },
@@ -7094,13 +7104,14 @@ const OPERATIONS_JSON: &str = r##"
           "schema": {
             "type": "integer"
           },
-          "description": "Number of results per page (default: 20, max: 100)",
+          "description": "Number of results per page (default: 1000, max: 1000). The default is also the maximum, so callers must follow next_cursor to read past the first page.",
           "examples": {
             "Default": {
-              "value": 20
+              "value": 1000
             },
-            "Maximum": {
-              "value": 100
+            "SmallerPage": {
+              "value": 100,
+              "summary": "Smaller page"
             }
           }
         },
@@ -7470,13 +7481,14 @@ const OPERATIONS_JSON: &str = r##"
           "schema": {
             "type": "integer"
           },
-          "description": "Number of results per page (default: 20, max: 100)",
+          "description": "Number of results per page (default: 1000, max: 1000). The default is also the maximum, so callers must follow next_cursor to read past the first page.",
           "examples": {
             "Default": {
-              "value": 20
+              "value": 1000
             },
-            "Maximum": {
-              "value": 100
+            "SmallerPage": {
+              "value": 100,
+              "summary": "Smaller page"
             }
           }
         },
@@ -8165,13 +8177,14 @@ const OPERATIONS_JSON: &str = r##"
           "schema": {
             "type": "integer"
           },
-          "description": "Number of results per page (default: 20, max: 100)",
+          "description": "Number of results per page (default: 1000, max: 1000). The default is also the maximum, so callers must follow next_cursor to read past the first page.",
           "examples": {
             "Default": {
-              "value": 20
+              "value": 1000
             },
-            "Maximum": {
-              "value": 100
+            "SmallerPage": {
+              "value": 100,
+              "summary": "Smaller page"
             }
           }
         },
@@ -9060,13 +9073,14 @@ const OPERATIONS_JSON: &str = r##"
           "schema": {
             "type": "integer"
           },
-          "description": "Number of results per page (default: 20, max: 100)",
+          "description": "Number of results per page (default: 1000, max: 1000). The default is also the maximum, so callers must follow next_cursor to read past the first page.",
           "examples": {
             "Default": {
-              "value": 20
+              "value": 1000
             },
-            "Maximum": {
-              "value": 100
+            "SmallerPage": {
+              "value": 100,
+              "summary": "Smaller page"
             }
           }
         },
@@ -9364,13 +9378,14 @@ const OPERATIONS_JSON: &str = r##"
           "schema": {
             "type": "integer"
           },
-          "description": "Number of results per page (default: 20, max: 100)",
+          "description": "Number of results per page (default: 1000, max: 1000). The default is also the maximum, so callers must follow next_cursor to read past the first page.",
           "examples": {
             "Default": {
-              "value": 20
+              "value": 1000
             },
-            "Maximum": {
-              "value": 100
+            "SmallerPage": {
+              "value": 100,
+              "summary": "Smaller page"
             }
           }
         },
@@ -10120,13 +10135,14 @@ const OPERATIONS_JSON: &str = r##"
           "schema": {
             "type": "integer"
           },
-          "description": "Number of results per page (default: 20, max: 100)",
+          "description": "Number of results per page (default: 1000, max: 1000). The default is also the maximum, so callers must follow next_cursor to read past the first page.",
           "examples": {
             "Default": {
-              "value": 20
+              "value": 1000
             },
-            "Maximum": {
-              "value": 100
+            "SmallerPage": {
+              "value": 100,
+              "summary": "Smaller page"
             }
           }
         },
@@ -11535,13 +11551,14 @@ const OPERATIONS_JSON: &str = r##"
           "schema": {
             "type": "integer"
           },
-          "description": "Number of results per page (default: 20, max: 100)",
+          "description": "Number of results per page (default: 1000, max: 1000). The default is also the maximum, so callers must follow next_cursor to read past the first page.",
           "examples": {
             "Default": {
-              "value": 20
+              "value": 1000
             },
-            "Maximum": {
-              "value": 100
+            "SmallerPage": {
+              "value": 100,
+              "summary": "Smaller page"
             }
           }
         },
@@ -12209,13 +12226,14 @@ const OPERATIONS_JSON: &str = r##"
           "schema": {
             "type": "integer"
           },
-          "description": "Number of results per page (default: 20, max: 100)",
+          "description": "Number of results per page (default: 1000, max: 1000). The default is also the maximum, so callers must follow next_cursor to read past the first page.",
           "examples": {
             "Default": {
-              "value": 20
+              "value": 1000
             },
-            "Maximum": {
-              "value": 100
+            "SmallerPage": {
+              "value": 100,
+              "summary": "Smaller page"
             }
           }
         },
@@ -12567,13 +12585,14 @@ const OPERATIONS_JSON: &str = r##"
           "schema": {
             "type": "integer"
           },
-          "description": "Number of results per page (default: 20, max: 100)",
+          "description": "Number of results per page (default: 1000, max: 1000). The default is also the maximum, so callers must follow next_cursor to read past the first page.",
           "examples": {
             "Default": {
-              "value": 20
+              "value": 1000
             },
-            "Maximum": {
-              "value": 100
+            "SmallerPage": {
+              "value": 100,
+              "summary": "Smaller page"
             }
           }
         },
@@ -12780,13 +12799,14 @@ const OPERATIONS_JSON: &str = r##"
           "schema": {
             "type": "integer"
           },
-          "description": "Number of results per page (default: 20, max: 100)",
+          "description": "Number of results per page (default: 1000, max: 1000). The default is also the maximum, so callers must follow next_cursor to read past the first page.",
           "examples": {
             "Default": {
-              "value": 20
+              "value": 1000
             },
-            "Maximum": {
-              "value": 100
+            "SmallerPage": {
+              "value": 100,
+              "summary": "Smaller page"
             }
           }
         },
@@ -13658,13 +13678,14 @@ const OPERATIONS_JSON: &str = r##"
           "schema": {
             "type": "integer"
           },
-          "description": "Number of results per page (default: 20, max: 100)",
+          "description": "Number of results per page (default: 1000, max: 1000). The default is also the maximum, so callers must follow next_cursor to read past the first page.",
           "examples": {
             "Default": {
-              "value": 20
+              "value": 1000
             },
-            "Maximum": {
-              "value": 100
+            "SmallerPage": {
+              "value": 100,
+              "summary": "Smaller page"
             }
           }
         },
@@ -14530,13 +14551,14 @@ const OPERATIONS_JSON: &str = r##"
           "schema": {
             "type": "integer"
           },
-          "description": "Number of results per page (default: 20, max: 100)",
+          "description": "Number of results per page (default: 1000, max: 1000). The default is also the maximum, so callers must follow next_cursor to read past the first page.",
           "examples": {
             "Default": {
-              "value": 20
+              "value": 1000
             },
-            "Maximum": {
-              "value": 100
+            "SmallerPage": {
+              "value": 100,
+              "summary": "Smaller page"
             }
           }
         },
@@ -14906,13 +14928,14 @@ const OPERATIONS_JSON: &str = r##"
           "schema": {
             "type": "integer"
           },
-          "description": "Number of results per page (default: 20, max: 100)",
+          "description": "Number of results per page (default: 1000, max: 1000). The default is also the maximum, so callers must follow next_cursor to read past the first page.",
           "examples": {
             "Default": {
-              "value": 20
+              "value": 1000
             },
-            "Maximum": {
-              "value": 100
+            "SmallerPage": {
+              "value": 100,
+              "summary": "Smaller page"
             }
           }
         },
@@ -15251,13 +15274,14 @@ const OPERATIONS_JSON: &str = r##"
           "schema": {
             "type": "integer"
           },
-          "description": "Number of results per page (default: 20, max: 100)",
+          "description": "Number of results per page (default: 1000, max: 1000). The default is also the maximum, so callers must follow next_cursor to read past the first page.",
           "examples": {
             "Default": {
-              "value": 20
+              "value": 1000
             },
-            "Maximum": {
-              "value": 100
+            "SmallerPage": {
+              "value": 100,
+              "summary": "Smaller page"
             }
           }
         },

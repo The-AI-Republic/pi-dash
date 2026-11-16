@@ -63,7 +63,7 @@
 //!   (`pidash_db::runner_enroll`), `send_to_runner` + `PubsubStore` +
 //!   `OutboxError::RunnerOffline` (`runner_sessions::pubsub`,
 //!   `pidash_db::runner_sessions`), `AgentRunStatus`
-//!   (`pidash_db::dispatch`), `ISSUE_ACTIVITY_TASK`
+//!   (`pidash_db::agent_runs`), `ISSUE_ACTIVITY_TASK`
 //!   (`app_project::tasks`), `MODEL_ACTIVITY_TASK`
 //!   (`v1_projects::tasks`) — all reused, never re-ported.
 //! * `_create_project_move_handoff_run` runs behind
@@ -104,11 +104,11 @@
 
 use std::fmt::Write as _;
 
+use pidash_db::agent_runs::AgentRunStatus;
 /// Re-exported for the pool implementation + the 404 handler: the
 /// generic resolve-miss detail (`"Project not found"`).
 pub use pidash_db::app_project::models::project::NOT_FOUND_DETAIL;
 use pidash_db::app_project::models::project::{classify_lookup, ProjectLookup};
-use pidash_db::dispatch::AgentRunStatus;
 use pidash_db::runner_sessions::outbox::OutboxError;
 use pidash_types::orchestration::PROJECT_MOVE_HANDOFF_CONFIG_KEY;
 use serde_json::{Map, Value};
@@ -117,7 +117,7 @@ use uuid::Uuid;
 use super::pr_links::TaskEnqueue;
 use super::serializers_detail::serialize_drf_datetime;
 use crate::app_project::tasks::ISSUE_ACTIVITY_TASK;
-use crate::dispatch::tools::{advisory_lock_key, saved_sequence_id};
+use crate::domain::issue_create_sql::{advisory_lock_key, saved_sequence_id};
 use crate::domain::issues_move::{REPOINT_DESCRIPTION_SQL, REPOINT_ISSUE_COMMENT_SQL};
 use crate::orchestration::blockers::{summary_list, BlockerRow};
 use crate::runner_sessions::pubsub::{send_to_runner, PubsubStore};
@@ -275,16 +275,16 @@ impl MoveOptions {
 
 /// `issues` columns in `_meta` order (the `SourceIssueRow` projection,
 /// shared by the three issue SELECTs).
-pub const ISSUE_COLUMNS: &str = "\"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"assigned_runner_id\", \"issues\".\"agent_executor\"";
+pub const ISSUE_COLUMNS: &str = "\"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"assigned_runner_id\", \"issues\".\"agent_executor\", \"issues\".\"work_type\"";
 
 /// `agent_run` columns in `_meta` order (the `HandoffRunRow` projection).
-pub const AGENT_RUN_COLUMNS: &str = "\"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error_details\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\"";
+pub const AGENT_RUN_COLUMNS: &str = "\"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error_details\", \"agent_run\".\"refusal_category\", \"agent_run\".\"failure_reason\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\"";
 
 /// Locked re-fetch (`:182-184`): the source-issue fetch with
 /// `select_for_update(of=("self",))` — the lock scopes to the base row
 /// (a bare `FOR UPDATE` would ask Postgres to lock the nullable side of
 /// the `states` outer join and 500).
-pub const SOURCE_ISSUE_LOCK_SQL: &str = "SELECT \"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"assigned_runner_id\", \"issues\".\"agent_executor\" FROM \"issues\" INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND NOT (\"issues\".\"is_draft\" = TRUE) AND NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL) AND \"projects\".\"archived_at\" IS NULL AND \"workspaces\".\"slug\" = $1 AND \"issues\".\"project_id\" = $2 AND \"issues\".\"id\" = $3) LIMIT 1 FOR UPDATE OF \"issues\"";
+pub const SOURCE_ISSUE_LOCK_SQL: &str = "SELECT \"issues\".\"id\", \"issues\".\"created_at\", \"issues\".\"updated_at\", \"issues\".\"created_by_id\", \"issues\".\"updated_by_id\", \"issues\".\"deleted_at\", \"issues\".\"project_id\", \"issues\".\"workspace_id\", \"issues\".\"parent_id\", \"issues\".\"state_id\", \"issues\".\"point\", \"issues\".\"estimate_point_id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"description_stripped\", \"issues\".\"description_binary\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"completed_at\", \"issues\".\"archived_at\", \"issues\".\"is_draft\", \"issues\".\"external_source\", \"issues\".\"external_id\", \"issues\".\"type_id\", \"issues\".\"git_work_branch\", \"issues\".\"workpad\", \"issues\".\"created_via\", \"issues\".\"assigned_pod_id\", \"issues\".\"assigned_runner_id\", \"issues\".\"agent_executor\", \"issues\".\"work_type\" FROM \"issues\" INNER JOIN \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \"states\" ON (\"issues\".\"state_id\" = \"states\".\"id\") INNER JOIN \"workspaces\" ON (\"issues\".\"workspace_id\" = \"workspaces\".\"id\") WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"archived_at\" IS NULL AND NOT (\"issues\".\"is_draft\" = TRUE) AND NOT (\"states\".\"group\" = 'triage' AND \"states\".\"group\" IS NOT NULL) AND \"projects\".\"archived_at\" IS NULL AND \"workspaces\".\"slug\" = $1 AND \"issues\".\"project_id\" = $2 AND \"issues\".\"id\" = $3) LIMIT 1 FOR UPDATE OF \"issues\"";
 
 /// Target-membership probe (`:146-152`): active `role >= MEMBER`
 /// membership. `$1` slug, `$2` target project id, `$3` actor id.
@@ -352,7 +352,7 @@ pub mod orm {
 
     /// The `SourceIssueRow` columns (the full row minus the JSON,
     /// stripped-text and workpad columns nothing reads).
-    pub const SOURCE_ROW_COLUMNS: [issues::Column; 32] = [
+    pub const SOURCE_ROW_COLUMNS: [issues::Column; 33] = [
         issues::Column::Id,
         issues::Column::CreatedAt,
         issues::Column::UpdatedAt,
@@ -385,6 +385,7 @@ pub mod orm {
         issues::Column::AssignedPodId,
         issues::Column::AssignedRunnerId,
         issues::Column::AgentExecutor,
+        issues::Column::WorkType,
     ];
 
     /// `Issue.issue_objects` over the source-row columns: INNER
@@ -762,6 +763,7 @@ pub struct SourceIssueRow {
     pub git_work_branch: String,
     pub created_via: Option<String>,
     pub agent_executor: Option<String>,
+    pub work_type: Option<String>,
     pub created_by_id: Option<Uuid>,
     pub updated_by_id: Option<Uuid>,
 }
@@ -1276,11 +1278,18 @@ fn dumps_number(n: &serde_json::Number) -> String {
     if let Some(u) = n.as_u64() {
         return u.to_string();
     }
+    // Beyond i64/u64. The workspace build unifies
+    // `serde_json/arbitrary_precision` (from pidash-api), so an integer
+    // literal keeps its exact digits here; Python ints are unbounded, so
+    // `json.dumps` echoes them verbatim — never route them through `f64`.
+    // Only float-syntax literals (`.`, `e`, `E`) take the `repr` path.
+    let token = n.to_string();
+    if !token.bytes().any(|byte| matches!(byte, b'.' | b'e' | b'E')) {
+        return token;
+    }
     match n.as_f64() {
         Some(f) => dumps_float(f),
-        // Unreachable without `arbitrary_precision`: every Number is
-        // i64, u64 or f64.
-        None => n.to_string(),
+        None => token,
     }
 }
 
@@ -1654,6 +1663,7 @@ async fn render_current_instance<S: MoveStore>(
         git_work_branch: &issue.git_work_branch,
         created_via: issue.created_via.as_deref(),
         agent_executor: issue.agent_executor.as_deref(),
+        work_type: issue.work_type.as_deref(),
         created_by: created_by_s.as_deref(),
         updated_by: updated_by_s.as_deref(),
         project: &project_s,
@@ -2024,6 +2034,7 @@ mod tests {
             git_work_branch: String::new(),
             created_via: None,
             agent_executor: None,
+            work_type: None,
             created_by_id: Some(uuid(0x40)),
             updated_by_id: None,
         }
@@ -3317,6 +3328,38 @@ mod tests {
         ] {
             assert_eq!(py_dumps(&serde_json::json!(input)), expected, "{input}");
         }
+    }
+
+    #[test]
+    fn dumps_big_integers() {
+        // Python ints are unbounded: `json.dumps(IssueSerializer(issue).
+        // data, cls=DjangoJSONEncoder)` (`issue_move.py:159`) echoes the
+        // exact digits past u64/i64. The workspace build unifies
+        // `serde_json/arbitrary_precision` (from pidash-api), so the
+        // literal survives parsing and must echo verbatim
+        // (PIDASHCONV-1733) — never route it through `f64`.
+        let parse = |text: &str| {
+            let value: serde_json::Value = serde_json::from_str(text).expect("valid JSON");
+            py_dumps(&value)
+        };
+        assert_eq!(
+            parse(
+                r#"{"big": 18446744073709551616, "neg": -9223372036854775809, "huge": 1267650600228229401496703205376}"#,
+            ),
+            r#"{"big": 18446744073709551616, "neg": -9223372036854775809, "huge": 1267650600228229401496703205376}"#
+        );
+        // Float-syntax literals still take the float path (`repr`).
+        assert_eq!(
+            parse(r#"{"e": 1e19, "f": 100.00}"#),
+            r#"{"e": 1e+19, "f": 100.0}"#
+        );
+        // i64/u64 edges still echo exactly.
+        assert_eq!(
+            parse(
+                r#"{"max": 9223372036854775807, "umax": 18446744073709551615, "min": -9223372036854775808}"#,
+            ),
+            r#"{"max": 9223372036854775807, "umax": 18446744073709551615, "min": -9223372036854775808}"#
+        );
     }
 
     // -- SQL shape ----------------------------------------------------------

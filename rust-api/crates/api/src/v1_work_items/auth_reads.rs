@@ -345,8 +345,8 @@ pub async fn newest_run_facts_on_issue<C: ConnectionTrait>(
         .await
 }
 
-/// A yield run row: [`RunFactsRow`] plus the run's workspace and
-/// `done_payload`.
+/// A yield run row: [`RunFactsRow`] plus the run's workspace,
+/// `done_payload` and scheduler binding.
 #[derive(Debug, Clone, PartialEq, FromQueryResult)]
 pub struct YieldRunRow {
     pub id: Uuid,
@@ -358,6 +358,8 @@ pub struct YieldRunRow {
     pub status: String,
     pub workspace_id: Uuid,
     pub done_payload: Option<serde_json::Value>,
+    /// Set on scheduler runs (PDASHOSS01-276).
+    pub scheduler_binding_id: Option<Uuid>,
 }
 
 impl YieldRunRow {
@@ -388,6 +390,7 @@ pub async fn yield_run_by_id<C: ConnectionTrait>(
         .columns([
             agent_run::Column::WorkspaceId,
             agent_run::Column::DonePayload,
+            agent_run::Column::SchedulerBindingId,
         ])
         .join(
             JoinType::InnerJoin,

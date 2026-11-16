@@ -94,7 +94,7 @@ use pidash_services::app_issues::serializers_assoc::{
     issue_description_version_detail_to_representation, issue_version_detail_to_representation,
     IssueDescriptionVersionDetailRow, IssueVersionDetailRow,
 };
-use pidash_services::app_issues::serializers_engage::{git_issue_synced, github_issue_synced};
+use pidash_services::app_issues::serializers_engage::git_issue_synced;
 use pidash_services::app_issues::{
     issue_detail_base_to_representation, issue_is_actively_synced, IssueDetailBaseRow,
     SourceIssueRow,
@@ -112,10 +112,9 @@ use super::access;
 use super::queries_engage::VERSION_PAGE_KEYS;
 use super::render::{v2_page, V2Page};
 use super::{query_last, QueryMap};
-use crate::domain_hooks::{AppMoveAdmissionCache, AppMovePostCommitHook, AppTaskEnqueueHook};
+use crate::domain_hooks::{AppMovePostCommitHook, AppTaskEnqueueHook};
 use crate::issue_transition::AppTransitionHook;
 use crate::middleware::body_limit::read_request_bytes;
-use crate::orchestration::SpanCreationDeps;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
 use crate::v1_cycles_modules::json::{
@@ -1073,21 +1072,8 @@ async fn move_issue(
     });
     let transition: Arc<dyn IssueTransitionHook> = Arc::new(AppTransitionHook::new(&state, &pool));
     let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&pool));
-    let span_deps = SpanCreationDeps::from_state(&state);
-    let drain: Arc<dyn MovePostCommitHook> = Arc::new(AppMovePostCommitHook::new(
-        &pool,
-        &state,
-        span_deps.cache.clone(),
-    ));
-    let creation = CreationDeps {
-        pool: pool.clone(),
-        cloud: span_deps.cloud.clone(),
-        managed: span_deps.managed.clone(),
-        now_unix_secs: span_deps.now_unix_secs,
-        toolsets: span_deps.toolsets.clone(),
-        assistant_seam: span_deps.assistant_seam.clone(),
-        admission: Arc::new(AppMoveAdmissionCache::new(span_deps.cache)),
-    };
+    let drain: Arc<dyn MovePostCommitHook> = Arc::new(AppMovePostCommitHook::new(&pool, &state));
+    let creation = CreationDeps { pool: pool.clone() };
     let outcome = domain::run(&ctx, orm, |txn| {
         let transition = transition.clone();
         let enqueue = enqueue.clone();
@@ -1292,6 +1278,7 @@ async fn render_moved_issue(
         assigned_pod_id: assigned_pod_id.as_deref(),
         assigned_runner_id: assigned_runner_id.as_deref(),
         agent_executor: issue.agent_executor.as_deref(),
+        work_type: issue.work_type.as_deref(),
         module_ids: None,
         label_ids: None,
         assignee_ids: None,
@@ -1326,8 +1313,8 @@ async fn moved_is_epic(pool: &PgPool, type_id: Option<&str>) -> Result<bool, Den
 }
 
 /// The move's `is_synced` (`serializers/issue.py:297-323`): the bare
-/// instance carries no annotation, so the merged predicate runs — no
-/// probe when `external_source` is blank, else git then github.
+/// instance carries no annotation, so the predicate runs — no
+/// probe when `external_source` is blank, else git-only (PDASHOSS01-354).
 async fn moved_is_synced(pool: &PgPool, issue: &SourceIssueRow) -> Result<bool, Denial> {
     let blank = issue
         .external_source
@@ -1338,29 +1325,16 @@ async fn moved_is_synced(pool: &PgPool, issue: &SourceIssueRow) -> Result<bool, 
             issue.external_source.as_deref(),
             None,
             || false,
-            || false,
         ));
     }
     let db = orm(pool);
     let git_hit = git_issue_synced(&db, issue.id)
         .await
         .map_err(|_| Denial::ServerError)?;
-    if git_hit {
-        return Ok(issue_is_actively_synced(
-            issue.external_source.as_deref(),
-            None,
-            || true,
-            || false,
-        ));
-    }
-    let github_hit = github_issue_synced(&db, issue.id)
-        .await
-        .map_err(|_| Denial::ServerError)?;
     Ok(issue_is_actively_synced(
         issue.external_source.as_deref(),
         None,
-        || false,
-        || github_hit,
+        || git_hit,
     ))
 }
 

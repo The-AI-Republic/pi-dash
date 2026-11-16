@@ -497,15 +497,7 @@ pub fn validate_row(
 /// The best-effort swallow (`except Exception` + `print` when `verbosity`)
 /// owns to the DB edge, which must never fail a migration on a seed error.
 pub fn migrate_seed_enabled(app_label: Option<&str>, skip_seed_env: bool) -> bool {
-    if let Some(label) = app_label {
-        if label != "prompting" {
-            return false;
-        }
-    }
-    if skip_seed_env {
-        return false;
-    }
-    true
+    !(app_label.is_some_and(|label| label != "prompting") || skip_seed_env)
 }
 
 #[cfg(test)]
@@ -590,7 +582,7 @@ mod tests {
 
     #[test]
     fn default_body_assembles_from_fragments_in_order() {
-        // `FIX-seed / statics.default_body_*`: 54780 chars, sha over UTF-8 bytes.
+        // `FIX-seed / statics.default_body_*`: 55780 chars, sha over UTF-8 bytes.
         assert_eq!(FRAGMENT_FILES.len(), 14);
         let names: Vec<&str> = FRAGMENT_FILES.iter().map(|(n, _)| *n).collect();
         let mut sorted = names.clone();
@@ -598,10 +590,10 @@ mod tests {
         assert_eq!(names, sorted, "fragments embed in lexical order");
         let body = read_default_body();
         assert_eq!(DEFAULT_TEMPLATE_NAME, "coding-task");
-        assert_eq!(char_len(&body), 54780);
+        assert_eq!(char_len(&body), 55780);
         assert_eq!(
             sha_hex(&body),
-            "eea2ba89650f68ca0e1a7e919ef803dddb373b7c9c9086a8bcb3776c1c9a9b2a"
+            "c22d97d534bb0dbd0b7b9ee26a340c0559d559aed47ebb52ed810a34ca962cb2"
         );
         assert!(body.ends_with('\n') && !body.ends_with("\n\n"));
     }

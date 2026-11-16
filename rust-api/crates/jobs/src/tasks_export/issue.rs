@@ -36,6 +36,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::{DateTime, NaiveDate, Utc};
 use pidash_services::app_analytics::export_format as porter;
@@ -50,6 +51,9 @@ use super::{
     ISSUE_EXPORT_TASK, STATUS_FAILED, STATUS_PROCESSING,
 };
 use crate::queue::JobRow;
+use crate::tasks_cleanup::assets::{
+    s3_error_code, s3_retryable_answer, sleep_backoff, S3_MAX_ATTEMPTS,
+};
 use crate::worker::{Handler, Verdict};
 use pidash_db::entity::{
     cycle_issues as cycle_issues_entity, cycles as cycles_entity,
@@ -130,13 +134,17 @@ pub fn full_name(first_name: Option<&str>, last_name: Option<&str>) -> String {
 
 /// The S3 settings the upload branches read
 /// (`settings/common.py:372-387`, all env-sourced with registry
-/// defaults), resolved once per task run.
+/// defaults), resolved once per task run. Credential defaults are the
+/// local-MinIO placeholders only when `USE_MINIO=1`; otherwise they are
+/// empty and the per-request credential chain (instance role) supplies
+/// them (NEWPIDASH-204).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExportS3 {
     pub use_minio: bool,
     pub endpoint_url: Option<String>,
     pub access_key_id: String,
     pub secret_access_key: String,
+    pub session_token: String,
     pub bucket: String,
     pub region_setting: String,
     pub web_url: String,
@@ -148,28 +156,47 @@ impl ExportS3 {
         std::env::var(key).ok().filter(|value| !value.is_empty())
     }
 
+    fn env_allow_empty(key: &str) -> Option<String> {
+        std::env::var(key).ok()
+    }
+
     /// Read the upload settings from the environment with Django's
     /// registry defaults. `AWS_DEFAULT_REGION` reads verbatim (even
     /// `""`, like botocore); shared-config files are NOT consulted
     /// (botocore would read them — the contract runs scrub them so both
-    /// backends resolve `us-east-1`; see the suite docs).
+    /// backends resolve `us-east-1`; see the suite docs). Placeholders
+    /// are kept only for `USE_MINIO=1`.
     pub fn from_env() -> Self {
         let use_minio = Self::env("USE_MINIO")
             .and_then(|raw| raw.trim().parse::<i64>().ok())
             .is_some_and(|flag| flag == 1);
         let endpoint_url =
             Self::env("AWS_S3_ENDPOINT_URL").or_else(|| Self::env("MINIO_ENDPOINT_URL"));
+        let access_key_id = Self::env("AWS_ACCESS_KEY_ID").unwrap_or_else(|| {
+            if use_minio {
+                "access-key".to_owned()
+            } else {
+                String::new()
+            }
+        });
+        let secret_access_key = Self::env("AWS_SECRET_ACCESS_KEY").unwrap_or_else(|| {
+            if use_minio {
+                "secret-key".to_owned()
+            } else {
+                String::new()
+            }
+        });
+        let session_token = Self::env("AWS_SESSION_TOKEN").unwrap_or_default();
         Self {
             use_minio,
             endpoint_url,
-            access_key_id: Self::env("AWS_ACCESS_KEY_ID")
-                .unwrap_or_else(|| "access-key".to_owned()),
-            secret_access_key: Self::env("AWS_SECRET_ACCESS_KEY")
-                .unwrap_or_else(|| "secret-key".to_owned()),
+            access_key_id,
+            secret_access_key,
+            session_token,
             bucket: Self::env("AWS_S3_BUCKET_NAME").unwrap_or_else(|| "uploads".to_owned()),
             region_setting: Self::env("AWS_REGION").unwrap_or_default(),
             web_url: Self::env("WEB_URL").unwrap_or_else(|| "http://localhost".to_owned()),
-            default_region: std::env::var("AWS_DEFAULT_REGION").ok(),
+            default_region: Self::env_allow_empty("AWS_DEFAULT_REGION"),
         }
     }
 
@@ -1102,36 +1129,82 @@ pub fn encode_project_file(
 
 /// Execute one signed PUT (`upload_fileobj` single-part shape for zips
 /// under the 8 MiB multipart threshold — identical object bytes either
-/// way): `PUT url` with the signed headers + content SHA. Any transport
-/// or status failure is the task error (boto raises the same way).
+/// way): `PUT url` with the signed headers + content SHA. The client is
+/// bounded like botocore's defaults (60s to connect, 60s to read — the
+/// Python task passes no timeout `Config`), and a transport or retryable
+/// service answer gets the legacy 5 attempts with `rand * 2**(n-1)`
+/// backoff (the `tasks_cleanup/assets.rs` loop); any final failure is
+/// the task error (boto raises the same way). The signed request is
+/// reused across attempts: the backoff (max ~15s) stays far inside
+/// SigV4's 15-minute skew.
 pub async fn put_object(
     signed: &pidash_storage::SignedRequest,
     payload: &[u8],
 ) -> Result<(), String> {
-    let client = reqwest::Client::new();
-    let mut request = client
-        .put(&signed.url)
-        .header("authorization", &signed.authorization)
-        .header("x-amz-date", &signed.amz_date)
-        .header("x-amz-content-sha256", &signed.content_sha256);
-    if let Some(content_type) = &signed.content_type {
-        request = request.header("content-type", content_type);
-    }
-    for (name, value) in &signed.extra_headers {
-        request = request.header(name.as_str(), value.as_str());
-    }
-    let response = request
-        .body(payload.to_vec())
-        .send()
-        .await
+    // Bounded like botocore's defaults (PIDASHCONV-1291 precedent in
+    // tasks_cleanup/expiry.rs): a wedged S3 fails the upload instead
+    // of holding the worker slot forever.
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(60))
+        .read_timeout(Duration::from_secs(60))
+        .build()
         .map_err(|error| format!("issue_export_task: S3 upload failed ({error})"))?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "issue_export_task: S3 upload failed (HTTP {})",
-            response.status()
-        ));
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
+        let mut request = client
+            .put(&signed.url)
+            .header("authorization", &signed.authorization)
+            .header("x-amz-date", &signed.amz_date)
+            .header("x-amz-content-sha256", &signed.content_sha256);
+        if let Some(content_type) = &signed.content_type {
+            request = request.header("content-type", content_type);
+        }
+        if let Some(token) = &signed.security_token {
+            request = request.header("x-amz-security-token", token);
+        }
+        for (name, value) in &signed.extra_headers {
+            request = request.header(name.as_str(), value.as_str());
+        }
+        let response = match request.body(payload.to_vec()).send().await {
+            Ok(response) => response,
+            Err(error) => {
+                if attempt >= S3_MAX_ATTEMPTS {
+                    return Err(format!("issue_export_task: S3 upload failed ({error})"));
+                }
+                sleep_backoff(attempt).await;
+                continue;
+            }
+        };
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        // Error status: parse the `<Code>` for the retry decision. A body
+        // that will not read is a transport failure (retryable); an empty
+        // or codeless body decides on the status alone.
+        let body = match response.bytes().await {
+            Ok(body) => body,
+            Err(error) => {
+                if attempt >= S3_MAX_ATTEMPTS {
+                    return Err(format!("issue_export_task: S3 upload failed ({error})"));
+                }
+                sleep_backoff(attempt).await;
+                continue;
+            }
+        };
+        let code = std::str::from_utf8(&body)
+            .ok()
+            .and_then(s3_error_code)
+            .map(str::to_owned);
+        if !s3_retryable_answer(status.as_u16(), code.as_deref()) || attempt >= S3_MAX_ATTEMPTS {
+            return Err(format!(
+                "issue_export_task: S3 upload failed (HTTP {})",
+                status
+            ));
+        }
+        sleep_backoff(attempt).await;
     }
-    Ok(())
 }
 
 /// `upload_to_s3` (`export_task.py:20-125`): PUT the zip, then mint the
@@ -1145,16 +1218,39 @@ pub async fn upload_to_s3(
     payload: &[u8],
     now: DateTime<Utc>,
 ) -> Result<(String, String), String> {
-    use pidash_storage::{presign_get_url, sign_put, sign_put_extra, PresignEndpoint};
-    // The PUT settings: `use_minio: false` always, so the resolver takes
-    // the endpoint-URL arm (path-style `{endpoint}/{bucket}/{key}` —
-    // the probed boto3 shape for both the MinIO and endpoint uploads).
-    // The MinIO-ness of the upload is the `x-amz-acl` header alone.
+    use pidash_storage::{
+        is_placeholder_credentials, presign_get_url_with_creds, sign_put_extra_with_creds,
+        sign_put_with_creds, PresignEndpoint,
+    };
+    // Resolve credentials per request (NEWPIDASH-204): static keys from
+    // `ExportS3` when present and not placeholder-outside-MinIO, else the
+    // EC2 instance role via the shared IMDS cache. The `use_minio: false`
+    // `put_storage` below is only for endpoint resolution (path-style);
+    // signing uses the resolved `creds` (including session token).
+    let creds = {
+        let is_ph = is_placeholder_credentials(&s3.access_key_id, &s3.secret_access_key);
+        let has_static = !s3.access_key_id.is_empty()
+            && !s3.secret_access_key.is_empty()
+            && !(is_ph && !s3.use_minio);
+        if has_static || (s3.use_minio && is_ph) {
+            pidash_storage::AwsCredentials {
+                access_key: s3.access_key_id.clone(),
+                secret_key: s3.secret_access_key.clone(),
+                session_token: s3.session_token.clone(),
+                expires_at: None,
+            }
+        } else {
+            pidash_storage::resolve_default_credentials()
+                .await
+                .map_err(|err| format!("issue_export_task: S3 credentials failed ({err})"))?
+        }
+    };
     let put_storage = pidash_db::config::StorageSettings {
         use_minio: false,
         minio_endpoint_ssl: false,
-        access_key_id: s3.access_key_id.clone(),
-        secret_access_key: s3.secret_access_key.clone(),
+        access_key_id: creds.access_key.clone(),
+        secret_access_key: creds.secret_key.clone(),
+        session_token: creds.session_token.clone(),
         bucket_name: s3.bucket.clone(),
         region: s3.client_region(),
         endpoint_url: s3.endpoint_url.clone(),
@@ -1164,8 +1260,9 @@ pub async fn upload_to_s3(
     let date_stamp = now.format("%Y%m%d").to_string();
     match upload_branch(s3) {
         UploadBranch::Minio => {
-            let signed = sign_put_extra(
+            let signed = sign_put_extra_with_creds(
                 &put_storage,
+                &creds,
                 "http",
                 "localhost",
                 key,
@@ -1180,7 +1277,7 @@ pub async fn upload_to_s3(
             let (protocol, custom_domain) = minio_presign_parts(s3)?;
             let endpoint = ex::minio_presign_endpoint(&protocol, &custom_domain);
             let (base, host) = endpoint_parts(&endpoint)?;
-            let url = presign_get_url(
+            let url = presign_get_url_with_creds(
                 &PresignEndpoint {
                     url_base: base,
                     signed_host: host,
@@ -1188,18 +1285,19 @@ pub async fn upload_to_s3(
                 },
                 &s3.bucket,
                 key,
-                &s3.access_key_id,
-                &s3.secret_access_key,
+                &creds,
                 &s3.client_region(),
                 &amz_datetime,
                 &date_stamp,
                 dto::EXPORT_URL_EXPIRES_IN_SECS,
+                now,
             );
             Ok((url, key.to_owned()))
         }
         UploadBranch::Endpoint => {
-            let signed = sign_put(
+            let signed = sign_put_with_creds(
                 &put_storage,
+                &creds,
                 "http",
                 "localhost",
                 key,
@@ -1212,7 +1310,7 @@ pub async fn upload_to_s3(
             put_object(&signed, payload).await?;
             let endpoint_url = s3.endpoint_url.clone().unwrap_or_default();
             let (base, host) = endpoint_parts(&endpoint_url)?;
-            let url = presign_get_url(
+            let url = presign_get_url_with_creds(
                 &PresignEndpoint {
                     url_base: base,
                     signed_host: host,
@@ -1220,12 +1318,12 @@ pub async fn upload_to_s3(
                 },
                 &s3.bucket,
                 key,
-                &s3.access_key_id,
-                &s3.secret_access_key,
+                &creds,
                 &s3.client_region(),
                 &amz_datetime,
                 &date_stamp,
                 dto::EXPORT_URL_EXPIRES_IN_SECS,
+                now,
             );
             Ok((url, key.to_owned()))
         }
@@ -1240,8 +1338,9 @@ pub async fn upload_to_s3(
                 endpoint_url: None,
                 ..put_storage.clone()
             };
-            let signed = sign_put(
+            let signed = sign_put_with_creds(
                 &storage,
+                &creds,
                 "https",
                 "localhost",
                 key,
@@ -1253,7 +1352,7 @@ pub async fn upload_to_s3(
             .map_err(|error| format!("issue_export_task: S3 sign failed ({error})"))?;
             put_object(&signed, payload).await?;
             let (base, host) = region_base(&s3.bucket, &s3.region_setting);
-            let url = presign_get_url(
+            let url = presign_get_url_with_creds(
                 &PresignEndpoint {
                     url_base: base,
                     signed_host: host,
@@ -1261,12 +1360,12 @@ pub async fn upload_to_s3(
                 },
                 &s3.bucket,
                 key,
-                &s3.access_key_id,
-                &s3.secret_access_key,
+                &creds,
                 &s3.region_setting,
                 &amz_datetime,
                 &date_stamp,
                 dto::EXPORT_URL_EXPIRES_IN_SECS,
+                now,
             );
             Ok((url, key.to_owned()))
         }
@@ -1636,6 +1735,7 @@ mod tests {
             endpoint_url: None,
             access_key_id: String::new(),
             secret_access_key: String::new(),
+            session_token: String::new(),
             bucket: "uploads".to_owned(),
             region_setting: String::new(),
             web_url: "http://localhost".to_owned(),
@@ -1668,6 +1768,7 @@ mod tests {
             endpoint_url: Some("http://minio:9000".to_owned()),
             access_key_id: String::new(),
             secret_access_key: String::new(),
+            session_token: String::new(),
             bucket: "uploads".to_owned(),
             region_setting: String::new(),
             web_url: "http://localhost:8123".to_owned(),

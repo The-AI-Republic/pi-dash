@@ -3520,9 +3520,11 @@ export class WebNewDriver implements ParityDriver {
   // the link dialog reports validation through an alert.
 
   async homeAllOffVisible(): Promise<boolean> {
-    const empty = this.page.getByTestId("home-all-off").first();
-    if ((await empty.count()) === 0) return false;
-    return empty.isVisible().catch(() => false);
+    // NEWPIDASH-301 (DIFF-39): the new home renders no all-off
+    // illustration — an all-widgets-off home shows only the composer
+    // while Manage widgets stays reachable. The oracle home keeps its
+    // guidance illustration (see web.ts).
+    return false;
   }
 
   private homeLinksSection(): Locator {
@@ -16653,6 +16655,16 @@ export class WebNewDriver implements ParityDriver {
     return tabs;
   }
 
+  async schedulerSectionNewPlacement(): Promise<{ inTabRow: boolean; total: number }> {
+    // The tab row is the element holding the "Scheduler views" navigation.
+    const row = this.schedulerTabs().locator("xpath=..");
+    const control = { name: "New Scheduler", exact: true } as const;
+    return {
+      inTabRow: await this.isShown(row.getByRole("button", control)),
+      total: await this.page.getByRole("button", control).count(),
+    };
+  }
+
   async schedulerSectionOpenTab(tab: "List" | "Calendar"): Promise<void> {
     await this.schedulerTabs().getByRole("link", { name: tab, exact: true }).click();
     if (tab === "List") {
@@ -18480,14 +18492,28 @@ export class WebNewDriver implements ParityDriver {
     await this.page.locator(`${selector}[data-settled="true"]`).first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  /** The dashboard card's single-line entry input. */
+  /**
+   * The dashboard card's entry composer. The new home renders a
+   * multi-line textarea composer with the Ask action inside it
+   * (NEWPIDASH-301, DIFF-39), while the oracle home keeps its
+   * single-line input.
+   */
   private assistantHomeCardInput() {
-    return this.page.locator('input[placeholder*="Ask Pi Dash to do something"]');
+    return this.page.locator('textarea[placeholder*="Ask Pi Dash to do something"]');
   }
 
   /** The dashboard card root: the card shell around the entry input. */
   private assistantHomeCard() {
     return this.page.locator("#home-assistant-card").first();
+  }
+
+  /**
+   * The recent-conversations section. The new home renders recents as
+   * their own section below the composer (NEWPIDASH-301, DIFF-39),
+   * while the oracle home lists them inside the card.
+   */
+  private assistantRecentConversations() {
+    return this.page.locator('[data-testid="home-recent-conversations"]').first();
   }
 
   /** The conversation's scrolling body that holds the transcript. */
@@ -18808,9 +18834,10 @@ export class WebNewDriver implements ParityDriver {
   }
   async assistantCardRecents(): Promise<{ title: string; href: string }[]> {
     if (!(await this.assistantCardVisible())) return [];
-    // Only the recents list counts: the keyless setup reminder is also an
-    // anchor inside the card and must not displace the newest thread.
-    const links = this.assistantHomeCard().locator("ul a");
+    // Only the sibling recents section counts: it lives outside the card
+    // (NEWPIDASH-301, DIFF-39), so the keyless setup link inside the card
+    // can never displace the newest thread.
+    const links = this.assistantRecentConversations().locator("ul a");
     const total = await links.count();
     const out: { title: string; href: string }[] = [];
     for (let i = 0; i < total; i++) {
@@ -18823,7 +18850,7 @@ export class WebNewDriver implements ParityDriver {
     return out;
   }
   async assistantCardClickRecent(index: number): Promise<void> {
-    await this.assistantHomeCard().locator("ul a").nth(index).click();
+    await this.assistantRecentConversations().locator("ul a").nth(index).click();
   }
   async assistantStubStream(threadId: string, frames: AssistantStreamFrame[]): Promise<void> {
     this.assistantStreamFrames.set(threadId, frames);
@@ -20776,6 +20803,24 @@ export class WebNewDriver implements ParityDriver {
   }
   async archivesCyclesOpenPeek(name: string): Promise<void> {
     await this.openArchivedCyclePeek(name);
+  }
+  async archivesCyclesClickRow(name: string): Promise<void> {
+    // Row body click: archived rows render a button that opens the peek,
+    // live rows (not used here) would link to detail. Click the name's
+    // owning button and wait for the peek panel, as a user would.
+    const row = this.cycleRowRoot(name);
+    const nameLocator = row.getByText(name, { exact: true }).first();
+    const button = nameLocator.locator("xpath=ancestor::button[1]");
+    if ((await button.count()) > 0) {
+      await button.first().click({ timeout: WebNewDriver.WAIT_MS });
+    } else {
+      // Fallback for live rows (not expected on the archived tab): click the link.
+      await row.locator("a").first().click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.page.waitForFunction(() => new URL(location.href).searchParams.has("peekCycle"), undefined, {
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await this.archivedCyclePeekPanel().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
   async archivesCyclesOpenPeekLink(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
     await this.page.goto(`/${workspaceSlug}/projects/${projectId}/archives/cycles?peekCycle=${cycleId}`);
@@ -29373,6 +29418,15 @@ export class WebNewDriver implements ParityDriver {
       .nth(index)
       .click({ timeout: WebNewDriver.WAIT_MS });
     await this.page.waitForURL(/\/cycles\/[^/]+\/?$/, { timeout: WebNewDriver.WAIT_MS });
+  }
+  async cyclesHeroTapBreakdownEntryByText(entryText: string): Promise<void> {
+    // No navigation wait: the no-assignee row carries no click action,
+    // so the scenario asserts the address stays on the list.
+    await this.cyclesHeroBreakdownCard()
+      .locator('[data-testid="hero-breakdown-entry"]')
+      .filter({ hasText: entryText })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async cyclesHeroOpenWorkspaceActives(workspaceSlug: string): Promise<void> {
     await this.page.goto(`/${workspaceSlug}/active-cycles`, { waitUntil: "domcontentloaded" });
@@ -54118,6 +54172,54 @@ export class WebNewDriver implements ParityDriver {
     const row = this.page.getByText(name, { exact: true });
     if ((await row.count()) === 0) return false;
     return row.first().isVisible();
+  }
+
+  private viewsDetailMenuTrigger(): Locator {
+    return this.page.getByTestId("project-view-detail-menu-trigger");
+  }
+
+  async viewsDetailMenuOpen(): Promise<void> {
+    const trigger = this.viewsDetailMenuTrigger();
+    await trigger.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async viewsDetailMenuItems(): Promise<string[]> {
+    const menu = this.page.getByRole("menu");
+    await menu.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const texts = await menu.getByRole("menuitem").allInnerTexts();
+    return texts.map((text) => text.replace(/\s+/g, " ").trim()).filter((text) => text.length > 0);
+  }
+
+  async viewsDetailMenuPick(item: string): Promise<void> {
+    const menu = this.page.getByRole("menu");
+    await menu.getByRole("menuitem", { name: item }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await menu.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+  }
+
+  async viewsDetailCopyLink(): Promise<string> {
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.viewsDetailMenuOpen();
+    await this.viewsDetailMenuPick("Copy link");
+    await expect
+      .poll(() => this.page.evaluate(() => navigator.clipboard.readText()), {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .not.toBe("");
+    return this.page.evaluate(() => navigator.clipboard.readText());
+  }
+
+  async viewsDetailMenuOpenNewTabHref(): Promise<string> {
+    await this.viewsDetailMenuOpen();
+    const menu = this.page.getByRole("menu");
+    const [popup] = await Promise.all([
+      this.page.waitForEvent("popup", { timeout: WebNewDriver.WAIT_MS }),
+      menu.getByRole("menuitem", { name: "Open in new tab" }).first().click({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    const href = popup.url();
+    await popup.close().catch(() => undefined);
+    return href;
   }
 
   // --- Workspace views list, CRUD and detail (VIEW-029-040) ---------------

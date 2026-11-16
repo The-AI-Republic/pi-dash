@@ -794,6 +794,7 @@ struct ParsedWrite {
     git_work_branch: Option<String>,
     created_via: Option<Option<String>>,
     agent_executor: Option<Option<String>>,
+    work_type: Option<Option<String>>,
     created_by: Option<Option<Uuid>>,
     parent: Option<Option<Uuid>>,
     state: Option<Option<Uuid>>,
@@ -1182,6 +1183,10 @@ async fn parse_issue_write(
         }
     };
 
+    // --- work_type (Char 32, allow_null+allow_blank; registry check in
+    // `validate`) ---
+    let work_type_shape = parse_optional_char(get("work_type"), Some(32));
+
     // --- created_by (PKRF User, allow_null) ---
     let created_by_shape = parse_optional_pk(get("created_by"), from_form);
 
@@ -1476,6 +1481,7 @@ async fn parse_issue_write(
     scalar_field!(branch_shape, "git_work_branch", parsed.git_work_branch);
     scalar_field!(via_shape, "created_via", parsed.created_via);
     scalar_field!(executor_shape, "agent_executor", parsed.agent_executor);
+    scalar_field!(work_type_shape, "work_type", parsed.work_type);
     // created_by
     match created_by_shape {
         FieldParse::Absent => {}
@@ -2902,7 +2908,7 @@ async fn run_write_validate(
                 }
             }
             Some(value) => {
-                let Some(kind) = pidash_types::dispatch::normalize_executor_write(value) else {
+                let Some(kind) = pidash_types::agent_runs::normalize_executor_write(value) else {
                     return Err(fail(ValidateError::ExecutorUnknown));
                 };
                 let normalized = kind.value().to_owned();
@@ -2981,18 +2987,28 @@ async fn run_write_validate(
                 Some(roundtripped) => html = roundtripped,
                 None => return Err(fail(ValidateError::InvalidHtml)),
             }
-            // Sanitizer substitute (`:232-238`): only truthy HTML
-            // validates, and the clean output always substitutes.
+        }
+        parsed.description_html = Some(html);
+    }
+
+    // Work type (PDASHOSS01-234): `""` normalizes to the inherit state; a
+    // truthy key must be registered. Runs between the lxml round-trip and
+    // the sanitizer, like Django.
+    parsed.work_type = shape::normalize_work_type(parsed.work_type.take()).map_err(fail)?;
+
+    // Sanitizer substitute (`:232-238`): only truthy HTML validates, and the
+    // clean output always substitutes.
+    if !from_markdown {
+        if let Some(html) = parsed.description_html.as_mut() {
             if !html.is_empty() {
-                match crate::space::sanitize::sanitize_html(&html) {
-                    crate::space::sanitize::Sanitize::Clean(clean) => html = clean,
+                match crate::space::sanitize::sanitize_html(html) {
+                    crate::space::sanitize::Sanitize::Clean(clean) => *html = clean,
                     crate::space::sanitize::Sanitize::Invalid => {
                         return Err(fail(ValidateError::HtmlContentInvalid));
                     }
                 }
             }
         }
-        parsed.description_html = Some(html);
     }
 
     // Assignee / label allow-lists (`:246-259`): falsy inputs (absent or
@@ -3509,6 +3525,7 @@ pub async fn create(
         // `create()` validates + applies exactly like the app surface).
         assigned_runner_id: parsed.assigned_runner.flatten(),
         agent_executor: parsed.agent_executor.clone().flatten(),
+        work_type: parsed.work_type.clone().flatten(),
     };
     // The raw-data overrides resolve pre-save (pure), but their failures
     // surface post-commit in the chain leg, in port order — a bad override
@@ -3831,6 +3848,9 @@ pub async fn update(
     }
     if let Some(value) = parsed.agent_executor.clone() {
         fields.agent_executor = value;
+    }
+    if let Some(value) = parsed.work_type.clone() {
+        fields.work_type = value;
     }
     if let Some(value) = parsed.created_by {
         fields.created_by_id = value;
@@ -4271,6 +4291,7 @@ async fn render_moved_issue_api(
         git_work_branch: &issue.git_work_branch,
         created_via: issue.created_via.as_deref(),
         agent_executor: issue.agent_executor.as_deref(),
+        work_type: issue.work_type.as_deref(),
         created_by: created_by.as_deref(),
         updated_by: updated_by.as_deref(),
         project: &project,
@@ -4438,7 +4459,7 @@ mod move_tests {
     use crate::domain::issues_move::MoveCreationOutboxes;
     use crate::domain::WriteActor;
     use crate::orchestration::entries::{FireOutcome, FireRequest};
-    use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
+
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Mutex;
@@ -4541,81 +4562,10 @@ mod move_tests {
         }
     }
 
-    struct FakeAdmission;
-
-    impl domain_issues::MoveAdmissionCache for FakeAdmission {
-        fn bucket_count(&self, _key: &str) -> Result<Option<i64>, String> {
-            Ok(None)
-        }
-
-        fn add_or_incr(&self, _key: &str, _timeout_secs: i64) -> Result<(), String> {
-            Ok(())
-        }
-    }
-
-    #[derive(Debug)]
-    struct NoAssistant;
-
-    impl crate::extensions::AssistantModelSeam for NoAssistant {
-        fn generate_title(
-            &self,
-            _request: crate::extensions::TitleRequest,
-        ) -> crate::extensions::SeamFuture<'_, Result<String, crate::extensions::TitleError>>
-        {
-            Box::pin(async move { unreachable!("move tests never generate titles") })
-        }
-    }
+    // (P4: FakeAdmission/MoveAdmissionCache died with the cache family.)
 
     fn test_creation_deps(pool: sqlx::PgPool) -> domain_issues::CreationDeps {
-        domain_issues::CreationDeps {
-            pool,
-            cloud: CloudAgentSettings {
-                enabled: false,
-                writes_enabled: false,
-                github_tools_enabled: false,
-                disabled_tools: Vec::new(),
-                reconcile_interval_secs: 0,
-                model_request_timeout_secs: 0,
-                execution_timeout_secs: 0,
-                run_soft_limit_secs: 0,
-                run_hard_limit_secs: 0,
-                stale_grace_secs: 0,
-                dispatch_lease_secs: 0,
-                dispatch_backoff_secs: 0,
-                dispatch_scan_interval_secs: 0,
-                sweep_interval_secs: 0,
-                dispatch_scan_batch: 0,
-                max_queue_age_secs: 0,
-                model_request_limit: 0,
-                tool_call_limit: 0,
-                write_call_limit: 0,
-                input_token_limit: 0,
-                output_token_limit: 0,
-                total_token_limit: 0,
-                max_output_tokens_per_request: 0,
-                max_queued_per_workspace: 0,
-                max_running_per_workspace: 0,
-                user_creation_rate_per_minute: 0,
-                workspace_creation_rate_per_minute: 0,
-                tool_timeout_secs: 0,
-                max_tool_result_bytes: 0,
-                max_prompt_bytes: 0,
-                max_final_result_bytes: 0,
-                max_events: 0,
-                block_private_urls: false,
-            },
-            managed: ManagedRunnerSettings {
-                enabled: false,
-                queued_max_age_secs: 0,
-                graceful_stop_secs: 0,
-                sweep_interval_secs: 0,
-                desktop_min_version: String::new(),
-            },
-            now_unix_secs: 0,
-            toolsets: Arc::new(crate::extensions::NoExtraToolsets),
-            assistant_seam: Arc::new(NoAssistant),
-            admission: Arc::new(FakeAdmission),
-        }
+        domain_issues::CreationDeps { pool }
     }
 
     /// The MCP caller's options (`execute_cross_project_move`): dual

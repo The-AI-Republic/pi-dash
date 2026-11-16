@@ -1256,14 +1256,23 @@ pub async fn download_and_upload_avatar(
     // string — `upload_to` never applies).
     let filename =
         pidash_storage::avatar_object_key(&uuid::Uuid::new_v4().simple().to_string(), extension);
-    if pidash_storage::validate_storage(storage).is_err() {
-        tracing::warn!("avatar storage misconfigured; falling back to provider URL");
-        return None;
-    }
+    let resolved_storage = match pidash_storage::resolve_storage_credentials(storage).await {
+        Ok(creds) => {
+            let mut s = storage.clone();
+            s.access_key_id = creds.access_key.clone();
+            s.secret_access_key = creds.secret_key.clone();
+            s.session_token = creds.session_token.clone();
+            s
+        }
+        Err(error) => {
+            tracing::warn!(%error, "avatar storage misconfigured; falling back to provider URL");
+            return None;
+        }
+    };
     let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
     let date_stamp = now.format("%Y%m%d").to_string();
     let Ok(signed) = pidash_storage::sign_put(
-        storage,
+        &resolved_storage,
         scheme,
         host,
         &filename,
@@ -1275,16 +1284,17 @@ pub async fn download_and_upload_avatar(
         tracing::warn!("avatar storage endpoint invalid; falling back to provider URL");
         return None;
     };
-    let put = match client
+    let security_token = signed.security_token.clone();
+    let mut put_req = client
         .put(signed.url)
         .header("Authorization", signed.authorization)
         .header("x-amz-date", signed.amz_date)
         .header("x-amz-content-sha256", signed.content_sha256)
-        .header(reqwest::header::CONTENT_TYPE, content_type.clone())
-        .body(content)
-        .send()
-        .await
-    {
+        .header(reqwest::header::CONTENT_TYPE, content_type.clone());
+    if let Some(token) = &security_token {
+        put_req = put_req.header("x-amz-security-token", token);
+    }
+    let put = match put_req.body(content).send().await {
         Ok(put) => put,
         Err(error) => {
             tracing::warn!(%error, "avatar S3 PUT failed; falling back to provider URL");
@@ -1335,19 +1345,33 @@ pub async fn head_storage_metadata(
 ) -> Option<serde_json::Value> {
     let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
     let date_stamp = now.format("%Y%m%d").to_string();
-    let Ok(signed) =
-        pidash_storage::sign_head(storage, scheme, host, object_key, &amz_date, &date_stamp)
-    else {
+    let resolved = pidash_storage::resolve_storage_credentials(storage)
+        .await
+        .ok()?;
+    let mut resolved_storage = storage.clone();
+    resolved_storage.access_key_id = resolved.access_key.clone();
+    resolved_storage.secret_access_key = resolved.secret_key.clone();
+    resolved_storage.session_token = resolved.session_token.clone();
+    let Ok(signed) = pidash_storage::sign_head(
+        &resolved_storage,
+        scheme,
+        host,
+        object_key,
+        &amz_date,
+        &date_stamp,
+    ) else {
         return None;
     };
-    let head = client
+    let security_token = signed.security_token.clone();
+    let mut head_req = client
         .head(signed.url)
         .header("Authorization", signed.authorization)
         .header("x-amz-date", signed.amz_date)
-        .header("x-amz-content-sha256", signed.content_sha256)
-        .send()
-        .await
-        .ok()?;
+        .header("x-amz-content-sha256", signed.content_sha256);
+    if let Some(token) = &security_token {
+        head_req = head_req.header("x-amz-security-token", token);
+    }
+    let head = head_req.send().await.ok()?;
     if !head.status().is_success() {
         return None;
     }
@@ -1484,26 +1508,42 @@ pub async fn delete_old_avatar(
     let Some(key) = row else {
         return;
     };
-    if pidash_storage::validate_storage(storage).is_err() {
-        tracing::warn!("delete_old_avatar storage misconfigured; keeping old avatar");
-        return;
-    }
+    let resolved_storage = match pidash_storage::resolve_storage_credentials(storage).await {
+        Ok(creds) => {
+            let mut s = storage.clone();
+            s.access_key_id = creds.access_key.clone();
+            s.secret_access_key = creds.secret_key.clone();
+            s.session_token = creds.session_token.clone();
+            s
+        }
+        Err(error) => {
+            tracing::warn!(%error, "delete_old_avatar storage misconfigured; keeping old avatar");
+            return;
+        }
+    };
     let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
     let date_stamp = now.format("%Y%m%d").to_string();
-    let Ok(signed) =
-        pidash_storage::sign_delete(storage, scheme, host, &key, &amz_date, &date_stamp)
-    else {
+    let Ok(signed) = pidash_storage::sign_delete(
+        &resolved_storage,
+        scheme,
+        host,
+        &key,
+        &amz_date,
+        &date_stamp,
+    ) else {
         tracing::warn!("delete_old_avatar storage endpoint invalid; keeping old avatar");
         return;
     };
-    match client
+    let security_token = signed.security_token.clone();
+    let mut delete_req = client
         .delete(signed.url)
         .header("Authorization", signed.authorization)
         .header("x-amz-date", signed.amz_date)
-        .header("x-amz-content-sha256", signed.content_sha256)
-        .send()
-        .await
-    {
+        .header("x-amz-content-sha256", signed.content_sha256);
+    if let Some(token) = &security_token {
+        delete_req = delete_req.header("x-amz-security-token", token);
+    }
+    match delete_req.send().await {
         Ok(_) => {}
         Err(error) => {
             tracing::warn!(%error, "delete_old_avatar S3 delete failed; keeping old avatar");
@@ -2131,9 +2171,13 @@ pub async fn authenticate_google(
     let now = chrono::Utc::now();
     let (client_id, client_secret) = google_config(&ctx.pool, secret).await?;
     let callback_uri = redirect_uri(ctx.secure, &ctx.host, PROVIDER);
+    // Token/userinfo client stays unbounded (Django's `requests` has no
+    // timeout there); the avatar S3 client is bounded separately
+    // (PIDASHCONV-1728) so S3 PUT/HEAD/DELETE cannot hang the callback.
     let client = reqwest::Client::builder()
         .build()
         .map_err(|_| CallbackError::Internal)?;
+    let s3_client = super::avatar_s3_client();
     // `request.scheme` for the server-side S3 calls (`S3Storage(request)`,
     // `base.py:198` — `is_server=False` signs the public host).
     let scheme = if ctx.secure { "https" } else { "http" };
@@ -2228,7 +2272,7 @@ pub async fn authenticate_google(
                 // success sets the FK too, failure keeps the provider URL
                 // (`base.py:330-345`). No old avatar exists to delete.
                 if let Some(asset_id) = download_and_upload_avatar(
-                    &client,
+                    &s3_client,
                     &ctx.pool,
                     &ctx.storage,
                     scheme,
@@ -2252,7 +2296,7 @@ pub async fn authenticate_google(
             }
             if !is_signup && google_sync_enabled(&ctx.pool, secret).await? {
                 sync_user_data(
-                    &client,
+                    &s3_client,
                     &ctx.pool,
                     &ctx.storage,
                     scheme,
@@ -3592,6 +3636,7 @@ mod tests {
             minio_endpoint_ssl: false,
             access_key_id: "kernel-access".to_owned(),
             secret_access_key: "kernel-secret".to_owned(),
+            session_token: String::new(),
             bucket_name: "uploads".to_owned(),
             region: "us-east-1".to_owned(),
             endpoint_url: Some(s3_base),
@@ -3679,6 +3724,7 @@ mod tests {
             minio_endpoint_ssl: false,
             access_key_id: "kernel-access".to_owned(),
             secret_access_key: "kernel-secret".to_owned(),
+            session_token: String::new(),
             bucket_name: "uploads".to_owned(),
             region: "us-east-1".to_owned(),
             endpoint_url: Some(s3_base),
@@ -3882,6 +3928,7 @@ mod tests {
             minio_endpoint_ssl: false,
             access_key_id: "kernel-access".to_owned(),
             secret_access_key: "kernel-secret".to_owned(),
+            session_token: String::new(),
             bucket_name: "uploads".to_owned(),
             region: "us-east-1".to_owned(),
             endpoint_url: Some(s3_base),

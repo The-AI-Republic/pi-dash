@@ -17,6 +17,8 @@
 //!   write + [`plan_assignment`] + [`DrainEffect::SendAssign`].
 //! * `drain_for_runner_by_id` (`:298-304`) → a SeaORM `runner` find
 //!   (executors).
+//! * `release_runner_if_idle` (`:306-328`, PDASHOSS01-231) →
+//!   [`release_runner_if_idle_stmt`].
 //!
 //! Out of scope here (sibling sub-issue PIDASHCONV-555):
 //! `HEARTBEAT_GRACE` / `NON_TERMINAL_STATUSES` / `BUSY_STATUSES`
@@ -126,12 +128,12 @@
 
 use chrono::{DateTime, Utc};
 use pidash_db::runner_runs::agent_run::COLUMNS as AGENT_RUN_COLUMNS;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::runner_runs::AgentRunStatus;
 use pidash_types::runner_sessions::envelopes::build_assign_msg;
 use sea_query::{
     Alias, Condition, Expr, ExprTrait, LockBehavior, LockType, Order, Query, SelectStatement,
-    SimpleExpr,
+    SimpleExpr, UpdateStatement,
 };
 use serde_json::{Map, Value};
 use uuid::Uuid;
@@ -173,7 +175,7 @@ pub const POD_COLUMNS: [&str; 10] = [
 /// `DevMachine.engine_team_runs` (any value for own-agent runners).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DispatchFacts {
-    pub is_engine: bool,
+    pub is_pidash_agent: bool,
     pub pod_member: bool,
     pub paused: bool,
     pub team_runs: bool,
@@ -308,7 +310,12 @@ pub fn drain_for_runner_lock_stmt(threshold: DateTime<Utc>, runner_id: Uuid) -> 
 /// pod id. Pinned runs are excluded (`IS NULL`); the `IN` list is
 /// `MACHINE_EXECUTORS` in tuple order. `FOR UPDATE SKIP LOCKED`:
 /// call inside a transaction.
-pub const NEXT_QUEUED_RUN_FOR_POD_SQL: &str = "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"pin_kind\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error_details\", \"agent_run\".\"refusal_category\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\" FROM \"agent_run\" WHERE (\"agent_run\".\"executor_kind\" IN ('local_runner', 'managed_runner') AND \"agent_run\".\"pinned_runner_id\" IS NULL AND \"agent_run\".\"pod_id\" = $1 AND \"agent_run\".\"status\" = 'queued') ORDER BY \"agent_run\".\"created_at\" ASC LIMIT 1 FOR UPDATE SKIP LOCKED";
+///
+/// NEWPIDASH-241 T1: the projection appends the three native-owned
+/// columns (`assignment_token`, `assignment_protocol`,
+/// `capacity_wait`, last in field order) beyond the Django baseline
+/// capture; the term order is unchanged.
+pub const NEXT_QUEUED_RUN_FOR_POD_SQL: &str = "SELECT \"agent_run\".\"id\", \"agent_run\".\"workspace_id\", \"agent_run\".\"owner_id\", \"agent_run\".\"created_by_id\", \"agent_run\".\"pod_id\", \"agent_run\".\"runner_id\", \"agent_run\".\"pinned_runner_id\", \"agent_run\".\"pin_kind\", \"agent_run\".\"work_item_id\", \"agent_run\".\"scheduler_binding_id\", \"agent_run\".\"parent_run_id\", \"agent_run\".\"status\", \"agent_run\".\"executor_kind\", \"agent_run\".\"dispatch_attempts\", \"agent_run\".\"cancel_requested_at\", \"agent_run\".\"cancel_reason\", \"agent_run\".\"tool_plan\", \"agent_run\".\"terminal_hooks_applied_at\", \"agent_run\".\"terminal_capacity_released_at\", \"agent_run\".\"prompt\", \"agent_run\".\"trigger\", \"agent_run\".\"prompt_manifest\", \"agent_run\".\"phase_kind\", \"agent_run\".\"work_type\", \"agent_run\".\"run_config\", \"agent_run\".\"required_capabilities\", \"agent_run\".\"thread_id\", \"agent_run\".\"agent_metadata\", \"agent_run\".\"lease_expires_at\", \"agent_run\".\"done_payload\", \"agent_run\".\"error_details\", \"agent_run\".\"refusal_category\", \"agent_run\".\"failure_reason\", \"agent_run\".\"llm_model\", \"agent_run\".\"usage\", \"agent_run\".\"input_tokens\", \"agent_run\".\"output_tokens\", \"agent_run\".\"total_tokens\", \"agent_run\".\"created_at\", \"agent_run\".\"assigned_at\", \"agent_run\".\"started_at\", \"agent_run\".\"ended_at\", \"agent_run\".\"assignment_token\", \"agent_run\".\"assignment_protocol\", \"agent_run\".\"capacity_wait\" FROM \"agent_run\" WHERE (\"agent_run\".\"executor_kind\" IN ('local_runner', 'managed_runner') AND \"agent_run\".\"pinned_runner_id\" IS NULL AND \"agent_run\".\"pod_id\" = $1 AND \"agent_run\".\"status\" = 'queued') ORDER BY \"agent_run\".\"created_at\" ASC LIMIT 1 FOR UPDATE SKIP LOCKED";
 
 /// The `next_for_runner` eligibility arms (`:169-178`): what a runner
 /// may take, as one `Condition`. Own-agent runners take `local_runner`
@@ -318,9 +325,9 @@ pub const NEXT_QUEUED_RUN_FOR_POD_SQL: &str = "SELECT \"agent_run\".\"id\", \"ag
 /// (`pod_member` and unpaused). The old `desktop_bundled` split is gone.
 fn eligible_condition(runner_id: Uuid, facts: &DispatchFacts) -> Condition {
     let local = AgentExecutorKind::LocalRunner.value();
-    let managed = AgentExecutorKind::ManagedRunner.value();
+    let managed = AgentExecutorKind::PidashAgent.value();
     let pinned = col("agent_run", "pinned_runner_id");
-    if facts.is_engine {
+    if facts.is_pidash_agent {
         let managed_arm = Condition::all()
             .add(col("agent_run", "executor_kind").eq(managed))
             .add(pinned.clone().eq(runner_id));
@@ -409,7 +416,7 @@ pub fn next_for_runner_stmt(
         visibility,
         owner_id,
         "agent_run",
-        facts.is_engine,
+        facts.is_pidash_agent,
         facts.team_runs,
     )?;
     let mut query = Query::select().to_owned();
@@ -432,7 +439,7 @@ pub fn next_for_runner_stmt(
         .from(Alias::new("agent_run"))
         .and_where(col("agent_run", "executor_kind").is_in([
             AgentExecutorKind::LocalRunner.value(),
-            AgentExecutorKind::ManagedRunner.value(),
+            AgentExecutorKind::PidashAgent.value(),
         ]))
         .and_where(col("agent_run", "pod_id").eq(pod_id))
         .and_where(col("agent_run", "status").eq(AgentRunStatus::Queued.value()))
@@ -455,6 +462,31 @@ pub fn next_for_runner_stmt(
 // projection is pinned against the fixture's pod SELECT in `by_id`
 // test below.
 
+/// `release_runner_if_idle` (`matcher.py:306-328`, PDASHOSS01-231):
+/// `Runner.objects.filter(pk=runner_id, status=BUSY)
+/// .exclude(agent_runs__status__in=BUSY_STATUSES)
+/// .update(status=ONLINE)`. `$1` is the runner id; the rows-affected
+/// count is the Python `bool(...)` return. Strictly `busy` →
+/// `online`: `offline` / `revoked` rows never match, and a runner
+/// still holding a busy-status run (values in [`BUSY_STATUSES`]
+/// order, `ASSIGNED` included so a run awaiting redelivery keeps it
+/// busy) is left alone. `.update()` never stamps `updated_at`.
+///
+/// Every terminal-effects capacity release runs it right before
+/// `drain_for_runner_by_id`, and session open runs it inside the
+/// open transaction when the hello reports no `in_flight_run`.
+///
+/// [`BUSY_STATUSES`]: super::guards::BUSY_STATUSES
+pub fn release_runner_if_idle_stmt(runner_id: Uuid) -> UpdateStatement {
+    Query::update()
+        .table(Alias::new("runner"))
+        .value("status", "online")
+        .and_where(col("runner", "id").eq(runner_id))
+        .and_where(col("runner", "status").eq("busy"))
+        .cond_where(Condition::all().add(busy_not_exists()).not())
+        .to_owned()
+}
+
 // ---------------------------------------------------------------------------
 // Assignment plan + post-commit effect
 // ---------------------------------------------------------------------------
@@ -475,6 +507,10 @@ pub struct AssignmentFacts {
     pub prompt: String,
     /// `run.run_config` for the assign frame (`dict.get` lookups).
     pub run_config: Map<String, Value>,
+    /// Fresh attempt token minted for this assignment (NEWPIDASH-241 T1).
+    pub assignment_token: Uuid,
+    /// Negotiated assignment protocol (0 legacy, 1 machine queue).
+    pub assignment_protocol: i16,
 }
 
 /// One committed assignment: the ordered `SET` plan plus the
@@ -523,11 +559,21 @@ pub enum DrainEffect {
 pub fn plan_assignment(facts: &AssignmentFacts) -> AssignmentPlan {
     let run_id = facts.run_id.to_string();
     let work_item_id = facts.work_item_id.map(|id| id.to_string());
-    let message = build_assign_msg(
+    let mut message = build_assign_msg(
         &run_id,
         work_item_id.as_deref(),
         &facts.prompt,
         &facts.run_config,
+    );
+    // NEWPIDASH-241 T1: carry attempt identity so the daemon echoes it on
+    // capacity/lifecycle calls. Old daemons ignore the additive fields.
+    message.insert(
+        "assignment_token".to_string(),
+        Value::String(facts.assignment_token.to_string()),
+    );
+    message.insert(
+        "assignment_protocol".to_string(),
+        Value::from(facts.assignment_protocol),
     );
     AssignmentPlan {
         run_id: facts.run_id,
@@ -548,6 +594,18 @@ pub fn plan_assignment(facts: &AssignmentFacts) -> AssignmentPlan {
             SetClause {
                 column: "assigned_at",
                 value: SetValue::Now,
+            },
+            SetClause {
+                column: "assignment_token",
+                value: SetValue::Text(facts.assignment_token.to_string()),
+            },
+            SetClause {
+                column: "assignment_protocol",
+                value: SetValue::Text(facts.assignment_protocol.to_string()),
+            },
+            SetClause {
+                column: "capacity_wait",
+                value: SetValue::Null,
             },
         ],
         after_commit: DrainEffect::SendAssign {
@@ -581,7 +639,7 @@ mod tests {
     use crate::runner_sessions::guards::{BUSY_STATUSES, RUNNER_COLUMNS};
     use chrono::TimeZone;
     use pidash_auth::permissions::runner::VISIBILITY_PRIVATE;
-    use pidash_types::dispatch::MACHINE_EXECUTORS;
+    use pidash_types::agent_runs::MACHINE_EXECUTORS;
     use sea_query::PostgresQueryBuilder;
     use serde_json::Value;
 
@@ -714,12 +772,39 @@ mod tests {
             runner_stmt_sql(&select_runner_in_pod_stmt(threshold(), pod())),
             runner_stmt_sql(&drain_pod_idle_list_stmt(threshold(), pod())),
             runner_stmt_sql(&drain_for_runner_lock_stmt(threshold(), runner())),
+            release_runner_if_idle_stmt(runner()).to_string(PostgresQueryBuilder),
         ] {
             assert!(
                 sql.contains(&format!("\"status\" IN ({list})")),
                 "NOT EXISTS arm pins BUSY_STATUSES order"
             );
         }
+    }
+
+    /// `release_runner_if_idle` (PDASHOSS01-231): strictly `busy` →
+    /// `online`, gated on no busy-status run, never stamping
+    /// `updated_at`.
+    #[test]
+    fn release_runner_if_idle_stmt_matches_django() {
+        let sql = release_runner_if_idle_stmt(runner()).to_string(PostgresQueryBuilder);
+        assert!(
+            sql.starts_with("UPDATE \"runner\" SET \"status\" = 'online' WHERE "),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(&format!("\"runner\".\"id\" = '{}'", runner())),
+            "{sql}"
+        );
+        assert!(sql.contains("\"runner\".\"status\" = 'busy'"), "{sql}");
+        assert!(
+            sql.contains("(NOT EXISTS(SELECT 1 AS \"a\" FROM \"agent_run\" AS \"U1\""),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("\"U1\".\"runner_id\" = \"runner\".\"id\""),
+            "{sql}"
+        );
+        assert!(!sql.contains("updated_at"), "{sql}");
     }
 
     #[test]
@@ -794,6 +879,11 @@ mod tests {
             .expect("run SELECT");
         let django = django.replace("5bd71e42032f47b7987ac407e6465809", POD_ID);
         let django = django.replace(&format!("'{POD_ID}'::uuid"), "$1");
+        // NEWPIDASH-241 T1: three native-owned columns appended beyond the Django baseline.
+        let django = django.replace(
+            "\"agent_run\".\"ended_at\" FROM \"agent_run\"",
+            "\"agent_run\".\"ended_at\", \"agent_run\".\"assignment_token\", \"agent_run\".\"assignment_protocol\", \"agent_run\".\"capacity_wait\" FROM \"agent_run\"",
+        );
         assert_eq!(django.trim_end(), NEXT_QUEUED_RUN_FOR_POD_SQL);
         let projected: Vec<&str> = NEXT_QUEUED_RUN_FOR_POD_SQL
             .strip_prefix("SELECT ")
@@ -826,7 +916,7 @@ mod tests {
 
     fn manual_facts() -> DispatchFacts {
         DispatchFacts {
-            is_engine: false,
+            is_pidash_agent: false,
             pod_member: true,
             paused: false,
             team_runs: true,
@@ -836,7 +926,7 @@ mod tests {
 
     fn engine_facts(pod_member: bool, paused: bool) -> DispatchFacts {
         DispatchFacts {
-            is_engine: true,
+            is_pidash_agent: true,
             pod_member,
             paused,
             team_runs: false,
@@ -862,7 +952,8 @@ mod tests {
         );
         let (cols, rest) = run_projection(&sql);
         assert_eq!(cols, AGENT_RUN_COLUMNS);
-        assert_eq!(cols.len(), 40);
+        // NEWPIDASH-241 T1: 42 Django-baseline columns + 3 native-owned columns.
+        assert_eq!(cols.len(), 45);
         assert_eq!(rest.len(), 3);
         assert!(sql.contains("_is_mine"));
         assert!(sql.ends_with(
@@ -981,7 +1072,7 @@ mod tests {
     #[test]
     fn next_for_runner_team_runs_restores_ordinary_rule() {
         let team = DispatchFacts {
-            is_engine: true,
+            is_pidash_agent: true,
             pod_member: true,
             paused: false,
             team_runs: true,
@@ -1184,10 +1275,24 @@ mod tests {
             work_item_id: Uuid::parse_str("d36a0a49-a1f3-41de-a09d-f8a74e031f4c").ok(),
             prompt: String::new(),
             run_config: Map::new(),
+            assignment_token: Uuid::parse_str("00000000-0000-0000-0000-000000000099")
+                .expect("token"),
+            assignment_protocol: 1,
         };
         let plan = plan_assignment(&facts);
         let columns: Vec<&str> = plan.set_clauses.iter().map(|c| c.column).collect();
-        assert_eq!(columns, ["owner_id", "runner_id", "status", "assigned_at"]);
+        assert_eq!(
+            columns,
+            [
+                "owner_id",
+                "runner_id",
+                "status",
+                "assigned_at",
+                "assignment_token",
+                "assignment_protocol",
+                "capacity_wait"
+            ]
+        );
         assert_eq!(
             plan.set_clauses[0].value,
             SetValue::Text("ce755a5b-0c64-4e83-8f27-6218e639df62".to_string())
@@ -1201,6 +1306,12 @@ mod tests {
             SetValue::Text("assigned".to_string())
         );
         assert_eq!(plan.set_clauses[3].value, SetValue::Now);
+        assert_eq!(
+            plan.set_clauses[4].value,
+            SetValue::Text("00000000-0000-0000-0000-000000000099".to_string())
+        );
+        assert_eq!(plan.set_clauses[5].value, SetValue::Text("1".to_string()));
+        assert_eq!(plan.set_clauses[6].value, SetValue::Null);
         // The frame matches the drained assign shape.
         let frame = &fx07()["drain_pod"]["sent_frames"][0];
         assert_eq!(

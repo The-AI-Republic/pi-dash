@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Dashboard widget stack (SHELL-021–023; written from parity/specs/shell.md
-// §2). The header pairs the home breadcrumb with the widget-settings
-// shortcut; below it the staged shell skeleton yields to the enabled
-// sections in map order. The quicklinks section, the manage-widgets dialog
-// and the all-off illustration arrive through slots owned by NEWFRONT-279;
-// unknown keys render nothing.
+// §2; chat-first empty state per NEWPIDASH-301). The header pairs the home
+// breadcrumb with the widget-settings shortcut; below it the staged shell
+// skeleton yields to the enabled sections in map order. The quicklinks
+// section and the manage-widgets dialog arrive through slots owned by
+// NEWFRONT-279; unknown keys render nothing. When every widget is off the
+// stack renders no section — the composer stays the centerpiece — while
+// the Manage widgets control keeps widgets reachable.
 
 import * as React from "react";
 import { SlidersHorizontal } from "lucide-react";
@@ -30,8 +32,6 @@ export interface HomeWidgetStackProps {
   quicklinks?: React.ReactNode;
   /** The manage-widgets dialog, owned by NEWFRONT-279. */
   manageWidgets?: (controls: ManageWidgetsControls) => React.ReactNode;
-  /** The all-widgets-off illustration, owned by NEWFRONT-279. */
-  emptyState?: React.ReactNode;
 }
 
 function DashboardSkeleton(): React.ReactElement {
@@ -57,7 +57,6 @@ export function HomeWidgetStack({
   projects,
   quicklinks,
   manageWidgets,
-  emptyState,
 }: HomeWidgetStackProps): React.ReactElement {
   const [manageOpen, setManageOpen] = React.useState(false);
   const prefs = useWidgetPrefs(workspaceSlug);
@@ -96,9 +95,7 @@ export function HomeWidgetStack({
               return null;
           }
         })
-      ) : (
-        (emptyState ?? null)
-      )}
+      ) : null}
       {manageWidgets?.({ open: manageOpen, onOpenChange: setManageOpen })}
     </div>
   );

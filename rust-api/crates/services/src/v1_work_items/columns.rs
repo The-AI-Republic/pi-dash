@@ -24,7 +24,7 @@
 //! | `IssueActivity` | `issue_activities` | `app_issues::models_read::issue_activity` | — |
 //! | `FileAsset` | `file_assets` | `v1_assets::model::file_asset` | `app_assets::columns` (D-31, columns + helpers) |
 //! | `IssueRelation` | `issue_relations` | `app_issues::models_links::issue_relation` | `space::columns::issue_relation` (D-02, columns only) |
-//! | `GithubPullRequestLink` | `github_pull_request_links` | `app_issues::models_links::github_pull_request_link` (D-26, full port) | `integrations::github_models::github_pull_request_link` (D-05) |
+//! | `GithubPullRequestLink` | `git_code_review_links` (legacy alias, PDASHOSS01-355: reads generic with provider='github') | `app_issues::models_links::git_code_review_link` (D-26, full port) | `integrations::git_models::git_code_review_link` (D-05) |
 //! | `GitCodeReviewLink` | `git_code_review_links` | `app_issues::models_links::git_code_review_link` (D-26, full port) | `integrations::git_models::git_code_review_link` (D-05) |
 //! | `Page` | `pages` | `app_pages::page` | — |
 //! | `ProjectPage` | `project_pages` | `app_pages::project_page` | — |
@@ -52,7 +52,7 @@
 /// `issues` nullable columns (`app_issues::models_core::issue`, F18-05
 /// `Issue`, `db/models/issue.py`), in fixture ordinal order.
 pub mod issue {
-    /// Columns whose F18-05 entry has `nullable: true` (19 of 34).
+    /// Columns whose F18-05 entry has `nullable: true` (20 of 35).
     pub const NULLABLE: &[&str] = &[
         "start_date",
         "target_date",
@@ -73,6 +73,7 @@ pub mod issue {
         "assigned_pod_id",
         "created_via",
         "agent_executor",
+        "work_type",
     ];
 }
 
@@ -170,7 +171,7 @@ pub mod issue_relation {
     pub const NULLABLE: &[&str] = &["created_by_id", "updated_by_id", "deleted_at"];
 }
 
-/// `github_pull_request_links` nullable columns
+/// `git_code_review_links` (GitHub PR shape, PDASHOSS01-355) nullable columns
 /// (`app_issues::models_links::github_pull_request_link`, F18-05
 /// `GithubPullRequestLink`, `db/models/github_pr.py`), in fixture ordinal
 /// order.
@@ -535,6 +536,7 @@ mod tests {
             created_via: None,
             assigned_pod_id: None,
             agent_executor: None,
+            work_type: None,
         }
     }
 

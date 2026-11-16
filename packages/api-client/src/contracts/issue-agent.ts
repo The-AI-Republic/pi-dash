@@ -49,6 +49,22 @@ export const DispatchWait = z.object({
 });
 export type DispatchWait = z.infer<typeof DispatchWait>;
 
+/**
+ * Machine-level queue wait (NEWPIDASH-241 T7): distinct from dispatch_wait
+ * (cloud-level). Only phase/position/queued/reported/active/limit are
+ * workspace-visible; no admission/session IDs, no cross-workspace runner lists.
+ * Additive: old backends omit it, old clients ignore it.
+ */
+export const CapacityWait = z.object({
+  phase: z.string(),
+  queue_position: z.nullable(z.number()),
+  queued_at: z.nullable(z.string()),
+  reported_at: z.nullable(z.string()),
+  active: z.nullable(z.number()),
+  limit: z.nullable(z.number()),
+});
+export type CapacityWait = z.infer<typeof CapacityWait>;
+
 /** The per-issue continuation clock as the detail read carries it. */
 export const AgentTicker = z.object({
   enabled: z.boolean(),
@@ -104,10 +120,13 @@ export const AgentRunSummary = z.object({
   pinned_runner_name: z.optional(z.nullable(z.string())),
   pin_kind: z.optional(z.string()),
   dispatch_wait: z.optional(z.nullable(DispatchWait)),
+  capacity_wait: z.optional(z.nullable(CapacityWait)),
   created_at: nullableDateTime(),
   assigned_at: nullableDateTime(),
   started_at: nullableDateTime(),
   ended_at: nullableDateTime(),
+  cancel_requested_at: z.optional(nullableDateTime()),
+  cancel_reason: z.optional(z.string()),
   done_payload: z.unknown(),
   error: z.string(),
   error_code: z.string(),

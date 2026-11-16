@@ -77,8 +77,10 @@
 //! # Ported bugs (translate, don't redesign; also listed in the PR)
 //!
 //! * BUG-open-hello-reaps (`session_service.py:142-147`): `apply_hello`
-//!   ends with `reap_stale_busy_runs(exclude_redeliverable=True)`,
-//!   so every session open may fail stale `RUNNING` runs.
+//!   runs `reap_stale_busy_runs(exclude_redeliverable=True)`,
+//!   so every session open may fail stale `RUNNING` runs. It then
+//!   reconciles a stale `busy` runner back to `online` when the hello
+//!   reports nothing in flight (`:149-164`, PDASHOSS01-231).
 //! * BUG-open-barrier-always-empty (`:246-254` with the open-path
 //!   exclusion): the stopped-cancel scans run but `CANCEL_REQUESTED`
 //!   is never reapable here, so the barrier write and the project-move
@@ -143,7 +145,6 @@ use pidash_services::runner_runs::LifecycleEffect;
 use pidash_services::runner_sessions::pubsub as pubsub_kernel;
 use pidash_services::runner_sessions::pubsub::PubsubStore;
 use pidash_services::runner_sessions::session_service as session_kernel;
-use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::runner_runs::AgentRunStatus;
 use pidash_types::runner_sessions::keys::runner as runner_keys;
 use pidash_types::runner_sessions::{
@@ -186,34 +187,30 @@ const CHAT_RELEASE_DETAIL: &str =
 /// default): claim everything pending, however fresh.
 const CLAIM_MIN_IDLE_MS: i64 = 0;
 /// The reaper's finalize `SET` order (`status`, `ended_at`, the two
-/// markers, then the `error_details` patch the `error` / `error_code`
-/// updates fold into): pinned so a kernel drift fails loudly instead of
+/// markers, then the `failure_reason` safety net (PDASHOSS01-183) and
+/// the `error_details` patch the `error` / `error_code` updates fold
+/// into): pinned so a kernel drift fails loudly instead of
 /// mis-binding (the `runs.rs` `CANCEL_FINALIZE_COLUMNS` precedent).
-const REAP_FINALIZE_COLUMNS: [&str; 5] = [
+const REAP_FINALIZE_COLUMNS: [&str; 6] = [
     "status",
     "ended_at",
     "terminal_hooks_applied_at",
     "terminal_capacity_released_at",
+    "failure_reason",
     "error_details",
 ];
 /// The hello `SET` order with a capabilities change (model
-/// field-definition order, `capabilities` first).
-const HELLO_COLUMNS_WITH_CAPS: [&str; 6] = [
+/// field-definition order, `capabilities` first). NEWPIDASH-262
+/// removes last_heartbeat_at: a poll is the only heartbeat.
+const HELLO_COLUMNS_WITH_CAPS: [&str; 5] = [
     "capabilities",
     "os",
     "arch",
     "runner_version",
     "dev_metadata",
-    "last_heartbeat_at",
 ];
 /// The hello `SET` order without one.
-const HELLO_COLUMNS_BARE: [&str; 5] = [
-    "os",
-    "arch",
-    "runner_version",
-    "dev_metadata",
-    "last_heartbeat_at",
-];
+const HELLO_COLUMNS_BARE: [&str; 4] = ["os", "arch", "runner_version", "dev_metadata"];
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -691,10 +688,6 @@ impl RunnerPorts for SessionPorts<'_> {
         self.live.agent_system_user_id().await
     }
 
-    async fn dispatch_waiting(&self, workspace_id: Uuid) -> Result<(), PortError> {
-        self.live.dispatch_waiting(workspace_id).await
-    }
-
     async fn emit_terminal_effects(&self, run_id: Uuid) -> Result<(), PortError> {
         self.live.emit_terminal_effects(run_id).await
     }
@@ -823,7 +816,7 @@ async fn execute_reap_finalize(
         return Err(TxnFail::Other);
     }
     let conn = TxConn::new(tx);
-    let Some(locked) = finalize_orm::lock_run_for_finalize(&conn, run_id, Some(runner_id), None)
+    let Some(_locked) = finalize_orm::lock_run_for_finalize(&conn, run_id, Some(runner_id), None)
         .await
         .map_err(TxnFail::from)?
     else {
@@ -832,17 +825,6 @@ async fn execute_reap_finalize(
     finalize_orm::finalize_update(&conn, &values, run_id, Utc::now())
         .await
         .map_err(TxnFail::from)?;
-    if locked.executor_kind == AgentExecutorKind::CloudAgent.value() {
-        finalize_orm::append_terminal_event_once(
-            &conn,
-            run_id,
-            AgentRunStatus::Failed,
-            &finalization::finalize_error_code(&values),
-            Utc::now(),
-        )
-        .await
-        .map_err(TxnFail::from)?;
-    }
     effects.extend(finalization::plan_publish_effects(run_id));
     Ok(())
 }
@@ -912,6 +894,31 @@ async fn execute_reap_open(
             &pod_ids,
             &stopped_ids,
         ));
+    Ok(())
+}
+
+/// The `apply_hello` stale-busy reconcile (`session_service.py:149-164`,
+/// PDASHOSS01-231), after the reaper: when the hello reports no
+/// `in_flight_run`, flip a `busy` runner with no busy-status run back
+/// to `online` and log the release. No drain is queued — dispatch
+/// still waits for the session's first poll.
+async fn execute_release_on_open(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    runner_id: Uuid,
+    body: &Map<String, Value>,
+) -> Result<(), TxnFail> {
+    if !session_kernel::should_release_on_open(body.get("in_flight_run")) {
+        return Ok(());
+    }
+    let released = pidash_services::runner_sessions::live_drains::release_runner_if_idle(
+        &TxConn::new(tx),
+        runner_id,
+    )
+    .await
+    .map_err(TxnFail::from)?;
+    if released {
+        tracing::info!("{}", session_kernel::release_on_open_log(&runner_id));
+    }
     Ok(())
 }
 
@@ -1099,17 +1106,26 @@ async fn open_transaction(
     // `create(… last_seen_at=now())`: the kwarg `now()` evaluates
     // first, then `auto_now_add` stamps `created_at` — the domain
     // driver keeps that order.
+    let capabilities = pidash_services::runner_runs::capacity::parse_session_capabilities(body);
+    let capabilities_value = serde_json::Value::Array(
+        capabilities
+            .into_iter()
+            .map(serde_json::Value::String)
+            .collect(),
+    );
     pidash_services::domain::tokens::open_runner_session(
         &pidash_db::orm_tx::TxConn::new(&mut tx),
         new_sid,
         runner.id,
         runner_session::DEFAULT_PROTOCOL_VERSION,
+        capabilities_value,
     )
     .await
     .map_err(TxnFail::from)?;
     execute_hello(&mut tx, runner, body).await?;
     let mut effects = OpenEffects::default();
     execute_reap_open(&mut tx, runner.id, body, &mut effects).await?;
+    execute_release_on_open(&mut tx, runner.id, body).await?;
     execute_chat_release(&mut tx, runner.id, &mut effects.chat).await?;
     tx.commit().await.map_err(TxnFail::from)?;
     Ok((OpenTxnOutcome { old_session_id }, effects))
@@ -1291,6 +1307,8 @@ async fn open_redeliver(
                         work_item_id: row.work_item_id,
                         prompt: row.prompt,
                         run_config,
+                        assignment_token: row.assignment_token,
+                        assignment_protocol: row.assignment_protocol,
                     }),
                 }
             }

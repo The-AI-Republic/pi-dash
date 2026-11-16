@@ -77,7 +77,7 @@ fn model_applies_to_agent(kind: AgentKind, model: &str) -> bool {
             !m.is_empty()
         }
         // The engine's model comes from the server's profile (design §4.3).
-        AgentKind::Engine => false,
+        AgentKind::PidashAgent => false,
     }
 }
 
@@ -166,7 +166,7 @@ pub fn agent_sections_for(
         AgentKind::OpenClaw => openclaw.model_default = model,
         AgentKind::Grok => grok.model_default = model,
         AgentKind::MuseCode => muse_code.model_default = model,
-        AgentKind::Engine => {}
+        AgentKind::PidashAgent => {}
     }
     (codex, claude_code, cursor_agent, openclaw, grok, muse_code)
 }
@@ -215,6 +215,7 @@ pub fn write_cli_token(paths: &Paths, cloud_url: &str, token: &str, force: bool)
                 agent_observability_v1: false,
                 agent_watchdog: Default::default(),
                 auto_update: true,
+                max_concurrent_agent_runs: 3,
             },
             runners: vec![],
             cli: None,
@@ -441,12 +442,12 @@ pub fn clear_cli_token(paths: &Paths) -> Result<()> {
 /// `[auth] credentials_store` says.
 pub fn store_engine_credential(
     paths: &Paths,
-    credential: Option<&crate::engine::api::IssuedEngineCredential>,
+    credential: Option<&crate::pidash_agent::api::IssuedPidashAgentCredential>,
     state: crate::config::schema::EngineSignInState,
 ) -> Result<Config> {
     file::mutate_config(paths, |cfg| {
         let cli = cfg.cli.get_or_insert_with(Default::default);
-        cli.engine_credential = credential.map(|c| crate::config::schema::EngineCredential {
+        cli.engine_credential = credential.map(|c| crate::config::schema::PidashAgentCredential {
             token: c.token.clone(),
             expires_at: c.expires_at,
         });
@@ -661,6 +662,7 @@ pub async fn apply_enroll_response(
                 agent_observability_v1: false,
                 agent_watchdog: Default::default(),
                 auto_update: true,
+                max_concurrent_agent_runs: 3,
             },
             runners: vec![],
             cli: None,
@@ -703,10 +705,10 @@ pub async fn apply_enroll_response(
         // caller checked before enrolling, but outside this lock: two adds
         // at the same time both pass that check. (The runner cap is checked
         // by `Config::validate` on this same write.)
-        if new_runner_for_closure.agent.kind == AgentKind::Engine
+        if new_runner_for_closure.agent.kind == AgentKind::PidashAgent
             && let Some(existing) = cfg.runners.iter().find(|r| {
                 r.runner_id != new_runner_for_closure.runner_id
-                    && r.agent.kind == AgentKind::Engine
+                    && r.agent.kind == AgentKind::PidashAgent
                     && r.workspace_slug == new_runner_for_closure.workspace_slug
                     && r.project_slug.as_deref().is_some_and(|p| {
                         new_runner_for_closure
@@ -717,7 +719,7 @@ pub async fn apply_enroll_response(
             })
         {
             anyhow::bail!(
-                "the built-in engine is already on for {} in {} (runner {})",
+                "the Pi Dash Agent is already on for {} in {} (runner {})",
                 existing.project_slug.as_deref().unwrap_or_default(),
                 existing.workspace_slug.as_deref().unwrap_or_default(),
                 existing.name
@@ -737,7 +739,7 @@ pub async fn apply_enroll_response(
         Err(e) => return Err(e.context("persisting [[runner]] block under config lock")),
     };
     // A runner added again is no longer one the user removed locally.
-    crate::engine::tombstones::forget(paths, runner_id);
+    crate::pidash_agent::tombstones::forget(paths, runner_id);
     let new_runner = cfg_after
         .runners
         .iter()
@@ -1150,7 +1152,7 @@ mod tests {
             &paths,
             &resp,
             "https://example.com",
-            enroll_options(tmp.path().join("wd1"), AgentKind::Engine),
+            enroll_options(tmp.path().join("wd1"), AgentKind::PidashAgent),
         )
         .await
         .unwrap();
@@ -1158,7 +1160,7 @@ mod tests {
             &paths,
             &resp,
             "https://example.com",
-            enroll_options(tmp.path().join("wd2"), AgentKind::Engine),
+            enroll_options(tmp.path().join("wd2"), AgentKind::PidashAgent),
         )
         .await
         .unwrap();
@@ -1178,7 +1180,7 @@ mod tests {
             &paths,
             &resp,
             "https://example.com",
-            enroll_options(tmp.path().join("wd1"), AgentKind::Engine),
+            enroll_options(tmp.path().join("wd1"), AgentKind::PidashAgent),
         )
         .await
         .unwrap();
@@ -1190,7 +1192,7 @@ mod tests {
             &paths,
             &resp,
             "https://example.com",
-            enroll_options(tmp.path().join("wd1"), AgentKind::Engine),
+            enroll_options(tmp.path().join("wd1"), AgentKind::PidashAgent),
         )
         .await
         .unwrap_err();

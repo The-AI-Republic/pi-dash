@@ -7,16 +7,22 @@
 //! `apps/api/pi_dash/app/urls/views.py:16-65`.
 //!
 //! Handler notes (all verified against the Python source):
-//! - `create` on both viewsets is the DRF default (no `allow_permission`
-//!   decorator in Python): session auth only, then `perform_create`
-//!   scoping. The response serializes the bare instance, so `is_favorite`
-//!   is absent on every create response.
-//! - `PUT` on both detail routes is the DRF default `update` (no
-//!   locked/owner recheck in Python): full write through the serializer,
-//!   response re-read through the *annotated* queryset on project views,
-//!   so `is_favorite` is present. `PATCH` is the custom `partial_update`
-//!   with the locked/owner rechecks and the un-annotated read, so
-//!   `is_favorite` is absent.
+//! - `create` on both viewsets is the DRF default in Python, but
+//!   NEWPIDASH-202 gates it (DIFF-17): workspace create is WORKSPACE
+//!   `[ADMIN, MEMBER]`, project create is PROJECT `[ADMIN, MEMBER, GUEST]`
+//!   on active membership; the response serializes the bare instance, so
+//!   `is_favorite` is absent on every create response.
+//! - `PUT` on both detail routes was the DRF default `update` with no
+//!   locked/owner recheck (Python) — NEWPIDASH-202 makes the Rust PUT run
+//!   the same creator / locked / owner chain as `PATCH` (full write
+//!   through the serializer, response re-read through the *annotated*
+//!   queryset on project views, so `is_favorite` is present; on workspace
+//!   views the un-annotated read, so `is_favorite` is absent).
+//! - `PATCH` is the custom `partial_update` with the locked/owner
+//!   rechecks and the un-annotated read, so `is_favorite` is absent.
+//! - `workspace_retrieve` was undecorated (authN only) in Python —
+//!   NEWPIDASH-202 gates it as WORKSPACE `[ADMIN, MEMBER, GUEST]`
+//!   (PB-0644/0662).
 //! - Destroy of a missing row calls `.get()` directly: `DoesNotExist`
 //!   answers the `ObjectDoesNotExist` branch (`{"error": "The required
 //!   object does not exist."}`, 404), not the DRF `{"detail": ...}` body.
@@ -1878,11 +1884,12 @@ fn predicates_to_query(predicates: &[(String, pidash_db::issue_filters::FilterVa
 
 /// `issue_filters(filters_dict, method)` over a JSON-object filters value:
 /// JSON arrays of scalars become id-list params, strings become text
-/// params; `null` values are dropped (Python's falsy check skips them).
-/// Unrecognized keys are ignored by the kernel, like the Python
-/// `ISSUE_FILTER` loop. Kernel failures (relative-date overflow) escape
-/// as 500s in Python (`TypeError`/`OverflowError` uncaught), mapped here
-/// to the generic 500.
+/// params; `null` values stay as present keys (Python's
+/// `if key in query_params` runs the arm; the falsy check skips the `__in`
+/// but companion predicates emit). Unrecognized keys are ignored by the
+/// kernel, like the Python `ISSUE_FILTER` loop. Kernel failures
+/// (relative-date overflow) escape as 500s in Python
+/// (`TypeError`/`OverflowError` uncaught), mapped here to the generic 500.
 /// POST and PATCH share the `else` branches in every filter func, so one
 /// kernel serves both write paths. Takes the `Option` directly: `None`
 /// is the validated `{}` default for a missing key.
@@ -1897,7 +1904,9 @@ fn stored_lookup_query(filters: Option<&Value>) -> Result<Value, Denial> {
     let mut params: HashMap<String, PostVal> = HashMap::new();
     for (key, value) in object {
         match value {
-            Value::Null => {}
+            Value::Null => {
+                params.insert(key.clone(), PostVal::Null);
+            }
             Value::Array(items) => {
                 let mut list = Vec::with_capacity(items.len());
                 for item in items {
@@ -2357,9 +2366,9 @@ fn resolve_view_order(raw: &str) -> Result<queries_views::ViewOrder, Denial> {
     Ok(queries_views::ViewOrder { column, descending })
 }
 
-/// `POST /api/workspaces/<slug>/views/`: the DRF default create (no role
-/// gate in Python) with `perform_create` scoping (`:56-58`) — 201 with
-/// the bare instance (no `is_favorite`).
+/// `POST /api/workspaces/<slug>/views/`: NEWPIDASH-202 gated WORKSPACE
+/// `[ADMIN, MEMBER]` (Django has no decorator, `perform_create` only
+/// `:56-58`) — 201 with the bare instance (no `is_favorite`).
 async fn workspace_create(
     State(state): State<AppState>,
     Path(slug): Path<String>,
@@ -2370,6 +2379,8 @@ async fn workspace_create(
     let pool = pool_of(&state)?.clone();
     let user_id = resolved.id;
     let timezone = resolved.timezone;
+    let member = membership(&pool, &slug, None, &user_id).await?;
+    permissions::workspace_view_create_gate(&member).map_err(gate_denial)?;
     // DRF parses the body after initial (auth): serializer validation
     // (400) precedes `perform_create`'s workspace lookup (404).
     let body = match detail_body(&state, req).await {
@@ -2416,10 +2427,10 @@ async fn fetch_workspace_view(
     single_row(rows)
 }
 
-/// `GET /api/workspaces/<slug>/views/<pk>/` (`:102-112`): no decorator —
-/// auth only. Unknown pk answers the `get_initial()` 200 (B1). Fires the
-/// retrieve visit publish for found rows (the task runs unconditionally
-/// in Python, but there is no row to name when missing).
+/// `GET /api/workspaces/<slug>/views/<pk>/` (`:102-112`): NEWPIDASH-202
+/// gated WORKSPACE `[ADMIN, MEMBER, GUEST]` (was undecorated, authN
+/// only). Unknown pk for a member answers the `get_initial()` 200 (B1).
+/// Fires the retrieve visit publish for found rows.
 async fn workspace_retrieve(
     State(state): State<AppState>,
     Path((slug, pk)): Path<(String, String)>,
@@ -2436,6 +2447,8 @@ async fn workspace_retrieve(
     let pool = pool_of(&state)?.clone();
     let user_id = resolved.id;
     let timezone = resolved.timezone;
+    let member = membership(&pool, &slug, None, &user_id).await?;
+    permissions::workspace_view_retrieve_gate(&member).map_err(gate_denial)?;
     let row = fetch_workspace_view(
         &pool,
         &slug,
@@ -2529,11 +2542,10 @@ async fn workspace_patch(
     Ok(json_response(StatusCode::OK, rendered))
 }
 
-/// `PUT /api/workspaces/<slug>/views/<pk>/`: the DRF default `update` —
-/// no decorator and no locked/owner recheck in Python, so auth only;
-/// full write through the queryset, response without `is_favorite` (the
-/// un-annotated queryset serves workspace views). A miss is the
-/// model-named `Http404`.
+/// `PUT /api/workspaces/<slug>/views/<pk>/`: NEWPIDASH-202 — was the DRF
+/// default `update` (no decorator, no locked/owner recheck); now runs the
+/// same WORKSPACE creator gate and locked/owner rechecks as `PATCH`
+/// (`:80-100`), with a full (non-partial) write.
 async fn workspace_put(
     State(state): State<AppState>,
     Path((slug, pk)): Path<(String, String)>,
@@ -2554,15 +2566,15 @@ async fn workspace_put(
         StatusCode::BAD_REQUEST,
         r#"{"error":"Please provide valid detail"}"#.to_owned(),
     ))?;
-    // `get_object()` through the queryset precedes validation: a miss is
-    // the model-named 404.
-    let existing = fetch_workspace_view(&pool, &slug, user_id, &pk).await?;
-    let Some(existing) = existing else {
-        return Err(Denial::Raw(
-            StatusCode::NOT_FOUND,
-            VIEW_PUT_MISSING_BODY.to_owned(),
-        ));
-    };
+    let member = membership(&pool, &slug, None, &user_id).await?;
+    let creator = is_view_creator(&pool, &pk, &user_id).await?;
+    permissions::workspace_view_partial_gate(&member, creator).map_err(gate_denial)?;
+    let (is_locked, owned_by, filters_old) = lock_workspace_view(&pool, &slug, &pk).await?;
+    permissions::view_partial_recheck(permissions::ViewRow::Found {
+        is_locked,
+        is_owner: owned_by == user_id,
+    })
+    .map_err(gate_denial)?;
     let body = match detail_body(&state, req).await {
         Ok(body) => body,
         Err(into) => return Ok(into),
@@ -2570,7 +2582,7 @@ async fn workspace_put(
     let object = body.as_object().cloned().unwrap_or_default();
     reject_null_json(&object)?;
     let write = split_write(&object, false)?;
-    let query = update_query(write.filters.as_ref(), existing.get("filters"))?;
+    let query = update_query(write.filters.as_ref(), Some(&filters_old))?;
     let rendered =
         apply_view_update(&pool, &pk, &user_id, &timezone, &write, &query, false).await?;
     Ok(json_response(StatusCode::OK, rendered))
@@ -2743,9 +2755,10 @@ async fn project_list(
     Ok(json_response(StatusCode::OK, out))
 }
 
-/// `POST /api/workspaces/<slug>/projects/<project_id>/views/`: the DRF
-/// default create (no role gate in Python) with `perform_create` scoping
-/// (`:260-262`) — 201 with the bare instance (no `is_favorite`).
+/// `POST /api/workspaces/<slug>/projects/<project_id>/views/`: NEWPIDASH-202
+/// gated PROJECT `[ADMIN, MEMBER, GUEST]` (Django has no decorator,
+/// `perform_create` only `:260-262`) — 201 with the bare instance (no
+/// `is_favorite`).
 async fn project_create(
     State(state): State<AppState>,
     Path((slug, project_raw)): Path<(String, String)>,
@@ -2757,9 +2770,12 @@ async fn project_create(
     let user_id = resolved.id;
     let timezone = resolved.timezone;
     // The identifier rewrite runs in `initial`, before the view: it stays
-    // ahead of validation. Serializer validation (400) then precedes the
-    // save-time workspace fallback.
+    // ahead of validation. The gate runs after the rewrite (the project
+    // id is needed for the membership row) and before validation, mirroring
+    // the decorator order in Django.
     let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
+    let member = membership(&pool, &slug, Some(&project_id), &user_id).await?;
+    permissions::project_view_create_gate(&member).map_err(gate_denial)?;
     let body = match detail_body(&state, req).await {
         Ok(body) => body,
         Err(into) => return Ok(into),
@@ -2948,9 +2964,10 @@ async fn project_patch(
     Ok(json_response(StatusCode::OK, rendered))
 }
 
-/// `PUT .../views/<pk>/`: the DRF default `update` (no decorator and no
-/// locked/owner recheck in Python) — auth only, full write through the
-/// annotated queryset, so `is_favorite` is present.
+/// `PUT .../views/<pk>/`: NEWPIDASH-202 — was the DRF default `update`
+/// (no decorator, no locked/owner recheck); now runs the same PROJECT
+/// creator gate and locked/owner rechecks as `PATCH` (`:343-363`), with a
+/// full (non-partial) write through the annotated queryset.
 async fn project_put(
     State(state): State<AppState>,
     Path((slug, project_raw, pk)): Path<(String, String, String)>,
@@ -2972,15 +2989,16 @@ async fn project_put(
         StatusCode::BAD_REQUEST,
         r#"{"error":"Please provide valid detail"}"#.to_owned(),
     ))?;
-    // `get_object()` through the annotated queryset precedes validation:
-    // a miss is the model-named `Http404`.
-    let existing = fetch_project_view(&pool, &slug, &project_id, &user_id, &pk).await?;
-    let Some(existing) = existing else {
-        return Err(Denial::Raw(
-            StatusCode::NOT_FOUND,
-            VIEW_PUT_MISSING_BODY.to_owned(),
-        ));
-    };
+    let member = membership(&pool, &slug, Some(&project_id), &user_id).await?;
+    let creator = is_view_creator(&pool, &pk, &user_id).await?;
+    permissions::project_view_partial_gate(&member, creator).map_err(gate_denial)?;
+    let (is_locked, owned_by, filters_old) =
+        lock_project_view(&pool, &slug, &project_id, &pk).await?;
+    permissions::view_partial_recheck(permissions::ViewRow::Found {
+        is_locked,
+        is_owner: owned_by == user_id,
+    })
+    .map_err(gate_denial)?;
     let body = match detail_body(&state, req).await {
         Ok(body) => body,
         Err(into) => return Ok(into),
@@ -2988,7 +3006,7 @@ async fn project_put(
     let object = body.as_object().cloned().unwrap_or_default();
     reject_null_json(&object)?;
     let write = split_write(&object, false)?;
-    let query = update_query(write.filters.as_ref(), existing.get("filters"))?;
+    let query = update_query(write.filters.as_ref(), Some(&filters_old))?;
     apply_view_update(&pool, &pk, &user_id, &timezone, &write, &query, false).await?;
     let reread = fetch_project_view(&pool, &slug, &project_id, &user_id, &pk)
         .await?
@@ -3383,6 +3401,39 @@ fn alias_nullable_only(where_sql: &str, alias: &str) -> bool {
     })
 }
 
+/// Rewrite every `alias.` reference in the filter SQL (both spellings,
+/// see [`alias_ref_starts`]) to `replacement.`. Used to give the legacy
+/// stack its own copy of a relation join (NEWPIDASH-195).
+fn rename_alias_refs(sql: &str, alias: &str, replacement: &str) -> String {
+    let mut starts = alias_ref_starts(sql, alias);
+    if starts.is_empty() {
+        return sql.to_owned();
+    }
+    starts.sort_unstable();
+    let mut out = String::with_capacity(sql.len() + starts.len() * replacement.len());
+    let mut cursor = 0;
+    for start in starts {
+        let quoted = sql[start..].starts_with('"');
+        let marker_len = if quoted {
+            alias.len() + 3
+        } else {
+            alias.len() + 1
+        };
+        out.push_str(&sql[cursor..start]);
+        if quoted {
+            out.push('"');
+        }
+        out.push_str(replacement);
+        if quoted {
+            out.push('"');
+        }
+        out.push('.');
+        cursor = start + marker_len;
+    }
+    out.push_str(&sql[cursor..]);
+    out
+}
+
 /// Shape one view-issues row in `ViewIssueListSerializer` source order
 /// (`app/serializers/view.py:28-55`): the four datetimes render as raw UTC
 /// `...Z` (DRF `JSONEncoder`, not a `DateTimeField`), `sort_order` through
@@ -3508,6 +3559,17 @@ async fn view_issues_list(
     } else {
         pidash_db::filter::FilterTree::parse_param_opt(&filters_raw).map_err(filter_denial)?
     };
+    // Relation aliases with a plain positive rich occurrence (INNER);
+    // `or`-only aliases join LEFT and `not`'d aliases compile to
+    // `NOT EXISTS` (Django `split_exclude` / LEFT-OUTER disjuncts).
+    let rich_inner: std::collections::BTreeSet<&'static str> = tree
+        .as_ref()
+        .map(|tree| {
+            pidash_db::filterset::compile_tree(tree, &timezone)
+                .map(|compiled| compiled.inner)
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
     let complex_where = match tree {
         None => None,
         Some(tree) => {
@@ -3535,7 +3597,12 @@ async fn view_issues_list(
         // UTC keeps this slice's current truncation; its own actor-zone
         // fix follows the app_issues pattern separately.
         let fragment = crate::app_issues::legacy_sql(&mut binder, name, value, &chrono_tz::UTC)
-            .map_err(|_| Denial::ServerError)?;
+            .map_err(|e| match e {
+                crate::app_issues::Denial::BadError(msg) => Denial::BadError(msg),
+                crate::app_issues::Denial::BadDetail(msg) => Denial::BadDetail(msg),
+                crate::app_issues::Denial::BadFilter(msg, code) => Denial::BadFilter(msg, code),
+                _ => Denial::ServerError,
+            })?;
         legacy_parts.push(fragment);
     }
     let legacy_where = if legacy_parts.is_empty() {
@@ -3543,6 +3610,33 @@ async fn view_issues_list(
     } else {
         Some(legacy_parts.join(" AND "))
     };
+    // NEWPIDASH-195: Django applies the rich `filter=` tree and the
+    // legacy predicates as two separate `.filter()` calls, so a
+    // relation filtered by BOTH stacks joins the link table twice and
+    // an issue linked to both rows matches. Give the legacy stack's
+    // copy of each shared relation its own alias (`<alias>_legacy`) —
+    // otherwise one link row must satisfy both predicates and the
+    // result is empty whenever the two sides name different rows.
+    // A request can only produce one legacy predicate per relation
+    // (`issue_filters` emits `__in` xor `__isnull`, plus the
+    // `\*_deleted_at__isnull` guard on the same alias), so one extra
+    // alias per shared relation is enough. The primary join still
+    // covers the rich side; the legacy alias join is INNER when the
+    // legacy predicates are positive, LEFT when only `__isnull`.
+    let mut legacy_where = legacy_where;
+    let mut legacy_joins: Vec<(&str, String, bool)> = Vec::new();
+    if let (Some(complex), Some(legacy)) = (complex_where.as_deref(), legacy_where.clone()) {
+        let mut renamed = legacy;
+        for (table, alias) in FILTER_JOINS {
+            if alias_referenced(complex, alias) && alias_referenced(&renamed, alias) {
+                let nullable_only = alias_nullable_only(&renamed, alias);
+                let legacy_alias = format!("{alias}_legacy");
+                renamed = rename_alias_refs(&renamed, alias, &legacy_alias);
+                legacy_joins.push((*table, legacy_alias, nullable_only));
+            }
+        }
+        legacy_where = Some(renamed);
+    }
 
     // Ordering (`:242-244`): the rewritten paginator key over the
     // annotation expressions, `NULLS LAST`, `issue.created_at` tiebreak —
@@ -3563,8 +3657,16 @@ async fn view_issues_list(
     // Both alias spellings count: legacy predicates spell the bridge
     // unquoted (`issue_cycle.`), and the traversal must reuse the
     // filter's scoped join for those too — a cycle filter's `issue_cycle`
-    // join wins over joining fresh (see [`alias_referenced`]).
-    let cycle_bridge = alias_referenced(&filter_sql, "issue_cycle").then_some("issue_cycle");
+    // join wins over joining fresh (see [`alias_referenced`]). A shared
+    // cycle relation (NEWPIDASH-195) resolves over the primary join
+    // first, like Django's first `.filter()` call.
+    let cycle_bridge = if alias_referenced(&filter_sql, "issue_cycle") {
+        Some("issue_cycle")
+    } else if alias_referenced(&filter_sql, "issue_cycle_legacy") {
+        Some("issue_cycle_legacy")
+    } else {
+        None
+    };
     let key = crate::app_issues::order_key(&spec.out_param, &order_param, cycle_bridge, false)
         .map_err(|_| Denial::ServerError)?;
     let direction = if key.descending { "DESC" } else { "ASC" };
@@ -3574,7 +3676,10 @@ async fn view_issues_list(
     );
 
     // Relation joins for filter references (Django's `filter()` joins):
-    // INNER when referenced positively, LEFT when only `__isnull`-tested.
+    // INNER when referenced positively (a plain rich occurrence or a
+    // positive legacy predicate), LEFT when only `__isnull`-tested or
+    // under `or`; `not`'d aliases are in the SQL only as `NOT EXISTS`
+    // subqueries and never promote a join.
     // The probe is the filter fragments only: the base statement never
     // mentions these aliases, and the ORDER BY key resolves to `issue.*`,
     // `state.*`, self-contained subqueries, or the cycle-name traversal
@@ -3595,13 +3700,29 @@ async fn view_issues_list(
         if !alias_referenced(&filter_probe, alias) {
             continue;
         }
-        let kind = if alias_nullable_only(&filter_probe, alias) {
+        // Legacy `__isnull`-only references stay LEFT; a rich `or`-only
+        // alias joins LEFT too (Django LEFT-OUTERs disjuncts). Only a
+        // plain positive occurrence upgrades to INNER.
+        let legacy_positive = legacy_where.as_deref().is_some_and(|legacy| {
+            alias_referenced(legacy, alias) && !alias_nullable_only(legacy, alias)
+        });
+        let inner = rich_inner.contains(alias) || legacy_positive;
+        let kind = if inner { "INNER JOIN" } else { "LEFT JOIN" };
+        joins.push_str(&format!(
+            " {kind} {table} AS {alias} ON {alias}.issue_id = issue.id"
+        ));
+    }
+    // The legacy stacks' own copy of each shared relation join
+    // (NEWPIDASH-195); the probe above only sees the primary aliases
+    // because the renamed fragment spells these `<alias>_legacy`.
+    for (table, legacy_alias, nullable_only) in &legacy_joins {
+        let kind = if *nullable_only {
             "LEFT JOIN"
         } else {
             "INNER JOIN"
         };
         joins.push_str(&format!(
-            " {kind} {table} AS {alias} ON {alias}.issue_id = issue.id"
+            " {kind} {table} AS {legacy_alias} ON {legacy_alias}.issue_id = issue.id"
         ));
     }
     if alias_referenced(&filter_probe, "issue_intake") {

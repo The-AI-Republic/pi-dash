@@ -2,7 +2,12 @@
   "bugs": [],
   "data": {
     "recipes": {
-      "all_kinds": ["coding-task", "review", "test", "scheduler"],
+      "all_kinds": [
+        "coding-task",
+        "review",
+        "test",
+        "scheduler"
+      ],
       "cloud_recipe_for_unknown": {
         "error": "RecipeNotFound: no Cloud Agent recipe for kind 'nope'",
         "ok": false
@@ -68,15 +73,17 @@
         "work_kind_coding": "coding"
       },
       "local_recipe_lengths": {
-        "coding-task": 16,
-        "review": 10,
+        "coding-task": 17,
+        "review": 11,
         "scheduler": 6,
-        "test": 10
+        "test": 11
       },
       "local_recipes": {
         "coding-task": [
           "intro",
-          "repo-context",
+          {
+            "slot": "context"
+          },
           "relationships",
           "session-framing",
           "pidash-cli",
@@ -86,6 +93,9 @@
           "state-routing",
           "analyze-and-scope",
           "workpad-setup",
+          {
+            "slot": "execute"
+          },
           "implementation",
           "blocking",
           "guardrails",
@@ -94,12 +104,17 @@
         ],
         "review": [
           "review-intro",
-          "repo-context",
+          {
+            "slot": "context"
+          },
           "session-framing",
           "pidash-cli",
           "task-lifecycle",
           "workpad-context",
           "review-cycle",
+          {
+            "slot": "review"
+          },
           "blocking",
           "guardrails",
           "ending-run"
@@ -114,12 +129,17 @@
         ],
         "test": [
           "test-intro",
-          "repo-context",
+          {
+            "slot": "context"
+          },
           "session-framing",
           "pidash-cli",
           "task-lifecycle",
           "workpad-context",
           "test-cycle",
+          {
+            "slot": "test"
+          },
           "blocking",
           "guardrails",
           "ending-run"
@@ -134,15 +154,162 @@
         "error": "RecipeNotFound: no recipe for kind 'nope'",
         "ok": false
       },
-      "trace": "prompting/recipes.py:24-28 (kind consts), 30-84 (RECIPES), 88-129 (CLOUD_RECIPES), 142-152 (kind_for), 163-178 (MANAGED_RECIPES alias + recipe_for), 181-185 (cloud_recipe_for), 188-189 (all_kinds)"
+      "trace": "prompting/recipes.py:24-28 (kind consts), 30-84 (RECIPES), 88-129 (CLOUD_RECIPES), 142-152 (kind_for), 163-178 (MANAGED_RECIPES alias + recipe_for), 181-185 (cloud_recipe_for), 188-189 (all_kinds)",
+      "work_types": {
+        "default": "software",
+        "expanded": {
+          "coding-task": {
+            "general": [
+              "intro",
+              "relationships",
+              "session-framing",
+              "pidash-cli",
+              "task-lifecycle",
+              "default-posture",
+              "autonomy",
+              "state-routing",
+              "analyze-and-scope",
+              "workpad-setup",
+              "general.execute",
+              "implementation",
+              "blocking",
+              "guardrails",
+              "workpad-template",
+              "ending-run"
+            ],
+            "software": [
+              "intro",
+              "software.context",
+              "relationships",
+              "session-framing",
+              "pidash-cli",
+              "task-lifecycle",
+              "default-posture",
+              "autonomy",
+              "state-routing",
+              "analyze-and-scope",
+              "workpad-setup",
+              "software.execute",
+              "implementation",
+              "blocking",
+              "guardrails",
+              "workpad-template",
+              "ending-run"
+            ]
+          },
+          "review": {
+            "general": [
+              "review-intro",
+              "session-framing",
+              "pidash-cli",
+              "task-lifecycle",
+              "workpad-context",
+              "review-cycle",
+              "general.review",
+              "blocking",
+              "guardrails",
+              "ending-run"
+            ],
+            "software": [
+              "review-intro",
+              "software.context",
+              "session-framing",
+              "pidash-cli",
+              "task-lifecycle",
+              "workpad-context",
+              "review-cycle",
+              "software.review",
+              "blocking",
+              "guardrails",
+              "ending-run"
+            ]
+          },
+          "scheduler": {
+            "general": [
+              "scheduler-intro",
+              "session-framing",
+              "pidash-cli",
+              "scheduler-task",
+              "guardrails",
+              "scheduler-ending"
+            ],
+            "software": [
+              "scheduler-intro",
+              "session-framing",
+              "pidash-cli",
+              "scheduler-task",
+              "guardrails",
+              "scheduler-ending"
+            ]
+          },
+          "test": {
+            "general": [
+              "test-intro",
+              "session-framing",
+              "pidash-cli",
+              "task-lifecycle",
+              "workpad-context",
+              "test-cycle",
+              "general.test",
+              "blocking",
+              "guardrails",
+              "ending-run"
+            ],
+            "software": [
+              "test-intro",
+              "software.context",
+              "session-framing",
+              "pidash-cli",
+              "task-lifecycle",
+              "workpad-context",
+              "test-cycle",
+              "software.test",
+              "blocking",
+              "guardrails",
+              "ending-run"
+            ]
+          }
+        },
+        "keys": [
+          "general",
+          "software"
+        ],
+        "slot_names": [
+          "context",
+          "execute",
+          "review",
+          "test"
+        ],
+        "types": {
+          "general": {
+            "description": "Any kind of task; deliverables are documents, project pages, or answers recorded on the issue.",
+            "sections": {
+              "execute": "general.execute",
+              "review": "general.review",
+              "test": "general.test"
+            },
+            "title": "General"
+          },
+          "software": {
+            "description": "Code changes delivered as branches and code reviews (PRs/MRs) on the project's repository, with repo-gate discovery and app-level testing.",
+            "sections": {
+              "context": "software.context",
+              "execute": "software.execute",
+              "review": "software.review",
+              "test": "software.test"
+            },
+            "title": "Software"
+          }
+        }
+      }
     }
   },
   "fixture_id": "FIX-recipes",
-  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world). PIDASHCONV-1058 re-sync: content-derived fields regenerated from origin/main@3267ceb9 via /tmp/fx1058_gen.py (registry.py + recipes.py loaded by path; stdlib-only, no Django).",
+  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world). PIDASHCONV-1058 re-sync: content-derived fields regenerated from origin/main@3267ceb9 via /tmp/fx1058_gen.py (registry.py + recipes.py loaded by path; stdlib-only, no Django). PDASHOSS01-234 re-sync: content-derived fields + work types regenerated from the work-type branch @28421e56e via fx234_gen.py (registry.py + recipes.py + work_types.py imported without Django).",
   "notes": [
     "MANAGED_RECIPES is dict(RECIPES) (equal copy, not alias); recipe_for('direct') raises RecipeNotFound (cloud kinds unreachable here); recipe errors read 'no recipe for kind %r' / 'no Cloud Agent recipe for kind %r'."
   ],
-  "ported_from": "3267ceb9cda65c90e6cb66e4a3ef8aaa26ca3a4e",
+  "ported_from": "28421e56e",
   "trace": [
     "prompting/recipes.py:24-28 (kind consts), 30-84 (RECIPES), 88-129 (CLOUD_RECIPES), 142-152 (kind_for), 163-178 (MANAGED_RECIPES + recipe_for), 181-189 (cloud_recipe_for, all_kinds)"
   ]

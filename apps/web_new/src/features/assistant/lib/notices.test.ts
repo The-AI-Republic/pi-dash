@@ -200,9 +200,9 @@ describe("turnFailureNotice (NEWPIDASH-148, cloud vs OSS)", () => {
     expect(
       turnFailureNotice({
         error_code: "openhub_paid_model_needs_credit",
-        detail: "This model needs credit. The free model deepseek/deepseek-v4.1-flash-1017 is included on every plan.",
+        detail: "This model needs credit. The OpenHub free model is included on every plan.",
       })
-    ).toBe("This model needs credit. The free model deepseek/deepseek-v4.1-flash-1017 is included on every plan.");
+    ).toBe("This model needs credit. The OpenHub free model is included on every plan.");
   });
 
   it("keeps the wallet-empty top-up notice", () => {

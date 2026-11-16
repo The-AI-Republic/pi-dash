@@ -37,6 +37,7 @@ ISSUE_ROW_KEYS = {
     "git_work_branch",
     "created_via",
     "agent_executor",
+    "work_type",
     "created_by",
     "updated_by",
     "project",

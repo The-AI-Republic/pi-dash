@@ -91,6 +91,7 @@
         "git_work_branch": "",
         "created_via": null,
         "agent_executor": null,
+        "work_type": null,
         "created_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
         "updated_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
         "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
@@ -164,6 +165,7 @@
           "git_work_branch": "",
           "created_via": null,
           "agent_executor": null,
+          "work_type": null,
           "created_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
           "updated_by": null,
           "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
@@ -201,6 +203,7 @@
           "git_work_branch": "",
           "created_via": null,
           "agent_executor": null,
+          "work_type": null,
           "created_by": null,
           "updated_by": null,
           "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
@@ -253,6 +256,7 @@
         "git_work_branch": "",
         "created_via": null,
         "agent_executor": null,
+        "work_type": null,
         "created_by": null,
         "updated_by": null,
         "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
@@ -938,6 +942,7 @@
         "git_work_branch": "",
         "created_via": null,
         "agent_executor": null,
+        "work_type": null,
         "created_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
         "updated_by": null,
         "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
@@ -989,6 +994,7 @@
         "git_work_branch": "",
         "created_via": null,
         "agent_executor": null,
+        "work_type": null,
         "created_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
         "updated_by": "79c81d76-5a93-4d3d-894d-5935576834b6",
         "project": "d715be3d-234f-46ef-89a3-97f0c7c04b7e",
@@ -1512,7 +1518,8 @@
         "run_id": "640d8cdf-08fb-4772-82d3-2c693d0e105f",
         "work_item_id": "a9b6c9f9-2817-4967-a501-1e26caf4abea",
         "outcome": "progressed",
-        "stop_ticking": false
+        "stop_ticking": false,
+        "run_kind": "issue"
       }
     },
     "yield_stop_true": {
@@ -1528,7 +1535,8 @@
         "run_id": "640d8cdf-08fb-4772-82d3-2c693d0e105f",
         "work_item_id": "a9b6c9f9-2817-4967-a501-1e26caf4abea",
         "outcome": "done",
-        "stop_ticking": true
+        "stop_ticking": true,
+        "run_kind": "issue"
       }
     },
     "yield_bad_stop_ticking": {
@@ -1851,6 +1859,7 @@
         "git_work_branch": "",
         "created_via": null,
         "agent_executor": null,
+        "work_type": null,
         "created_by": null,
         "updated_by": null,
         "project": "b8a8b19c-5586-4e41-9be9-240e24354058",
@@ -1938,6 +1947,7 @@
         "git_work_branch": "",
         "created_via": null,
         "agent_executor": null,
+        "work_type": null,
         "created_by": null,
         "updated_by": null,
         "project": "b8a8b19c-5586-4e41-9be9-240e24354058",

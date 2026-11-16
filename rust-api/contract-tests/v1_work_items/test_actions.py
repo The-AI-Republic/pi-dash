@@ -89,6 +89,7 @@ def test_yield_happy_path(api, world, seeder):
         "work_item_id": world["issue"]["id"],
         "outcome": "done",
         "stop_ticking": False,
+        "run_kind": "issue",
     }
 
 
@@ -195,3 +196,95 @@ def test_yield_anonymous_is_401(anon, world, seeder):
         json={"outcome": "done"},
     )
     assert response.status_code == 401
+
+
+# -- runs with no work item (PDASHOSS01-276) ---------------------------------
+# A scheduler run is project-scoped (work_item NULL, scheduler_binding set);
+# its agent ends on the same `pidash run yield`. Ports of the scheduler and
+# direct-run cases in Django's test_run_yield_and_moved_by_run.py.
+
+
+def _scheduler_run(world, seeder, *, status="running"):
+    pod = seeder.create_pod(world["workspace"]["id"], world["project"]["id"])
+    binding = seeder.create_scheduler_binding(
+        world["workspace"]["id"], world["project"]["id"], world["owner"]["id"]
+    )
+    run = seeder.create_agent_run(
+        world["workspace"]["id"],
+        world["owner"]["id"],
+        pod["id"],
+        None,
+        status=status,
+        scheduler_binding_id=binding["id"],
+    )
+    return run, binding
+
+
+def test_yield_scheduler_run_records_the_outcome(api, world, seeder, db):
+    run, binding = _scheduler_run(world, seeder)
+    response = _yield(api, world, run["id"], {"outcome": "done", "note": "scan finished"})
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "ok": True,
+        "run_id": run["id"],
+        "work_item_id": None,
+        "outcome": "done",
+        "stop_ticking": False,
+        "run_kind": "scheduler",
+        "scheduler_binding_id": binding["id"],
+    }
+    row = db.fetchone("SELECT done_payload FROM agent_run WHERE id = %s", (run["id"],))
+    assert row["done_payload"]["status"] == "done"
+    assert row["done_payload"]["note"] == "scan finished"
+    assert "yielded_at" in row["done_payload"]
+
+
+def test_yield_scheduler_run_ignores_stop_ticking(api, world, seeder, db):
+    """No clock to stop: the flag is not stored and never disables the binding."""
+    run, binding = _scheduler_run(world, seeder)
+    response = _yield(api, world, run["id"], {"outcome": "done", "stop_ticking": True})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["stop_ticking"] is False
+    assert body["run_kind"] == "scheduler"
+    assert body["detail"] == (
+        "outcome recorded; scheduled runs have no ticking clock, so stop_ticking was ignored"
+    )
+    row = db.fetchone("SELECT done_payload FROM agent_run WHERE id = %s", (run["id"],))
+    assert "stop_ticking" not in row["done_payload"]
+    binding_row = db.fetchone(
+        "SELECT enabled FROM scheduler_bindings WHERE id = %s", (binding["id"],)
+    )
+    assert binding_row["enabled"] is True
+
+
+def test_yield_finished_scheduler_run_is_409(api, world, seeder):
+    run, _ = _scheduler_run(world, seeder, status="completed")
+    response = _yield(api, world, run["id"], {"outcome": "done"})
+    assert response.status_code == 409
+    assert response.json() == {"error": "run is not active"}
+
+
+def test_yield_direct_run_records_the_outcome(api, world, seeder, db):
+    """A run with neither a work item nor a binding yields as `direct`."""
+    pod = seeder.create_pod(world["workspace"]["id"], world["project"]["id"])
+    run = seeder.create_agent_run(
+        world["workspace"]["id"], world["owner"]["id"], pod["id"], None
+    )
+    response = _yield(api, world, run["id"], {"outcome": "progressed", "stop_ticking": True})
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "ok": True,
+        "run_id": run["id"],
+        "work_item_id": None,
+        "outcome": "progressed",
+        "stop_ticking": False,
+        "run_kind": "direct",
+        "detail": (
+            "outcome recorded; a run without a work item has no ticking clock,"
+            " so stop_ticking was ignored"
+        ),
+    }
+    row = db.fetchone("SELECT done_payload FROM agent_run WHERE id = %s", (run["id"],))
+    assert row["done_payload"]["status"] == "progressed"
+    assert "stop_ticking" not in row["done_payload"]

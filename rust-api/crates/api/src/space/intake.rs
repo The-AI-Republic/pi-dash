@@ -63,8 +63,6 @@
 //!   Django, not the builder.
 //! * QUIRK-pop-mutates (`:197`): a missing/non-dict `issue` key raises
 //!   (`AttributeError`) → the 500 envelope (verified live).
-//! * QUIRK-updated_at-filter (`utils/issue_filters.py`): `updated_at`
-//!   filters `created_at` (owned by [`super::filters`]).
 //! * Dead `allow_triage_state`/`project_id` serializer context (`:215`):
 //!   accepted and ignored — the app `validate` reads `allow_triage_state`
 //!   but the 3-key subset never carries `state`, and `update` never reads
@@ -90,8 +88,8 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use pidash_db::entity::{
-    deploy_boards, file_assets, git_issue_syncs, github_issue_syncs, intake_issues, issues,
-    projects, states, workspaces,
+    deploy_boards, file_assets, git_issue_syncs, intake_issues, issues, projects, states,
+    workspaces,
 };
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::issues as domain_issues;
@@ -337,6 +335,7 @@ struct IssueRow {
     assigned_runner_id: Option<Uuid>,
     agent_executor: Option<String>,
     workpad: String,
+    work_type: Option<String>,
 }
 
 impl IssueRow {
@@ -377,6 +376,7 @@ impl IssueRow {
             assigned_runner_id: row.try_get("assigned_runner_id")?,
             agent_executor: row.try_get("agent_executor")?,
             workpad: row.try_get("workpad")?,
+            work_type: row.try_get("work_type")?,
         })
     }
 
@@ -419,6 +419,7 @@ impl IssueRow {
             assigned_pod_id: self.assigned_pod_id,
             assigned_runner_id: self.assigned_runner_id,
             agent_executor: self.agent_executor.clone(),
+            work_type: self.work_type.clone(),
         }
     }
 }
@@ -478,6 +479,7 @@ async fn fetch_issue(
                 assigned_runner_id: m.assigned_runner_id,
                 agent_executor: m.agent_executor,
                 workpad: m.workpad,
+                work_type: m.work_type,
             })
         })
         .transpose()
@@ -1433,6 +1435,7 @@ fn render_app_detail(
         "agent_executor".to_string(),
         opt_string(&issue.agent_executor),
     );
+    map.insert("work_type".to_string(), opt_string(&issue.work_type));
     map.insert("created_by".to_string(), opt_uuid(&issue.created_by_id));
     map.insert("updated_by".to_string(), opt_uuid(&issue.updated_by_id));
     map.insert("project".to_string(), uuid_string(&issue.project_id));
@@ -1586,6 +1589,7 @@ fn render_app_issue_create(
         "agent_executor".to_string(),
         opt_string(&issue.agent_executor),
     );
+    map.insert("work_type".to_string(), opt_string(&issue.work_type));
     map.insert("created_by".to_string(), opt_uuid(&issue.created_by_id));
     map.insert("updated_by".to_string(), opt_uuid(&issue.updated_by_id));
     map.insert("project".to_string(), uuid_string(&issue.project_id));
@@ -1694,6 +1698,7 @@ fn render_issue_snapshot(
         "agent_executor".to_string(),
         opt_string(&issue.agent_executor),
     );
+    map.insert("work_type".to_string(), opt_string(&issue.work_type));
     map.insert(
         "created_at".to_string(),
         serde_json::Value::String(render_dt(&issue.created_at, timezone)),
@@ -1721,7 +1726,7 @@ fn render_issue_snapshot(
 
 /// Whether the issue is git-synced (`app/serializers/issue.py:63-76`):
 /// empty `external_source` short-circuits before any query; otherwise a
-/// `GitIssueSync`/`GithubIssueSync` row decides.
+/// `GitIssueSync` row decides (git-only after PDASHOSS01-354).
 async fn is_synced(pool: &PgPool, issue: &IssueRow) -> Result<bool, sqlx::Error> {
     let Some(source) = issue.external_source.as_deref() else {
         return Ok(false);
@@ -1737,17 +1742,7 @@ async fn is_synced(pool: &PgPool, issue: &IssueRow) -> Result<bool, sqlx::Error>
         .one(&db)
         .await
         .map_err(pidash_db::orm_tx::into_sqlx)?;
-    if git.is_some() {
-        return Ok(true);
-    }
-    let github = github_issue_syncs::Entity::find()
-        .filter(github_issue_syncs::Column::DeletedAt.is_null())
-        .filter(github_issue_syncs::Column::IssueId.eq(issue.id))
-        .limit(1)
-        .one(&db)
-        .await
-        .map_err(pidash_db::orm_tx::into_sqlx)?;
-    Ok(github.is_some())
+    Ok(git.is_some())
 }
 
 /// `get_is_epic` (`app/serializers/issue.py:1109-1112`): false when the
@@ -2307,6 +2302,7 @@ async fn collection_create(
         assigned_pod_id: None,
         assigned_runner_id: None,
         agent_executor: None,
+        work_type: None,
     };
     let fire = fire_spec(&actor.id, now);
     let Some(orm) = state.orm() else {
@@ -2948,6 +2944,7 @@ mod tests {
                 assigned_runner_id: None,
                 agent_executor: None,
                 workpad: String::new(),
+                work_type: None,
             },
             state: None,
             project: ProjectRow {

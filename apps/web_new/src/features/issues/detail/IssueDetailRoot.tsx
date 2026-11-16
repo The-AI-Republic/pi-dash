@@ -5,9 +5,12 @@
 // column plus the collapsible properties sidebar. The collapse flag is
 // global (detail/store): wide viewports honor it with a collapse toggle
 // and an expand rail, while narrow viewports (< 768px) always render
-// the sidebar content inline under the main column. Sidebar rows arrive
-// through the sidebar slot. The parent banner (ISS-158) sits directly
-// above the title when the item has a parent.
+// the sidebar content inline between the description and the activity
+// feed (NEWPIDASH-233). Sidebar rows arrive through the sidebar slot.
+// The parent banner (ISS-158) sits directly above the title when the
+// item has a parent. Activity is hoisted out of DetailMainColumn into
+// its own grid area so narrow stacking can order main → Properties →
+// activity without duplicating the stateful sidebar.
 
 import { IconButton } from "@pidash/kit";
 import type { Issue } from "@pidash/api-client";
@@ -67,9 +70,53 @@ export function IssueDetailRoot({
     }
   }, [narrow, collapsed, setCollapsed]);
 
+  const hasSidebar = sidebar !== undefined;
+  const hasActivity = activity !== undefined;
+  const gridStyle: React.CSSProperties = (() => {
+    if (narrow) {
+      const areas = hasSidebar
+        ? hasActivity
+          ? '"main" "sidebar" "activity"'
+          : '"main" "sidebar"'
+        : hasActivity
+          ? '"main" "activity"'
+          : '"main"';
+      return {
+        gridTemplateAreas: areas,
+        gridTemplateColumns: "minmax(0,1fr)",
+        gap: "var(--space-8)",
+      };
+    }
+    if (collapsed && hasSidebar) {
+      const areas = hasActivity ? '"main rail" "activity rail"' : '"main rail"';
+      return {
+        gridTemplateAreas: areas,
+        gridTemplateColumns: "minmax(0,1fr) auto",
+        rowGap: "var(--space-6)",
+        columnGap: "var(--space-8)",
+      };
+    }
+    if (hasSidebar) {
+      const areas = hasActivity ? '"main sidebar" "activity sidebar"' : '"main sidebar"';
+      return {
+        gridTemplateAreas: areas,
+        gridTemplateColumns: "minmax(0,1fr) 20rem",
+        rowGap: "var(--space-6)",
+        columnGap: "var(--space-8)",
+      };
+    }
+    const areas = hasActivity ? '"main" "activity"' : '"main"';
+    return {
+      gridTemplateAreas: areas,
+      gridTemplateColumns: "minmax(0,1fr)",
+      rowGap: "var(--space-6)",
+      columnGap: "var(--space-8)",
+    };
+  })();
+
   return (
-    <div data-testid="issue-detail-root" className="flex flex-col gap-(--space-8) p-(--space-8) md:flex-row">
-      <div className="flex min-w-0 flex-1 flex-col gap-(--space-4)">
+    <div data-testid="issue-detail-root" className="grid gap-(--space-8) p-(--space-8)" style={gridStyle}>
+      <div className="flex min-w-0 flex-col gap-(--space-4)" style={{ gridArea: "main" }}>
         {showParentBanner ? (
           <ParentBanner workspaceSlug={workspaceSlug} projectId={projectId} issue={issue} editable={editable} />
         ) : null}
@@ -80,7 +127,6 @@ export function IssueDetailRoot({
           editable={editable}
           topSlot={topSlot}
           agentActions={agentActions}
-          activity={activity}
           fieldWrites={fieldWrites}
         />
       </div>
@@ -93,6 +139,7 @@ export function IssueDetailRoot({
                 ? "flex min-w-0 flex-col gap-(--space-4) md:hidden"
                 : "flex min-w-0 flex-col gap-(--space-4) md:w-80 md:shrink-0"
             }
+            style={{ gridArea: "sidebar" }}
           >
             <div className="flex items-center justify-between gap-(--space-2)">
               <p className="text-meta font-medium text-(--text-muted)">Properties</p>
@@ -105,13 +152,18 @@ export function IssueDetailRoot({
             {sidebar}
           </aside>
           {collapsed ? (
-            <div className="hidden shrink-0 md:block">
+            <div className="hidden shrink-0 md:block" style={{ gridArea: "rail" }}>
               <IconButton label="Expand properties" variant="ghost" size="small" onClick={() => setCollapsed(false)}>
                 <PanelRightOpen size={16} strokeWidth={1.5} />
               </IconButton>
             </div>
           ) : null}
         </>
+      )}
+      {activity === undefined ? null : (
+        <div data-slot="activity" className="min-w-0" style={{ gridArea: "activity" }}>
+          {activity}
+        </div>
       )}
     </div>
   );

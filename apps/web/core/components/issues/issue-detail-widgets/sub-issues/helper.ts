@@ -22,6 +22,7 @@ export const useSubIssueOperations = (issueServiceType: TIssueServiceType): TSub
     subIssues: { setSubIssueHelpers },
     createSubIssues,
     fetchSubIssues,
+    fetchNextSubIssues,
     updateSubIssue,
     deleteSubIssue,
     removeSubIssue,
@@ -45,6 +46,22 @@ export const useSubIssueOperations = (issueServiceType: TIssueServiceType): TSub
       fetchSubIssues: async (workspaceSlug, projectId, parentIssueId) => {
         try {
           await fetchSubIssues(workspaceSlug, projectId, parentIssueId);
+        } catch {
+          setToast({
+            type: TOAST_TYPE.ERROR,
+            title: t("Error!"),
+            message: t("Error fetching {entity}", {
+              entity:
+                issueServiceType === EIssueServiceType.ISSUES
+                  ? t("Sub-work items", { count: 2 })
+                  : t("{count, plural, one {Work item} other {Work items}}", { count: 2 }),
+            }),
+          });
+        }
+      },
+      fetchNextSubIssues: async (workspaceSlug, projectId, parentIssueId) => {
+        try {
+          await fetchNextSubIssues(workspaceSlug, projectId, parentIssueId);
         } catch {
           setToast({
             type: TOAST_TYPE.ERROR,
@@ -161,6 +178,7 @@ export const useSubIssueOperations = (issueServiceType: TIssueServiceType): TSub
       createSubIssues,
       deleteSubIssue,
       fetchSubIssues,
+      fetchNextSubIssues,
       issueServiceType,
       removeSubIssue,
       setSubIssueHelpers,

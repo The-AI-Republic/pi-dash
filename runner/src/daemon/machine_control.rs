@@ -227,7 +227,7 @@ impl MachineControl {
     /// Cache the engine pause fields a welcome frame carries, if any.
     fn note_welcome(&self, welcome: &serde_json::Value) {
         if let Ok(payload) =
-            serde_json::from_value::<crate::engine::api::MachinePayload>(welcome.clone())
+            serde_json::from_value::<crate::pidash_agent::api::MachinePayload>(welcome.clone())
         {
             self.spawn_ctx.engine.note_machine_payload(&payload);
         }
@@ -289,7 +289,7 @@ impl MachineControl {
             anyhow::bail!("create_runner command missing project");
         }
         let agent_kind = parse_agent_kind(&cmd.agent)?;
-        let is_engine = agent_kind == AgentKind::Engine;
+        let is_engine = agent_kind == AgentKind::PidashAgent;
         // Held to the end: the engine reconcile must not see this row
         // before its block is written.
         let _engine_ops = if is_engine {
@@ -301,7 +301,7 @@ impl MachineControl {
         // computer already runs the engine for the project, the command is
         // already satisfied. Answer with that runner instead of creating
         // (and possibly rolling back) another.
-        if agent_kind == AgentKind::Engine
+        if agent_kind == AgentKind::PidashAgent
             && !cmd.workspace_slug.is_empty()
             && let Some(existing) =
                 existing_engine_runner(&self.spawn_ctx.paths, &cmd.workspace_slug, &cmd.project)?
@@ -319,7 +319,7 @@ impl MachineControl {
         }
         if is_engine {
             // Same checks as `EngineRunnerAdd`, before the server is called.
-            crate::engine::provision::ensure_engine_can_run(&self.spawn_ctx.engine.status())?;
+            crate::pidash_agent::provision::ensure_engine_can_run(&self.spawn_ctx.engine.status())?;
         }
         // The per-computer runner limit fails before anything is registered
         // (design §5): a cloud row created first and rolled back on the
@@ -347,7 +347,7 @@ impl MachineControl {
                 // The server names engine runners (design §5 "Naming").
                 name: (!is_engine && !cmd.name.is_empty()).then_some(cmd.name.as_str()),
                 pod: (!cmd.pod.is_empty()).then_some(cmd.pod.as_str()),
-                agent_kind: is_engine.then_some(crate::engine::api::ENGINE_AGENT_KIND),
+                agent_kind: is_engine.then_some(crate::pidash_agent::api::ENGINE_AGENT_KIND),
             },
         )
         .await
@@ -434,7 +434,7 @@ fn create_working_dir(
     if !cmd.working_dir.is_empty() {
         return Ok(Some(PathBuf::from(&cmd.working_dir)));
     }
-    if agent_kind != AgentKind::Engine {
+    if agent_kind != AgentKind::PidashAgent {
         return Ok(None);
     }
     let workspace = if resp.workspace_slug.is_empty() {
@@ -447,7 +447,7 @@ fn create_working_dir(
     } else {
         resp.project_identifier.as_str()
     };
-    crate::engine::workdir::allocate_engine_folder(paths, workspace, project).map(Some)
+    crate::pidash_agent::workdir::allocate_engine_folder(paths, workspace, project).map(Some)
 }
 
 /// The engine runner this computer already has for `workspace`/`project`.
@@ -461,7 +461,7 @@ fn existing_engine_runner(
     }
     let cfg = crate::config::file::load_config(paths)?;
     Ok(cfg.runners.into_iter().find(|r| {
-        r.agent.kind == AgentKind::Engine
+        r.agent.kind == AgentKind::PidashAgent
             && r.workspace_slug.as_deref() == Some(workspace)
             && r.project_slug
                 .as_deref()
@@ -904,8 +904,8 @@ mod tests {
     /// clash), not the generic data-dir default, and is named by the server.
     #[tokio::test]
     async fn engine_runners_created_by_machine_control_get_a_task_root_folder() {
-        use crate::config::schema::{Config, DaemonConfig, EngineCredential};
-        use crate::engine::test_server::{self, Handler};
+        use crate::config::schema::{Config, DaemonConfig, PidashAgentCredential};
+        use crate::pidash_agent::test_server::{self, Handler};
         let handler: Handler = Arc::new(|req| {
             if req.path == "/api/v1/runner/runners/" {
                 let body = req.json();
@@ -936,7 +936,7 @@ mod tests {
         let cli = CliSection {
             token: Some("mt_acme".into()),
             workspace_slug: Some("acme".into()),
-            engine_credential: Some(EngineCredential {
+            engine_credential: Some(PidashAgentCredential {
                 token: "ec_live".into(),
                 expires_at: None,
             }),
@@ -964,7 +964,7 @@ mod tests {
         // Runners come up offline: only the mock is contacted.
         let mut ctx =
             RunnerSpawnCtx::for_tests_with_daemon(None, tokens.clone(), &paths, daemon, &[]);
-        ctx.engine = crate::engine::manager::EngineManager::new(
+        ctx.engine = crate::pidash_agent::manager::PidashAgentManager::new(
             Some(&server.url),
             paths.clone(),
             tokens,
@@ -1067,7 +1067,7 @@ mod tests {
             ..cmd
         };
         assert_eq!(
-            create_working_dir(&paths, &explicit, &resp, AgentKind::Engine).unwrap(),
+            create_working_dir(&paths, &explicit, &resp, AgentKind::PidashAgent).unwrap(),
             Some(PathBuf::from("/srv/web"))
         );
     }
@@ -1130,7 +1130,7 @@ mod tests {
             "https://example.com",
             ApplyEnrollOptions {
                 working_dir: Some(tmp.path().join("wd")),
-                agent_kind: AgentKind::Engine,
+                agent_kind: AgentKind::PidashAgent,
                 model: None,
                 reasoning_effort: None,
             },

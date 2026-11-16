@@ -236,11 +236,11 @@ async fn dispatch_facts_of(
     machine_id: Option<Uuid>,
 ) -> Result<DispatchFacts, DrainError> {
     let last_dedicated = last_dedicated_for(db, runner_id).await?;
-    let is_engine = provisioning == "desktop_bundled";
+    let is_pidash_agent = provisioning == "desktop_bundled";
     let pod_member = pod_dispatch == "pod_member";
-    if !is_engine {
+    if !is_pidash_agent {
         return Ok(DispatchFacts {
-            is_engine: false,
+            is_pidash_agent: false,
             pod_member,
             paused: false,
             team_runs: true,
@@ -261,7 +261,7 @@ async fn dispatch_facts_of(
         None => (false, false),
     };
     Ok(DispatchFacts {
-        is_engine: true,
+        is_pidash_agent: true,
         pod_member,
         paused,
         team_runs,
@@ -269,11 +269,41 @@ async fn dispatch_facts_of(
     })
 }
 
+/// Mint a fresh attempt token and choose the protocol from the runner's
+/// active session capabilities (Django `mint_assignment_attempt` +
+/// `protocol_for_runner`; Rust-only T1). Called inside the assignment
+/// transaction so Runner → Session order is preserved. Missing session or
+/// capability means legacy (protocol 0); a fresh UUID is minted on every
+/// new assignment, including to the same runner.
+async fn mint_attempt(
+    db: &impl ConnectionTrait,
+    runner_id: Uuid,
+) -> Result<(Uuid, i16), DrainError> {
+    let caps = crate::runner_sessions::pubsub::active_runner_sessions(db, runner_id)
+        .await
+        .map_err(DrainError::from)
+        .unwrap_or_default();
+    // Centralized helper: first active session with queue capability wins,
+    // otherwise legacy. Fresh UUID minted unconditionally.
+    let mut caps_value = serde_json::json!([]);
+    for session in caps {
+        if crate::runner_runs::capacity::supports_machine_queue(&session.capabilities) {
+            caps_value = session.capabilities.clone();
+            break;
+        }
+    }
+    Ok(crate::runner_runs::capacity::mint_for_capabilities(
+        &caps_value,
+    ))
+}
+
 async fn write_assignment(
     db: &impl ConnectionTrait,
     owner_id: Uuid,
     runner_id: Uuid,
     run_id: Uuid,
+    assignment_token: Uuid,
+    assignment_protocol: i16,
 ) -> Result<(), DrainError> {
     // A fresh `timezone.now()` per assignment (`matcher.py:285-289`).
     use sea_orm::sea_query::Expr;
@@ -282,10 +312,36 @@ async fn write_assignment(
         .col_expr(agent_run::Column::RunnerId, Expr::value(runner_id))
         .col_expr(agent_run::Column::Status, Expr::value("assigned"))
         .col_expr(agent_run::Column::AssignedAt, Expr::value(now_micros()))
+        .col_expr(
+            agent_run::Column::AssignmentToken,
+            Expr::value(Some(assignment_token)),
+        )
+        .col_expr(
+            agent_run::Column::AssignmentProtocol,
+            Expr::value(assignment_protocol),
+        )
+        .col_expr(
+            agent_run::Column::CapacityWait,
+            Expr::val(None::<serde_json::Value>).into(),
+        )
         .filter(agent_run::Column::Id.eq(run_id))
         .exec(db)
         .await?;
     Ok(())
+}
+
+/// `release_runner_if_idle` (`matcher.py:306-328`, PDASHOSS01-231):
+/// flip a `busy` runner with no busy-status run back to `online`.
+/// Returns whether a row changed (the Python `bool(...)`). Runs on the
+/// caller's connection, so session open keeps it inside its transaction.
+pub async fn release_runner_if_idle<C: ConnectionTrait>(
+    db: &C,
+    runner_id: Uuid,
+) -> Result<bool, sea_orm::DbErr> {
+    let result = db
+        .execute(DbBackend::Postgres.build(&drain_kernel::release_runner_if_idle_stmt(runner_id)))
+        .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 /// `drain_for_runner_by_id` (`matcher.py:298-304`): runner lookup
@@ -362,7 +418,16 @@ async fn drain_for_runner(
             "drain_for_runner: run_config is not an object".to_owned(),
         ));
     };
-    write_assignment(&txn, owner_id, runner_id, run_id).await?;
+    let (assignment_token, assignment_protocol) = mint_attempt(&txn, runner_id).await?;
+    write_assignment(
+        &txn,
+        owner_id,
+        runner_id,
+        run_id,
+        assignment_token,
+        assignment_protocol,
+    )
+    .await?;
     let plan = drain_kernel::plan_assignment(&drain_kernel::AssignmentFacts {
         run_id,
         runner_id,
@@ -370,6 +435,8 @@ async fn drain_for_runner(
         work_item_id,
         prompt,
         run_config,
+        assignment_token,
+        assignment_protocol,
     });
     txn.commit().await?;
     let drain_kernel::DrainEffect::SendAssign { runner_id, message } = &plan.after_commit;
@@ -455,7 +522,16 @@ async fn drain_pod(
                 "drain_pod: run_config is not an object".to_owned(),
             ));
         };
-        write_assignment(&txn, owner_id, runner_id, run_id).await?;
+        let (assignment_token, assignment_protocol) = mint_attempt(&txn, runner_id).await?;
+        write_assignment(
+            &txn,
+            owner_id,
+            runner_id,
+            run_id,
+            assignment_token,
+            assignment_protocol,
+        )
+        .await?;
         plans.push(drain_kernel::plan_assignment(
             &drain_kernel::AssignmentFacts {
                 run_id,
@@ -464,6 +540,8 @@ async fn drain_pod(
                 work_item_id,
                 prompt,
                 run_config,
+                assignment_token,
+                assignment_protocol,
             },
         ));
     }
@@ -495,6 +573,7 @@ mod tests {
             offline_threshold_secs: 90,
             offline_pin_release_secs: 300,
             offline_run_fail_secs: 3600,
+            pin_auto_release_secs: 600,
             offline_stream_ttl_secs: 86400,
             offline_stream_maxlen: 1000,
             stream_min_retention_secs: 3600,

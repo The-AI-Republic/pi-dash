@@ -21,21 +21,28 @@
 //!
 //! * `WorkspaceViewViewSet.list` (`:71`): WORKSPACE `[ADMIN, MEMBER, GUEST]`
 //!   + guest narrowing to owned rows (`:75-76`).
-//! * `WorkspaceViewViewSet.partial_update` (`:80`): WORKSPACE `roles=[]` +
-//!   creator — only creators pass — then locked/owner rechecks (`:85-94`).
-//! * `WorkspaceViewViewSet.retrieve` (`:102`): undecorated, authN only.
+//! * `WorkspaceViewViewSet.create` (`:52-58`): NEWPIDASH-202 gate, WORKSPACE
+//!   `[ADMIN, MEMBER]` (guests are not offered workspace view creation).
+//! * `WorkspaceViewViewSet.partial_update` (`:80`) and `update` (PUT,
+//!   NEWPIDASH-202): WORKSPACE `roles=[]` + creator — only creators pass —
+//!   then locked/owner rechecks (`:85-94`).
+//! * `WorkspaceViewViewSet.retrieve` (`:102`): NEWPIDASH-202 gate, WORKSPACE
+//!   `[ADMIN, MEMBER, GUEST]` (was undecorated, authN only — PB-0644/0662).
 //! * `WorkspaceViewViewSet.destroy` (`:114`): WORKSPACE `[ADMIN]` + creator,
 //!   then the admin-or-owner recheck (`:118-134`).
 //! * `WorkspaceViewIssuesViewSet.list` (`:216`): WORKSPACE
 //!   `[ADMIN, MEMBER, GUEST]`; the project permission Q (`:142-162`) owns
 //!   to the query layer
 //!   ([`project_permission_filter`](super::queries_views::project_permission_filter)).
+//! * `IssueViewViewSet.create` (`:256-262`): NEWPIDASH-202 gate, PROJECT
+//!   `[ADMIN, MEMBER, GUEST]` (guests may create project views).
 //! * `IssueViewViewSet.list` (`:289`): PROJECT `[ADMIN, MEMBER, GUEST]` +
 //!   guest narrowing (`:293-303`).
 //! * `IssueViewViewSet.retrieve` (`:308`): PROJECT `[ADMIN, MEMBER, GUEST]`
 //!   + guest 403 (`:317-331`).
-//! * `IssueViewViewSet.partial_update` (`:343`): PROJECT `roles=[]` +
-//!   creator, then locked/owner rechecks (`:347-356`).
+//! * `IssueViewViewSet.partial_update` (`:343`) and `update` (PUT,
+//!   NEWPIDASH-202): PROJECT `roles=[]` + creator, then locked/owner
+//!   rechecks (`:347-356`).
 //! * `IssueViewViewSet.destroy` (`:365`): PROJECT `[ADMIN]` + creator, then
 //!   the admin-or-owner recheck (`:368-392`).
 //! * `IssueViewFavoriteViewSet.create` (`:413`) / `destroy` (`:423`):
@@ -296,11 +303,25 @@ pub fn workspace_view_list_guest_scoped(m: &Membership) -> bool {
     m.workspace_role == Some(GUEST)
 }
 
-/// `GET workspaces/<slug>/views/<pk>/` (`:102`): no decorator — any
-/// authenticated caller passes (even a workspace outsider; that is the
-/// source as written). B1 (200 `null` on unknown pk) owns to the handler.
+/// `GET workspaces/<slug>/views/<pk>/` (`:102`): NEWPIDASH-202 gate,
+/// WORKSPACE `[ADMIN, MEMBER, GUEST]` (was undecorated, authN only —
+/// PB-0644/0662). B1 (200 `get_initial()` on unknown pk for members) owns
+/// to the handler, unchanged.
+pub fn workspace_view_retrieve_gate(m: &Membership) -> Result<(), ErrorBody> {
+    allow_workspace(&[ADMIN, MEMBER, GUEST], m)
+}
+
+/// Legacy undecorated entry point, kept for fixture pinning (PB-0644).
+/// New code must use [`workspace_view_retrieve_gate`].
 pub fn workspace_view_retrieve_undecorated(authenticated: bool) -> Result<(), ErrorBody> {
     require_authenticated(authenticated)
+}
+
+/// `POST workspaces/<slug>/views/` (`:52-58`): NEWPIDASH-202 gate,
+/// WORKSPACE `[ADMIN, MEMBER]` (guests are not offered workspace view
+/// creation, VIEW-034; project guests may still create project views).
+pub fn workspace_view_create_gate(m: &Membership) -> Result<(), ErrorBody> {
+    allow_workspace(&[ADMIN, MEMBER], m)
 }
 
 /// `PATCH workspaces/<slug>/views/<pk>/` (`:80`): WORKSPACE `roles=[]` +
@@ -399,6 +420,13 @@ pub fn project_view_retrieve_guest_gate(
         return Err(not_allowed_to_view());
     }
     Ok(())
+}
+
+/// `POST .../projects/<project_id>/views/` (`:256-262`): NEWPIDASH-202
+/// gate, PROJECT `[ADMIN, MEMBER, GUEST]` — active membership in the URL's
+/// project, any role.
+pub fn project_view_create_gate(m: &Membership) -> Result<(), ErrorBody> {
+    allow_project(&[ADMIN, MEMBER, GUEST], m)
 }
 
 /// `PATCH .../views/<pk>/` (`:343`): PROJECT `roles=[]` + creator — only

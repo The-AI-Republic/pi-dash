@@ -185,7 +185,7 @@ pub async fn update_machine_controls(
             .await
             .map_err(UpdateError::Db)?;
     }
-    let effects = dispatch_rules::on_engine_pause_changed(
+    let effects = dispatch_rules::on_pidash_agent_pause_changed(
         db,
         machine_id,
         changed_paused,

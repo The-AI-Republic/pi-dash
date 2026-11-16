@@ -50,13 +50,14 @@ async fn daemon_payload(
 ) -> Result<String, Response> {
     let db = pidash_db::pool::sea_orm_connection(pool);
     let now = Utc::now();
-    let sign_in_state = pidash_services::domain::engine_credential::current_engine_sign_in_state(
-        &machine.engine_sign_in_state,
-        machine
-            .engine_credential_expires_at
-            .map(|at| at.with_timezone(&Utc)),
-        now,
-    );
+    let sign_in_state =
+        pidash_services::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
+            &machine.engine_sign_in_state,
+            machine
+                .engine_credential_expires_at
+                .map(|at| at.with_timezone(&Utc)),
+            now,
+        );
     let engine_state = machine.engine_state.clone();
     let id_owned = machine.id.to_string();
     let expires_rendered = machine
@@ -304,8 +305,31 @@ pub async fn daemon_machine_patch(
     };
     match updated {
         Ok(updated) => {
+            let effects = updated.effects.clone();
             if tx.commit().await.is_err() {
                 return server_error();
+            }
+            // Post-commit drains for the owner-pause flip.
+            if !effects.drain_pod_ids.is_empty() || !effects.drain_runner_ids.is_empty() {
+                let redis = pidash_db::redis::client_from_settings(state.settings());
+                for pod_id in &effects.drain_pod_ids {
+                    let _ = pidash_services::runner_sessions::live_drains::drain_pod_by_id(
+                        &pool,
+                        redis.as_ref(),
+                        &state.settings().runner,
+                        *pod_id,
+                    )
+                    .await;
+                }
+                for runner_id in &effects.drain_runner_ids {
+                    let _ = pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
+                        &pool,
+                        redis.as_ref(),
+                        &state.settings().runner,
+                        *runner_id,
+                    )
+                    .await;
+                }
             }
             match daemon_payload(&pool, &updated.model, auth.token.workspace_id).await {
                 Ok(body) => json_response(StatusCode::OK, body),

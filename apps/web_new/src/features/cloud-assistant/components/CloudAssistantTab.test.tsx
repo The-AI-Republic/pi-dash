@@ -485,7 +485,7 @@ describe("CloudAssistantTab", () => {
       kind: "openhub",
       provider_kind: "openhub",
       base_url: "",
-      model_name: "deepseek/deepseek-v4.1-flash-1017",
+      model_name: "openhub_free_llm",
     };
     const calls = stubTransport((method, url) => {
       if (method === "GET" && url.endsWith(SERVERS)) return { status: 200, body: [] };
@@ -493,7 +493,7 @@ describe("CloudAssistantTab", () => {
         return {
           status: 200,
           body: {
-            llm: { freeTokensUsed: 1, freeTokensLimit: 10, freeModels: ["deepseek/deepseek-v4.1-flash-1017"] },
+            llm: { freeTokensUsed: 1, freeTokensLimit: 10, freeModels: ["openhub_free_llm"] },
             plan: "free",
           },
         };
@@ -503,7 +503,7 @@ describe("CloudAssistantTab", () => {
           status: 200,
           body: list({
             connections: [hosted],
-            openhub_model_options: ["deepseek/deepseek-v4.1-flash-1017", "moonshotai/kimi-k3"],
+            openhub_model_options: ["openhub_free_llm", "moonshotai/kimi-k3"],
             openhub_wallet_url: "https://hub.example.com/account/credits",
           }),
         };
@@ -516,9 +516,9 @@ describe("CloudAssistantTab", () => {
     await waitFor(() =>
       expect(screen.getByRole("option", { name: "Balanced hosted model (Needs credit)" })).toBeInTheDocument()
     );
-    expect(screen.getByRole("option", { name: "Lowest cost (Free)" })).toBeEnabled();
+    expect(screen.getByRole("option", { name: "OpenHub free model (Free)" })).toBeEnabled();
     expect(screen.getByRole("option", { name: "Balanced hosted model (Needs credit)" })).toBeDisabled();
-    expect(picker).toHaveValue("deepseek/deepseek-v4.1-flash-1017");
+    expect(picker).toHaveValue("openhub_free_llm");
     await waitFor(() => expect(calls.some((call) => call.url.endsWith("/api/openhub/usage/quota/"))).toBe(true));
     expect(calls.some((call) => call.method === "PATCH")).toBe(false);
   });
@@ -530,14 +530,14 @@ describe("CloudAssistantTab", () => {
       kind: "openhub",
       provider_kind: "openhub",
       base_url: "",
-      model_name: "deepseek/deepseek-v4.1-flash-1017",
+      model_name: "openhub_free_llm",
     };
     const calls = stubTransport((method, url) => {
       if (method === "GET" && url.endsWith(SERVERS)) return { status: 200, body: [] };
       if (method === "GET" && url.endsWith("/api/openhub/usage/quota/")) {
         return {
           status: 200,
-          body: { llm: { freeModels: ["deepseek/deepseek-v4.1-flash-1017"] }, plan: "free" },
+          body: { llm: { freeModels: ["openhub_free_llm"] }, plan: "free" },
         };
       }
       if (method === "GET") {
@@ -545,7 +545,7 @@ describe("CloudAssistantTab", () => {
           status: 200,
           body: list({
             connections: [hosted],
-            openhub_model_options: ["deepseek/deepseek-v4.1-flash-1017", "moonshotai/kimi-k3"],
+            openhub_model_options: ["openhub_free_llm", "moonshotai/kimi-k3"],
             openhub_wallet_url: "https://hub.example.com/account/credits",
           }),
         };
@@ -572,7 +572,7 @@ describe("CloudAssistantTab", () => {
       kind: "openhub",
       provider_kind: "openhub",
       base_url: "",
-      model_name: "deepseek/deepseek-v4.1-flash-1017",
+      model_name: "openhub_free_llm",
     };
     const codex = {
       ...CODEX,
@@ -584,7 +584,7 @@ describe("CloudAssistantTab", () => {
       if (method === "GET" && url.endsWith("/api/openhub/usage/quota/")) {
         return {
           status: 200,
-          body: { llm: { freeModels: ["deepseek/deepseek-v4.1-flash-1017"] }, plan: "free" },
+          body: { llm: { freeModels: ["openhub_free_llm"] }, plan: "free" },
         };
       }
       if (method === "GET") {
@@ -592,7 +592,7 @@ describe("CloudAssistantTab", () => {
           status: 200,
           body: list({
             connections: [hosted, codex],
-            openhub_model_options: ["deepseek/deepseek-v4.1-flash-1017", "moonshotai/kimi-k3"],
+            openhub_model_options: ["openhub_free_llm", "moonshotai/kimi-k3"],
           }),
         };
       }
@@ -626,14 +626,14 @@ describe("CloudAssistantTab", () => {
       kind: "openhub",
       provider_kind: "openhub",
       base_url: "",
-      model_name: "deepseek/deepseek-v4.1-flash-1017",
+      model_name: "openhub_free_llm",
     };
     const calls = stubTransport((method, url) => {
       if (method === "GET" && url.endsWith(SERVERS)) return { status: 200, body: [] };
       if (method === "GET" && url.endsWith("/api/openhub/usage/quota/")) {
         return {
           status: 200,
-          body: { llm: { freeModels: ["deepseek/deepseek-v4.1-flash-1017"] }, plan: "free" },
+          body: { llm: { freeModels: ["openhub_free_llm"] }, plan: "free" },
         };
       }
       if (method === "GET") {
@@ -641,7 +641,7 @@ describe("CloudAssistantTab", () => {
           status: 200,
           body: list({
             connections: [hosted, BYOK],
-            openhub_model_options: ["deepseek/deepseek-v4.1-flash-1017", "moonshotai/kimi-k3"],
+            openhub_model_options: ["openhub_free_llm", "moonshotai/kimi-k3"],
           }),
         };
       }
@@ -671,14 +671,14 @@ describe("CloudAssistantTab", () => {
       kind: "openhub",
       provider_kind: "openhub",
       base_url: "",
-      model_name: "deepseek/deepseek-v4.1-flash-1017",
+      model_name: "openhub_free_llm",
     };
     const calls = stubTransport((method, url) => {
       if (method === "GET" && url.endsWith(SERVERS)) return { status: 200, body: [] };
       if (method === "GET" && url.endsWith("/api/openhub/usage/quota/")) {
         return {
           status: 200,
-          body: { llm: { freeModels: ["deepseek/deepseek-v4.1-flash-1017"] }, plan: "payg" },
+          body: { llm: { freeModels: ["openhub_free_llm"] }, plan: "payg" },
         };
       }
       if (method === "GET") {
@@ -686,7 +686,7 @@ describe("CloudAssistantTab", () => {
           status: 200,
           body: list({
             connections: [hosted],
-            openhub_model_options: ["deepseek/deepseek-v4.1-flash-1017", "moonshotai/kimi-k3"],
+            openhub_model_options: ["openhub_free_llm", "moonshotai/kimi-k3"],
             openhub_wallet_url: "https://hub.example.com/account/credits",
           }),
         };

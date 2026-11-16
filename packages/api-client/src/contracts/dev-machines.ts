@@ -13,7 +13,7 @@ import { dateTime, nullableDateTime, uuid } from "./fields.js";
  * it is not auto-paused. Kept an open string so a new server reason
  * still parses (and renders as-is).
  */
-export const ENGINE_AUTO_PAUSE_REASONS = [
+export const PIDASH_AGENT_AUTO_PAUSE_REASONS = [
   "",
   "engine_sign_in_required",
   "gateway_session_revoked",
@@ -21,14 +21,14 @@ export const ENGINE_AUTO_PAUSE_REASONS = [
   "profile_unavailable",
   "engine_disabled",
 ] as const;
-export type EngineAutoPauseReason = (typeof ENGINE_AUTO_PAUSE_REASONS)[number];
+export type PidashAgentAutoPauseReason = (typeof PIDASH_AGENT_AUTO_PAUSE_REASONS)[number];
 
 /**
  * The machine's engine sign-in state (design §4.3). Not served yet: the
  * second server change adds it, so clients degrade when it is absent.
  */
-export const ENGINE_SIGN_IN_STATES = ["never", "active", "expiring", "expired", "signed_out", "revoked"] as const;
-export type EngineSignInState = (typeof ENGINE_SIGN_IN_STATES)[number];
+export const PIDASH_AGENT_SIGN_IN_STATES = ["never", "active", "expiring", "expired", "signed_out", "revoked"] as const;
+export type PidashAgentSignInState = (typeof PIDASH_AGENT_SIGN_IN_STATES)[number];
 
 /**
  * Built-in engine controls carried on both machine shapes (design §8):
@@ -174,7 +174,7 @@ export async function updateDevMachine(
  * Served by the second server change; callers offer it only when the
  * machine reports its engine sign-in state. Answers the updated row.
  */
-export async function signOutDevMachineEngine(
+export async function signOutDevMachinePidashAgent(
   client: ApiClient,
   machineId: string,
   workspaceId: string

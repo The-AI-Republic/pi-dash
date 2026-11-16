@@ -1795,7 +1795,10 @@ async fn app_callback(
         // Avatar I/O inputs (`S3Storage(request)`, `base.py:198` —
         // `is_server=False` signs the public host; the cap is
         // `DATA_UPLOAD_MAX_MEMORY_SIZE`, i.e. `FILE_SIZE_LIMIT`).
-        let avatar_http = reqwest::Client::new();
+        // Bounded S3 client (60s/60s, PIDASHCONV-1728): the provider
+        // download inherits a tighter 10s per-request timeout, while S3
+        // PUT/HEAD/DELETE must not hang the callback indefinitely.
+        let avatar_http = super::avatar_s3_client();
         let avatar_scheme = if is_secure_request(&headers, settings) {
             "https"
         } else {
@@ -2358,6 +2361,7 @@ mod tests {
             minio_endpoint_ssl: false,
             access_key_id: String::new(),
             secret_access_key: String::new(),
+            session_token: String::new(),
             bucket_name: String::new(),
             region: "us-east-1".to_owned(),
             endpoint_url: None,
@@ -2845,10 +2849,10 @@ mod tests {
                     "agent_ticking_enabled", "is_default",
                     "agent_review_default_interval_seconds",
                     "default_agent_executor",
-                    "agent_test_default_interval_seconds")
+                    "agent_test_default_interval_seconds", "default_work_type")
                    VALUES ($1,$1,$2,$3,'',0,$4,$5,true,true,true,true,true,
                            365,365,'{}',true,false,false,'UTC',true,'','',
-                           10800,10,true,false,10800,'local_runner',10800)"#,
+                           10800,10,true,false,10800,'local_runner',10800,'software')"#,
             )
             .bind(now)
             .bind(project_id)
@@ -3267,6 +3271,7 @@ mod tests {
             minio_endpoint_ssl: false,
             access_key_id: "kernel-access".to_owned(),
             secret_access_key: "kernel-secret".to_owned(),
+            session_token: String::new(),
             bucket_name: "uploads".to_owned(),
             region: "us-east-1".to_owned(),
             endpoint_url: Some(s3_base),
@@ -3357,6 +3362,7 @@ mod tests {
             minio_endpoint_ssl: false,
             access_key_id: "kernel-access".to_owned(),
             secret_access_key: "kernel-secret".to_owned(),
+            session_token: String::new(),
             bucket_name: "uploads".to_owned(),
             region: "us-east-1".to_owned(),
             endpoint_url: Some(s3_base),

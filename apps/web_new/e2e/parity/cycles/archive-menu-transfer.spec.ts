@@ -440,6 +440,50 @@ test(
 );
 
 test(
+  specTitle(["CYC-027"], "clicking an archived row's name opens its peek without navigating to detail"),
+  { tag: specTags(["CYC-027"]) },
+  async ({ driver, seed }) => {
+    const tag = `NF252 rowclick ${Date.now()}`;
+    const session = await signInSession(seed.email, seed.password);
+    const projectId = await serverCreateProjectWithFlags(
+      seed.workspaceSlug,
+      `${tag} project`,
+      parityProjectIdentifier("N252"),
+      { cycleView: true },
+      session
+    );
+    const name = `${tag} row click`;
+    const cycleId = await createArchivedCycle(seed, projectId, name, session);
+    await createLiveAnchor(seed, projectId, tag, session);
+    try {
+      await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
+      await openTabViaLiveSettled(driver, seed.workspaceSlug, projectId, [name]);
+
+      await driver.archivesCyclesClickRow(name);
+
+      await expect.poll(() => driver.archivesCyclesPeekParam(), { timeout: 30_000 }).toBe(cycleId);
+      await expect.poll(() => driver.archivesCyclesPeekName(), { timeout: 30_000 }).toBe(name);
+      // Stayed on the archives list; did not navigate to the detail route,
+      // which would render the gone-away view for an archived cycle.
+      expect(await driver.currentPath()).toContain(`/projects/${projectId}/archives/cycles`);
+      expect((await driver.currentPath()).replace(/\/$/, "")).not.toBe(
+        `/${seed.workspaceSlug}/projects/${projectId}/cycles/${cycleId}`
+      );
+      await driver.archivesCyclesClosePeek();
+      expect(await driver.archivesCyclesPeekParam()).toBe(null);
+
+      // The live detail address is only reachable via "Open in new tab":
+      // the menu still offers it for archived rows.
+      await driver.archivesCyclesOpenRowMenu(name);
+      const titles = (await driver.archivesCyclesMenuEntries()).map((entry) => entry.title);
+      expect(titles).toContain("Open in new tab");
+    } finally {
+      await serverCleanupProject(seed.workspaceSlug, projectId, session);
+    }
+  }
+);
+
+test(
   specTitle(["CYC-028"], "row menus offer state-valid entries in order, reachable on hover"),
   { tag: specTags(["CYC-028"]) },
   async ({ driver, seed }) => {

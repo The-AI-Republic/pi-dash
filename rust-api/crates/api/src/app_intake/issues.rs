@@ -88,7 +88,7 @@ use pidash_services::domain::issues::IssueFieldSet;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::orchestration::clock::ProjectClockPolicy;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::orchestration::StateRef;
 
 use super::{
@@ -141,6 +141,7 @@ pub struct IssueRow {
     pub assigned_runner_id: Option<Uuid>,
     pub created_via: Option<String>,
     pub agent_executor: Option<String>,
+    pub work_type: Option<String>,
     pub complexity_score: i32,
     pub workpad: String,
 }
@@ -182,6 +183,7 @@ impl IssueRow {
             assigned_runner_id: row.try_get("assigned_runner_id")?,
             created_via: row.try_get("created_via")?,
             agent_executor: row.try_get("agent_executor")?,
+            work_type: row.try_get("work_type")?,
             complexity_score: row.try_get("complexity_score")?,
             workpad: row.try_get("workpad")?,
         })
@@ -226,6 +228,7 @@ impl IssueRow {
             assigned_pod_id: self.assigned_pod_id,
             assigned_runner_id: self.assigned_runner_id,
             agent_executor: self.agent_executor.clone(),
+            work_type: self.work_type.clone(),
         }
     }
 }
@@ -323,6 +326,7 @@ fn issue_row_from(model: issue_entity::Model) -> IssueRow {
         assigned_runner_id: model.assigned_runner_id,
         created_via: model.created_via,
         agent_executor: model.agent_executor,
+        work_type: model.work_type,
         complexity_score: model.complexity_score,
         workpad: model.workpad,
     }
@@ -454,6 +458,7 @@ struct AnnotatedIssueRow {
     assigned_runner_id: Option<Uuid>,
     created_via: Option<String>,
     agent_executor: Option<String>,
+    work_type: Option<String>,
     complexity_score: i32,
     workpad: String,
     label_ids: Vec<Uuid>,
@@ -499,6 +504,7 @@ impl AnnotatedIssueRow {
                 assigned_runner_id: self.assigned_runner_id,
                 created_via: self.created_via,
                 agent_executor: self.agent_executor,
+                work_type: self.work_type,
                 complexity_score: self.complexity_score,
                 workpad: self.workpad,
             },
@@ -552,6 +558,7 @@ pub async fn fetch_issue_annotated(
             issue_entity::Column::AssignedRunnerId,
             issue_entity::Column::CreatedVia,
             issue_entity::Column::AgentExecutor,
+            issue_entity::Column::WorkType,
             issue_entity::Column::ComplexityScore,
             issue_entity::Column::Workpad,
         ])
@@ -634,6 +641,7 @@ struct DetailRow {
     i_assigned_runner_id: Option<Uuid>,
     i_created_via: Option<String>,
     i_agent_executor: Option<String>,
+    i_work_type: Option<String>,
     i_complexity_score: i32,
     i_workpad: String,
     label_ids: Vec<Uuid>,
@@ -695,6 +703,7 @@ impl DetailRow {
             assigned_runner_id: self.i_assigned_runner_id,
             created_via: self.i_created_via,
             agent_executor: self.i_agent_executor,
+            work_type: self.i_work_type,
             complexity_score: self.i_complexity_score,
             workpad: self.i_workpad,
         };
@@ -765,6 +774,7 @@ pub async fn fetch_detail(
         )
         .column_as(issue_entity::Column::CreatedVia, "i_created_via")
         .column_as(issue_entity::Column::AgentExecutor, "i_agent_executor")
+        .column_as(issue_entity::Column::WorkType, "i_work_type")
         .column_as(issue_entity::Column::ComplexityScore, "i_complexity_score")
         .column_as(issue_entity::Column::Workpad, "i_workpad")
         .column_as(label_ids_annotation(), "label_ids")
@@ -1401,6 +1411,7 @@ pub struct ValidatedIssue {
     pub type_id: Option<Option<Uuid>>,
     pub assigned_pod_id: Option<Option<Uuid>>,
     pub agent_executor: Option<Option<String>>,
+    pub work_type: Option<Option<String>>,
     pub git_work_branch: Option<String>,
     pub created_via: Option<Option<String>>,
     pub assignee_ids: Option<Vec<Uuid>>,
@@ -1686,6 +1697,13 @@ pub async fn validate_issue_fields(
                     .map(|choice| normalize_executor_write(Some(choice)));
         }
     }
+    if let Some(value) = input.get("work_type") {
+        if value.is_null() {
+            out.work_type = Some(None);
+        } else {
+            out.work_type = validate_char(errors, "work_type", value, 32, true, false).map(Some);
+        }
+    }
     if let Some(value) = input.get("git_work_branch") {
         match validate_char(errors, "git_work_branch", value, 128, true, false) {
             Some(branch)
@@ -1811,7 +1829,7 @@ pub struct IssueObjectValidation {
 
 /// Whether the stored issue is actively synced (`_issue_is_actively_synced`,
 /// `serializers/issue.py:63-76`): empty `external_source` short-circuits
-/// before any query.
+/// before any query. Git-only after PDASHOSS01-354.
 pub async fn is_synced(pool: &PgPool, issue: &IssueRow) -> Result<bool, Denial> {
     let Some(source) = issue.external_source.as_deref() else {
         return Ok(false);
@@ -1819,9 +1837,10 @@ pub async fn is_synced(pool: &PgPool, issue: &IssueRow) -> Result<bool, Denial> 
     if source.is_empty() {
         return Ok(false);
     }
-    // No `is_synced` annotation rides these handlers, so the sync tables
-    // decide.
-    use pidash_db::entity::{git_issue_syncs as git_entity, github_issue_syncs as gh_entity};
+    // No `is_synced` annotation rides these handlers, so the sync table
+    // decides (generic `git_issue_syncs`, provider='github' rows included;
+    // legacy GitHub tables sunset, PDASHOSS01-354).
+    use pidash_db::entity::git_issue_syncs as git_entity;
     let db = sea_conn(pool);
     let git = git_entity::Entity::find()
         .filter(git_entity::Column::IssueId.eq(issue.id))
@@ -1831,18 +1850,7 @@ pub async fn is_synced(pool: &PgPool, issue: &IssueRow) -> Result<bool, Denial> 
         .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-    if git.is_some() {
-        return Ok(true);
-    }
-    let github = gh_entity::Entity::find()
-        .filter(gh_entity::Column::IssueId.eq(issue.id))
-        .select_only()
-        .column(gh_entity::Column::IssueId)
-        .into_tuple::<Uuid>()
-        .one(&db)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    Ok(github.is_some())
+    Ok(git.is_some())
 }
 
 /// Table names for the sync probes above live behind Django model
@@ -1974,6 +1982,19 @@ pub async fn validate_issue_object(
             }
             // Store the normalized value (`attrs["agent_executor"]`).
             translated_executor = translated.stored;
+        }
+    }
+
+    // Work type (PDASHOSS01-234): `""` normalizes to the inherit state
+    // (`None`); a truthy key must be registered.
+    // The `""` → `None` normalization lands at the save.
+    if let Some(Some(work_type)) = validated.work_type.as_ref() {
+        if !work_type.is_empty() && !pidash_services::prompting::work_types::is_known(work_type) {
+            push_error(
+                errors,
+                "work_type",
+                pidash_services::prompting::work_types::unknown_work_type_message(),
+            );
         }
     }
 
@@ -2200,7 +2221,7 @@ async fn validate_executor(
         );
         return Ok(Some(ExecutorTranslation { stored: None }));
     }
-    let normalized = pidash_types::dispatch::normalize_executor_write(&value)
+    let normalized = pidash_types::agent_runs::normalize_executor_write(&value)
         .expect("known value parses")
         .value()
         .to_owned();
@@ -2359,6 +2380,11 @@ pub async fn apply_issue_update(
         .created_via
         .clone()
         .unwrap_or_else(|| issue.created_via.clone());
+    fields.work_type = validated
+        .work_type
+        .clone()
+        .map(|work_type| work_type.filter(|work_type| !work_type.is_empty()))
+        .unwrap_or_else(|| issue.work_type.clone());
     fields.updated_at = now;
     let prev_state = issue.state_id;
     let m2m_audit = (issue.created_by_id, issue.updated_by_id);
@@ -2881,33 +2907,43 @@ pub async fn blocker_summary(
                     )
                     .add(rel_entity::Column::WorkspaceId.eq(*workspace_id))
                     .add(
-                        Condition::any().add(
-                            Condition::all()
-                                .add(
-                                    Expr::col((rel_entity::Entity, rel_entity::Column::IssueId))
+                        Condition::any()
+                            .add(
+                                Condition::all()
+                                    .add(
+                                        Expr::col((
+                                            rel_entity::Entity,
+                                            rel_entity::Column::IssueId,
+                                        ))
                                         .eq(*issue_id),
-                                )
-                                .add(
-                                    Expr::col((
-                                        rel_entity::Entity,
-                                        rel_entity::Column::RelatedIssueId,
-                                    ))
-                                    .equals((issue_entity::Entity, issue_entity::Column::Id)),
-                                )
-                                .add(rel_entity::Column::RelationType.eq("blocked_by")),
-                        ),
-                    )
-                    .add(
-                        Condition::all()
-                            .add(
-                                Expr::col((rel_entity::Entity, rel_entity::Column::RelatedIssueId))
-                                    .eq(*issue_id),
+                                    )
+                                    .add(
+                                        Expr::col((
+                                            rel_entity::Entity,
+                                            rel_entity::Column::RelatedIssueId,
+                                        ))
+                                        .equals((issue_entity::Entity, issue_entity::Column::Id)),
+                                    )
+                                    .add(rel_entity::Column::RelationType.eq("blocked_by")),
                             )
                             .add(
-                                Expr::col((rel_entity::Entity, rel_entity::Column::IssueId))
-                                    .equals((issue_entity::Entity, issue_entity::Column::Id)),
-                            )
-                            .add(rel_entity::Column::RelationType.eq("blocking")),
+                                Condition::all()
+                                    .add(
+                                        Expr::col((
+                                            rel_entity::Entity,
+                                            rel_entity::Column::RelatedIssueId,
+                                        ))
+                                        .eq(*issue_id),
+                                    )
+                                    .add(
+                                        Expr::col((
+                                            rel_entity::Entity,
+                                            rel_entity::Column::IssueId,
+                                        ))
+                                        .equals((issue_entity::Entity, issue_entity::Column::Id)),
+                                    )
+                                    .add(rel_entity::Column::RelationType.eq("blocking")),
+                            ),
                     ),
             )
             .to_owned(),
@@ -3092,10 +3128,16 @@ pub async fn render_agent_status(
         .await
         .map_err(|_| Denial::ServerError)?;
     let run_count = runs.count;
+    let total_tokens = runs.total_tokens;
     let latest_row = runs.latest.as_ref().map(RenderedAgentRun::detail_row);
     let active_row = runs.active.as_ref().map(RenderedAgentRun::detail_row);
-    let status =
-        agent_status_to_representation(ticker, active_row.as_ref(), latest_row.as_ref(), run_count);
+    let status = agent_status_to_representation(
+        ticker,
+        active_row.as_ref(),
+        latest_row.as_ref(),
+        run_count,
+        total_tokens,
+    );
     match status {
         None => Ok(serde_json::Value::Null),
         Some(view) => serde_json::to_value(&view).map_err(|_| Denial::ServerError),
@@ -3262,6 +3304,7 @@ pub async fn render_issue_detail(
         "agent_executor".to_owned(),
         opt_string(&issue.agent_executor),
     );
+    map.insert("work_type".to_owned(), opt_string(&issue.work_type));
     map.insert(
         "label_ids".to_owned(),
         label_ids
@@ -4918,6 +4961,7 @@ fn day_comparison(name: &str) -> Option<(&'static str, &'static str)> {
     let (term, operator) = name.rsplit_once("__")?;
     let column = match term {
         "issue__created_at__date" => "\"issues\".\"created_at\"::date",
+        "issue__updated_at__date" => "\"issues\".\"updated_at\"::date",
         "issue__completed_at__date" => "\"issues\".\"completed_at\"::date",
         "issue__start_date" => "\"issues\".\"start_date\"",
         "issue__target_date" => "\"issues\".\"target_date\"",
@@ -4962,19 +5006,16 @@ fn compile_text_predicate(
     };
     let column = match term {
         "issue__created_at__date" => "\"issues\".\"created_at\"::date",
+        "issue__updated_at__date" => "\"issues\".\"updated_at\"::date",
         "issue__completed_at__date" => "\"issues\".\"completed_at\"::date",
         "issue__start_date" => "\"issues\".\"start_date\"",
         "issue__target_date" => "\"issues\".\"target_date\"",
         _ => return Ok(None),
     };
-    // Explicit bounds must parse as dates: Django's `get_prep_value`
-    // raises `ValidationError` (400 invalid detail) on garbage.
-    if text.parse::<chrono::NaiveDate>().is_err() && parse_datetime_param(text).is_none() {
-        return Err(Denial::BadError("Please provide valid detail".to_owned()).into_response());
-    }
     if operator == "=" {
-        // Single-value form on a date term: Django's `contains`
-        // lookup, i.e. LIKE with metacharacters escaped.
+        // Bare token: Django __contains is a text LIKE, no date validation
+        // (Django 200 for garbage / partial dates). The single-value form
+        // LIKEs the date text with metacharacters escaped.
         let escaped = text
             .replace('\\', "\\\\")
             .replace('%', "\\%")
@@ -4982,6 +5023,11 @@ fn compile_text_predicate(
         let holder = placeholder(next);
         binds.push(OwnedBind::Text(format!("%{escaped}%")));
         return Ok(Some(format!("{column}::text LIKE {holder}")));
+    }
+    // Explicit bounds must parse as dates: Django's `get_prep_value`
+    // raises `ValidationError` (400 invalid detail) on garbage.
+    if text.parse::<chrono::NaiveDate>().is_err() && parse_datetime_param(text).is_none() {
+        return Err(Denial::BadError("Please provide valid detail".to_owned()).into_response());
     }
     let holder = placeholder(next);
     binds.push(OwnedBind::Text(text.to_owned()));
@@ -5304,6 +5350,7 @@ pub async fn collection_create(
         assigned_pod_id: validated.assigned_pod_id,
         assigned_runner_id: None,
         agent_executor: validated.agent_executor.clone(),
+        work_type: validated.work_type.clone(),
     };
     // The m2m plan resolves pre-save (pure reads of validated input).
     let assignees = validated.assignee_ids.clone().unwrap_or_default();
@@ -5650,6 +5697,7 @@ struct ValidatedCreate {
     git_work_branch: String,
     created_via: Option<String>,
     agent_executor: Option<String>,
+    work_type: Option<String>,
     estimate_point_id: Option<Uuid>,
     type_id: Option<Uuid>,
     deleted_at: Option<DateTime<Utc>>,
@@ -5997,7 +6045,7 @@ async fn validate_issue_create(
         {
             // #2903: deprecated writes translate to local_runner.
             Some(
-                pidash_types::dispatch::normalize_executor_write(executor)
+                pidash_types::agent_runs::normalize_executor_write(executor)
                     .expect("choice passes")
                     .value()
                     .to_owned(),
@@ -6015,6 +6063,13 @@ async fn validate_issue_create(
                 "agent_executor".to_owned(),
                 serde_json::json!(["Not a valid string."]),
             );
+            None
+        }
+    };
+    let work_type = match opt_limited_string(issue_data, "work_type", 32) {
+        Ok(value) => value,
+        Err(message) => {
+            field_errors.insert("work_type".to_owned(), serde_json::json!([message]));
             None
         }
     };
@@ -6235,6 +6290,7 @@ async fn validate_issue_create(
         git_work_branch,
         created_via,
         agent_executor,
+        work_type,
         estimate_point_id,
         type_id,
         deleted_at,
@@ -6714,7 +6770,7 @@ fn opt_limited_string(
 /// * `cloud_agent` needs the instance kill switch
 ///   (`CLOUD_AGENT_ENABLED`); the per-run BYOK question is answered at
 ///   run creation, not here.
-/// * `managed_runner` evaluates `managed_runner_availability` in gate
+/// * `managed_runner` evaluates `pidash_agent_availability` in gate
 ///   order; the desktop-unenrolled case (`NO_RUNNER_FOR_PROJECT`) is
 ///   ACCEPTED (the client self-resolves on open). The deeper gates
 ///   (LLM profile, enrollment, online presence) need the managed-runner
@@ -6854,6 +6910,7 @@ struct CreatedRows {
     assigned_runner_id: Option<Uuid>,
     assigned_runner_detail: Option<serde_json::Value>,
     agent_executor: Option<String>,
+    work_type: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     created_by_id: Option<Uuid>,
@@ -6996,6 +7053,7 @@ async fn render_created_detail(
         .await
         .map_err(|_| Denial::ServerError.into_response())?,
         agent_executor: m.agent_executor,
+        work_type: m.work_type,
         created_at: m.created_at.with_timezone(&Utc),
         updated_at: m.updated_at.with_timezone(&Utc),
         created_by_id: m.created_by_id,
@@ -7095,6 +7153,7 @@ fn render_created_issue(rows: &CreatedRows, timezone: chrono_tz::Tz) -> serde_js
         "agent_executor".to_owned(),
         opt_string(&rows.agent_executor),
     );
+    issue.insert("work_type".to_owned(), opt_string(&rows.work_type));
     issue.insert(
         "label_ids".to_owned(),
         serde_json::Value::Array(rows.label_ids.iter().map(uuid_string).collect()),
@@ -7202,6 +7261,26 @@ mod tests {
             app_origin(&state).as_deref(),
             Some("https://app.example.invalid")
         );
+    }
+
+    #[test]
+    fn updated_at_predicates_hit_the_issue_updated_column() {
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 12).expect("day");
+        let (mut binds, mut next) = (Vec::new(), 1);
+        let sql = compile_predicate(
+            "issue__updated_at__date__gte",
+            &FilterValue::Day(day),
+            &mut binds,
+            &mut next,
+        )
+        .expect("compiles")
+        .expect("known key");
+        assert_eq!(sql, "\"issues\".\"updated_at\"::date >= $1::date");
+        let text = FilterValue::Text("2026-01-12".to_owned());
+        let sql = compile_predicate("issue__updated_at__date__lte", &text, &mut binds, &mut next)
+            .expect("compiles")
+            .expect("known key");
+        assert!(sql.starts_with("\"issues\".\"updated_at\"::date"), "{sql}");
     }
 
     #[test]

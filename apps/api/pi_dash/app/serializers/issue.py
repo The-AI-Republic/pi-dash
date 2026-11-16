@@ -7,6 +7,7 @@ from django.utils import timezone
 from django.core.validators import URLValidator
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import IntegrityError
+from django.db.models import Sum
 
 # Third Party imports
 from rest_framework import serializers
@@ -297,6 +298,20 @@ class IssueCreateSerializer(BaseSerializer):
         project_id = self.instance.project_id if self.instance is not None else self.context.get("project_id")
         validate_execution_target(attrs, issue=self.instance, user=user, project_id=project_id)
         normalize_issue_executor(attrs, instance=self.instance)
+
+        # ``work_type`` is the per-issue work-type override; NULL inherits the
+        # project's ``default_work_type``. Validated against the code-owned
+        # registry (PDASHOSS01-234).
+        if "work_type" in attrs:
+            if not attrs["work_type"]:
+                attrs["work_type"] = None  # normalize "" to the inherit state
+            else:
+                from pi_dash.prompting.work_types import WORK_TYPES
+
+                if attrs["work_type"] not in WORK_TYPES:
+                    raise serializers.ValidationError(
+                        {"work_type": f"unknown work type; expected one of {sorted(WORK_TYPES)}"}
+                    )
 
         # Validate description content for security
         if "description_html" in attrs and attrs["description_html"]:
@@ -1114,6 +1129,7 @@ class IssueSerializer(DynamicBaseSerializer):
             "assigned_pod_id",
             "assigned_runner_id",
             "agent_executor",
+            "work_type",
             "module_ids",
             "label_ids",
             "assignee_ids",
@@ -1347,9 +1363,20 @@ class IssueDetailSerializer(IssueSerializer):
         from pi_dash.orchestration.agent_phases import is_ticking_state
         from pi_dash.orchestration.scheduling import is_paused_state
 
-        # Re-tick is offered wherever the grant is honoured: in the bucket,
+        # Re-tick is offered wherever the press is honoured: in the bucket,
         # and on the Paused state the cap-hit auto-pause parks issues in.
-        can_re_tick = (is_ticking_state(obj.state) or is_paused_state(obj.state)) and ticker.cap_reached()
+        # Besides a spent pool, the failure policy's stops (needs-human /
+        # repeated failure, PDASHOSS01-183) also honour Re-tick — it re-arms
+        # the clock without granting, mirroring ``scheduling._on_retick``.
+        from pi_dash.db.models.issue_agent_ticker import TickerDisarmReason
+
+        failure_stopped = not ticker.enabled and ticker.disarm_reason in (
+            TickerDisarmReason.FAILURE_NEEDS_HUMAN,
+            TickerDisarmReason.REPEATED_FAILURE,
+        )
+        can_re_tick = (is_ticking_state(obj.state) or is_paused_state(obj.state)) and (
+            ticker.cap_reached() or failure_stopped
+        )
         return {
             "enabled": ticker.enabled,
             "user_disabled": ticker.user_disabled,
@@ -1442,10 +1469,13 @@ class IssueDetailSerializer(IssueSerializer):
             "assigned_at": self._serialize_datetime(run.assigned_at),
             "started_at": self._serialize_datetime(run.started_at),
             "ended_at": self._serialize_datetime(run.ended_at),
+            "cancel_requested_at": self._serialize_datetime(getattr(run, "cancel_requested_at", None)),
+            "cancel_reason": getattr(run, "cancel_reason", ""),
             "done_payload": run.done_payload,
             "error": run.error,
             "error_code": run.error_code,
-            "error_diagnostic": classify_run_error(run.error),
+            "failure_reason": run.failure_reason,
+            "error_diagnostic": classify_run_error(run.error, failure_reason=run.failure_reason),
             "llm_model": run.llm_model,
             "input_tokens": run.input_tokens,
             "output_tokens": run.output_tokens,
@@ -1492,6 +1522,13 @@ class IssueDetailSerializer(IssueSerializer):
             "active_run": self._serialize_agent_run(active_run, include_live_state=True),
             "latest_run": self._serialize_agent_run(latest_run, include_live_state=active_run is None),
             "run_count": runs.count(),
+            # Cumulative tokens across every run this issue has had.
+            # ``total_tokens`` is a generated column over ``AgentRun.usage``
+            # (PDASHOSS01-188), so this is a plain column aggregate. It is a
+            # floor, not an audited total: a run that died before reporting
+            # usage stores NULL and ``Sum`` skips it. 0, never None, so the
+            # tile never has to render a blank.
+            "total_tokens": runs.aggregate(total=Sum("total_tokens"))["total"] or 0,
         }
 
 

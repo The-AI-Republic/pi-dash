@@ -51,6 +51,8 @@
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
+use crate::util::containment::BackendKind;
+
 tokio::task_local! {
     /// Per-run identity for the agent process, scoped to the task that
     /// drives one `AgentRun` (see `Supervisor::handle_assign`). Every bridge
@@ -67,6 +69,12 @@ tokio::task_local! {
 #[derive(Debug, Clone)]
 pub struct RunEnv {
     pub run_id: uuid::Uuid,
+    /// Which process-containment backend this run uses (NEWPIDASH-255).
+    /// `login_shell_command` reads it to put the agent in its own process
+    /// group when the backend is [`BackendKind::ProcessGroup`]; the
+    /// cgroup backend needs no command-line help (the supervisor moves
+    /// the spawned pid after spawn).
+    pub backend: BackendKind,
 }
 
 /// Environment variable name the agent reads for its run id.
@@ -76,6 +84,13 @@ pub const RUN_ID_ENV: &str = "PIDASH_RUN_ID";
 fn apply_run_env(cmd: &mut Command) {
     if let Ok(env) = RUN_ENV.try_with(|e| e.clone()) {
         cmd.env(RUN_ID_ENV, env.run_id.to_string());
+        #[cfg(unix)]
+        if env.backend == BackendKind::ProcessGroup {
+            // Own process group so cleanup can signal the whole group.
+            // A child that `setsid`s escapes it (documented limit of
+            // the process-group backend).
+            cmd.process_group(0);
+        }
     }
 }
 
@@ -86,7 +101,7 @@ fn apply_run_env(cmd: &mut Command) {
 /// `export CODEX_HOME=...` or a `PATH` rewrite in their profile would silently
 /// win over the daemon. Passing our values under `PIDASH_*` names and
 /// re-exporting them here is the same trick the working directory has always
-/// used, extended to the managed runner's environment.
+/// used, extended to the Pi Dash Agent's environment.
 ///
 /// Every clause is a no-op when its `PIDASH_*` variable is unset, so a
 /// user-enrolled runner produces exactly the command line it always did.
@@ -102,7 +117,7 @@ exec "$@""#;
 /// Pi Dash-controlled environment for a spawned agent process.
 ///
 /// All fields are `None` for a user-enrolled runner, which is what keeps that
-/// path byte-identical. The managed runner fills them from its `CodexSection`
+/// path byte-identical. The Pi Dash Agent fills them from its `CodexSection`
 /// so the bundled engine reads Pi Dash's own config, finds the bundled CLI,
 /// and receives a credential that never touches `config.toml` or a command
 /// line.
@@ -374,9 +389,13 @@ mod tests {
     async fn run_env_scope_puts_run_id_on_the_child() {
         let run_id = uuid::Uuid::new_v4();
         let cmd = RUN_ENV
-            .scope(RunEnv { run_id }, async {
-                login_shell_command("claude", &[], None)
-            })
+            .scope(
+                RunEnv {
+                    run_id,
+                    backend: BackendKind::None,
+                },
+                async { login_shell_command("claude", &[], None) },
+            )
             .await;
         assert_eq!(
             env_value(&cmd, RUN_ID_ENV),

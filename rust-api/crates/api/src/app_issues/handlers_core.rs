@@ -128,13 +128,6 @@ use pidash_services::app_issues::serializers_detail::{
 };
 use pidash_services::app_issues::serializers_engage;
 use pidash_services::auth_session::shapes::{base_host, HostSettings};
-use pidash_services::dispatch::admission::{
-    managed_runner_availability, managed_runner_probe, LlmProfile, ManagedRunnerProbe,
-    HEARTBEAT_GRACE_SECS,
-};
-use pidash_services::dispatch::policy::{
-    cloud_agent_is_configured, managed_runner_is_enabled, UserFlags,
-};
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::issues as domain_issues;
 use pidash_services::domain::issues::IssueFieldSet as IssueSaveRow;
@@ -142,7 +135,12 @@ use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::orchestration::clock::ProjectClockPolicy;
 use pidash_services::read;
-use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason};
+use pidash_services::run_creation::executor_policy::{pidash_agent_is_enabled, UserFlags};
+use pidash_services::run_creation::pidash_agent_availability::{
+    pidash_agent_availability, pidash_agent_probe, LlmProfile, PidashAgentProbe,
+    HEARTBEAT_GRACE_SECS,
+};
+use pidash_types::agent_runs::{AgentExecutorKind, PidashAgentReason};
 use pidash_types::orchestration::StateRef;
 use pidash_types::WorkspaceId;
 
@@ -1725,6 +1723,15 @@ const FIELD_TABLE: &[FieldSpec] = &[
         allow_null: true,
     },
     FieldSpec {
+        name: "work_type",
+        shape: FieldShape::Char {
+            max_length: Some(32),
+            allow_blank: true,
+            branch_regex: false,
+        },
+        allow_null: true,
+    },
+    FieldSpec {
         name: "parent",
         shape: FieldShape::UuidPk(PkQueryset::Issues),
         allow_null: true,
@@ -2339,10 +2346,6 @@ async fn git_issue_synced(pool: &sqlx::PgPool, issue_id: &Uuid) -> Result<bool, 
     serializers_engage::git_issue_synced(&orm(pool), *issue_id).await
 }
 
-async fn github_issue_synced(pool: &sqlx::PgPool, issue_id: &Uuid) -> Result<bool, DbErr> {
-    serializers_engage::github_issue_synced(&orm(pool), *issue_id).await
-}
-
 async fn has_active_run(pool: &sqlx::PgPool, issue_id: &Uuid) -> Result<bool, DbErr> {
     serializers_create::has_active_run(&orm(pool), *issue_id).await
 }
@@ -2418,9 +2421,9 @@ pub(crate) async fn enrolled_runner(
     project_id: &Uuid,
     workspace_id: &Uuid,
 ) -> Result<bool, DbErr> {
-    let hit = managed_runner_probe(
+    let hit = pidash_agent_probe(
         &orm(pool),
-        ManagedRunnerProbe::Enrolled,
+        PidashAgentProbe::Enrolled,
         *user_id,
         *project_id,
         *workspace_id,
@@ -2436,9 +2439,9 @@ pub(crate) async fn online_runner(
     workspace_id: &Uuid,
 ) -> Result<bool, DbErr> {
     let bound = Utc::now() - chrono::Duration::seconds(HEARTBEAT_GRACE_SECS);
-    let hit = managed_runner_probe(
+    let hit = pidash_agent_probe(
         &orm(pool),
-        ManagedRunnerProbe::Online(bound),
+        PidashAgentProbe::Online(bound),
         *user_id,
         *project_id,
         *workspace_id,
@@ -2454,9 +2457,9 @@ pub(crate) async fn paused_runner(
     project_id: &Uuid,
     workspace_id: &Uuid,
 ) -> Result<bool, DbErr> {
-    let hit = managed_runner_probe(
+    let hit = pidash_agent_probe(
         &orm(pool),
-        ManagedRunnerProbe::Paused,
+        PidashAgentProbe::Paused,
         *user_id,
         *project_id,
         *workspace_id,
@@ -2566,6 +2569,12 @@ async fn run_validate(
         Some(Validated::Text(executor)) => Some(Some(executor.as_str())),
         _ => None,
     };
+    let work_type: Option<Option<&str>> = match validated.get("work_type") {
+        None => None,
+        Some(Validated::Null) => Some(None),
+        Some(Validated::Text(work_type)) => Some(Some(work_type.as_str())),
+        _ => None,
+    };
     let description_stripped: Option<Option<&str>> = match validated.get("description_stripped") {
         None => None,
         Some(Validated::Null) => Some(None),
@@ -2597,6 +2606,7 @@ async fn run_validate(
         assigned_pod,
         assigned_runner,
         agent_executor,
+        work_type,
         description_html: text("description_html"),
         description_binary: None,
         assignee_ids: assignee_ids.as_deref(),
@@ -2624,8 +2634,8 @@ async fn run_validate(
     });
 
     // Step 1 probes. `issue_is_actively_synced` short-circuits: empty /
-    // missing source runs nothing; otherwise git, then github iff git
-    // misses — ahead of the blocked-keys check either way.
+    // missing source runs nothing; otherwise git-only (PDASHOSS01-354) —
+    // ahead of the blocked-keys check either way.
     let synced_source = current
         .as_ref()
         .and_then(|row| row.external_source)
@@ -2634,13 +2644,6 @@ async fn run_validate(
     let instance_id = instance.map(|row| row.id).unwrap_or(Uuid::nil());
     let git_sync = if synced_source {
         git_issue_synced(pool, &instance_id)
-            .await
-            .map_err(|_| db_error())?
-    } else {
-        false
-    };
-    let github_sync = if synced_source && !git_sync {
-        github_issue_synced(pool, &instance_id)
             .await
             .map_err(|_| db_error())?
     } else {
@@ -2677,7 +2680,7 @@ async fn run_validate(
     let mut fetched_project: Option<ResolvedProject> = None;
     let mut llm_profile = LlmProfile {
         available: false,
-        reason_code: ManagedRunnerReason::LLM_CONFIG_MISSING.to_owned(),
+        reason_code: PidashAgentReason::LLM_CONFIG_MISSING.to_owned(),
     };
     let mut enrolled_exists = false;
     let mut online_exists = false;
@@ -2692,11 +2695,10 @@ async fn run_validate(
             match AgentExecutorKind::from_value(executor) {
                 None => executor_returns = true,
                 Some(kind) => {
-                    if kind == AgentExecutorKind::CloudAgent
-                        && !cloud_agent_is_configured(&state.settings().cloud_agent)
-                    {
-                        executor_returns = true;
-                    } else if kind == AgentExecutorKind::ManagedRunner {
+                    // P1 (agent naming convention): a `cloud_agent` write
+                    // on this non-pod path is normalized, not gated on
+                    // CLOUD_AGENT_ENABLED — it must not block the run.
+                    if kind == AgentExecutorKind::PidashAgent {
                         let project = match instance {
                             Some(row) => Some(row.resolved_project()),
                             None => match project_id {
@@ -2713,14 +2715,14 @@ async fn run_validate(
                         match project {
                             None => executor_returns = true,
                             Some(project) => {
-                                // `managed_runner_availability` gates in
+                                // `pidash_agent_availability` gates in
                                 // fixed order: the LLM seam runs only
                                 // past the instance switch + viewer
                                 // legs; enrolled/online only past a
                                 // usable profile (never in CE — the
                                 // profile is always unavailable — but
                                 // the structure mirrors the policy).
-                                if managed_runner_is_enabled(&state.settings().managed_runner)
+                                if pidash_agent_is_enabled(&state.settings().pidash_agent)
                                     && viewer.is_active
                                     && !viewer.is_bot
                                 {
@@ -2730,9 +2732,9 @@ async fn run_validate(
                                     llm_profile = LlmProfile {
                                         available: false,
                                         reason_code: if keyed {
-                                            ManagedRunnerReason::BYOK_UNSUPPORTED.to_owned()
+                                            PidashAgentReason::BYOK_UNSUPPORTED.to_owned()
                                         } else {
-                                            ManagedRunnerReason::LLM_CONFIG_MISSING.to_owned()
+                                            PidashAgentReason::LLM_CONFIG_MISSING.to_owned()
                                         },
                                     };
                                     if llm_profile.available {
@@ -2769,8 +2771,8 @@ async fn run_validate(
                                         }
                                     }
                                 }
-                                let verdict = managed_runner_availability(
-                                    &state.settings().managed_runner,
+                                let verdict = pidash_agent_availability(
+                                    &state.settings().pidash_agent,
                                     Some(&viewer),
                                     || llm_profile.clone(),
                                     enrolled_exists,
@@ -2779,7 +2781,7 @@ async fn run_validate(
                                 );
                                 if !verdict.available
                                     && verdict.reason_code
-                                        != ManagedRunnerReason::NO_RUNNER_FOR_PROJECT
+                                        != PidashAgentReason::NO_RUNNER_FOR_PROJECT
                                 {
                                     executor_returns = true;
                                 }
@@ -2895,13 +2897,11 @@ async fn run_validate(
         None => None,
     };
     let policy = ExecutorPolicy {
-        cloud: &state.settings().cloud_agent,
-        managed: &state.settings().managed_runner,
+        managed: &state.settings().pidash_agent,
         viewer: Some(&viewer),
     };
     let probes = ValidateProbes {
         git_sync_exists: &|| git_sync,
-        github_sync_exists: &|| github_sync,
         has_active_run: &|| run_value,
         filter_assignees: &|_| filtered_assignees.clone().unwrap_or_default(),
         filter_labels: &|_| filtered_labels.clone().unwrap_or_default(),
@@ -3487,7 +3487,7 @@ impl FromQueryResult for AnnotatedIssueRow {
     }
 }
 
-/// One looked-up issue: the 34 storable columns, the scalar annotations
+/// One looked-up issue: the 35 storable columns, the scalar annotations
 /// (each `None`/empty when its leg is absent), and the joined state pair
 /// for the ticker leg.
 struct CoreIssueRow {
@@ -3720,17 +3720,18 @@ async fn fetch_clock_policy(
     })
 }
 
-/// The issue's latest and active runs plus the run count through the
+/// The issue's latest and active runs, the run count and the cumulative
+/// token total (`issue.py:1376-1421`) through the
 /// SeaORM agent-run reader. The live-state rule (`include_live_state`, the
 /// observed-run guard) is applied by `agent_status_to_representation`.
 async fn fetch_agent_runs(
     pool: &sqlx::PgPool,
     issue_id: &Uuid,
-) -> Result<(Option<RenderedAgentRun>, Option<RenderedAgentRun>, i64), Denial> {
+) -> Result<(Option<RenderedAgentRun>, Option<RenderedAgentRun>, i64, i64), Denial> {
     let runs = agent_runs::issue_agent_runs(pool, *issue_id)
         .await
         .map_err(|_| Denial::ServerError)?;
-    Ok((runs.latest, runs.active, runs.count))
+    Ok((runs.latest, runs.active, runs.count, runs.total_tokens))
 }
 
 /// The cached blocker summary via the public read service: both
@@ -3783,7 +3784,8 @@ async fn render_detail_map(
         (Some(group), Some(name)) => Some(StateRef { group, name }),
         _ => None,
     };
-    let (latest, active, run_count) = fetch_agent_runs(pool, &row.save.id).await?;
+    let (latest, active, run_count, run_total_tokens) =
+        fetch_agent_runs(pool, &row.save.id).await?;
     let blockers = fetch_blocker_summary(pool, &row.save.id).await?;
     let synced = if row
         .save
@@ -3791,10 +3793,7 @@ async fn render_detail_map(
         .as_deref()
         .is_some_and(|source| !source.is_empty())
     {
-        let git = git_issue_synced(pool, &row.save.id)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-        git || github_issue_synced(pool, &row.save.id)
+        git_issue_synced(pool, &row.save.id)
             .await
             .map_err(|_| Denial::ServerError)?
     } else {
@@ -3857,6 +3856,7 @@ async fn render_detail_map(
         assigned_pod_id: assigned_pod_id.as_deref(),
         assigned_runner_id: assigned_runner_id.as_deref(),
         agent_executor: save.agent_executor.as_deref(),
+        work_type: save.work_type.as_deref(),
         module_ids: Some(module_refs),
         label_ids: Some(label_refs),
         assignee_ids: Some(assignee_refs),
@@ -3887,6 +3887,7 @@ async fn render_detail_map(
         latest_run: latest_row,
         active_run: active_row,
         run_count,
+        run_total_tokens,
         blockers: &blockers,
         assigned_runner_detail,
     };
@@ -4088,6 +4089,7 @@ fn assemble_new_issue(
         assigned_runner_id: v_uuid(validated, "assigned_runner_id"),
         // The normalized write (#2903): deprecated choices land local.
         agent_executor: filtered.agent_executor.clone().flatten(),
+        work_type: filtered.work_type.clone().flatten(),
     };
     Ok((
         row,
@@ -4139,6 +4141,11 @@ fn apply_validated_to_existing(
         // `attrs["agent_executor"]` holds the normalized write (#2903):
         // deprecated values land as local_runner.
         row.agent_executor = filtered.agent_executor.clone().flatten();
+    }
+    if validated.contains_key("work_type") {
+        row.work_type = v_text(validated, "work_type")
+            .filter(|work_type| !work_type.is_empty())
+            .map(str::to_owned);
     }
     if let Some(priority) = v_text(validated, "priority") {
         row.priority = priority.to_owned();
@@ -4428,6 +4435,7 @@ async fn render_put_body(
         git_work_branch: row.git_work_branch.as_str(),
         created_via: row.created_via.as_deref(),
         agent_executor: row.agent_executor.as_deref(),
+        work_type: row.work_type.as_deref(),
         point: row.point,
         deleted_at: deleted_at.as_deref(),
         created_at: created_at.as_str(),
@@ -5121,13 +5129,10 @@ async fn destroy_issue_inner(
     let Some(mut row) = fetch_destroy_issue(&pool, &slug, &tenant.project_id, &pk).await? else {
         return Ok(not_found_detail(NOT_FOUND_BODY, StatusCode::NOT_FOUND));
     };
-    // `GitIssueSync...exists() or GithubIssueSync...exists()` — short-circuit.
+    // Git-only synced guard (PDASHOSS01-354).
     let synced = git_issue_synced(&pool, &pk)
         .await
-        .map_err(|_| Denial::ServerError)?
-        || github_issue_synced(&pool, &pk)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+        .map_err(|_| Denial::ServerError)?;
     if synced {
         return Ok(not_found_detail(DESTROY_SYNCED_BODY, StatusCode::CONFLICT));
     }

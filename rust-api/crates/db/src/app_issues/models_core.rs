@@ -188,6 +188,7 @@ pub mod issue {
         "created_via",
         "assigned_pod_id",
         "agent_executor",
+        "work_type",
     ];
 
     /// `name` bound (`issue.py:137`, `max_length=255`).
@@ -204,6 +205,9 @@ pub mod issue {
     pub const CREATED_VIA_MAX_LENGTH: usize = 32;
     /// `agent_executor` bound (`issue.py:222-227`, `max_length=24`).
     pub const AGENT_EXECUTOR_MAX_LENGTH: usize = 24;
+    /// `work_type` bound (`issue.py`, `max_length=32`). No model choices:
+    /// the serializers validate against the code-owned work-type registry.
+    pub const WORK_TYPE_MAX_LENGTH: usize = 32;
 
     /// `point` validators (`issue.py:129`, 0..12 inclusive).
     pub const POINT_MIN: i32 = 0;
@@ -350,6 +354,7 @@ pub mod issue {
         pub created_via: Option<String>,
         pub assigned_pod_id: Option<uuid::Uuid>,
         pub agent_executor: Option<String>,
+        pub work_type: Option<String>,
     }
 
     impl std::fmt::Display for Issue {
@@ -1044,7 +1049,7 @@ mod tests {
     fn issue_columns_match_fixture() {
         let v = fixture();
         assert_eq!(owned(issue::COLUMNS), issue_column_names(&v));
-        assert_eq!(issue::COLUMNS.len(), 34);
+        assert_eq!(issue::COLUMNS.len(), 35);
         let table: &str = issue::TABLE;
         assert_eq!(table, v["issue"]["table"].as_str().unwrap());
         assert_eq!(table, "issues");
@@ -1097,6 +1102,7 @@ mod tests {
                 "created_via",
                 "assigned_pod_id",
                 "agent_executor",
+                "work_type",
             ]
         );
         // FK delete behavior, fixture `on_delete` per column.
@@ -1233,6 +1239,11 @@ mod tests {
             .unwrap()
             .contains("varchar(24)"));
         assert_eq!(issue::AGENT_EXECUTOR_MAX_LENGTH, 24);
+        assert!(issue_entry(&v, "work_type")["type"]
+            .as_str()
+            .unwrap()
+            .contains("varchar(32)"));
+        assert_eq!(issue::WORK_TYPE_MAX_LENGTH, 32);
         assert!(issue_entry(&v, "point")["type"]
             .as_str()
             .unwrap()
@@ -1755,6 +1766,7 @@ mod tests {
             created_via: None,
             assigned_pod_id: None,
             agent_executor: None,
+            work_type: None,
         };
         assert_eq!(row.to_string(), format!("Ship it <{}>", uuid::Uuid::nil()));
         let tag = label::Label {

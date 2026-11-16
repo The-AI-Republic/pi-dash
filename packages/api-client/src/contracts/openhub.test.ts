@@ -12,7 +12,7 @@ const QUOTA_BODY = {
   llm: {
     freeTokensUsed: 123_456,
     freeTokensLimit: 2_000_000,
-    freeModels: ["deepseek/deepseek-v4.1-flash-1017"],
+    freeModels: ["openhub_free_llm"],
   },
   apps: { freeCallsUsed: 5, freeCallsLimit: 150 },
   resetsAt: "2026-11-10T00:00:00+00:00",
@@ -38,7 +38,7 @@ describe("getUsageQuota", () => {
     expect(quota.plan).toBe("free");
     expect(quota.llm.freeTokensUsed).toBe(123_456);
     expect(quota.llm.freeTokensLimit).toBe(2_000_000);
-    expect(quota.llm.freeModels).toEqual(["deepseek/deepseek-v4.1-flash-1017"]);
+    expect(quota.llm.freeModels).toEqual(["openhub_free_llm"]);
     expect(quota.apps).toEqual({ freeCallsUsed: 5, freeCallsLimit: 150 });
     expect(quota.resetsAt).toBe("2026-11-10T00:00:00+00:00");
   });

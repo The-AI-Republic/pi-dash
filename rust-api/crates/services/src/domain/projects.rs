@@ -146,6 +146,10 @@ pub struct NewProject<'a> {
     pub default_executor: &'a str,
     pub dedicated_runner_lost_action: &'a str,
     pub members_can_edit_states: bool,
+    /// `Project.default_work_type` (PDASHOSS01-234), already resolved
+    /// by the caller (`Project.save()` fills a blank one from the repo
+    /// binding via `work_types::default_for_new_project`).
+    pub default_work_type: &'a str,
     pub created_by: Uuid,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -221,6 +225,7 @@ fn project_row(id: Uuid, p: &NewProject<'_>) -> projects::ActiveModel {
         // Django field default (db 0173 drops the DB default); the
         // writable project serializers may override it on create.
         dedicated_runner_lost_action: Set(p.dedicated_runner_lost_action.to_owned()),
+        default_work_type: Set(p.default_work_type.to_owned()),
     }
 }
 
@@ -557,6 +562,8 @@ pub struct ProjectUpdate<'a> {
     pub default_executor: &'a str,
     pub dedicated_runner_lost_action: &'a str,
     pub members_can_edit_states: bool,
+    /// `Project.default_work_type` (PDASHOSS01-234).
+    pub default_work_type: &'a str,
     pub workspace_id: Uuid,
     pub deleted_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
@@ -885,6 +892,9 @@ fn seed_project_row(id: Uuid, p: &SeedProject<'_>) -> projects::ActiveModel {
         default_agent_executor: Set(p.default_agent_executor.to_owned()),
         members_can_edit_states: Set(true),
         dedicated_runner_lost_action: Set(DEDICATED_RUNNER_LOST_ACTION_DEFAULT.to_owned()),
+        // `Project.save()` fills a blank one from the repo binding; the
+        // seed's repo_url is empty, so `general`.
+        default_work_type: Set("general".to_owned()),
     }
 }
 
@@ -970,6 +980,9 @@ fn demo_project_row(id: Uuid, p: &DemoProject<'_>) -> projects::ActiveModel {
         agent_ticking_enabled: Set(true),
         default_agent_executor: Set(p.default_agent_executor.to_owned()),
         dedicated_runner_lost_action: Set(DEDICATED_RUNNER_LOST_ACTION_DEFAULT.to_owned()),
+        // `Project.save()` fills a blank one from the repo binding; the
+        // dummy project has no repo_url, so `general`.
+        default_work_type: Set("general".to_owned()),
         ..Default::default()
     }
 }
@@ -2711,8 +2724,8 @@ mod tests {
         }
         assert_eq!(
             insert.matches(", ").count(),
-            2 * 46,
-            "47 columns, 47 values"
+            2 * 47,
+            "48 columns, 48 values"
         );
     }
 
@@ -2818,6 +2831,7 @@ mod tests {
             default_executor: "x",
             dedicated_runner_lost_action: "fail_to_backlog",
             members_can_edit_states: false,
+            default_work_type: "software",
             workspace_id: ws,
             deleted_at: None,
             updated_at: now,
@@ -3339,6 +3353,7 @@ mod tests {
             default_executor: "local_runner",
             dedicated_runner_lost_action: "fail_to_backlog",
             members_can_edit_states: true,
+            default_work_type: "software",
             created_by: actor,
             created_at: now,
             updated_at: now,
@@ -3469,6 +3484,7 @@ mod tests {
             default_executor: "x",
             dedicated_runner_lost_action: "fail_to_backlog",
             members_can_edit_states: false,
+            default_work_type: "software",
             workspace_id: ws,
             deleted_at: None,
             updated_at: now,
