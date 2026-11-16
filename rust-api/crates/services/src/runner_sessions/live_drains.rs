@@ -292,7 +292,9 @@ async fn mint_attempt(
             break;
         }
     }
-    Ok(crate::runner_runs::capacity::mint_for_capabilities(&caps_value))
+    Ok(crate::runner_runs::capacity::mint_for_capabilities(
+        &caps_value,
+    ))
 }
 
 async fn write_assignment(

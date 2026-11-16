@@ -56,7 +56,10 @@ pub fn mint_attempt_token() -> Uuid {
 /// Create a fresh attempt (token + protocol) from session capabilities.
 /// All new assignments call this; redelivery preserves the stored token instead.
 pub fn mint_for_capabilities(capabilities: &Value) -> (Uuid, i16) {
-    (mint_attempt_token(), protocol_for_capabilities(capabilities))
+    (
+        mint_attempt_token(),
+        protocol_for_capabilities(capabilities),
+    )
 }
 
 /// u64 revision or None when invalid. Rejects bools, floats,
@@ -175,6 +178,225 @@ pub fn is_fresh_capacity_wait(
     };
     let reported = reported.with_timezone(&Utc);
     (now - reported).num_seconds() <= CAPACITY_FRESH_SECS
+}
+
+/// Apply poll's held-token/capacity snapshot (T2).
+/// This is pure validation for the poll path: it returns the reap entry
+/// (possibly stripped) and the cw to persist. The actual DB write is done
+/// by the caller under Runner → Run lock order.
+/// Returns (reap_entry, Option<cw>) where cw is the new capacity_wait to store.
+pub fn apply_poll_snapshot(
+    status_entry: &Map<String, Value>,
+    stored_wait: Option<&Value>,
+    stored_token: Option<Uuid>,
+    stored_protocol: i16,
+    session_id: Uuid,
+    now: DateTime<Utc>,
+) -> (Map<String, Value>, Option<Value>) {
+    let mut reap_entry = status_entry.clone();
+    let held_raw = reap_entry
+        .get("in_flight_run")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    if held_raw.is_empty() {
+        return (reap_entry, None);
+    }
+    let _in_flight = match Uuid::parse_str(&held_raw) {
+        Ok(u) => u,
+        Err(_) => return (reap_entry, None),
+    };
+    // For protocol-1, need token check
+    let held_token_raw = reap_entry.get("held_assignment_token").cloned();
+    let snapshot = reap_entry.get("capacity").cloned();
+    let snapshot_dict: Option<&Map<String, Value>> = match snapshot.as_ref() {
+        Some(Value::Object(m)) => Some(m),
+        _ => None,
+    };
+    if held_token_raw.is_none() && snapshot.is_none() {
+        return (reap_entry, None);
+    }
+    // Only protocol-1 has fencing
+    if stored_protocol != PROTOCOL_MACHINE_QUEUE {
+        return (reap_entry, None);
+    }
+    let provided = held_token_raw.as_ref().and_then(|v| {
+        if v.is_null() {
+            None
+        } else {
+            cap_parse_uuid_from_value(v)
+        }
+    });
+    if !token_matches(stored_token, provided) {
+        // Strip in_flight so reaper doesn't suppress
+        reap_entry.insert("in_flight_run".to_string(), Value::Null);
+        return (reap_entry, None);
+    }
+    // Validate snapshot
+    if snapshot_dict.is_none() {
+        return (reap_entry, None);
+    }
+    let snapshot_dict = snapshot_dict.unwrap();
+    // revision: if present must parse, else use stored
+    let stored_rev = stored_wait
+        .and_then(|v| v.get("revision"))
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            stored_wait
+                .and_then(|v| v.get("revision"))
+                .and_then(Value::as_i64)
+                .map(|i| i as u64)
+        });
+    let revision: Option<u64> = if let Some(raw_rev) = snapshot_dict.get("revision") {
+        if raw_rev.is_null() {
+            stored_rev
+        } else {
+            match parse_revision(raw_rev) {
+                Some(r) => Some(r),
+                None => return (reap_entry, None),
+            }
+        }
+    } else {
+        stored_rev
+    };
+    if let Some(rev) = revision {
+        if let Some(stored) = stored_rev {
+            if rev < stored {
+                return (reap_entry, None);
+            }
+        }
+    }
+    let raw_phase = snapshot_dict
+        .get("phase")
+        .and_then(Value::as_str)
+        .map(|s| s.to_owned());
+    if let Some(ref phase) = raw_phase {
+        if phase != PHASE_WAITING && phase != PHASE_PREPARING {
+            return (reap_entry, None);
+        }
+    }
+    // queued_at
+    let queued_at: Option<String> = snapshot_dict
+        .get("queued_at")
+        .and_then(|v| if v.is_null() { None } else { Some(v.clone()) })
+        .map(|v| v.as_str().unwrap_or("").to_owned())
+        .or_else(|| {
+            stored_wait
+                .and_then(|v| v.get("queued_at"))
+                .and_then(Value::as_str)
+                .map(|s| s.to_owned())
+        });
+    if let Some(q) = snapshot_dict.get("queued_at") {
+        if !q.is_null() {
+            if let Some(s) = q.as_str() {
+                if parse_rfc3339_str(s).is_none() {
+                    return (reap_entry, None);
+                }
+            } else {
+                return (reap_entry, None);
+            }
+        }
+    }
+    let queue_position: Option<u64> = if let Some(v) = snapshot_dict.get("queue_position") {
+        if v.is_null() {
+            None
+        } else {
+            match validate_count(v, false, true) {
+                Some(n) => Some(n),
+                None => return (reap_entry, None),
+            }
+        }
+    } else {
+        stored_wait
+            .and_then(|v| v.get("queue_position"))
+            .and_then(Value::as_u64)
+    };
+    let active: Option<u64> = if let Some(v) = snapshot_dict.get("active") {
+        if v.is_null() {
+            None
+        } else {
+            match validate_count(v, true, false) {
+                Some(n) => Some(n),
+                None => return (reap_entry, None),
+            }
+        }
+    } else {
+        stored_wait
+            .and_then(|v| v.get("active"))
+            .and_then(Value::as_u64)
+    };
+    let limit: Option<u64> = if let Some(v) = snapshot_dict.get("limit") {
+        if v.is_null() {
+            None
+        } else {
+            match validate_count(v, false, true) {
+                Some(n) if (CAPACITY_MIN_LIMIT..=CAPACITY_MAX_LIMIT).contains(&n) => Some(n),
+                _ => return (reap_entry, None),
+            }
+        }
+    } else {
+        stored_wait
+            .and_then(|v| v.get("limit"))
+            .and_then(Value::as_u64)
+    };
+    let stored_phase = stored_wait
+        .and_then(|v| v.get("phase"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let phase = raw_phase.unwrap_or_else(|| {
+        if stored_phase.is_empty() {
+            PHASE_WAITING.to_owned()
+        } else {
+            stored_phase.clone()
+        }
+    });
+    let phase = if stored_phase == PHASE_PREPARING && phase == PHASE_WAITING {
+        PHASE_PREPARING.to_owned()
+    } else {
+        phase
+    };
+    let queue_position = if phase == PHASE_PREPARING {
+        None
+    } else {
+        queue_position
+    };
+    let mut cw = serde_json::json!({
+        "phase": phase,
+        "assignment_token": stored_token.map(|u| Value::String(u.to_string())).unwrap_or(Value::Null),
+        "session_id": session_id.to_string(),
+        "revision": revision,
+        "queued_at": queued_at.map(Value::String).unwrap_or(Value::Null),
+        "reported_at": rfc3339_now_string_pub(now),
+        "queue_position": queue_position.map(Value::from).unwrap_or(Value::Null),
+        "active": active.map(Value::from).unwrap_or(Value::Null),
+        "limit": limit.map(Value::from).unwrap_or(Value::Null),
+    });
+    if phase == PHASE_PREPARING {
+        if let Some(admission) = stored_wait
+            .and_then(|v| v.get("admission_id"))
+            .and_then(Value::as_str)
+        {
+            cw.as_object_mut().unwrap().insert(
+                "admission_id".to_string(),
+                Value::String(admission.to_owned()),
+            );
+        }
+    }
+    (reap_entry, Some(cw))
+}
+
+fn cap_parse_uuid_from_value(v: &Value) -> Option<Uuid> {
+    v.as_str().and_then(|s| Uuid::parse_str(s).ok())
+}
+fn parse_rfc3339_str(s: &str) -> Option<DateTime<Utc>> {
+    let normalized = s.replace('Z', "+00:00");
+    chrono::DateTime::parse_from_rfc3339(&normalized)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
+}
+fn rfc3339_now_string_pub(now: DateTime<Utc>) -> String {
+    now.to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
 }
 
 #[cfg(test)]

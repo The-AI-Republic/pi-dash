@@ -1434,9 +1434,15 @@ pub fn plan_redeliver(facts: &RedeliverFacts) -> Option<Map<String, Value>> {
     );
     // T1: redelivery preserves the attempt token/protocol (never mints).
     if let Some(tok) = assign.assignment_token {
-        msg.insert("assignment_token".to_string(), Value::String(tok.to_string()));
+        msg.insert(
+            "assignment_token".to_string(),
+            Value::String(tok.to_string()),
+        );
     }
-    msg.insert("assignment_protocol".to_string(), Value::from(assign.assignment_protocol));
+    msg.insert(
+        "assignment_protocol".to_string(),
+        Value::from(assign.assignment_protocol),
+    );
     Some(msg)
 }
 
