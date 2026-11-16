@@ -1,8 +1,8 @@
 # Code-grounded design review
 
-Date: 2026-11-13. Baseline: `24b546d2d`. Reviewed artifact: [design.md](design.md).
+Original review: 2026-11-13 at `24b546d2d`; scope rechecked 2026-11-15 against OSS `5852f02e7` and private `d3ad2a3`. Reviewed artifact: [design.md](design.md).
 
-Verdict: the two-queue architecture fits current cloud runner selection. The initial draft understated delivery, ownership and teardown work; those findings are now resolved at specification level by [implementation.md](implementation.md). [tasks.md](tasks.md) maps the remaining work to implementation and validation. No product code has been changed or runtime guarantees verified by this review.
+Verdict: the two-queue architecture fits current cloud runner selection. The initial draft understated delivery, ownership and teardown work; those findings are now resolved at specification level by [implementation.md](implementation.md). [tasks.md](tasks.md) maps the remaining work to implementation and validation. No product code has been changed or runtime guarantees verified by this review. Python citations below record historical evidence, not implementation targets; current scope is Rust API/native cloud migrations plus daemon and new frontend.
 
 Priority: P1 means a correctness requirement before enabling the queue; P2 means a necessary scope or compatibility correction. Findings concern gaps between the proposed design and existing code, not assertions that every existing path is already defective in normal use.
 
@@ -78,9 +78,13 @@ Correction: keep one live coordinator authoritative for the effective limit, use
 
 ## Closure and implementation validation obligations
 
+2026-11-15 scope correction: repository inspection confirms that the private Rust release uses `pidash-migrate up` from its own image (`rust-cloud/migrations.md`, `docker-compose.rust.ecr.yaml`). Earlier “Django owns schema until switchover” project text does not justify a Python runtime implementation. The revised contract requires a native-only migration registry extension and Rust runtime/new-frontend delivery; historical Django sources remain verification inputs only. No Python feature-parity or old-web delivery gate remains.
+
+Latest-main correction: NEWPIDASH-262 adds an assigned-never-started sweep and scheduler in-flight exemption after 180 seconds. The queue must amend both rules for authenticated fresh capacity waits, while preserving poll-only heartbeat liveness and recovery for stale attempts. These requirements and tests are now included in implementation.md §3 and tasks T2.
+
 The specification decisions are closed: SQLite owns receipt/outbox durability, the protocol uses typed decisions and assignment UUIDs, lock order is Runner → Session → Run, process scopes use a guard with durable stop receipts, and the product cap covers issue runs. The checks below remain required implementation evidence, not prerequisites for handing off the design.
 
-1. Prove consistent session/runner/run locking and response semantics in both Python and Rust. Add tests for session eviction, admission retries and stale attempt events.
+1. Prove consistent session/runner/run locking and response semantics in the Rust backend. Add tests for session eviction, admission retries and stale attempt events.
 2. Implement and test the selected platform-specific managed-process containment/recovery contract. Fail closed on uncertain survivors; do not equate worker return with confirmed process exit.
 3. Verify durable-store crash points, including receipt-before-ACK and terminal-state replacement, with injected failures. SQLite storage and its settings are specified; correctness still requires implementation tests.
 4. Audit every assignment builder and new-daemon lifecycle sender for assignment tokens, not just the main pod drain.

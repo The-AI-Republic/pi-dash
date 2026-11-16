@@ -1,6 +1,6 @@
 # Implementation contract and handoff
 
-Status: ready for implementation, 2026-11-13. No feature code has been implemented.
+Status: ready for Rust-only backend implementation; scope revised 2026-11-15. No feature code has been implemented.
 
 Read [design.md](design.md), then this contract, then [tasks.md](tasks.md). [review.md](review.md) records the source findings that motivated these requirements. This document fixes the remaining choices and is normative for wire formats, ordering, recovery and compatibility. The task list's unchecked boxes represent implementation work, not unresolved product decisions.
 
@@ -8,7 +8,7 @@ Read [design.md](design.md), then this contract, then [tasks.md](tasks.md). [rev
 
 | Decision | Required implementation |
 | --- | --- |
-| Scope | All cloud-assigned issue AgentRuns served by one daemon; chats on other runners excluded. |
+| Scope | Rust API + native Rust cloud migrator + shared daemon/IPC/TUI + new frontend. All cloud-assigned issue AgentRuns served by one daemon; chats on other runners excluded. |
 | Default | `daemon.max_concurrent_agent_runs = 3`; valid range 1–65535; shared validation and `u16` storage. |
 | Selection | Cloud retains runner selection. The daemon never changes binding. |
 | Scheduling | FIFO by durable local sequence among ready entries; temporarily unready entries retain their sequence. |
@@ -50,11 +50,23 @@ Validation timeout is 5 seconds. Retry temporary failures after 1, 2, 4, 8, 16 a
 
 ## 3. Backend schema and protocol
 
-Add these AgentRun columns in Django migrations and the matching Rust database migration/entity path:
+Add these AgentRun columns through a new native SeaORM migration in `private-pi-dash/rust-cloud/crates/cloud-migration/`, with matching entity/query updates in OSS `rust-api/`. Do not add or change Django models or migrations for this feature:
 
 - `assignment_token`: nullable UUID, indexed only if needed by existing query shape; mint UUIDv4 under the assignment transaction for every fresh binding, including binding again to the same runner.
 - `assignment_protocol`: small integer, default 0; values 0 (legacy) and 1 (machine queue). Set from the assigning runner's negotiated capability. This is immutable for an assignment attempt.
 - `capacity_wait`: nullable JSON object, schema below.
+
+### Native migration ownership and deployment
+
+The implementation spans two repositories: OSS `rust-api/` owns runtime entities/queries; `private-pi-dash/rust-cloud/crates/cloud-migration/` owns the production upgrade executable. The current private release already runs `pidash-migrate up` before API/worker startup. It is not necessary to implement a Django capacity endpoint or create a Django migration to add these fields.
+
+Add a **native-only** migration, ordered after the shipped legacy ports, to the existing `pidash_cloud_schema_migrations` history. The current migrator enumerates `PORTS`, derives known versions/pending status from them, and checks matching Django history for each port. Therefore this task includes introducing an explicit native-only registry/variant and updating `status`, `check`, `up`, known-version validation and pending accounting to include it. Preserve every existing port name, ordering and Django-history import rule. Do not add a fictitious Django `(app, migration)` entry or stamp a nonexistent Django migration. Do not repurpose the OSS `rust-api/crates/db/src/migrations.rs` private-prefix discovery helper as a second upgrade runner.
+
+Keep `sources.json` and `verify-source` checks for historical Django migration sources intact. Native-only schema is tested against explicit expected DDL/state, not falsely compared to an unchanged Django model. If another issue has already added compatible fields before this work lands, verify their types, nullability, defaults and constraints and adopt them; reject incompatible definitions rather than silently stamping success. Do not edit previously shipped migration source to retrofit the feature.
+
+Use additive nullable token/capacity fields, `assignment_protocol SMALLINT NOT NULL DEFAULT 0` with values constrained to 0 or 1, and a non-null JSON capability list defaulting to `[]` on RunnerSession. Preserve persistent defaults so existing writers that omit new columns keep working. Retain the migrator's baseline rejection, schema-owner credential requirement, advisory serialization and transaction/error discipline. Add tests for upgrade, rerun, rollback, adoption of matching preexisting columns, wrong-column rejection, status/check and DML-only application credentials. Test the public Rust entities against the upgraded database; add explicit expectations for native-owned fields instead of weakening general schema checks.
+
+Release ordering is **native upgrade → Rust API/workers with the capability → queue-capable daemon → new frontend**. Prepare/review the OSS and private changes together, and update the private OSS pin only to the compatible runtime commit. Cloud CI/contract fixtures must apply the native upgrade before running new endpoint tests. Historic Django baseline provisioning may remain as a test fixture/bootstrap dependency, but feature code, models and migration files in Python are out of scope. Native-only schema also means older native binaries can reject an unknown history version: document compatible rollback images rather than promising arbitrary downgrade. No live deployment is part of this implementation task unless separately authorized.
 
 Record negotiated queue support on RunnerSession and expose it to the matcher through the runner's current active session. Session open request and welcome response each have an additive `capabilities: string[]` containing `machine_run_queue_v1`. A new daemon enables managed admission only when both parties advertise it. Existing sessions default to protocol 0. Assignment builders, direct-assignment paths and redelivery must share token/protocol construction helpers.
 
@@ -103,7 +115,7 @@ Recheck current session, token, status and cancellation on every admit retry. Ne
 
 ### Locks, lifecycle and polling
 
-Use the lock order **Runner → active RunnerSession → AgentRun** where all three are needed. Update session open to lock Runner before replacing its session; poll bookkeeping, capacity operations, matcher and relevant lifecycle mutations must follow the same order when acquiring multiple locks. Reuse the existing bounded transaction waits. No HTTP/Redis I/O or background dispatch happens while those locks are held. Dispatch effects remain after commit. Add a concurrent session-open/admit/poll/cancel test to both backend suites.
+Use the lock order **Runner → active RunnerSession → AgentRun** where all three are needed. Update session open to lock Runner before replacing its session; poll bookkeeping, capacity operations, matcher and relevant lifecycle mutations must follow the same order when acquiring multiple locks. Reuse the existing bounded transaction waits. No HTTP/Redis I/O or background dispatch happens while those locks are held. Dispatch effects remain after commit. Add a concurrent session-open/admit/poll/cancel test to the Rust backend suite.
 
 For protocol-1 attempts, all lifecycle writes—including Accept, Started, completion, cancellation, failure, approval and resume transitions—require the assignment token. Authentication plus current run ownership is still required. Require current session for admission/Accept/Started; terminal outbox retries may use the current reopened session with the original attempt token, since the attempt survives reconnect. Old tokenless requests cannot modify a protocol-1 attempt even if an old session token remains valid. Protocol-0 attempts retain their existing compatibility behavior. Do not base enforcement solely on a client-supplied version string.
 
@@ -112,6 +124,8 @@ Give the worker a typed `accept_for_execution` call. After workspace preparation
 Runner polls add `held_assignment_token` and a defaulted `capacity` snapshot carrying the current phase/revision/counts. Validate token and session before persisting phase or allowing a reported in-flight ID to suppress reaping. During received-but-not-yet-durable state, report the held ID/token as `receiving` for missing-run protection but do not exempt it indefinitely from offline recovery. Never ACK until durable receipt. `receiving` is not a UI queue position.
 
 Refresh waiting visibility through every normal poll, independent of `agent_observability_v1`. Coalesce position-change reports to at most one per runner per second. A capacity report is fresh for 90 seconds by server receipt time. Agent-silence reaping excludes fresh waiting reports matching current attempt; offline recovery remains unchanged. A stale capacity report is displayed as last known; it alone neither fails a run nor suppresses existing recovery.
+
+Latest-main integration requirement (NEWPIDASH-262): Rust `runner_runs/sweeps_chat.rs` now reaps assigned/never-started runs after 180 seconds, and `tasks_ticker/fire_binding.rs::is_in_flight_at` treats such aged assignments as no longer in flight. Update **both** decisions using the same authenticated, current-attempt fresh-capacity predicate. A healthy protocol-1 run waiting for capacity stays nonterminal and in flight beyond 180 seconds, so no replacement scheduled run is created. Missing/stale/wrong-token reports retain the existing bounded recovery. Recheck the predicate under the relevant row locks before finalization, not just in the candidate query. Keep the latest behavior that session-open alone does not refresh runner heartbeat; only actual polls establish liveness. Add tests at the 180-second boundary and well beyond it, with fresh versus expired reports and concurrent cancel/reassignment.
 
 ## 4. Queue and transport integration
 
@@ -163,10 +177,10 @@ Add to shared IPC `DaemonInfo` an optional `run_queue` object: `mode`, `limit`, 
 
 `MachineRunLimitSet { limit }` returns `MachineRunLimitResult { configured_limit, effective_limit, active, waiting, applied }`. The daemon serializes the config write with existing config mutation helpers, then updates the actor before replying. On write failure return an error and preserve both old values. On daemon crash after write, next startup uses the persisted value. `MachineRunQueueRecover` returns a fresh snapshot plus per-scope diagnostics without prompts/secrets.
 
-TUI adds a machine-level section outside the per-runner editor. Limit-only edits do not call restart-and-verify. Cloud issue/run serializers add nullable `capacity_wait` containing presentation fields only: phase, position, queued time, last report time, active and limit. Do not expose admission IDs, session IDs or cross-workspace runner lists. Update API-client contracts, `apps/web_new` waiting UI and the current web AgentRun detail surface where each consumes the serializer. Cloud capacity waiting is a separate branch from cloud `dispatch_wait`; use “Waiting for machine capacity” and retain the usual cancel action, with no pin-release action introduced by this feature.
+TUI adds a machine-level section outside the per-runner editor. Limit-only edits do not call restart-and-verify. Cloud issue/run serializers add nullable `capacity_wait` containing presentation fields only: phase, position, queued time, last report time, active and limit. Do not expose admission IDs, session IDs or cross-workspace runner lists. Update API-client contracts and `apps/web_new` waiting UI. Existing old-web clients must tolerate the additive response fields, but receive no new capacity UI in this feature. Cloud capacity waiting is a separate branch from cloud `dispatch_wait`; use “Waiting for machine capacity” and retain the usual cancel action, with no pin-release action introduced by this feature.
 
 ## 8. Handoff completion rule
 
 The implementation agent owns code, migrations, protocol parity, tests and user-facing documentation through the entire checklist. Native library selection, module layout within the named components and precise frontend component extraction are ordinary engineering choices, not additional product approvals. If a supported platform cannot satisfy a process-scope guarantee, keep the feature disabled there with an explicit diagnostic and report it as incomplete; do not claim end-to-end delivery.
 
-The design is complete when read with this contract. Implementation is complete only when the checks in [tasks.md](tasks.md) pass and all required platforms/backends are covered. No remaining test gate is being represented as an already-proven runtime property.
+The design is complete when read with this contract. Implementation is complete only when the checks in [tasks.md](tasks.md) pass and the Rust backend, native cloud migrator and all required daemon platforms are covered. No remaining test gate is being represented as an already-proven runtime property.

@@ -4,7 +4,7 @@ Status: implementation-ready specification; implementation has not started.
 
 Reviewed against additional transport, process and chat paths on 2026-11-13. See [review.md](review.md) for findings and evidence. The decisions are closed in [implementation.md](implementation.md), with the end-to-end checklist in [tasks.md](tasks.md). Read all three specification files for handoff; implementation.md governs concrete wire, storage and recovery contracts. The corrections below are design requirements, not claims that the current code already provides these guarantees.
 
-Research baseline: `pi-dash` main at `24b546d2d`, 2026-11-13. Paths below are relative to the repository root. This design covers the open-source daemon and both Python and Rust backend implementations present in this checkout; it does not assert which backend is deployed in production.
+Scope revision: 2026-11-15, checked against `pi-dash/main` at `5852f02e7` and `private-pi-dash/main` at `d3ad2a3`. The feature targets the Rust backend, shared daemon/IPC/TUI and new frontend only. Cloud schema upgrades use the native SeaORM `pidash-migrate` executable in the private repository. No Python runtime, Django model/migration, or old-web implementation is required. Earlier Python references below are historical research evidence only. Repository paths are OSS-relative unless explicitly prefixed `private-pi-dash/`.
 
 ## 1. Problem and intended behavior
 
@@ -32,9 +32,11 @@ Default: **three concurrent AgentRun executions per daemon**, independent of the
 - Durable receipt, runner reservation, cancellation, reconnect and restart behavior.
 - A configurable concurrency cap, applied live without restarting active work.
 - Local and cloud visibility of waiting for machine capacity.
-- Matching lifecycle behavior in Python and Rust backends.
+- Rust runtime lifecycle behavior and native cloud schema upgrades, with additive compatibility for existing clients.
 
 ### Not included
+
+- Implementing capacity APIs or lifecycle changes in Python, adding Django model/migration files, or adding old-web capacity presentation.
 
 - Resource sampling, peak memory/CPU/disk statistics, automatic sizing, or hard OS resource quotas.
 - Changing cloud selection, machine-aware cloud scheduling, work stealing, priorities, preemption, or queue reordering.
@@ -146,11 +148,11 @@ Keep the top-level state model:
 | Executing / approval or reauth | Existing lifecycle status | Yes | Yes while worker retained |
 | Terminal or fully stopped human-input pause | Existing lifecycle status | Existing rules | No |
 
-Introduce the optional capability `machine_run_queue_v1`, advertised by the cloud session handshake. Implement it in both backend variants before enabling the new daemon behavior against that cloud.
+Introduce the optional capability `machine_run_queue_v1`, advertised by the cloud session handshake. Implement it in the Rust backend and enable it only after the native schema upgrade succeeds. Legacy Python servers do not advertise it.
 
 ### Capacity report and admission
 
-Add the authenticated runner endpoint `POST /api/v1/runner/runs/<id>/capacity/`, with actions `waiting`, `admit`, `defer`, and `reconcile`, using the exact request/response and idempotency contract in implementation.md §3. Reuse runner authentication and ownership checks, but add an explicit active-session fence: ordinary lifecycle authorization currently proves runner identity, not that the caller owns the current polling session. Carry the session ID and reject evicted sessions before admission. Use consistent session/runner/run locking order with session-open and dispatch in both backends.
+Add the authenticated runner endpoint `POST /api/v1/runner/runs/<id>/capacity/`, with actions `waiting`, `admit`, `defer`, and `reconcile`, using the exact request/response and idempotency contract in implementation.md §3. Reuse runner authentication and ownership checks, but add an explicit active-session fence: ordinary lifecycle authorization currently proves runner identity, not that the caller owns the current polling session. Carry the session ID and reject evicted sessions before admission. Use consistent session/runner/run locking order with session-open and dispatch in the Rust backend.
 
 Add a typed request/response method on `RunnerCloudClient` for this endpoint. It cannot use `RunnerOut::send` or `post_run_lifecycle` as an admission oracle: they return `()` and discard successful response bodies; the WS variant confirms channel enqueue only. Admission, reconciliation and receipt decisions must reach the coordinator as typed outcomes. A duplicate admission request must revalidate current ownership, cancellation, session and attempt under lock and return a complete current decision, never only `{duplicate: true}` or a cached obsolete permission to proceed. Persist request IDs for retry; `RunnerOut::send` currently generates a new envelope ID for each call.
 
@@ -160,11 +162,11 @@ Add a typed request/response method on `RunnerCloudClient` for this endpoint. It
 - Accepted reports only update matching assigned attempts. Add a nullable UUID `assignment_token` to AgentRun and mint it inside every new assignment transaction, including reassignments to the same runner. Include it in every assignment builder and session-open redelivery and echo it in these requests. Validate it under the row lock. A redelivery retains the same token; a new assignment gets a new one. Old daemons can ignore the additive field. Old assigned rows need token initialization under lock before new-daemon reconciliation/redelivery.
 - Ignore older report revisions for the same attempt. Late waiting reports cannot overwrite preparing/running/terminal phases. Return explicit terminal, canceled or stale-assignment dispositions.
 
-Persist a dedicated, nullable capacity-wait JSON object on AgentRun (same schema in Django and SeaORM), including phase, attempt token, last revision and server receipt time. Use server time for freshness; local time is informational. Clear it on requeue/new assignment and terminal transitions; `Accept` clears the waiting presentation while retaining any timing data needed for wait-duration metrics. Do not overload `agent_metadata`, which is already populated for agent session identity at run start.
+Persist a dedicated, nullable capacity-wait JSON object on AgentRun (native migration plus matching SeaORM entity fields), including phase, attempt token, last revision and server receipt time. Use server time for freshness; local time is informational. Clear it on requeue/new assignment and terminal transitions; `Accept` clears the waiting presentation while retaining any timing data needed for wait-duration metrics. Do not overload `agent_metadata`, which is already populated for agent session identity at run start.
 
 Queue position is a snapshot, not a guaranteed ETA. Report position changes with coalescing, and refresh waiting phase through runner polls. Include only that run's position and machine totals in workspace-visible responses; do not leak other projects' prompts, issue identifiers or runner identities across workspace permissions.
 
-Use the UUID token rather than `assigned_at`: existing assignment payloads do not contain that timestamp, and time precision should not define execution identity. Carry the token on new-daemon `Accept`, `RunStarted`, terminal events and durable terminal retries too; capacity fencing alone cannot stop a delayed terminal event from affecting a later attempt. Keep legacy tokenless behavior only for legacy senders, with explicit capability/version validation in both backends.
+Use the UUID token rather than `assigned_at`: existing assignment payloads do not contain that timestamp, and time precision should not define execution identity. Carry the token on new-daemon `Accept`, `RunStarted`, terminal events and durable terminal retries too; capacity fencing alone cannot stop a delayed terminal event from affecting a later attempt. Keep legacy tokenless behavior only for legacy senders, with explicit capability/version validation in the Rust backend.
 
 ### Heartbeats and reapers
 
@@ -172,7 +174,8 @@ Use the UUID token rather than `assigned_at`: existing assignment payloads do no
 - Capacity waiting is normal and has no agent-silence timeout. Stall detection must exclude a fresh, same-attempt `waiting_for_capacity` report; clear stale prior-run agent snapshots on admission/receipt.
 - Preparing and running retain applicable existing health checks. Do not invent agent events to keep a waiting run alive.
 - Offline detection remains authoritative. A disconnected machine can still lose assignments under the existing offline grace. Its restored queue must discard runs the cloud has already finalized.
-- Audit assignment-age limits, lease refreshes, cancellation redelivery, session-open recovery and terminal reconciliation in both backends. A fresh waiting report must not be treated as a missing execution; it must not grant immunity to genuinely offline machines.
+- Audit assignment-age limits, lease refreshes, cancellation redelivery, session-open recovery and terminal reconciliation in the Rust backend. A fresh waiting report must not be treated as a missing execution; it must not grant immunity to genuinely offline machines.
+- Latest main adds a 180-second assigned/never-started reaper and scheduler in-flight cutoff (NEWPIDASH-262). Both must recognize healthy current-attempt capacity waiting beyond that cutoff. Otherwise the queue would lose assignments or create duplicate scheduled work. See implementation.md §3 for the shared predicate and tests.
 
 Do not send the retired `RunQueued` notice or introduce new `WAITING_FOR_WORKTREE` rows.
 
@@ -238,7 +241,7 @@ TUI runner rows and run details show **Waiting for machine capacity · #2**. Mac
 
 ## 11. Compatibility and rollout
 
-1. Ship backend schema, capability advertisement, endpoints, serialization and reaper changes in Python and Rust. Old daemons retain their current immediate-start behavior.
+1. Ship the native schema upgrade in `private-pi-dash/rust-cloud/crates/cloud-migration/`, then Rust capability advertisement, endpoints, serialization and reaper changes. Old daemons retain their current immediate-start behavior.
 2. Ship daemon storage, coordinator, lifecycle integration and IPC, with TUI support. Enable queuing only after the cloud advertises the capability. For older clouds, explicitly expose “local run queue unsupported by this server”; retain legacy execution behavior rather than silently claiming the limit is enforced.
 3. Current configuration has one daemon `cloud_url` and one shared HTTP transport; different workspaces do not imply different clouds. Remove mixed-cloud scheduling from v1. Cache capability for that cloud, refresh it on session open/reopen, and propagate it through both `WelcomePayload` and the constructed `ServerMsg::Welcome`. Once a daemon has durably queued work, capability loss or an incomplete backend rollout must freeze new admissions with an explicit unsupported/reconnecting state; it cannot switch that queue to unbounded legacy execution. Legacy mode is only a startup choice with no managed queue entries. HTTP is the v1 supported queue transport; legacy WS requires a real request/response admission protocol before it can enable this capability.
 4. Exercise restart/cancel/reaper scenarios in staging before enabling by default for supported servers. Default remains 3 once active.
@@ -248,12 +251,12 @@ No cloud matcher algorithm change is required. Cloud availability still means an
 
 ## 12. Implementation sequence
 
-1. **Cloud contract:** capability, assignment-token/protocol fields and capacity-wait schema, ownership/attempt validation, waiting/admit/defer/reconcile endpoint actions, serializers, heartbeat phase and reaper guards in both backends. Keep legacy worktree endpoint behavior unchanged.
+1. **Cloud contract:** capability, assignment-token/protocol fields and capacity-wait schema, ownership/attempt validation, waiting/admit/defer/reconcile endpoint actions, serializers, heartbeat phase and reaper guards in the Rust backend. Keep legacy worktree endpoint behavior unchanged.
 2. **Coordinator and store:** FIFO actor, durable receipt, attempt-aware dedupe, cancellation, active permit accounting, limit changes and crash-safe transitions. Add proposed modules under `runner/src/daemon/` and paths under `runner/src/util/paths.rs`.
 3. **Daemon integration:** construct once in supervisor, thread through hot-add paths, intercept `Assign` before worker startup, preserve transport ACK ordering, adapt heartbeat state, distinguish waiting from started shutdown entries, and ensure completion/teardown releases permits.
 4. **Recovery:** reconcile before startup, assigned redelivery, terminal-pending handling, cancellation replay, orphan-process handling, store corruption and offline expiry behavior.
 5. **TUI and cloud visibility:** shared IPC additions in `pidash-ipc`, live settings handler, machine summary, per-run waiting presentation and frontend types. Do not trigger a service restart for a limit-only edit.
-6. **Rollout validation:** Python/Rust contract parity, end-to-end daemon tests and upgrade/downgrade documentation.
+6. **Rollout validation:** native migration upgrade/adoption tests, Rust HTTP contracts, end-to-end daemon tests and upgrade/downgrade documentation. No Python feature-parity requirement.
 
 ## 13. Acceptance and test matrix
 
@@ -276,6 +279,7 @@ No cloud matcher algorithm change is required. Cloud availability still means an
 | Graceful restart with running and waiting work | Running follows restart failure policy; confirmed waiting restores in order. |
 | Offline expiry while waiting | Cloud finalization wins; reconnect cannot launch that entry. |
 | Fresh heartbeat with prolonged capacity wait | No false missing-run, assignment-stall or agent-silence failure. |
+| Healthy capacity wait exceeds the latest 180-second assigned cutoff | No reaping and no replacement scheduler run; stale/wrong-token waits retain bounded recovery. |
 | Terminal/cancel report arrives before delayed waiting report | No status/phase regression. |
 | Waiting run and chat on same runner | Reservation blocks new chat from taking the working directory lane. |
 | Old/new cloud and daemon combinations | Explicit capability behavior; no use of retired worktree state. |
@@ -288,7 +292,7 @@ No cloud matcher algorithm change is required. Cloud availability still means an
 | Completion channel closes before verified process exit | No premature permit release; teardown/recovery path owns the slot. |
 | Capability disappears while local work is queued | No fallback that bypasses the configured limit. |
 
-Use fake execution workers and controllable barriers to measure active preparation/execution count; do not rely on timing sleeps alone. Add backend contract tests for Python/Rust parity and UI tests for live setting changes, waiting labels and stale snapshots. Crash-injection tests should cover every persistence/ACK/admission boundary.
+Use fake execution workers and controllable barriers to measure active preparation/execution count; do not rely on timing sleeps alone. Add backend contract tests against the Rust API and UI tests for live setting changes, waiting labels and stale snapshots. Crash-injection tests should cover every persistence/ACK/admission boundary.
 
 ## 14. Future work
 
