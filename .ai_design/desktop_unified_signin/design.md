@@ -1,7 +1,7 @@
 # Design: one sign-in for the desktop app, the CLI and the engine
 
 - **Issue:** PIDESKAPP-225, to be rewritten as this design's epic.
-- **Status:** revision 1, a draft for product-owner review. The product owner decided U-1 to U-4 on 2026-11-16 (section 3). The rules in section 6 follow from those decisions and still need review; section 12 lists them.
+- **Status:** revision 1, **approved** by the product owner on 2026-11-16. U-1 to U-4 (section 3) and the rules in section 12 are decided.
 - **Dates:** revision 1 on 2026-11-16.
 - **Code baseline:** pi-dash `main` at `6e29c6157`. Paths are relative to that tree.
 - **Terms:** "engine" is the Pi Dash Agent (`AGENTS.md`); this design keeps BE's word for the credential and its states, which are stored values.
@@ -243,7 +243,7 @@ Prior work to reuse: pi-dash#2458 (server handoff), pi-dash#2459 (runner parking
 
 ## 12. Rules for review
 
-These rules follow from U-1 to U-4, but the product owner did not state them. They need confirming:
+These rules follow from U-1 to U-4. The product owner confirmed them on 2026-11-16:
 
 1. Only a sign-out the user made counts: `pidash auth logout`, the last workspace's logout, the app's sign-out, or removing the computer on the web. These do not sign the app out:
    - a daemon that stops answering;
