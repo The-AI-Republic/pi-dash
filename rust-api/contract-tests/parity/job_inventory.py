@@ -285,6 +285,16 @@ NON_PI_DASH_TASKS = {
 # row went once Python PR #541 reached main.
 RUST_AHEAD_BEAT_ENTRIES = {}
 
+# Django beat entries Rust retired on purpose: the agent-naming P3
+# deleted the cloud plane (spec section 5.2), so Rust schedules neither
+# cloud entry while Django's celery.py still does. Each diffs RETIRED
+# (not drift) while Rust has no entry (a Rust entry of that name is
+# compared normally); Django dropping it fails the check (delete the row).
+RETIRED_BEAT_ENTRIES = {
+    "cloud-agent-scan-queued-runs": "W-cloud-agent",
+    "cloud-agent-sweep-stale-runs": "W-cloud-agent",
+}
+
 # Beat cadence the Rust entry must equal, rendered deterministically.
 def _rust_cadence_string(entry: dict) -> str:
     cadence = entry["cadence"]
@@ -351,6 +361,19 @@ def diff_jobs(django: dict, rust: dict) -> dict:
             )
             continue
         rust_entry = rust_schedule.get(entry["name"])
+        if rust_entry is None and entry["name"] in RETIRED_BEAT_ENTRIES:
+            beat_rows.append(
+                {
+                    "entry": entry["name"],
+                    "task": entry["task"],
+                    "django_cadence": entry["cadence"],
+                    "rust_cadence": "-",
+                    "task_owner": owner.get(entry["task"], "-"),
+                    "disposition": "RETIRED",
+                    "detail": f"retired-in-rust ({RETIRED_BEAT_ENTRIES[entry['name']]})",
+                }
+            )
+            continue
         if rust_entry is None:
             beat_rows.append(
                 {
@@ -592,9 +615,13 @@ def cmd_check(args: argparse.Namespace) -> int:
         print(f"stale EXPECTED.md entry (fix landed? update the file): {line}")
         failures += 1
     for row in diff["beat"]:
-        if row["disposition"] != "OWNED":
+        if row["disposition"] not in ("OWNED", "RETIRED"):
             print(f"beat drift: {row['entry']} :: {row['detail']}")
             failures += 1
+    django_beat = {entry["name"] for entry in django["beat"]}
+    for name in sorted(set(RETIRED_BEAT_ENTRIES) - django_beat):
+        print(f"stale RETIRED_BEAT_ENTRIES row (Django dropped it? delete the row): {name}")
+        failures += 1
     owned = sum(1 for row in diff["tasks"] if row["disposition"] == "OWNED")
     proxied = sum(1 for row in diff["tasks"] if row["disposition"] == "PROXIED")
     beat_owned = sum(1 for row in diff["beat"] if row["disposition"] == "OWNED")
