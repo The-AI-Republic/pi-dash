@@ -912,6 +912,21 @@ mod tests {
             .collect()
     }
 
+    /// NEWPIDASH-241 T2: upgrade a captured Django run body with the
+    /// additive `capacity_wait` key at its wire position (after
+    /// `dispatch_wait`); order-preserving like the wire shape.
+    fn with_capacity_wait(body: &Value) -> Value {
+        let obj = body.as_object().expect("object");
+        let mut upgraded = serde_json::Map::new();
+        for (k, v) in obj {
+            upgraded.insert(k.clone(), v.clone());
+            if k == "dispatch_wait" {
+                upgraded.insert("capacity_wait".to_string(), Value::Null);
+            }
+        }
+        Value::Object(upgraded)
+    }
+
     fn dt(text: &str) -> DateTime<Utc> {
         text.parse().expect("fixture datetime")
     }
@@ -1066,7 +1081,7 @@ mod tests {
             keys(&body["pod_detail"]),
             ["id", "name", "is_default", "project", "project_identifier"]
         );
-        assert_eq!(body.to_string(), gold.to_string());
+        assert_eq!(body.to_string(), with_capacity_wait(gold).to_string());
     }
 
     #[test]
@@ -1081,7 +1096,7 @@ mod tests {
         assert_eq!(keys(&body), RUN_WIRE_FIELDS);
         // The list pins `error_diagnostic: null` even with `error` set…
         assert_eq!(body["error_diagnostic"], Value::Null);
-        assert_eq!(body.to_string(), gold.to_string());
+        assert_eq!(body.to_string(), with_capacity_wait(gold).to_string());
     }
 
     #[test]

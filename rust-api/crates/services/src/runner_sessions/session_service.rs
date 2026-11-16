@@ -1532,6 +1532,11 @@ mod tests {
             );
             expected = expected.replace(old, new);
         }
+        // NEWPIDASH-241 T1: three native-owned columns appended beyond the Django baseline.
+        expected = expected.replace(
+            "\"agent_run\".\"ended_at\" FROM \"agent_run\"",
+            "\"agent_run\".\"ended_at\", \"agent_run\".\"assignment_token\", \"agent_run\".\"assignment_protocol\", \"agent_run\".\"capacity_wait\" FROM \"agent_run\"",
+        );
         assert_eq!(actual, expected);
     }
 
@@ -3054,7 +3059,10 @@ mod tests {
             Some(fx()["redeliver_cancel_first"]["msg"].clone())
         );
         // Assign branch: reconstructed run_config replays the frame.
+        // NEWPIDASH-241 T1: the frame carries `assignment_protocol` beyond the Django baseline.
         let msg = fx()["redeliver_skip_cancel"]["msg"].clone();
+        let mut expected = msg.as_object().cloned().expect("msg object");
+        expected.insert("assignment_protocol".to_string(), Value::from(0));
         let mut run_config = Map::new();
         run_config.insert("repo_url".to_string(), msg["repo_url"].clone());
         run_config.insert("repo_ref".to_string(), msg["repo_ref"].clone());
@@ -3082,7 +3090,7 @@ mod tests {
                 }),
             })
             .map(Value::Object),
-            Some(msg)
+            Some(Value::Object(expected))
         );
         // Nothing to redeliver.
         assert_eq!(

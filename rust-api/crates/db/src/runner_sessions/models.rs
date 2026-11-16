@@ -114,7 +114,11 @@ pub mod runner_session {
     /// order); the row lock is held for the open transaction's
     /// lifetime, which is why Redis I/O stays outside the
     /// `atomic()` block (`:156-167`).
-    pub const OPEN_PRIOR_SQL: &str = "SELECT \"runner_session\".\"id\", \"runner_session\".\"runner_id\", \"runner_session\".\"protocol_version\", \"runner_session\".\"created_at\", \"runner_session\".\"last_seen_at\", \"runner_session\".\"revoked_at\", \"runner_session\".\"revoked_reason\" FROM \"runner_session\" WHERE (\"runner_session\".\"revoked_at\" IS NULL AND \"runner_session\".\"runner_id\" = $1) ORDER BY \"runner_session\".\"created_at\" DESC LIMIT 1 FOR UPDATE";
+    ///
+    /// NEWPIDASH-241 T1: the projection appends the native-owned
+    /// `capabilities` column (last in field order) beyond the Django
+    /// baseline capture; the term order is unchanged.
+    pub const OPEN_PRIOR_SQL: &str = "SELECT \"runner_session\".\"id\", \"runner_session\".\"runner_id\", \"runner_session\".\"protocol_version\", \"runner_session\".\"created_at\", \"runner_session\".\"last_seen_at\", \"runner_session\".\"revoked_at\", \"runner_session\".\"revoked_reason\", \"runner_session\".\"capabilities\" FROM \"runner_session\" WHERE (\"runner_session\".\"revoked_at\" IS NULL AND \"runner_session\".\"runner_id\" = $1) ORDER BY \"runner_session\".\"created_at\" DESC LIMIT 1 FOR UPDATE";
     // NOTE: the session-open insert, revoke and touch statements lived
     // here; they moved to `pidash_services::domain::tokens`
     // (`open_runner_session`, `revoke_runner_session`,
@@ -126,13 +130,13 @@ pub mod runner_session {
     /// returns 204 (`:304-306`), so callers treat "no row" as
     /// success. `$1` session id, `$2` runner id. `.get()` clears
     /// `Meta.ordering` and caps at `LIMIT 21`.
-    pub const DELETE_GET_SQL: &str = "SELECT \"runner_session\".\"id\", \"runner_session\".\"runner_id\", \"runner_session\".\"protocol_version\", \"runner_session\".\"created_at\", \"runner_session\".\"last_seen_at\", \"runner_session\".\"revoked_at\", \"runner_session\".\"revoked_reason\" FROM \"runner_session\" WHERE (\"runner_session\".\"id\" = $1 AND \"runner_session\".\"revoked_at\" IS NULL AND \"runner_session\".\"runner_id\" = $2) LIMIT 21";
+    pub const DELETE_GET_SQL: &str = "SELECT \"runner_session\".\"id\", \"runner_session\".\"runner_id\", \"runner_session\".\"protocol_version\", \"runner_session\".\"created_at\", \"runner_session\".\"last_seen_at\", \"runner_session\".\"revoked_at\", \"runner_session\".\"revoked_reason\", \"runner_session\".\"capabilities\" FROM \"runner_session\" WHERE (\"runner_session\".\"id\" = $1 AND \"runner_session\".\"revoked_at\" IS NULL AND \"runner_session\".\"runner_id\" = $2) LIMIT 21";
     /// Poll-bookkeeping lookup (`views/sessions.py:339`):
     /// `get(id=sid, runner=runner)` — note: no `revoked_at` filter;
     /// a revoked row is fetched and rejected with its reason
     /// (`:345-352`). `$1` session id, `$2` runner id. Ordering
     /// cleared, `LIMIT 21`, like every `.get()`.
-    pub const POLL_GET_SQL: &str = "SELECT \"runner_session\".\"id\", \"runner_session\".\"runner_id\", \"runner_session\".\"protocol_version\", \"runner_session\".\"created_at\", \"runner_session\".\"last_seen_at\", \"runner_session\".\"revoked_at\", \"runner_session\".\"revoked_reason\" FROM \"runner_session\" WHERE (\"runner_session\".\"id\" = $1 AND \"runner_session\".\"runner_id\" = $2) LIMIT 21";
+    pub const POLL_GET_SQL: &str = "SELECT \"runner_session\".\"id\", \"runner_session\".\"runner_id\", \"runner_session\".\"protocol_version\", \"runner_session\".\"created_at\", \"runner_session\".\"last_seen_at\", \"runner_session\".\"revoked_at\", \"runner_session\".\"revoked_reason\", \"runner_session\".\"capabilities\" FROM \"runner_session\" WHERE (\"runner_session\".\"id\" = $1 AND \"runner_session\".\"runner_id\" = $2) LIMIT 21";
     /// Active-session id lookup
     /// (`services/outbox.py:207-213`): `filter(runner_id=runner_id,
     /// revoked_at__isnull=True).values_list("id",
@@ -293,8 +297,12 @@ pub mod runner_session {
 
         #[test]
         fn columns_match_fixture_in_order() {
-            assert_eq!(ts::owned_cols(COLUMNS), ts::columns(&session_fixture()));
-            assert_eq!(COLUMNS.len(), 7);
+            // NEWPIDASH-241 T1: one native-owned column appended beyond the Django baseline.
+            let fixture_cols = ts::columns(&session_fixture());
+            let owned = ts::owned_cols(COLUMNS);
+            assert_eq!(&owned[..fixture_cols.len()], fixture_cols.as_slice());
+            assert_eq!(COLUMNS.len(), 8);
+            assert_eq!(&COLUMNS[fixture_cols.len()..], ["capabilities"]);
         }
 
         #[test]

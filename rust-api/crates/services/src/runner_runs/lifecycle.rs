@@ -2526,9 +2526,11 @@ mod tests {
 
     #[test]
     fn lock_sql_match_django_tails() {
+        // NEWPIDASH-241 T1: agent_run projections carry 45 columns
+        // (42 Django baseline + 3 native-owned); tails are unchanged.
         let pause = lock_run_for_pause_sql();
         assert!(pause.starts_with("SELECT \"agent_run\".\"id\", "), "prefix");
-        assert_eq!(select_runs(&pause), vec![("\"agent_run\"".to_owned(), 42)]);
+        assert_eq!(select_runs(&pause), vec![("\"agent_run\"".to_owned(), 45)]);
         assert!(
             pause.ends_with(
                 " FROM \"agent_run\" WHERE (\"agent_run\".\"id\" = $1 AND \
@@ -2541,7 +2543,7 @@ mod tests {
         let requeue = lock_run_for_requeue_sql();
         assert_eq!(
             select_runs(&requeue),
-            vec![("\"agent_run\"".to_owned(), 42)]
+            vec![("\"agent_run\"".to_owned(), 45)]
         );
         assert!(
             requeue.ends_with(
@@ -2560,7 +2562,7 @@ mod tests {
         assert_eq!(
             select_runs(&reread),
             vec![
-                ("\"agent_run\"".to_owned(), 42),
+                ("\"agent_run\"".to_owned(), 45),
                 ("\"issues\"".to_owned(), 35),
             ]
         );
@@ -2576,7 +2578,7 @@ mod tests {
         assert_eq!(
             select_runs(&drain),
             vec![
-                ("\"agent_run\"".to_owned(), 42),
+                ("\"agent_run\"".to_owned(), 45),
                 ("\"issues\"".to_owned(), 35),
                 ("\"projects\"".to_owned(), 47),
                 ("\"states\"".to_owned(), 18),
@@ -2596,7 +2598,7 @@ mod tests {
         assert_eq!(
             select_runs(&failure),
             vec![
-                ("\"agent_run\"".to_owned(), 42),
+                ("\"agent_run\"".to_owned(), 45),
                 ("\"issues\"".to_owned(), 35),
                 ("\"projects\"".to_owned(), 47),
             ]

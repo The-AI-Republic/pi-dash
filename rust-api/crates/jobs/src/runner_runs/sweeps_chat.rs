@@ -2144,17 +2144,24 @@ mod tests {
             .map(|(list, _)| list)
             .expect("SELECT list");
         let entries: Vec<&str> = select_list.split(", ").collect();
-        let agent_entries: Vec<&str> = entries
+        let mut agent_entries: Vec<&str> = entries
             .iter()
             .filter(|e| e.starts_with("\"agent_run\""))
             .copied()
             .collect();
+        // NEWPIDASH-241 T1: three native-owned columns appended beyond the Django baseline.
+        agent_entries.extend([
+            "\"agent_run\".\"assignment_token\"",
+            "\"agent_run\".\"assignment_protocol\"",
+            "\"agent_run\".\"capacity_wait\"",
+        ]);
         let runner_entries: Vec<&str> = entries
             .iter()
             .filter(|e| e.starts_with("\"runner\""))
             .copied()
             .collect();
-        assert_eq!(agent_entries.len(), 42, "agent_run columns");
+        // NEWPIDASH-241 T1: 42 Django-baseline columns + 3 native-owned columns.
+        assert_eq!(agent_entries.len(), 45, "agent_run columns");
         assert_eq!(
             runner_entries.len(),
             32,
