@@ -22,6 +22,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER } from "../../../core/session/index.js";
 import { assistantKeys } from "../../assistant/index.js";
+import { cloudAssistantKeys } from "../../cloud-assistant/index.js";
 import { sessionKeys, setSessionClient } from "../../../core/session/queries.js";
 import { cardAskOutcome, HomeAssistantCard, recentConversations } from "./HomeAssistantCard.js";
 
@@ -85,6 +86,8 @@ function renderCard(options: {
   seedWorkspaces?: boolean;
   threads?: AssistantThread[];
   config?: LlmConfig;
+  list?: unknown;
+  quota?: unknown;
 }): void {
   setSessionClient({
     getJson: () => new Promise<never>(() => {}),
@@ -110,6 +113,8 @@ function renderCard(options: {
   }
   if (options.threads !== undefined) queryClient.setQueryData(assistantKeys.threads("acme"), options.threads);
   if (options.config !== undefined) queryClient.setQueryData(assistantKeys.config("acme"), options.config);
+  if (options.list !== undefined) queryClient.setQueryData(cloudAssistantKeys.connections(), options.list);
+  if (options.quota !== undefined) queryClient.setQueryData(cloudAssistantKeys.quota(), options.quota);
   // The card navigates into a started conversation, so it mounts under a
   // minimal router with that address registered.
   const rootRoute = createRootRouteWithContext<{ queryClient: QueryClient }>()();
@@ -393,6 +398,68 @@ describe("HomeAssistantCard", () => {
   it("renders nothing while permissions load", () => {
     renderCard({ seedWorkspaces: false });
     expect(screen.queryByRole("region", { name: "Assistant" })).not.toBeInTheDocument();
+  });
+
+  it("shows the OpenHub model picker beside Ask for an OpenHub user (NEWPIDASH-303)", async () => {
+    renderCard({
+      threads: [],
+      config: { ...CONFIGURED, credential_mode: "openhub", has_openhub_access: true, model_name: "moonshotai/kimi-k3" },
+      list: {
+        connections: [
+          {
+            id: "123e4567-e89b-12d3-a456-426614174001",
+            kind: "openhub",
+            provider_kind: "openhub",
+            base_url: "",
+            model_name: "moonshotai/kimi-k3",
+            has_api_key: true,
+            is_selected: true,
+            last_verified_at: null,
+            created_at: null,
+            connected: true,
+            uses_chatgpt_plan: false,
+          },
+        ],
+        codex_model_options: [],
+        has_codex_credential: false,
+        openai_login_available: false,
+        openhub_model_options: ["moonshotai/kimi-k3", "openhub_free_llm"],
+        openhub_wallet_url: "",
+      },
+      quota: {
+        plan: "payg",
+        freeModels: ["openhub_free_llm"],
+        freeTokensUsed: null,
+        freeTokensLimit: null,
+        resetsAt: null,
+      },
+    });
+    const picker = await screen.findByRole("combobox", { name: "Assistant model" });
+    expect(screen.getByTestId("assistant-card-entry").contains(picker)).toBe(true);
+    expect(picker).toHaveValue("moonshotai/kimi-k3");
+    // The picker sits in the composer box next to Ask, and never sends.
+    const box = screen.getByRole("textbox", { name: "Ask the assistant" });
+    fireEvent.keyDown(picker, { key: "Enter" });
+    fireEvent.keyDown(box, { key: "Enter", ctrlKey: true });
+    expect(calls.some((call) => call.method === "POST")).toBe(false);
+  });
+
+  it("shows no OpenHub picker for a self-supplied lane", async () => {
+    renderCard({
+      threads: [],
+      config: CONFIGURED,
+      list: {
+        connections: [],
+        codex_model_options: [],
+        has_codex_credential: false,
+        openai_login_available: false,
+        openhub_model_options: ["openhub_free_llm"],
+        openhub_wallet_url: "",
+      },
+      quota: null,
+    });
+    await screen.findByRole("region", { name: "Assistant" });
+    expect(screen.queryByRole("combobox", { name: "Assistant model" })).not.toBeInTheDocument();
   });
 });
 

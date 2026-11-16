@@ -34,6 +34,7 @@ import {
   startFailureDetail,
   START_FAILED_TITLE,
   useStartConversation,
+  OpenHubModelPicker,
 } from "../../assistant/index.js";
 
 /** How many conversations the card lists. */
@@ -156,6 +157,11 @@ export function HomeAssistantCard({ workspaceSlug }: HomeAssistantCardProps): Re
               "max-h-50 min-h-24 overflow-y-auto px-(--space-6) pt-(--space-5) pr-(--space-24) pb-(--space-16)",
               "text-(--text) placeholder:text-(--text-muted) focus:border-(--accent) focus:outline-none"
             )}
+          />
+          <OpenHubModelPicker
+            workspaceSlug={workspaceSlug}
+            config={config.data}
+            className="absolute bottom-(--space-4) left-(--space-4)"
           />
           <Button
             variant="primary"

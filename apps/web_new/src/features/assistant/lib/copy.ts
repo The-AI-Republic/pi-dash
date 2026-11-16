@@ -12,6 +12,17 @@ export const ASSISTANT_CAPTION = "Ask about your issues, create work, or start a
 export const ASSISTANT_PLACEHOLDER = "Ask Pi Dash to do something…";
 /** Composer label for assistive technology. */
 export const ASSISTANT_COMPOSER_LABEL = "Message the assistant";
+/** Label of the OpenHub model picker in the composer (NEWPIDASH-303). */
+export const ASSISTANT_MODEL_PICKER_LABEL = "Assistant model";
+/** Failure notice title when the composer model picker's write is refused. */
+export const MODEL_PICKER_FAILED_TITLE = "Model change failed";
+/** Fallback detail when the model write carries no server message. */
+export const MODEL_PICKER_FAILED_FALLBACK = "The model could not be changed";
+/** Notice title when a free-plan pick would charge credit the plan cannot pay. */
+export const MODEL_PICKER_BLOCKED_TITLE = "Model needs credit";
+/** Body of the blocked-pick notice, mirroring the Settings guard. */
+export const MODEL_PICKER_BLOCKED_BODY =
+  "Free plans can use free models only. Switch to a free model or top up to use this one.";
 /** Send action label. */
 export const ASSISTANT_SEND_LABEL = "Send message";
 /** Stop action label (owned by the thread slice; the gate only proves it hides). */
