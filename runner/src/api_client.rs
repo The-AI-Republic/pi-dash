@@ -386,7 +386,10 @@ fn map_error_status(status: StatusCode, body: String) -> CliError {
         _ => "request failed",
     };
     let message = match server_reason(&body) {
-        Some(reason) => format!("HTTP {status}: {msg}: {reason}"),
+        Some(reason) => match server_code(&body) {
+            Some(code) => format!("HTTP {status}: {msg}: {code}: {reason}"),
+            None => format!("HTTP {status}: {msg}: {reason}"),
+        },
         None => format!("HTTP {status}: {msg}"),
     };
     CliError::new(exit_code, message).with_detail(body)
@@ -411,6 +414,21 @@ fn server_reason(body: &str) -> Option<String> {
         return None;
     }
     Some(reason.to_string())
+}
+
+/// Pull the machine-readable `code` out of an error body so it lands in the
+/// operator-facing message next to the reason (DIFF-45/NEWPIDASH-236: every
+/// archived-project read answers `409` with `code: "project_archived"`; the
+/// CLI must print the message *and* the code, not just a generic 409).
+/// Bodies without a `code` (every pre-existing error) yield `None` and render
+/// exactly as before.
+fn server_code(body: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(body).ok()?;
+    let code = value.get("code")?.as_str()?.trim();
+    if code.is_empty() {
+        return None;
+    }
+    Some(code.to_string())
 }
 
 /// Emit a JSON error payload to stderr and return the recommended exit code.
@@ -508,5 +526,41 @@ mod resolve_tests {
         assert_eq!(env.api_url, "https://cloud.example");
         assert_eq!(env.workspace_slug, "acme");
         assert_eq!(env.token, "tok-from-cfg");
+    }
+}
+
+#[cfg(test)]
+mod error_rendering_tests {
+    use super::*;
+    use reqwest::StatusCode;
+
+    const PROJECT_ARCHIVED_BODY: &str = r#"{"error":"Project NEWFRONT is archived (since 2026-11-13T18:57:37Z). Unarchive it to read or change its work items.","code":"project_archived","project":"NEWFRONT","project_identifier":"NEWFRONT","archived_at":"2026-11-13T18:57:37Z"}"#;
+
+    #[test]
+    fn project_archived_renders_code_and_message_with_nonzero_exit() {
+        let err = map_error_status(StatusCode::CONFLICT, PROJECT_ARCHIVED_BODY.to_string());
+        assert_eq!(err.exit_code, EXIT_INVALID);
+        assert_ne!(err.exit_code, 0);
+        assert_eq!(
+            err.message,
+            "HTTP 409 Conflict: invalid request: project_archived: Project NEWFRONT is archived (since 2026-11-13T18:57:37Z). Unarchive it to read or change its work items."
+        );
+        // The full body still rides along as detail for agents.
+        assert_eq!(err.detail.as_deref(), Some(PROJECT_ARCHIVED_BODY));
+    }
+
+    #[test]
+    fn codeless_409_renders_exactly_as_before() {
+        let err = map_error_status(StatusCode::CONFLICT, r#"{"error":"conflict"}"#.to_string());
+        assert_eq!(err.exit_code, EXIT_INVALID);
+        assert_eq!(err.message, "HTTP 409 Conflict: invalid request: conflict");
+    }
+
+    #[test]
+    fn server_code_ignores_non_json_and_non_string_code() {
+        assert_eq!(server_code("<html>no</html>"), None);
+        assert_eq!(server_code(r#"{"error":"x"}"#), None);
+        assert_eq!(server_code(r#"{"error":"x","code":409}"#), None);
+        assert_eq!(server_code(r#"{"error":"x","code":"  "}"#), None);
     }
 }

@@ -662,6 +662,251 @@ async fn http_422_maps_to_exit_invalid() {
     assert_eq!(err.exit_code, EXIT_INVALID);
 }
 
+// ---------------------------------------------------------------------------
+// `pidash project …` — active-only list by default, `--all` adds archived,
+// `get` for one project, `status` on every printed row (NEWPIDASH-238).
+// The list endpoint has no archive filter, so the CLI filters on
+// `archived_at` from the row; `get` passes the ref through and the server
+// resolves UUID or identifier.
+// ---------------------------------------------------------------------------
+
+const PROJECT_LIST_ENVELOPE: &str = r#"{"count":2,"total_count":2,"next_cursor":"1000:1:0","prev_cursor":"1000:-1:1","next_page_results":false,"results":[
+{"id":"11111111-1111-1111-1111-111111111111","identifier":"ENG","name":"Engineering","description":"","repo_url":"","is_default":true,"archived_at":null},
+{"id":"22222222-2222-2222-2222-222222222222","identifier":"OLD","name":"Old Project","description":"","repo_url":"","is_default":false,"archived_at":"2026-11-13T18:57:37Z"}
+]}"#;
+
+const PROJECT_DETAIL_ACTIVE: &str = r#"{"id":"11111111-1111-1111-1111-111111111111","identifier":"ENG","name":"Engineering","description":"","repo_url":"","is_default":true,"archived_at":null}"#;
+
+const PROJECT_DETAIL_ARCHIVED: &str = r#"{"id":"22222222-2222-2222-2222-222222222222","identifier":"OLD","name":"Old Project","description":"","repo_url":"","is_default":false,"archived_at":"2026-11-13T18:57:37Z"}"#;
+
+const PROJECT_ARCHIVED_BODY: &str = r#"{"error":"Project OLD is archived (since 2026-11-13T18:57:37Z). Unarchive it to read or change its work items.","code":"project_archived","project":"OLD","project_identifier":"OLD","archived_at":"2026-11-13T18:57:37Z"}"#;
+
+#[tokio::test]
+async fn project_list_defaults_to_active_only() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(PROJECT_LIST_ENVELOPE))).await;
+
+    let out = run_pidash(&fake, &["project", "list"], "").await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let printed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    let rows = printed.as_array().unwrap();
+    assert_eq!(rows.len(), 1, "archived rows are left out entirely");
+    assert_eq!(rows[0]["identifier"], "ENG");
+    assert_eq!(rows[0]["status"], "active");
+    assert_eq!(rows[0]["archived_at"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn project_list_all_includes_archived_with_status() {
+    let fake = start_fake(Box::new(|_req| CannedResponse::ok(PROJECT_LIST_ENVELOPE))).await;
+
+    let out = run_pidash(&fake, &["project", "list", "--all"], "").await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let printed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    let rows = printed.as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["identifier"], "ENG");
+    assert_eq!(rows[0]["status"], "active");
+    assert_eq!(rows[0]["archived_at"], serde_json::Value::Null);
+    assert_eq!(rows[1]["identifier"], "OLD");
+    assert_eq!(rows[1]["status"], "archived");
+    assert_eq!(rows[1]["archived_at"], "2026-11-13T18:57:37Z");
+}
+
+#[tokio::test]
+async fn project_get_prints_active_and_archived() {
+    let fake = start_fake(Box::new(|req| {
+        if req.path.ends_with("/OLD/") {
+            CannedResponse::ok(PROJECT_DETAIL_ARCHIVED)
+        } else {
+            CannedResponse::ok(PROJECT_DETAIL_ACTIVE)
+        }
+    }))
+    .await;
+
+    let active = run_pidash(&fake, &["project", "get", "ENG"], "").await;
+    assert_eq!(active.code, Some(0), "stderr: {}", active.stderr);
+    let printed: serde_json::Value = serde_json::from_str(active.stdout.trim()).unwrap();
+    assert_eq!(printed["identifier"], "ENG");
+    assert_eq!(printed["status"], "active");
+    assert_eq!(printed["archived_at"], serde_json::Value::Null);
+
+    let archived = run_pidash(&fake, &["project", "get", "OLD"], "").await;
+    assert_eq!(archived.code, Some(0), "stderr: {}", archived.stderr);
+    let printed: serde_json::Value = serde_json::from_str(archived.stdout.trim()).unwrap();
+    assert_eq!(printed["identifier"], "OLD");
+    assert_eq!(printed["status"], "archived");
+    assert_eq!(printed["archived_at"], "2026-11-13T18:57:37Z");
+
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded[0].path, "/api/v1/workspaces/acme/projects/ENG/");
+    assert_eq!(recorded[1].path, "/api/v1/workspaces/acme/projects/OLD/");
+}
+
+#[tokio::test]
+async fn project_get_missing_project_exits_nonzero_with_a_clear_message() {
+    let fake = start_fake(Box::new(|_req| CannedResponse {
+        status: 404,
+        status_text: "Not Found",
+        body: r#"{"detail":"Project not found"}"#.into(),
+    }))
+    .await;
+
+    let out = run_pidash(&fake, &["project", "get", "NOPE"], "").await;
+
+    assert_eq!(out.code, Some(EXIT_NOT_FOUND));
+    assert_eq!(out.stdout, "");
+    assert!(
+        out.stderr.contains("Project not found"),
+        "stderr: {}",
+        out.stderr
+    );
+}
+
+#[tokio::test]
+async fn issue_list_on_an_archived_project_reaches_the_api() {
+    // An explicit `--project OLD` passes straight through to the work-items
+    // route, so the API's `project_archived` error — not an empty list —
+    // is what the operator sees.
+    let fake = start_fake(Box::new(|req| {
+        if req.path.contains("/projects/OLD/work-items/") {
+            CannedResponse {
+                status: 409,
+                status_text: "Conflict",
+                body: PROJECT_ARCHIVED_BODY.into(),
+            }
+        } else {
+            CannedResponse::ok(PROJECT_LIST_ENVELOPE)
+        }
+    }))
+    .await;
+
+    let out = run_pidash(&fake, &["issue", "list", "--project", "OLD"], "").await;
+
+    assert_eq!(out.code, Some(EXIT_INVALID), "stderr: {}", out.stderr);
+    assert_eq!(out.stdout, "", "never an empty list on stdout");
+    assert!(
+        out.stderr.contains("project_archived"),
+        "stderr: {}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("Project OLD is archived"),
+        "stderr: {}",
+        out.stderr
+    );
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(
+        recorded.len(),
+        1,
+        "one request: straight to the archived project"
+    );
+    assert!(recorded[0].path.contains("/projects/OLD/work-items/"));
+}
+
+#[tokio::test]
+async fn default_project_resolves_an_archived_default() {
+    // The workspace default is archived: `default_project` still resolves it
+    // (first `is_default` in the unfiltered list) and the command reaches the
+    // API, which answers `project_archived`. `issue create` takes an optional
+    // `--project`, so omitting it walks the resolve chain down to the default.
+    const ENVELOPE_ARCHIVED_DEFAULT: &str = r#"{"count":1,"total_count":1,"next_cursor":"1000:1:0","prev_cursor":"1000:-1:1","next_page_results":false,"results":[
+{"id":"22222222-2222-2222-2222-222222222222","identifier":"OLD","name":"Old Project","description":"","repo_url":"","is_default":true,"archived_at":"2026-11-13T18:57:37Z"}
+]}"#;
+    let fake = start_fake(Box::new(|req| {
+        if req.path.contains("/work-items/") {
+            CannedResponse {
+                status: 409,
+                status_text: "Conflict",
+                body: PROJECT_ARCHIVED_BODY.into(),
+            }
+        } else {
+            CannedResponse::ok(ENVELOPE_ARCHIVED_DEFAULT)
+        }
+    }))
+    .await;
+
+    let out = run_pidash(&fake, &["issue", "create", "--title", "New thing"], "").await;
+
+    assert_eq!(out.code, Some(EXIT_INVALID), "stderr: {}", out.stderr);
+    assert_eq!(out.stdout, "");
+    assert!(
+        out.stderr.contains("project_archived"),
+        "stderr: {}",
+        out.stderr
+    );
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 2, "project list, then the archived create");
+    assert!(recorded[1].path.contains("/projects/OLD/work-items"));
+}
+
+#[tokio::test]
+async fn issue_get_on_an_archived_project_prints_message_and_code() {
+    let fake = start_fake(Box::new(|_req| CannedResponse {
+        status: 409,
+        status_text: "Conflict",
+        body: PROJECT_ARCHIVED_BODY.into(),
+    }))
+    .await;
+
+    let out = run_pidash(&fake, &["issue", "get", "OLD-1"], "").await;
+
+    assert_eq!(out.code, Some(EXIT_INVALID), "stderr: {}", out.stderr);
+    assert_eq!(out.stdout, "", "never an empty list on stdout");
+    assert!(
+        out.stderr.contains("project_archived"),
+        "stderr: {}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("Project OLD is archived"),
+        "stderr: {}",
+        out.stderr
+    );
+    assert!(
+        !out.stderr.contains("HTTP 404"),
+        "never a bare 404, stderr: {}",
+        out.stderr
+    );
+}
+
+#[tokio::test]
+async fn page_get_on_an_archived_project_prints_message_and_code() {
+    let fake = start_fake(Box::new(|_req| CannedResponse {
+        status: 409,
+        status_text: "Conflict",
+        body: PROJECT_ARCHIVED_BODY.into(),
+    }))
+    .await;
+
+    let out = run_pidash(
+        &fake,
+        &[
+            "page",
+            "get",
+            "00000000-0000-0000-0000-0000000000f1",
+            "--project",
+            "OLD",
+        ],
+        "",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(EXIT_INVALID), "stderr: {}", out.stderr);
+    assert_eq!(out.stdout, "");
+    assert!(
+        out.stderr.contains("project_archived"),
+        "stderr: {}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("Project OLD is archived"),
+        "stderr: {}",
+        out.stderr
+    );
+}
+
 #[tokio::test]
 async fn http_429_maps_to_exit_throttled() {
     let fake = start_fake(Box::new(|_req| CannedResponse {
