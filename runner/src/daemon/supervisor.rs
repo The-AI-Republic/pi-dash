@@ -299,16 +299,20 @@ impl Supervisor {
             // Always-on retry loop (NEWPIDASH-251): normal RunFailed
             // sends journaled mid-run (not only shutdown drains) must
             // replay without waiting for the next daemon start. The
-            // loop exits on its own within one 60s tick once the
-            // journal is empty, so spawning it unconditionally costs
-            // one short-lived task.
+            // loop is long-lived: it never exits on an empty journal,
+            // only on the shutdown abort just before the drain below.
             {
                 let replay_paths = paths.clone();
                 let replay_runners = hello_runners.clone();
                 let replay_previous = previous_exit.clone();
                 replay_retry_handle = Some(tokio::spawn(async move {
-                    replay_drain_journal_retry_loop(replay_paths, replay_runners, replay_previous)
-                        .await;
+                    replay_drain_journal_retry_loop(
+                        replay_paths,
+                        replay_runners,
+                        replay_previous,
+                        DRAIN_JOURNAL_RETRY_INTERVAL,
+                    )
+                    .await;
                 }));
             }
         }
@@ -1847,19 +1851,30 @@ enum ReplayOutcome {
     Retry,
 }
 
+/// Delay between journal replay passes. The retry loop is long-lived:
+/// it never exits on an empty journal — only `Supervisor::run`'s
+/// shutdown abort stops it — so an entry journaled mid-run
+/// (NEWPIDASH-251) still replays on the next tick, not only at the
+/// next daemon start.
+const DRAIN_JOURNAL_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+
 /// Background retry for journal entries the startup pass could not
-/// deliver (cloud unreachable, token mid-refresh). Exits as soon as
-/// the journal is empty; entries past the TTL are dropped by
-/// [`replay_drain_journal_once`].
+/// deliver (cloud unreachable, token mid-refresh), and for entries
+/// journaled mid-run (NEWPIDASH-251: normal `RunFailed` sends that
+/// exhaust their HTTP retries). Long-lived: an empty journal only
+/// skips that tick; entries past the TTL are dropped by
+/// [`replay_drain_journal_once`]. Exits only when the owning task is
+/// aborted on shutdown (see the abort-before-drain in `Supervisor::run`).
 async fn replay_drain_journal_retry_loop(
     paths: Paths,
     runners: Arc<RwLock<HelloRunnerMap>>,
     previous_exit: Option<String>,
+    interval: Duration,
 ) {
     loop {
-        tokio::time::sleep(Duration::from_secs(60)).await;
+        tokio::time::sleep(interval).await;
         if drain_journal::load(&paths).is_empty() {
-            return;
+            continue;
         }
         replay_drain_journal_once(&paths, &runners, previous_exit.clone()).await;
     }
@@ -7101,6 +7116,97 @@ mod tests {
         let delivered = replay_drain_journal_once(&paths, &runners, None).await;
         assert_eq!(delivered, 0);
         assert!(drain_journal::load(&paths).is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retry_loop_replays_entry_journaled_after_empty_tick() {
+        // NEWPIDASH-251 review: the retry loop must stay alive across
+        // empty ticks. An entry journaled AFTER the first (empty) tick
+        // must still replay without a daemon restart. The old
+        // `return` on empty killed the task at the first tick, so this
+        // entry would have sat in the journal until the next restart.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let (out_tx, mut out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+        let inst = RunnerInstance::new(
+            runner_config("midrun", "WEB", tmp.path().join("wd")),
+            &paths,
+            out_tx,
+        );
+        let runners: Arc<RwLock<HelloRunnerMap>> = Arc::new(RwLock::new(
+            std::iter::once(&inst)
+                .map(|i| {
+                    (
+                        i.runner_id,
+                        (
+                            i.out.clone(),
+                            i.state.clone(),
+                            i.config.project_slug.clone(),
+                        ),
+                    )
+                })
+                .collect(),
+        ));
+        let handle = tokio::spawn(replay_drain_journal_retry_loop(
+            paths.clone(),
+            runners.clone(),
+            None,
+            Duration::from_millis(20),
+        ));
+        // Let a few empty ticks elapse. With the buggy `return` the
+        // task would already be finished after the first one.
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(
+            !handle.is_finished(),
+            "retry loop must not exit on an empty journal"
+        );
+        // Journal a mid-run failure (pre-start style) after startup.
+        let run_id = uuid::Uuid::new_v4();
+        let now = Utc::now();
+        drain_journal::record_all(
+            &paths,
+            &[drain_journal::PendingRunFailure {
+                runner_id: inst.runner_id,
+                run_id,
+                reason: FailureReason::AgentCrash,
+                detail: "timed out waiting for muse exec's run.lifecycle.started record".into(),
+                ended_at: now,
+                recorded_at: now,
+                trigger: None,
+                previous_exit: None,
+            }],
+        )
+        .unwrap();
+        let env = tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
+            .await
+            .expect("timed out waiting for replayed mid-run RunFailed")
+            .expect("channel closed");
+        match env.body {
+            ClientMsg::RunFailed {
+                run_id: got,
+                reason,
+                detail,
+                ..
+            } => {
+                assert_eq!(got, run_id);
+                assert!(matches!(reason, FailureReason::AgentCrash));
+                assert_eq!(
+                    detail.as_deref(),
+                    Some("timed out waiting for muse exec's run.lifecycle.started record")
+                );
+            }
+            other => panic!("expected RunFailed, got {other:?}"),
+        }
+        // The loop replays until the journal is empty, then keeps
+        // idling (still alive) until aborted on shutdown.
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(
+            drain_journal::load(&paths).is_empty(),
+            "replayed entry must be cleared from the journal"
+        );
+        assert!(!handle.is_finished(), "loop must keep idling after replay");
+        handle.abort();
+        let _ = handle.await;
     }
 
     /// The rig for driving bridge events through `handle_bridge_event`:
