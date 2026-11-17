@@ -73,17 +73,26 @@ def _member_client(settings, user):
     return client_ctx, client
 
 
-def _assign(seeder, issue_id, user_id):
-    # Direct insert into issue_assignees (live row).
+def _assign(seeder, daemon_world, issue_id, user_id):
+    # Direct insert into issue_assignees (live row) with required FKs.
     import uuid
 
     row_id = str(uuid.uuid4())
     seeder.db.execute(
-        "INSERT INTO issue_assignees (id, issue_id, assignee_id, created_at, updated_at) "
-        "VALUES (%s, %s, %s, now(), now())",
-        (row_id, issue_id, user_id),
+        "INSERT INTO issue_assignees (created_at, updated_at, id, assignee_id,"
+        " created_by_id, issue_id, project_id, updated_by_id, workspace_id)"
+        " VALUES (now(),now(),%s,%s,%s,%s,%s,%s,%s)",
+        (
+            row_id,
+            user_id,
+            daemon_world["owner"]["id"],
+            issue_id,
+            daemon_world["project"]["id"],
+            daemon_world["owner"]["id"],
+            daemon_world["workspace"]["id"],
+        ),
     )
-    seeder._put("issue_assignees", row_id)
+    seeder.track.add("issue_assignees", row_id)
 
 
 def _set_creator(seeder, issue_id, user_id):
@@ -328,7 +337,7 @@ def test_direct_allowed_for_assignee(settings, seeder, daemon_world):
     issue = _ticking_issue(seeder, daemon_world)
     _set_creator(seeder, issue["id"], daemon_world["owner"]["id"])
     member = _member(seeder, daemon_world, role=15)
-    _assign(seeder, issue["id"], member["id"])
+    _assign(seeder, daemon_world, issue["id"], member["id"])
     ctx, client = _member_client(settings, member)
     try:
         resp = web_post(
@@ -424,7 +433,7 @@ def test_run_ai_allowed_for_assignee(settings, seeder, daemon_world, machine_flo
     issue = _ticking_issue(seeder, daemon_world)
     _set_creator(seeder, issue["id"], daemon_world["owner"]["id"])
     member = _member(seeder, daemon_world, role=15)
-    _assign(seeder, issue["id"], member["id"])
+    _assign(seeder, daemon_world, issue["id"], member["id"])
     ctx, client = _member_client(settings, member)
     try:
         resp = web_post(
@@ -516,6 +525,10 @@ def test_pod_once_allowed_in_project_members(settings, seeder, daemon_world, mac
             assert body.get("code") != "pod_once_not_allowed"
     finally:
         ctx.__exit__(None, None, None)
+        seeder.db.execute(
+            "UPDATE issues SET assigned_runner_id = NULL, assigned_pod_id = NULL WHERE id = %s",
+            (issue["id"],),
+        )
 
 
 def test_pod_once_denied_in_default_mode(settings, seeder, daemon_world, machine_flow):
@@ -555,3 +568,7 @@ def test_pod_once_denied_in_default_mode(settings, seeder, daemon_world, machine
             ) in (REASON, "pod_once_not_allowed")
     finally:
         ctx.__exit__(None, None, None)
+        seeder.db.execute(
+            "UPDATE issues SET assigned_runner_id = NULL, assigned_pod_id = NULL WHERE id = %s",
+            (issue["id"],),
+        )
