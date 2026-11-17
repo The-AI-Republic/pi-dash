@@ -471,6 +471,30 @@ describe("tickerStatusView", () => {
     expect(off).toMatchObject({ title: "Agent ticking off", badge: "Off" });
     expect(off.detail).toBe("3/13 runs used");
   });
+
+  it("covers failure-policy stops (PDASHOSS01-183) with paused-after-failure card", () => {
+    const needsHuman = tickerStatusView(tickerFixture({ enabled: false, disarm_reason: "failure_needs_human" }), NOW);
+    expect(needsHuman.title).toContain("paused after a failure");
+    expect(needsHuman.badge).toBe("Needs attention");
+    expect(needsHuman.tone).toBe("warning");
+    expect(needsHuman.icon).toBe("alert");
+    expect(needsHuman.detail).toContain("failure comment");
+    expect(needsHuman.detail).toContain("Re-tick");
+    expect(needsHuman.detail).toContain("retry cannot fix");
+    const repeated = tickerStatusView(tickerFixture({ enabled: false, disarm_reason: "repeated_failure" }), NOW);
+    expect(repeated.title).toContain("paused after a failure");
+    expect(repeated.badge).toBe("Needs attention");
+    expect(repeated.tone).toBe("warning");
+    expect(repeated.icon).toBe("alert");
+    expect(repeated.detail).toContain("failure comment");
+    expect(repeated.detail).toContain("Re-tick");
+    expect(repeated.detail).toContain("Several runs in a row failed");
+    // Failure stops must not fall through to the generic off card
+    expect(needsHuman.title).not.toBe("Agent ticking off");
+    expect(repeated.title).not.toBe("Agent ticking off");
+    expect(needsHuman.detail).not.toBe("3/13 runs used");
+    expect(repeated.detail).not.toBe("3/13 runs used");
+  });
 });
 
 describe("agentStatusView", () => {
