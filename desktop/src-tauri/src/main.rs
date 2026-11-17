@@ -11,6 +11,7 @@ mod chat;
 mod chat_history;
 mod daemon;
 mod desktop_http;
+mod handoff;
 // build.rs owns this module; it is compiled here only so its tests run.
 #[cfg(test)]
 #[path = "../dist_guard.rs"]
@@ -400,6 +401,15 @@ fn handle_deep_link(app: &tauri::AppHandle, url: &str) {
         eprintln!("deep-link: missing code or state param");
         return;
     };
+    // Unified sign-in (desktop_unified_signin §6.2): this is the app's own
+    // browser sign-in, so mark it fresh before the exchange lands. The sync
+    // supervisor stamps the app's sign-in event from the marker once the
+    // session loads (and drops it, unused, if no session ever appears within
+    // its window), so the CLI follows. Best-effort: the sign-in stands
+    // without it.
+    if let Err(e) = handoff::mark_fresh_sign_in(app) {
+        eprintln!("deep-link: marking the fresh sign-in failed: {e}");
+    }
     let mut session_url = config.target_url.clone();
     session_url.set_path("/api/auth/desktop-exchange/");
     session_url
@@ -623,7 +633,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // the app is a client over its standard control socket and never
             // starts, stops or re-roots it.
             daemon::daemon_discover,
+            daemon::daemon_hello,
             daemon::daemon_status,
+            daemon::daemon_active_runs,
             daemon::daemon_engine_status,
             daemon::daemon_engine_set_paused,
             daemon::daemon_engine_settings_get,
@@ -634,6 +646,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             daemon::daemon_runners,
             daemon::daemon_credentials_reload,
             daemon::daemon_reconnect,
+            // Desktop session handoff + the sign-in reconciliation record
+            // (desktop_unified_signin §5, §6.2).
+            handoff::desktop_session_handoff,
+            handoff::auth_sync_get,
+            handoff::auth_sync_set,
+            handoff::auth_sync_mark_sign_in,
             // Set-up, update and sign-in, each through the installed CLI and
             // only on the user's say-so.
             setup::daemon_install_service,

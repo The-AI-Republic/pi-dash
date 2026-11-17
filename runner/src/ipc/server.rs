@@ -165,6 +165,7 @@ impl IpcServer {
                 self.spawn_ctx.reload_credentials().await?;
                 Ok(Response::Ack)
             }
+            Request::SessionHandoff { challenge } => self.spawn_ctx.session_handoff(&challenge).await,
             Request::MachineRunLimitSet { limit } => {
                 if !(1..=65535).contains(&limit) {
                     return Ok(Response::Error(crate::ipc::protocol::RpcError {
@@ -903,6 +904,7 @@ mod tests {
                 cli: None,
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
             }),
             paths: paths.clone(),
             instances: Arc::new(std::sync::RwLock::new(HashMap::new())),
@@ -1056,6 +1058,7 @@ sleep 1
                 cli: None,
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
             },
         )
         .unwrap();
@@ -1089,6 +1092,7 @@ sleep 1
                 cli: None,
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
             }),
             paths: paths.clone(),
             instances: Arc::new(std::sync::RwLock::new(
@@ -1320,6 +1324,7 @@ sleep 1
                 cli: None,
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
             }),
             paths: paths.clone(),
             instances: Arc::new(std::sync::RwLock::new(HashMap::new())),
@@ -1412,6 +1417,7 @@ sleep 1
             }),
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
         }
     }
 
@@ -1515,6 +1521,7 @@ sleep 1
                 cli: None,
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
             }),
             paths: paths.clone(),
             instances: Arc::new(std::sync::RwLock::new(HashMap::new())),

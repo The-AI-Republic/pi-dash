@@ -384,6 +384,11 @@ pidash_sdk::db::sea_orm_connection
 pidash_sdk::db::soft_delete_configs_by_keys
 pidash_sdk::db::update_instance_setup
 pidash_sdk::domain::AccountUpsert
+pidash_sdk::domain::HANDOFF_DISABLED
+pidash_sdk::domain::HANDOFF_TTL_SECS
+pidash_sdk::domain::HandoffDbError
+pidash_sdk::domain::HandoffError
+pidash_sdk::domain::IssuedHandoff
 pidash_sdk::domain::LlmConfigFullSave
 pidash_sdk::domain::LlmConfigInsert
 pidash_sdk::domain::MemberOverwrite
@@ -393,6 +398,7 @@ pidash_sdk::domain::NewApiToken
 pidash_sdk::domain::NewMemberWithActive
 pidash_sdk::domain::NewWorkspace
 pidash_sdk::domain::ProvisionedUser
+pidash_sdk::domain::RedeemedHandoff
 pidash_sdk::domain::ResolveError
 pidash_sdk::domain::RunnerListParams
 pidash_sdk::domain::RunnerListRow
@@ -402,6 +408,7 @@ pidash_sdk::domain::WriteActor
 pidash_sdk::domain::WriteCtx
 pidash_sdk::domain::WriteScope
 pidash_sdk::domain::add_with_active
+pidash_sdk::domain::challenge_for_verifier
 pidash_sdk::domain::create_account
 pidash_sdk::domain::deactivate_by_workspace
 pidash_sdk::domain::deactivate_without_updated_by
@@ -413,10 +420,12 @@ pidash_sdk::domain::insert_default_profile
 pidash_sdk::domain::insert_llm_config
 pidash_sdk::domain::insert_provisioned_user
 pidash_sdk::domain::insert_user_notification_preference
+pidash_sdk::domain::issue_handoff
 pidash_sdk::domain::issue_token
 pidash_sdk::domain::list_project_runners
 pidash_sdk::domain::make_unusable_password
 pidash_sdk::domain::overwrite
+pidash_sdk::domain::redeem_handoff
 pidash_sdk::domain::resolve_pod_ref
 pidash_sdk::domain::resolve_runner_ref
 pidash_sdk::domain::revoke_machine_token_by_hash

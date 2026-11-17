@@ -100,16 +100,58 @@ export interface DaemonPidashAgentStatus {
   model?: string | undefined;
 }
 
+/** The daemon's sign-in state now (desktop_unified_signin §6.1). */
+export type DaemonAuthState = "signed_in" | "signed_out";
+
+/**
+ * One persisted sign-in event (`[auth_event]`), as `Hello` reports it
+ * (desktop_unified_signin §6.1). `seq` only increases on this computer;
+ * `reason` is only for `signed_out`.
+ */
+export interface DaemonAuthEvent {
+  seq: number;
+  kind: "signed_in" | "signed_out" | string;
+  reason?: string | undefined;
+  account?: { user_id?: string | undefined; email?: string | undefined; cloud_url: string } | undefined;
+  at: string;
+}
+
 /** The daemon's `Hello`, as the shell relays it. */
 export interface DaemonHello {
   daemon_version: string;
   ipc_version: number;
   cloud_url: string;
   account?: { user_id?: string | undefined; email?: string | undefined; cloud_url: string } | undefined;
+  auth_state?: DaemonAuthState | undefined;
+  auth_event?: DaemonAuthEvent | undefined;
   workspaces: Array<{ slug: string; signed_in: boolean; runners: number }>;
   machine_id?: string | undefined;
   engine: DaemonPidashAgentState;
   engine_detail?: DaemonPidashAgentStatus | undefined;
+}
+
+/** One sign-in event on the app's side (desktop_unified_signin §6.2). */
+export interface AuthSyncEvent {
+  kind: "signed_in" | "signed_out" | string;
+  account?: { user_id?: string | undefined; email?: string | undefined; cloud_url: string } | undefined;
+  /** Wall-clock time, RFC 3339, for the newest-wins comparison. */
+  at: string;
+}
+
+/**
+ * The app's reconciliation record (desktop_unified_signin §6.2): its own
+ * last sign-in or sign-out, whichever kind, and the daemon `seq` it last
+ * acted on. Kept in the host's store — not the webview — because sign-out
+ * wipes the webview's storage exactly when this record matters.
+ */
+export interface AuthSyncRecord {
+  own_event?: AuthSyncEvent | null | undefined;
+  last_seen_seq?: number | null | undefined;
+  /**
+   * When the app last signed IN via a sign-in mutation (never on session
+   * restore — the reconciler stamps `own_event` from it and clears it).
+   */
+  fresh_sign_in_at?: string | null | undefined;
 }
 
 /** The installed command-line tool, as discovery reports it. */
@@ -207,8 +249,39 @@ export interface NoticesView {
 export interface AgentRuntimeApi {
   /** Find the daemon and classify it for the app's account. */
   discover(identity: AgentAppIdentity): Promise<DaemonDiscovery>;
+  /**
+   * The daemon's `Hello` with no account classification (desktop_unified_signin
+   * §6.2): the sign-in reconciliation needs the daemon's event even before
+   * the app has a session of its own. Rejects with no daemon, no answer, or
+   * an incompatible daemon — the caller then skips the comparison.
+   */
+  daemonHello(): Promise<DaemonHello>;
+  /**
+   * Sign the app in as the daemon's account, with no browser, through one
+   * single-use handoff code (desktop_unified_signin §5). The code and the
+   * verifier never reach the webview; answers with the account only. The
+   * web session itself lands in the cookie store through the native
+   * transport. Rejects when the daemon cannot hand off (too old, signed
+   * out, kill switch off) — the caller then falls back to a browser sign-in.
+   */
+  desktopSessionHandoff(expectedUserId: string): Promise<{ user_id?: string | undefined; email?: string | undefined }>;
+  /** The app's reconciliation record (desktop_unified_signin §6.2), or `null` before the host wrote one. */
+  getAuthSyncRecord(): Promise<AuthSyncRecord | null>;
+  /** Persist the app's reconciliation record in the host's store. */
+  setAuthSyncRecord(record: AuthSyncRecord): Promise<void>;
+  /**
+   * Mark a fresh sign-in (called by the sign-in mutations, never on session
+   * restore): stamps `fresh_sign_in_at` so the reconciler can stamp the
+   * app's own event from it (desktop_unified_signin §6.2).
+   */
+  markFreshSignIn(): Promise<void>;
   /** The daemon's runners (engine and own-agent). */
   localRunners(): Promise<DaemonLocalRunner[]>;
+  /**
+   * How many runs are in flight on this computer's runners, for the account
+   * switch warning (desktop_unified_signin §6.4): switching stops them.
+   */
+  daemonActiveRuns(): Promise<number>;
   /** Turn the Pi Dash Agent on for a project on this computer (enrol on use). */
   addPidashAgentRunner(input: {
     workspace: string;
@@ -247,8 +320,12 @@ export interface AgentRuntimeApi {
   recordNotices(account: string, notices: DesktopNotices): Promise<NoticesView>;
   /** Dismiss notices (or decline a replace prompt) for good. */
   dismissNotices(account: string, keys: string[]): Promise<NoticesView>;
-  /** Sign the computer's Pi Dash daemon out (`pidash auth logout`). */
-  signOutComputer(): Promise<void>;
+  /**
+   * Sign the computer's Pi Dash daemon out (`pidash auth logout`). With
+   * `localOnly`, only the local tokens are cleared, for when the server
+   * cannot be reached (desktop_unified_signin §4).
+   */
+  signOutComputer(opts?: { localOnly?: boolean | undefined }): Promise<void>;
 }
 
 /**
@@ -482,8 +559,13 @@ export interface CliSetupApi {
   install(): Promise<CliStatus>;
   /** Subscribe to installer output; render each line verbatim, in order. */
   onInstallLog(callback: (progress: CliInstallProgress) => void): Unsubscribe;
-  /** Hand an approved device code to the tool, which owns the credential. */
-  login(input: { deviceCode: string; cloudUrl: string; workspace: string }): Promise<void>;
+  /**
+   * Hand an approved device code to the tool, which owns the credential.
+   * `workspace: ""` signs in the computer's default workspace. `force`
+   * rebinds the tool to the app's cloud when the computer is bound to
+   * another one (desktop_unified_signin §6.2).
+   */
+  login(input: { deviceCode: string; cloudUrl: string; workspace: string; force?: boolean | undefined }): Promise<void>;
 }
 
 /**

@@ -1299,7 +1299,6 @@ export {
   mergeDevMachineInto,
   revokeDevMachine,
   rotateDevMachine,
-  signOutDevMachinePidashAgent,
   updateDevMachine,
 } from "./contracts/dev-machines.js";
 export type {

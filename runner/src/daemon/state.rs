@@ -724,6 +724,7 @@ mod tests {
         StateHandle::new(Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: Default::default(),
             runners: vec![],
@@ -899,6 +900,7 @@ mod tests {
         let state = StateHandle::new(Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon,
             runners: vec![],

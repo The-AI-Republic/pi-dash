@@ -20,7 +20,7 @@ from datetime import timedelta
 import pytest
 from django.db import connection
 from django.test import override_settings
-from django.urls import reverse
+from django.urls import NoReverseMatch, reverse
 from django.utils import timezone
 
 from pi_dash.db.models import CLIDeviceCode, Project, User, WorkspaceMember
@@ -272,9 +272,13 @@ def test_silent_approval_needs_own_machine(db, web, workspace, machine, lane):
 
 
 @override_settings(**ENABLED)
-def test_silent_approval_refused_after_sign_out_and_interactive_clears_it(db, web, create_user, machine, mt, lane):
+def test_silent_approval_renews_a_signed_out_engine_while_daemon_is_signed_in(
+    db, web, create_user, machine, mt, lane
+):
+    """Pre-change engine-only sign-out, the daemon still signed in: the next
+    sign-in of the computer signs the engine in silently (desktop_unified_signin §6.3, §8)."""
     _sign_in(create_user, machine)
-    # ``pidash auth logout --engine``.
+    # ``pidash auth logout --engine`` (before this change).
     out = _client(bearer=mt).post("/api/v1/runner/engine/credential/revoke/", {}, format="json")
     assert out.status_code == 200, out.data
     assert out.data["engine_sign_in_state"] == EngineSignInState.SIGNED_OUT
@@ -282,16 +286,10 @@ def test_silent_approval_refused_after_sign_out_and_interactive_clears_it(db, we
     assert machine.engine_sign_in_state == EngineSignInState.SIGNED_OUT
     assert machine.engine_auto_pause_reason == EngineAutoPauseReason.ENGINE_SIGN_IN_REQUIRED
 
-    # The app's silent renewal is refused.
-    start = _start("engine")
-    silent = _approve(web, start["user_code"], interactive=False, dev_machine_id=str(machine.id))
-    assert silent.status_code == 409
-    assert silent.data["error"] == "engine_silent_renewal_refused"
-    assert silent.data["engine_sign_in_state"] == EngineSignInState.SIGNED_OUT
-
-    # An explicit browser sign-in clears it.
-    resp = _engine_login(web, mt, interactive=True)
+    # The app's silent renewal signs it in again with no prompt.
+    resp = _engine_login(web, mt, interactive=False, dev_machine_id=machine.id)
     assert resp.status_code == 200, resp.data
+    assert resp.data["engine_credential"]["token"].startswith("ec_")
     machine.refresh_from_db()
     assert machine.current_engine_sign_in_state() == EngineSignInState.ACTIVE
     assert machine.engine_auto_pause_reason == ""
@@ -329,38 +327,40 @@ def test_silent_approval_without_machine_is_checked_at_redemption(db, web, creat
     assert refused_early.status_code == 409
     assert refused_early.data["engine_sign_in_state"] == EngineSignInState.ACTIVE
 
+    # A signed-out engine next to a live daemon credential renews silently
+    # (the pre-change engine-only logout migration, desktop_unified_signin §6.3).
     _client(bearer=mt).post("/api/v1/runner/engine/credential/revoke/", {}, format="json")
     again = _start("engine")
     assert _approve(web, again["user_code"], **body).status_code == 200
-    refused = _poll(again["device_code"], bearer=mt)
-    assert refused.status_code == 409
-    assert refused.data["error"] == "engine_silent_renewal_refused"
+    renewed = _poll(again["device_code"], bearer=mt)
+    assert renewed.status_code == 200, renewed.data
+    assert renewed.data["engine_credential"]["token"].startswith("ec_")
 
 
 @override_settings(**ENABLED)
-def test_signed_out_between_silent_approval_and_redemption_is_refused(db, web, create_user, machine, mt, lane):
+def test_signed_out_between_silent_approval_and_redemption_is_renewed(db, web, create_user, machine, mt, lane):
     _sign_in(create_user, machine)
     _make_expiring(machine)
     start = _start("engine")
     assert _approve(web, start["user_code"], interactive=False, dev_machine_id=str(machine.id)).status_code == 200
     _client(bearer=mt).post("/api/v1/runner/engine/credential/revoke/", {}, format="json")
     resp = _poll(start["device_code"], bearer=mt)
-    assert resp.status_code == 409
-    assert resp.data["error"] == "engine_silent_renewal_refused"
+    assert resp.status_code == 200, resp.data
+    assert resp.data["engine_credential"]["token"].startswith("ec_")
 
 
 @override_settings(**ENABLED)
-def test_silent_cli_login_after_sign_out_issues_no_engine_credential(db, web, create_user, workspace, machine, lane):
+def test_silent_cli_login_after_sign_out_issues_the_engine_credential(db, web, create_user, workspace, machine, lane):
     _sign_in(create_user, machine)
     from pi_dash.runner.services.engine_credentials import revoke_engine_credential
 
     revoke_engine_credential(machine, reason="signed_out")
+    # The app's sign-in signs the engine in with no prompt (desktop_unified_signin §6.3).
     silent = _cli_login(web, machine.id, interactive=False)
-    assert silent.status_code == 201
-    assert "engine_credential" not in silent.data
-    assert silent.data["engine_sign_in_state"] == EngineSignInState.SIGNED_OUT
-    explicit = _cli_login(web, machine.id, interactive=True)
-    assert explicit.data["engine_credential"]["token"].startswith("ec_")
+    assert silent.status_code == 201, silent.data
+    assert silent.data["engine_credential"]["token"].startswith("ec_")
+    machine.refresh_from_db()
+    assert machine.current_engine_sign_in_state() == EngineSignInState.ACTIVE
 
 
 def test_device_start_rejects_unknown_scope(db):
@@ -542,18 +542,13 @@ def test_remove_this_computer_revokes_the_engine_credential(db, web, create_user
 
 
 @override_settings(**ENABLED)
-def test_web_sign_out_the_engine(db, web, create_user, workspace, workspace_b, machine, mt, lane):
+def test_no_engine_only_sign_out_on_the_machine_api(db, web, create_user, workspace, machine, mt, lane):
+    """There is no engine-only sign-out any more (desktop_unified_signin §6.3, U-3)."""
     _sign_in(create_user, machine)
     url = f"/api/runners/dev-machines/{machine.id}/engine-sign-out/"
-    assert reverse("dev-machine-engine-sign-out", kwargs={"machine_id": machine.id}) == url
-    # A workspace the machine is not attached to does not see it.
-    assert web.post(url, {"workspace": str(workspace_b.id)}, format="json").status_code == 404
-    resp = web.post(url, {"workspace": str(workspace.id)}, format="json")
-    assert resp.status_code == 200, resp.data
-    assert resp.data["engine_sign_in_state"] == EngineSignInState.SIGNED_OUT
-    assert EngineCredential.objects.get().revoked_reason == "signed_out"
-    machine.refresh_from_db()
-    assert machine.engine_sign_in_state == EngineSignInState.SIGNED_OUT
+    assert web.post(url, {"workspace": str(workspace.id)}, format="json").status_code == 404
+    with pytest.raises(NoReverseMatch):
+        reverse("dev-machine-engine-sign-out", kwargs={"machine_id": machine.id})
 
 
 @override_settings(**ENABLED)
@@ -928,22 +923,21 @@ def test_cap_setting_is_gone():
 
 
 # --------------------------------------------------------------------------
-# Silent renewal is an allow-list: expiring / expired only (§4.3 table)
+# Silent issuance is per grant scope (desktop_unified_signin §6.3): a cli
+# grant from never / signed_out / expiring / expired; an engine grant from
+# never / expiring / expired and from signed_out while the machine holds a
+# live daemon credential. Only revoked still needs an interactive sign-in.
 # --------------------------------------------------------------------------
 
 
 @override_settings(**ENABLED)
-def test_silent_engine_approval_refused_for_never_machine(db, web, machine, mt, lane):
+def test_silent_engine_approval_signs_in_a_never_machine(db, web, machine, mt, lane):
     assert machine.current_engine_sign_in_state() == EngineSignInState.NEVER
     resp = _engine_login(web, mt, interactive=False, dev_machine_id=machine.id)
-    assert resp.status_code == 409
-    assert resp.data["error"] == "engine_silent_renewal_refused"
-    assert resp.data["engine_sign_in_state"] == EngineSignInState.NEVER
-    assert not EngineCredential.objects.exists()
-    # "Turn on the built-in engine" is an explicit sign-in.
-    explicit = _engine_login(web, mt, interactive=True, dev_machine_id=machine.id)
-    assert explicit.status_code == 200, explicit.data
-    assert explicit.data["engine_credential"]["token"].startswith("ec_")
+    assert resp.status_code == 200, resp.data
+    assert resp.data["engine_credential"]["token"].startswith("ec_")
+    machine.refresh_from_db()
+    assert machine.current_engine_sign_in_state() == EngineSignInState.ACTIVE
 
 
 @override_settings(**ENABLED)
@@ -968,16 +962,12 @@ def test_silent_engine_approval_renews_an_expired_engine(db, web, create_user, m
 
 
 @override_settings(**ENABLED)
-def test_silent_cli_login_issues_engine_only_when_due(db, web, create_user, workspace, lane):
+def test_silent_cli_login_signs_in_the_engine(db, web, create_user, workspace, lane):
     machine_id = "6f1c7d1e-1111-4a2b-9c3d-0000000000a1"
-    # ``never``: a silent (app) sign-in does not turn the engine on.
+    # ``never``: the app's sign-in signs the engine in with no prompt.
     first = _cli_login(web, machine_id, interactive=False)
     assert first.status_code == 201, first.data
-    assert "engine_credential" not in first.data
-    assert first.data["engine_sign_in_state"] == EngineSignInState.NEVER
-    # A person approving turns it on.
-    on = _cli_login(web, machine_id, interactive=True)
-    token = on.data["engine_credential"]["token"]
+    token = first.data["engine_credential"]["token"]
     # ``active``: a silent sign-in leaves the live credential alone.
     again = _cli_login(web, machine_id, interactive=False)
     assert "engine_credential" not in again.data

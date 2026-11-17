@@ -6,7 +6,7 @@
 // is resolved from the web manifest, so lazy route chunks never move the
 // reading and chunk hashes can rotate freely.
 //
-// One initial-JS ceiling, 277 KB gzipped: a reading above it fails the PR.
+// One initial-JS ceiling, 278 KB gzipped: a reading above it fails the PR.
 // It is sized to catch an accidental large eager import, not ordinary slice
 // growth (NEWFRONT-248, 2026-10-15; raised from 260 KB on 2026-10-16 when
 // shell growth used up the headroom, from 265 KB on 2026-10-17 when the
@@ -27,7 +27,11 @@
 // new dependencies) measured 275.08 KB in CI, matched locally to the byte),
 // and from 276 KB on 2026-11-16 when the desktop switch (NEWFRONT-92 M-01,
 // the desktop hand-off boundary and NotFoundPage hand-off in the shell, no new
-// dependencies) measured 276.21 KB in CI on top of the then-current main.
+// dependencies) measured 276.21 KB in CI on top of the then-current main,
+// and from 277 KB on 2026-11-17 when unified sign-in (desktop_unified_signin,
+// the Tauri adapter's new native commands and the sign-in marker necessarily
+// eager, the sync supervisor lazy-split behind the agent-runtime gate, no new
+// dependencies) measured 276.49 KB locally; CI reads about half a KB higher.
 //
 // There is no second number and no environment variable to switch budgets:
 // owner decision 5 of 2026-11-10 retired the earlier composition target, so a

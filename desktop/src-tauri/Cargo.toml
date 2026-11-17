@@ -35,6 +35,10 @@ serde_json = "1"
 reqwest = { version = "0.13", default-features = false, features = ["cookies", "rustls-no-provider", "system-proxy"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+# SHA-256 of the handoff verifier (desktop_unified_signin §5).
+sha2 = "0.10"
+# Wall-clock timestamps for the sign-in reconciliation record (§6.2).
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 # The standard daemon's directories, resolved exactly as the `pidash` CLI
 # resolves them (`ProjectDirs("so", "pidash", "pidash")`), so the app finds

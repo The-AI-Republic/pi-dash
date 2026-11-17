@@ -107,12 +107,15 @@ def resolve_machine_token(raw: str, *, touch: bool = True) -> MachineToken:
         token = MachineToken.objects.select_related("user", "workspace", "dev_machine").get(token_hash=hash_token(raw))
     except MachineToken.DoesNotExist:
         raise exceptions.AuthenticationFailed("machine_token_invalid")
+    # The machine first: removing a computer on the web revokes its tokens
+    # too, and the daemon must read that as "removed" (dev_machine_revoked),
+    # not as a plain token revoke (desktop_unified_signin §12 rule 1).
+    if token.dev_machine_id is not None and token.dev_machine.revoked_at is not None:
+        raise exceptions.AuthenticationFailed("dev_machine_revoked")
     if token.revoked_at is not None:
         raise exceptions.AuthenticationFailed("machine_token_revoked")
     if token.is_expired():
         raise exceptions.AuthenticationFailed("machine_token_expired")
-    if token.dev_machine_id is not None and token.dev_machine.revoked_at is not None:
-        raise exceptions.AuthenticationFailed("dev_machine_revoked")
     if not is_workspace_member(token.user, token.workspace_id):
         token.revoke()
         raise exceptions.AuthenticationFailed("membership_revoked")

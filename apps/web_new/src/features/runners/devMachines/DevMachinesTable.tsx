@@ -59,7 +59,6 @@ export const MACHINE_RESUME_LABEL = "Resume the Pi Dash Agent";
 export const MACHINE_TEAM_RUNS_LABEL = "Teammates can start runs on my issues";
 export const MACHINE_TEAM_RUNS_HINT =
   "Off: only your own runs, and automatic runs on your issues, use this computer's Pi Dash Agent and your wallet.";
-export const MACHINE_SIGN_OUT_PIDASH_AGENT_LABEL = "Sign out Pi Dash Agent";
 
 /** "Replaced by <machine>": the merge offer for a wiped computer. */
 export function replacedByLabel(targetName: string): string {
@@ -71,7 +70,6 @@ export type MachineSettingRequest =
   | { kind: "rename"; machine: DevMachine }
   | { kind: "pause"; machine: DevMachine; paused: boolean }
   | { kind: "team-runs"; machine: DevMachine; enabled: boolean }
-  | { kind: "sign-out-pidash-agent"; machine: DevMachine }
   | { kind: "replace"; machine: DevMachine; target: DevMachine }
   | { kind: "remove-pidash-agent"; machine: DevMachine; runner: Runner };
 
@@ -264,16 +262,6 @@ function MachineDetails({
             onClick={() => request({ kind: "pause", machine, paused: machine.engine_paused_by_owner !== true })}
           >
             {machine.engine_paused_by_owner === true ? MACHINE_RESUME_LABEL : MACHINE_PAUSE_LABEL}
-          </Button>
-        ) : null}
-        {settings.signOutPidashAgent ? (
-          <Button
-            size="small"
-            variant="secondary"
-            disabled={disabled}
-            onClick={() => request({ kind: "sign-out-pidash-agent", machine })}
-          >
-            {MACHINE_SIGN_OUT_PIDASH_AGENT_LABEL}
           </Button>
         ) : null}
         {replacement === null ? null : (

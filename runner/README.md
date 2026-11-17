@@ -348,7 +348,6 @@ pidash engine status                   # available / signed out / expiring / una
 pidash engine pause                    # this computer's engine takes no new work …
 pidash engine resume                   # … until resumed
 pidash login --engine                  # renew the engine's 14-day credential alone
-pidash auth logout --engine            # sign the engine out; the daemon stays signed in
 pidash auth status                     # both credentials, expiry, engine sign-in state
 pidash config set engine-task-root ~/pidash-tasks   # or `default`
 ```
@@ -360,6 +359,16 @@ pidash config set engine-task-root ~/pidash-tasks   # or `default`
   those **in memory only**, refreshes them when under 60 s remain, and hands
   them to the engine through its auth helper `pidash __engine model-token`
   (over the local socket). Nothing short-lived is written to disk.
+- **One sign-in.** There is no engine-only sign-out: `pidash auth logout`
+  signs the daemon and the engine out together, and the next sign-in on
+  either side signs both in again. The engine credential is renewed silently
+  by a signed-in desktop app (from `never` and `signed_out` too), and on a
+  computer with no app `pidash login --engine` renews it alone.
+  Signing in as another account parks the previous account's machine
+  identity (machine id + runner blocks, under
+  `<config dir>/parked/<cloud>/<account>.toml`) and restores the new
+  account's own, restarting the daemon — nothing is deleted
+  (`.ai_design/desktop_unified_signin/design.md` §6.4).
 - **An engine runner** is `[runner.agent] kind = "engine"` with no paths: the
   daemon supplies the engine binary, a private `CODEX_HOME` at
   `<data dir>/engine/<account>/codex-home` (never `~/.codex`) and the Codex

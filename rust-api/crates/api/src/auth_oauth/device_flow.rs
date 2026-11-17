@@ -373,9 +373,10 @@ fn is_unique_violation_db(err: &sea_orm::DbErr) -> bool {
 
 fn silent_refusal_description(state: &str) -> &'static str {
     match state {
-        "never" => "The built-in engine is not turned on for this computer; turn it on explicitly.",
+        "revoked" => "The built-in engine was revoked on this computer; sign it in again.",
         "active" => "The built-in engine credential on this computer is not due for renewal yet.",
-        _ => "The built-in engine was signed out on this computer; sign it in explicitly.",
+        "signed_out" => "The built-in engine was signed out on this computer and this computer holds no daemon credential; sign in on this computer first.",
+        _ => "The built-in engine is not signed in for this computer; sign in on this computer first.",
     }
 }
 
@@ -920,7 +921,7 @@ async fn post_approve(
                     );
                 let allowed =
                     pidash_services::domain::pidash_agent_credential::silent_issue_allowed(
-                        &db, machine.id, now,
+                        &db, machine.id, now, "engine",
                     )
                     .await
                     .unwrap_or(false);
@@ -1233,7 +1234,7 @@ async fn post_token(State(state): State<AppState>, headers: HeaderMap, body: Byt
                 now,
             );
             let allowed = pidash_services::domain::pidash_agent_credential::silent_issue_allowed(
-                &db_conn, machine.id, now,
+                &db_conn, machine.id, now, "engine",
             )
             .await
             .unwrap_or(false);
@@ -1285,6 +1286,7 @@ async fn post_token(State(state): State<AppState>, headers: HeaderMap, body: Byt
                 user_id,
                 machine_id,
                 !row_interactive,
+                "engine",
                 now,
             )
             .await;
@@ -1549,14 +1551,9 @@ async fn resolve_machine_token_for_engine(
     let Some(token_row) = row else {
         return Err(invalid_client("machine_token_invalid"));
     };
-    if token_row.revoked_at.is_some() {
-        return Err(invalid_client("machine_token_revoked"));
-    }
-    if let Some(exp) = token_row.expires_at {
-        if exp.with_timezone(&chrono::Utc) <= now {
-            return Err(invalid_client("machine_token_expired"));
-        }
-    }
+    // The machine first: removing a computer on the web revokes its tokens
+    // too, and the daemon must read that as removed (`dev_machine_revoked`),
+    // not a plain token revoke (desktop_unified_signin §12 rule 1).
     // Revoked (or missing) dev machine -> dev_machine_revoked. Unbound
     // (NULL) skips this gate; redemption 403s below (device.py:258-262).
     if let Some(mid) = token_row.dev_machine_id {
@@ -1569,6 +1566,14 @@ async fn resolve_machine_token_for_engine(
         };
         if machine.revoked_at.is_some() {
             return Err(invalid_client("dev_machine_revoked"));
+        }
+    }
+    if token_row.revoked_at.is_some() {
+        return Err(invalid_client("machine_token_revoked"));
+    }
+    if let Some(exp) = token_row.expires_at {
+        if exp.with_timezone(&chrono::Utc) <= now {
+            return Err(invalid_client("machine_token_expired"));
         }
     }
     // Workspace membership (`is_workspace_member`): a lapsed token is

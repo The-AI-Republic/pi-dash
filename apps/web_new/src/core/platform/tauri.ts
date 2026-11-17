@@ -15,10 +15,12 @@ import type {
   AboutInfo,
   AgentAppIdentity,
   AgentRuntimeApi,
+  AuthSyncRecord,
   BundledNotice,
   CliSetupApi,
   CliStatus,
   DaemonDiscovery,
+  DaemonHello,
   DaemonPidashAgentRunner,
   DaemonLocalRunner,
   DeepLinkApi,
@@ -621,6 +623,7 @@ const desktopAgentRuntime: AgentRuntimeApi = {
       },
     }),
   localRunners: async () => (await invokeNative<DaemonLocalRunner[] | null>("daemon_runners")) ?? [],
+  daemonActiveRuns: async () => (await invokeNative<number | null>("daemon_active_runs")) ?? 0,
   addPidashAgentRunner: (input: { workspace: string; project: string; workingDir?: string | undefined }) =>
     invokeNative<DaemonPidashAgentRunner>("daemon_engine_runner_add", {
       workspace: input.workspace,
@@ -648,7 +651,16 @@ const desktopAgentRuntime: AgentRuntimeApi = {
     invokeNative<NoticesView>("desktop_notices_record", { account, notices }),
   dismissNotices: (account: string, keys: string[]) =>
     invokeNative<NoticesView>("desktop_notices_dismiss", { account, keys }),
-  signOutComputer: () => invokeNative("pidash_cli_logout", { engine: false }),
+  signOutComputer: (opts?: { localOnly?: boolean | undefined }) =>
+    invokeNative("pidash_cli_logout", { localOnly: opts?.localOnly ?? false }),
+  daemonHello: () => invokeNative<DaemonHello>("daemon_hello"),
+  desktopSessionHandoff: (expectedUserId: string) =>
+    invokeNative<{ user_id?: string | undefined; email?: string | undefined }>("desktop_session_handoff", {
+      expectedUserId,
+    }),
+  getAuthSyncRecord: async () => (await invokeNative<AuthSyncRecord | null>("auth_sync_get")) ?? null,
+  setAuthSyncRecord: (record: AuthSyncRecord) => invokeNative("auth_sync_set", { record }),
+  markFreshSignIn: () => invokeNative("auth_sync_mark_sign_in"),
 };
 
 const desktopSessionTeardown: SessionTeardownApi = {
@@ -891,6 +903,7 @@ const desktopCliSetup: CliSetupApi = {
       deviceCode: input.deviceCode,
       cloudUrl: input.cloudUrl,
       workspace: input.workspace,
+      force: input.force ?? false,
     }),
 };
 

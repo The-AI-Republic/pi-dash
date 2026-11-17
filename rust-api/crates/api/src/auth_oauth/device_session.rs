@@ -190,7 +190,7 @@ fn invalid_token() -> Response {
 /// The authenticated caller: an `APIToken` bridge (`request.auth` is the
 /// raw token string) or a machine token (`request.auth_machine_token` is
 /// set, `request.auth` the raw `mt_` value).
-enum Caller {
+pub(crate) enum Caller {
     Api { user_id: Uuid, raw: String },
     Machine { user_id: Uuid, token_id: Uuid },
 }
@@ -200,7 +200,7 @@ enum Caller {
 /// No usable credential is DRF's `NotAuthenticated` (401); a bad one is
 /// `AuthenticationFailed` (403 here — see [`INVALID_TOKEN_BODY`]).
 #[allow(clippy::result_large_err)]
-async fn authenticate(
+pub(crate) async fn authenticate(
     pool: &sqlx::PgPool,
     secret_key: &[u8],
     headers: &HeaderMap,
@@ -1071,6 +1071,7 @@ async fn exchange_in_transaction(
                             &pidash_db::orm_tx::TxConn::new(tx) as &_,
                             m.id,
                             now,
+                            "cli",
                         )
                         .await
                         .unwrap_or(false)
@@ -1089,6 +1090,7 @@ async fn exchange_in_transaction(
                             user_id,
                             params.dev_machine_id,
                             silent,
+                            "cli",
                             now,
                         )
                         .await;

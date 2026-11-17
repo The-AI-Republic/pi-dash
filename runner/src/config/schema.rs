@@ -28,6 +28,84 @@ pub struct Config {
     /// (`config::secrets`). Not written while it holds only defaults.
     #[serde(default, skip_serializing_if = "AuthSection::is_default")]
     pub auth: AuthSection,
+    /// `[auth_event]`: the persisted record of the last sign-in event on
+    /// this computer (desktop_unified_signin §6.1). Written by every
+    /// `pidash auth login` and `pidash auth logout` in the same config
+    /// write as the credentials, and reported by the IPC `Hello` whether
+    /// or not an account is live, so the desktop app can follow the newest
+    /// event. Absent on installs from before this change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_event: Option<AuthEvent>,
+}
+
+/// One persisted sign-in event (desktop_unified_signin §6.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthEvent {
+    /// A counter that only increases on this computer.
+    pub seq: u64,
+    pub kind: AuthEventKind,
+    /// For `signed_out`: why this computer was signed out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<AuthEventReason>,
+    /// Whose sign-in (or sign-out) this was, also for `signed_out`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<AuthEventAccount>,
+    /// Wall-clock time, for display and the newest-wins tie-break.
+    pub at: DateTime<Utc>,
+}
+
+/// The persisted form of a sign-in event, as `Hello` reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthEventKind {
+    SignedIn,
+    SignedOut,
+}
+
+/// Why a `signed_out` event happened (design §6.1). `logout` and
+/// `last_workspace_logout` are written by `pidash auth logout` itself;
+/// `removed`, `revoked` and `expired` describe server-side losses of the
+/// daemon credential. Only a sign-out the user made can sign the app out
+/// (design §12 rule 1): `expired` and `revoked` never win.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthEventReason {
+    Logout,
+    LastWorkspaceLogout,
+    Removed,
+    Revoked,
+    Expired,
+}
+
+/// The account a sign-in event names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthEventAccount {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    pub cloud_url: String,
+}
+
+impl AuthEventKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuthEventKind::SignedIn => "signed_in",
+            AuthEventKind::SignedOut => "signed_out",
+        }
+    }
+}
+
+impl AuthEventReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuthEventReason::Logout => "logout",
+            AuthEventReason::LastWorkspaceLogout => "last_workspace_logout",
+            AuthEventReason::Removed => "removed",
+            AuthEventReason::Revoked => "revoked",
+            AuthEventReason::Expired => "expired",
+        }
+    }
 }
 
 /// Top-level `[engine]` table (`src/engine/locate.rs`).
@@ -1300,6 +1378,7 @@ mod tests {
         Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),

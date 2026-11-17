@@ -70,6 +70,17 @@ pub mod domain {
     pub use pidash_services::domain::assistant::stamp_llm_config_verified;
     pub use pidash_services::domain::assistant::LlmConfigFullSave;
     pub use pidash_services::domain::assistant::LlmConfigInsert;
+    // Desktop session handoff (desktop_unified_signin §5): the overlay's
+    // cloud redeem (desktop JWT pair) calls the same domain checks.
+    pub use pidash_services::domain::desktop_handoff::challenge_for_verifier;
+    pub use pidash_services::domain::desktop_handoff::issue_handoff;
+    pub use pidash_services::domain::desktop_handoff::redeem_handoff;
+    pub use pidash_services::domain::desktop_handoff::HandoffDbError;
+    pub use pidash_services::domain::desktop_handoff::HandoffError;
+    pub use pidash_services::domain::desktop_handoff::IssuedHandoff;
+    pub use pidash_services::domain::desktop_handoff::RedeemedHandoff;
+    pub use pidash_services::domain::desktop_handoff::HANDOFF_DISABLED;
+    pub use pidash_services::domain::desktop_handoff::HANDOFF_TTL_SECS;
     pub use pidash_services::domain::identity::account::create_account;
     pub use pidash_services::domain::identity::account::update_account_metadata;
     pub use pidash_services::domain::identity::account::update_account_rotated_tokens;

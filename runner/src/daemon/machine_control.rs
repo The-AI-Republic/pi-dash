@@ -131,7 +131,10 @@ impl MachineControl {
                     resp.session_id
                 }
                 Err(e) if is_token_fatal(&e) => {
-                    tokens.mark_revoked(client.machine_token());
+                    tokens.mark_fatal(
+                        client.machine_token(),
+                        crate::daemon::workspace_tokens::fatal_reason(&e),
+                    );
                     tracing::warn!(
                         workspace = %workspace_label,
                         "machine session token rejected ({e}); reopening with another workspace's token"
@@ -141,6 +144,7 @@ impl MachineControl {
                 Err(e) => {
                     if is_machine_fatal(&e) {
                         tracing::error!("machine control session unrecoverable: {e}");
+                        tokens.mark_machine_removed();
                         return;
                     }
                     let delay = jittered(open_backoff.next_base());
@@ -195,7 +199,10 @@ impl MachineControl {
                         break 'poll;
                     }
                     Err(e) if is_token_fatal(&e) => {
-                        tokens.mark_revoked(client.machine_token());
+                        tokens.mark_fatal(
+                            client.machine_token(),
+                            crate::daemon::workspace_tokens::fatal_reason(&e),
+                        );
                         tracing::warn!(
                             workspace = %workspace_label,
                             "machine session token revoked ({e}); reopening with another workspace's token"
@@ -205,6 +212,7 @@ impl MachineControl {
                     Err(e) => {
                         if is_machine_fatal(&e) {
                             tracing::error!("machine control session unrecoverable: {e}");
+                            tokens.mark_machine_removed();
                             return;
                         }
                         let delay = jittered(poll_backoff.next_base());
@@ -582,6 +590,7 @@ mod tests {
             cli: None,
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
         };
         crate::config::file::write_config(&paths, &cfg).unwrap();
         ensure_below_runner_cap(&paths).expect("one slot left");
@@ -794,6 +803,7 @@ mod tests {
         let daemon_state = StateHandle::new(crate::config::schema::Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: Default::default(),
             runners: vec![],
@@ -854,6 +864,7 @@ mod tests {
         let daemon_state = StateHandle::new(crate::config::schema::Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: Default::default(),
             runners: vec![],
@@ -957,6 +968,7 @@ mod tests {
                 cli: Some(cli.clone()),
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
             },
         )
         .unwrap();

@@ -223,6 +223,42 @@ pub async fn probe_hello(socket: &Path) -> HelloProbe {
     }
 }
 
+/// What a `SessionHandoff` answered: the single-use code and the account it
+/// belongs to. The code never reaches the webview: the handoff command
+/// redeems it natively.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionHandoffAnswer {
+    pub code: String,
+    pub user_id: Option<String>,
+    pub email: Option<String>,
+}
+
+pub async fn session_handoff_at(
+    socket: &Path,
+    challenge: &str,
+) -> Result<SessionHandoffAnswer, CallError> {
+    match call_at(
+        socket,
+        Request::SessionHandoff {
+            challenge: challenge.to_string(),
+        },
+        CALL_TIMEOUT,
+    )
+    .await?
+    {
+        Response::SessionHandoff {
+            code,
+            user_id,
+            email,
+        } => Ok(SessionHandoffAnswer {
+            code,
+            user_id,
+            email,
+        }),
+        other => Err(CallError::Failed(unexpected(&other))),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Discovery
 // ---------------------------------------------------------------------------
@@ -431,64 +467,12 @@ fn cli_info() -> CliInfo {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The app's account, for native checks (PO-13)
-// ---------------------------------------------------------------------------
-
-/// The account the webview last asked discovery about: the app's signed-in
-/// account. Native commands that sign the daemon in check against it, so
-/// PO-13 does not rest on the UI alone.
-static APP_IDENTITY: std::sync::Mutex<Option<AppIdentity>> = std::sync::Mutex::new(None);
-
-fn remember_app_identity(identity: &AppIdentity) {
-    *APP_IDENTITY.lock().unwrap_or_else(|e| e.into_inner()) = Some(identity.clone());
-}
-
-fn app_identity() -> Option<AppIdentity> {
-    APP_IDENTITY
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
-}
-
-/// Whether the app may sign the daemon in now (design §4.6, PO-13): refused
-/// when the daemon is signed in as another account or to another cloud,
-/// unless `force` ("Sign Pi Dash on this computer in as me") and it hosts
-/// no runners. Asked again right before the sign-in, so an account change
-/// since the consent screen (a `pidash auth login` in a terminal) is caught.
-pub fn login_allowed(probe: HelloProbe, app: &AppIdentity, force: bool) -> Result<(), String> {
-    match evaluate(probe, app, CliInfo::default()) {
-        Discovery::AccountMismatch {
-            daemon_account,
-            hosts_runners,
-            ..
-        } => {
-            if force && !hosts_runners {
-                return Ok(());
-            }
-            Err(if hosts_runners {
-                format!(
-                    "Pi Dash on this computer is signed in as {daemon_account} and hosts runners. \
-                     Run `pidash auth logout` in a terminal first to use it with this account."
-                )
-            } else {
-                format!(
-                    "Pi Dash on this computer is signed in as {daemon_account}, not this account."
-                )
-            })
-        }
-        _ => Ok(()),
-    }
-}
-
-/// [`login_allowed`] against the running daemon and the account the app
-/// last reported. No check when the app has not reported one yet.
-pub async fn check_login_allowed(force: bool) -> Result<(), String> {
-    let Some(app) = app_identity() else {
-        return Ok(());
-    };
-    login_allowed(probe_hello(&socket()?).await, &app, force)
-}
+// There is no PO-13 refusal any more (desktop_unified_signin U-2): signing
+// the daemon in as another account switches it instead — the CLI signs the
+// old account out, parks its machine identity, restores the new account's
+// own, and restarts the daemon (design §6.4). The commands that sign in
+// need no native gate; `Discovery::AccountMismatch` still tells the app
+// its engine features are off until it signs the daemon in.
 
 // ---------------------------------------------------------------------------
 // Tauri commands
@@ -497,7 +481,6 @@ pub async fn check_login_allowed(force: bool) -> Result<(), String> {
 /// Find the computer's daemon and say whether the app can work with it.
 #[tauri::command]
 pub async fn daemon_discover(app_identity: AppIdentity) -> Result<Discovery, String> {
-    remember_app_identity(&app_identity);
     let probe = probe_hello(&socket()?).await;
     let cli = tauri::async_runtime::spawn_blocking(cli_info)
         .await
@@ -505,10 +488,69 @@ pub async fn daemon_discover(app_identity: AppIdentity) -> Result<Discovery, Str
     Ok(evaluate(probe, &app_identity, cli))
 }
 
+/// The daemon's `Hello` with no account classification (design §6.2): the
+/// sign-in reconciliation needs the daemon's event even when the app has no
+/// session of its own yet (CLI-first sign-in) or is signed in as another
+/// account. Rejects when there is no daemon, it did not answer `Hello`, or
+/// its protocol is outside the supported range — the caller then skips the
+/// comparison (§6.2: "No answer, no daemon, or an incompatible daemon").
+#[tauri::command]
+pub async fn daemon_hello() -> Result<HelloInfo, String> {
+    match probe_hello(&socket()?).await {
+        HelloProbe::Answered(hello) => {
+            if hello.ipc_version < MIN_DAEMON_IPC {
+                return Err("the daemon is too old".to_string());
+            }
+            if hello.ipc_version > MAX_DAEMON_IPC {
+                return Err("the daemon is too new".to_string());
+            }
+            Ok(*hello)
+        }
+        HelloProbe::Unreachable => Err("Pi Dash is not running on this computer".to_string()),
+        HelloProbe::NoHello(_) => Err("the daemon is too old".to_string()),
+        HelloProbe::NoAnswer(reason) => Err(reason),
+    }
+}
+
 #[tauri::command]
 pub async fn daemon_status() -> Result<StatusSnapshot, String> {
     match call(Request::StatusGet, CALL_TIMEOUT).await? {
         Response::Status(s) => Ok(s),
+        other => Err(unexpected(&other)),
+    }
+}
+
+/// Run statuses that end as failed when the account switches
+/// (design §6.4): queued runs pinned to the old account's runners go back
+/// to their pod instead. Mirrors the CLI's switch warning count.
+const RUNS_IN_FLIGHT: &[&str] = &[
+    "assigned",
+    "running",
+    "awaiting_approval",
+    "awaiting_reauth",
+    "paused_awaiting_input",
+    "cancel_requested",
+    "waiting_for_worktree",
+];
+
+/// How many runs are in flight on this computer's runners, for the account
+/// switch warning (design §6.4): switching stops them. Best-effort over
+/// the daemon's recent runs; a daemon that does not answer means none.
+#[tauri::command]
+pub async fn daemon_active_runs() -> Result<usize, String> {
+    match call(
+        Request::RunsList {
+            limit: Some(200),
+            runner: None,
+        },
+        CALL_TIMEOUT,
+    )
+    .await?
+    {
+        Response::Runs(runs) => Ok(runs
+            .iter()
+            .filter(|r| RUNS_IN_FLIGHT.contains(&r.status.as_str()))
+            .count()),
         other => Err(unexpected(&other)),
     }
 }
@@ -739,6 +781,8 @@ mod tests {
             ipc_version: ipc,
             cloud_url: "https://pidash.example.com/".into(),
             account,
+            auth_state: None,
+            auth_event: None,
             workspaces: vec![HelloWorkspace {
                 slug: "acme".into(),
                 signed_in: true,
@@ -837,37 +881,6 @@ mod tests {
             classify_connect_error(denied),
             CallError::NoAnswer(_)
         ));
-    }
-
-    /// PO-13 natively: a sign-in is refused when the daemon is signed in as
-    /// another account, unless forced on a daemon that hosts no runners.
-    #[test]
-    fn login_is_refused_for_another_account_unless_forced_on_an_empty_daemon() {
-        let me = Some(account(Some("u-1"), None, "https://pidash.example.com"));
-        assert!(login_allowed(answered(hello(MAX_DAEMON_IPC, me)), &app(), false).is_ok());
-        assert!(login_allowed(HelloProbe::Unreachable, &app(), false).is_ok());
-        assert!(login_allowed(answered(hello(MAX_DAEMON_IPC, None)), &app(), false).is_ok());
-
-        let other = Some(account(
-            Some("u-2"),
-            Some("someone@example.com"),
-            "https://pidash.example.com",
-        ));
-        let err = login_allowed(
-            answered(hello(MAX_DAEMON_IPC, other.clone())),
-            &app(),
-            false,
-        )
-        .unwrap_err();
-        assert!(err.contains("someone@example.com"), "{err}");
-        assert!(
-            login_allowed(answered(hello(MAX_DAEMON_IPC, other.clone())), &app(), true).is_ok()
-        );
-
-        let mut busy = hello(MAX_DAEMON_IPC, other);
-        busy.workspaces[0].runners = 2;
-        let err = login_allowed(answered(busy), &app(), true).unwrap_err();
-        assert!(err.contains("hosts runners"), "{err}");
     }
 
     #[test]

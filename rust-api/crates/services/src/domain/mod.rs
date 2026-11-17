@@ -55,6 +55,7 @@ pub mod assistant;
 pub mod clock;
 pub mod comments;
 pub mod ctx;
+pub mod desktop_handoff;
 pub mod error;
 pub mod identity;
 pub mod issue_assignment;

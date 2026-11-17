@@ -108,6 +108,20 @@ def test_revoked_dev_machine_keeps_its_code(db, api_client, minted_token, dev_ma
 
 
 @pytest.mark.unit
+def test_removed_computer_reads_as_removed_even_with_its_token_revoked(db, api_client, minted_token, dev_machine):
+    """Removing a computer on the web revokes its tokens too; the daemon must
+    still see ``dev_machine_revoked`` (removed), not ``machine_token_revoked``
+    (desktop_unified_signin §12 rule 1)."""
+    raw, row = minted_token
+    now = timezone.now()
+    DevMachine.objects.filter(pk=dev_machine.pk).update(revoked_at=now)
+    MachineToken.objects.filter(pk=row.pk).update(revoked_at=now)
+    resp = _open_session(api_client, raw, uuid.uuid4())
+    assert resp.status_code == 401
+    assert resp.json() == {"detail": "dev_machine_revoked"}
+
+
+@pytest.mark.unit
 def test_revoked_membership_keeps_its_code(db, api_client, minted_token, monkeypatch):
     raw, _ = minted_token
     monkeypatch.setattr(

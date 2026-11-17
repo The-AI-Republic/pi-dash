@@ -300,6 +300,7 @@ mod tests {
             }),
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
         };
         file::write_config(paths, &cfg).unwrap();
     }
