@@ -767,7 +767,9 @@ async fn enforce_slug_unique(
 /// `active_binding_count` is the resolved count (annotation or R6
 /// fallback, decided by the caller per [`shape::resolve_active_binding_count`]
 /// semantics), datetimes render in the actor zone, `color` renders
-/// as stored (no normalization on read).
+/// as stored (no normalization on read). `is_builtin` is slug-in-catalog
+/// (mirroring `definition_writes.is_builtin`), not `source` — `source`
+/// defaults to `builtin` for user-created rows too (PDASHOSS01-290).
 pub fn render_scheduler_row(row: &SchedulerRow, active_binding_count: i64, tz: &Tz) -> Value {
     let mut rendered = Map::new();
     rendered.insert("id".to_owned(), Value::String(row.id.to_string()));
@@ -784,6 +786,10 @@ pub fn render_scheduler_row(row: &SchedulerRow, active_binding_count: i64, tz: &
     rendered.insert("prompt".to_owned(), Value::String(row.prompt.clone()));
     rendered.insert("color".to_owned(), Value::String(row.color.clone()));
     rendered.insert("source".to_owned(), Value::String(row.source.clone()));
+    rendered.insert(
+        "is_builtin".to_owned(),
+        Value::Bool(crate::v1_schedulers::writes::is_builtin_slug(&row.slug)),
+    );
     rendered.insert("is_enabled".to_owned(), Value::Bool(row.is_enabled));
     rendered.insert(
         "active_binding_count".to_owned(),

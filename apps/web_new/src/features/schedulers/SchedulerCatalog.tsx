@@ -19,8 +19,12 @@ export interface SchedulerCatalogProps {
   workspaceSlug: string;
 }
 
-export function schedulerSourceLabel(source: Scheduler["source"]): string {
-  return source === "builtin" ? "Built in" : "Manifest";
+export function schedulerSourceLabel(isBuiltin: boolean): string {
+  // NEWPIDASH-256: badge from `is_builtin` (slug-in-catalog), not
+  // `source`. `source` defaults to `builtin` for user-created rows too,
+  // so reading it labeled every row "Built in". `source` is left for
+  // back-compat and documented as not meaningful for this badge.
+  return isBuiltin ? "Built in" : "Custom";
 }
 
 export function formatSchedulerUpdatedAt(value: string): string {
@@ -128,7 +132,7 @@ export function SchedulerCatalog({ workspaceSlug }: SchedulerCatalogProps): Reac
                       <p className="text-meta font-mono text-(--text-muted)">{scheduler.slug}</p>
                     </td>
                     <td className="border-b border-(--border) px-(--space-4) py-(--space-4)">
-                      <Badge>{schedulerSourceLabel(scheduler.source)}</Badge>
+                      <Badge>{schedulerSourceLabel(scheduler.is_builtin)}</Badge>
                     </td>
                     <td className="border-b border-(--border) px-(--space-4) py-(--space-4) text-(--text)">
                       {scheduler.active_binding_count}

@@ -8697,6 +8697,7 @@ export interface ParityScheduler {
   prompt: string;
   color: string;
   source: "builtin" | "manifest";
+  is_builtin: boolean;
   is_enabled: boolean;
   active_binding_count: number;
   created_at: string;

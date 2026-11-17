@@ -7273,6 +7273,7 @@ describe("scheduler contracts", () => {
     prompt: "Contract base prompt.",
     color: "#3b82f6",
     source: "builtin",
+    is_builtin: false,
     is_enabled: true,
     active_binding_count: 1,
     created_at: "2026-10-01T00:00:00Z",

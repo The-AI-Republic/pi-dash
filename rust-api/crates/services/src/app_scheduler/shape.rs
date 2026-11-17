@@ -90,6 +90,7 @@ pub const SCHEDULER_SERIALIZER_FIELDS: &[&str] = &[
     "prompt",
     "color",
     "source",
+    "is_builtin",
     "is_enabled",
     "active_binding_count",
     "created_at",
@@ -101,6 +102,7 @@ pub const SCHEDULER_READ_ONLY_FIELDS: &[&str] = &[
     "id",
     "workspace",
     "source",
+    "is_builtin",
     "active_binding_count",
     "created_at",
     "updated_at",
@@ -1529,7 +1531,8 @@ mod tests {
     fn scheduler_fields_match_f36_01_in_order() {
         let parsed = golden(F36_01);
         let expected = str_list(&parsed["fields"]);
-        assert_eq!(SCHEDULER_SERIALIZER_FIELDS.len(), 12);
+        // NEWPIDASH-256 added `is_builtin` (13 keys now).
+        assert_eq!(SCHEDULER_SERIALIZER_FIELDS.len(), 13);
         assert_eq!(SCHEDULER_SERIALIZER_FIELDS, expected.as_slice());
     }
 
@@ -1538,7 +1541,7 @@ mod tests {
         let parsed = golden(F36_01);
         let guards = str_list(&parsed["read_only_fields"]);
         assert_eq!(SCHEDULER_READ_ONLY_FIELDS, guards.as_slice());
-        // The render example carries exactly the 12 keys (order is pinned
+        // The render example carries exactly the 13 keys (order is pinned
         // by the `fields` array above — `serde_json` maps do not preserve
         // document order).
         let mut rendered: Vec<&str> = parsed["render_example"]
