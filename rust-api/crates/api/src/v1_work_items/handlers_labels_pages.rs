@@ -206,6 +206,10 @@ pub enum Denial {
     /// 503, `_conversion_failed` (the live document server is unavailable
     /// and nothing was written).
     ServiceUnavailable(String),
+    /// 409, archived project (NEWPIDASH-236 shared envelope).
+    ProjectArchived(String),
+    /// 400, move target refusal.
+    BadMoveRequest(String),
     /// 500, generic branch.
     ServerError,
 }
@@ -245,6 +249,11 @@ impl Denial {
             Denial::ForbiddenError(body) => (StatusCode::FORBIDDEN, body.clone()),
             Denial::NotFound(body) => (StatusCode::NOT_FOUND, body.clone()),
             Denial::Conflict(body) => (StatusCode::CONFLICT, body.clone()),
+            Denial::ProjectArchived(body) => (StatusCode::CONFLICT, body.clone()),
+            Denial::BadMoveRequest(message) => (
+                StatusCode::BAD_REQUEST,
+                format!("{{\"error\":{}}}", json_string(message)),
+            ),
             Denial::ServiceUnavailable(body) => (StatusCode::SERVICE_UNAVAILABLE, body.clone()),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -282,6 +291,32 @@ fn json_created(body: String) -> Response {
 fn db_error<E: std::fmt::Display>(error: E, site: &str) -> Denial {
     tracing::warn!(%error, site, "v1_work_items labels_pages database failure");
     Denial::ServerError
+}
+
+/// NEWPIDASH-240 archived-project gate for v1 page routes. After auth and
+/// the role gate, a project-scoped page route on an archived project
+/// answers 409 with the shared envelope.
+async fn require_not_archived(pool: &PgPool, project_id: &Uuid) -> Result<(), Denial> {
+    if let Some(info) = crate::project_archived::archived_by_id(pool, *project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
+    Ok(())
+}
+
+/// Fetch the archived project info for the list read (which returns the
+/// pages with status instead of 409).
+async fn archived_info_for(
+    pool: &PgPool,
+    project_id: &Uuid,
+) -> Result<Option<crate::project_archived::ArchivedProject>, Denial> {
+    crate::project_archived::archived_by_id(pool, *project_id)
+        .await
+        .map_err(|_| Denial::ServerError)
 }
 
 /// `timezone.now()` truncated to microseconds: Python datetimes carry no
@@ -394,6 +429,13 @@ pub fn owned_page_archive(
     router: axum::routing::MethodRouter<AppState>,
 ) -> axum::routing::MethodRouter<AppState> {
     owned(router, &["POST", "DELETE"])
+}
+
+/// The page move path owns POST only (NEWPIDASH-240).
+pub fn owned_page_move(
+    router: axum::routing::MethodRouter<AppState>,
+) -> axum::routing::MethodRouter<AppState> {
+    owned(router, &["POST"])
 }
 
 // ---------------------------------------------------------------------------
@@ -794,7 +836,21 @@ async fn fetch_label_detail(
 /// live rows for this slug, the `Exists` over the through table (member +
 /// live project, no row fan-out), public-or-owned — `-created_at`.
 fn page_scope(slug: &str, project_id: &Uuid, user_id: &Uuid) -> sea_orm::Select<pages::Entity> {
-    let visible = SeaQuery::select()
+    page_scope_with_archived(slug, project_id, user_id, false)
+}
+
+/// NEWPIDASH-240: when `include_archived_project` is true the
+/// `projects.archived_at IS NULL` leg is omitted, so the archived
+/// project's own pages are visible to its list. Every other caller
+/// (detail, patch, archive) uses the filtered scope but normally returns
+/// 409 before fetching.
+fn page_scope_with_archived(
+    slug: &str,
+    project_id: &Uuid,
+    user_id: &Uuid,
+    include_archived_project: bool,
+) -> sea_orm::Select<pages::Entity> {
+    let mut visible = SeaQuery::select()
         .expr(Expr::value(1))
         .from(project_pages::Entity)
         .inner_join(
@@ -815,12 +871,14 @@ fn page_scope(slug: &str, project_id: &Uuid, user_id: &Uuid) -> sea_orm::Select<
         .and_where(
             Expr::col((project_pages::Entity, project_pages::Column::ProjectId)).eq(*project_id),
         )
-        .and_where(Expr::col((projects::Entity, projects::Column::ArchivedAt)).is_null())
         .and_where(Expr::col((project_members::Entity, project_members::Column::IsActive)).eq(true))
         .and_where(
             Expr::col((project_members::Entity, project_members::Column::MemberId)).eq(*user_id),
         )
         .take();
+    if !include_archived_project {
+        visible.and_where(Expr::col((projects::Entity, projects::Column::ArchivedAt)).is_null());
+    }
     pages::Entity::find()
         .filter(pages::Column::DeletedAt.is_null())
         .filter(
@@ -837,13 +895,26 @@ fn page_scope(slug: &str, project_id: &Uuid, user_id: &Uuid) -> sea_orm::Select<
 
 /// Page list statement (`:267-273`): [`page_scope`] plus the
 /// `include_archived` arm (`archived_at IS NULL` unless requested).
+#[allow(dead_code)]
 fn page_list_query(
     slug: &str,
     project_id: &Uuid,
     user_id: &Uuid,
     include_archived: bool,
 ) -> sea_orm::Select<pages::Entity> {
-    let scope = page_scope(slug, project_id, user_id);
+    page_list_query_with_archived_project(slug, project_id, user_id, include_archived, false)
+}
+
+/// NEWPIDASH-240: list of an archived project omits the
+/// `projects.archived_at IS NULL` leg via `page_scope_with_archived`.
+fn page_list_query_with_archived_project(
+    slug: &str,
+    project_id: &Uuid,
+    user_id: &Uuid,
+    include_archived: bool,
+    include_archived_project: bool,
+) -> sea_orm::Select<pages::Entity> {
+    let scope = page_scope_with_archived(slug, project_id, user_id, include_archived_project);
     if include_archived {
         scope
     } else {
@@ -852,6 +923,7 @@ fn page_list_query(
 }
 
 /// Page list rows, every column, in `-created_at` order.
+#[allow(dead_code)]
 async fn fetch_page_rows(
     pool: &PgPool,
     slug: &str,
@@ -3113,31 +3185,52 @@ async fn page_list_inner(
             .as_str(),
         "true" | "1" | "yes"
     );
-    let rows = fetch_page_rows(
-        &pre.pool,
+    // NEWPIDASH-240: list of an archived project returns its pages with
+    // `project_status` fields instead of the old 0 rows.
+    let archived = archived_info_for(&pre.pool, &project_id).await?;
+    let include_archived_project = archived.is_some();
+    let rows = page_list_query_with_archived_project(
         slug,
         &project_id,
         &pre.actor.id,
         include_archived,
+        include_archived_project,
     )
-    .await?;
+    .all(&sea_orm_connection(&pre.pool))
+    .await
+    .map_err(|error| db_error(error, "page-list"))?;
     let total_count = rows.len() as i64;
     let (page_rows, has_more) = window_rows(&rows, per_page, &cursor)?;
     let (field_specs, kept, expand) = field_selection(query, PAGE_LITE_FIELDS)?;
     let expand_refs: Vec<&str> = expand.iter().map(String::as_str).collect();
+    let (project_status, project_archived_at) = match &archived {
+        Some(info) => (
+            Value::String("archived".to_owned()),
+            Value::String(crate::project_archived::format_archived_at(
+                &info.archived_at,
+            )),
+        ),
+        None => (Value::String("active".to_owned()), Value::Null),
+    };
     let mut rendered: Vec<Value> = Vec::with_capacity(page_rows.len());
     for row in page_rows {
         let decoded = decode_page(row, &tz);
-        rendered.push(
-            render_page_lite_expanded(
-                &pre.pool,
-                &decoded,
-                field_specs.as_deref(),
-                &expand_refs,
-                &kept,
-            )
-            .await?,
-        );
+        let mut value = render_page_lite_expanded(
+            &pre.pool,
+            &decoded,
+            field_specs.as_deref(),
+            &expand_refs,
+            &kept,
+        )
+        .await?;
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("project_status".to_owned(), project_status.clone());
+            obj.insert(
+                "project_archived_at".to_owned(),
+                project_archived_at.clone(),
+            );
+        }
+        rendered.push(value);
     }
     let next = crate::paginator::next_cursor(per_page, cursor.offset, has_more);
     let prev = crate::paginator::prev_cursor(per_page, cursor.offset);
@@ -3262,6 +3355,7 @@ async fn page_post_inner(
         "POST",
     )
     .await?;
+    require_not_archived(&pre.pool, &project_id).await?;
     let tz = activate_timezone(pre.actor.timezone.as_deref())?;
     let mut parsed = parse_write_body(headers, raw_body)?;
     if parsed.from_form {
@@ -3642,6 +3736,7 @@ async fn page_detail_inner(
         "GET",
     )
     .await?;
+    require_not_archived(&pre.pool, &project_id).await?;
     let tz = activate_timezone(pre.actor.timezone.as_deref())?;
     let row = fetch_visible_page(&pre.pool, slug, &project_id, &pre.actor.id, page_id).await?;
     let Some(row) = row else {
@@ -3709,6 +3804,7 @@ async fn page_patch_inner(
         "PATCH",
     )
     .await?;
+    require_not_archived(&pre.pool, &project_id).await?;
     let tz = activate_timezone(pre.actor.timezone.as_deref())?;
     // `get_page_or_error` (`:410-412`): the "Page not found" 404.
     let row = fetch_visible_page(&pre.pool, slug, &project_id, &pre.actor.id, page_id).await?;
@@ -3947,6 +4043,231 @@ pub async fn delete_page_archive(
     }
 }
 
+/// `POST .../pages/<page_id>/move/` — move a page from its project
+/// (archived or active) to an active project in the same workspace.
+/// Caller must be able to view the source and to edit pages in the target.
+/// The `pages` row never moves; only the `project_pages` bridge is
+/// re-pointed, so content and `page_versions` are preserved.
+pub async fn post_page_move(
+    State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
+    Path((slug, project_id_raw, page_raw)): Path<(String, String, String)>,
+    headers: HeaderMap,
+    body: axum::body::Body,
+) -> Response {
+    if !crate::runner_runs::is_uuid_path_segment(&page_raw) {
+        return proxy_request(&state, "POST", original.to_string()).await;
+    }
+    let page_id = page_raw.parse::<Uuid>().expect("checked segment");
+    let raw = match read_body(body).await {
+        Ok(raw) => raw,
+        Err(denial) => return denial.into_response(),
+    };
+    match page_move_inner(&state, &headers, &slug, &project_id_raw, &page_id, &raw).await {
+        Ok(response) => response,
+        Err(denial) => denial.into_response(),
+    }
+}
+
+async fn page_move_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+    project_id_raw: &str,
+    page_id: &Uuid,
+    raw_body: &[u8],
+) -> Result<Response, Denial> {
+    let pre = preamble(state, headers, slug).await?;
+    let source_project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
+    // Source gate: the one exception — an archived source is allowed.
+    // View-level gate (GET) mirrors the app move's source-view check.
+    require_gate(
+        &pre.pool,
+        &workspace_id,
+        slug,
+        &pre.actor.id,
+        &source_project_id,
+        V1WorkItemsRoute::PageDetail,
+        "GET",
+    )
+    .await?;
+    // The source project must be live (soft-deleted source 404s).
+    let source_live = project_probe(&sea_orm_connection(&pre.pool), &source_project_id, false)
+        .await
+        .map_err(|error| db_error(error, "page-move-source-live"))?;
+    if !source_live {
+        return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
+    }
+    // Parse the move body: `{"target_project_id": "<uuid-or-identifier>"}`
+    // (also accepts `target_project`, `to_project`, `project_id`, `project`).
+    let parsed: Value = if raw_body.is_empty() {
+        Value::Null
+    } else {
+        match serde_json::from_slice(raw_body) {
+            Ok(value) => value,
+            Err(_) => return Err(Denial::BadDetail("JSON parse error".to_owned())),
+        }
+    };
+    let target_raw = parsed.as_object().and_then(|map| {
+        map.get("target_project_id")
+            .or_else(|| map.get("target_project"))
+            .or_else(|| map.get("to_project"))
+            .or_else(|| map.get("project_id"))
+            .or_else(|| map.get("project"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+    });
+    let Some(target_raw) = target_raw else {
+        return Err(Denial::BadMoveRequest("Missing target project".to_owned()));
+    };
+    let target_project_id = rewrite_project_id(&pre.pool, slug, target_raw).await?;
+    // Target must be live.
+    let target_live = project_probe(&sea_orm_connection(&pre.pool), &target_project_id, false)
+        .await
+        .map_err(|error| db_error(error, "page-move-target-live"))?;
+    if !target_live {
+        return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
+    }
+    // Moving to an archived project is refused with the shared envelope.
+    if let Some(info) = archived_info_for(&pre.pool, &target_project_id).await? {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
+    // Same-workspace guard before the target gate (cross-workspace is 400
+    // before the source-slug gate would 403).
+    let db = sea_orm_connection(&pre.pool);
+    let source_ws_early: Option<Uuid> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::WorkspaceId)
+        .filter(projects::Column::Id.eq(source_project_id))
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|error| db_error(error, "page-move-source-ws-early"))?;
+    let target_ws_early: Option<Uuid> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::WorkspaceId)
+        .filter(projects::Column::Id.eq(target_project_id))
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|error| db_error(error, "page-move-target-ws-early"))?;
+    if let (Some(s), Some(t)) = (source_ws_early, target_ws_early) {
+        if s != t {
+            return Err(Denial::BadMoveRequest(
+                "Cannot move a page across workspaces".to_owned(),
+            ));
+        }
+    }
+    // Target edit gate: the caller must be allowed to edit pages there.
+    require_gate(
+        &pre.pool,
+        &workspace_id,
+        slug,
+        &pre.actor.id,
+        &target_project_id,
+        V1WorkItemsRoute::PageList,
+        "POST",
+    )
+    .await?;
+    // Same-workspace guard (already verified above).
+    let db = sea_orm_connection(&pre.pool);
+    let source_ws: Option<Uuid> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::WorkspaceId)
+        .filter(projects::Column::Id.eq(source_project_id))
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|error| db_error(error, "page-move-source-ws"))?;
+    let target_ws: Option<Uuid> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::WorkspaceId)
+        .filter(projects::Column::Id.eq(target_project_id))
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|error| db_error(error, "page-move-target-ws"))?;
+    match (source_ws, target_ws) {
+        (Some(s), Some(t)) if s != t => {
+            return Err(Denial::BadMoveRequest(
+                "Cannot move a page across workspaces".to_owned(),
+            ));
+        }
+        (Some(_), Some(_)) => {}
+        _ => return Err(Denial::ServerError),
+    }
+    // Source link must be live.
+    let source_link: Option<Uuid> = project_pages::Entity::find()
+        .select_only()
+        .column(project_pages::Column::Id)
+        .filter(project_pages::Column::PageId.eq(*page_id))
+        .filter(project_pages::Column::ProjectId.eq(source_project_id))
+        .filter(project_pages::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|error| db_error(error, "page-move-source-link"))?;
+    if source_link.is_none() {
+        return Err(Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()));
+    }
+    // Re-point atomically.
+    let mut tx = pre
+        .pool
+        .begin()
+        .await
+        .map_err(|error| db_error(error, "page-move-tx"))?;
+    let existing_target: Option<Uuid> = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM project_pages WHERE page_id = $1 AND project_id = $2 AND deleted_at IS NULL",
+    )
+    .bind(*page_id)
+    .bind(target_project_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| db_error(error, "page-move-existing"))?;
+    let now = now_utc();
+    if existing_target.is_some() {
+        sqlx::query(
+            "UPDATE project_pages SET deleted_at = $3, updated_at = $4, updated_by_id = $5 WHERE page_id = $1 AND project_id = $2 AND deleted_at IS NULL",
+        )
+        .bind(*page_id)
+        .bind(source_project_id)
+        .bind(now.fixed_offset())
+        .bind(now.fixed_offset())
+        .bind(pre.actor.id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| db_error(error, "page-move-drop"))?;
+    } else {
+        sqlx::query(
+            "UPDATE project_pages SET project_id = $3, updated_at = $4, updated_by_id = $5 WHERE page_id = $1 AND project_id = $2 AND deleted_at IS NULL",
+        )
+        .bind(*page_id)
+        .bind(source_project_id)
+        .bind(target_project_id)
+        .bind(now.fixed_offset())
+        .bind(pre.actor.id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| db_error(error, "page-move-repoint"))?;
+    }
+    tx.commit()
+        .await
+        .map_err(|error| db_error(error, "page-move-commit"))?;
+    detail_response(
+        &pre.pool,
+        slug,
+        &target_project_id,
+        &pre.actor.id,
+        page_id,
+        &activate_timezone(pre.actor.timezone.as_deref())?,
+        StatusCode::OK,
+    )
+    .await
+}
+
 async fn page_archive_inner(
     state: &AppState,
     headers: &HeaderMap,
@@ -3968,6 +4289,7 @@ async fn page_archive_inner(
         if is_archive { "POST" } else { "DELETE" },
     )
     .await?;
+    require_not_archived(&pre.pool, &project_id).await?;
     let tz = activate_timezone(pre.actor.timezone.as_deref())?;
     // `get_page_or_error` (`:222-226`): the visibility queryset plus pk;
     // a miss answers `{"error":"Page not found"}` (NOT the `.get()`

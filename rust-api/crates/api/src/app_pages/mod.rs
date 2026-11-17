@@ -262,6 +262,10 @@ pub enum Denial {
     ValidDetail,
     /// 403, `{"error": ...}` view-inline denials (destroy owner-or-admin).
     ForbiddenError(String),
+    /// 409, archived project (NEWPIDASH-236 shared envelope).
+    ProjectArchived(String),
+    /// 400, move target refusal (cross-workspace or unknown target).
+    BadRequest(String),
     /// 500, generic branch.
     ServerError,
 }
@@ -293,6 +297,11 @@ impl Denial {
             Denial::ValidDetail => (StatusCode::BAD_REQUEST, VALID_DETAIL_BODY.to_owned()),
             Denial::ForbiddenError(message) => (
                 StatusCode::FORBIDDEN,
+                format!("{{\"error\":{}}}", json_string(message)),
+            ),
+            Denial::ProjectArchived(body) => (StatusCode::CONFLICT, body.clone()),
+            Denial::BadRequest(message) => (
+                StatusCode::BAD_REQUEST,
                 format!("{{\"error\":{}}}", json_string(message)),
             ),
             Denial::ServerError => (
@@ -430,6 +439,13 @@ pub fn routes() -> Router<AppState> {
             owned(
                 axum::routing::get(pages_summary),
                 &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+            ),
+        )
+        .route(
+            "/api/workspaces/{slug}/projects/{project_id}/pages/{page_id}/move/",
+            owned(
+                axum::routing::post(page_move),
+                &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
 }
@@ -784,6 +800,49 @@ fn read_scope_where(slug: &str, user: &str) -> String {
     )
 }
 
+/// Archived-project list scope: same shape as [`read_scope_where`] but
+/// without the `projects.archived_at IS NULL` leg, so the archived
+/// project's own pages are visible. Only used for the list read of an
+/// archived project (NEWPIDASH-240); every other read returns 409 before
+/// fetching, so this never widens detail access.
+fn read_scope_where_archived(slug: &str, user: &str) -> String {
+    format!(
+        "pages.deleted_at IS NULL \
+         AND pages.workspace_id = (SELECT id FROM workspaces WHERE slug = {slug}) \
+         AND EXISTS (SELECT 1 FROM project_pages pp_scope JOIN projects ON projects.id = pp_scope.project_id \
+         JOIN project_members pm ON pm.project_id = projects.id AND pm.member_id = {user} AND pm.is_active = TRUE \
+         WHERE pp_scope.page_id = pages.id AND pp_scope.deleted_at IS NULL) \
+         AND (pages.owned_by_id = {user} OR pages.access = 0)"
+    )
+}
+
+/// NEWPIDASH-240 archived-project gate: after auth and the role gate,
+/// every non-list page route on an archived project answers 409 with
+/// the shared envelope. Returns the archived info for the list path.
+async fn archived_info_for(
+    pool: &PgPool,
+    project_id: &uuid::Uuid,
+) -> Result<Option<crate::project_archived::ArchivedProject>, Denial> {
+    crate::project_archived::archived_by_id(pool, *project_id)
+        .await
+        .map_err(|_| Denial::ServerError)
+}
+
+/// Return 409 when the URL project is archived (NEWPIDASH-240). The list
+/// path never calls this; it reads the archived info directly to decide
+/// the scope and the `project_status` fields.
+pub(crate) async fn require_not_archived(
+    pool: &PgPool,
+    project_id: &uuid::Uuid,
+) -> Result<(), Denial> {
+    if let Some(info) = archived_info_for(pool, project_id).await? {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
+    Ok(())
+}
+
 /// The `sub_pages_count` annotation (`visible_pages`): live children
 /// linked to the URL project that the user can see — owner-or-public, or
 /// only their own for a restricted guest. An archived page counts its
@@ -1051,11 +1110,24 @@ fn search_sql(first_bind: u32, terms: &[String]) -> String {
 /// `?search=` name filter `get_queryset` carries (`base.py:88`) on both
 /// paths. `?order_by=` stays ignored: the `:105` `order_by` replaces the
 /// `:103` request one in Django (ported bug, fixture F30-06).
+#[allow(dead_code)]
 fn read_rows_sql(
     guest_only: bool,
     filter: RowFilter,
     guest_count: bool,
     search: &[String],
+) -> String {
+    read_rows_sql_with_archived(guest_only, filter, guest_count, search, false)
+}
+
+/// NEWPIDASH-240: `include_archived` switches to the archived list scope
+/// (list read of an archived project). Every other caller passes false.
+fn read_rows_sql_with_archived(
+    guest_only: bool,
+    filter: RowFilter,
+    guest_count: bool,
+    search: &[String],
+    include_archived: bool,
 ) -> String {
     let annotations = format!(
         "{}, pages.parent_id AS parent_id, {} AS sub_pages_count, {} AS is_favorite, \
@@ -1067,10 +1139,15 @@ fn read_rows_sql(
         label_ids_annotation(),
         project_ids_annotation(),
     );
+    let scope = if include_archived {
+        read_scope_where_archived("$1", "$2")
+    } else {
+        read_scope_where("$1", "$2")
+    };
     let mut sql = format!(
         "SELECT row_to_json(__r)::text AS __row FROM (SELECT {annotations} FROM pages \
          WHERE {} AND ({}) = TRUE",
-        read_scope_where("$1", "$2"),
+        scope,
         project_annotation("$3"),
     );
     if guest_only {
@@ -1253,8 +1330,37 @@ async fn fetch_read_rows(
     guest_count: bool,
     search: &[String],
 ) -> Result<Vec<Map<String, Value>>, Denial> {
+    fetch_read_rows_with_archived(
+        pool,
+        slug,
+        user_id,
+        project_id,
+        filter,
+        id,
+        guest_only,
+        guest_count,
+        search,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn fetch_read_rows_with_archived(
+    pool: &PgPool,
+    slug: &str,
+    user_id: &uuid::Uuid,
+    project_id: &uuid::Uuid,
+    filter: RowFilter,
+    id: Option<&uuid::Uuid>,
+    guest_only: bool,
+    guest_count: bool,
+    search: &[String],
+    include_archived: bool,
+) -> Result<Vec<Map<String, Value>>, Denial> {
     use sqlx::Row as _;
-    let sql = read_rows_sql(guest_only, filter, guest_count, search);
+    let sql =
+        read_rows_sql_with_archived(guest_only, filter, guest_count, search, include_archived);
     let mut query = sqlx::query(&sql) // raw-sql: annotated row_to_json read (keep, see fetch_read_rows note).
         .bind(slug)
         .bind(user_id)
@@ -1337,7 +1443,12 @@ pub async fn list_pages(
     if let Err(denial) = require_live_project(pool, &project_id).await {
         return denial.into_response();
     }
-    let rows = match fetch_read_rows(
+    let archived = match archived_info_for(pool, &project_id).await {
+        Ok(info) => info,
+        Err(denial) => return denial.into_response(),
+    };
+    let include_archived = archived.is_some();
+    let rows = match fetch_read_rows_with_archived(
         pool,
         &slug,
         &user_id,
@@ -1347,18 +1458,41 @@ pub async fn list_pages(
         gate.guest_scoped,
         gate.guest_scoped,
         &search,
+        include_archived,
     )
     .await
     {
         Ok(rows) => rows,
         Err(denial) => return denial.into_response(),
     };
+    let (project_status, project_archived_at) = match &archived {
+        Some(info) => (
+            "archived".to_owned(),
+            Some(crate::project_archived::format_archived_at(
+                &info.archived_at,
+            )),
+        ),
+        None => ("active".to_owned(), None),
+    };
+    let archived_at_json = match &project_archived_at {
+        Some(ts) => serde_json::to_string(ts).expect("json string"),
+        None => "null".to_owned(),
+    };
+    let status_json = serde_json::to_string(&project_status).expect("json string");
     let mut out = String::from("[");
     for (index, row) in rows.iter().enumerate() {
         if index > 0 {
             out.push(',');
         }
-        out.push_str(&shape_row(row, LIST_ROW_ORDER, &timezone));
+        let mut rendered = shape_row(row, LIST_ROW_ORDER, &timezone);
+        // Inject NEWPIDASH-240 status fields after the serializer fields,
+        // keeping LIST_ROW_ORDER serializer-parity for the pin tests.
+        rendered.pop(); // strip trailing }
+        rendered.push_str(&format!(
+            ",\"project_status\":{},\"project_archived_at\":{}}}",
+            status_json, archived_at_json
+        ));
+        out.push_str(&rendered);
     }
     out.push(']');
     json_response(StatusCode::OK, out)
@@ -1403,6 +1537,9 @@ pub async fn retrieve_page(
         Err(denial) => return denial.into_response(),
     };
     if let Err(denial) = require_live_project(pool, &project_id).await {
+        return denial.into_response();
+    }
+    if let Err(denial) = require_not_archived(pool, &project_id).await {
         return denial.into_response();
     }
     // `?search=` rides `get_queryset` (`base.py:88`) before the pk filter,
@@ -1513,6 +1650,9 @@ pub async fn pages_summary(
     if let Err(denial) = require_live_project(pool, &project_id).await {
         return denial.into_response();
     }
+    if let Err(denial) = require_not_archived(pool, &project_id).await {
+        return denial.into_response();
+    }
     // The old aggregate counts conditionally over the deduplicated set
     // (`SELECT DISTINCT id, access, archived_at`): the same three counts
     // over the same distinct rows, computed in memory — one statement.
@@ -1575,6 +1715,9 @@ pub async fn favorite_create(
         Ok(gate) => gate,
         Err(denial) => return denial.into_response(),
     };
+    if let Err(denial) = require_not_archived(pool, &project_id).await {
+        return denial.into_response();
+    }
     // `WorkspaceBaseModel.save` (`db/models/workspace.py:192-195`): the
     // workspace comes from the project row (already resolved above).
     // `UserFavorite.save` (`db/models/favorite.py:40-47`): `sequence` is
@@ -1667,6 +1810,9 @@ pub async fn favorite_destroy(
         Ok(gate) => gate,
         Err(denial) => return denial.into_response(),
     };
+    if let Err(denial) = require_not_archived(pool, &project_id).await {
+        return denial.into_response();
+    }
     let row: Option<uuid::Uuid> = match user_favorites::Entity::find()
         .select_only()
         .column(user_favorites::Column::Id)
@@ -1977,6 +2123,9 @@ pub async fn archive_page(
         Ok(gate) => gate,
         Err(denial) => return denial.into_response(),
     };
+    if let Err(denial) = require_not_archived(pool, &project_id).await {
+        return denial.into_response();
+    }
     let page = match fetch_state_page(pool, &slug, &project_id, &page_id).await {
         Ok(page) => page,
         Err(denial) => return denial.into_response(),
@@ -2064,6 +2213,9 @@ pub async fn unarchive_page(
         Ok(gate) => gate,
         Err(denial) => return denial.into_response(),
     };
+    if let Err(denial) = require_not_archived(pool, &project_id).await {
+        return denial.into_response();
+    }
     let page = match fetch_state_page(pool, &slug, &project_id, &page_id).await {
         Ok(page) => page,
         Err(denial) => return denial.into_response(),
@@ -2217,6 +2369,9 @@ async fn write_lock(
         Ok(gate) => gate,
         Err(denial) => return denial.into_response(),
     };
+    if let Err(denial) = require_not_archived(pool, &project_id).await {
+        return denial.into_response();
+    }
     let page = match fetch_state_page(pool, &slug, &project_id, &page_id).await {
         Ok(page) => page,
         Err(denial) => return denial.into_response(),
@@ -2282,6 +2437,9 @@ pub async fn access_page(
         Ok(gate) => gate,
         Err(denial) => return denial.into_response(),
     };
+    if let Err(denial) = require_not_archived(pool, &project_id).await {
+        return denial.into_response();
+    }
     // `request.data` is read HERE (`base.py:272`, `_base_manager` scoped
     // fetch at `:273-278` follows it): a malformed body is DRF's 400
     // `ParseError` even when the project-scoped page fetch would miss.
@@ -2452,6 +2610,9 @@ pub async fn description_retrieve(
         Ok(gate) => gate,
         Err(denial) => return denial.into_response(),
     };
+    if let Err(denial) = require_not_archived(pool, &project_id).await {
+        return denial.into_response();
+    }
     let page = match fetch_description_page(pool, &slug, &project_id, &page_id, &gate.user_id).await
     {
         Ok(page) => page,
@@ -2773,6 +2934,9 @@ pub async fn description_partial_update(
         Ok(gate) => gate,
         Err(denial) => return denial.into_response(),
     };
+    if let Err(denial) = require_not_archived(pool, &project_id).await {
+        return denial.into_response();
+    }
     let page = match fetch_description_page(pool, &slug, &project_id, &page_id, &gate.user_id).await
     {
         Ok(page) => page,
@@ -4135,6 +4299,9 @@ pub async fn page_create(
     {
         return denial.into_response();
     }
+    if let Err(denial) = require_not_archived(pool, &project_id).await {
+        return denial.into_response();
+    }
     let body = match read_write_body(req).await {
         Ok(body) => body,
         Err(denial) => return denial.into_response(),
@@ -4552,6 +4719,9 @@ pub async fn page_partial_update(
         Ok(gate) => gate,
         Err(denial) => return denial.into_response(),
     };
+    if let Err(denial) = require_not_archived(pool, &project_id).await {
+        return denial.into_response();
+    }
     let body = match read_write_body(req).await {
         Ok(body) => body,
         Err(denial) => return denial.into_response(),
@@ -4810,6 +4980,9 @@ pub async fn page_destroy(
     {
         return denial.into_response();
     }
+    if let Err(denial) = require_not_archived(pool, &project_id).await {
+        return denial.into_response();
+    }
     // The scoped fetch (`:369-374`): no `try` here, so a miss 404s through
     // `handle_exception` (an unlinked page for a member, or a second
     // DELETE after the soft delete hid the row).
@@ -4937,6 +5110,291 @@ pub async fn page_destroy(
         return Denial::ServerError.into_response();
     }
     StatusCode::NO_CONTENT.into_response()
+}
+
+/// `POST .../pages/<page_id>/move/` — move a page from its project
+/// (archived or active) to an active project in the same workspace
+/// (NEWPIDASH-240). The caller must be able to view the source and to
+/// edit pages in the target. The `pages` row itself never moves: only the
+/// `project_pages` bridge is re-pointed (or soft-deleted when the target
+/// link already exists), so `description_*`, `page_versions` and `page_logs`
+/// are preserved by construction.
+pub async fn page_move(
+    State(state): State<AppState>,
+    Path((slug, project_raw, page_raw)): Path<(String, String, String)>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    let Ok(page_id) = parse_page_id(&page_raw) else {
+        return crate::edge::proxy(State(state), req).await;
+    };
+    // 401 before the rewrite, like every other state-op.
+    if let Err(denial) = actor_user_id(extension.clone()) {
+        return denial.into_response();
+    }
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(denial) => return denial.into_response(),
+    };
+    let source_project_id = match resolve_project_id(pool, &slug, &project_raw).await {
+        Ok(id) => id,
+        Err(denial) => return denial.into_response(),
+    };
+    // Source gate: the caller must be able to VIEW the source page. `GET`
+    // with the page id carries the guest/owner matrix (private non-owners
+    // deny). A source archived project still views via this gate — the
+    // archived check is intentionally skipped for move, the one exception.
+    let source_gate = match gate::resolve_gate(
+        &state,
+        "GET",
+        &slug,
+        &source_project_id,
+        Some(page_id),
+        extension.clone(),
+    )
+    .await
+    {
+        Ok(gate) => gate,
+        Err(denial) => return denial.into_response(),
+    };
+    if let Err(denial) = require_live_project(pool, &source_project_id).await {
+        return denial.into_response();
+    }
+    // Read the move body: `{"target_project_id": "<uuid-or-identifier>"}`
+    // (also accepts `target_project`, `to_project`, `project_id`, `project`
+    // for caller ergonomics; the CLI sends `target_project_id`).
+    let (_parts, body) = req.into_parts();
+    let bytes = match body.collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let parsed: Value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        match serde_json::from_slice(&bytes) {
+            Ok(value) => value,
+            Err(_) => {
+                return Denial::BadDetail("JSON parse error".to_owned()).into_response();
+            }
+        }
+    };
+    let target_raw = match parsed.as_object() {
+        Some(map) => map
+            .get("target_project_id")
+            .or_else(|| map.get("target_project"))
+            .or_else(|| map.get("to_project"))
+            .or_else(|| map.get("project_id"))
+            .or_else(|| map.get("project"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty()),
+        None => None,
+    };
+    let Some(target_raw) = target_raw else {
+        return Denial::BadRequest("Missing target project".to_owned()).into_response();
+    };
+    let target_project_id = match resolve_project_id(pool, &slug, target_raw).await {
+        Ok(id) => id,
+        Err(denial) => return denial.into_response(),
+    };
+    // Target must be live (soft-deleted targets 404 like the source path).
+    if let Err(denial) = require_live_project(pool, &target_project_id).await {
+        return denial.into_response();
+    }
+    // Moving to an archived project is refused with the shared envelope.
+    if let Some(info) = match archived_info_for(pool, &target_project_id).await {
+        Ok(info) => info,
+        Err(denial) => return denial.into_response(),
+    } {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
+    }
+    // Same-workspace guard (checked before the target gate so a
+    // cross-workspace move is 400, not 403 due to the source slug).
+    // Target edit gate: the caller must be allowed to edit pages there.
+    // `POST` (create) requires ADMIN/MEMBER, mirroring page creation.
+    let (source_ws_early, target_ws_early): (uuid::Uuid, uuid::Uuid) = {
+        let db = orm(pool);
+        let s: Option<uuid::Uuid> = match projects::Entity::find()
+            .select_only()
+            .column(projects::Column::WorkspaceId)
+            .filter(projects::Column::Id.eq(source_project_id))
+            .into_tuple()
+            .one(&db)
+            .await
+        {
+            Ok(row) => row,
+            Err(_) => return Denial::ServerError.into_response(),
+        };
+        let t: Option<uuid::Uuid> = match projects::Entity::find()
+            .select_only()
+            .column(projects::Column::WorkspaceId)
+            .filter(projects::Column::Id.eq(target_project_id))
+            .into_tuple()
+            .one(&db)
+            .await
+        {
+            Ok(row) => row,
+            Err(_) => return Denial::ServerError.into_response(),
+        };
+        match (s, t) {
+            (Some(s), Some(t)) => (s, t),
+            _ => return Denial::ServerError.into_response(),
+        }
+    };
+    if source_ws_early != target_ws_early {
+        return Denial::BadRequest("Cannot move a page across workspaces".to_owned())
+            .into_response();
+    }
+    let _target_gate = match gate::resolve_gate(
+        &state,
+        "POST",
+        &slug,
+        &target_project_id,
+        None,
+        extension,
+    )
+    .await
+    {
+        Ok(gate) => gate,
+        Err(denial) => return denial.into_response(),
+    };
+    // Same-workspace guard (already verified above; kept for the later fetch).
+    let (source_ws, target_ws): (uuid::Uuid, uuid::Uuid) = {
+        let db = orm(pool);
+        let s: Option<uuid::Uuid> = match projects::Entity::find()
+            .select_only()
+            .column(projects::Column::WorkspaceId)
+            .filter(projects::Column::Id.eq(source_project_id))
+            .into_tuple()
+            .one(&db)
+            .await
+        {
+            Ok(row) => row,
+            Err(_) => return Denial::ServerError.into_response(),
+        };
+        let t: Option<uuid::Uuid> = match projects::Entity::find()
+            .select_only()
+            .column(projects::Column::WorkspaceId)
+            .filter(projects::Column::Id.eq(target_project_id))
+            .into_tuple()
+            .one(&db)
+            .await
+        {
+            Ok(row) => row,
+            Err(_) => return Denial::ServerError.into_response(),
+        };
+        match (s, t) {
+            (Some(s), Some(t)) => (s, t),
+            _ => return Denial::ServerError.into_response(),
+        }
+    };
+    if source_ws != target_ws {
+        return Denial::BadRequest("Cannot move a page across workspaces".to_owned())
+            .into_response();
+    }
+    // Source link must be live: the page is in the source project.
+    let source_link: Option<uuid::Uuid> = match project_pages::Entity::find()
+        .select_only()
+        .column(project_pages::Column::Id)
+        .filter(project_pages::Column::PageId.eq(page_id))
+        .filter(project_pages::Column::ProjectId.eq(source_project_id))
+        .filter(project_pages::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+    {
+        Ok(row) => row,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if source_link.is_none() {
+        return Denial::ObjectNotFound.into_response();
+    }
+    // Re-point atomically: if the target link already exists, drop the
+    // source row (soft delete); otherwise update the source row's
+    // `project_id` to the target. The `pages` row, `page_versions` and
+    // `page_logs` are untouched.
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let existing_target: Option<uuid::Uuid> = match sqlx::query_scalar::<_, uuid::Uuid>(
+        "SELECT id FROM project_pages WHERE page_id = $1 AND project_id = $2 AND deleted_at IS NULL",
+    )
+    .bind(page_id)
+    .bind(target_project_id)
+    .fetch_optional(&mut *tx)
+    .await
+    {
+        Ok(row) => row,
+        Err(_) => {
+            let _ = tx.rollback().await;
+            return Denial::ServerError.into_response();
+        }
+    };
+    let now = chrono::Utc::now();
+    if existing_target.is_some() {
+        if let Err(_) = sqlx::query(
+            "UPDATE project_pages SET deleted_at = $3, updated_at = $4, updated_by_id = $5 WHERE page_id = $1 AND project_id = $2 AND deleted_at IS NULL",
+        )
+        .bind(page_id)
+        .bind(source_project_id)
+        .bind(now.fixed_offset())
+        .bind(now.fixed_offset())
+        .bind(source_gate.user_id)
+        .execute(&mut *tx)
+        .await
+        {
+            let _ = tx.rollback().await;
+            return Denial::ServerError.into_response();
+        }
+    } else if let Err(_) = sqlx::query(
+        "UPDATE project_pages SET project_id = $3, updated_at = $4, updated_by_id = $5 WHERE page_id = $1 AND project_id = $2 AND deleted_at IS NULL",
+    )
+    .bind(page_id)
+    .bind(source_project_id)
+    .bind(target_project_id)
+    .bind(now.fixed_offset())
+    .bind(source_gate.user_id)
+    .execute(&mut *tx)
+    .await
+    {
+        let _ = tx.rollback().await;
+        return Denial::ServerError.into_response();
+    }
+    if let Err(_) = tx.commit().await {
+        return Denial::ServerError.into_response();
+    }
+    // Read back the moved page in the target project and answer the detail
+    // shape with the active status, so the caller can verify the move.
+    let timezone = match read_timezone(pool, &source_gate.user_id).await {
+        Ok(timezone) => timezone,
+        Err(denial) => return denial.into_response(),
+    };
+    let rows = match fetch_read_rows_with_archived(
+        pool,
+        &slug,
+        &source_gate.user_id,
+        &target_project_id,
+        RowFilter::Page,
+        Some(&page_id),
+        false,
+        false,
+        &[],
+        false,
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(denial) => return denial.into_response(),
+    };
+    let row = match rows.into_iter().next() {
+        Some(row) => row,
+        None => return Denial::ObjectNotFound.into_response(),
+    };
+    let mut rendered = shape_row(&row, DETAIL_ROW_ORDER, &timezone);
+    rendered.pop();
+    rendered.push_str(",\"project_status\":\"active\",\"project_archived_at\":null}");
+    json_response(StatusCode::OK, rendered)
 }
 
 #[cfg(test)]
