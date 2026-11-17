@@ -28,7 +28,7 @@ from pi_dash.ee.authentication.desktop import DESKTOP_CLIENT, DESKTOP_SESSION_KE
 from pi_dash.runner.models import DesktopHandoffCode, DevMachine
 from pi_dash.runner.services.desktop_handoff import challenge_for_verifier
 
-from .conftest import _client, _mint_mt
+from .conftest import _client
 
 pytestmark = [pytest.mark.contract, pytest.mark.usefixtures("_isolate")]
 

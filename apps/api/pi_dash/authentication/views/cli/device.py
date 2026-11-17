@@ -199,7 +199,10 @@ def _silent_refusal_description(state: str) -> str:
     if state == "active":
         return "The built-in engine credential on this computer is not due for renewal yet."
     if state == "signed_out":
-        return "The built-in engine was signed out on this computer and this computer holds no daemon credential; sign in on this computer first."
+        return (
+            "The built-in engine was signed out on this computer and this computer holds "
+            "no daemon credential; sign in on this computer first."
+        )
     return "The built-in engine is not signed in for this computer; sign in on this computer first."
 
 
@@ -293,7 +296,9 @@ def _redeem_engine_grant(row, machine_token: MachineToken) -> Response:
     try:
         # ``silent`` re-checks the state on the locked machine row, so a
         # sign-out racing this redemption is never overwritten.
-        issued = issue_engine_credential(user=row.user, dev_machine=machine, silent=silent, scope=CLI_DEVICE_SCOPE_ENGINE)
+        issued = issue_engine_credential(
+            user=row.user, dev_machine=machine, silent=silent, scope=CLI_DEVICE_SCOPE_ENGINE
+        )
     except EngineCredentialError:
         machine.refresh_from_db()
         return _silent_redemption_refused(machine.current_engine_sign_in_state())

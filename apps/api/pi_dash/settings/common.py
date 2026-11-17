@@ -565,7 +565,11 @@ RUNNER_PIN_AUTO_RELEASE_SECS = int(get_config("RUNNER_PIN_AUTO_RELEASE_SECS", 60
 # single-use code (desktop_unified_signin §5). The kill switch is default
 # ON; when off, the handoff endpoints refuse and the app falls back to a
 # browser sign-in (which then signs the CLI in, §4).
-DESKTOP_SESSION_HANDOFF_ENABLED = get_config("DESKTOP_SESSION_HANDOFF_ENABLED", "true").lower() not in ("0", "false", "no")
+DESKTOP_SESSION_HANDOFF_ENABLED = get_config("DESKTOP_SESSION_HANDOFF_ENABLED", "true").lower() not in (
+    "0",
+    "false",
+    "no",
+)
 
 # Desktop-bundled managed runner. The kill switch gates creation, availability
 # and dispatch; turning it off must never mutate project settings, so issues

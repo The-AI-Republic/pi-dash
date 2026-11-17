@@ -61,7 +61,9 @@ ENGINE_CREDENTIAL_PREFIX = "ec_"
 SILENT_CLI_ALLOWED_STATES = frozenset(
     {EngineSignInState.NEVER, EngineSignInState.SIGNED_OUT, EngineSignInState.EXPIRING, EngineSignInState.EXPIRED}
 )
-SILENT_ENGINE_ALLOWED_STATES = frozenset({EngineSignInState.NEVER, EngineSignInState.EXPIRING, EngineSignInState.EXPIRED})
+SILENT_ENGINE_ALLOWED_STATES = frozenset(
+    {EngineSignInState.NEVER, EngineSignInState.EXPIRING, EngineSignInState.EXPIRED}
+)
 
 SILENT_RENEWAL_REFUSED = "engine_silent_renewal_refused"
 

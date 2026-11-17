@@ -79,7 +79,10 @@ class DesktopHandoffIssueEndpoint(APIView):
             )
         challenge = str(request.data.get("challenge") or "").strip()
         if not challenge or len(challenge) > _MAX_CHALLENGE_LEN:
-            return Response({"error": "invalid_request", "error_description": "challenge is required."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "invalid_request", "error_description": "challenge is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         user = request.user
         machine = machine_token.dev_machine
         if not user.is_active:
@@ -130,7 +133,10 @@ class DesktopHandoffRedeemEndpoint(APIView):
             return Response({"error": "invalid_request"}, status=status.HTTP_400_BAD_REQUEST)
         if not desktop_handoff.handoff_enabled():
             return Response(
-                {"error": desktop_handoff.HANDOFF_DISABLED, "error_description": "The handoff is unavailable right now."},
+                {
+                    "error": desktop_handoff.HANDOFF_DISABLED,
+                    "error_description": "The handoff is unavailable right now.",
+                },
                 status=status.HTTP_410_GONE,
             )
         try:
