@@ -676,6 +676,7 @@ mod tests {
             cli: Some(cli(chrono::Duration::days(10))),
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
         };
         crate::config::file::write_config(&p, &cfg).unwrap();
         let m = manager(

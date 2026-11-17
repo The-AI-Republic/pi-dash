@@ -216,6 +216,70 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
 
     let token = poll_for_token(&client, &cloud_url, &start).await?;
 
+    println!();
+    if let Some(email) = token.user_email.as_deref() {
+        println!("✓ Logged in as {email}.");
+    } else {
+        println!("✓ Logged in.");
+    }
+
+    // Account switch (desktop_unified_signin §6.4): this computer is signed
+    // in (or was) as another account. The old account is signed out first
+    // (on its own cloud), its machine identity parked, and the new
+    // account's own identity restored (or the machine id cleared so a new
+    // one is minted). Runs before the cloud bind, so the old account's
+    // revokes reach its own cloud; the restore runs after the bind, so the
+    // new identity is keyed by the sign-in's cloud.
+    let incoming_user_id = fetch_user_id(&client, &cloud_url, &token.access_token).await;
+    let mut switched = false;
+    let mut switch_restore_account: Option<super::switch::SwitchAccount> = None;
+    if let Ok(cfg) = file::load_config(paths) {
+        let stored_cloud = cfg.daemon.cloud_url.clone();
+        match super::switch::plan_switch(
+            &cfg,
+            token.user_email.as_deref(),
+            incoming_user_id.as_deref(),
+        ) {
+            super::switch::SwitchPlan::None => {}
+            super::switch::SwitchPlan::Switch {
+                previous,
+                incoming,
+                signed_in,
+            } => {
+                let active = super::switch::count_active_runs(paths).await;
+                if !super::switch::confirm_switch(
+                    previous.email.as_deref(),
+                    incoming.email.as_deref(),
+                    active,
+                ) {
+                    anyhow::bail!("sign-in cancelled; this computer is still signed in as the previous account");
+                }
+                // Park: sign the old account out first when it holds live
+                // credentials (revokes them on its own cloud; its
+                // `signed_out` event is recorded), then move its machine
+                // identity to the parked store, keyed by that cloud.
+                if signed_in {
+                    super::logout::run(
+                        super::logout::Args {
+                            local_only: false,
+                            workspace: None,
+                        },
+                        paths,
+                    )
+                    .await
+                    .context("signing out the previous account before the switch")?;
+                }
+                if active > 0 {
+                    println!("  {active} in-flight task(s) end as failed; the account can retry them by hand.");
+                }
+                super::switch::park_identity(paths, &stored_cloud, &previous)
+                    .context("parking the previous account's machine identity")?;
+                switched = true;
+                switch_restore_account = Some(incoming);
+            }
+        }
+    }
+
     // Refuse a cloud mismatch, and make sure `config.toml` exists so the
     // dev-machine id can be persisted. Only after approval, so an aborted
     // login on a fresh host leaves no config behind (bare `pidash` then
@@ -223,11 +287,9 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
     runner_ops::bind_cloud(paths, &cloud_url, args.force)
         .context("binding config.toml to the cloud")?;
 
-    println!();
-    if let Some(email) = token.user_email.as_deref() {
-        println!("✓ Logged in as {email}.");
-    } else {
-        println!("✓ Logged in.");
+    if let Some(incoming) = switch_restore_account.take() {
+        super::switch::restore_or_clear_identity(paths, &cloud_url, &incoming)
+            .context("restoring the new account's machine identity")?;
     }
 
     // One daemon serves several workspaces (design §4.9). `--workspace`
@@ -308,6 +370,17 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
     {
         tracing::warn!("recording the signed-in account failed: {e:#}");
     }
+    // The persisted sign-in event, written with the credentials (design §6.1).
+    if let Err(e) = runner_ops::record_auth_event(
+        paths,
+        crate::config::schema::AuthEventKind::SignedIn,
+        None,
+        token.user_email.as_deref(),
+        user_id.as_deref(),
+        &cloud_url,
+    ) {
+        tracing::warn!("recording the sign-in event failed: {e:#}");
+    }
     println!("  Workspace: {}", machine_token.workspace_slug);
     let signed_in = cfg
         .cli
@@ -321,8 +394,21 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
 
     // A running daemon picks the new or refreshed token up without a
     // restart. Best-effort: no daemon, or an older one, just means the
-    // token is used from the next start.
-    crate::service::reload::notify_credentials_changed(paths).await;
+    // token is used from the next start. An account switch changed the
+    // daemon's identity, which needs a restart (design §6.4 step 4).
+    if switched {
+        let outcome = crate::service::reload::restart_and_verify(paths).await;
+        if outcome.ok {
+            println!("  Daemon restarted as this account.");
+        } else {
+            println!(
+                "  The daemon needs a restart to serve this account: {}",
+                outcome.detail.unwrap_or_else(|| outcome.summary.clone())
+            );
+        }
+    } else {
+        crate::service::reload::notify_credentials_changed(paths).await;
+    }
 
     // "Is this <label>, last seen <date>? Replace it" (design §4.10). Only
     // for a new machine and only with someone at the terminal: the desktop

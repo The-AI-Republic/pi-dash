@@ -215,6 +215,27 @@ pub struct ApiRequest {
     timeout_ms: Option<u64>,
 }
 
+impl ApiRequest {
+    /// Build a request natively (the handoff redeem, which the webview must
+    /// never see the code or verifier of).
+    pub(crate) fn new(
+        id: &str,
+        url: Url,
+        method: &str,
+        headers: Vec<(String, String)>,
+        has_body: bool,
+    ) -> Self {
+        Self {
+            id: id.to_owned(),
+            url,
+            method: method.to_owned(),
+            headers,
+            has_body,
+            timeout_ms: Some(15_000),
+        }
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResponseHead {
@@ -537,7 +558,7 @@ async fn refresh_session(
 /// sees a 401 only when the session is really over (`Rejected`); a transient
 /// refresh failure is `REFRESH_FAILED` with no status, so the page does not
 /// treat it as signed out (PIDESKAPP-1 rule).
-async fn send(
+pub(crate) async fn send(
     window: &tauri::WebviewWindow,
     state: &DesktopHttp,
     request: ApiRequest,

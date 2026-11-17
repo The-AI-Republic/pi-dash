@@ -408,6 +408,7 @@ mod tests {
                 cli: Some(cli()),
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
             },
         )
         .unwrap();

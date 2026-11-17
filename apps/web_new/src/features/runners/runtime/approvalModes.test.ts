@@ -61,6 +61,14 @@ function fakeRuntime(): AgentRuntimeApi {
     recordNotices: vi.fn(async () => ({ notices: { legacy_folders: [], pod_member_projects: [] }, dismissed: [] })),
     dismissNotices: vi.fn(async () => ({ notices: { legacy_folders: [], pod_member_projects: [] }, dismissed: [] })),
     signOutComputer: vi.fn(async () => undefined),
+    daemonHello: vi.fn(async () => {
+      throw new Error("no daemon in this test");
+    }),
+    daemonActiveRuns: vi.fn(async () => 0),
+    desktopSessionHandoff: vi.fn(async () => ({})),
+    getAuthSyncRecord: vi.fn(async () => null),
+    setAuthSyncRecord: vi.fn(async () => undefined),
+    markFreshSignIn: vi.fn(async () => undefined),
   };
 }
 

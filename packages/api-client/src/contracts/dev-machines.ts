@@ -169,22 +169,6 @@ export async function updateDevMachine(
 }
 
 /**
- * Revoke the machine's engine credential only ("Sign out the engine",
- * design §4.3); the daemon and its own-agent runners stay signed in.
- * Served by the second server change; callers offer it only when the
- * machine reports its engine sign-in state. Answers the updated row.
- */
-export async function signOutDevMachinePidashAgent(
-  client: ApiClient,
-  machineId: string,
-  workspaceId: string
-): Promise<DevMachine> {
-  const path = `/api/runners/dev-machines/${machineId}/engine-sign-out/`;
-  const envelope = await client.sendJson<unknown>("POST", path, { json: { workspace: workspaceId } });
-  return client.parse(DevMachine, envelope.data, `POST ${path}`);
-}
-
-/**
  * The merge endpoint's answer (`machine_identity.merge_dev_machine`).
  */
 export const MergeResult = z.object({

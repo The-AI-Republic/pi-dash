@@ -360,8 +360,8 @@ impl PidashAgentApi {
         Self::json(resp).await
     }
 
-    /// Revoke this machine's engine credential (`logout --engine`). A 401
-    /// means there was nothing left to revoke.
+    /// Revoke this machine's engine credential (a full logout does this
+    /// first). A 401 means there was nothing left to revoke.
     pub async fn revoke_credential(&self, machine_token: &str) -> Result<(), PidashAgentApiError> {
         let resp = self
             .http

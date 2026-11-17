@@ -3369,6 +3369,7 @@ mod reconnect_loop_tests {
         StateHandle::new(crate::config::schema::Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: Default::default(),
             runners: vec![],

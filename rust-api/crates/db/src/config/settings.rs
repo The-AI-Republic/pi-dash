@@ -98,6 +98,9 @@ pub struct Settings {
     pub storage: StorageSettings,
     pub runner: RunnerSettings,
     pub pidash_agent: PidashAgentSettings,
+    /// Desktop session handoff kill switch (desktop_unified_signin §5.1):
+    /// default ON; off refuses the handoff endpoints.
+    pub desktop_session_handoff_enabled: bool,
     pub default_agent_executor: String,
     pub session: SessionSettings,
     pub urls: UrlSettings,
@@ -1119,6 +1122,8 @@ impl Settings {
                 desktop_min_version: ctx
                     .req_string("DESKTOP_MIN_VERSION_FOR_MANAGED_RUNNER", "")?,
             },
+            desktop_session_handoff_enabled: ctx
+                .flag_tri("DESKTOP_SESSION_HANDOFF_ENABLED", "true")?,
             default_agent_executor: ctx.req_string("DEFAULT_AGENT_EXECUTOR", "local_runner")?,
             session: SessionSettings {
                 cookie_age_secs: ctx.req_int("SESSION_COOKIE_AGE", ConfigValue::from(604800))?,
@@ -1249,6 +1254,7 @@ impl Settings {
             "MANAGED_RUNNER_GRACEFUL_STOP_SECS",
             "MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS",
             "DESKTOP_MIN_VERSION_FOR_MANAGED_RUNNER",
+            "DESKTOP_SESSION_HANDOFF_ENABLED",
             "DEFAULT_AGENT_EXECUTOR",
             "AGENT_RUN_TERMINAL_RECONCILE_INTERVAL_SECONDS",
             "SESSION_COOKIE_AGE",

@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,8 +29,8 @@ use crate::daemon::workspace_tokens::WorkspaceTokens;
 use crate::history::index::{RunSummary, RunsIndex};
 use crate::history::jsonl::{HistoryEntry, HistoryWriter};
 use crate::ipc::protocol::{
-    CurrentRunSummary, HelloAccount, HelloInfo, HelloWorkspace, IPC_VERSION, RunnerChanges,
-    version_lt,
+    AuthEventAccountInfo, AuthEventInfo, AuthState, CurrentRunSummary, HelloAccount, HelloInfo,
+    HelloWorkspace, IPC_VERSION, Response, RunnerChanges, version_lt,
 };
 use crate::ipc::server::IpcServer;
 use crate::util::containment::{self, RunGroup};
@@ -856,16 +856,94 @@ impl RunnerSpawnCtx {
                 cloud_url: self.daemon.cloud_url.clone(),
             })
         };
+        // The persisted record, read from disk so a sign-in or sign-out in a
+        // terminal since startup is reported at once. A daemon older than
+        // this build has no record (design §8): the app starts recording
+        // from the first `seq` the updated CLI reports.
+        let auth_event = crate::config::file::load_config(&self.paths)
+            .ok()
+            .and_then(|cfg| cfg.auth_event)
+            .map(|e| AuthEventInfo {
+                seq: e.seq,
+                kind: e.kind.as_str().to_string(),
+                reason: e.reason.as_ref().map(|r| r.as_str().to_string()),
+                account: e.account.map(|a| AuthEventAccountInfo {
+                    user_id: a.user_id,
+                    email: a.email,
+                    cloud_url: a.cloud_url,
+                }),
+                at: e.at,
+            });
         HelloInfo {
             daemon_version: crate::RUNNER_VERSION.to_string(),
             ipc_version: IPC_VERSION,
             cloud_url: self.daemon.cloud_url.clone(),
             account,
+            auth_state: Some(if self.tokens.session_candidates().is_empty() {
+                AuthState::SignedOut
+            } else {
+                AuthState::SignedIn
+            }),
+            auth_event,
             workspaces,
             machine_id: self.daemon.dev_machine_id,
             engine: engine.state,
             engine_detail: Some(engine),
         }
+    }
+
+    /// Desktop session handoff (desktop_unified_signin §5): trade the app's
+    /// `challenge` for a single-use code with one workspace daemon
+    /// credential. The daemon hands the code to the app over this socket
+    /// only; the code is never logged (it is useless without the app's
+    /// verifier, which never leaves the app's process).
+    pub(crate) async fn session_handoff(
+        &self,
+        challenge: &str,
+    ) -> Result<Response> {
+        let cloud_url = self.daemon.cloud_url.clone();
+        if cloud_url.is_empty() {
+            anyhow::bail!("this computer is not bound to a Pi Dash cloud");
+        }
+        let (_, token) = self
+            .tokens
+            .session_candidates()
+            .into_iter()
+            .find(|(_, t)| t.starts_with("mt_"))
+            .ok_or_else(|| anyhow::anyhow!("this computer is signed out"))?;
+        let url = format!("{cloud_url}/api/v1/auth/desktop-handoff/");
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()?;
+        let resp = client
+            .post(&url)
+            .header("X-Api-Key", token)
+            .json(&serde_json::json!({ "challenge": challenge }))
+            .send()
+            .await
+            .with_context(|| format!("POST {url}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            // Status (and the server's error code), never the code or verifier.
+            let detail = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string));
+            anyhow::bail!(
+                "the handoff was refused (HTTP {status}{})",
+                detail.map(|d| format!(": {d}")).unwrap_or_default()
+            );
+        }
+        let body: serde_json::Value = resp.json().await.context("parsing the handoff response")?;
+        let code = body
+            .get("code")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("the handoff response carried no code"))?;
+        Ok(Response::SessionHandoff {
+            code: code.to_string(),
+            user_id: body.get("user_id").and_then(|v| v.as_str()).map(str::to_string),
+            email: body.get("email").and_then(|v| v.as_str()).map(str::to_string),
+        })
     }
 
     fn all_instances(&self) -> Vec<RunnerInstance> {
@@ -5519,6 +5597,7 @@ mod tests {
             daemon_state: StateHandle::new(crate::config::schema::Config {
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
                 version: 2,
                 daemon: Default::default(),
                 runners: vec![],
@@ -5554,6 +5633,7 @@ mod tests {
             &Config {
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
                 version: 2,
                 daemon: DaemonConfig::default(),
                 runners: vec![gone_cfg.clone(), keep_cfg.clone()],
@@ -5608,6 +5688,7 @@ mod tests {
             &Config {
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
                 version: 2,
                 daemon: DaemonConfig::default(),
                 runners,
@@ -6137,6 +6218,7 @@ mod tests {
                 state: StateHandle::new(Config {
                     engine: Default::default(),
                     auth: Default::default(),
+                    auth_event: None,
                     version: 2,
                     daemon: Default::default(),
                     runners: vec![config.clone()],
@@ -6195,6 +6277,7 @@ mod tests {
             state: StateHandle::new(Config {
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
                 version: 2,
                 daemon: Default::default(),
                 runners: vec![config.clone()],
@@ -6476,6 +6559,7 @@ mod tests {
         let daemon_state = StateHandle::new(crate::config::schema::Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: Default::default(),
             runners: vec![],
@@ -6998,6 +7082,7 @@ mod tests {
             state: StateHandle::new(Config {
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
                 version: 2,
                 daemon: Default::default(),
                 runners: vec![config.clone()],

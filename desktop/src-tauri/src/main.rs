@@ -11,6 +11,7 @@ mod chat;
 mod chat_history;
 mod daemon;
 mod desktop_http;
+mod handoff;
 // build.rs owns this module; it is compiled here only so its tests run.
 #[cfg(test)]
 #[path = "../dist_guard.rs"]
@@ -623,7 +624,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // the app is a client over its standard control socket and never
             // starts, stops or re-roots it.
             daemon::daemon_discover,
+            daemon::daemon_hello,
             daemon::daemon_status,
+            daemon::daemon_active_runs,
             daemon::daemon_engine_status,
             daemon::daemon_engine_set_paused,
             daemon::daemon_engine_settings_get,
@@ -634,6 +637,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             daemon::daemon_runners,
             daemon::daemon_credentials_reload,
             daemon::daemon_reconnect,
+            // Desktop session handoff + the sign-in reconciliation record
+            // (desktop_unified_signin §5, §6.2).
+            handoff::desktop_session_handoff,
+            handoff::auth_sync_get,
+            handoff::auth_sync_set,
+            handoff::auth_sync_mark_sign_in,
             // Set-up, update and sign-in, each through the installed CLI and
             // only on the user's say-so.
             setup::daemon_install_service,

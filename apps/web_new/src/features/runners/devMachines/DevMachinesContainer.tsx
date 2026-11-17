@@ -19,7 +19,6 @@ import {
   useMergeDevMachine,
   useRevokeDevMachine,
   useRotateDevMachine,
-  useSignOutDevMachinePidashAgent,
   useUpdateDevMachine,
 } from "../api/devMachines.js";
 import { useRevokeRunner } from "../api/mutations.js";
@@ -34,7 +33,6 @@ export function DevMachinesContainer({ workspaceSlug }: { workspaceSlug: string 
   const revoke = useRevokeDevMachine(workspaceSlug, workspaceId);
   const remove = useDeleteDevMachine(workspaceSlug, workspaceId);
   const update = useUpdateDevMachine(workspaceSlug, workspaceId);
-  const signOutPidashAgent = useSignOutDevMachinePidashAgent(workspaceSlug, workspaceId);
   const merge = useMergeDevMachine(workspaceSlug);
   // Revoking invalidates every runners read, the expanded rows' included.
   const removePidashAgent = useRevokeRunner(workspaceSlug);
@@ -58,7 +56,6 @@ export function DevMachinesContainer({ workspaceSlug }: { workspaceSlug: string 
       onRevoke={(id) => revoke.mutateAsync(id)}
       onDelete={(id) => remove.mutateAsync(id)}
       onUpdate={(machineId, patch) => update.mutateAsync({ machineId, patch })}
-      onSignOutPidashAgent={(id) => signOutPidashAgent.mutateAsync(id)}
       onMerge={(sourceId, targetId) => merge.mutateAsync({ sourceId, targetId })}
       onRemovePidashAgent={(runnerId) => removePidashAgent.mutateAsync(runnerId)}
     />

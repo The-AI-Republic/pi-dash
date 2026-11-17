@@ -191,6 +191,8 @@ Runs, pods and billing then behave as in sections 6 to 9, whether or not the use
 
 Revision 4.0's option A, its independent sign-out and its refusal to cooperate across accounts (PO-13, PO-16) are withdrawn.
 
+Implementation (desktop_unified_signin §7): the handoff endpoints and issuance rule in `apps/api/pi_dash/runner/services/desktop_handoff.py`, `apps/api/pi_dash/authentication/views/cli/handoff.py` and `apps/api/pi_dash/runner/services/engine_credentials.py` (and rust-api parity); the event record, `SessionHandoff` and account-switch parking in the CLI; the handoff command and sync record in the desktop host; the reconciliation supervisor and the unified sign-out in the app.
+
 ### 4.7 App first: setting up the daemon
 
 When the app finds no daemon, it offers "Set up Pi Dash on this computer" the first time the user turns the engine on for a project, adds a runner or opens local chat.

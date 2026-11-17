@@ -341,6 +341,7 @@ mod tests {
         let cfg = Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),
@@ -573,6 +574,7 @@ model_default = "o4-mini"
         let cfg = Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),
@@ -625,6 +627,7 @@ model_default = "o4-mini"
         let cfg = Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),
@@ -665,6 +668,7 @@ model_default = "o4-mini"
         let cfg = Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),
@@ -708,6 +712,7 @@ model_default = "o4-mini"
         let cfg = Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),

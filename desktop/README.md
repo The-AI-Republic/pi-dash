@@ -26,11 +26,21 @@ the daemon up when there is none. Builds to `.AppImage` / `.deb` on Linux,
   signs it in with a device grant it approves with its own session, runs
   `pidash install` with the user's login-shell `PATH` and `pidash start`, and
   `pidash engine install` when the engine is missing (`src-tauri/src/setup.rs`).
-- **Sign-in.** The app renews the engine credential silently only when the
-  daemon reports it `expiring` or `expired`; `never` gets "Turn on the
-  built-in engine", `signed_out` only an explicit "Sign in the built-in
-  engine". Signing out of the app signs out only the app, unless the user
-  ticks "Also sign out Pi Dash on this computer" (`pidash auth logout`).
+- **Sign-in.** One sign-in for the app, the CLI and the engine
+  (`.ai_design/desktop_unified_signin/design.md`). The app signs the CLI in
+  the moment the user signs in to the app, and signs it out when the user
+  signs out (`pidash auth logout`; "Also delete chat history" is the only
+  sign-out option left). The engine has no sign-in of its own: the server
+  signs it in silently from `never` and `signed_out` too (§6.3). A CLI
+  signed in first signs the app in with no browser through a single-use
+  handoff (`desktop_session_handoff`: the host mints a verifier, asks the
+  daemon for a code over `SessionHandoff`, and redeems it natively so
+  neither the code nor the verifier reaches the webview); on Windows the
+  handoff waits for PIDESKAPP-236 and a browser sign-in does the same job.
+  The reconciler compares the newest sign-in event each way and the newest
+  wins; the record lives in the host's store (`auth-sync.json`), not the
+  webview. Signing in as another account switches the CLI (its identity is
+  parked), warned by the in-flight task count first.
 - **Chat.** "This computer" chats go to the daemon over the socket; every
   other runner's chat goes through the server.
 - **Migration.** Builds before this ran a private daemon per workspace under

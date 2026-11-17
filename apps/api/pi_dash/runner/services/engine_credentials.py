@@ -33,6 +33,7 @@ from pi_dash.runner.models import (
     EngineCredential,
     EngineCredentialRevokeReason,
     EngineSignInState,
+    MachineToken,
 )
 from pi_dash.runner.services.tokens import fingerprint, hash_token
 
@@ -40,20 +41,45 @@ logger = logging.getLogger("pi_dash.runner.engine_credential")
 
 ENGINE_CREDENTIAL_PREFIX = "ec_"
 
-#: The only sign-in states in which an engine credential may be issued on a
-#: silent (non-interactive) approval, e.g. the desktop app's renewal (design
-#: §4.3 table). An allow-list on purpose: ``never`` needs an explicit "Turn
-#: on the built-in engine", ``active`` is not yet due for renewal (renewing it
-#: silently would extend the fixed 14-day lifetime forever), and
-#: ``signed_out`` / ``revoked`` are cleared only by an explicit sign-in.
-SILENT_RENEWAL_ALLOWED_STATES = frozenset({EngineSignInState.EXPIRING, EngineSignInState.EXPIRED})
+#: Sign-in states in which a silent (non-interactive) approval may (re)issue
+#: the engine credential, by grant scope (desktop_unified_signin §6.3). There
+#: is no engine-only sign-out any more, so a silent sign-in of the computer
+#: signs the engine in too:
+#:
+#: - a ``cli`` grant (``pidash auth login``, the app's silent approval) is
+#:   issued from ``never``, ``signed_out``, ``expiring`` or ``expired``;
+#: - an ``engine`` grant (renewal) is issued from ``never``, ``expiring``
+#:   or ``expired``, and from ``signed_out`` only while the machine holds a
+#:   live daemon credential (a full sign-out revokes those together with the
+#:   engine's, so ``signed_out`` next to a live one can only come from an
+#:   engine-only logout made before this change — renewing it is the
+#:   migration).
+#:
+#: ``revoked`` still needs an interactive sign-in, and ``active`` is still
+#: left alone (renewing it silently would extend the fixed 14-day lifetime
+#: forever).
+SILENT_CLI_ALLOWED_STATES = frozenset(
+    {EngineSignInState.NEVER, EngineSignInState.SIGNED_OUT, EngineSignInState.EXPIRING, EngineSignInState.EXPIRED}
+)
+SILENT_ENGINE_ALLOWED_STATES = frozenset({EngineSignInState.NEVER, EngineSignInState.EXPIRING, EngineSignInState.EXPIRED})
 
 SILENT_RENEWAL_REFUSED = "engine_silent_renewal_refused"
 
 
 def silent_renewal_allowed(state: str) -> bool:
-    """True when a non-interactive approval may (re)issue the engine credential."""
-    return state in SILENT_RENEWAL_ALLOWED_STATES
+    """True when a silent ``engine``-grant approval may (re)issue the credential."""
+    return state in SILENT_ENGINE_ALLOWED_STATES
+
+
+def _machine_has_live_token(machine: DevMachine) -> bool:
+    """True while any machine token of ``machine`` can still authenticate."""
+    from django.db.models import Q
+
+    return (
+        MachineToken.objects.filter(dev_machine=machine, revoked_at__isnull=True)
+        .filter(Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()))
+        .exists()
+    )
 
 
 #: Sign-in states a daemon reports when it holds no engine credential of its own.
@@ -62,15 +88,18 @@ _DAEMON_HOLDS_NO_CREDENTIAL = frozenset(
 )
 
 
-def silent_issue_allowed(machine: DevMachine, now=None) -> bool:
+def silent_issue_allowed(machine: DevMachine, now=None, *, scope: str = "engine") -> bool:
     """True when a non-interactive approval may (re)issue ``machine``'s engine credential.
 
-    ``expiring`` / ``expired``, as :func:`silent_renewal_allowed` says. Also
-    ``active`` when the daemon's last report says it holds no credential (its
-    keychain was wiped, or Pi Dash was reinstalled): the user already turned
-    the engine on for this machine, so re-issuing the lost credential is a
-    renewal, not a new consent. Without this the engine stayed off until the
-    server's credential reached ``expiring``, about 11 days.
+    By grant scope (desktop_unified_signin §6.3): a ``cli`` grant from
+    ``never`` / ``signed_out`` / ``expiring`` / ``expired``, an ``engine``
+    grant from ``never`` / ``expiring`` / ``expired`` and from ``signed_out``
+    while the machine holds a live daemon credential. Also ``active`` when
+    the daemon's last report says it holds no credential (its keychain was
+    wiped, or Pi Dash was reinstalled): the user already turned the engine on
+    for this machine, so re-issuing the lost credential is a renewal, not a
+    new consent. Without this the engine stayed off until the server's
+    credential reached ``expiring``, about 11 days.
 
     The report counts only when it is newer than the live credential. A
     report from before the credential was issued (the daemon was stopped, or
@@ -79,8 +108,14 @@ def silent_issue_allowed(machine: DevMachine, now=None) -> bool:
     supersede the credential and restart its fixed 14 days.
     """
     state = machine.current_engine_sign_in_state(now)
-    if silent_renewal_allowed(state):
-        return True
+    if scope == "cli":
+        if state in SILENT_CLI_ALLOWED_STATES:
+            return True
+    else:
+        if state in SILENT_ENGINE_ALLOWED_STATES:
+            return True
+        if state == EngineSignInState.SIGNED_OUT and _machine_has_live_token(machine):
+            return True
     if state != EngineSignInState.ACTIVE:
         return False
     reported = (machine.engine_state or {}).get("sign_in_state")
@@ -159,7 +194,9 @@ def _mint_raw() -> str:
     return ENGINE_CREDENTIAL_PREFIX + secrets.token_urlsafe(32)
 
 
-def issue_engine_credential(*, user, dev_machine: DevMachine, silent: bool = False) -> IssuedEngineCredential:
+def issue_engine_credential(
+    *, user, dev_machine: DevMachine, silent: bool = False, scope: str = "engine"
+) -> IssuedEngineCredential:
     """Issue a new engine credential for ``dev_machine``, revoking the live one.
 
     Must run inside the caller's transaction when it is part of a larger
@@ -171,6 +208,8 @@ def issue_engine_credential(*, user, dev_machine: DevMachine, silent: bool = Fal
     state is then re-checked on the locked row, so a sign-out that committed
     after the caller's unlocked check is never overwritten; raises
     :class:`EngineCredentialError` (``engine_silent_renewal_refused``).
+    ``scope`` is the grant's scope (``cli`` or ``engine``) and decides which
+    states a silent issue may come from (desktop_unified_signin §6.3).
     """
     if dev_machine.owner_id != user.id:
         raise ValueError("engine credentials are issued only to the machine's owner")
@@ -179,7 +218,7 @@ def issue_engine_credential(*, user, dev_machine: DevMachine, silent: bool = Fal
     now = timezone.now()
     with transaction.atomic():
         machine = DevMachine.objects.select_for_update().get(pk=dev_machine.pk)
-        if silent and not silent_issue_allowed(machine, now):
+        if silent and not silent_issue_allowed(machine, now, scope=scope):
             raise EngineCredentialError(SILENT_RENEWAL_REFUSED)
         superseded = EngineCredential.objects.filter(dev_machine=machine, revoked_at__isnull=True).update(
             revoked_at=now, revoked_reason=EngineCredentialRevokeReason.SUPERSEDED
@@ -219,9 +258,10 @@ def revoke_engine_credential(dev_machine: DevMachine, *, reason: str) -> bool:
     """Revoke ``dev_machine``'s live engine credential and record the state.
 
     The machine's state follows the reason (``signed_out`` or ``revoked``)
-    even when no credential is live, so an explicit sign-out of an expired
-    engine still blocks the app's silent renewal. On a new-path machine the
-    engine is paused automatically with ``engine_sign_in_required``.
+    even when no credential is live, so a full sign-out of the computer
+    leaves the engine ``signed_out`` until the next sign-in of the computer
+    signs it in again (desktop_unified_signin §6.3). On a new-path machine
+    the engine is paused automatically with ``engine_sign_in_required``.
     Returns True when a live credential was revoked.
     """
     from pi_dash.runner.services.dispatch_rules import set_engine_auto_pause_reason

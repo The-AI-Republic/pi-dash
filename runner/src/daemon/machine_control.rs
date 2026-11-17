@@ -582,6 +582,7 @@ mod tests {
             cli: None,
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
         };
         crate::config::file::write_config(&paths, &cfg).unwrap();
         ensure_below_runner_cap(&paths).expect("one slot left");
@@ -794,6 +795,7 @@ mod tests {
         let daemon_state = StateHandle::new(crate::config::schema::Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: Default::default(),
             runners: vec![],
@@ -854,6 +856,7 @@ mod tests {
         let daemon_state = StateHandle::new(crate::config::schema::Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: Default::default(),
             runners: vec![],
@@ -957,6 +960,7 @@ mod tests {
                 cli: Some(cli.clone()),
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
             },
         )
         .unwrap();

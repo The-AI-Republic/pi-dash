@@ -373,9 +373,10 @@ fn is_unique_violation_db(err: &sea_orm::DbErr) -> bool {
 
 fn silent_refusal_description(state: &str) -> &'static str {
     match state {
-        "never" => "The built-in engine is not turned on for this computer; turn it on explicitly.",
+        "revoked" => "The built-in engine was revoked on this computer; sign it in again.",
         "active" => "The built-in engine credential on this computer is not due for renewal yet.",
-        _ => "The built-in engine was signed out on this computer; sign it in explicitly.",
+        "signed_out" => "The built-in engine was signed out on this computer and this computer holds no daemon credential; sign in on this computer first.",
+        _ => "The built-in engine is not signed in for this computer; sign in on this computer first.",
     }
 }
 
@@ -920,7 +921,7 @@ async fn post_approve(
                     );
                 let allowed =
                     pidash_services::domain::pidash_agent_credential::silent_issue_allowed(
-                        &db, machine.id, now,
+                        &db, machine.id, now, "engine",
                     )
                     .await
                     .unwrap_or(false);
@@ -1233,7 +1234,7 @@ async fn post_token(State(state): State<AppState>, headers: HeaderMap, body: Byt
                 now,
             );
             let allowed = pidash_services::domain::pidash_agent_credential::silent_issue_allowed(
-                &db_conn, machine.id, now,
+                &db_conn, machine.id, now, "engine",
             )
             .await
             .unwrap_or(false);
@@ -1285,6 +1286,7 @@ async fn post_token(State(state): State<AppState>, headers: HeaderMap, body: Byt
                 user_id,
                 machine_id,
                 !row_interactive,
+                "engine",
                 now,
             )
             .await;

@@ -66,6 +66,11 @@ use crate::dto::{
 /// `pause_checked_at`), and local chat on the daemon's own engine profile —
 /// a `Chat*` request with no `runner` selector and an absolute `cwd` runs on
 /// the machine-level built-in engine, not on a project runner.
+/// Still v7 (no bump): desktop_unified_signin §5, §6.1 added
+/// `SessionHandoff` and the `auth_state` / `auth_event` fields on
+/// `HelloInfo`. The new fields are optional on the wire, so older apps keep
+/// working against a new daemon; the new verb is answered with an error by
+/// older daemons, which clients treat as "cannot hand off" (§8).
 pub const IPC_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,6 +232,15 @@ pub enum Request {
     MachineRunLimitSet { limit: u16 },
     /// Snapshot of the durable FIFO queue (NEWPIDASH-241 T7).
     RunQueueSnapshot,
+    /// Desktop session handoff (desktop_unified_signin §5): the app's
+    /// `challenge` = base64url(SHA-256(verifier)) for the verifier held only
+    /// in the app's memory. The daemon trades it for a single-use code with
+    /// one of its workspace credentials and answers with
+    /// [`Response::SessionHandoff`]. Older daemons reject this verb as
+    /// unknown; the app then falls back to a browser sign-in (§8).
+    SessionHandoff {
+        challenge: String,
+    },
 
     // ---- Local chat (PDASHOSS01-159, IPC v4) ------------------------
     //
@@ -355,6 +369,14 @@ pub enum Response {
     },
     /// Answer to RunQueueSnapshot.
     RunQueueSnapshot(RunQueueSnapshot),
+    /// Answer to [`Request::SessionHandoff`]: the single-use code and the
+    /// account it belongs to. The code is the daemon's only secret in this
+    /// frame: it is useless without the app's verifier.
+    SessionHandoff {
+        code: String,
+        user_id: Option<String>,
+        email: Option<String>,
+    },
     Error(RpcError),
     StatusDelta(StatusSnapshot),
 
@@ -448,6 +470,17 @@ pub struct HelloInfo {
     /// The signed-in account; `None` when no workspace is signed in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<HelloAccount>,
+    /// Whether the daemon is signed in (computed from the live tokens). The
+    /// state now; `auth_event` says how it got there (design §6.1).
+    /// `None` from a daemon that predates this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_state: Option<AuthState>,
+    /// The persisted record of the last sign-in event (`[auth_event]`),
+    /// reported whether or not an account is live, so a signed-out daemon
+    /// still says when and why it was signed out. `None` from a daemon that
+    /// predates this field, or from one that never signed in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_event: Option<AuthEventInfo>,
     /// Workspaces the daemon holds a credential for, plus workspaces that
     /// have runners but whose credential is missing or revoked
     /// (`signed_in = false`). Sorted by slug.
@@ -462,6 +495,43 @@ pub struct HelloInfo {
     /// Why, and until when (v6). `None` from a v5 daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_detail: Option<EngineStatusInfo>,
+}
+
+/// The daemon's sign-in state now (desktop_unified_signin §6.1).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthState {
+    SignedIn,
+    SignedOut,
+}
+
+/// One persisted sign-in event (`[auth_event]`), as `Hello` reports it
+/// (desktop_unified_signin §6.1).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthEventInfo {
+    /// A counter that only increases on this computer.
+    pub seq: u64,
+    pub kind: String,
+    /// For `signed_out`: why this computer was signed out
+    /// (`logout` / `last_workspace_logout` / `removed` / `revoked` /
+    /// `expired`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Whose sign-in (or sign-out) this was, also for `signed_out`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<AuthEventAccountInfo>,
+    /// Wall-clock time, for display and the newest-wins tie-break.
+    pub at: DateTime<Utc>,
+}
+
+/// The account an [`AuthEventInfo`] names.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthEventAccountInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    pub cloud_url: String,
 }
 
 /// The account `pidash auth login` signed in. Fields the login could not
@@ -1535,6 +1605,18 @@ mod tests {
                 email: Some("dev@example.com".into()),
                 cloud_url: "https://cloud.example".into(),
             }),
+            auth_state: Some(AuthState::SignedIn),
+            auth_event: Some(AuthEventInfo {
+                seq: 3,
+                kind: "signed_in".into(),
+                reason: None,
+                account: Some(AuthEventAccountInfo {
+                    user_id: Some("u-1".into()),
+                    email: Some("dev@example.com".into()),
+                    cloud_url: "https://cloud.example".into(),
+                }),
+                at: Utc::now(),
+            }),
             workspaces: vec![HelloWorkspace {
                 slug: "acme".into(),
                 signed_in: true,
@@ -1545,6 +1627,7 @@ mod tests {
             engine_detail: None,
         };
         let wire = serde_json::to_value(Response::Hello(hello.clone())).unwrap();
+        let at = wire["data"]["auth_event"]["at"].as_str().unwrap().to_string();
         assert_eq!(
             wire,
             serde_json::json!({
@@ -1554,6 +1637,13 @@ mod tests {
                     "ipc_version": IPC_VERSION,
                     "cloud_url": "https://cloud.example",
                     "account": {"email": "dev@example.com", "cloud_url": "https://cloud.example"},
+                    "auth_state": "signed_in",
+                    "auth_event": {
+                        "seq": 3,
+                        "kind": "signed_in",
+                        "account": {"user_id": "u-1", "email": "dev@example.com", "cloud_url": "https://cloud.example"},
+                        "at": at,
+                    },
                     "workspaces": [{"slug": "acme", "signed_in": true, "runners": 2}],
                     "machine_id": "00000000-0000-0000-0000-000000000000",
                     "engine": "unavailable",
@@ -1634,6 +1724,10 @@ mod tests {
         }))
         .unwrap();
         assert!(back.engine_detail.is_none());
+        assert!(
+            back.auth_state.is_none() && back.auth_event.is_none(),
+            "older daemons omit the unified-signin fields"
+        );
         let status = EngineStatusInfo {
             state: EngineState::SignedOut,
             reason_code: Some("engine_sign_in_required".into()),

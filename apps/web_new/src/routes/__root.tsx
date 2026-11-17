@@ -15,6 +15,7 @@ import * as React from "react";
 import { edition, isEditionProviderFreePath } from "../core/edition/index.js";
 import { LanguageProvider } from "../core/i18n/LanguageProvider.js";
 import { ThemeProvider } from "../core/theme/ThemeProvider.js";
+import { AuthSyncSupervisor } from "../features/runners/runtime/SyncSupervisor.js";
 import { RuntimeSignOutLifecycle } from "../features/runners/runtime/SignOutLifecycle.js";
 import { NotFoundPage, markInitialColorScheme, notifyError, useDocumentHead } from "../shared/shell/index.js";
 
@@ -44,6 +45,7 @@ export const Route = createRootRouteWithContext<RouterContext>()({
         <ThemeProvider notifyError={notifyError}>
           <LanguageProvider notifyError={notifyError}>
             <RuntimeSignOutLifecycle />
+            <AuthSyncSupervisor />
             <Outlet />
           </LanguageProvider>
         </ThemeProvider>

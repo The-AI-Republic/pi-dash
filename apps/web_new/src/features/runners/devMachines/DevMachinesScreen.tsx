@@ -3,10 +3,10 @@
 // See the LICENSE file for details.
 // Dev-machines screen (NEWFRONT-555, RUN-037–041; Pi Dash Agent design
 // §4.10, §11). Owns the table, the row action confirmations, the machine
-// settings (rename, engine pause, teammates' runs, engine sign-out, the
-// "Replaced by" merge) and the install section. The add-runner control is
-// a slot: its own slice mounts the shared modal here without the page
-// having to know how that modal is built.
+// settings (rename, engine pause, teammates' runs, the "Replaced by"
+// merge) and the install section. The add-runner control is a slot: its
+// own slice mounts the shared modal here without the page having to know
+// how that modal is built.
 
 import { isApiError, type DevMachine, type DevMachinePatch, type Runner } from "@pidash/api-client";
 import * as React from "react";
@@ -17,7 +17,6 @@ import { DevMachineActionDialog } from "./DevMachineActionDialog.js";
 import {
   DevMachineConfirmDialog,
   DevMachineRenameDialog,
-  SIGN_OUT_PIDASH_AGENT_COPY,
   REMOVE_PIDASH_AGENT_COPY,
   replaceMachineCopy,
 } from "./DevMachineSettingsDialogs.js";
@@ -37,7 +36,6 @@ export const MACHINE_SETTING_FAILED_BODY = {
   renameUnsupported: "This server cannot rename computers yet. Update Pi Dash on the server and try again.",
   pause: "Could not change the Pi Dash Agent's pause.",
   teamRuns: "Could not change who can start runs on this computer's Pi Dash Agent.",
-  signOutPidashAgent: "Could not sign out the Pi Dash Agent.",
   merge: "Could not merge the computers.",
   removePidashAgent: "Could not remove the Pi Dash Agent from the project.",
   forbidden: "Only the computer's owner can change this.",
@@ -64,7 +62,6 @@ export interface DevMachinesScreenProps {
   onDelete: (machineId: string) => Promise<unknown>;
   /** Rename or engine control change; settings stay inert without it. */
   onUpdate?: ((machineId: string, patch: DevMachinePatch) => Promise<unknown>) | undefined;
-  onSignOutPidashAgent?: ((machineId: string) => Promise<unknown>) | undefined;
   onMerge?: ((sourceId: string, targetId: string) => Promise<unknown>) | undefined;
   /**
    * "Remove from project" for one engine runner (design §11): revokes the
@@ -77,7 +74,6 @@ type Pending = { action: MachineAction; machine: DevMachine };
 
 type Editing =
   | { kind: "rename"; machine: DevMachine }
-  | { kind: "sign-out-pidash-agent"; machine: DevMachine }
   | { kind: "replace"; machine: DevMachine; target: DevMachine }
   | { kind: "remove-pidash-agent"; machine: DevMachine; runner: Runner };
 
@@ -104,7 +100,6 @@ export function DevMachinesScreen({
   onRevoke,
   onDelete,
   onUpdate,
-  onSignOutPidashAgent,
   onMerge,
   onRemovePidashAgent,
 }: DevMachinesScreenProps): React.ReactElement {
@@ -189,11 +184,7 @@ export function DevMachinesScreen({
     }
   }
 
-  const settingsAvailable =
-    onUpdate !== undefined ||
-    onSignOutPidashAgent !== undefined ||
-    onMerge !== undefined ||
-    onRemovePidashAgent !== undefined;
+  const settingsAvailable = onUpdate !== undefined || onMerge !== undefined || onRemovePidashAgent !== undefined;
 
   let editDialog: React.ReactNode = null;
   if (editing?.kind === "rename" && onUpdate !== undefined) {
@@ -209,22 +200,6 @@ export function DevMachinesScreen({
           void runEdit(
             () => onUpdate(target.id, { label }),
             (error) => settingFailureBody(error, MACHINE_SETTING_FAILED_BODY.rename, true)
-          )
-        }
-      />
-    );
-  } else if (editing?.kind === "sign-out-pidash-agent" && onSignOutPidashAgent !== undefined) {
-    const target = editing.machine;
-    editDialog = (
-      <DevMachineConfirmDialog
-        copy={SIGN_OUT_PIDASH_AGENT_COPY}
-        machineName={devMachineName(target)}
-        pending={working}
-        onCancel={() => setEditing(null)}
-        onConfirm={() =>
-          void runEdit(
-            () => onSignOutPidashAgent(target.id),
-            (error) => settingFailureBody(error, MACHINE_SETTING_FAILED_BODY.signOutPidashAgent)
           )
         }
       />

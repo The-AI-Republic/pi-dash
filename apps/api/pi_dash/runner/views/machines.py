@@ -21,10 +21,9 @@ Daemon-facing (``/api/v1/runner/``):
   so ``pidash auth login`` can offer "Replace it" too). Merge a replaced or
   legacy machine into that one.
 
-Web (``/api/runners/``):
-
-- ``POST dev-machines/<id>/engine-sign-out/`` — "Sign out the engine" on the
-  machine page (owner only).
+There is no engine-only sign-out any more (desktop_unified_signin §6.3,
+U-3): the engine follows the computer's sign-in, and "Sign out the engine"
+is gone from the machine API.
 """
 
 from __future__ import annotations
@@ -38,9 +37,8 @@ from rest_framework.views import APIView
 
 from pi_dash.authentication.session import BaseSessionAuthentication
 from pi_dash.runner.authentication import MachineTokenAuthentication
-from pi_dash.runner.models import DevMachine, EngineCredentialRevokeReason, Runner, RunnerProvisioning
+from pi_dash.runner.models import DevMachine, Runner, RunnerProvisioning
 from pi_dash.runner.serializers import DevMachineSerializer
-from pi_dash.runner.services.engine_credentials import revoke_engine_credential
 from pi_dash.runner.services.machine_identity import (
     MachineControlError,
     MergeError,
@@ -226,32 +224,3 @@ class DevMachineMergeEndpoint(APIView):
         except MergeError as exc:
             return Response({"error": exc.code}, status=exc.http_status)
         return Response(result, status=status.HTTP_200_OK)
-
-
-class DevMachineEngineSignOutEndpoint(APIView):
-    """``POST /api/runners/dev-machines/<id>/engine-sign-out/`` — revoke the
-    machine's engine credential only (state ``signed_out``)."""
-
-    authentication_classes = [BaseSessionAuthentication]
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request, machine_id):
-        from pi_dash.runner.views.runners import (
-            _machine_is_in_workspace_scope,
-            _request_workspace_id,
-            _serialize_dev_machine,
-        )
-
-        machine = DevMachine.objects.filter(pk=machine_id, owner=request.user).first()
-        if machine is None:
-            return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
-        # ``{workspace}`` (the machine page's scope) is optional; when given,
-        # the machine must be in it, like every other machine-page action.
-        workspace_id = _request_workspace_id(request)
-        if workspace_id and not _machine_is_in_workspace_scope(request.user, machine, workspace_id):
-            return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
-        revoke_engine_credential(machine, reason=EngineCredentialRevokeReason.SIGNED_OUT)
-        machine.refresh_from_db()
-        if workspace_id:
-            return Response(_serialize_dev_machine(machine, request.user, workspace_id), status=status.HTTP_200_OK)
-        return Response(DevMachineSerializer(machine).data, status=status.HTTP_200_OK)

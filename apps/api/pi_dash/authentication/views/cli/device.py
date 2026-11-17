@@ -148,15 +148,16 @@ def _parse_uuid(value):
 
 
 def _check_engine_grant_approval(row, user, *, requested_machine_id, interactive):
-    """Approval rules for an ``engine`` grant (design §4.3, §4.6).
+    """Approval rules for an ``engine`` grant (BE §4.3, desktop_unified_signin §6.3).
 
     The machine (named at start by the CLI, or now by the app) must be the
-    approver's own. A silent approval is allowed only while the machine's
-    engine credential is ``expiring`` or ``expired``: ``never`` needs an
-    explicit "Turn on the built-in engine", ``active`` is not due yet, and
-    ``signed_out`` / ``revoked`` are cleared only by an explicit sign-in.
-    When no machine is named yet, the same rule is applied at redemption to
-    the redeeming token's machine. Returns ``(refusal_response, machine)``.
+    approver's own. A silent approval is allowed from ``never``,
+    ``expiring`` and ``expired``, and from ``signed_out`` while the machine
+    holds a live daemon credential (the pre-change engine-only logout
+    migration). ``revoked`` still needs an interactive sign-in, and
+    ``active`` is not due yet. When no machine is named yet, the same rule
+    is applied at redemption to the redeeming token's machine. Returns
+    ``(refusal_response, machine)``.
     """
     machine_id = requested_machine_id or row.dev_machine_id
     if requested_machine_id and row.dev_machine_id and requested_machine_id != row.dev_machine_id:
@@ -171,7 +172,7 @@ def _check_engine_grant_approval(row, user, *, requested_machine_id, interactive
         # against the redeeming machine token's machine (same rules).
         return None, machine
     state = machine.current_engine_sign_in_state()
-    if not silent_issue_allowed(machine):
+    if not silent_issue_allowed(machine, scope=CLI_DEVICE_SCOPE_ENGINE):
         logger.info(
             "engine_credential.silent_approval_refused user=%s dev_machine=%s state=%s",
             user.id,
@@ -193,11 +194,13 @@ def _check_engine_grant_approval(row, user, *, requested_machine_id, interactive
 
 
 def _silent_refusal_description(state: str) -> str:
-    if state == "never":
-        return "The built-in engine is not turned on for this computer; turn it on explicitly."
+    if state == "revoked":
+        return "The built-in engine was revoked on this computer; sign it in again."
     if state == "active":
         return "The built-in engine credential on this computer is not due for renewal yet."
-    return "The built-in engine was signed out on this computer; sign it in explicitly."
+    if state == "signed_out":
+        return "The built-in engine was signed out on this computer and this computer holds no daemon credential; sign in on this computer first."
+    return "The built-in engine is not signed in for this computer; sign in on this computer first."
 
 
 def _bearer_machine_token(request):
@@ -210,26 +213,26 @@ def _bearer_machine_token(request):
 
 
 def _maybe_issue_engine_credential(*, user, dev_machine: DevMachine, grant) -> "IssuedEngineCredential | None":
-    """The engine half of ``pidash auth login`` (design §4.3).
+    """The engine half of ``pidash auth login`` (BE §4.3, desktop_unified_signin §6.3).
 
     Issued only for a human-approved device grant (never for a bare machine
     token or a personal API token, so neither can mint one), when the
     instance can serve the engine. A person approving on the browser page
     (``interactive``) always signs the engine in. A silent approval (the
-    desktop app) renews it only when it is ``expiring`` or ``expired``, the
-    same rule as an ``engine`` grant: on a ``never`` machine the app offers
-    "Turn on the built-in engine" instead, and an ``active`` credential is
-    left as it is (the daemon keeps it; the response carries none).
+    desktop app) signs it in from ``never``, ``signed_out``, ``expiring`` or
+    ``expired`` — the app's sign-in signs the engine in with no prompt — and
+    leaves an ``active`` credential as it is (the daemon keeps it; the
+    response carries none).
     """
     if grant is None or dev_machine.revoked_at is not None:
         return None
     silent = not grant.interactive_approval
-    if silent and not silent_issue_allowed(dev_machine):
+    if silent and not silent_issue_allowed(dev_machine, scope=CLI_DEVICE_SCOPE_CLI):
         return None
     if not instance_can_serve_engine(user):
         return None
     try:
-        return issue_engine_credential(user=user, dev_machine=dev_machine, silent=silent)
+        return issue_engine_credential(user=user, dev_machine=dev_machine, silent=silent, scope=CLI_DEVICE_SCOPE_CLI)
     except EngineCredentialError:
         # A sign-out committed after the check above: leave it signed out.
         return None
@@ -271,10 +274,10 @@ def _redeem_engine_grant(row, machine_token: MachineToken) -> Response:
             status=status.HTTP_403_FORBIDDEN,
         )
     # Re-checked here, not only at approval: the user may have signed the
-    # engine out between a silent approval and its redemption.
+    # computer out between a silent approval and its redemption.
     state = machine.current_engine_sign_in_state()
     silent = not row.interactive_approval
-    if silent and not silent_issue_allowed(machine):
+    if silent and not silent_issue_allowed(machine, scope=CLI_DEVICE_SCOPE_ENGINE):
         return _silent_redemption_refused(state)
     available, _profile, pause_reason = engine_profile_for_user(row.user)
     if not available:
@@ -290,7 +293,7 @@ def _redeem_engine_grant(row, machine_token: MachineToken) -> Response:
     try:
         # ``silent`` re-checks the state on the locked machine row, so a
         # sign-out racing this redemption is never overwritten.
-        issued = issue_engine_credential(user=row.user, dev_machine=machine, silent=silent)
+        issued = issue_engine_credential(user=row.user, dev_machine=machine, silent=silent, scope=CLI_DEVICE_SCOPE_ENGINE)
     except EngineCredentialError:
         machine.refresh_from_db()
         return _silent_redemption_refused(machine.current_engine_sign_in_state())
