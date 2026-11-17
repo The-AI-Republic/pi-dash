@@ -110,6 +110,47 @@ pub const SCHEDULER_BINDING_MALFORMED_BODY: &str =
 /// Issue lookup / membership miss on the three issue-bound creates
 /// (`runs.py:367/369/439/441/505/507`).
 pub const ISSUE_NOT_FOUND_BODY: &str = r#"{"error":"issue not found"}"#;
+/// NEWPIDASH-261: gate run control (cancel / release-pin) on a
+/// work-item run by the project's `issue_run_policy`. Scheduler runs
+/// (no work item) are never gated. Returns `Err(response)` with the
+/// already-rendered 403/500 response.
+async fn gate_run_control(
+    pool: &PgPool,
+    actor_id: Uuid,
+    work_item_id: Option<Uuid>,
+) -> Result<(), Response> {
+    let Some(work_item_id) = work_item_id else {
+        return Ok(());
+    };
+    let orm_pool = sea_orm_connection(pool);
+    let issue_entity = orm::issues::Entity::find_by_id(work_item_id)
+        .one(&orm_pool)
+        .await
+        .map_err(|_| server_error())?
+        .ok_or_else(server_error)?;
+    let project_entity = orm::projects::Entity::find_by_id(issue_entity.project_id)
+        .one(&orm_pool)
+        .await
+        .map_err(|_| server_error())?
+        .ok_or_else(server_error)?;
+    let allowed = pidash_services::domain::project_settings::can_run_issue(
+        &orm_pool,
+        actor_id,
+        &issue_entity,
+        &project_entity,
+    )
+    .await
+    .map_err(|_| server_error())?;
+    if allowed {
+        Ok(())
+    } else {
+        Err(json_response(
+            StatusCode::FORBIDDEN,
+            pidash_services::domain::project_settings::not_issue_runner_body(),
+        ))
+    }
+}
+
 /// Cancel on a terminal run (`runs.py:572-576`).
 pub const RUN_ALREADY_TERMINAL_BODY: &str =
     r#"{"error":"run already terminal","code":"run_already_terminal"}"#;
@@ -1793,6 +1834,11 @@ async fn cancel_run_inner(
     if !guards::can_cancel_run(&facts) {
         return not_found();
     }
+    // NEWPIDASH-261: cancel on a work-item run follows the project's
+    // `issue_run_policy` (a removed assignee loses the right at once).
+    if let Err(response) = gate_run_control(pool, actor.id, guarded.run.work_item_id).await {
+        return response;
+    }
     let (parts, body) = req.into_parts();
     let bytes = match collect_body(body).await {
         Ok(bytes) => bytes,
@@ -2023,6 +2069,11 @@ async fn release_pin_inner(
     };
     if !guards::can_cancel_run(&facts) {
         return not_found();
+    }
+    // NEWPIDASH-261: release-pin on a work-item run follows the
+    // project's `issue_run_policy`.
+    if let Err(response) = gate_run_control(pool, actor.id, guarded.run.work_item_id).await {
+        return response;
     }
     if guarded.run.executor_kind == AgentExecutorKind::RetiredCloudRun {
         return json_response(StatusCode::CONFLICT, EXECUTOR_NOT_LOCAL_BODY.to_owned());

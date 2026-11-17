@@ -440,6 +440,23 @@ pub fn eligible_owner_ids(
     eligible
 }
 
+/// The project's `issue_run_policy` read off its stored settings bag
+/// (dispatch side, NEWPIDASH-261). Missing/invalid-stored blobs are
+/// fail-closed: [`parse_row_settings`] errors surface as `DbErr` so
+/// callers answer 500 instead of silently picking a mode.
+pub async fn policy_for_project(
+    db: &impl ConnectionTrait,
+    project_id: Uuid,
+) -> Result<IssueRunPolicy, sea_orm::DbErr> {
+    let project = projects::Entity::find_by_id(project_id)
+        .one(db)
+        .await?
+        .ok_or_else(|| sea_orm::DbErr::RecordNotFound("project".to_owned()))?;
+    let parsed = parse_row_settings(&project.settings)
+        .map_err(|error| sea_orm::DbErr::Custom(error.to_string()))?;
+    Ok(parsed.settings.issue_run_policy)
+}
+
 /// The one shared human gate (NEWPIDASH-261): whether `actor_id` may
 /// move `issue`'s state or start/cancel/release an agent run on it
 /// under `project`'s `issue_run_policy`. Callers answer a refusal
