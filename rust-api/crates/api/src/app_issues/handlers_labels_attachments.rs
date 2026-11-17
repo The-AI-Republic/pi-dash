@@ -2835,6 +2835,14 @@ pub async fn v1_list(
     let user_id = actor_user_id(extension)?;
     let project_id = super::resolve_project_id(&pool, &slug, &project_raw).await?;
     gate_decorator(&pool, &slug, &project_id, &user_id, &[20, 15, 5], None).await?;
+    if let Some(info) = crate::project_archived::archived_by_id(&pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     let db = orm(&pool);
     let timezone = actor_timezone(&db, &user_id).await?;
     let rows = v1_list_rows(&db, &slug, project_id, issue_id)
@@ -2867,6 +2875,14 @@ pub async fn v1_create(
     let user_id = actor_user_id(extension)?;
     let project_id = super::resolve_project_id(&pool, &slug, &project_raw).await?;
     gate_decorator(&pool, &slug, &project_id, &user_id, &[20, 15, 5], None).await?;
+    if let Some(info) = crate::project_archived::archived_by_id(&pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     // The workspace lookup mirrors `:39` (a miss is the required-object
     // 404). It runs after the decorator, which 403s on a bad slug first,
     // so the miss arm is unreachable while the slug gates pass.
@@ -2937,6 +2953,14 @@ pub async fn v1_delete(
     let user_id = actor_user_id(extension)?;
     let project_id = super::resolve_project_id(&pool, &slug, &project_raw).await?;
     gate_decorator(&pool, &slug, &project_id, &user_id, &[20], Some(pk)).await?;
+    if let Some(info) = crate::project_archived::archived_by_id(&pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     let found = v1_delete_target(&orm(&pool), &slug, project_id, issue_id, pk)
         .await
         .map_err(db_denial)?;
@@ -3081,6 +3105,14 @@ pub async fn v2_list(
     let user_id = actor_user_id(extension)?;
     let project_id = super::resolve_project_id(&pool, &slug, &project_raw).await?;
     gate_decorator(&pool, &slug, &project_id, &user_id, &[20, 15, 5], None).await?;
+    if let Some(info) = crate::project_archived::archived_by_id(&pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     let db = orm(&pool);
     let timezone = actor_timezone(&db, &user_id).await?;
     let rows = v2_list_rows(&db, &slug, project_id, issue_id)
@@ -3115,6 +3147,14 @@ pub async fn v2_create(
     let user_id = actor_user_id(extension)?;
     let project_id = super::resolve_project_id(&pool, &slug, &project_raw).await?;
     gate_decorator(&pool, &slug, &project_id, &user_id, &[20, 15, 5], None).await?;
+    if let Some(info) = crate::project_archived::archived_by_id(&pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
 
     let (parts, bytes) = split_parts(req).await?;
     let data = match negotiate_input(&parts.headers, &bytes, &RAW_BODY_SPEC, true) {
@@ -3266,6 +3306,14 @@ pub async fn v2_detail(
     let user_id = actor_user_id(extension)?;
     let project_id = super::resolve_project_id(&pool, &slug, &project_raw).await?;
     gate_decorator(&pool, &slug, &project_id, &user_id, &[20, 15, 5], None).await?;
+    if let Some(info) = crate::project_archived::archived_by_id(&pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     let Some(row) = v2_object(&orm(&pool), &slug, project_id, pk)
         .await
         .map_err(db_denial)?
@@ -3323,6 +3371,14 @@ pub async fn v2_patch(
     let user_id = actor_user_id(extension)?;
     let project_id = super::resolve_project_id(&pool, &slug, &project_raw).await?;
     gate_decorator(&pool, &slug, &project_id, &user_id, &[20, 15, 5], None).await?;
+    if let Some(info) = crate::project_archived::archived_by_id(&pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     let db = orm(&pool);
     let Some(row) = v2_object(&db, &slug, project_id, pk)
         .await
@@ -3395,6 +3451,14 @@ pub async fn v2_delete(
     let user_id = actor_user_id(extension)?;
     let project_id = super::resolve_project_id(&pool, &slug, &project_raw).await?;
     gate_decorator(&pool, &slug, &project_id, &user_id, &[20], Some(pk)).await?;
+    if let Some(info) = crate::project_archived::archived_by_id(&pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     let db = orm(&pool);
     if v2_object(&db, &slug, project_id, pk)
         .await

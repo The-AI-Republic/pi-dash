@@ -1,0 +1,113 @@
+#![forbid(unsafe_code)]
+
+//! Shared `project_archived` helper (NEWPIDASH-236).
+//!
+//! Every project-scoped issue read/write on an archived project answers
+//! `409` with code `project_archived` instead of the old system's silent
+//! `200` empty list / `404`. Workspace-wide issue lists and search stay
+//! silent (they are not scoped to one project) and never call this.
+//! NEWPIDASH-240 (pages) and NEWPIDASH-239 (scheduler run-now) reuse
+//! this module; keep the envelope in one place.
+//!
+//! The check runs after authentication (401) and the permission gate
+//! (403) and before any issue query, so a non-member still gets 403.
+//! Archive state is read from `projects.archived_at` — no schema change.
+
+use chrono::{DateTime, SecondsFormat, Utc};
+use sqlx::{PgPool, Row};
+use uuid::Uuid;
+
+/// A project that is archived: its identifier and the archive instant.
+#[derive(Debug, Clone)]
+pub struct ArchivedProject {
+    pub identifier: String,
+    pub archived_at: DateTime<Utc>,
+}
+
+/// Render the `archived_at` instant as `2026-11-13T18:57:37Z`.
+pub fn format_archived_at(archived_at: &DateTime<Utc>) -> String {
+    archived_at.to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+/// The exact 409 JSON body. `error` carries the human message with the
+/// identifier and timestamp plus the unarchive recovery hint; `code`,
+/// `project`/`project_identifier` and `archived_at` are machine-readable.
+pub fn archived_body(info: &ArchivedProject) -> String {
+    let ts = format_archived_at(&info.archived_at);
+    let message = format!(
+        "Project {} is archived (since {}). Unarchive it to read or change its work items.",
+        info.identifier, ts
+    );
+    let identifier = serde_json::to_string(&info.identifier).expect("json string");
+    let message = serde_json::to_string(&message).expect("json string");
+    let ts = serde_json::to_string(&ts).expect("json string");
+    format!(
+        "{{\"error\":{message},\"code\":\"project_archived\",\"project\":{identifier},\"project_identifier\":{identifier},\"archived_at\":{ts}}}"
+    )
+}
+
+/// Fetch the archived project by UUID, if it is archived.
+pub async fn archived_by_id(
+    pool: &PgPool,
+    project_id: Uuid,
+) -> Result<Option<ArchivedProject>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT identifier, archived_at FROM projects WHERE id = $1 AND archived_at IS NOT NULL",
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| ArchivedProject {
+        identifier: r.get("identifier"),
+        archived_at: r.get("archived_at"),
+    }))
+}
+
+/// Fetch the archived project addressed by identifier inside a workspace,
+/// if it is archived. The identifier match follows `Project.resolve`:
+/// `strip().upper()` equality scoped to `workspace.slug` with
+/// `deleted_at IS NULL`. Calls it with the already-resolved UUID should
+/// instead use [`archived_by_id`]; this entry exists for the
+/// by-identifier `PROJ-123` path where only the identifier (plus the
+/// issue part) is known before the project fetch.
+pub async fn archived_by_identifier(
+    pool: &PgPool,
+    workspace_slug: &str,
+    project_identifier: &str,
+) -> Result<Option<ArchivedProject>, sqlx::Error> {
+    let upper = project_identifier.trim().to_uppercase();
+    let row = sqlx::query(
+        "SELECT p.identifier, p.archived_at FROM projects p \
+         JOIN workspaces w ON w.id = p.workspace_id \
+         WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL \
+         AND p.archived_at IS NOT NULL",
+    )
+    .bind(workspace_slug)
+    .bind(upper)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| ArchivedProject {
+        identifier: r.get("identifier"),
+        archived_at: r.get("archived_at"),
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn body_matches_issue_example() {
+        let info = ArchivedProject {
+            identifier: "NEWFRONT".to_owned(),
+            archived_at: DateTime::parse_from_rfc3339("2026-11-13T18:57:37+00:00")
+                .expect("parse")
+                .with_timezone(&Utc),
+        };
+        let body = archived_body(&info);
+        assert_eq!(
+            body,
+            r#"{"error":"Project NEWFRONT is archived (since 2026-11-13T18:57:37Z). Unarchive it to read or change its work items.","code":"project_archived","project":"NEWFRONT","project_identifier":"NEWFRONT","archived_at":"2026-11-13T18:57:37Z"}"#
+        );
+    }
+}

@@ -266,6 +266,8 @@ pub(crate) enum Denial {
     UnsupportedMediaType(String),
     /// 502, truncated request-body read (the shared bad-gateway shape).
     TruncatedBody,
+    /// 409, archived project (NEWPIDASH-236, pre-rendered body).
+    ProjectArchived(String),
     /// 500, generic branch.
     ServerError,
 }
@@ -330,6 +332,7 @@ impl Denial {
                 StatusCode::BAD_GATEWAY,
                 crate::edge::BAD_GATEWAY_BODY.to_owned(),
             ),
+            Denial::ProjectArchived(body) => (StatusCode::CONFLICT, body.clone()),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 super::SERVER_ERROR_BODY.to_owned(),
@@ -548,9 +551,26 @@ async fn check_admin_creator(
         .await
         .map_err(db_denial)?;
     if created {
+        if let Some(info) = crate::project_archived::archived_by_id(pool, *project_id)
+            .await
+            .map_err(|_| Denial::ServerError)?
+        {
+            return Err(Denial::ProjectArchived(
+                crate::project_archived::archived_body(&info),
+            ));
+        }
         return Ok(());
     }
-    check_allow(&membership, &[20])
+    check_allow(&membership, &[20])?;
+    if let Some(info) = crate::project_archived::archived_by_id(pool, *project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
+    Ok(())
 }
 
 /// The `model` behind an `allow_permission(creator=True, model=...)`.
@@ -3803,8 +3823,24 @@ async fn history(
     if let Err(error) = check_entity(&membership, true) {
         return error.into_response();
     }
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
+    }
     if let Err(error) = check_allow(&membership, &[20, 15, 5]) {
         return error.into_response();
+    }
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
     }
     let tenant = match tenant_context(&pool, &user_id).await {
         Ok(tenant) => tenant,
@@ -4221,6 +4257,14 @@ async fn read_context(
     let user_id = actor_user_id(&pool, extension).await?;
     let project_id = resolve_project_id(&pool, slug, project_raw).await?;
     let tenant = tenant_context(&pool, &user_id).await?;
+    if let Some(info) = crate::project_archived::archived_by_id(&pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     Ok(ReadContext {
         pool,
         slug: slug.to_owned(),
@@ -4393,6 +4437,14 @@ async fn comment_create(
     };
     if let Err(error) = check_allow(&membership, &[20, 15, 5]) {
         return error.into_response();
+    }
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
     }
     // `Project.objects.get` plus the issue load: default managers
     // (soft-deleted rows 404), unscoped by tenant (the gate scoped).
@@ -5236,6 +5288,14 @@ async fn comment_reaction_list(
         Ok(id) => id,
         Err(error) => return error.into_response(),
     };
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
+    }
     let tenant = match tenant_context(&pool, &user_id).await {
         Ok(tenant) => tenant,
         Err(error) => return error.into_response(),
@@ -5320,6 +5380,14 @@ async fn comment_reaction_create(
     };
     if let Err(error) = check_allow(&membership, &[20, 15, 5]) {
         return error.into_response();
+    }
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
     }
     let tenant = match tenant_context(&pool, &user_id).await {
         Ok(tenant) => tenant,
@@ -5452,6 +5520,14 @@ async fn comment_reaction_destroy(
     if let Err(error) = check_allow(&membership, &[20, 15, 5]) {
         return error.into_response();
     }
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
+    }
     // The body is never read here; drop `req` without parsing.
     let _ = req;
     let row: Option<uuid::Uuid> = match comment_reactions::Entity::find()
@@ -5548,6 +5624,14 @@ async fn issue_reaction_list(
         Ok(id) => id,
         Err(error) => return error.into_response(),
     };
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
+    }
     let tenant = match tenant_context(&pool, &user_id).await {
         Ok(tenant) => tenant,
         Err(error) => return error.into_response(),
@@ -5641,6 +5725,14 @@ async fn issue_reaction_create(
     };
     if let Err(error) = check_allow(&membership, &[20, 15, 5]) {
         return error.into_response();
+    }
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
     }
     let tenant = match tenant_context(&pool, &user_id).await {
         Ok(tenant) => tenant,
@@ -5815,6 +5907,14 @@ async fn issue_reaction_destroy(
     if let Err(error) = check_allow(&membership, &[20, 15, 5]) {
         return error.into_response();
     }
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
+    }
     let _ = req;
     let row: Option<uuid::Uuid> = match issue_reactions::Entity::find()
         .select_only()
@@ -5937,6 +6037,14 @@ async fn subscriber_list(
     };
     if let Err(error) = check_entity(&membership, true) {
         return error.into_response();
+    }
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
     }
     let rows = match subscriber_roster_select(&slug, project_id)
         .into_model::<RosterRow>()
@@ -6121,6 +6229,14 @@ async fn subscriber_create(
     if let Err(error) = check_entity(&membership, false) {
         return error.into_response();
     }
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
+    }
     let tenant = match tenant_context(&pool, &user_id).await {
         Ok(tenant) => tenant,
         Err(error) => return error.into_response(),
@@ -6288,6 +6404,14 @@ async fn subscriber_destroy(
     if let Err(error) = check_entity(&membership, false) {
         return error.into_response();
     }
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
+    }
     let _ = req;
     let pk = match fetch_subscription(&pool, &slug, &project_id, &issue_id, &subscriber_id).await {
         Ok(Some(pk)) => pk,
@@ -6340,6 +6464,14 @@ async fn subscribe(
     };
     if let Err(error) = check_lite(&membership) {
         return error.into_response();
+    }
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
     }
     // DIFF-13: the issue must belong to the URL's project
     // (NEWPIDASH-170), before any subscription read or write;
@@ -6433,6 +6565,14 @@ async fn unsubscribe(
     if let Err(error) = check_lite(&membership) {
         return error.into_response();
     }
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
+    }
     let _ = req;
     let pk = match fetch_subscription(&pool, &slug, &project_id, &issue_id, &user_id).await {
         Ok(Some(pk)) => pk,
@@ -6484,6 +6624,14 @@ async fn subscription_status(
     };
     if let Err(error) = check_lite(&membership) {
         return error.into_response();
+    }
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
     }
     let _ = req;
     match fetch_subscription(&pool, &slug, &project_id, &issue_id, &user_id).await {
@@ -7114,6 +7262,14 @@ async fn worklog_create(
     };
     if let Err(error) = check_allow(&membership, &[20, 15]) {
         return error.into_response();
+    }
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
     }
     // `Issue.objects.get(pk=issue_id, project_id=project_id)`: default
     // manager (soft-deleted rows miss), unscoped by workspace slug.

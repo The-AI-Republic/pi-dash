@@ -136,6 +136,8 @@ pub enum Denial {
     ForbiddenBody(String),
     /// 409, view-inline body (external duplicate).
     Conflict(String),
+    /// 409, archived project (NEWPIDASH-236, pre-rendered body).
+    ProjectArchived(String),
     /// 500, generic branch.
     ServerError,
 }
@@ -175,6 +177,7 @@ impl Denial {
             Denial::NotFound(body) => (StatusCode::NOT_FOUND, body.clone()),
             Denial::ForbiddenBody(body) => (StatusCode::FORBIDDEN, body.clone()),
             Denial::Conflict(body) => (StatusCode::CONFLICT, body.clone()),
+            Denial::ProjectArchived(body) => (StatusCode::CONFLICT, body.clone()),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 SERVER_ERROR_BODY.to_owned(),
@@ -1053,6 +1056,15 @@ async fn by_identifier_inner(
         "GET",
     )
     .await?;
+    if let Some(info) =
+        crate::project_archived::archived_by_identifier(&pre.pool, slug, project_identifier)
+            .await
+            .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     // `sequence_id=issue_identifier` (`:259`): `IntegerField` runs
     // `int()` — whitespace/sign/underscores accepted, anything else a
     // `ValueError` into the 500. Out-of-`i64` magnitudes saturate and
@@ -1213,6 +1225,14 @@ async fn issue_list_inner(
         "GET",
     )
     .await?;
+    if let Some(info) = crate::project_archived::archived_by_id(&pre.pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     let tz = activate_timezone(pre.actor.timezone.as_deref())?;
     let (field_specs, kept, expand) = field_selection(query, shape::FIELDS_IN_ORDER)?;
     let expand_refs: Vec<&str> = expand.iter().map(String::as_str).collect();
@@ -1360,6 +1380,14 @@ async fn issue_detail_inner(
         "GET",
     )
     .await?;
+    if let Some(info) = crate::project_archived::archived_by_id(&pre.pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     let tz = activate_timezone(pre.actor.timezone.as_deref())?;
     let rows = fetch_lookup_rows(
         &pre.pool,
@@ -1466,6 +1494,14 @@ async fn create_issue_inner(
         "POST",
     )
     .await?;
+    if let Some(info) = crate::project_archived::archived_by_id(&pre.pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     // `TimezoneMixin.initial` precedes the view body: an unknown stored
     // zone 400s here, before the project fetch 404s below.
     activate_timezone(pre.actor.timezone.as_deref())?;
@@ -1566,6 +1602,14 @@ async fn patch_issue_inner(
         "PATCH",
     )
     .await?;
+    if let Some(info) = crate::project_archived::archived_by_id(&pre.pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     let tz = activate_timezone(pre.actor.timezone.as_deref())?;
     // The issue fetch precedes the project fetch (`:792-793`).
     let current = fetch_issue_for_write(&pre.pool, slug, &project_id, pk, &tz).await?;
@@ -1707,6 +1751,14 @@ async fn delete_issue_inner(
         "DELETE",
     )
     .await?;
+    if let Some(info) = crate::project_archived::archived_by_id(&pre.pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     let tz = activate_timezone(pre.actor.timezone.as_deref())?;
     let current = fetch_issue_for_write(&pre.pool, slug, &project_id, pk, &tz).await?;
 
