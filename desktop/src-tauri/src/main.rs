@@ -401,6 +401,15 @@ fn handle_deep_link(app: &tauri::AppHandle, url: &str) {
         eprintln!("deep-link: missing code or state param");
         return;
     };
+    // Unified sign-in (desktop_unified_signin §6.2): this is the app's own
+    // browser sign-in, so mark it fresh before the exchange lands. The sync
+    // supervisor stamps the app's sign-in event from the marker once the
+    // session loads (and drops it, unused, if no session ever appears within
+    // its window), so the CLI follows. Best-effort: the sign-in stands
+    // without it.
+    if let Err(e) = handoff::mark_fresh_sign_in(app) {
+        eprintln!("deep-link: marking the fresh sign-in failed: {e}");
+    }
     let mut session_url = config.target_url.clone();
     session_url.set_path("/api/auth/desktop-exchange/");
     session_url

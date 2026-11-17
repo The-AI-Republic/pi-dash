@@ -28,6 +28,8 @@ const harness = vi.hoisted(() => ({
   me: null as { id?: string | undefined; email?: string | undefined; cloudUrl?: string } | null,
   resumeRuntime: vi.fn((_input: unknown) => undefined),
   signInDaemonForAccount: vi.fn((_input: unknown) => Promise.resolve()),
+  releaseRuntimeForAccountSwitch: vi.fn((_input: unknown) => Promise.resolve()),
+  focusListeners: [] as Array<(focused: boolean) => void>,
   performSignOut: vi.fn((_input: unknown) => Promise.resolve("/")),
   notifyInfo: vi.fn(),
   navigate: vi.fn(),
@@ -44,7 +46,10 @@ vi.mock("../../../core/platform/index.js", () => ({
       apiOrigin: "https://cloud.test",
       agentRuntime: harness.agentRuntime,
       cliSetup: {},
-      onFocusChange: () => () => undefined,
+      onFocusChange: (listener: (focused: boolean) => void) => {
+        harness.focusListeners.push(listener);
+        return () => undefined;
+      },
     };
   },
 }));
@@ -65,6 +70,7 @@ vi.mock("./service.js", async (importOriginal) => {
     ...original,
     resumeRuntime: (input: unknown) => harness.resumeRuntime(input),
     signInDaemonForAccount: (input: unknown) => harness.signInDaemonForAccount(input),
+    releaseRuntimeForAccountSwitch: (input: unknown) => harness.releaseRuntimeForAccountSwitch(input),
   };
 });
 
@@ -95,8 +101,7 @@ function runtime(hello: unknown, record: unknown = null) {
   return harness.agentRuntime;
 }
 
-function renderSupervisor() {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+function renderSupervisor(queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
   return render(
     <QueryClientProvider client={queryClient}>
       <AuthSyncSupervisor />
@@ -108,6 +113,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   harness.me = null;
   harness.agentRuntime = undefined;
+  harness.focusListeners = [];
 });
 
 afterEach(() => {
@@ -141,8 +147,9 @@ describe("AuthSyncSupervisor", () => {
     await vi.waitFor(() => expect(rt.desktopSessionHandoff).toHaveBeenCalledWith("u1"));
     expect(harness.navigate).toHaveBeenCalledWith({ to: "/" });
     expect(rt.setAuthSyncRecord).toHaveBeenCalledWith(
-      expect.objectContaining({ last_seen_seq: 1, fresh_sign_in_at: null })
+      expect.objectContaining({ own_event: expect.objectContaining({ kind: "signed_in" }), fresh_sign_in_at: null })
     );
+    expect(rt.setAuthSyncRecord).toHaveBeenCalledWith(expect.objectContaining({ last_seen_seq: 1 }));
   });
 
   it("falls back to the browser sign-in (once per account) when the handoff fails", async () => {
@@ -204,6 +211,117 @@ describe("AuthSyncSupervisor", () => {
     );
     expect(harness.performSignOut).toHaveBeenCalledWith(expect.objectContaining({ skipRuntimeConfirm: true }));
     expect(rt.setAuthSyncRecord).toHaveBeenCalledWith(expect.objectContaining({ last_seen_seq: 4 }));
+    // It lands on the signed-out entry performSignOut returned.
+    await vi.waitFor(() => expect(harness.navigate).toHaveBeenCalledWith({ href: "/" }));
+  });
+
+  it("signs the old account out of the app (locally only) on a handoff to another account", async () => {
+    harness.me = { id: "u2", email: "u2@test", cloudUrl: CLOUD };
+    const rt = runtime(
+      {
+        daemon_version: "1.0.0",
+        ipc_version: 7,
+        cloud_url: CLOUD,
+        account: { user_id: "u1", email: "u1@test", cloud_url: CLOUD },
+        auth_state: "signed_in",
+        auth_event: {
+          seq: 5,
+          kind: "signed_in",
+          at: "2026-11-16T10:00:00Z",
+          account: { user_id: "u1", email: "u1@test", cloud_url: CLOUD },
+        },
+        workspaces: [],
+        engine: "available",
+      },
+      {
+        own_event: {
+          kind: "signed_in",
+          account: { user_id: "u2", email: "u2@test", cloud_url: CLOUD },
+          at: "2026-11-16T09:00:00Z",
+        },
+        last_seen_seq: 3,
+      }
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(["old-account-data"], { secret: "u2" });
+    renderSupervisor(queryClient);
+    await vi.waitFor(() => expect(harness.navigate).toHaveBeenCalledWith({ to: "/" }));
+    expect(rt.desktopSessionHandoff).toHaveBeenCalledWith("u1");
+    expect(harness.releaseRuntimeForAccountSwitch).toHaveBeenCalledTimes(1);
+    expect(queryClient.getQueryData(["old-account-data"])).toBeUndefined();
+    // Local only: no server sign-out, and the CLI is never signed out.
+    expect(harness.performSignOut).not.toHaveBeenCalled();
+    expect(rt.signOutComputer).not.toHaveBeenCalled();
+  });
+
+  it("keeps the fresh sign-in marker through a write made before the session loads", async () => {
+    const fresh = new Date().toISOString();
+    const rt = runtime(
+      {
+        daemon_version: "1.0.0",
+        ipc_version: 7,
+        cloud_url: CLOUD,
+        auth_state: "signed_out",
+        auth_event: { seq: 6, kind: "signed_out", reason: "logout", at: "2026-11-16T09:00:00Z" },
+        workspaces: [],
+        engine: "available",
+      },
+      { own_event: null, last_seen_seq: 2, fresh_sign_in_at: fresh }
+    );
+    renderSupervisor();
+    await vi.waitFor(() =>
+      expect(rt.setAuthSyncRecord).toHaveBeenCalledWith(expect.objectContaining({ last_seen_seq: 6 }))
+    );
+    for (const call of rt.setAuthSyncRecord.mock.calls) {
+      expect((call[0] as Record<string, unknown>).fresh_sign_in_at).toBe(fresh);
+    }
+  });
+
+  it("runs one CLI sign-in at a time, checks stay quiet meanwhile, and a failure still marks its events seen", async () => {
+    harness.me = { id: "u1", email: "u1@test", cloudUrl: CLOUD };
+    const before = {
+      daemon_version: "1.0.0",
+      ipc_version: 7,
+      cloud_url: CLOUD,
+      auth_state: "signed_out",
+      auth_event: { seq: 2, kind: "signed_out", reason: "logout", at: "2026-11-16T09:00:00Z" },
+      workspaces: [],
+      engine: "available",
+    };
+    const rt = runtime(before, {
+      own_event: {
+        kind: "signed_in",
+        account: { user_id: "u1", email: "u1@test", cloud_url: CLOUD },
+        at: "2026-11-16T10:00:00Z",
+      },
+      last_seen_seq: 2,
+    });
+    let fail: (error: Error) => void = () => undefined;
+    harness.signInDaemonForAccount.mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          fail = reject;
+        })
+    );
+    renderSupervisor();
+    await vi.waitFor(() => expect(harness.signInDaemonForAccount).toHaveBeenCalledTimes(1));
+    const hellosBefore = rt.daemonHello.mock.calls.length;
+    // The sign-in parks the daemon: an intermediate event the app caused.
+    rt.daemonHello.mockResolvedValue({
+      ...before,
+      auth_event: { seq: 4, kind: "signed_out", reason: "logout", at: new Date().toISOString() },
+    });
+    for (const listener of harness.focusListeners) listener(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // The check ran no step: no new hello, no second grant, no app sign-out.
+    expect(rt.daemonHello.mock.calls.length).toBe(hellosBefore);
+    expect(harness.signInDaemonForAccount).toHaveBeenCalledTimes(1);
+    expect(harness.performSignOut).not.toHaveBeenCalled();
+    fail(new Error("device grant failed"));
+    await vi.waitFor(() =>
+      expect(rt.setAuthSyncRecord).toHaveBeenCalledWith(expect.objectContaining({ last_seen_seq: 4 }))
+    );
+    expect(harness.performSignOut).not.toHaveBeenCalled();
   });
 
   it("signs the CLI in when the app signed in newest", async () => {

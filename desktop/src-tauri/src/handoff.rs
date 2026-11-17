@@ -101,10 +101,24 @@ pub async fn auth_sync_set<R: tauri::Runtime>(
 pub async fn auth_sync_mark_sign_in<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
 ) -> Result<(), String> {
-    let mut record = read_sync_record(&app)?.unwrap_or_default();
-    record.fresh_sign_in_at =
-        Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
-    write_sync_record(&app, &record)
+    mark_fresh_sign_in(&app)
+}
+
+/// Stamp `fresh_sign_in_at` with now (read-modify-write). Shared by the
+/// sign-in mutations (through [`auth_sync_mark_sign_in`]) and the browser
+/// sign-in's `pidash://auth/callback` deep link, which completes in the
+/// host and never passes a web sign-in mutation.
+pub(crate) fn mark_fresh_sign_in<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<(), String> {
+    let mut record = read_sync_record(app)?.unwrap_or_default();
+    stamp_fresh_sign_in(&mut record, chrono::Utc::now());
+    write_sync_record(app, &record)
+}
+
+/// Set the marker on `record`, keeping the rest of it untouched.
+fn stamp_fresh_sign_in(record: &mut AuthSyncRecord, now: chrono::DateTime<chrono::Utc>) {
+    record.fresh_sign_in_at = Some(now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
 }
 
 fn read_sync_record<R: tauri::Runtime>(
@@ -287,6 +301,30 @@ async fn redeem(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fresh_sign_in_stamp_keeps_the_rest_of_the_record() {
+        let own = SyncEvent {
+            kind: "signed_out".into(),
+            account: None,
+            at: "2026-11-16T09:00:00Z".into(),
+        };
+        let mut record = AuthSyncRecord {
+            own_event: Some(own.clone()),
+            last_seen_seq: Some(7),
+            fresh_sign_in_at: None,
+        };
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-16T10:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        stamp_fresh_sign_in(&mut record, now);
+        assert_eq!(
+            record.fresh_sign_in_at.as_deref(),
+            Some("2026-11-16T10:00:00.000Z")
+        );
+        assert_eq!(record.own_event, Some(own));
+        assert_eq!(record.last_seen_seq, Some(7));
+    }
 
     #[test]
     fn verifier_is_32_random_bytes_and_challenge_is_stable() {

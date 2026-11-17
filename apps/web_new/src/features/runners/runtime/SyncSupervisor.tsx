@@ -35,7 +35,7 @@ import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { platform, type AgentRuntimeApi, type AuthSyncRecord, type DaemonHello } from "../../../core/platform/index.js";
-import { sessionKeys, useMe } from "../../../core/session/index.js";
+import { resetRegisteredStores, sessionKeys, useMe, useSessionStore } from "../../../core/session/index.js";
 import { notifyInfo } from "../../../shared/shell/index.js";
 import { performSignOut } from "../../auth/index.js";
 import { reconcile, sameAccount, type SyncDecision, type SyncMe } from "./sync.js";
@@ -92,18 +92,29 @@ function AuthSyncSupervisorInner({ runtime }: { runtime: AgentRuntimeApi }): Rea
   /** A switch warning is already open: don't stack a second one. */
   const warningOpen = React.useRef(false);
   const hinted = React.useRef(new Set<string>());
+  /**
+   * A CLI sign-in or switch is running (device grant, park, restart). Checks
+   * stay quiet until it ends: the daemon's intermediate events (a parked
+   * sign-out, the restart) are the app's own doing, never something to follow.
+   */
+  const cliOp = React.useRef(false);
 
   const me: SyncMe | null = React.useMemo(() => {
     if (!meData?.id) return null;
     return { id: meData.id, email: meData.email, cloudUrl: platform.apiOrigin ?? client.baseUrl };
   }, [meData, client]);
 
-  /** Merge `patch` into the host record (clearing the marker unless set), best-effort. */
+  /**
+   * Merge `patch` into the host record, best-effort. The fresh-sign-in
+   * marker survives unless the patch clears it explicitly: an unrelated
+   * write (advancing `last_seen_seq` before the session loads) must not
+   * eat a sign-in the next check still has to stamp.
+   */
   const writeRecord = React.useCallback(
     async (patch: Partial<AuthSyncRecord>): Promise<AuthSyncRecord | null> => {
       if (!runtime) return null;
       const prior = await runtime.getAuthSyncRecord().catch(() => null);
-      const next: AuthSyncRecord = { ...(prior ?? {}), ...patch, fresh_sign_in_at: patch.fresh_sign_in_at ?? null };
+      const next: AuthSyncRecord = { ...(prior ?? {}), ...patch };
       await runtime.setAuthSyncRecord(next).catch(() => undefined);
       return next;
     },
@@ -167,6 +178,19 @@ function AuthSyncSupervisorInner({ runtime }: { runtime: AgentRuntimeApi }): Rea
             hintFallback(hello, hinted);
             return;
           }
+          if (me && me.id !== decision.userId) {
+            // §4 row 6: the CLI signed in as someone else, so the app signs
+            // its old account out — locally only. No server logout (the
+            // handoff already replaced the session cookie) and no CLI logout
+            // (the daemon is the side being followed). Every store, the
+            // query cache and the runtime identity go, so nothing of the old
+            // account shows under the new one.
+            const { releaseRuntimeForAccountSwitch } = await import("./service.js");
+            await releaseRuntimeForAccountSwitch({ runtime });
+            resetRegisteredStores();
+            queryClient.clear();
+            useSessionStore.getState().markAuthenticated();
+          }
           const account = hello.account;
           await writeRecord({
             own_event: {
@@ -188,17 +212,33 @@ function AuthSyncSupervisorInner({ runtime }: { runtime: AgentRuntimeApi }): Rea
           if (!me) return;
           const cli = platform.cliSetup;
           const run = (): void => {
+            // One CLI sign-in at a time, and no check runs while it does
+            // (see `cliOp`). Whether it lands or fails, the daemon events it
+            // produced are the app's own: mark them seen so none is followed
+            // back (no echo, rule 2). A failure leaves the app's sign-in the
+            // newest event, so the next check retries the CLI sign-in.
+            if (cliOp.current) return;
+            cliOp.current = true;
             void (async () => {
-              const { resumeRuntime, signInDaemonForAccount } = await import("./service.js");
-              resumeRuntime({ id: me.id, email: me.email, cloudUrl: me.cloudUrl }, { client, runtime });
-              await signInDaemonForAccount({
-                client,
-                runtime,
-                cli,
-                force: decision.kind === "sign_in_cli" ? decision.force : undefined,
-              });
-              const fresh = await runtime.daemonHello().catch(() => null);
-              await advance(fresh?.auth_event?.seq ?? daemonSeq);
+              try {
+                const { resumeRuntime, signInDaemonForAccount } = await import("./service.js");
+                resumeRuntime({ id: me.id, email: me.email, cloudUrl: me.cloudUrl }, { client, runtime });
+                await signInDaemonForAccount({
+                  client,
+                  runtime,
+                  cli,
+                  force: decision.kind === "sign_in_cli" ? decision.force : undefined,
+                });
+              } catch {
+                // Retried by the next check (see above).
+              } finally {
+                try {
+                  const fresh = await runtime.daemonHello().catch(() => null);
+                  await advance(fresh?.auth_event?.seq ?? daemonSeq);
+                } finally {
+                  cliOp.current = false;
+                }
+              }
             })().catch(() => undefined);
           };
           if (decision.kind === "sign_in_cli" && decision.switch && hello.account && !sameAccount(me, hello.account)) {
@@ -210,13 +250,21 @@ function AuthSyncSupervisorInner({ runtime }: { runtime: AgentRuntimeApi }): Rea
         }
         case "sign_out_app": {
           notifyInfo(CLI_SIGN_OUT_TITLE, CLI_SIGN_OUT_MESSAGE);
+          let landing: string | null = null;
           try {
-            await performSignOut({ client, queryClient, teardown: platform.sessionTeardown, skipRuntimeConfirm: true });
+            landing = await performSignOut({
+              client,
+              queryClient,
+              teardown: platform.sessionTeardown,
+              skipRuntimeConfirm: true,
+            });
           } catch {
             // A failed sign-out leaves the user where they are; the next
             // check retries.
           }
           await advance(daemonSeq);
+          // Land on the signed-out entry, as every other sign-out does.
+          if (landing !== null) void router.navigate({ href: landing });
           return;
         }
         case "sign_out_cli": {
@@ -239,7 +287,7 @@ function AuthSyncSupervisorInner({ runtime }: { runtime: AgentRuntimeApi }): Rea
   );
 
   const tick = React.useCallback(async () => {
-    if (!runtime || ticking.current) return;
+    if (!runtime || ticking.current || cliOp.current) return;
     ticking.current = true;
     try {
       const hello = await runtime.daemonHello().catch(() => null as DaemonHello | null);

@@ -582,6 +582,31 @@ function defaultSleep(ms: number): Promise<void> {
 }
 
 /**
+ * Release the runtime for an app-only account switch (desktop_unified_signin
+ * §4 row 6: the CLI signed in as someone else, so the app signs its current
+ * account out locally and follows). Unlike `disposeRuntimeForSignOut` the
+ * computer stays signed in — the daemon is the side being followed — and no
+ * sign-out event is recorded. The approval modes are stashed for the old
+ * account and the runtime identity is dropped, so `resumeRuntime` starts
+ * clean for the new one. Never rejects.
+ */
+export async function releaseRuntimeForAccountSwitch(input: Pick<RuntimeDeps, "runtime">): Promise<void> {
+  const { runtime } = input;
+  if (!runtime) return;
+  const account = getRuntimeAccount();
+  try {
+    await stashApprovalModes({ account, runtime });
+  } catch {
+    // A lost preference must not block the switch.
+  }
+  state.identity = null;
+  state.discovery = null;
+  state.topUpUrl = "";
+  state.lastSilentAttempt = 0;
+  state.account = "";
+}
+
+/**
  * The app half of a sign-out. The daemon, the engine and every runner stay
  * signed in (they are independent of the app) unless the user ticked "Also
  * sign out Pi Dash on this computer". Approval modes are handed to the host
