@@ -43,8 +43,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-use pidash_auth::permissions::ROLE_ADMIN;
-use pidash_db::entity::projects;
+use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
+use pidash_db::entity::{issue_assignees, issues, project_members, projects};
 use pidash_db::orm_tx::into_sqlx;
 
 /// The role that may change a settings key.
@@ -81,17 +81,36 @@ pub struct SettingsKey {
     pub role: SettingsRole,
 }
 
-/// Every known settings key, in wire order. Empty until the first
-/// consumer adds one (NEWPIDASH-261): reads render `{}`, PATCH
-/// rejects any key as unknown.
-pub const KNOWN_KEYS: &[SettingsKey] = &[];
+/// Every known settings key, in wire order.
+pub const KNOWN_KEYS: &[SettingsKey] = &[SettingsKey {
+    name: "issue_run_policy",
+    role: SettingsRole::ProjectAdmin,
+}];
+
+/// Who may a human move an issue's state or start/cancel/release an
+/// agent run on it (NEWPIDASH-261). Stored as the `issue_run_policy`
+/// key string in `projects.settings`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueRunPolicy {
+    /// Only the issue's creator and its current assignees.
+    #[default]
+    CreatorAndAssignees,
+    /// Any active project Member or Admin.
+    ProjectMembers,
+}
 
 /// The typed settings: the single definition of each key, its type
 /// and its default. Stored as one JSON object; missing keys read as
 /// their `#[serde(default)]` value.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
-pub struct ProjectSettings {}
+pub struct ProjectSettings {
+    /// Who may move an issue's state or run it. Missing reads as
+    /// `creator_and_assignees`, so `{}` (every existing project) is
+    /// the strict default mode.
+    pub issue_run_policy: IssueRunPolicy,
+}
 
 /// The validated read of one stored blob: the typed settings plus
 /// the unknown keys carried for forward compatibility.
@@ -210,13 +229,22 @@ pub fn check_permissions(
 /// deserialize `value` into the key's type and answer
 /// [`SettingsError::InvalidValue`] on mismatch.
 fn check_key_value(key: &str, value: &Value) -> Result<(), SettingsError> {
-    // No keys yet: every key is unknown. The first consumer
-    // (NEWPIDASH-261, `issue_run_policy`) turns this into a `match`
-    // with one arm per key, each type-checking its value.
-    let _ = value;
-    Err(SettingsError::UnknownKey {
-        key: key.to_owned(),
-    })
+    match key {
+        "issue_run_policy" => match value {
+            Value::String(s)
+                if matches!(s.as_str(), "creator_and_assignees" | "project_members") =>
+            {
+                Ok(())
+            }
+            _ => Err(SettingsError::InvalidValue {
+                key: key.to_owned(),
+                detail: "must be \"creator_and_assignees\" or \"project_members\"".to_owned(),
+            }),
+        },
+        _ => Err(SettingsError::UnknownKey {
+            key: key.to_owned(),
+        }),
+    }
 }
 
 /// Parse one stored blob (the `projects.settings` column for one
@@ -282,7 +310,6 @@ pub fn authorize_and_validate(
 }
 
 /// The read shape: the validated settings with defaults filled in.
-/// `{}` until the first key lands.
 pub fn render(settings: &ProjectSettings) -> Value {
     serde_json::to_value(settings).unwrap_or(Value::Object(Map::new()))
 }
@@ -343,6 +370,100 @@ pub fn empty_bag() -> Value {
     Value::Object(Map::new())
 }
 
+/// Machine-readable refusal reason for a human who may not move an
+/// issue's state or run it under the project's `issue_run_policy`
+/// (NEWPIDASH-261).
+pub const NOT_ISSUE_RUNNER: &str = "not_issue_runner";
+
+/// Human message for [`NOT_ISSUE_RUNNER`].
+pub const NOT_ISSUE_RUNNER_MESSAGE: &str = "Only the issue's creator and assignees can do this in this project. Ask the creator to assign you, or ask a project admin to change the project's 'Who can run issues' setting.";
+
+/// Pure decision behind [`can_run_issue`]: whether a human with the
+/// given facts may move the issue's state or start/cancel/release a
+/// run under `policy`. `member_role` is the caller's active project
+/// membership role (`None` when not an active member).
+///
+/// - `creator_and_assignees`: creator or current (live) assignee only.
+///   There is no admin bypass (NEWPIDASH-261 open decision: no).
+/// - `project_members`: active Member (15) or Admin (20) only; guests
+///   (5) and non-members never pass.
+pub fn can_run_issue_pure(
+    policy: IssueRunPolicy,
+    is_creator: bool,
+    is_assignee: bool,
+    member_role: Option<i32>,
+) -> bool {
+    match policy {
+        IssueRunPolicy::CreatorAndAssignees => is_creator || is_assignee,
+        IssueRunPolicy::ProjectMembers => {
+            member_role.map(|role| role >= ROLE_MEMBER).unwrap_or(false)
+        }
+    }
+}
+
+/// Eligible runner-owner set for a work-item run under `policy`
+/// (NEWPIDASH-261 dispatch side). The base is always the issue's
+/// creator (when set) plus its current assignees; `project_members`
+/// adds the run's triggerer again, while `creator_and_assignees`
+/// does not (a triggerer-only runner never takes the run).
+pub fn eligible_owner_ids(
+    issue_creator: Option<Uuid>,
+    issue_people: &std::collections::HashSet<Uuid>,
+    triggerer: Option<Uuid>,
+    policy: IssueRunPolicy,
+) -> std::collections::HashSet<Uuid> {
+    let mut eligible = issue_people.clone();
+    if let Some(creator) = issue_creator {
+        eligible.insert(creator);
+    }
+    if policy == IssueRunPolicy::ProjectMembers {
+        if let Some(triggerer) = triggerer {
+            eligible.insert(triggerer);
+        }
+    }
+    eligible
+}
+
+/// The one shared human gate (NEWPIDASH-261): whether `actor_id` may
+/// move `issue`'s state or start/cancel/release an agent run on it
+/// under `project`'s `issue_run_policy`. Callers answer a refusal
+/// with 403 [`NOT_ISSUE_RUNNER`] + [`NOT_ISSUE_RUNNER_MESSAGE`];
+/// system actions (ticks, continuations, review/test entry runs,
+/// project-move handoffs, agent self-actions inside a run) never
+/// call this check.
+pub async fn can_run_issue(
+    db: &impl ConnectionTrait,
+    actor_id: Uuid,
+    issue: &issues::Model,
+    project: &projects::Model,
+) -> Result<bool, sea_orm::DbErr> {
+    let parsed = parse_row_settings(&project.settings)
+        .map_err(|error| sea_orm::DbErr::Custom(error.to_string()))?;
+    let policy = parsed.settings.issue_run_policy;
+    let is_creator = issue.created_by_id == Some(actor_id);
+    let is_assignee = issue_assignees::Entity::find()
+        .filter(issue_assignees::Column::IssueId.eq(issue.id))
+        .filter(issue_assignees::Column::AssigneeId.eq(actor_id))
+        .filter(issue_assignees::Column::DeletedAt.is_null())
+        .one(db)
+        .await?
+        .is_some();
+    let member_role = project_members::Entity::find()
+        .filter(project_members::Column::ProjectId.eq(project.id))
+        .filter(project_members::Column::MemberId.eq(actor_id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .one(db)
+        .await?
+        .map(|row| i32::from(row.role));
+    Ok(can_run_issue_pure(
+        policy,
+        is_creator,
+        is_assignee,
+        member_role,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use sea_orm::QueryTrait;
@@ -365,8 +486,79 @@ mod tests {
     fn empty_bag_parses_to_defaults() {
         let parsed = parse_stored(&empty_bag()).expect("empty bag parses");
         assert_eq!(parsed.settings, ProjectSettings::default());
+        assert_eq!(
+            parsed.settings.issue_run_policy,
+            IssueRunPolicy::CreatorAndAssignees
+        );
         assert!(parsed.extra.is_empty());
-        assert_eq!(render(&parsed.settings), json!({}));
+        assert_eq!(
+            render(&parsed.settings),
+            json!({"issue_run_policy": "creator_and_assignees"})
+        );
+    }
+
+    #[test]
+    fn issue_run_policy_reads_stored_value() {
+        let stored = obj(&[("issue_run_policy", json!("project_members"))]);
+        let parsed = parse_stored(&stored).expect("stored value parses");
+        assert_eq!(
+            parsed.settings.issue_run_policy,
+            IssueRunPolicy::ProjectMembers
+        );
+        assert!(parsed.extra.is_empty());
+        assert_eq!(
+            render(&parsed.settings),
+            json!({"issue_run_policy": "project_members"})
+        );
+    }
+
+    #[test]
+    fn issue_run_policy_accepts_both_values() {
+        for value in ["creator_and_assignees", "project_members"] {
+            let fragment = obj(&[("issue_run_policy", json!(value))]);
+            assert_eq!(
+                validate_update(&fragment),
+                Ok(fragment.clone()),
+                "value {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue_run_policy_rejects_bad_values_as_invalid_value() {
+        // Non-string JSON types.
+        for bad in [
+            json!(null),
+            json!(true),
+            json!(1),
+            json!([]),
+            json!({}),
+            json!("creator"),
+            json!(""),
+            json!("PROJECT_MEMBERS"),
+            json!("creator_and_assignees "),
+        ] {
+            let fragment = obj(&[("issue_run_policy", bad.clone())]);
+            let error = validate_update(&fragment).expect_err("bad value rejected");
+            assert_eq!(
+                error,
+                SettingsError::InvalidValue {
+                    key: "issue_run_policy".to_owned(),
+                    detail: "must be \"creator_and_assignees\" or \"project_members\"".to_owned(),
+                },
+                "bad {bad}"
+            );
+            assert_eq!(error.status(), 400, "bad {bad}");
+        }
+    }
+
+    #[test]
+    fn issue_run_policy_stored_wrong_type_is_invalid_stored() {
+        let stored = obj(&[("issue_run_policy", json!(1))]);
+        assert!(matches!(
+            parse_stored(&stored),
+            Err(SettingsError::InvalidStored(_))
+        ));
     }
 
     #[test]
@@ -381,6 +573,21 @@ mod tests {
     }
 
     #[test]
+    fn known_and_unknown_keys_coexist_on_read() {
+        let stored = obj(&[
+            ("issue_run_policy", json!("project_members")),
+            ("future_key", json!(7)),
+        ]);
+        let parsed = parse_stored(&stored).expect("mixed blob parses");
+        assert_eq!(
+            parsed.settings.issue_run_policy,
+            IssueRunPolicy::ProjectMembers
+        );
+        assert_eq!(parsed.extra.get("future_key"), Some(&json!(7)));
+        assert!(!parsed.extra.contains_key("issue_run_policy"));
+    }
+
+    #[test]
     fn non_object_stored_blob_is_invalid_stored() {
         for stored in [json!(null), json!([]), json!("x"), json!(1), json!(true)] {
             assert!(matches!(
@@ -391,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn update_with_any_key_is_unknown_until_first_key_lands() {
+    fn update_with_unregistered_key_is_unknown() {
         let fragment = obj(&[("anything", json!(true))]);
         assert_eq!(
             validate_update(&fragment),
@@ -439,8 +646,6 @@ mod tests {
 
     #[test]
     fn permission_check_denies_unknown_keys() {
-        // With no registered keys, check_permissions and
-        // validate_update agree: every key is UnknownKey.
         let fragment = obj(&[("anything", json!(1))]);
         let Value::Object(object) = &fragment else {
             panic!("fragment is an object");
@@ -449,6 +654,39 @@ mod tests {
             check_permissions(object, ROLE_ADMIN, ROLE_ADMIN),
             Err(SettingsError::UnknownKey {
                 key: "anything".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn issue_run_policy_permission_is_project_admin() {
+        use pidash_auth::permissions::ROLE_ADMIN as ADMIN;
+        // Project admin and workspace admin may change it; members
+        // and guests may not (403 Forbidden).
+        let fragment = obj(&[("issue_run_policy", json!("project_members"))]);
+        let Value::Object(object) = &fragment else {
+            panic!("fragment is an object");
+        };
+        assert!(check_permissions(object, ADMIN, ROLE_GUEST).is_ok());
+        assert!(check_permissions(object, ROLE_GUEST, ADMIN).is_ok());
+        assert_eq!(
+            check_permissions(object, ROLE_MEMBER, ROLE_MEMBER),
+            Err(SettingsError::Forbidden {
+                key: "issue_run_policy".to_owned()
+            })
+        );
+        assert_eq!(
+            check_permissions(object, ROLE_GUEST, ROLE_GUEST),
+            Err(SettingsError::Forbidden {
+                key: "issue_run_policy".to_owned()
+            })
+        );
+        // authorize_and_validate runs permissions first: a member
+        // gets 403 even with a well-formed value.
+        assert_eq!(
+            authorize_and_validate(&fragment, ROLE_MEMBER, ROLE_MEMBER),
+            Err(SettingsError::Forbidden {
+                key: "issue_run_policy".to_owned()
             })
         );
     }
@@ -465,6 +703,115 @@ mod tests {
         assert!(SettingsRole::WorkspaceAdmin.allows(ROLE_GUEST, ROLE_ADMIN));
         assert!(!SettingsRole::WorkspaceAdmin.allows(ROLE_ADMIN, ROLE_GUEST));
         assert!(!SettingsRole::WorkspaceAdmin.allows(ROLE_ADMIN, ROLE_MEMBER));
+    }
+
+    #[test]
+    fn can_run_issue_pure_covers_both_modes() {
+        use pidash_auth::permissions::{
+            ROLE_ADMIN as ADMIN, ROLE_GUEST as GUEST, ROLE_MEMBER as MEMBER,
+        };
+        // Default mode: creator or live assignee only; project
+        // membership (even Admin) without creator/assignee fails —
+        // there is no admin bypass.
+        assert!(can_run_issue_pure(
+            IssueRunPolicy::CreatorAndAssignees,
+            true,
+            false,
+            None
+        ));
+        assert!(can_run_issue_pure(
+            IssueRunPolicy::CreatorAndAssignees,
+            false,
+            true,
+            None
+        ));
+        assert!(!can_run_issue_pure(
+            IssueRunPolicy::CreatorAndAssignees,
+            false,
+            false,
+            Some(ADMIN)
+        ));
+        assert!(!can_run_issue_pure(
+            IssueRunPolicy::CreatorAndAssignees,
+            false,
+            false,
+            Some(MEMBER)
+        ));
+        // project_members: Member/Admin pass, guest and non-member fail
+        // regardless of creator/assignee facts.
+        assert!(can_run_issue_pure(
+            IssueRunPolicy::ProjectMembers,
+            false,
+            false,
+            Some(MEMBER)
+        ));
+        assert!(can_run_issue_pure(
+            IssueRunPolicy::ProjectMembers,
+            false,
+            false,
+            Some(ADMIN)
+        ));
+        assert!(!can_run_issue_pure(
+            IssueRunPolicy::ProjectMembers,
+            false,
+            false,
+            Some(GUEST)
+        ));
+        assert!(!can_run_issue_pure(
+            IssueRunPolicy::ProjectMembers,
+            false,
+            false,
+            None
+        ));
+    }
+
+    #[test]
+    fn eligible_owner_ids_follows_the_policy() {
+        use std::collections::HashSet;
+        let creator = Uuid::from_u128(1);
+        let assignee = Uuid::from_u128(2);
+        let triggerer = Uuid::from_u128(3);
+        let people: HashSet<Uuid> = [assignee].into_iter().collect();
+        // Default: triggerer excluded — a triggerer-only runner never
+        // takes the run.
+        let default_set = eligible_owner_ids(
+            Some(creator),
+            &people,
+            Some(triggerer),
+            IssueRunPolicy::CreatorAndAssignees,
+        );
+        assert!(default_set.contains(&creator));
+        assert!(default_set.contains(&assignee));
+        assert!(!default_set.contains(&triggerer));
+        // project_members: triggerer is admitted again.
+        let members_set = eligible_owner_ids(
+            Some(creator),
+            &people,
+            Some(triggerer),
+            IssueRunPolicy::ProjectMembers,
+        );
+        assert!(members_set.contains(&creator));
+        assert!(members_set.contains(&assignee));
+        assert!(members_set.contains(&triggerer));
+        // No triggerer (system/automatic run): both modes agree on the
+        // creator+assignee base.
+        let system_set =
+            eligible_owner_ids(Some(creator), &people, None, IssueRunPolicy::ProjectMembers);
+        assert_eq!(system_set, default_set);
+        // No creator and no people (orphan row): empty set.
+        let empty: HashSet<Uuid> = HashSet::new();
+        assert!(
+            eligible_owner_ids(None, &empty, None, IssueRunPolicy::CreatorAndAssignees).is_empty()
+        );
+    }
+
+    #[test]
+    fn not_issue_runner_reason_and_message_are_stable() {
+        assert_eq!(NOT_ISSUE_RUNNER, "not_issue_runner");
+        assert_eq!(
+            NOT_ISSUE_RUNNER_MESSAGE,
+            "Only the issue's creator and assignees can do this in this project. Ask the creator to assign you, or ask a project admin to change the project's 'Who can run issues' setting."
+        );
     }
 
     #[test]
