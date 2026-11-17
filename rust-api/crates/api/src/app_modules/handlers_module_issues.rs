@@ -635,25 +635,112 @@ const RELATION_JOINS: &[(&str, &str)] = &[
     ("issue_subscribers", "issue_subscribers"),
 ];
 
-/// True when every `"alias".` reference in the filter SQL is an `IS NULL` /
-/// `IS NOT NULL` test (the `__isnull` predicates take the LEFT join).
+/// True when the filter SQL references the relation `alias`, quoted
+/// (`"alias".`, complex filters and the group guards below) or unquoted
+/// (`alias.`, legacy predicates, which never quote the alias).
+/// Ported from `app_cycles::handlers_cycle_issues` (PIDASHCONV-1504,
+/// NEWPIDASH-284): the legacy surface must join the link table or
+/// Postgres rejects the query with "missing FROM-clause entry".
+fn alias_mentioned(where_sql: &str, alias: &str) -> bool {
+    if where_sql.contains(&format!("\"{alias}\".")) {
+        return true;
+    }
+    alias_unquoted_offsets(where_sql, alias).next().is_some()
+}
+
+/// Byte offsets of unquoted `alias.` references. The alias must start on
+/// an identifier boundary so a longer name never matches.
+fn alias_unquoted_offsets<'a>(where_sql: &'a str, alias: &str) -> impl Iterator<Item = usize> + 'a {
+    let needle = format!("{alias}.");
+    let mut offsets = Vec::new();
+    let mut base = 0;
+    while let Some(at) = where_sql[base..].find(&needle) {
+        let absolute = base + at;
+        let boundary = absolute == 0 || {
+            let prev = where_sql.as_bytes()[absolute - 1];
+            !prev.is_ascii_alphanumeric() && prev != b'_'
+        };
+        if boundary {
+            offsets.push(absolute);
+        }
+        base = absolute + 1;
+    }
+    offsets.into_iter()
+}
+
+/// True when the identifier after an alias reference is followed by an
+/// `IS NULL` / `IS NOT NULL` test.
+fn is_null_test(after: &str) -> bool {
+    let ident_len = after
+        .chars()
+        .take_while(|char| char.is_alphanumeric() || *char == '_' || *char == '"')
+        .map(|char| char.len_utf8())
+        .sum::<usize>();
+    let tail = after[ident_len..].trim_start();
+    tail.starts_with("IS NULL") || tail.starts_with("IS NOT NULL")
+}
+
+/// True when every reference to `alias` in the filter SQL — quoted or
+/// unquoted — is an `IS NULL` / `IS NOT NULL` test (the `__isnull`
+/// predicates take the LEFT join).
 fn alias_nullable_only(where_sql: &str, alias: &str) -> bool {
     let marker = format!("\"{alias}\".");
     let mut rest = where_sql;
     while let Some(start) = rest.find(&marker) {
-        let after = &rest[start + marker.len()..];
-        let ident_len = after
-            .chars()
-            .take_while(|char| char.is_alphanumeric() || *char == '_' || *char == '"')
-            .map(|char| char.len_utf8())
-            .sum::<usize>();
-        let tail = after[ident_len..].trim_start();
-        if !(tail.starts_with("IS NULL") || tail.starts_with("IS NOT NULL")) {
+        if !is_null_test(&rest[start + marker.len()..]) {
             return false;
         }
-        rest = &after[ident_len..];
+        rest = &rest[start + marker.len()..];
+    }
+    for absolute in alias_unquoted_offsets(where_sql, alias) {
+        if !is_null_test(&where_sql[absolute + alias.len() + 1..]) {
+            return false;
+        }
     }
     true
+}
+
+/// Rewrite every `alias.` reference in the filter SQL (both spellings,
+/// see [`alias_mentioned`]) to `replacement.`. Used to give the legacy
+/// stack its own copy of a relation join (NEWPIDASH-195).
+fn rename_alias_refs(sql: &str, alias: &str, replacement: &str) -> String {
+    let mut starts: Vec<usize> = Vec::new();
+    let quoted = format!("\"{alias}\".");
+    let mut base = 0;
+    while let Some(at) = sql[base..].find(&quoted) {
+        starts.push(base + at);
+        base += at + 1;
+    }
+    starts.extend(alias_unquoted_offsets(sql, alias));
+    if starts.is_empty() {
+        return sql.to_owned();
+    }
+    starts.sort_unstable();
+    let mut out = String::with_capacity(sql.len() + starts.len() * replacement.len());
+    let mut cursor = 0;
+    for start in starts {
+        if start < cursor {
+            continue;
+        }
+        let quoted_ref = sql[start..].starts_with('"');
+        let marker_len = if quoted_ref {
+            alias.len() + 3
+        } else {
+            alias.len() + 1
+        };
+        out.push_str(&sql[cursor..start]);
+        if quoted_ref {
+            out.push('"');
+        }
+        out.push_str(replacement);
+        if quoted_ref {
+            out.push('"');
+        }
+        out.push('.');
+        cursor = start + marker_len;
+    }
+    out.push_str(&sql[cursor..]);
+    out
 }
 
 /// M2M group keys LEFT-join their bridge with an
@@ -751,9 +838,11 @@ fn module_filtered_set(
                      WHERE pm.member_id = {user_holder} AND pm.project_id = {project_holder}
                        AND pm.is_active AND pm.deleted_at IS NULL)"#
     )];
+    let mut complex_sql_text = String::new();
     if let Some(cond) = complex_filter(query, tz)? {
         let (fragment, values) = render_condition(&cond);
-        fragments.push(binder.splice(&fragment, values));
+        complex_sql_text = binder.splice(&fragment, values);
+        fragments.push(complex_sql_text.clone());
     }
     let flat: HashMap<String, String> = query
         .keys()
@@ -772,6 +861,28 @@ fn module_filtered_set(
         } else {
             legacy_sql_text = format!("{legacy_sql_text} AND {fragment}");
         }
+    }
+    // NEWPIDASH-195: Django applies the rich `filters` tree and the
+    // legacy predicates as two separate `.filter()` calls, so a
+    // relation filtered by BOTH stacks joins the link table twice
+    // and an issue linked to both rows matches. Give the legacy
+    // stack's copy of each shared relation its own alias
+    // (`<alias>_legacy`) — otherwise one link row must satisfy both
+    // predicates and the result is empty whenever the two sides
+    // name different rows. Ported from
+    // `app_cycles::handlers_cycle_issues` (NEWPIDASH-284).
+    let mut legacy_joins: Vec<(&str, String, bool)> = Vec::new();
+    if !complex_sql_text.is_empty() && !legacy_sql_text.is_empty() {
+        let mut renamed = legacy_sql_text.clone();
+        for (table, alias) in RELATION_JOINS {
+            if alias_mentioned(&complex_sql_text, alias) && alias_mentioned(&renamed, alias) {
+                let nullable_only = alias_nullable_only(&renamed, alias);
+                let legacy_alias = format!("{alias}_legacy");
+                renamed = rename_alias_refs(&renamed, alias, &legacy_alias);
+                legacy_joins.push((*table, legacy_alias, nullable_only));
+            }
+        }
+        legacy_sql_text = renamed;
     }
     if !legacy_sql_text.is_empty() {
         fragments.push(legacy_sql_text.clone());
@@ -814,10 +925,12 @@ fn module_filtered_set(
     // `NOT EXISTS` with no join.
     let rich_inner = rich_inner_aliases(query, tz);
     for (table, alias) in RELATION_JOINS {
-        let marker = format!("\"{alias}\".");
-        let mentioned = where_sql.contains(&marker);
-        let legacy_positive =
-            legacy_sql_text.contains(&marker) && !alias_nullable_only(&legacy_sql_text, alias);
+        // `legacy_sql` spells relation aliases unquoted (`label_issue.`)
+        // while complex filters and the group guards quote them
+        // (`"label_issue".`) — `alias_mentioned` sees both (NEWPIDASH-284).
+        let mentioned = alias_mentioned(&where_sql, alias);
+        let legacy_positive = alias_mentioned(&legacy_sql_text, alias)
+            && !alias_nullable_only(&legacy_sql_text, alias);
         let used = mentioned || group_join_alias(group_by, sub_group_by, alias);
         if !used {
             continue;
@@ -829,6 +942,20 @@ fn module_filtered_set(
             " {kind} {table} AS {alias} ON {alias}.issue_id = issue.id"
         ));
     }
+    // The legacy stacks' own copy of each shared relation join
+    // (NEWPIDASH-195); the probe above only sees the primary
+    // aliases because the renamed fragment spells these
+    // `<alias>_legacy`.
+    for (table, legacy_alias, nullable_only) in &legacy_joins {
+        let kind = if *nullable_only {
+            "LEFT JOIN"
+        } else {
+            "INNER JOIN"
+        };
+        joins.push_str(&format!(
+            " {kind} {table} AS {legacy_alias} ON {legacy_alias}.issue_id = issue.id"
+        ));
+    }
     // `issue_intake` always joins: the grouped totals carry the intake
     // `count_filter` over this same `from_where`, so the alias must resolve
     // there even when no filter names it (Django's totals `filter()` adds
@@ -836,7 +963,7 @@ fn module_filtered_set(
     // like every other relation. The `deleted_at` guard is the
     // `SoftDeletionManager` on `IntakeIssue.objects`; at most one live row
     // per issue exists in practice, so the join cannot fan out.
-    let intake_used = where_sql.contains("\"issue_intake\".");
+    let intake_used = alias_mentioned(&where_sql, "issue_intake");
     let intake_kind = if !intake_used || alias_nullable_only(&where_sql, "issue_intake") {
         "LEFT JOIN"
     } else {
@@ -2335,6 +2462,193 @@ mod tests {
             ]
         );
         assert_eq!(&sub[25..], &["module_ids"]);
+    }
+
+    #[test]
+    fn legacy_relation_filters_join_their_link_table() {
+        // NEWPIDASH-284: `legacy_sql` renders relation aliases
+        // unquoted (`label_issue.label_id`); the join loop must see
+        // unquoted refs (cycle-handler `alias_mentioned` port) or
+        // Postgres rejects the query ("missing FROM-clause entry" →
+        // 500). Positive legacy predicates take the INNER join.
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "labels",
+                "JOIN issue_labels AS label_issue ON",
+                "label_issue.label_id IN",
+            ),
+            (
+                "assignees",
+                "JOIN issue_assignees AS issue_assignee ON",
+                "issue_assignee.assignee_id IN",
+            ),
+            (
+                "cycle",
+                "JOIN cycle_issues AS issue_cycle ON",
+                "issue_cycle.cycle_id IN",
+            ),
+            (
+                "module",
+                "JOIN module_issues AS issue_module ON",
+                "issue_module.module_id IN",
+            ),
+            (
+                "subscriber",
+                "JOIN issue_subscribers AS issue_subscribers ON",
+                "issue_subscribers.subscriber_id IN",
+            ),
+            (
+                "mentions",
+                "JOIN issue_mentions AS issue_mention ON",
+                "issue_mention.mention_id IN",
+            ),
+        ];
+        for (param, join, predicate) in cases {
+            let mut query = empty_query();
+            query.insert(
+                (*param).to_owned(),
+                OneOrMany::One("00000000-0000-0000-0000-000000000001".to_owned()),
+            );
+            let filtered = module_filtered_set(
+                "slug",
+                &uuid::Uuid::nil(),
+                &uuid::Uuid::nil(),
+                &uuid::Uuid::nil(),
+                &query,
+                None,
+                None,
+                &chrono_tz::UTC,
+                None,
+            )
+            .expect("scope");
+            assert!(
+                filtered.from_where.contains(predicate),
+                "{param} predicate missing: {}",
+                filtered.from_where
+            );
+            assert!(
+                filtered.from_where.contains(join),
+                "{param} join missing: {}",
+                filtered.from_where
+            );
+            assert!(
+                filtered.from_where.contains(&format!("INNER {join}")),
+                "{param} positive predicate must join INNER: {}",
+                filtered.from_where
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_none_filters_take_the_left_join() {
+        // NEWPIDASH-284: `?labels=None` / `?assignees=None` render
+        // `alias.id IS NULL` — the join must still exist (LEFT, like
+        // Django's `__isnull` annotation join) or the query 500s.
+        let cases: &[(&str, &str, &str)] = &[
+            ("labels", "label_issue.label_id IS NULL", "label_issue"),
+            (
+                "assignees",
+                "issue_assignee.assignee_id IS NULL",
+                "issue_assignee",
+            ),
+            ("cycle", "issue_cycle.cycle_id IS NULL", "issue_cycle"),
+            ("module", "issue_module.module_id IS NULL", "issue_module"),
+        ];
+        for (param, predicate, alias) in cases {
+            let mut query = empty_query();
+            query.insert((*param).to_owned(), OneOrMany::One("None".to_owned()));
+            let filtered = module_filtered_set(
+                "slug",
+                &uuid::Uuid::nil(),
+                &uuid::Uuid::nil(),
+                &uuid::Uuid::nil(),
+                &query,
+                None,
+                None,
+                &chrono_tz::UTC,
+                None,
+            )
+            .expect("scope");
+            assert!(
+                filtered.from_where.contains(predicate),
+                "{param} predicate missing: {}",
+                filtered.from_where
+            );
+            assert!(
+                filtered.from_where.contains("LEFT JOIN"),
+                "{param} nullable-only predicate must join LEFT: {}",
+                filtered.from_where
+            );
+            assert!(
+                filtered.from_where.contains(alias),
+                "{param} alias must resolve: {}",
+                filtered.from_where
+            );
+        }
+    }
+
+    #[test]
+    fn shared_relation_gets_a_second_legacy_join() {
+        // NEWPIDASH-284 (NEWPIDASH-195 twin): a rich assignee leaf AND
+        // a legacy `assignees=` key on the same relation must join the
+        // link table twice (Django applies two `.filter()` calls); the
+        // legacy predicates resolve over `issue_assignee_legacy`.
+        let mut query = empty_query();
+        query.insert(
+            "filters".to_owned(),
+            OneOrMany::One(
+                r#"{"assignee_id__in":"00000000-0000-0000-0000-000000000001"}"#.to_owned(),
+            ),
+        );
+        query.insert(
+            "assignees".to_owned(),
+            OneOrMany::One("00000000-0000-0000-0000-000000000002".to_owned()),
+        );
+        let filtered = module_filtered_set(
+            "slug",
+            &uuid::Uuid::nil(),
+            &uuid::Uuid::nil(),
+            &uuid::Uuid::nil(),
+            &query,
+            None,
+            None,
+            &chrono_tz::UTC,
+            None,
+        )
+        .expect("scope");
+        assert!(
+            filtered
+                .from_where
+                .contains("INNER JOIN issue_assignees AS issue_assignee ON"),
+            "primary join missing: {}",
+            filtered.from_where
+        );
+        assert!(
+            filtered
+                .from_where
+                .contains("INNER JOIN issue_assignees AS issue_assignee_legacy ON"),
+            "legacy join missing: {}",
+            filtered.from_where
+        );
+        assert!(
+            filtered
+                .from_where
+                .contains("issue_assignee_legacy.assignee_id IN"),
+            "legacy predicate must resolve over the legacy alias: {}",
+            filtered.from_where
+        );
+        assert!(
+            filtered
+                .from_where
+                .contains("\"issue_assignee\".\"assignee_id\" IN"),
+            "rich leaf must stay on the primary alias: {}",
+            filtered.from_where
+        );
+        assert!(
+            !filtered.from_where.contains("label_issue_legacy"),
+            "unrelated relations gain no legacy copy: {}",
+            filtered.from_where
+        );
     }
 
     #[test]
