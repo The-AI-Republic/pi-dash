@@ -6494,7 +6494,8 @@ async fn project_destroy(
 /// (`ProjectArchiveUnarchiveEndpoint.post`, `base.py:435-442`): stamp
 /// `archived_at`, soft-delete the workspace's favorites for the project
 /// (any entity type — the filter has none), and answer the Python-`str`
-/// timestamp.
+/// timestamp. NEWPIDASH-239: the same transaction also sets
+/// `enabled = false` on every live scheduler binding of the project.
 async fn archive_post(
     State(state): State<AppState>,
     extension: Option<axum::Extension<SessionHandle>>,
@@ -6511,6 +6512,17 @@ async fn archive_post(
         membership.workspace_role,
         membership.project_role,
     )?;
+    // Snapshot the workspace ids before the transaction so the favorites
+    // clear can use the snapshot the old order read after the stamp; the
+    // ids do not change inside the archive transaction.
+    let workspace_ids = ws_entity::Entity::find()
+        .select_only()
+        .column(ws_entity::Column::Id)
+        .filter(ws_entity::Column::Slug.eq(slug.clone()))
+        .into_tuple::<uuid::Uuid>()
+        .all(&sea_conn(&pool))
+        .await
+        .map_err(orm_denial)?;
     let row = proj_entity::Entity::find_by_id(project_id)
         .select_only()
         .column(proj_entity::Column::Id)
@@ -6523,35 +6535,39 @@ async fn archive_post(
         .map_err(orm_denial)?;
     row.ok_or(Denial::ObjectNotFound)?;
     let now = utc_now_micros();
+    let mut tx = pool.begin().await.map_err(db_denial)?;
     pidash_services::domain::projects::archive(
-        &pidash_db::pool::sea_orm_connection(&pool),
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
         project_id,
         now,
         actor.id,
     )
     .await
     .map_err(db_denial)?;
-    let db = sea_conn(&pool);
+    pidash_services::domain::projects::disable_project_bindings(
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
+        project_id,
+        now,
+        actor.id,
+    )
+    .await
+    .map_err(db_denial)?;
     let now_ts: sea_orm::prelude::DateTimeWithTimeZone = now.into();
-    let workspace_ids = ws_entity::Entity::find()
-        .select_only()
-        .column(ws_entity::Column::Id)
-        .filter(ws_entity::Column::Slug.eq(slug))
-        .into_tuple::<uuid::Uuid>()
-        .all(&db)
-        .await
-        .map_err(orm_denial)?;
-    pidash_db::entity::user_favorites::Entity::update_many()
-        .col_expr(
-            pidash_db::entity::user_favorites::Column::DeletedAt,
-            sea_orm::sea_query::Expr::value(now_ts),
-        )
-        .filter(pidash_db::entity::user_favorites::Column::ProjectId.eq(project_id))
-        .filter(pidash_db::entity::user_favorites::Column::DeletedAt.is_null())
-        .filter(pidash_db::entity::user_favorites::Column::WorkspaceId.is_in(workspace_ids))
-        .exec(&db)
-        .await
-        .map_err(orm_denial)?;
+    {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        pidash_db::entity::user_favorites::Entity::update_many()
+            .col_expr(
+                pidash_db::entity::user_favorites::Column::DeletedAt,
+                sea_orm::sea_query::Expr::value(now_ts),
+            )
+            .filter(pidash_db::entity::user_favorites::Column::ProjectId.eq(project_id))
+            .filter(pidash_db::entity::user_favorites::Column::DeletedAt.is_null())
+            .filter(pidash_db::entity::user_favorites::Column::WorkspaceId.is_in(workspace_ids))
+            .exec(&conn)
+            .await
+            .map_err(orm_denial)?;
+    }
+    tx.commit().await.map_err(db_denial)?;
     Ok(json_ok(format!(
         "{{\"archived_at\":{}}}",
         json_string(&django_str_datetime(&now))
