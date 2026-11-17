@@ -329,7 +329,8 @@ impl Bridge {
         approval_id: &str,
         decision: ApprovalDecision,
     ) -> Result<()> {
-        if let Some(raw_id) = approval_id.strip_prefix("rpc:") {
+        if let Some(handle) = approval_id.strip_prefix("rpc:") {
+            let (_, raw_id) = handle.split_once(':').context("invalid approval handle")?;
             let id: jsonrpc::RpcId =
                 serde_json::from_str(raw_id).context("invalid approval request id")?;
             let decision = match decision {
@@ -503,7 +504,8 @@ impl BridgeCursor {
                     .and_then(|value| value.as_str())
                     .map(str::to_owned);
                 let approval_id = format!(
-                    "rpc:{}",
+                    "rpc:{}:{}",
+                    Uuid::new_v4(),
                     serde_json::to_string(&id).expect("RPC id serializes")
                 );
                 let kind = match kind {
@@ -814,12 +816,29 @@ mod translate_tests {
                     ..
                 },
             ] => {
-                assert_eq!(approval_id, "rpc:71");
+                assert!(approval_id.starts_with("rpc:"));
+                assert!(approval_id.ends_with(":71"));
                 assert_eq!(*kind, ApprovalKind::CommandExecution);
                 assert_eq!(reason.as_deref(), Some("write access"));
             }
             other => panic!("expected real server approval request, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn concurrent_engines_with_the_same_rpc_id_get_distinct_approval_handles() {
+        let request: Incoming = serde_json::from_value(json!({
+            "id": 1, "method": "item/commandExecution/requestApproval", "params": { "command": "touch file" }
+        })).unwrap();
+        let id = |events: Vec<BridgeEvent>| match events.into_iter().next().unwrap() {
+            BridgeEvent::ApprovalRequest { approval_id, .. } => approval_id,
+            event => panic!("expected approval, got {event:?}"),
+        };
+        let first = id(cursor().translate(request.clone()));
+        let second = id(cursor().translate(request));
+        assert_ne!(first, second);
+        assert!(first.ends_with(":1"));
+        assert!(second.ends_with(":1"));
     }
 
     #[test]
@@ -834,7 +853,7 @@ mod translate_tests {
                     approval_id, kind, ..
                 },
             ] => {
-                assert_eq!(approval_id, "rpc:\"file:approval-1\"");
+                assert!(approval_id.ends_with(":\"file:approval-1\""));
                 assert_eq!(*kind, ApprovalKind::FileChange);
             }
             other => panic!("expected file approval, got {other:?}"),
