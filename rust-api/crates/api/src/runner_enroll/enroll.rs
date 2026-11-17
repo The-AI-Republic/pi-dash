@@ -1528,35 +1528,32 @@ struct AttemptDone {
     created: bool,
 }
 
-/// `_engine_refusal` (`enrollment.py:813-843`): `None` when the engine may
-/// be created, else the 409 response. OSS CE has no gateway lane, so the
-/// profile is always unavailable (mirrors N51); the pause reason follows
-/// the managed-runner kill switch.
-async fn engine_refusal(
-    tx: &mut Transaction<'_, Postgres>,
-    user_id: Uuid,
-    _dev_machine: &pidash_db::entity::dev_machine::Model,
-    settings: &pidash_db::config::Settings,
+/// Refuse native-agent enrollment when the installed edition cannot serve
+/// this account. A cloud profile must not be gated by the CE-only defaults.
+async fn engine_refusal(state: &AppState, user_id: Uuid) -> Option<Response> {
+    let profile = match crate::pidash_agent::endpoints::account_agent_profile(state, user_id).await
+    {
+        Ok(profile) => profile,
+        Err(response) => return Some(response),
+    };
+    engine_refusal_for_profile(state.settings().pidash_agent.enabled, &profile)
+}
+
+fn engine_refusal_for_profile(
+    enabled: bool,
+    profile: &pidash_services::extensions::PidashAgentProfile,
 ) -> Option<Response> {
-    let (_available, pause_reason) = engine_cred::pidash_agent_profile_for_user_available(settings);
-    // `profile.reason_code` follows the caller's BYOK key
-    // (`pidash_agent_profile_for_user`, `model_provider.py:110-113`).
-    let conn = TxConn::new(&mut *tx);
-    let profile_reason_code =
-        match engine_cred::pidash_agent_profile_reason_code_for_user(&conn, user_id).await {
-            Ok(code) => code,
-            Err(err) => {
-                tracing::warn!("engine_refusal byok lookup failed: {err}");
-                return Some(server_error());
-            }
-        };
+    let (available, pause_reason) = engine_cred::pidash_agent_profile_for_user(enabled, profile);
+    if available {
+        return None;
+    }
     Some(json_response(
         StatusCode::CONFLICT,
         serde_json::json!({
             "error": "engine_unavailable",
             "reason_code": pause_reason,
-            "profile_reason_code": profile_reason_code,
-            "error_description": "This Pi Dash instance cannot serve the built-in engine for this account.",
+            "profile_reason_code": profile.reason_code,
+            "error_description": "This Pi Dash instance cannot serve the Pi Dash Agent for this account.",
         })
         .to_string(),
     ))
@@ -1566,6 +1563,7 @@ async fn engine_refusal(
 /// attach, engine/manual branch, live-engine dedupe, runner insert,
 /// APIToken-path rotate + `deactivate_api_token`.
 async fn create_attempt(
+    state: &AppState,
     tx: &mut Transaction<'_, Postgres>,
     params: &CreateAttempt<'_>,
     settings: &pidash_db::config::Settings,
@@ -1603,11 +1601,7 @@ async fn create_attempt(
         }
         let machine_id = dev_machine_id.unwrap();
         if !legacy_machine {
-            let Some(machine_full) = fetch_dev_machine_full(tx, machine_id).await else {
-                return Attempt::Server;
-            };
-            if let Some(refusal) = engine_refusal(tx, params.user_id, &machine_full, settings).await
-            {
+            if let Some(refusal) = engine_refusal(state, params.user_id).await {
                 return Attempt::Refusal(refusal);
             }
             // Credential check (live now, not stored).
@@ -2066,6 +2060,7 @@ async fn create_runner_inner(
             Err(_) => return server_error(),
         };
         let attempt = create_attempt(
+            &state,
             &mut tx,
             &CreateAttempt {
                 user_id,
@@ -2565,6 +2560,33 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn agent_enrollment_uses_installed_profile_and_kill_switch() {
+        let mut profile = pidash_services::extensions::PidashAgentProfile {
+            available: true,
+            lane: "openhub".into(),
+            base_url: "https://gateway.example.test/v1".into(),
+            model: "free-model".into(),
+            reason_code: String::new(),
+            top_up_url: String::new(),
+            context_window: Some(128000),
+        };
+        assert!(engine_refusal_for_profile(true, &profile).is_none());
+        for (enabled, available, expected) in [
+            (false, true, "engine_disabled"),
+            (true, false, "profile_unavailable"),
+        ] {
+            profile.available = available;
+            profile.reason_code = "profile_reason".into();
+            let response = engine_refusal_for_profile(enabled, &profile).expect("refusal");
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let body: serde_json::Value =
+                serde_json::from_slice(&body_bytes(response).await).unwrap();
+            assert_eq!(body["reason_code"], expected);
+            assert_eq!(body["profile_reason_code"], "profile_reason");
+        }
+    }
 
     /// Read a response body into bytes (1MB cap).
     async fn body_bytes(response: Response) -> Vec<u8> {
