@@ -327,7 +327,9 @@ def test_software_review_syncs_pr_branch_with_base():
     ):
         assert phrase in text, f"missing {phrase!r}"
     # The sync step precedes the review-kind guidance.
-    assert text.index("Sync the PR branch with its base") < text.index("Software work products come in these review kinds")
+    assert text.index(
+        "Sync the PR branch with its base"
+    ) < text.index("Software work products come in these review kinds")
     # Mergeability re-check on agent-close.
     assert "re-check mergeability" in text
 
