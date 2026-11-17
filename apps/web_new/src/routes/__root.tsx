@@ -14,14 +14,31 @@ import * as React from "react";
 
 import { edition, isEditionProviderFreePath } from "../core/edition/index.js";
 import { LanguageProvider } from "../core/i18n/LanguageProvider.js";
+import { platform } from "../core/platform/index.js";
 import { ThemeProvider } from "../core/theme/ThemeProvider.js";
-import { AuthSyncSupervisor } from "../features/runners/runtime/SyncSupervisor.js";
 import { RuntimeSignOutLifecycle } from "../features/runners/runtime/SignOutLifecycle.js";
 import { NotFoundPage, markInitialColorScheme, notifyError, useDocumentHead } from "../shared/shell/index.js";
 
 export interface RouterContext {
   queryClient: QueryClient;
   apiClient: ApiClient;
+}
+
+// Desktop-only sign-in sync (desktop_unified_signin): lazy so the web build,
+// which has no agent runtime, never loads it into the initial chunk.
+const AuthSyncSupervisor = React.lazy(() =>
+  import("../features/runners/runtime/SyncSupervisor.js").then((module) => ({
+    default: module.AuthSyncSupervisor,
+  }))
+);
+
+function DesktopAuthSync() {
+  if (!platform.agentRuntime) return null;
+  return (
+    <React.Suspense fallback={null}>
+      <AuthSyncSupervisor />
+    </React.Suspense>
+  );
 }
 
 export const Route = createRootRouteWithContext<RouterContext>()({
@@ -45,7 +62,7 @@ export const Route = createRootRouteWithContext<RouterContext>()({
         <ThemeProvider notifyError={notifyError}>
           <LanguageProvider notifyError={notifyError}>
             <RuntimeSignOutLifecycle />
-            <AuthSyncSupervisor />
+            <DesktopAuthSync />
             <Outlet />
           </LanguageProvider>
         </ThemeProvider>
