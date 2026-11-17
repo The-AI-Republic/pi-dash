@@ -6,7 +6,10 @@
 //!   code with a workspace daemon credential and a `challenge`; the server
 //!   stores it bound to the user, the machine and the challenge, and
 //!   returns it with the account it belongs to.
-//! * `POST /api/v1/auth/desktop-handoff/redeem/` — the app redeems the code
+//! * `POST /auth/desktop-handoff/redeem/` (the path the desktop app posts
+//!   to, `authentication/urls.py`) and `POST
+//!   /api/v1/auth/desktop-handoff/redeem/` (`api/urls/auth.py`) — the app
+//!   redeems the code
 //!   with its verifier (never a URL) and `expected_user_id`; on success the
 //!   server creates the same kind of session a desktop browser sign-in
 //!   creates (marked `client = "desktop"`). On any mismatch the code is
@@ -42,6 +45,9 @@ use super::device_session::{authenticate, Caller};
 
 pub const HANDOFF_PATH: &str = "/api/v1/auth/desktop-handoff/";
 pub const HANDOFF_REDEEM_PATH: &str = "/api/v1/auth/desktop-handoff/redeem/";
+/// The redeem path the desktop app posts to (`authentication/urls.py`,
+/// design §5 step 5; the cloud serves it under `/api/auth/`).
+pub const HANDOFF_AUTH_REDEEM_PATH: &str = "/auth/desktop-handoff/redeem/";
 
 const CSRF_COOKIE_NAME: &str = "csrftoken";
 const CSRF_COOKIE_MAX_AGE: i64 = 31_449_600;
@@ -49,29 +55,32 @@ const LOGIN_BACKEND: &str = "django.contrib.auth.backends.ModelBackend";
 const DESKTOP_SESSION_KEY: &str = "pidash_client";
 const DESKTOP_CLIENT_VALUE: &str = "desktop";
 
+/// An owned POST path: the write serves from Rust, every other method
+/// falls through to Django (which answers 405 / OPTIONS metadata).
+fn owned_post(
+    handler: axum::routing::MethodRouter<AppState>,
+) -> axum::routing::MethodRouter<AppState> {
+    handler
+        .get(crate::edge::proxy)
+        .put(crate::edge::proxy)
+        .patch(crate::edge::proxy)
+        .delete(crate::edge::proxy)
+        .head(crate::edge::proxy)
+        .options(crate::edge::proxy)
+}
+
+/// The `/api/v1/` pair (issue + redeem), mounted on the ApiV1 group.
 pub fn routes() -> Router<AppState> {
     use axum::routing::post;
     Router::new()
-        .route(
-            HANDOFF_PATH,
-            post(post_issue)
-                .get(crate::edge::proxy)
-                .put(crate::edge::proxy)
-                .patch(crate::edge::proxy)
-                .delete(crate::edge::proxy)
-                .head(crate::edge::proxy)
-                .options(crate::edge::proxy),
-        )
-        .route(
-            HANDOFF_REDEEM_PATH,
-            post(post_redeem)
-                .get(crate::edge::proxy)
-                .put(crate::edge::proxy)
-                .patch(crate::edge::proxy)
-                .delete(crate::edge::proxy)
-                .head(crate::edge::proxy)
-                .options(crate::edge::proxy),
-        )
+        .route(HANDOFF_PATH, owned_post(post(post_issue)))
+        .route(HANDOFF_REDEEM_PATH, owned_post(post(post_redeem)))
+}
+
+/// The `/auth/` redeem the desktop app posts to, mounted on the Auth group.
+pub fn auth_routes() -> Router<AppState> {
+    use axum::routing::post;
+    Router::new().route(HANDOFF_AUTH_REDEEM_PATH, owned_post(post(post_redeem)))
 }
 
 fn host_settings(settings: &pidash_db::config::Settings) -> HostSettings<'_> {
@@ -175,6 +184,7 @@ async fn post_issue(
         settings.secret_key.as_bytes(),
         user_id,
         machine_id,
+        token_id,
         &challenge,
         enabled,
         Utc::now(),
@@ -459,11 +469,22 @@ mod tests {
 
     #[test]
     fn owned_paths_match_django_urls() {
-        // `api/urls/auth.py`: the Rust-owned paths are the /api/v1/ ones.
+        // `api/urls/auth.py`: issue + redeem under /api/v1/ (the daemon
+        // issues on HANDOFF_PATH, runner/src/daemon/supervisor.rs).
         assert_eq!(HANDOFF_PATH, "/api/v1/auth/desktop-handoff/");
         assert_eq!(HANDOFF_REDEEM_PATH, "/api/v1/auth/desktop-handoff/redeem/");
-        // Both are POST routes in the Rust router (non-POST proxies).
+        // `authentication/urls.py`: the redeem the desktop app posts to
+        // (desktop/src-tauri/src/handoff.rs joins it onto the API base).
+        assert_eq!(HANDOFF_AUTH_REDEEM_PATH, "/auth/desktop-handoff/redeem/");
+    }
+
+    #[test]
+    fn both_routers_build() {
+        // Registration is proven end to end by the inventory pin test
+        // (`bin/pidash-api/src/inventory.rs`: the three POST rows are
+        // owned); here, each router builds without a path conflict.
         let _ = routes();
+        let _ = auth_routes();
     }
 
     #[test]

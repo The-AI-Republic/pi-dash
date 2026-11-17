@@ -13,10 +13,13 @@
 
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
-use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter, Set};
+use sea_orm::{
+    ColumnTrait, Condition, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter, QuerySelect,
+    Set,
+};
 use uuid::Uuid;
 
-use pidash_db::entity::{desktop_handoff_code, dev_machine, users};
+use pidash_db::entity::{desktop_handoff_code, dev_machine, machine_token, users};
 use pidash_db::orm_tx::into_sqlx;
 
 pub use pidash_db::entity::desktop_handoff_code as code_entity;
@@ -27,6 +30,12 @@ pub const HANDOFF_TTL_SECS: i64 = 60;
 /// database (codes in the last minute), so no cache is needed.
 pub const HANDOFF_RATE_LIMIT: u64 = 30;
 pub const HANDOFF_RATE_WINDOW_SECS: i64 = 60;
+
+/// Dead codes (expired or consumed) are deleted on the next issue once
+/// they are this old: far past the 60-second TTL and the rate window, so
+/// the rate-limit counts (codes created / consumed in the last minute) are
+/// untouched.
+pub const HANDOFF_RETENTION_SECS: i64 = 3600;
 
 /// Kill-switch value when off (design §5.1).
 pub const HANDOFF_DISABLED: &str = "handoff_disabled";
@@ -56,6 +65,13 @@ fn mint_raw() -> String {
 pub fn challenge_for_verifier(verifier: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier))
+}
+
+/// Constant-time equality of two byte strings (the challenge compare): the
+/// time taken depends only on the lengths, never on where they differ.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    a.ct_eq(b).into()
 }
 
 fn hash_code(raw: &str, secret_key: &[u8]) -> String {
@@ -155,6 +171,39 @@ async fn recent_redeems(
         .map_err(|e| HandoffDbError::Db(into_sqlx(e)))
 }
 
+async fn machine_token_of(
+    db: &impl ConnectionTrait,
+    token_id: Uuid,
+) -> Result<Option<machine_token::Model>, HandoffDbError> {
+    machine_token::Entity::find_by_id(token_id)
+        .one(db)
+        .await
+        .map_err(|e| HandoffDbError::Db(into_sqlx(e)))
+}
+
+/// Delete `user_id`'s expired or consumed codes older than the retention.
+async fn prune_dead_codes(
+    db: &impl ConnectionTrait,
+    user_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), HandoffDbError> {
+    desktop_handoff_code::Entity::delete_many()
+        .filter(desktop_handoff_code::Column::UserId.eq(user_id))
+        .filter(
+            desktop_handoff_code::Column::CreatedAt
+                .lt(at(now - chrono::Duration::seconds(HANDOFF_RETENTION_SECS))),
+        )
+        .filter(
+            Condition::any()
+                .add(desktop_handoff_code::Column::ConsumedAt.is_not_null())
+                .add(desktop_handoff_code::Column::ExpiresAt.lte(at(now))),
+        )
+        .exec(db)
+        .await
+        .map_err(|e| HandoffDbError::Db(into_sqlx(e)))?;
+    Ok(())
+}
+
 /// An issued code: the raw value is returned once, never stored again.
 #[derive(Debug)]
 pub struct IssuedHandoff {
@@ -165,13 +214,18 @@ pub struct IssuedHandoff {
 
 /// Issue a single-use code for `machine_id` bound to `user_id`.
 ///
+/// `machine_token_id` is the daemon credential that asked: the code is
+/// refused on redeem once it is revoked or expired (design §5.1).
 /// `enabled` is the kill switch (`DESKTOP_SESSION_HANDOFF_ENABLED`,
-/// default on). Raises a refusal on the switch or the rate limit.
+/// default on). Raises a refusal on the switch or the rate limit. Dead
+/// codes of `user_id` past the retention are pruned here.
+#[allow(clippy::too_many_arguments)]
 pub async fn issue_handoff(
     db: &impl ConnectionTrait,
     secret_key: &[u8],
     user_id: Uuid,
     machine_id: Uuid,
+    machine_token_id: Uuid,
     challenge: &str,
     enabled: bool,
     now: DateTime<Utc>,
@@ -218,6 +272,7 @@ pub async fn issue_handoff(
             400,
         )));
     }
+    prune_dead_codes(db, user_id, now).await?;
     let raw = mint_raw();
     let expires = now + chrono::Duration::seconds(HANDOFF_TTL_SECS);
     desktop_handoff_code::Entity::insert(desktop_handoff_code::ActiveModel {
@@ -229,6 +284,7 @@ pub async fn issue_handoff(
         expires_at: Set(at(expires)),
         consumed_at: Set(None),
         dev_machine_id: Set(machine_id),
+        machine_token_id: Set(Some(machine_token_id)),
         user_id: Set(user_id),
     })
     .exec_without_returning(db)
@@ -242,6 +298,12 @@ pub async fn issue_handoff(
     })
 }
 
+/// A daemon credential is live while unrevoked and unexpired
+/// (`MachineToken.is_expired`: a null `expires_at` never expires).
+fn token_is_live(token: &machine_token::Model, now: DateTime<Utc>) -> bool {
+    token.revoked_at.is_none() && token.expires_at.is_none_or(|expires| utc(expires) > now)
+}
+
 /// A redeemed code: the caller creates the web session.
 #[derive(Debug)]
 pub struct RedeemedHandoff {
@@ -251,9 +313,11 @@ pub struct RedeemedHandoff {
 
 /// Consume `code` and, when every check passes, redeem it (design §5 step
 /// 6). The first redeem attempt uses the code up, pass or fail; only then
-/// does the session get created. The consumer (`conn`) is expected to run
-/// in the caller's transaction so the consume is atomic with the checks
-/// (a concurrent second redeem sees `consumed_at` and refuses).
+/// does the session get created. `db` must be the caller's transaction:
+/// the row is read `FOR UPDATE`, so a concurrent second redeem waits for
+/// the first to commit and then sees `consumed_at` and refuses; the
+/// conditional consume (`consumed_at IS NULL`) must also hit exactly one
+/// row, else the code is refused as already used.
 ///
 /// Checks, in order: the code is live and unused; SHA-256(verifier) matches
 /// the stored challenge; the code's user is `expected_user_id`; the user
@@ -268,6 +332,7 @@ pub async fn redeem_handoff(
 ) -> Result<RedeemedHandoff, HandoffDbError> {
     let row = desktop_handoff_code::Entity::find()
         .filter(desktop_handoff_code::Column::CodeHash.eq(hash_code(code, secret_key)))
+        .lock_exclusive()
         .one(db)
         .await
         .map_err(into_sqlx)?;
@@ -319,7 +384,7 @@ pub async fn redeem_handoff(
     // the consume together with a successful session stamping, and rolls
     // back on server error — a mismatch commits the consume by returning
     // the refusal *after* the write (the caller must not roll back).
-    desktop_handoff_code::Entity::update_many()
+    let consumed = desktop_handoff_code::Entity::update_many()
         .col_expr(
             desktop_handoff_code::Column::ConsumedAt,
             sea_orm::sea_query::Expr::value(at(now)),
@@ -329,7 +394,23 @@ pub async fn redeem_handoff(
         .exec(db)
         .await
         .map_err(into_sqlx)?;
-    if challenge_for_verifier(verifier) != row.challenge {
+    if consumed.rows_affected != 1 {
+        // Another redeem consumed it first: single-use.
+        tracing::info!(
+            user_id = %row.user_id,
+            machine_id = %row.dev_machine_id,
+            reason = "already_consumed",
+            "handoff.redeem_refused",
+        );
+        return Err(HandoffDbError::Refusal(HandoffError::new(
+            "invalid_code",
+            400,
+        )));
+    }
+    if !constant_time_eq(
+        challenge_for_verifier(verifier).as_bytes(),
+        row.challenge.as_bytes(),
+    ) {
         tracing::info!(
             user_id = %row.user_id,
             machine_id = %row.dev_machine_id,
@@ -383,6 +464,27 @@ pub async fn redeem_handoff(
             400,
         )));
     }
+    // The daemon credential the code was issued with must still be live
+    // (design §5.1): same refusal as a revoked machine.
+    let token = match row.machine_token_id {
+        Some(token_id) => machine_token_of(db, token_id).await?,
+        None => None,
+    };
+    if !token
+        .as_ref()
+        .is_some_and(|token| token_is_live(token, now))
+    {
+        tracing::info!(
+            user_id = %row.user_id,
+            machine_id = %row.dev_machine_id,
+            reason = "machine_token_revoked",
+            "handoff.redeem_refused",
+        );
+        return Err(HandoffDbError::Refusal(HandoffError::new(
+            "invalid_grant",
+            400,
+        )));
+    }
     tracing::info!(
         user_id = %row.user_id,
         machine_id = %row.dev_machine_id,
@@ -412,6 +514,169 @@ mod tests {
             challenge_for_verifier(b"other"),
             challenge,
             "a different verifier challenges differently"
+        );
+    }
+
+    #[test]
+    fn constant_time_eq_compares_bytes() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"abcd"));
+    }
+
+    /// Seed a user, a workspace, a machine and its daemon credential
+    /// (the `read::test_support` user/workspace rows, nothing more).
+    /// Returns `(user_id, machine_id, token_id)`.
+    async fn seed_machine(pool: &sqlx::PgPool) -> (Uuid, Uuid, Uuid) {
+        let user_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let username = format!("handoff-{}", user_id.simple());
+        sqlx::query(
+            "INSERT INTO users (id, password, username, email, first_name, last_name, avatar,\
+             date_joined, created_at, updated_at, last_location, created_location,\
+             is_superuser, is_managed, is_password_expired, is_active, is_staff,\
+             is_email_verified, is_password_autoset, token, user_timezone,\
+             last_login_ip, last_logout_ip, last_login_medium, last_login_uagent,\
+             is_bot, display_name, is_email_valid, is_password_reset_required)\
+             VALUES ($1,'pbkdf2_sha256$600000$x$y',$2,$3,'Seed','User','',\
+             now(), now(), now(), '','', false,false,false,true,false,false,false,'','UTC',\
+             '','','email','',false,'Seed User',false,false)",
+        )
+        .bind(user_id)
+        .bind(&username)
+        .bind(format!("{username}@example.com"))
+        .execute(pool)
+        .await
+        .expect("seed user");
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, slug, owner_id, timezone, background_color,\
+             created_at, updated_at) VALUES ($1,'Seed WS',$2,$3,'UTC','#ffffff', now(), now())",
+        )
+        .bind(workspace_id)
+        .bind(format!("ws-{}", workspace_id.simple()))
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .expect("seed workspace");
+        let machine_id = Uuid::new_v4();
+        let token_id = Uuid::new_v4();
+        let host = format!("handoff-{}", machine_id.simple());
+        sqlx::query(
+            "INSERT INTO dev_machine (id, owner_id, host_label, label, visibility, provisioning,\
+             engine_paused_by_owner, engine_auto_pause_reason, engine_team_runs,\
+             engine_sign_in_state, engine_state, merge_result, created_at, updated_at)\
+             VALUES ($1,$2,$3,'Handoff',0,'',false,'',false,'signed_out','{}'::jsonb,\
+             '{}'::jsonb, now(), now())",
+        )
+        .bind(machine_id)
+        .bind(user_id)
+        .bind(&host)
+        .execute(pool)
+        .await
+        .expect("seed dev_machine");
+        sqlx::query(
+            "INSERT INTO machine_token (id, user_id, workspace_id, dev_machine_id, host_label,\
+             token_hash, token_fingerprint, label, is_service, created_at, expires_at)\
+             VALUES ($1,$2,$3,$4,$5,$6,'fp','',true, now(), now() + interval '60 days')",
+        )
+        .bind(token_id)
+        .bind(user_id)
+        .bind(workspace_id)
+        .bind(machine_id)
+        .bind(&host)
+        .bind(format!("hash-{}", token_id.simple()))
+        .execute(pool)
+        .await
+        .expect("seed machine_token");
+        (user_id, machine_id, token_id)
+    }
+
+    /// One redeem in its own transaction, committed whatever the outcome
+    /// (what the endpoint does).
+    async fn redeem_in_tx(
+        pool: &sqlx::PgPool,
+        code: &str,
+        verifier: &[u8],
+        user_id: Uuid,
+    ) -> Result<Uuid, String> {
+        let mut tx = pool.begin().await.expect("begin");
+        let result = {
+            let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+            redeem_handoff(&conn, SECRET, code, verifier, user_id, Utc::now()).await
+        };
+        tx.commit().await.expect("commit");
+        match result {
+            Ok(redeemed) => Ok(redeemed.user_id),
+            Err(HandoffDbError::Refusal(refusal)) => Err(refusal.code),
+            Err(HandoffDbError::Db(error)) => panic!("db error: {error}"),
+        }
+    }
+
+    const SECRET: &[u8] = b"handoff-live-test-secret";
+
+    /// Live DB (skips without `DATABASE_URL`): two concurrent redeems of
+    /// one code — exactly one wins (the row lock + the conditional
+    /// consume); a code whose daemon credential was revoked is refused.
+    #[tokio::test]
+    async fn live_redeem_is_single_use_and_needs_a_live_daemon_credential() {
+        let Some(pool) = crate::read::test_support::pool().await else {
+            return;
+        };
+        let (user_id, machine_id, token_id) = seed_machine(&pool).await;
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        let verifier = [7u8; 32];
+        let challenge = challenge_for_verifier(&verifier);
+
+        let issued = issue_handoff(
+            &db,
+            SECRET,
+            user_id,
+            machine_id,
+            token_id,
+            &challenge,
+            true,
+            Utc::now(),
+        )
+        .await
+        .expect("issue");
+        let (first, second) = tokio::join!(
+            redeem_in_tx(&pool, &issued.raw, &verifier, user_id),
+            redeem_in_tx(&pool, &issued.raw, &verifier, user_id),
+        );
+        let wins = [&first, &second].iter().filter(|r| r.is_ok()).count();
+        assert_eq!(wins, 1, "exactly one redeem wins: {first:?} {second:?}");
+        assert!(
+            [&first, &second]
+                .iter()
+                .any(|r| r.as_ref().err().map(String::as_str) == Some("invalid_code")),
+            "the loser is refused as already used: {first:?} {second:?}"
+        );
+
+        let issued = issue_handoff(
+            &db,
+            SECRET,
+            user_id,
+            machine_id,
+            token_id,
+            &challenge,
+            true,
+            Utc::now(),
+        )
+        .await
+        .expect("issue");
+        machine_token::Entity::update_many()
+            .col_expr(
+                machine_token::Column::RevokedAt,
+                sea_orm::sea_query::Expr::value(at(Utc::now())),
+            )
+            .filter(machine_token::Column::Id.eq(token_id))
+            .exec(&db)
+            .await
+            .expect("revoke token");
+        assert_eq!(
+            redeem_in_tx(&pool, &issued.raw, &verifier, user_id).await,
+            Err("invalid_grant".to_owned()),
+            "a revoked daemon credential refuses its codes"
         );
     }
 }

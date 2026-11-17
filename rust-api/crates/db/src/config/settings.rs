@@ -348,6 +348,16 @@ impl<'a> Ctx<'a> {
         ))
     }
 
+    /// `value.lower() not in ("0", "false", "no")`: default-on kill
+    /// switches — anything but an explicit off (including `""` and junk
+    /// like `"off"`) is on, exactly as Django reads them.
+    fn flag_not_off(&self, key: &str, inline: &str) -> Result<bool, ConfigError> {
+        Ok(!matches!(
+            self.req_string(key, inline)?.to_lowercase().as_str(),
+            "0" | "false" | "no"
+        ))
+    }
+
     /// `value.lower() == "true"`: the sync/scheduler toggles.
     fn flag_true(&self, key: &str, inline: &str) -> Result<bool, ConfigError> {
         Ok(self.req_string(key, inline)?.to_ascii_lowercase().as_str() == "true")
@@ -1123,7 +1133,7 @@ impl Settings {
                     .req_string("DESKTOP_MIN_VERSION_FOR_MANAGED_RUNNER", "")?,
             },
             desktop_session_handoff_enabled: ctx
-                .flag_tri("DESKTOP_SESSION_HANDOFF_ENABLED", "true")?,
+                .flag_not_off("DESKTOP_SESSION_HANDOFF_ENABLED", "true")?,
             default_agent_executor: ctx.req_string("DEFAULT_AGENT_EXECUTOR", "local_runner")?,
             session: SessionSettings {
                 cookie_age_secs: ctx.req_int("SESSION_COOKIE_AGE", ConfigValue::from(604800))?,
@@ -1322,6 +1332,27 @@ mod tests {
         )
         .expect("resolves");
         assert_eq!(s2.email_backend, SMTP_BACKEND);
+    }
+
+    #[test]
+    fn desktop_handoff_switch_is_on_unless_explicitly_off() {
+        // `common.py`: `get_config(..., "true").lower() not in ("0", "false", "no")`.
+        let resolve = |value: Option<&str>| {
+            let map = match value {
+                Some(v) => vars(&[("DESKTOP_SESSION_HANDOFF_ENABLED", v)]),
+                None => HashMap::new(),
+            };
+            Settings::from_map_with(&map, Profile::Common, &NoOverlay)
+                .expect("resolves")
+                .desktop_session_handoff_enabled
+        };
+        assert!(resolve(None), "default on");
+        for on in ["1", "true", "TRUE", "yes", "on", "off", "", "anything"] {
+            assert!(resolve(Some(on)), "{on:?} is on");
+        }
+        for off in ["0", "false", "False", "no", "NO"] {
+            assert!(!resolve(Some(off)), "{off:?} is off");
+        }
     }
 
     #[test]

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import logging
 import secrets
 from datetime import timedelta
@@ -36,6 +37,7 @@ from datetime import timedelta
 from django.conf import settings as django_settings
 from django.core.cache import cache
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from pi_dash.runner.models import DesktopHandoffCode
@@ -69,17 +71,45 @@ def expected_challenge_for(verifier: bytes) -> str:
 
 
 def _rate_limited(machine_id, now) -> bool:
-    """True when ``machine_id`` has exceeded the per-minute limit."""
+    """True when ``machine_id`` has exceeded the per-minute limit.
+
+    ``cache.add`` creates the window's counter only when absent and
+    ``cache.incr`` bumps it atomically, so concurrent requests cannot both
+    read the same count and slip past the limit.
+    """
     window = int(now.timestamp() // HANDOFF_RATE_WINDOW.total_seconds())
     key = f"desktop_handoff_rate:{machine_id}:{window}"
-    count = cache.get(key)
-    if count is None:
-        cache.set(key, 1, timeout=int(HANDOFF_RATE_WINDOW.total_seconds()) + 1)
+    cache.add(key, 0, timeout=int(HANDOFF_RATE_WINDOW.total_seconds()) + 1)
+    try:
+        count = cache.incr(key)
+    except ValueError:
+        # The counter expired between add and incr: this is the first hit
+        # of a fresh window.
+        cache.add(key, 1, timeout=int(HANDOFF_RATE_WINDOW.total_seconds()) + 1)
         return False
-    if count >= HANDOFF_RATE_LIMIT:
-        return True
-    cache.set(key, count + 1, timeout=int(HANDOFF_RATE_WINDOW.total_seconds()) + 1)
-    return False
+    return count > HANDOFF_RATE_LIMIT
+
+
+#: Dead codes (expired or consumed) are deleted on the next issue once they
+#: are this old. Far past the 60-second TTL and the rate window (the limiter
+#: counts in the cache, not these rows), so nothing live is touched.
+HANDOFF_RETENTION = timedelta(hours=1)
+
+
+def _prune_dead_codes(user, now) -> None:
+    """Delete ``user``'s expired or consumed codes older than the retention."""
+    cutoff = now - HANDOFF_RETENTION
+    DesktopHandoffCode.objects.filter(user=user, created_at__lt=cutoff).filter(
+        Q(consumed_at__isnull=False) | Q(expires_at__lte=now)
+    ).delete()
+
+
+def _challenge_matches(verifier: bytes, stored: str) -> bool:
+    """Constant-time compare of SHA-256(verifier) with the stored challenge."""
+    return hmac.compare_digest(
+        expected_challenge_for(verifier).encode("utf-8"),
+        (stored or "").encode("utf-8"),
+    )
 
 
 class HandoffError(Exception):
@@ -91,8 +121,12 @@ class HandoffError(Exception):
         self.http_status = http_status
 
 
-def issue_handoff(*, user, dev_machine, challenge: str) -> DesktopHandoffCode:
+def issue_handoff(*, user, dev_machine, challenge: str, machine_token) -> DesktopHandoffCode:
     """Store a single-use code for ``dev_machine`` bound to ``user``.
+
+    ``machine_token`` is the daemon credential that asked; the code is
+    refused on redeem once that credential is revoked or expired (§5.1).
+    Dead codes of ``user`` past the retention are pruned here.
 
     Raises :class:`HandoffError` (``handoff_disabled``, ``rate_limited``).
     The raw code is returned on the row as ``_raw`` (never stored).
@@ -115,11 +149,13 @@ def issue_handoff(*, user, dev_machine, challenge: str) -> DesktopHandoffCode:
         raise HandoffError("rate_limited", 429)
     raw = "dh_" + secrets.token_urlsafe(32)
     with transaction.atomic():
+        _prune_dead_codes(user, now)
         row = DesktopHandoffCode.objects.create(
             code_hash=hash_token(raw),
             fingerprint=fingerprint(raw),
             user=user,
             dev_machine=dev_machine,
+            machine_token=machine_token,
             challenge=challenge,
             expires_at=now + HANDOFF_TTL,
         )
@@ -203,7 +239,7 @@ def _consume_and_check(code: str, verifier: bytes, expected_user_id: str, now):
         row.save(update_fields=["consumed_at"])
         user = row.user
         machine = row.dev_machine
-        if expected_challenge_for(verifier) != row.challenge:
+        if not _challenge_matches(verifier, row.challenge):
             logger.info(
                 "desktop_handoff.redeem_refused user=%s dev_machine=%s reason=verifier_mismatch",
                 row.user_id,
@@ -227,6 +263,16 @@ def _consume_and_check(code: str, verifier: bytes, expected_user_id: str, now):
         if machine is None or machine.revoked_at is not None or machine.owner_id != user.id:
             logger.info(
                 "desktop_handoff.redeem_refused user=%s dev_machine=%s reason=machine_revoked",
+                row.user_id,
+                machine_id,
+            )
+            return HandoffError("invalid_grant", 400)
+        # The daemon credential the code was issued with must still be live
+        # (design §5.1): same refusal as a revoked machine.
+        token = row.machine_token
+        if token is None or token.revoked_at is not None or token.is_expired(now):
+            logger.info(
+                "desktop_handoff.redeem_refused user=%s dev_machine=%s reason=machine_token_revoked",
                 row.user_id,
                 machine_id,
             )

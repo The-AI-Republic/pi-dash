@@ -1551,14 +1551,9 @@ async fn resolve_machine_token_for_engine(
     let Some(token_row) = row else {
         return Err(invalid_client("machine_token_invalid"));
     };
-    if token_row.revoked_at.is_some() {
-        return Err(invalid_client("machine_token_revoked"));
-    }
-    if let Some(exp) = token_row.expires_at {
-        if exp.with_timezone(&chrono::Utc) <= now {
-            return Err(invalid_client("machine_token_expired"));
-        }
-    }
+    // The machine first: removing a computer on the web revokes its tokens
+    // too, and the daemon must read that as removed (`dev_machine_revoked`),
+    // not a plain token revoke (desktop_unified_signin §12 rule 1).
     // Revoked (or missing) dev machine -> dev_machine_revoked. Unbound
     // (NULL) skips this gate; redemption 403s below (device.py:258-262).
     if let Some(mid) = token_row.dev_machine_id {
@@ -1571,6 +1566,14 @@ async fn resolve_machine_token_for_engine(
         };
         if machine.revoked_at.is_some() {
             return Err(invalid_client("dev_machine_revoked"));
+        }
+    }
+    if token_row.revoked_at.is_some() {
+        return Err(invalid_client("machine_token_revoked"));
+    }
+    if let Some(exp) = token_row.expires_at {
+        if exp.with_timezone(&chrono::Utc) <= now {
+            return Err(invalid_client("machine_token_expired"));
         }
     }
     // Workspace membership (`is_workspace_member`): a lapsed token is

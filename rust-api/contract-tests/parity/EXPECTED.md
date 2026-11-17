@@ -137,10 +137,10 @@ G6 :: /api/workspaces/{slug}/workspace-themes/{pk}/ :: POST:serves-but-django-40
 
 ### G7 — engine runner endpoints pending NEWPIDASH-50 (0 rows)
 
-All seven Django routes of the engine-credential / machine-identity
-surface are Rust-owned: the four NEWPIDASH-50 engine-credential routes
-(engine-sign-out, engine/profile, engine/model-token,
-engine/credential/revoke) and the three NEWPIDASH-52 daemon dev-machine
+All six Django routes of the engine-credential / machine-identity
+surface are Rust-owned: the three NEWPIDASH-50 engine-credential routes
+(engine/profile, engine/model-token, engine/credential/revoke; the web
+engine-sign-out was removed by desktop_unified_signin) and the three NEWPIDASH-52 daemon dev-machine
 routes (GET/PATCH, merge-into, replace-candidates). Nothing pending.
 
 ```expected-routes

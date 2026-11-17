@@ -834,6 +834,12 @@ async fn authenticate_machine_token(
     let Some(token) = token else {
         return Err(auth_failed("machine_token_invalid"));
     };
+    // The machine first: removing a computer on the web revokes its tokens
+    // too, and the daemon must read that as removed (`dev_machine_revoked`),
+    // not a plain token revoke (desktop_unified_signin §12 rule 1).
+    if token.dev_machine_id.is_some() && token.dev_revoked.unwrap_or(false) {
+        return Err(auth_failed("dev_machine_revoked"));
+    }
     if token.revoked_at.is_some() {
         return Err(auth_failed("machine_token_revoked"));
     }
@@ -842,9 +848,6 @@ async fn authenticate_machine_token(
         .is_some_and(|expires| expires <= chrono::Utc::now())
     {
         return Err(auth_failed("machine_token_expired"));
-    }
-    if token.dev_machine_id.is_some() && token.dev_revoked.unwrap_or(false) {
-        return Err(auth_failed("dev_machine_revoked"));
     }
     let member = workspace_member_exists(pool, token.workspace_id, token.user_id)
         .await

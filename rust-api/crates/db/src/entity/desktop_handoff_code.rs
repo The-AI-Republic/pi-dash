@@ -18,6 +18,9 @@ pub struct Model {
     pub expires_at: DateTimeWithTimeZone,
     pub consumed_at: Option<DateTimeWithTimeZone>,
     pub dev_machine_id: Uuid,
+    /// The daemon credential the code was issued with (design §5.1): the
+    /// code is refused once it is revoked or expired.
+    pub machine_token_id: Option<Uuid>,
     pub user_id: Uuid,
 }
 

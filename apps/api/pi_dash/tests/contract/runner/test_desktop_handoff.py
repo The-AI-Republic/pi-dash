@@ -18,6 +18,9 @@ Acceptance scenarios 3, 10 (Django half) in section 9.
 
 from __future__ import annotations
 
+import uuid
+from datetime import timedelta
+
 import pytest
 from django.conf import settings
 from django.test import Client, override_settings
@@ -25,7 +28,7 @@ from django.utils import timezone
 
 from pi_dash.db.models.session import Session
 from pi_dash.ee.authentication.desktop import DESKTOP_CLIENT, DESKTOP_SESSION_KEY
-from pi_dash.runner.models import DesktopHandoffCode, DevMachine
+from pi_dash.runner.models import DesktopHandoffCode, DevMachine, MachineToken
 from pi_dash.runner.services.desktop_handoff import challenge_for_verifier
 
 from .conftest import _client
@@ -106,9 +109,58 @@ def test_redeem_with_wrong_verifier_fails_consumes_and_makes_no_session(db, crea
 
 def test_redeem_for_another_user_fails_and_consumes(db, create_user, workspace, machine, mt):
     code = _issue(mt).data["code"]
+    resp = _redeem(code, uuid.uuid4())
+    assert resp.status_code == 400, resp.content
+    assert resp.json()["error"] == "invalid_grant"
+    assert _redeem(code, create_user.id).status_code == 400
+
+
+def test_malformed_expected_user_id_is_refused_without_consuming(db, create_user, workspace, machine, mt):
+    """A non-UUID expected_user_id is a bad request; the code stays live."""
+    code = _issue(mt).data["code"]
     resp = _redeem(code, "someone-else")
     assert resp.status_code == 400, resp.content
-    assert _redeem(code, create_user.id).status_code == 400
+    assert resp.json()["error"] == "invalid_request"
+    assert DesktopHandoffCode.objects.get().consumed_at is None
+    assert _redeem(code, create_user.id).status_code == 200
+
+
+def test_issue_records_the_daemon_credential(db, create_user, workspace, machine, mt):
+    _issue(mt)
+    row = DesktopHandoffCode.objects.get()
+    assert row.machine_token_id == MachineToken.objects.get(dev_machine=machine, revoked_at__isnull=True).id
+
+
+def test_code_for_a_revoked_daemon_credential_fails(db, create_user, workspace, machine, mt):
+    """§5.1: a code is refused once the credential it was issued with is revoked."""
+    code = _issue(mt).data["code"]
+    MachineToken.objects.filter(dev_machine=machine).update(revoked_at=timezone.now())
+    resp = _redeem(code, create_user.id)
+    assert resp.status_code == 400, resp.content
+    assert resp.json()["error"] == "invalid_grant"
+    assert resp.cookies.get(settings.SESSION_COOKIE_NAME) is None
+
+
+def test_code_for_an_expired_daemon_credential_fails(db, create_user, workspace, machine, mt):
+    code = _issue(mt).data["code"]
+    MachineToken.objects.filter(dev_machine=machine).update(expires_at=timezone.now() - timedelta(seconds=1))
+    resp = _redeem(code, create_user.id)
+    assert resp.status_code == 400, resp.content
+    assert resp.json()["error"] == "invalid_grant"
+
+
+def test_issue_prunes_old_dead_codes(db, create_user, workspace, machine, mt):
+    """Expired or consumed codes older than the retention go on the next issue."""
+    _issue(mt)
+    _issue(mt)
+    old = timezone.now() - timedelta(hours=2)
+    first, second = DesktopHandoffCode.objects.order_by("created_at")
+    DesktopHandoffCode.objects.filter(pk=first.pk).update(created_at=old, expires_at=old + timedelta(seconds=60))
+    DesktopHandoffCode.objects.filter(pk=second.pk).update(created_at=old, consumed_at=old)
+    _issue(mt)
+    remaining = list(DesktopHandoffCode.objects.all())
+    assert len(remaining) == 1
+    assert remaining[0].pk not in (first.pk, second.pk)
 
 
 def test_redeem_with_no_verifier_or_code_fails(db, create_user, workspace, machine, mt):

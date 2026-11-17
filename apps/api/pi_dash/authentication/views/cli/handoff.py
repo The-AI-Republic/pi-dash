@@ -24,6 +24,7 @@ machine and outcome.
 import base64
 import binascii
 import logging
+import uuid
 
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -88,7 +89,9 @@ class DesktopHandoffIssueEndpoint(APIView):
         if not user.is_active:
             return Response({"error": "invalid_grant"}, status=status.HTTP_400_BAD_REQUEST)
         try:
-            row = desktop_handoff.issue_handoff(user=user, dev_machine=machine, challenge=challenge)
+            row = desktop_handoff.issue_handoff(
+                user=user, dev_machine=machine, challenge=challenge, machine_token=machine_token
+            )
         except desktop_handoff.HandoffError as exc:
             return Response(
                 {"error": exc.code, "error_description": "The handoff is unavailable right now."},
@@ -131,6 +134,15 @@ class DesktopHandoffRedeemEndpoint(APIView):
             )
         if len(verifier) > _MAX_VERIFIER_BYTES:
             return Response({"error": "invalid_request"}, status=status.HTTP_400_BAD_REQUEST)
+        # A malformed expected_user_id is a bad request, refused before the
+        # code is looked up, so it does not consume the code (Rust parity).
+        try:
+            expected_user_id = str(uuid.UUID(expected_user_id))
+        except ValueError:
+            return Response(
+                {"error": "invalid_request", "error_description": "code, verifier and expected_user_id are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if not desktop_handoff.handoff_enabled():
             return Response(
                 {

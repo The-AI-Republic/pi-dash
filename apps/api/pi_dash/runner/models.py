@@ -1275,6 +1275,17 @@ class DesktopHandoffCode(models.Model):
         on_delete=models.CASCADE,
         related_name="desktop_handoff_codes",
     )
+    #: The daemon credential the code was issued with (design §5.1): a code
+    #: is refused once that credential is revoked or expired. Nullable only
+    #: for the schema; issue always sets it and redeem refuses a code
+    #: without one.
+    machine_token = models.ForeignKey(
+        MachineToken,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="desktop_handoff_codes",
+    )
     #: base64url(SHA-256(verifier)) from the app that asked for the code.
     challenge = models.CharField(max_length=128)
     created_at = models.DateTimeField(auto_now_add=True)

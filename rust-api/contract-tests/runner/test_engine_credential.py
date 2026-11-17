@@ -482,7 +482,7 @@ def test_one_live_engine_credential_per_machine_is_enforced_by_the_database(
         conn.rollback()
 
 
-# -- web sign-out + machine removal cascades -------------------------------
+# -- machine removal cascades ----------------------------------------------
 
 
 def test_remove_this_computer_revokes_the_engine_credential(
@@ -533,55 +533,6 @@ def test_machine_delete_revokes_the_engine_credential(
         seeder.db.fetchval("SELECT COUNT(*) FROM dev_machine WHERE id = %s", (machine_id,))
         == 0
     )
-
-
-def test_web_sign_out_the_engine(settings, seeder, daemon_world, machine_flow, user_client):
-    machine_id = _machine_id(user_client, daemon_world, machine_flow)
-    raw = "ec_" + secrets.token_urlsafe(32)
-    cred = _mint_engine_credential(seeder, daemon_world["owner"]["id"], machine_id, raw)
-    other_ws = seeder.create_workspace(daemon_world["owner"]["id"])
-    seeder.create_member(other_ws["id"], daemon_world["owner"]["id"])
-    # A workspace the machine is not attached to does not see it.
-    foreign = web_post(
-        user_client,
-        f"{WEB}/dev-machines/{machine_id}/engine-sign-out/",
-        {"workspace": other_ws["id"]},
-    )
-    assert foreign.status_code == 404, foreign.text
-    assert foreign.json() == {"error": "not found"}
-    response = web_post(
-        user_client,
-        f"{WEB}/dev-machines/{machine_id}/engine-sign-out/",
-        {"workspace": daemon_world["workspace"]["id"]},
-    )
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["engine_sign_in_state"] == "signed_out"
-    row = _credential_row(seeder, cred["id"])
-    assert row["revoked_reason"] == "signed_out"
-    assert _machine_engine_row(seeder, machine_id)["engine_sign_in_state"] == "signed_out"
-    with bearer_client(settings.base_url, raw) as client:
-        assert client.post(f"{ENGINE}/model-token/", json={}).status_code == 401
-
-
-def test_web_sign_out_the_engine_denies_a_foreign_machine(
-    settings, seeder, daemon_world, user_client,
-):
-    """The machine must be the caller's: another owner's machine is a
-    404, never a revoke."""
-    other_owner = seeder.create_user()
-    other_ws = seeder.create_workspace(other_owner["id"])
-    seeder.create_member(other_ws["id"], other_owner["id"])
-    foreign_machine = seeder.create_dev_machine(other_owner["id"])
-    raw = "ec_" + secrets.token_urlsafe(32)
-    cred = _mint_engine_credential(seeder, other_owner["id"], foreign_machine["id"], raw)
-    response = web_post(
-        user_client,
-        f"{WEB}/dev-machines/{foreign_machine['id']}/engine-sign-out/",
-        {"workspace": daemon_world["workspace"]["id"]},
-    )
-    assert response.status_code == 404, response.text
-    assert _credential_row(seeder, cred["id"])["revoked_at"] is None
 
 
 # -- heartbeat engine_state (machine-session poll) -------------------------

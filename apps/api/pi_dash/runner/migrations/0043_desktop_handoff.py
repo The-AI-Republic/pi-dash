@@ -41,6 +41,16 @@ class Migration(migrations.Migration):
                     ),
                 ),
                 (
+                    "machine_token",
+                    models.ForeignKey(
+                        blank=True,
+                        null=True,
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="desktop_handoff_codes",
+                        to="runner.machinetoken",
+                    ),
+                ),
+                (
                     "user",
                     models.ForeignKey(
                         on_delete=django.db.models.deletion.CASCADE,
