@@ -259,7 +259,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::schema::{
-        CliSection, Config, DaemonConfig, PidashAgentCredential, EngineSignInState,
+        CliSection, Config, DaemonConfig, EngineSignInState, PidashAgentCredential,
     };
 
     fn paths(root: &std::path::Path) -> Paths {
@@ -339,7 +339,9 @@ mod tests {
 
         let after = file::load_config(&p).unwrap();
         assert!(after.cli.unwrap().workspace_tokens().is_empty());
-        let event = after.auth_event.expect("the last workspace's logout records one");
+        let event = after
+            .auth_event
+            .expect("the last workspace's logout records one");
         assert_eq!(event.kind, crate::config::schema::AuthEventKind::SignedOut);
         assert_eq!(
             event.reason,
@@ -623,5 +625,4 @@ mod tests {
             }
         }
     }
-
 }

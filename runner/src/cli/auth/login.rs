@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use crate::cli::runner_ops;
 use crate::config::file;
-use crate::pidash_agent::api::{PidashAgentApi, EngineSignInState, IssuedPidashAgentCredential};
+use crate::pidash_agent::api::{EngineSignInState, IssuedPidashAgentCredential, PidashAgentApi};
 use crate::util::paths::Paths;
 
 #[derive(Debug, ClapArgs)]
@@ -170,6 +170,9 @@ struct LoginOutcome {
 async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOutcome> {
     let (cloud_url, source) = resolve_cloud_url(args, paths)?;
     crate::cli::connect::validate_cloud_url(&cloud_url)?;
+    // Refuse another cloud (without `--force`) before anything else, so a
+    // refused sign-in never signs the current account out (§6.4).
+    runner_ops::check_cloud_binding(paths, &cloud_url, args.force)?;
 
     // Only worth saying when we chose for them. If they passed `--url` or
     // this host is already enrolled, repeating the URL back is noise.
@@ -237,6 +240,7 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
         let stored_cloud = cfg.daemon.cloud_url.clone();
         match super::switch::plan_switch(
             &cfg,
+            &cloud_url,
             token.user_email.as_deref(),
             incoming_user_id.as_deref(),
         ) {
@@ -252,25 +256,21 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
                     incoming.email.as_deref(),
                     active,
                 ) {
-                    anyhow::bail!("sign-in cancelled; this computer is still signed in as the previous account");
+                    anyhow::bail!(
+                        "sign-in cancelled; this computer is still signed in as the previous account"
+                    );
                 }
                 // Park: sign the old account out first when it holds live
                 // credentials (revokes them on its own cloud; its
                 // `signed_out` event is recorded), then move its machine
                 // identity to the parked store, keyed by that cloud.
                 if signed_in {
-                    super::logout::run(
-                        super::logout::Args {
-                            local_only: false,
-                            workspace: None,
-                        },
-                        paths,
-                    )
-                    .await
-                    .context("signing out the previous account before the switch")?;
+                    sign_out_previous(paths).await?;
                 }
                 if active > 0 {
-                    println!("  {active} in-flight task(s) end as failed; the account can retry them by hand.");
+                    println!(
+                        "  {active} in-flight task(s) end as failed; the account can retry them by hand."
+                    );
                 }
                 super::switch::park_identity(paths, &stored_cloud, &previous)
                     .context("parking the previous account's machine identity")?;
@@ -280,8 +280,10 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
         }
     }
 
-    // Refuse a cloud mismatch, and make sure `config.toml` exists so the
-    // dev-machine id can be persisted. Only after approval, so an aborted
+    // Make sure `config.toml` exists and is bound to this cloud (the
+    // mismatch was refused up front; `--force` rebinds here, after the
+    // old cloud's account was signed out above) so the dev-machine id can
+    // be persisted. Only after approval, so an aborted
     // login on a fresh host leaves no config behind (bare `pidash` then
     // still drops into login).
     runner_ops::bind_cloud(paths, &cloud_url, args.force)
@@ -331,15 +333,6 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
             false,
         )),
     );
-    let cfg = runner_ops::store_workspace_token(
-        paths,
-        &cloud_url,
-        &machine_token.workspace_slug,
-        &machine_token.machine_token,
-        explicit_workspace.is_none(),
-        args.force,
-    )
-    .context("writing dev-machine token to config.toml")?;
     // The engine credential arrives with this sign-in when the instance
     // can serve the engine (design §4.3): on the device token or the
     // machine-token exchange.
@@ -349,37 +342,35 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
         .or(token.engine_credential.clone());
     let engine_state = machine_token
         .engine_sign_in_state
-        .or(token.engine_sign_in_state);
-    if let Some(credential) = engine_credential {
-        runner_ops::store_engine_credential(
-            paths,
-            Some(&credential),
-            engine_state.unwrap_or(EngineSignInState::Active),
-        )
-        .context("storing the engine credential")?;
-        println!(
+        .or(token.engine_sign_in_state)
+        .unwrap_or(EngineSignInState::Active);
+    let user_id = fetch_user_id(&client, &cloud_url, &machine_token.machine_token)
+        .await
+        .or(incoming_user_id);
+    // The credentials, the account and the `signed_in` event in one write
+    // (design §6.1).
+    let cfg = runner_ops::store_sign_in(
+        paths,
+        &runner_ops::SignIn {
+            cloud_url: &cloud_url,
+            slug: &machine_token.workspace_slug,
+            token: &machine_token.machine_token,
+            as_default: explicit_workspace.is_none(),
+            force: args.force,
+            engine: engine_credential.as_ref().map(|c| (c, engine_state)),
+            email: token.user_email.as_deref(),
+            user_id: user_id.as_deref(),
+        },
+    )
+    .context("writing dev-machine token to config.toml")?;
+    match &engine_credential {
+        Some(credential) => println!(
             "  Built-in engine: signed in{}",
             until(credential.expires_at)
-        );
-    } else {
-        println!("  Built-in engine: not signed in by this server (`pidash login --engine` later)");
-    }
-    let user_id = fetch_user_id(&client, &cloud_url, &machine_token.machine_token).await;
-    if let Err(e) =
-        runner_ops::store_account(paths, token.user_email.as_deref(), user_id.as_deref())
-    {
-        tracing::warn!("recording the signed-in account failed: {e:#}");
-    }
-    // The persisted sign-in event, written with the credentials (design §6.1).
-    if let Err(e) = runner_ops::record_auth_event(
-        paths,
-        crate::config::schema::AuthEventKind::SignedIn,
-        None,
-        token.user_email.as_deref(),
-        user_id.as_deref(),
-        &cloud_url,
-    ) {
-        tracing::warn!("recording the sign-in event failed: {e:#}");
+        ),
+        None => println!(
+            "  Built-in engine: not signed in by this server (`pidash login --engine` later)"
+        ),
     }
     println!("  Workspace: {}", machine_token.workspace_slug);
     let signed_in = cfg
@@ -434,6 +425,45 @@ async fn login_and_bind_workspace(args: &Args, paths: &Paths) -> Result<LoginOut
     }
 
     Ok(LoginOutcome { cloud_url })
+}
+
+/// Sign the previous account out before a switch (§6.4). Its credentials
+/// are revoked on its own cloud when that cloud answers; when it cannot be
+/// reached they are forgotten locally instead (with a warning), so the
+/// switch does not stop half-way with the engine already signed out.
+async fn sign_out_previous(paths: &Paths) -> Result<()> {
+    let remote = super::logout::run(
+        super::logout::Args {
+            local_only: false,
+            workspace: None,
+        },
+        paths,
+    )
+    .await;
+    match remote {
+        Ok(()) => Ok(()),
+        Err(e) if is_transport_error(&e) => {
+            eprintln!(
+                "warning: the previous account's cloud did not answer ({e:#}); signing it out on this computer only"
+            );
+            super::logout::run(
+                super::logout::Args {
+                    local_only: true,
+                    workspace: None,
+                },
+                paths,
+            )
+            .await
+            .context("signing out the previous account before the switch")
+        }
+        Err(e) => Err(e).context("signing out the previous account before the switch"),
+    }
+}
+
+/// A network failure (no answer, timeout, TLS), as opposed to a local error.
+fn is_transport_error(e: &anyhow::Error) -> bool {
+    e.chain()
+        .any(|c| c.downcast_ref::<reqwest::Error>().is_some())
 }
 
 /// ` (until <date>)`, or nothing when the expiry is unknown.
@@ -901,6 +931,44 @@ fn pick_workspace(workspaces: &[WorkspaceRow]) -> Result<&WorkspaceRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_switch_signs_the_previous_account_out_locally_when_its_cloud_is_down() {
+        use crate::config::schema::{AuthEventReason, CliSection, Config, DaemonConfig};
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config_dir: tmp.path().join("config"),
+            data_dir: tmp.path().join("data"),
+            runtime_dir: tmp.path().join("runtime"),
+            machine_context_dir: tmp.path().join("config"),
+        };
+        let cfg = Config {
+            version: 2,
+            // Nothing listens on port 1: every request fails to connect.
+            daemon: DaemonConfig {
+                cloud_url: "http://127.0.0.1:1".into(),
+                ..DaemonConfig::default()
+            },
+            runners: vec![],
+            cli: Some(CliSection {
+                token: Some("mt_old".into()),
+                workspace_slug: Some("acme".into()),
+                account_email: Some("old@example.com".into()),
+                ..Default::default()
+            }),
+            engine: Default::default(),
+            auth: Default::default(),
+            auth_event: None,
+        };
+        file::write_config(&paths, &cfg).unwrap();
+
+        sign_out_previous(&paths).await.unwrap();
+
+        let after = file::load_config(&paths).unwrap();
+        assert!(after.cli.unwrap().workspace_tokens().is_empty());
+        let event = after.auth_event.unwrap();
+        assert_eq!(event.reason, Some(AuthEventReason::Logout));
+    }
 
     #[test]
     fn a_machine_token_parse_error_never_prints_the_credentials() {

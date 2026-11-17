@@ -301,7 +301,10 @@ impl PidashAgentManager {
             match api.profile(&machine_token).await {
                 Ok(p) => break p,
                 Err(e) if e.is_workspace_auth_failure() => {
-                    self.tokens.mark_revoked(&machine_token);
+                    self.tokens.mark_fatal(
+                        &machine_token,
+                        crate::daemon::workspace_tokens::fatal_reason_code(e.reason_code()),
+                    );
                     continue;
                 }
                 Err(PidashAgentApiError::Refused {

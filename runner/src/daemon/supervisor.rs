@@ -137,7 +137,7 @@ impl Supervisor {
         // One dev-machine token per workspace (design §4.9): each runner
         // authenticates with its block's workspace token, the machine
         // session with any live one.
-        let tokens = WorkspaceTokens::from_cli(config.cli.as_ref());
+        let tokens = WorkspaceTokens::from_cli(config.cli.as_ref()).with_persistence(paths.clone());
 
         let mut instances: Vec<RunnerInstance> = Vec::new();
         for runner_cfg in &config.runners {
@@ -870,20 +870,17 @@ impl RunnerSpawnCtx {
         // terminal since startup is reported at once. A daemon older than
         // this build has no record (design §8): the app starts recording
         // from the first `seq` the updated CLI reports.
-        let auth_event = crate::config::file::load_config(&self.paths)
-            .ok()
-            .and_then(|cfg| cfg.auth_event)
-            .map(|e| AuthEventInfo {
-                seq: e.seq,
-                kind: e.kind.as_str().to_string(),
-                reason: e.reason.as_ref().map(|r| r.as_str().to_string()),
-                account: e.account.map(|a| AuthEventAccountInfo {
-                    user_id: a.user_id,
-                    email: a.email,
-                    cloud_url: a.cloud_url,
-                }),
-                at: e.at,
-            });
+        let auth_event = crate::config::file::load_auth_event(&self.paths).map(|e| AuthEventInfo {
+            seq: e.seq,
+            kind: e.kind.as_str().to_string(),
+            reason: e.reason.as_ref().map(|r| r.as_str().to_string()),
+            account: e.account.map(|a| AuthEventAccountInfo {
+                user_id: a.user_id,
+                email: a.email,
+                cloud_url: a.cloud_url,
+            }),
+            at: e.at,
+        });
         HelloInfo {
             daemon_version: crate::RUNNER_VERSION.to_string(),
             ipc_version: IPC_VERSION,
@@ -907,10 +904,7 @@ impl RunnerSpawnCtx {
     /// credential. The daemon hands the code to the app over this socket
     /// only; the code is never logged (it is useless without the app's
     /// verifier, which never leaves the app's process).
-    pub(crate) async fn session_handoff(
-        &self,
-        challenge: &str,
-    ) -> Result<Response> {
+    pub(crate) async fn session_handoff(&self, challenge: &str) -> Result<Response> {
         let cloud_url = self.daemon.cloud_url.clone();
         if cloud_url.is_empty() {
             anyhow::bail!("this computer is not bound to a Pi Dash cloud");
@@ -951,8 +945,14 @@ impl RunnerSpawnCtx {
             .ok_or_else(|| anyhow::anyhow!("the handoff response carried no code"))?;
         Ok(Response::SessionHandoff {
             code: code.to_string(),
-            user_id: body.get("user_id").and_then(|v| v.as_str()).map(str::to_string),
-            email: body.get("email").and_then(|v| v.as_str()).map(str::to_string),
+            user_id: body
+                .get("user_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            email: body
+                .get("email")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
         })
     }
 
@@ -1365,13 +1365,25 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
                 {
                     // Only this workspace is signed out: its other runners
                     // and the machine session stop offering the token, and
-                    // `pidash status` reports `workspace_signed_out`.
-                    let workspace = tokens.mark_revoked(token);
+                    // `pidash status` reports `workspace_signed_out`. The
+                    // last one going records the daemon's sign-out.
+                    let workspace =
+                        tokens.mark_fatal(token, crate::daemon::workspace_tokens::fatal_reason(&e));
                     tracing::error!(
                         runner = %runner_name,
                         workspace = workspace.as_deref().unwrap_or("(default)"),
                         "workspace token revoked; this workspace's runners are signed out \
                          until `pidash auth login --workspace <slug>`"
+                    );
+                    return;
+                }
+                if matches!(e, TransportError::DevMachineRevoked) {
+                    // The computer was removed on the web: no token of it
+                    // works any more (design §6.1 `removed`).
+                    tokens.mark_machine_removed();
+                    tracing::error!(
+                        runner = %runner_name,
+                        "this computer was removed on the web; signed out"
                     );
                     return;
                 }
@@ -6956,7 +6968,9 @@ mod tests {
             .send(ClientMsg::RunFailed {
                 run_id,
                 reason: FailureReason::AgentCrash,
-                detail: Some("timed out waiting for muse exec's run.lifecycle.started record".into()),
+                detail: Some(
+                    "timed out waiting for muse exec's run.lifecycle.started record".into(),
+                ),
                 ended_at,
                 tokens: None,
                 model: None,
@@ -7023,13 +7037,10 @@ mod tests {
             })
             .await;
         // The send went out on the channel (delivered).
-        let env = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            out_rx.recv(),
-        )
-        .await
-        .expect("timed out waiting for RunFailed")
-        .expect("channel closed before RunFailed arrived");
+        let env = tokio::time::timeout(std::time::Duration::from_secs(5), out_rx.recv())
+            .await
+            .expect("timed out waiting for RunFailed")
+            .expect("channel closed before RunFailed arrived");
         assert!(matches!(env.body, ClientMsg::RunFailed { .. }));
         assert!(
             drain_journal::load(&paths).is_empty(),

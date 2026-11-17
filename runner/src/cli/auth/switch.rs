@@ -8,8 +8,10 @@
 //! (`pidash auth logout`), then moves its identity — `[daemon].dev_machine_id`
 //! and its `[[runner]]` blocks, their per-runner data directories staying
 //! where they are — to `<config_dir>/parked/<cloud_host>/<account>.toml`
-//! (0600). The new account's parked identity is restored when one exists,
-//! otherwise the machine id is cleared so the sign-in mints a new one.
+//! (0600), and out of the live config in the same write. The new account's
+//! parked identity is restored when one exists; otherwise it starts with no
+//! runner blocks and no machine id, so the sign-in mints a new one. Another
+//! cloud is another account, whatever the e-mail.
 //! Nothing is deleted. The running daemon cannot change identity in
 //! process, so the CLI restarts it (`restart_and_verify`).
 
@@ -77,12 +79,46 @@ fn is_signed_in(cfg: &Config) -> bool {
         .is_some_and(|cli| !cli.workspace_tokens().is_empty())
 }
 
-/// Decide the plan from what is stored and what is signing in.
+/// Whether `config.toml` holds anything a switch must move: credentials, a
+/// recorded account, a machine id or runner blocks.
+fn holds_identity(cfg: &Config) -> bool {
+    is_signed_in(cfg)
+        || stored_account(cfg).is_some()
+        || cfg.daemon.dev_machine_id.is_some()
+        || !cfg.runners.is_empty()
+}
+
+/// Whether two cloud URLs name the same cloud (trailing `/` ignored).
+fn same_cloud(a: &str, b: &str) -> bool {
+    a.trim().trim_end_matches('/') == b.trim().trim_end_matches('/')
+}
+
+/// Decide the plan from what is stored and what is signing in. An account
+/// is one account on one cloud (§6.4): signing in to another cloud is a
+/// switch even for the same e-mail, so the old cloud's credentials are
+/// revoked there and its machine identity parked under its own host.
 pub fn plan_switch(
     cfg: &Config,
+    incoming_cloud: &str,
     incoming_email: Option<&str>,
     incoming_user_id: Option<&str>,
 ) -> SwitchPlan {
+    let incoming = SwitchAccount {
+        user_id: incoming_user_id.map(str::to_string),
+        email: incoming_email.map(str::to_string),
+    };
+    let stored_cloud = cfg.daemon.cloud_url.as_str();
+    let other_cloud = !stored_cloud.trim().is_empty() && !same_cloud(stored_cloud, incoming_cloud);
+    if other_cloud && holds_identity(cfg) {
+        return SwitchPlan::Switch {
+            signed_in: is_signed_in(cfg),
+            previous: stored_account(cfg).unwrap_or(SwitchAccount {
+                user_id: None,
+                email: None,
+            }),
+            incoming,
+        };
+    }
     let Some(previous) = stored_account(cfg) else {
         return SwitchPlan::None;
     };
@@ -96,10 +132,7 @@ pub fn plan_switch(
     SwitchPlan::Switch {
         signed_in: is_signed_in(cfg),
         previous,
-        incoming: SwitchAccount {
-            user_id: incoming_user_id.map(str::to_string),
-            email: incoming_email.map(str::to_string),
-        },
+        incoming,
     }
 }
 
@@ -169,40 +202,53 @@ pub fn parked_exists(paths: &Paths, cloud_url: &str, account: &SwitchAccount) ->
     parked_path(paths, cloud_url, account).is_some_and(|p| p.exists())
 }
 
+/// The parked file for `account`, or — for a computer that never recorded
+/// its account — one keyed by its machine id, so nothing is lost.
+fn park_target(paths: &Paths, cloud_url: &str, account: &SwitchAccount, cfg: &Config) -> PathBuf {
+    parked_path(paths, cloud_url, account).unwrap_or_else(|| {
+        let id = cfg.daemon.dev_machine_id.unwrap_or_else(Uuid::new_v4);
+        parked_dir(paths, cloud_url).join(format!("unknown-account-{id}.toml"))
+    })
+}
+
 /// Park the current machine identity for `account` (call after the account
-/// has been signed out, so no credentials are involved). Nothing is deleted;
-/// the live config keeps its `[[runner]]` blocks until the sign-in as the
-/// next account restores or replaces them.
+/// has been signed out, so no credentials are involved), and take it out of
+/// the live config in the same locked write: the machine id and the
+/// `[[runner]]` blocks belong to `account` and must not serve the next one.
+/// Runner data directories stay where they are; nothing is deleted.
 pub fn park_identity(paths: &Paths, cloud_url: &str, account: &SwitchAccount) -> Result<()> {
-    let Some(path) = parked_path(paths, cloud_url, account) else {
+    if !paths.config_path().exists() {
         return Ok(());
-    };
-    let cfg = file::load_config(paths)?;
-    write_parked(&path, &cfg)
+    }
+    file::mutate_config(paths, |cfg| {
+        if cfg.daemon.dev_machine_id.is_none() && cfg.runners.is_empty() {
+            return Ok(());
+        }
+        write_parked(&park_target(paths, cloud_url, account, cfg), cfg)?;
+        cfg.daemon.dev_machine_id = None;
+        cfg.runners.clear();
+        Ok(())
+    })?;
+    Ok(())
 }
 
 /// Restore `account`'s parked identity into the config (machine id and
-/// runner blocks), or clear the machine id so the sign-in mints a new one
-/// when there is nothing parked for it.
+/// runner blocks), or start it with none — no machine id, so the sign-in
+/// mints a new one, and no runner blocks — when nothing is parked for it.
 pub fn restore_or_clear_identity(
     paths: &Paths,
     cloud_url: &str,
     account: &SwitchAccount,
 ) -> Result<()> {
-    let Some(path) = parked_path(paths, cloud_url, account) else {
-        return Ok(());
+    let identity = match parked_path(paths, cloud_url, account).filter(|p| p.exists()) {
+        Some(path) => {
+            let text = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            toml::from_str::<ParkedIdentity>(&text)
+                .with_context(|| format!("parsing {}", path.display()))?
+        }
+        None => ParkedIdentity::default(),
     };
-    if !path.exists() {
-        file::mutate_config(paths, |cfg| {
-            cfg.daemon.dev_machine_id = None;
-            Ok(())
-        })?;
-        return Ok(());
-    }
-    let text =
-        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let identity: ParkedIdentity =
-        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
     file::mutate_config(paths, |cfg| {
         cfg.daemon.dev_machine_id = identity.dev_machine_id;
         cfg.runners = identity.runners;
@@ -275,10 +321,15 @@ pub fn confirm_switch(
 mod tests {
     use super::*;
 
+    const CLOUD: &str = "https://pidash.example.com";
+
     fn cfg_with_account(email: &str, id: &str, signed_in: bool) -> Config {
         let mut cfg = Config {
             version: 2,
-            daemon: Default::default(),
+            daemon: crate::config::schema::DaemonConfig {
+                cloud_url: CLOUD.into(),
+                ..Default::default()
+            },
             runners: vec![],
             cli: Some(crate::config::schema::CliSection::default()),
             engine: Default::default(),
@@ -300,17 +351,17 @@ mod tests {
     fn no_switch_when_same_account_or_nothing_signed_in() {
         let signed = cfg_with_account("a@example.com", "u-a", true);
         assert_eq!(
-            plan_switch(&signed, Some("a@example.com"), Some("u-a")),
+            plan_switch(&signed, CLOUD, Some("a@example.com"), Some("u-a")),
             SwitchPlan::None,
             "same e-mail and user id is not a switch"
         );
         assert_eq!(
-            plan_switch(&signed, Some("A@EXAMPLE.COM"), None),
+            plan_switch(&signed, CLOUD, Some("A@EXAMPLE.COM"), None),
             SwitchPlan::None,
             "e-mail compares case-insensitively when no user id is known"
         );
         assert_eq!(
-            plan_switch(&signed, Some("b@example.com"), Some("u-b")),
+            plan_switch(&signed, CLOUD, Some("b@example.com"), Some("u-b")),
             SwitchPlan::Switch {
                 previous: SwitchAccount {
                     user_id: Some("u-a".into()),
@@ -326,7 +377,7 @@ mod tests {
         );
         let signed_out = cfg_with_account("a@example.com", "u-a", false);
         assert_eq!(
-            plan_switch(&signed_out, Some("b@example.com"), Some("u-b")),
+            plan_switch(&signed_out, CLOUD, Some("b@example.com"), Some("u-b")),
             SwitchPlan::Switch {
                 previous: SwitchAccount {
                     user_id: Some("u-a".into()),
@@ -424,5 +475,101 @@ mod tests {
         let restored = file::load_config(&paths).unwrap();
         assert_eq!(restored.daemon.dev_machine_id, Some(machine_id));
         assert_eq!(restored.runners.len(), 1);
+    }
+
+    #[test]
+    fn another_cloud_is_another_account() {
+        let signed = cfg_with_account("a@example.com", "u-a", true);
+        assert_eq!(
+            plan_switch(
+                &signed,
+                "https://pidash.example.com/",
+                Some("a@example.com"),
+                Some("u-a")
+            ),
+            SwitchPlan::None,
+            "a trailing slash is the same cloud"
+        );
+        assert!(
+            matches!(
+                plan_switch(
+                    &signed,
+                    "https://other.example.com",
+                    Some("a@example.com"),
+                    Some("u-a")
+                ),
+                SwitchPlan::Switch {
+                    signed_in: true,
+                    ..
+                }
+            ),
+            "the same e-mail on another cloud is a switch: the old cloud's tokens are revoked there"
+        );
+        let mut anonymous = cfg_with_account("", "", true);
+        anonymous.cli.as_mut().unwrap().account_email = None;
+        anonymous.cli.as_mut().unwrap().account_user_id = None;
+        assert!(matches!(
+            plan_switch(
+                &anonymous,
+                "https://other.example.com",
+                Some("a@example.com"),
+                None
+            ),
+            SwitchPlan::Switch {
+                signed_in: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parking_takes_the_identity_out_and_a_new_account_starts_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config_dir: tmp.path().join("config"),
+            data_dir: tmp.path().join("data"),
+            runtime_dir: tmp.path().join("runtime"),
+            machine_context_dir: tmp.path().join("config"),
+        };
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        let text = format!(
+            "version = 2\n\n[daemon]\ncloud_url = \"{CLOUD}\"\ndev_machine_id = \"{}\"\n\n[[runner]]\nname = \"a\"\nrunner_id = \"{}\"\nworkspace_slug = \"acme\"\nproject_slug = \"DEF\"\n\n[runner.workspace]\nworking_dir = \"/tmp/wd\"\n",
+            Uuid::new_v4(),
+            Uuid::new_v4()
+        );
+        std::fs::write(paths.config_path(), text).unwrap();
+        let a = SwitchAccount {
+            user_id: Some("u-a".into()),
+            email: None,
+        };
+        park_identity(&paths, CLOUD, &a).unwrap();
+        let parked = file::load_config(&paths).unwrap();
+        assert_eq!(
+            parked.daemon.dev_machine_id, None,
+            "the machine id left with A"
+        );
+        assert!(parked.runners.is_empty(), "A's runners left with A");
+
+        // Something put a runner back (e.g. an interrupted earlier switch):
+        // a new account with nothing parked still starts with none.
+        std::fs::write(
+            paths.config_path(),
+            format!(
+                "version = 2\n\n[daemon]\ncloud_url = \"{CLOUD}\"\n\n[[runner]]\nname = \"a\"\nrunner_id = \"{}\"\nworkspace_slug = \"acme\"\nproject_slug = \"DEF\"\n\n[runner.workspace]\nworking_dir = \"/tmp/wd\"\n",
+                Uuid::new_v4()
+            ),
+        )
+        .unwrap();
+        let b = SwitchAccount {
+            user_id: Some("u-b".into()),
+            email: None,
+        };
+        restore_or_clear_identity(&paths, CLOUD, &b).unwrap();
+        let fresh = file::load_config(&paths).unwrap();
+        assert!(fresh.runners.is_empty(), "B never inherits A's runners");
+        assert_eq!(fresh.daemon.dev_machine_id, None);
+
+        restore_or_clear_identity(&paths, CLOUD, &a).unwrap();
+        assert_eq!(file::load_config(&paths).unwrap().runners.len(), 1);
     }
 }
