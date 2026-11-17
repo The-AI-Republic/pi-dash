@@ -1,16 +1,16 @@
-//! Reconnect triggers (PDASHOSS01-306).
+//! Reconnect triggers (PDASHOSS01-306, NEWPIDASH-244).
 //!
-//! While the cloud is unreachable each runner backs off up to 6 hours
-//! between attempts, so a runner could stay offline for hours after the
+//! While the cloud is unreachable each runner backs off up to 5 minutes
+//! between attempts, so a runner could stay offline for minutes after the
 //! server recovers. These background watchers cut the wait short when
 //! something suggests connectivity just changed:
 //!
 //! - **wake from sleep** — detected as wall-clock time jumping ahead of
 //!   monotonic time. Both `Instant` and tokio timers stop while the machine
-//!   sleeps (on macOS and Linux), but the wall clock keeps going.
+//!   sleeps (on macOS, Linux and Windows), but the wall clock keeps going.
 //! - **network change** — the set of non-loopback, non-link-local
-//!   interface addresses changed (interface up/down, new IP). Unix only.
-//!   Link-local addresses are ignored: every Docker container start/stop
+//!   interface addresses changed (interface up/down, new IP). Link-local
+//!   addresses are ignored: every Docker container start/stop
 //!   adds or drops a veth with an `fe80::` address, and counting those
 //!   would reset the outage backoff on every container lifecycle.
 //!
@@ -109,9 +109,44 @@ fn interface_fingerprint() -> Option<BTreeSet<String>> {
     Some(out)
 }
 
+/// Sorted IP addresses for every routable interface (Windows: plain IPs,
+/// since `local-ip-address` does not expose adapter names; the set is only
+/// compared within the same platform, so the format need not match Unix's
+/// `interface=ip` form).
+#[cfg(windows)]
+fn interface_fingerprint() -> Option<BTreeSet<String>> {
+    use local_ip_address::{list_all_local_ipv4_addresses, list_all_local_ipv6_addresses};
+    use std::net::IpAddr;
+
+    let mut out = BTreeSet::new();
+    let mut got_any = false;
+
+    if let Ok(addrs) = list_all_local_ipv4_addresses() {
+        got_any = true;
+        for ip in addrs {
+            if counts_for_network_change(IpAddr::V4(ip)) {
+                out.insert(ip.to_string());
+            }
+        }
+    }
+    if let Ok(addrs) = list_all_local_ipv6_addresses() {
+        got_any = true;
+        for ip in addrs {
+            if counts_for_network_change(IpAddr::V6(ip)) {
+                out.insert(ip.to_string());
+            }
+        }
+    }
+    // Both enumerations failed: treat as a failed sample, never a kick.
+    if !got_any {
+        return None;
+    }
+    Some(out)
+}
+
 /// Network-change detection is not implemented on this platform; wake
 /// detection and `pidash reconnect` still apply.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn interface_fingerprint() -> Option<BTreeSet<String>> {
     None
 }
@@ -162,5 +197,15 @@ mod tests {
                 && !e.ends_with("=::1")
                 && !e.contains("=fe80:"))
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn fingerprint_reads_interfaces_without_loopback() {
+        let fp = interface_fingerprint().expect("local-ip-address works on windows");
+        assert!(fp.iter().all(|e| e != "127.0.0.1"
+            && e != "::1"
+            && !e.starts_with("169.254.")
+            && !e.starts_with("fe80:")));
     }
 }
