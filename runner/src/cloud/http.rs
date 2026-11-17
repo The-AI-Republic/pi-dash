@@ -1729,7 +1729,7 @@ impl HttpLoop {
 
     /// Run `ensure_access_token` then `open_session` until a session is
     /// open. Fatal-for-runner errors propagate. Everything else retries on
-    /// [`ReconnectPolicy`]: transient failures back off 30 s → 6 h with
+    /// [`ReconnectPolicy`]: transient failures back off 30 s → 5 m with
     /// jitter, and `runner_gone` answers retry every ~30 s until enough of
     /// them confirm the deletion, which returns
     /// [`TransportError::RunnerDeletedInCloud`]. A local teardown
