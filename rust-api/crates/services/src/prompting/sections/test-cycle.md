@@ -29,7 +29,7 @@ order of authority:
 - the **hand-off comment** the implementation run posted — the most recent
   issue comment carrying `### Acceptance Criteria` and `### How to Test`
   headings. This is written for you and is the closest thing to a spec you
-  will get; start here. It is not authoritative about _outcomes_, only
+  will get; start here. It is not authoritative about *outcomes*, only
   about intent — an "Already validated here" line is a claim to re-check,
   not evidence.
 - the issue description and any `Validation` / `Test Plan` / `Testing`
@@ -88,7 +88,7 @@ If no route yields a place to act as the user, that is an honest
 6. Post a **structured results comment** to the pidash issue:
    - **Kind** detected and **what was tested** (scope).
    - **Method** — the commands you ran / the flows you exercised.
-   - **Result** — pass/fail _per acceptance criterion_, with evidence.
+   - **Result** — pass/fail *per acceptance criterion*, with evidence.
    - **Defects found** — and, for each, whether you auto-fixed it or it
      needs a human / a follow-up issue.
 7. Optionally act on the findings, within the limits the work-type
@@ -115,7 +115,7 @@ explicit `--stop-ticking` stops the issue's clock:
   Test** and yield `done --stop-ticking` — never fall back to "Done".
 - **defects** — real defects that need fixing. Record per-criterion
   verdicts and list the defects as open items in the workpad `### Path to
-done` block, post the results comment, and move the issue **back to In
+  done` block, post the results comment, and move the issue **back to In
   Progress** (the `started` group) so the next run fixes them. Do not use
   Blocked for a defect. Yield `done`.
 - **cannot run** — the test could not be run (missing env / creds /
