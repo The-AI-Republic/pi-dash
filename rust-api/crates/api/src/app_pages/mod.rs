@@ -5181,7 +5181,9 @@ pub async fn page_move(
     let target_raw = match parsed.as_object() {
         Some(map) => map
             .get("target_project_id")
+            .or_else(|| map.get("new_project_id"))
             .or_else(|| map.get("target_project"))
+            .or_else(|| map.get("new_project"))
             .or_else(|| map.get("to_project"))
             .or_else(|| map.get("project_id"))
             .or_else(|| map.get("project"))
@@ -5200,18 +5202,8 @@ pub async fn page_move(
     if let Err(denial) = require_live_project(pool, &target_project_id).await {
         return denial.into_response();
     }
-    // Moving to an archived project is refused with the shared envelope.
-    if let Some(info) = match archived_info_for(pool, &target_project_id).await {
-        Ok(info) => info,
-        Err(denial) => return denial.into_response(),
-    } {
-        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
-            .into_response();
-    }
     // Same-workspace guard (checked before the target gate so a
     // cross-workspace move is 400, not 403 due to the source slug).
-    // Target edit gate: the caller must be allowed to edit pages there.
-    // `POST` (create) requires ADMIN/MEMBER, mirroring page creation.
     let (source_ws_early, target_ws_early): (uuid::Uuid, uuid::Uuid) = {
         let db = orm(pool);
         let s: Option<uuid::Uuid> = match projects::Entity::find()
@@ -5245,6 +5237,10 @@ pub async fn page_move(
         return Denial::BadRequest("Cannot move a page across workspaces".to_owned())
             .into_response();
     }
+    // Target edit gate: the caller must be allowed to edit pages there.
+    // `POST` (create) requires ADMIN/MEMBER, mirroring page creation.
+    // Runs before the archived-target check so a caller with no target
+    // membership gets 403, not the 409 that would name the archive.
     let _target_gate = match gate::resolve_gate(
         &state,
         "POST",
@@ -5258,38 +5254,12 @@ pub async fn page_move(
         Ok(gate) => gate,
         Err(denial) => return denial.into_response(),
     };
-    // Same-workspace guard (already verified above; kept for the later fetch).
-    let (source_ws, target_ws): (uuid::Uuid, uuid::Uuid) = {
-        let db = orm(pool);
-        let s: Option<uuid::Uuid> = match projects::Entity::find()
-            .select_only()
-            .column(projects::Column::WorkspaceId)
-            .filter(projects::Column::Id.eq(source_project_id))
-            .into_tuple()
-            .one(&db)
-            .await
-        {
-            Ok(row) => row,
-            Err(_) => return Denial::ServerError.into_response(),
-        };
-        let t: Option<uuid::Uuid> = match projects::Entity::find()
-            .select_only()
-            .column(projects::Column::WorkspaceId)
-            .filter(projects::Column::Id.eq(target_project_id))
-            .into_tuple()
-            .one(&db)
-            .await
-        {
-            Ok(row) => row,
-            Err(_) => return Denial::ServerError.into_response(),
-        };
-        match (s, t) {
-            (Some(s), Some(t)) => (s, t),
-            _ => return Denial::ServerError.into_response(),
-        }
-    };
-    if source_ws != target_ws {
-        return Denial::BadRequest("Cannot move a page across workspaces".to_owned())
+    // Moving to an archived project is refused with the shared envelope.
+    if let Some(info) = match archived_info_for(pool, &target_project_id).await {
+        Ok(info) => info,
+        Err(denial) => return denial.into_response(),
+    } {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
             .into_response();
     }
     // Source link must be live: the page is in the source project.
@@ -5309,60 +5279,69 @@ pub async fn page_move(
     if source_link.is_none() {
         return Denial::ObjectNotFound.into_response();
     }
-    // Re-point atomically: if the target link already exists, drop the
-    // source row (soft delete); otherwise update the source row's
-    // `project_id` to the target. The `pages` row, `page_versions` and
-    // `page_logs` are untouched.
-    let mut tx = match pool.begin().await {
-        Ok(tx) => tx,
-        Err(_) => return Denial::ServerError.into_response(),
-    };
-    let existing_target: Option<uuid::Uuid> = match sqlx::query_scalar::<_, uuid::Uuid>(
-        "SELECT id FROM project_pages WHERE page_id = $1 AND project_id = $2 AND deleted_at IS NULL",
-    )
-    .bind(page_id)
-    .bind(target_project_id)
-    .fetch_optional(&mut *tx)
-    .await
+    // Re-point: if the target link already exists, drop the source row
+    // (soft delete); otherwise update the source row's `project_id` to the
+    // target. The `pages` row, `page_versions` and `page_logs` are
+    // untouched. One conditional `update_many` runs per call, so no
+    // explicit transaction is needed; each statement is atomic on its own.
+    let existing_target: Option<uuid::Uuid> = match project_pages::Entity::find()
+        .select_only()
+        .column(project_pages::Column::Id)
+        .filter(project_pages::Column::PageId.eq(page_id))
+        .filter(project_pages::Column::ProjectId.eq(target_project_id))
+        .filter(project_pages::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(pool))
+        .await
     {
         Ok(row) => row,
-        Err(_) => {
-            let _ = tx.rollback().await;
-            return Denial::ServerError.into_response();
-        }
+        Err(_) => return Denial::ServerError.into_response(),
     };
-    let now = chrono::Utc::now();
+    let now = chrono::Utc::now().fixed_offset();
     if existing_target.is_some() {
-        if let Err(_) = sqlx::query(
-            "UPDATE project_pages SET deleted_at = $3, updated_at = $4, updated_by_id = $5 WHERE page_id = $1 AND project_id = $2 AND deleted_at IS NULL",
-        )
-        .bind(page_id)
-        .bind(source_project_id)
-        .bind(now.fixed_offset())
-        .bind(now.fixed_offset())
-        .bind(source_gate.user_id)
-        .execute(&mut *tx)
-        .await
+        if let Err(_) = project_pages::Entity::update_many()
+            .col_expr(
+                project_pages::Column::DeletedAt,
+                sea_orm::sea_query::Expr::value(Some(now)),
+            )
+            .col_expr(
+                project_pages::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .col_expr(
+                project_pages::Column::UpdatedById,
+                sea_orm::sea_query::Expr::value(Some(source_gate.user_id)),
+            )
+            .filter(project_pages::Column::PageId.eq(page_id))
+            .filter(project_pages::Column::ProjectId.eq(source_project_id))
+            .filter(project_pages::Column::DeletedAt.is_null())
+            .exec(&orm(pool))
+            .await
         {
-            let _ = tx.rollback().await;
             return Denial::ServerError.into_response();
         }
-    } else if let Err(_) = sqlx::query(
-        "UPDATE project_pages SET project_id = $3, updated_at = $4, updated_by_id = $5 WHERE page_id = $1 AND project_id = $2 AND deleted_at IS NULL",
-    )
-    .bind(page_id)
-    .bind(source_project_id)
-    .bind(target_project_id)
-    .bind(now.fixed_offset())
-    .bind(source_gate.user_id)
-    .execute(&mut *tx)
-    .await
-    {
-        let _ = tx.rollback().await;
-        return Denial::ServerError.into_response();
-    }
-    if let Err(_) = tx.commit().await {
-        return Denial::ServerError.into_response();
+    } else {
+        if let Err(_) = project_pages::Entity::update_many()
+            .col_expr(
+                project_pages::Column::ProjectId,
+                sea_orm::sea_query::Expr::value(target_project_id),
+            )
+            .col_expr(
+                project_pages::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .col_expr(
+                project_pages::Column::UpdatedById,
+                sea_orm::sea_query::Expr::value(Some(source_gate.user_id)),
+            )
+            .filter(project_pages::Column::PageId.eq(page_id))
+            .filter(project_pages::Column::ProjectId.eq(source_project_id))
+            .filter(project_pages::Column::DeletedAt.is_null())
+            .exec(&orm(pool))
+            .await
+        {
+            return Denial::ServerError.into_response();
+        }
     }
     // Read back the moved page in the target project and answer the detail
     // shape with the active status, so the caller can verify the move.

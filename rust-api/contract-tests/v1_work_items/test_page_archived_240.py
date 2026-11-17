@@ -241,3 +241,99 @@ def test_move_cross_workspace_refused(active_world, seeder, db, settings):
         assert response.status_code == 400, response.text
     else:
         assert response.status_code in (404, 405)
+
+
+def test_move_new_project_id_alias(archived_world, seeder):
+    api, world = archived_world
+    second = seeder.create_project(world["workspace"]["id"])
+    seeder.create_project_member(world["workspace"]["id"], second["id"], world["owner"]["id"], role=20)
+    move_url = f"{_base(world)}/{world['page']['id']}/move/"
+    response = api.post(move_url, json={"new_project_id": second["id"]})
+    from _harness.diffs import is_rust as _is_rust
+    if _is_rust():
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["project_status"] == "active", body
+        assert body["project_archived_at"] is None, body
+    else:
+        assert response.status_code in (404, 405)
+
+
+def test_move_ordering_403_before_409(active_world, seeder, db):
+    api, world = active_world
+    # Archived target where the caller is NOT a member: gate 403 must win
+    # over the archived-target 409.
+    target = seeder.create_project(world["workspace"]["id"])
+    db.execute("UPDATE projects SET archived_at = %s WHERE id = %s", (ARCHIVED_AT, target["id"]))
+    move_url = f"{_base(world)}/{world['page']['id']}/move/"
+    response = api.post(move_url, json={"target_project_id": target["id"]})
+    from _harness.diffs import is_rust as _is_rust
+    if _is_rust():
+        assert response.status_code == 403, response.text
+    else:
+        assert response.status_code in (404, 405)
+    db.execute("UPDATE projects SET archived_at = NULL WHERE id = %s", (target["id"],))
+
+
+def test_move_private_page_forbidden(active_world, seeder):
+    api, world = active_world
+    # Private page owned by someone else, linked to the source: a member
+    # who cannot view it must not be able to move it.
+    other = seeder.create_user()
+    seeder.create_workspace_member(world["workspace"]["id"], other["id"], role=20)
+    private_page = seeder.create_page(world["workspace"]["id"], other["id"], name="Secret", access=1)
+    seeder.link_page_to_project(private_page["id"], world["project"]["id"], world["workspace"]["id"])
+    second = seeder.create_project(world["workspace"]["id"])
+    seeder.create_project_member(world["workspace"]["id"], second["id"], world["owner"]["id"], role=20)
+    move_url = f"{_base(world)}/{private_page['id']}/move/"
+    response = api.post(move_url, json={"target_project_id": second["id"]})
+    from _harness.diffs import is_rust as _is_rust
+    if _is_rust():
+        assert response.status_code == 403, response.text
+    else:
+        assert response.status_code in (404, 405)
+
+
+def test_move_active_to_active_succeeds(active_world, seeder):
+    api, world = active_world
+    second = seeder.create_project(world["workspace"]["id"])
+    seeder.create_project_member(world["workspace"]["id"], second["id"], world["owner"]["id"], role=20)
+    move_url = f"{_base(world)}/{world['page']['id']}/move/"
+    response = api.post(move_url, json={"target_project_id": second["id"]})
+    from _harness.diffs import is_rust as _is_rust
+    if _is_rust():
+        assert response.status_code == 200, response.text
+        assert response.json()["project_status"] == "active"
+        assert response.json()["project_archived_at"] is None
+        detail = api.get(f"/api/v1/workspaces/{world['workspace']['slug']}/projects/{second['id']}/pages/{world['page']['id']}/")
+        assert detail.status_code == 200, detail.text
+        src = api.get(_base(world) + "/")
+        assert src.json()["total_results"] == 0
+    else:
+        assert response.status_code in (404, 405)
+
+
+def test_move_unknown_page_404(active_world, seeder):
+    api, world = active_world
+    second = seeder.create_project(world["workspace"]["id"])
+    seeder.create_project_member(world["workspace"]["id"], second["id"], world["owner"]["id"], role=20)
+    import uuid as _uuid
+    move_url = f"{_base(world)}/{_uuid.uuid4()}/move/"
+    response = api.post(move_url, json={"target_project_id": second["id"]})
+    from _harness.diffs import is_rust as _is_rust
+    if _is_rust():
+        assert response.status_code == 404, response.text
+    else:
+        assert response.status_code in (404, 405)
+
+
+def test_move_unknown_target_404(active_world):
+    api, world = active_world
+    import uuid as _uuid
+    move_url = f"{_base(world)}/{world['page']['id']}/move/"
+    response = api.post(move_url, json={"target_project_id": str(_uuid.uuid4())})
+    from _harness.diffs import is_rust as _is_rust
+    if _is_rust():
+        assert response.status_code == 404, response.text
+    else:
+        assert response.status_code in (404, 405)

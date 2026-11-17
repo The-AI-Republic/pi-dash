@@ -204,3 +204,105 @@ def test_move_cross_workspace_refused(settings, active_world, seeder):
     else:
         assert response.status_code in (404, 405)
     client.close()
+
+SWEEP = [
+    ("desc-get", "get", "/description/", 200, {}),
+    ("desc-patch", "patch", "/description/", 200, {"json": {"description_html": "<p>x</p>"}}),
+    ("access", "post", "/access/", 204, {"json": {"access": 0}}),
+    ("fav-del", "delete", "/favorite-pages:{pid}", 404, {}),
+    ("archive", "post", "/archive/", 200, {}),
+    ("unarchive", "delete", "/archive/", 204, {}),
+    ("unlock", "delete", "/lock/", 204, {}),
+    ("destroy", "delete", "/", 400, {}),
+    ("duplicate", "post", "/duplicate/", 201, {}),
+    ("summary", "get", "/pages-summary/", 200, {}),
+    ("version-detail", "get", "/versions:{ver}/", 404, {}),
+]
+
+@pytest.mark.parametrize("name,method,suffix,django_status,kwargs", SWEEP)
+def test_archived_409_sweep(settings, archived_world, name, method, suffix, django_status, kwargs):
+    client = _client_for(settings, archived_world)
+    pid = archived_world["page"]["id"]
+    if suffix == "/favorite-pages:{pid}":
+        url = f"{pages_base(archived_world)}/favorite-pages/{pid}/"
+    elif suffix.startswith("/versions:"):
+        url = page_url(archived_world, pid) + f"versions/{uuid.uuid4()}/"
+    elif suffix == "/pages-summary/":
+        url = f"{pages_base(archived_world)}/pages-summary/"
+    elif suffix in ("/description/", "/access/", "/archive/", "/lock/", "/duplicate/"):
+        url = page_url(archived_world, pid) + suffix.lstrip("/")
+    else:
+        url = page_url(archived_world, pid)
+    response = getattr(client, method)(url, **kwargs)
+    assert response.status_code == expect("DIFF-49", django=django_status, rust=409), name
+    if response.status_code == 409:
+        _assert_archived_body(response, archived_world)
+    client.close()
+
+def test_move_active_to_active_succeeds(settings, active_world, seeder):
+    target = seeder.create_project(active_world["workspace"]["id"])
+    seeder.create_project_member(active_world["workspace"]["id"], target["id"], active_world["owner"]["id"], role=20)
+    client = _client_for(settings, active_world)
+    move_url = page_url(active_world, active_world["page"]["id"]) + "move/"
+    response = client.post(move_url, json={"target_project_id": target["id"]})
+    from _harness.diffs import is_rust
+    if is_rust():
+        assert response.status_code == 200, response.text
+        detail = client.get(f"/api/workspaces/{active_world['workspace']['slug']}/projects/{target['id']}/pages/{active_world['page']['id']}/")
+        assert detail.status_code == 200, detail.text
+        src_list = client.get(page_url(active_world))
+        assert active_world["page"]["id"] not in {r["id"] for r in src_list.json()}
+    else:
+        assert response.status_code in (404, 405)
+    client.close()
+
+def test_move_unknown_page_404(settings, active_world, seeder):
+    target = seeder.create_project(active_world["workspace"]["id"])
+    seeder.create_project_member(active_world["workspace"]["id"], target["id"], active_world["owner"]["id"], role=20)
+    client = _client_for(settings, active_world)
+    move_url = page_url(active_world, str(uuid.uuid4())) + "move/"
+    response = client.post(move_url, json={"target_project_id": target["id"]})
+    from _harness.diffs import is_rust
+    if is_rust():
+        assert response.status_code == 404, response.text
+    else:
+        assert response.status_code in (404, 405)
+    client.close()
+
+def test_move_unknown_target_404(settings, active_world):
+    client = _client_for(settings, active_world)
+    move_url = page_url(active_world, active_world["page"]["id"]) + "move/"
+    response = client.post(move_url, json={"target_project_id": str(uuid.uuid4())})
+    from _harness.diffs import is_rust
+    if is_rust():
+        assert response.status_code == 404, response.text
+    else:
+        assert response.status_code in (404, 405)
+    client.close()
+
+def test_move_new_project_id_alias(settings, archived_world, second_project):
+    client = _client_for(settings, archived_world)
+    move_url = page_url(archived_world, archived_world["page"]["id"]) + "move/"
+    response = client.post(move_url, json={"new_project_id": second_project["id"]})
+    from _harness.diffs import is_rust
+    if is_rust():
+        assert response.status_code == 200, response.text
+    else:
+        assert response.status_code in (404, 405)
+    client.close()
+
+def test_move_ordering_403_before_409(settings, active_world, seeder, db):
+    # Caller is a member of the source but NOT of the archived target:
+    # must get 403 (gate), not the 409 that would name the archive.
+    target = seeder.create_project(active_world["workspace"]["id"])
+    db.execute("UPDATE projects SET archived_at = %s WHERE id = %s", (ARCHIVED_AT, target["id"]))
+    client = _client_for(settings, active_world)
+    move_url = page_url(active_world, active_world["page"]["id"]) + "move/"
+    response = client.post(move_url, json={"target_project_id": target["id"]})
+    from _harness.diffs import is_rust
+    if is_rust():
+        assert response.status_code == 403, response.text
+    else:
+        assert response.status_code in (404, 405)
+    db.execute("UPDATE projects SET archived_at = NULL WHERE id = %s", (target["id"],))
+    client.close()
