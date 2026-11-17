@@ -1151,6 +1151,84 @@ mod tests {
         assert!(body.contains("the clock would keep ticking and burn the parent's budget"));
     }
 
+    fn composed_text_with_work_type(kind: &str, work_type: &str) -> String {
+        let ctx = crate::prompting::validation::sample_contexts(kind)
+            .into_iter()
+            .next()
+            .expect("populated sample first");
+        compose(
+            kind,
+            None,
+            None,
+            &OverrideIndex::new(),
+            &ctx,
+            None,
+            None,
+            Some(work_type),
+        )
+        .unwrap_or_else(|err| panic!("{kind} composes: {}", err.message()))
+        .text
+    }
+
+    #[test]
+    fn software_review_syncs_pr_branch_with_base() {
+        // NEWPIDASH-277: the sync step precedes the review-kind guidance
+        // and is software-only.
+        let body = composed_text_with_work_type(recipes::KIND_REVIEW, "software");
+        for phrase in [
+            "Sync the PR branch with its base",
+            "git fetch origin",
+            "git merge origin/<base>",
+            "merge, never rebase",
+            "never force-push",
+            "base SHA",
+            "In Progress",
+            "re-check mergeability",
+        ] {
+            assert!(body.contains(phrase), "review carries {phrase:?}");
+        }
+        assert!(
+            body.find("Sync the PR branch with its base")
+                < body.find("Software work products come in these review kinds"),
+            "sync precedes review kinds"
+        );
+    }
+
+    #[test]
+    fn software_test_syncs_pr_branch_with_base() {
+        let body = composed_text_with_work_type(recipes::KIND_TEST, "software");
+        for phrase in [
+            "Sync the PR branch with its base",
+            "git fetch origin",
+            "git merge origin/<base>",
+            "merge, never rebase",
+            "never force-push",
+            "base SHA",
+            "In Progress",
+            "re-check mergeability",
+            "A merge into the base after the test ran means syncing and re-checking first",
+        ] {
+            assert!(body.contains(phrase), "test carries {phrase:?}");
+        }
+        assert!(
+            body.find("Sync the PR branch with its base") < body.find("Gates and CI runs are"),
+            "sync precedes gates paragraph"
+        );
+    }
+
+    #[test]
+    fn general_review_and_test_have_no_sync_step() {
+        for kind in [recipes::KIND_REVIEW, recipes::KIND_TEST] {
+            let body = composed_text_with_work_type(kind, "general");
+            assert!(
+                !body.contains("Sync the PR branch with its base"),
+                "{kind} general has no sync step"
+            );
+            assert!(!body.contains("git fetch origin"), "{kind} has no fetch");
+            assert!(!body.contains("git merge origin"), "{kind} has no merge");
+        }
+    }
+
     #[test]
     fn attribution_without_context_returns_detail() {
         // No context disables the probe (`composer.py:253-254`); with no
