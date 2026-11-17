@@ -48,6 +48,7 @@ const DETAIL_PATH = `/api/workspaces/${SLUG}/projects/${PROJECT}/modules/${MODUL
 const ARCHIVED_PATH = `/api/workspaces/${SLUG}/projects/${PROJECT}/archived-modules/${MODULE}/`;
 const ESTIMATES_PATH = `/api/workspaces/${SLUG}/projects/${PROJECT}/estimates/`;
 const ROLES_PATH = `/api/users/me/workspaces/${SLUG}/project-roles/`;
+const PROJECT_PATH = `/api/workspaces/${SLUG}/projects/${PROJECT}/`;
 
 function detailFixture(overrides: Partial<ModuleDetail> = {}): ModuleDetail {
   return {
@@ -201,9 +202,11 @@ function prefsFixture(overrides: Partial<ModuleUserProperties> = {}): ModuleUser
   };
 }
 
+const ESTIMATE_ID = "423e4567-e89b-12d3-a456-426614174003";
+
 function estimate(type: string) {
   return {
-    id: "423e4567-e89b-12d3-a456-426614174003",
+    id: ESTIMATE_ID,
     workspace: "123e4567-e89b-12d3-a456-426614174000",
     project: PROJECT,
     name: "Estimate",
@@ -218,6 +221,61 @@ function estimate(type: string) {
   };
 }
 
+function projectFixture(estimateId: string | null): Record<string, unknown> {
+  return {
+    id: PROJECT,
+    name: "Project",
+    identifier: "WEB",
+    logo_props: {},
+    estimate: estimateId,
+    workspace: "123e4567-e89b-12d3-a456-426614174000",
+    created_at: "2026-01-02T03:04:05Z",
+    updated_at: "2026-02-03T04:05:06Z",
+    created_by: null,
+    updated_by: null,
+    deleted_at: null,
+    description: "",
+    description_text: null,
+    description_html: null,
+    network: 2,
+    default_assignee: null,
+    project_lead: null,
+    emoji: null,
+    icon_prop: null,
+    module_view: true,
+    cycle_view: true,
+    issue_views_view: true,
+    page_view: true,
+    intake_view: true,
+    inbox_view: true,
+    is_time_tracking_enabled: false,
+    is_issue_type_enabled: true,
+    is_default: false,
+    guest_view_all_features: false,
+    members_can_edit_states: true,
+    cover_image: null,
+    cover_image_asset: null,
+    cover_image_url: null,
+    archive_in: 0,
+    close_in: 0,
+    default_state: null,
+    archived_at: null,
+    timezone: "UTC",
+    external_source: null,
+    external_id: null,
+    repo_url: "",
+    base_branch: "",
+    is_favorite: false,
+    sort_order: null,
+    member_role: null,
+    anchor: null,
+    members: [],
+    next_work_item_sequence: 1,
+    agent_executor_options: [],
+    default_agent_executor: "",
+  };
+}
+
 interface Harness {
   detail: ModuleDetail | ArchivedModuleDetail;
   detailStatus: number;
@@ -228,6 +286,7 @@ interface Harness {
   richFilters: Record<string, unknown>;
   patchBodies: Record<string, unknown>[];
   prefsDelay: number;
+  projectEstimate: string | null;
 }
 
 let harness: Harness;
@@ -245,9 +304,13 @@ beforeEach(() => {
     richFilters: {},
     patchBodies: [],
     prefsDelay: 0,
+    projectEstimate: null,
   };
   createAppClient("https://api.test", (async (url: string, init?: { method?: string; body?: string }) => {
     const method = init?.method ?? "GET";
+    if (url.endsWith(PROJECT_PATH) && method === "GET") {
+      return jsonResponse(url, 200, projectFixture(harness.projectEstimate));
+    }
     if (url.endsWith(DETAIL_PATH) && method === "GET") {
       harness.detailCalls += 1;
       return jsonResponse(
@@ -391,6 +454,7 @@ describe("ModuleProgressSection", () => {
   it("refetches the detail when the measure switches", async () => {
     const user = userEvent.setup();
     harness.estimates = [estimate("points")];
+    harness.projectEstimate = ESTIMATE_ID;
     renderSection({ canEdit: true });
     await screen.findByTestId("module-progress-measure");
     expect(harness.detailCalls).toBe(1);
@@ -402,6 +466,15 @@ describe("ModuleProgressSection", () => {
     await user.click(await screen.findByRole("option", { name: "Work items" }));
     await waitFor(() => expect(screen.getByTestId("module-progress-measure").textContent).toBe("Work items"));
     await waitFor(() => expect(harness.detailCalls).toBe(3));
+  });
+
+  it("hides the measure selector when the project has disabled estimates (NEWPIDASH-297)", async () => {
+    harness.estimates = [estimate("points")];
+    harness.projectEstimate = null;
+    renderSection({ canEdit: true });
+    await screen.findByTestId("module-progress-section");
+    expect(screen.queryByTestId("module-progress-measure")).not.toBeInTheDocument();
+    expect(harness.detailCalls).toBe(1);
   });
 });
 
