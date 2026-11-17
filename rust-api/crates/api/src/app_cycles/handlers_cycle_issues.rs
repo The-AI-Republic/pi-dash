@@ -861,7 +861,11 @@ fn cycle_filtered_set(
     let mut complex_sql_text = String::new();
     if let Some(cond) = complex_filter(query, tz)? {
         let (fragment, values) = render_condition(&cond);
-        complex_sql_text = binder.splice(&fragment, values);
+        let spliced = binder.splice(&fragment, values);
+        // NEWPIDASH-296: parenthesise the rich tree, else `scope AND A OR B`
+        // leaks via SQL precedence (`(scope AND A) OR B`). Matches Django's
+        // `.filter(Q(...))` which parenthesises the tree.
+        complex_sql_text = format!("({spliced})");
         fragments.push(complex_sql_text.clone());
     }
     let flat: HashMap<String, String> = query
@@ -2560,6 +2564,74 @@ mod tests {
             filtered.from_where.contains("issue_assignee_legacy."),
             "legacy predicate must resolve over the legacy alias: {}",
             filtered.from_where
+        );
+    }
+
+    #[test]
+    fn rich_or_fragment_is_parenthesized_for_scope() {
+        // NEWPIDASH-296: the rich tree is spliced as `scope AND (A OR B)`,
+        // not `scope AND A OR B` (SQL precedence would leak the second
+        // disjunct). The parenthesised form matches Django's `.filter(Q(...))`.
+        const LABEL_ID: &str = "00000000-0000-0000-0000-000000000101";
+        let mut query = HashMap::new();
+        query.insert(
+            "filters".to_owned(),
+            OneOrMany::One(
+                serde_json::json!({
+                    "or": [
+                        {"label_id__in": [LABEL_ID]},
+                        {"priority__in": ["urgent"]},
+                    ]
+                })
+                .to_string(),
+            ),
+        );
+        let filtered = cycle_filtered_set(
+            "acme",
+            &uuid::Uuid::nil(),
+            &uuid::Uuid::nil(),
+            &uuid::Uuid::nil(),
+            &RowScope::default(),
+            &query,
+            None,
+            None,
+            &chrono_tz::UTC,
+        )
+        .expect("scope");
+        let sql = &filtered.from_where;
+        // The rendered rich fragment must appear parenthesised after AND.
+        // The scope already contributes one `AND (state.…)` guard, so the rich
+        // fragment must add a second parenthesised group — otherwise it is
+        // spliced as `scope AND A OR B` and leaks via SQL precedence.
+        assert!(
+            sql.contains("AND ("),
+            "rich fragment must be parenthesised: {}",
+            sql
+        );
+        assert!(
+            sql.matches("AND (").count() >= 2,
+            "rich or fragment must be wrapped in parentheses (second `AND (`): {}",
+            sql
+        );
+        assert!(sql.contains("OR"), "or fragment missing: {sql}");
+        // The or's two disjuncts must be inside the same outer parentheses:
+        // after the fix the fragment is `((A AND B) OR C)`, so the sql
+        // contains `AND ((` (double open) at the rich fragment, not a bare
+        // `AND (A AND B) OR C` that leaks C.
+        assert!(
+            sql.contains("AND ((\"label_issue\""),
+            "rich or fragment must be fully parenthesised as `((A) OR C)`: {}",
+            sql
+        );
+        // The scope predicates remain ANDed before the parenthesised group.
+        assert!(sql.contains("bridge.cycle_id = "), "scope missing: {sql}");
+        assert!(
+            sql.contains("workspaces.slug = "),
+            "workspace scope missing: {sql}"
+        );
+        assert!(
+            sql.contains("issue.project_id = "),
+            "project scope missing: {sql}"
         );
     }
 
