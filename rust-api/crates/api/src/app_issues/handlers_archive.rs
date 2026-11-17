@@ -153,6 +153,14 @@ async fn archive_context(
 ) -> Result<ArchiveContext, Denial> {
     let base = archive_base(state, slug, project_raw, extension).await?;
     archive_allow(&base.pool, &base.slug, &base.project_id, &base.user_id).await?;
+    if let Some(info) = crate::project_archived::archived_by_id(&base.pool, base.project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     archive_tenant(base, false).await
 }
 
@@ -167,6 +175,14 @@ async fn archive_read_context(
 ) -> Result<ArchiveContext, Denial> {
     let base = archive_base(state, slug, project_raw, extension).await?;
     super::allow_project(&base.pool, &base.slug, &base.project_id, &base.user_id).await?;
+    if let Some(info) = crate::project_archived::archived_by_id(&base.pool, base.project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     let guest_scoped =
         scoped_guest(&base.pool, &base.slug, &base.project_id, &base.user_id).await?;
     archive_tenant(base, guest_scoped).await
