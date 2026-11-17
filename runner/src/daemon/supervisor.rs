@@ -383,7 +383,7 @@ impl Supervisor {
         };
 
         // Wake from sleep / network change: retry every cloud connection
-        // now instead of waiting out a backoff of up to 6 hours.
+        // now instead of waiting out a backoff of up to 5 minutes.
         let triggers_handle = if opts.offline {
             None
         } else {

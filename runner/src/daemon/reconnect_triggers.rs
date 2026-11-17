@@ -109,37 +109,20 @@ fn interface_fingerprint() -> Option<BTreeSet<String>> {
     Some(out)
 }
 
-/// Sorted IP addresses for every routable interface (Windows: plain IPs,
-/// since `local-ip-address` does not expose adapter names; the set is only
-/// compared within the same platform, so the format need not match Unix's
-/// `interface=ip` form).
+/// Sorted IP addresses for every routable interface (Windows: plain IPs;
+/// interface names are ignored because the set is only compared within
+/// the same platform, so the format need not match Unix's `interface=ip`
+/// form).
 #[cfg(windows)]
 fn interface_fingerprint() -> Option<BTreeSet<String>> {
-    use local_ip_address::{list_all_local_ipv4_addresses, list_all_local_ipv6_addresses};
-    use std::net::IpAddr;
+    use local_ip_address::list_afinet_netifas;
 
     let mut out = BTreeSet::new();
-    let mut got_any = false;
-
-    if let Ok(addrs) = list_all_local_ipv4_addresses() {
-        got_any = true;
-        for ip in addrs {
-            if counts_for_network_change(IpAddr::V4(ip)) {
-                out.insert(ip.to_string());
-            }
+    let ifas = list_afinet_netifas().ok()?;
+    for (_iface, ip) in ifas {
+        if counts_for_network_change(ip) {
+            out.insert(ip.to_string());
         }
-    }
-    if let Ok(addrs) = list_all_local_ipv6_addresses() {
-        got_any = true;
-        for ip in addrs {
-            if counts_for_network_change(IpAddr::V6(ip)) {
-                out.insert(ip.to_string());
-            }
-        }
-    }
-    // Both enumerations failed: treat as a failed sample, never a kick.
-    if !got_any {
-        return None;
     }
     Some(out)
 }

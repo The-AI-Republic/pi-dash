@@ -457,7 +457,7 @@ Stable runner releases set `LATEST_RUNNER_VERSION` in Cloud SSM automatically (`
 When a runner can't reach Pi Dash (connection refused, DNS failure, timeout, any 5xx, a proxy error page, or 429), the daemon retries with exponential backoff: 30 s, 1 m, 2 m, 4 m, up to a 5-minute cap, with ±20% jitter on every wait so runners don't all reconnect at once. The cap is deliberately short so CLI-only machines (no desktop app to kick them) recover within minutes after the cloud returns instead of hours. A server outage never removes a runner. `pidash status` shows why a runner is offline and when it will try again:
 
 ```
-  laptop — DISCONNECTED project=WEB (server unreachable; next retry in 1h 52m; last connected 3h ago; 9 failed attempts)
+  laptop — DISCONNECTED project=WEB (server unreachable; next retry in 4m 12s; last connected 3h ago; 9 failed attempts)
 ```
 
 These retry immediately and start the backoff over:
