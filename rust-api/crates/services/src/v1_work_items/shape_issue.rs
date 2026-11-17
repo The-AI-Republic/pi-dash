@@ -1222,6 +1222,21 @@ pub struct BlockerSummary<'a> {
     pub has_open_blockers: bool,
 }
 
+/// The issue-detail `active_run` key (NEWPIDASH-251): the newest run
+/// occupying the one-active-run slot, with the assigned runner's last
+/// heartbeat, so coordinators can tell "really running" from "stuck".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ActiveRunSummary {
+    pub id: String,
+    pub status: String,
+    pub runner_id: Option<String>,
+    pub created_at: String,
+    pub assigned_at: Option<String>,
+    pub started_at: Option<String>,
+    pub age_seconds: i64,
+    pub runner_last_heartbeat_at: Option<String>,
+}
+
 /// Caller-resolved grouped relations (`grouped_relations(instance,
 /// member_project_issues(viewer, slug))` at `issue.py:492`), one list per
 /// [`RELATION_TYPES`] entry in order. `..Default::default()` fills the rest
@@ -1377,6 +1392,12 @@ pub struct RepresentationInput<'a> {
     /// `relations_viewer` context key is set AND the payload is single AND the
     /// fields gate passes); `None` omits the block.
     pub relations: Option<&'a GroupedRelations<'a>>,
+    /// Newest active run (NEWPIDASH-251): rendered as `active_run`
+    /// on single payloads when `?fields=` requests it (or no `fields=`
+    /// given) and a run occupies the one-active-run slot. Only the
+    /// read service fetches it; write paths and idle issues pass
+    /// `None` (key omitted — absence means no active run).
+    pub active_run: Option<&'a ActiveRunSummary>,
     /// Rendered values for map-hit `expand` names (`state`, `project`,
     /// `workspace`, `created_by`, `updated_by`, `parent`, `estimate_point`
     /// among this serializer's fields): `Some(value)` renders the object,
@@ -1632,6 +1653,18 @@ pub fn render_issue(input: &RepresentationInput<'_>) -> Result<Map<String, Value
             out.insert(
                 "relations".to_string(),
                 Value::Object(relations_block(groups)),
+            );
+        }
+    }
+
+    // Newest active run (NEWPIDASH-251): single payloads,
+    // `?fields=`-gated like the blocker summary above. `None` (write
+    // paths; idle issues) omits the key — absence means no active run.
+    if let Some(run) = input.active_run {
+        if !input.is_list && (requested.is_empty() || requested.contains(&"active_run")) {
+            out.insert(
+                "active_run".to_string(),
+                serde_json::to_value(run).expect("ActiveRunSummary is always serializable"),
             );
         }
     }
@@ -2732,6 +2765,7 @@ mod tests {
             expanded_labels,
             blockers,
             relations,
+            active_run: None,
             expansions: no_expansions,
         })
         .expect("render succeeds")
@@ -2830,9 +2864,68 @@ mod tests {
             expanded_labels: &[],
             blockers: None,
             relations: None,
+            active_run: None,
             expansions: no_expansions,
         });
         assert_eq!(err, Err(RenderError::MissingBlockers));
+    }
+
+    #[test]
+    fn render_active_run_block_gated() {
+        // NEWPIDASH-251: the newest active run rides single payloads
+        // with the heartbeat; `fields=`-gated and absent on lists.
+        let row = full_row();
+        let blockers = empty_blockers();
+        let run = ActiveRunSummary {
+            id: "a7509d00-345f-47fb-bee3-6bcf7d3339e2".to_string(),
+            status: "running".to_string(),
+            runner_id: Some("b71fe111-2222-3333-4444-555566667777".to_string()),
+            created_at: "2026-10-02T23:00:00+00:00".to_string(),
+            assigned_at: Some("2026-10-02T23:00:01+00:00".to_string()),
+            started_at: Some("2026-10-02T23:00:05+00:00".to_string()),
+            age_seconds: 720,
+            runner_last_heartbeat_at: Some("2026-10-02T23:10:00+00:00".to_string()),
+        };
+        let no_rows: &[UserLiteRow] = &[];
+        let no_expansions: &[(&str, Option<Value>)] = &[];
+        let render = |fields: Option<&[FieldSpec]>, is_list: bool| {
+            render_issue(&RepresentationInput {
+                row: &row,
+                fields,
+                expand: &[],
+                is_list,
+                assignee_ids: &[],
+                assignee_rows: no_rows,
+                label_ids: &[],
+                expanded_labels: &[],
+                blockers: Some(&blockers),
+                relations: None,
+                active_run: Some(&run),
+                expansions: no_expansions,
+            })
+            .expect("render succeeds")
+        };
+        let out = render(None, false);
+        let block = &out["active_run"];
+        assert_eq!(
+            block["id"].as_str().unwrap(),
+            "a7509d00-345f-47fb-bee3-6bcf7d3339e2"
+        );
+        assert_eq!(block["status"].as_str().unwrap(), "running");
+        assert_eq!(block["age_seconds"].as_i64().unwrap(), 720);
+        assert_eq!(
+            block["runner_last_heartbeat_at"].as_str().unwrap(),
+            "2026-10-02T23:10:00+00:00"
+        );
+        // `?fields=id,name` excludes the block; explicit
+        // `?fields=active_run` includes it on single payloads.
+        let restricted = render(Some(&includes(&["id", "name"])), false);
+        assert!(!restricted.contains_key("active_run"));
+        let explicit = render(Some(&includes(&["active_run"])), false);
+        assert!(explicit.contains_key("active_run"));
+        // Lists never carry it (like the blocker keys).
+        let list = render(None, true);
+        assert!(!list.contains_key("active_run"));
     }
 
     #[test]
@@ -2930,6 +3023,7 @@ mod tests {
             expanded_labels: &[],
             blockers: Some(&blockers),
             relations: None,
+            active_run: None,
             expansions: no_expansions,
         })
         .expect("assignee expand renders");
@@ -3001,6 +3095,7 @@ mod tests {
             expanded_labels: &[],
             blockers: None,
             relations: None,
+            active_run: None,
             expansions: no_expansions,
         });
         assert!(matches!(err, Err(RenderError::Fields(_))));
@@ -3153,6 +3248,7 @@ mod tests {
             expanded_labels: &[],
             blockers: Some(&blockers),
             relations: None,
+            active_run: None,
             expansions: &expansions,
         })
         .expect("map hits render");
@@ -3171,6 +3267,7 @@ mod tests {
             expanded_labels: &[],
             blockers: Some(&blockers),
             relations: None,
+            active_run: None,
             expansions: &[],
         });
         assert_eq!(err, Err(RenderError::MissingExpansion("state".to_string())));
@@ -3216,6 +3313,7 @@ mod tests {
             expanded_labels: &[],
             blockers: Some(&blockers),
             relations: None,
+            active_run: None,
             expansions: no_expansions,
         });
         assert_eq!(err, Err(RenderError::BinaryNotUtf8));
@@ -3233,6 +3331,7 @@ mod tests {
             expanded_labels: &[],
             blockers: Some(&blockers),
             relations: None,
+            active_run: None,
             expansions: no_expansions,
         });
         assert_eq!(err, Err(RenderError::NonFiniteFloat));

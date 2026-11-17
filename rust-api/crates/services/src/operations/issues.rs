@@ -4315,6 +4315,7 @@ async fn render_moved_issue_api(
         expanded_labels: &[],
         blockers: Some(&blockers),
         relations: None,
+        active_run: None,
         expansions: &[],
     };
     // The binary/NaN arms reproduce Django 500s; the `Missing*` arms are

@@ -168,6 +168,52 @@ def test_daemon_run_fail_shape(machine_client, daemon_run, seeder):
     ) == {"message": "boom"}
 
 
+def test_daemon_run_fail_dedupes_by_idempotency_key(machine_client, daemon_run):
+    """A journal replay re-sends with the same key: deduped, no rewrite."""
+    key = _idem()
+    first = machine_client.post(
+        f"{DAEMON}/runs/{daemon_run['id']}/fail/",
+        json={"detail": "boom"},
+        headers=key,
+    )
+    assert first.json() == {"ok": True}
+    second = machine_client.post(
+        f"{DAEMON}/runs/{daemon_run['id']}/fail/",
+        json={"detail": "boom"},
+        headers=key,
+    )
+    assert second.json() == {"ok": True, "duplicate": True}
+    assert second.headers["allow"] == "POST, OPTIONS"
+
+
+def test_daemon_run_fail_is_first_writer_wins(machine_client, daemon_run, seeder):
+    """A late failure after terminalization is acked, not applied.
+
+    NEWPIDASH-251: journaled RunFailed reports may arrive after the
+    server already closed the run (e.g. via the stuck-run sweep).
+    Both backends ack the late report without rewriting the row:
+    the first failure's detail wins.
+    """
+    first = machine_client.post(
+        f"{DAEMON}/runs/{daemon_run['id']}/fail/",
+        json={"detail": "boom"},
+        headers=_idem(),
+    )
+    assert first.json() == {"ok": True}
+    late = machine_client.post(
+        f"{DAEMON}/runs/{daemon_run['id']}/fail/",
+        json={"detail": "late replay detail"},
+        headers=_idem(),
+    )
+    assert late.status_code == 200, late.text
+    assert late.json() == {"ok": True}
+    row = seeder.db.fetchone(
+        "SELECT status, error_details FROM agent_run WHERE id = %s", (daemon_run["id"],)
+    )
+    assert row["status"] == "failed"
+    assert row["error_details"] == {"message": "boom"}
+
+
 @pytest.mark.parametrize(
     ("body", "expected"),
     [

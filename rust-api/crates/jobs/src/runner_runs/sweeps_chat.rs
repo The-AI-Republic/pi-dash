@@ -68,7 +68,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use sea_orm::sea_query::Expr;
+use sea_orm::sea_query::{Alias, Expr, Query, SimpleExpr};
 use sea_orm::{
     ColumnTrait, Condition, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect,
     RelationTrait,
@@ -459,6 +459,99 @@ pub fn assigned_never_started_select(
         .filter(Column::RunnerId.is_not_null())
         .order_by_asc(Column::AssignedAt)
         .into_model::<AssignedNeverStartedCandidate>()
+}
+
+/// A candidate for the NEWPIDASH-251 pre-start unconfirmed sweep:
+/// a `WAITING_FOR_WORKTREE` run assigned for longer than
+/// `ASSIGNED_NEVER_STARTED_SECS`, or a `RUNNING` run with no runner
+/// report (no `runner_live_state.observed_run_id`) for longer than
+/// the stall threshold. Both shapes hold the active-run guard while
+/// nothing will ever terminalize them (a lost pre-start failure
+/// report, or a runner that never confirmed). `QUEUED` is excluded
+/// by design (it is not yet assigned), as are the human-wait
+/// statuses (`cancel_requested`, `awaiting_*`).
+#[derive(Debug, Clone, PartialEq, Eq, sea_orm::FromQueryResult)]
+pub struct PreStartUnconfirmedCandidate {
+    pub run_id: Uuid,
+    pub runner_id: Option<Uuid>,
+    pub pod_id: Option<Uuid>,
+    pub status: String,
+    pub assigned_at: Option<DateTime<Utc>>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub capacity_wait: Option<serde_json::Value>,
+    pub assignment_token: Option<Uuid>,
+}
+
+/// The worktree-wait cutoff: `now - ASSIGNED_NEVER_STARTED_SECS`.
+/// Mirrors the assigned-never-started bound — a healthy worktree
+/// checkout completes well within 180s.
+pub fn pre_start_worktree_cutoff(now: DateTime<Utc>) -> DateTime<Utc> {
+    now - chrono::Duration::seconds(ASSIGNED_NEVER_STARTED_SECS)
+}
+
+/// The running-never-observed cutoff: `now - threshold_secs`.
+/// Mirrors the stall threshold (env `RUNNER_AGENT_STALL_THRESHOLD_SECS`,
+/// default 360s) so a runner that never reported is held to the
+/// same silence bound as one that went quiet.
+pub fn pre_start_running_cutoff(now: DateTime<Utc>, threshold_secs: i64) -> DateTime<Utc> {
+    now - chrono::Duration::seconds(threshold_secs)
+}
+
+/// `NOT EXISTS` a runner observation of this run: no
+/// `runner_live_state.observed_run_id = agent_run.id` row.
+fn not_observed_exists() -> SimpleExpr {
+    let sub = Query::select()
+        .expr_as(
+            SimpleExpr::Value(sea_orm::sea_query::Value::Int(Some(1))),
+            Alias::new("a"),
+        )
+        .from(Alias::new("runner_live_state"))
+        .and_where(
+            Expr::col((Alias::new("runner_live_state"), "observed_run_id"))
+                .equals((Alias::new("agent_run"), "id")),
+        )
+        .limit(1u64)
+        .to_owned();
+    Expr::exists(sub)
+}
+
+/// Candidate select for pre-start unconfirmed runs: runner-bound,
+/// never observed, and past the per-status bound. Ordered
+/// oldest-first by creation. `assigned_at`/`started_at` NULLs never
+/// match (`<` excludes NULL); anomalous rows stay for the other
+/// sweep arms (or manual triage), exactly like the assigned arm.
+pub fn pre_start_unconfirmed_select(
+    worktree_cutoff: DateTime<Utc>,
+    running_cutoff: DateTime<Utc>,
+) -> sea_orm::Selector<sea_orm::SelectModel<PreStartUnconfirmedCandidate>> {
+    use orm::agent_run::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .column_as(Column::Id, "run_id")
+        .column_as(Column::RunnerId, "runner_id")
+        .column_as(Column::PodId, "pod_id")
+        .column_as(Column::Status, "status")
+        .column_as(Column::AssignedAt, "assigned_at")
+        .column_as(Column::StartedAt, "started_at")
+        .column_as(Column::CapacityWait, "capacity_wait")
+        .column_as(Column::AssignmentToken, "assignment_token")
+        .filter(Column::RunnerId.is_not_null())
+        .filter(Condition::all().add(not_observed_exists()).not())
+        .filter(
+            Condition::any()
+                .add(
+                    Condition::all()
+                        .add(Column::Status.eq(AgentRunStatus::WaitingForWorktree.value()))
+                        .add(Column::AssignedAt.lt(worktree_cutoff)),
+                )
+                .add(
+                    Condition::all()
+                        .add(Column::Status.eq(AgentRunStatus::Running.value()))
+                        .add(Column::StartedAt.lt(running_cutoff)),
+                ),
+        )
+        .order_by_asc(Column::CreatedAt)
+        .into_model::<PreStartUnconfirmedCandidate>()
 }
 
 /// The terminal-effects batch select (`tasks.py:345-350`): terminal
@@ -933,6 +1026,17 @@ pub fn assigned_never_started_detail(threshold_secs: i64) -> String {
     format!("assigned run never started: runner never polled within >{threshold_secs}s")
 }
 
+/// The pre-start unconfirmed detail (NEWPIDASH-251): the run held
+/// its status with no runner report until the bound released it.
+/// The status and bound ride in the text so the issue activity
+/// comment says why, per the issue's acceptance.
+pub fn pre_start_unconfirmed_detail(status: &str, threshold_secs: i64) -> String {
+    let minutes = ((threshold_secs + 59) / 60).max(1);
+    format!(
+        "runner never confirmed this run (status={status}, no runner report >{threshold_secs}s); released after {minutes} minutes"
+    )
+}
+
 /// `runner.reconcile_stalled_runs`: reap silent `ASSIGNED`/`RUNNING`
 /// runs as `FAILED` via L4 (observed-run stall watchdog) plus, since
 /// NEWPIDASH-262, `ASSIGNED` / never-started runs older than
@@ -987,9 +1091,34 @@ pub async fn reconcile_stalled_runs(
             ),
         }
     }
+    // NEWPIDASH-251: pre-start unconfirmed runs the stall watchdog
+    // misses by construction (never observed): WAITING_FOR_WORKTREE
+    // past 180s and RUNNING with no report past the stall threshold.
+    let worktree_cutoff = pre_start_worktree_cutoff(*now);
+    let running_cutoff = pre_start_running_cutoff(*now, threshold_secs);
+    let unconfirmed_rows = pre_start_unconfirmed_select(worktree_cutoff, running_cutoff)
+        .all(&sea_orm_connection(pool))
+        .await?;
+    for candidate in &unconfirmed_rows {
+        let run_id = candidate.run_id;
+        // Skip runs an earlier arm already reaped in this pass.
+        if rows.iter().any(|r| r.run_id == run_id)
+            || assigned_rows.iter().any(|r| r.run_id == run_id)
+        {
+            continue;
+        }
+        match reap_pre_start_unconfirmed_row(pool, seams, candidate, threshold_secs).await {
+            Ok(true) => reaped += 1,
+            Ok(false) => {}
+            Err(error) => tracing::error!(
+                %error,
+                "reconcile_stalled_runs: failed to reap pre-start unconfirmed run {run_id}"
+            ),
+        }
+    }
     if reaped > 0 {
         tracing::info!(
-            "reconcile_stalled_runs reaped {reaped} stalled run(s) (threshold={threshold_secs}s, assigned-never-started>180s)"
+            "reconcile_stalled_runs reaped {reaped} stalled run(s) (threshold={threshold_secs}s, assigned-never-started>180s, pre-start-unconfirmed>180s/360s)"
         );
     }
     Ok(reaped)
@@ -1111,6 +1240,109 @@ pub async fn reap_assigned_never_started_by_id(
         assignment_token: run.assignment_token,
     };
     reap_assigned_never_started_row(pool, seams, &candidate).await
+}
+
+/// One pre-start unconfirmed row (NEWPIDASH-251): fail it (`FAILED`)
+/// so the active-run guard releases without manual action. Same
+/// shape as the assigned-never-started reap (no live-state
+/// requirement — the runner never observed the run) but the detail
+/// carries the status and the bound that released it. Fresh
+/// capacity waits are protected exactly like the assigned arm
+/// (NEWPIDASH-241 T2).
+async fn reap_pre_start_unconfirmed_row(
+    pool: &PgPool,
+    seams: &dyn RunnerRunsSeams,
+    candidate: &PreStartUnconfirmedCandidate,
+    threshold_secs: i64,
+) -> Result<bool, SweepError> {
+    let Some(runner_id) = candidate.runner_id else {
+        return Ok(false);
+    };
+    let bound_secs = if candidate.status == AgentRunStatus::Running.value() {
+        threshold_secs
+    } else {
+        ASSIGNED_NEVER_STARTED_SECS
+    };
+    // Same fresh-capacity protection as the assigned arm.
+    if let Some(cw) = candidate.capacity_wait.as_ref() {
+        if pidash_services::runner_runs::capacity::is_fresh_capacity_wait(
+            cw,
+            candidate.assignment_token,
+            Utc::now(),
+        ) {
+            return Ok(false);
+        }
+    }
+    let detail = pre_start_unconfirmed_detail(&candidate.status, bound_secs);
+    let live =
+        lifecycle::live_state_usage_facts(&sea_orm_connection(pool), runner_id, candidate.run_id)
+            .await?;
+    let error_detail = Value::String(detail);
+    let null = Value::Null;
+    let inputs = lifecycle::TerminalUpdateInputs {
+        status: AgentRunStatus::Failed,
+        done_payload: &null,
+        error_detail: &error_detail,
+        runner_failure_reason: &null,
+        refusal_category: &null,
+        tokens: &null,
+        model: &null,
+        live: live.as_ref(),
+        runner: None,
+    };
+    let mut values = lifecycle::plan_terminal_finalize(&inputs)?;
+    run_finalize_transaction(pool, &candidate.run_id, &runner_id, &mut values).await?;
+    for effect in finalization::plan_publish_effects(candidate.run_id) {
+        match effect {
+            LifecycleEffect::PublishTerminalEffects { run_id } => {
+                if let Err(error) = enqueue(pool, &terminal_effects_job(&run_id)).await {
+                    tracing::error!(%error, "failed to publish terminal effects for run {run_id}");
+                }
+            }
+            LifecycleEffect::ApplyTerminalEffectsInline { run_id } => {
+                if let Err(error) = apply_agent_run_terminal_effects(pool, seams, &run_id).await {
+                    tracing::error!(%error, "failed to apply terminal effects for run {run_id}");
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(true)
+}
+
+/// Reap a single pre-start unconfirmed run by id (used by tests).
+/// Returns whether the row was finalized.
+pub async fn reap_pre_start_unconfirmed_by_id(
+    pool: &PgPool,
+    seams: &dyn RunnerRunsSeams,
+    run_id: Uuid,
+    threshold_secs: i64,
+) -> Result<bool, SweepError> {
+    let row = orm::agent_run::Entity::find_by_id(run_id)
+        .one(&sea_orm_connection(pool))
+        .await?;
+    let Some(run) = row else {
+        return Ok(false);
+    };
+    let in_scope = run.status == AgentRunStatus::WaitingForWorktree.value()
+        || run.status == AgentRunStatus::Running.value();
+    if !in_scope {
+        return Ok(false);
+    }
+    let Some(runner_id) = run.runner_id else {
+        return Ok(false);
+    };
+    let candidate = PreStartUnconfirmedCandidate {
+        run_id,
+        runner_id: Some(runner_id),
+        pod_id: Some(run.pod_id),
+        status: run.status.clone(),
+        assigned_at: run.assigned_at.map(|at| at.with_timezone(&Utc)),
+        started_at: run.started_at.map(|at| at.with_timezone(&Utc)),
+        capacity_wait: run.capacity_wait.clone(),
+        assignment_token: run.assignment_token,
+    };
+    reap_pre_start_unconfirmed_row(pool, seams, &candidate, threshold_secs).await
 }
 
 /// One stall row: `finalize_run_terminal(runner, id, FAILED,
@@ -1995,6 +2227,23 @@ mod tests {
             assigned_never_started_detail(180),
             "assigned run never started: runner never polled within >180s"
         );
+        // NEWPIDASH-251: pre-start unconfirmed cutoffs and detail.
+        assert_eq!(
+            pre_start_worktree_cutoff(now),
+            now - chrono::Duration::seconds(ASSIGNED_NEVER_STARTED_SECS)
+        );
+        assert_eq!(
+            pre_start_running_cutoff(now, 360),
+            now - chrono::Duration::seconds(360)
+        );
+        assert_eq!(
+            pre_start_unconfirmed_detail("waiting_for_worktree", 180),
+            "runner never confirmed this run (status=waiting_for_worktree, no runner report >180s); released after 3 minutes"
+        );
+        assert_eq!(
+            pre_start_unconfirmed_detail("running", 360),
+            "runner never confirmed this run (status=running, no runner report >360s); released after 6 minutes"
+        );
     }
 
     #[test]
@@ -2012,6 +2261,31 @@ mod tests {
         }
         assert!(
             sql.contains(" ORDER BY \"agent_run\".\"assigned_at\" ASC"),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn pre_start_unconfirmed_select_shape() {
+        // NEWPIDASH-251: never-observed, runner-bound, per-status bound.
+        let worktree = utc(2026, 11, 14, 12, 0, 0);
+        let running = utc(2026, 11, 14, 11, 54, 0);
+        let sql = pg_selector(pre_start_unconfirmed_select(worktree, running));
+        for part in [
+            "\"agent_run\".\"runner_id\" IS NOT NULL",
+            "NOT EXISTS",
+            "\"runner_live_state\".\"observed_run_id\" = \"agent_run\".\"id\"",
+            "\"agent_run\".\"status\" = 'waiting_for_worktree'",
+            "\"agent_run\".\"assigned_at\" < '2026-11-14 12:00:00.000000 +00:00'",
+            "\"agent_run\".\"status\" = 'running'",
+            "\"agent_run\".\"started_at\" < '2026-11-14 11:54:00.000000 +00:00'",
+        ] {
+            assert!(sql.contains(part), "{part} missing: {sql}");
+        }
+        // Queued must never be reaped by this arm.
+        assert!(!sql.contains("'queued'"), "{sql}");
+        assert!(
+            sql.contains(" ORDER BY \"agent_run\".\"created_at\" ASC"),
             "{sql}"
         );
     }
