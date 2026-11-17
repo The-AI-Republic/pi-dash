@@ -489,8 +489,8 @@ def test_pod_once_allowed_in_project_members(settings, seeder, daemon_world, mac
     _set_creator(seeder, issue["id"], daemon_world["owner"]["id"])
     _set_policy(seeder, daemon_world, "project_members")
     seeder.db.execute(
-        "UPDATE issues SET assigned_runner_id = %s WHERE id = %s",
-        (machine_flow["runner_id"], issue["id"]),
+        "UPDATE issues SET assigned_runner_id = %s, assigned_pod_id = %s WHERE id = %s",
+        (machine_flow["runner_id"], daemon_world["pod"]["id"], issue["id"]),
     )
     member = _member(seeder, daemon_world, role=15)
     ctx, client = _member_client(settings, member)
@@ -525,8 +525,8 @@ def test_pod_once_denied_in_default_mode(settings, seeder, daemon_world, machine
     issue = _ticking_issue(seeder, daemon_world)
     _set_creator(seeder, issue["id"], daemon_world["owner"]["id"])
     seeder.db.execute(
-        "UPDATE issues SET assigned_runner_id = %s WHERE id = %s",
-        (machine_flow["runner_id"], issue["id"]),
+        "UPDATE issues SET assigned_runner_id = %s, assigned_pod_id = %s WHERE id = %s",
+        (machine_flow["runner_id"], daemon_world["pod"]["id"], issue["id"]),
     )
     member = _member(seeder, daemon_world, role=15)
     ctx, client = _member_client(settings, member)

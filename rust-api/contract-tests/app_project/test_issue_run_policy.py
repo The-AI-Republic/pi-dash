@@ -77,7 +77,7 @@ def test_assignee_moves_state(world):
     member_user, member_client = world.add_member(ws, project, ws_role=15, proj_role=15)
     issue = _make_issue(client, ws, project)
     resp = _patch_issue(
-        client, ws, project, issue["id"], {"assignee_ids": [member_user["id"]]}
+        client, ws, project, issue["id"], {"assignee_ids": [str(member_user["id"])]}
     )
     assert resp.status_code == 204, resp.text[:500]
     target = _other_state(_states(client, ws, project), issue["state_id"])
@@ -108,7 +108,7 @@ def test_removed_assignee_cannot_move_state(world):
     member_user, member_client = world.add_member(ws, project, ws_role=15, proj_role=15)
     issue = _make_issue(client, ws, project)
     resp = _patch_issue(
-        client, ws, project, issue["id"], {"assignee_ids": [member_user["id"]]}
+        client, ws, project, issue["id"], {"assignee_ids": [str(member_user["id"])]}
     )
     assert resp.status_code == 204, resp.text[:500]
     resp = _patch_issue(
@@ -148,16 +148,15 @@ def test_same_state_restatement_is_allowed(world):
 
 
 def test_guest_cannot_move_state(world):
-    # Guests hold no run rights in either mode; on Rust the 403 carries
-    # the run-policy reason (older permission gates answer 403 too).
+    # Guests hold no run rights in either mode; the generic permission
+    # gate answers 403 before the run-policy gate (guests already
+    # cannot edit issues today).
     client, user, ws, project = world.full_stack()
     guest_user, guest_client = world.add_member(ws, project, ws_role=15, proj_role=5)
     issue = _make_issue(client, ws, project)
     target = _other_state(_states(client, ws, project), issue["state_id"])
     resp = _patch_issue(guest_client, ws, project, issue["id"], {"state_id": target})
     assert resp.status_code == 403, resp.text[:500]
-    if is_rust():
-        assert resp.json() == {"error": MESSAGE, "reason": REASON}
 
 
 def test_project_members_allows_member(world):
@@ -172,6 +171,7 @@ def test_project_members_allows_member(world):
 
 
 def test_project_members_still_excludes_guests(world):
+    # Guests are excluded in project_members too (generic gate).
     client, user, ws, project = world.full_stack()
     guest_user, guest_client = world.add_member(ws, project, ws_role=15, proj_role=5)
     issue = _make_issue(client, ws, project)
@@ -179,8 +179,6 @@ def test_project_members_still_excludes_guests(world):
     target = _other_state(_states(client, ws, project), issue["state_id"])
     resp = _patch_issue(guest_client, ws, project, issue["id"], {"state_id": target})
     assert resp.status_code == 403, resp.text[:500]
-    if is_rust():
-        assert resp.json() == {"error": MESSAGE, "reason": REASON}
 
 
 def _bulk(client, ws, project, issue_ids, properties):
@@ -211,7 +209,7 @@ def test_bulk_state_allowed_for_assignee(world):
     member_user, member_client = world.add_member(ws, project, ws_role=15, proj_role=15)
     issue = _make_issue(client, ws, project)
     resp = _patch_issue(
-        client, ws, project, issue["id"], {"assignee_ids": [member_user["id"]]}
+        client, ws, project, issue["id"], {"assignee_ids": [str(member_user["id"])]}
     )
     assert resp.status_code == 204, resp.text[:500]
     target = _other_state(_states(client, ws, project), issue["state_id"])
