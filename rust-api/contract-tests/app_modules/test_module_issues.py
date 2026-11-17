@@ -717,3 +717,98 @@ def test_legacy_relation_filters_answer_200(
             cur.execute(
                 "DELETE FROM cycles WHERE workspace_id = %s", (ws_id,)
             )
+
+
+# --- NEWPIDASH-282: re-adding an already-linked item is a no-op 201 ----
+# Django's bulk_create(ignore_conflicts=True) ignores conflicts and
+# always answers 201 {"message": "success"}. The Rust port used
+# insert_many(...).exec() which surfaces DbErr::RecordNotInserted
+# (500) when every row conflicts. The fix swaps in
+# exec_without_returning so the all-duplicate case stays 201.
+# These cases pin the parity: they fail on the unfixed Rust binary
+# (500) and pass on both backends after the fix.
+
+def test_create_module_issues_idempotent(api, seed, tenant_a, project_a, auth_a, module_a, issue_a):
+    url = _module_issues_url(tenant_a, project_a, module_a)
+    # First add.
+    r = api.post(url, headers=auth_a, json={"issues": [issue_a]})
+    assert r.status_code == 201, r.text
+    assert r.json() == {"message": "success"}
+    # Duplicate add: still 201, still one live row.
+    r = api.post(url, headers=auth_a, json={"issues": [issue_a]})
+    assert r.status_code == 201, r.text
+    assert r.json() == {"message": "success"}
+    with seed.conn.cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) FROM module_issues WHERE module_id = %s AND issue_id = %s"
+            " AND deleted_at IS NULL",
+            (module_a, issue_a),
+        )
+        assert cur.fetchone()[0] == 1
+
+
+def test_create_issue_modules_idempotent(api, seed, tenant_a, project_a, auth_a, module_a, issue_a):
+    url = _issue_modules_url(tenant_a, project_a, issue_a)
+    r = api.post(url, headers=auth_a, json={"modules": [module_a], "removed_modules": []})
+    assert r.status_code == 201, r.text
+    assert r.json() == {"message": "success"}
+    r = api.post(url, headers=auth_a, json={"modules": [module_a], "removed_modules": []})
+    assert r.status_code == 201, r.text
+    assert r.json() == {"message": "success"}
+    with seed.conn.cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) FROM module_issues WHERE module_id = %s AND issue_id = %s"
+            " AND deleted_at IS NULL",
+            (module_a, issue_a),
+        )
+        assert cur.fetchone()[0] == 1
+
+
+def test_create_module_issues_mixed_duplicate_and_new(
+    api, seed, tenant_a, project_a, auth_a, module_a, issue_a
+):
+    ws_id = tenant_a["workspace"]["id"]
+    issue_b = seed.issue(ws_id, project_a, name="NEWPIDASH-282 mixed new")
+    url = _module_issues_url(tenant_a, project_a, module_a)
+    r = api.post(url, headers=auth_a, json={"issues": [issue_a]})
+    assert r.status_code == 201, r.text
+    # One duplicate (issue_a) plus one new (issue_b): still 201, both live.
+    r = api.post(url, headers=auth_a, json={"issues": [issue_a, issue_b]})
+    assert r.status_code == 201, r.text
+    assert r.json() == {"message": "success"}
+    with seed.conn.cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) FROM module_issues WHERE module_id = %s AND issue_id = %s"
+            " AND deleted_at IS NULL",
+            (module_a, issue_a),
+        )
+        assert cur.fetchone()[0] == 1
+        cur.execute(
+            "SELECT COUNT(*) FROM module_issues WHERE module_id = %s AND issue_id = %s"
+            " AND deleted_at IS NULL",
+            (module_a, issue_b),
+        )
+        assert cur.fetchone()[0] == 1
+
+
+def test_create_issue_modules_mixed_duplicate_and_new(
+    api, seed, tenant_a, project_a, auth_a, module_a, issue_a
+):
+    ws_id = tenant_a["workspace"]["id"]
+    module_b = seed.module(ws_id, project_a)
+    url = _issue_modules_url(tenant_a, project_a, issue_a)
+    r = api.post(url, headers=auth_a, json={"modules": [module_a], "removed_modules": []})
+    assert r.status_code == 201, r.text
+    r = api.post(
+        url, headers=auth_a, json={"modules": [module_a, module_b], "removed_modules": []}
+    )
+    assert r.status_code == 201, r.text
+    assert r.json() == {"message": "success"}
+    with seed.conn.cursor() as cur:
+        for mid in (module_a, module_b):
+            cur.execute(
+                "SELECT COUNT(*) FROM module_issues WHERE module_id = %s AND issue_id = %s"
+                " AND deleted_at IS NULL",
+                (mid, issue_a),
+            )
+            assert cur.fetchone()[0] == 1
