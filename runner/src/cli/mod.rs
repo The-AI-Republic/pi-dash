@@ -194,6 +194,12 @@ pub async fn run(cli: Cli) -> Result<()> {
     let paths = crate::util::paths::Paths::resolve(cli.config_dir.clone(), cli.data_dir.clone())?;
     tracing::debug!(?paths, "resolved runner paths");
 
+    // One-shot commands exit quietly when their stdout reader goes away
+    // (`pidash … | head`). The daemon keeps the default panic behaviour.
+    if quiet_on_broken_pipe(cli.command.as_ref()) {
+        crate::util::broken_pipe::install();
+    }
+
     let Some(command) = cli.command else {
         return run_default(&paths).await;
     };
@@ -263,5 +269,41 @@ fn run_crud(code: i32) -> Result<()> {
         Ok(())
     } else {
         std::process::exit(code);
+    }
+}
+
+/// Whether `command` gets the broken-pipe hook (see `util::broken_pipe`).
+/// Everything except the long-running daemon (`pidash __run`), whose
+/// behaviour on a broken socket or child pipe must not change.
+fn quiet_on_broken_pipe(command: Option<&Command>) -> bool {
+    !matches!(command, Some(Command::Run(_)))
+}
+
+#[cfg(test)]
+mod broken_pipe_scope_tests {
+    use super::*;
+
+    fn command(argv: &[&str]) -> Option<Command> {
+        Cli::try_parse_from(argv).expect("parse argv").command
+    }
+
+    #[test]
+    fn one_shot_commands_exit_quietly_on_broken_pipe() {
+        for argv in [
+            &["pidash", "comment", "list", "ENG-1"][..],
+            &["pidash", "issue", "get", "ENG-1"][..],
+            &["pidash", "workspace", "me"][..],
+            &["pidash", "status"][..],
+            &["pidash"][..],
+        ] {
+            assert!(quiet_on_broken_pipe(command(argv).as_ref()), "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn daemon_keeps_default_panic_behaviour() {
+        assert!(!quiet_on_broken_pipe(
+            command(&["pidash", "__run"]).as_ref()
+        ));
     }
 }
