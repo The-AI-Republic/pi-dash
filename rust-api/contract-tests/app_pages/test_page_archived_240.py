@@ -291,6 +291,37 @@ def test_move_new_project_id_alias(settings, archived_world, second_project):
         assert response.status_code in (404, 405)
     client.close()
 
+def test_move_self_is_noop(settings, active_world):
+    client = _client_for(settings, active_world)
+    move_url = page_url(active_world, active_world["page"]["id"]) + "move/"
+    response = client.post(move_url, json={"target_project_id": active_world["project"]["id"]})
+    from _harness.diffs import is_rust
+    if is_rust():
+        # Self-move is a no-op 200: the page stays linked and readable.
+        assert response.status_code == 200, response.text
+        assert response.json().get("project_status") == "active"
+        detail = client.get(page_url(active_world, active_world["page"]["id"]))
+        assert detail.status_code == 200, detail.text
+        listing = client.get(page_url(active_world))
+        assert listing.status_code == 200
+        assert active_world["page"]["id"] in {r["id"] for r in listing.json()}
+    else:
+        assert response.status_code in (404, 405)
+    client.close()
+
+def test_move_self_archived_refused(settings, archived_world):
+    client = _client_for(settings, archived_world)
+    move_url = page_url(archived_world, archived_world["page"]["id"]) + "move/"
+    response = client.post(move_url, json={"target_project_id": archived_world["project"]["id"]})
+    from _harness.diffs import is_rust
+    if is_rust():
+        # Target is archived (source), so the move is refused with 409.
+        assert response.status_code == 409, response.text
+        _assert_archived_body(response, archived_world)
+    else:
+        assert response.status_code in (404, 405)
+    client.close()
+
 def test_move_ordering_403_before_409(settings, active_world, seeder, db):
     # Caller is a member of the source but NOT of the archived target:
     # must get 403 (gate), not the 409 that would name the archive.

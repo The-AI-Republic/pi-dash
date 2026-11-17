@@ -4211,6 +4211,10 @@ async fn page_move_inner(
     }
     // Re-point: one conditional `update_many` runs per call, so no
     // explicit transaction is needed; each statement is atomic on its own.
+    // A self-move (target == source) is a no-op: the page is already
+    // linked, so the write is skipped entirely below — otherwise the
+    // soft-delete branch would unlink the page from its only project
+    // and the read-back would 404.
     let existing_target: Option<Uuid> = project_pages::Entity::find()
         .select_only()
         .column(project_pages::Column::Id)
@@ -4222,7 +4226,9 @@ async fn page_move_inner(
         .await
         .map_err(|error| db_error(error, "page-move-existing"))?;
     let now = now_utc().fixed_offset();
-    if existing_target.is_some() {
+    if target_project_id == source_project_id {
+        // No-op: page stays linked; fall through to the read-back.
+    } else if existing_target.is_some() {
         project_pages::Entity::update_many()
             .col_expr(project_pages::Column::DeletedAt, Expr::value(Some(now)))
             .col_expr(project_pages::Column::UpdatedAt, Expr::value(now))

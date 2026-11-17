@@ -800,11 +800,14 @@ fn read_scope_where(slug: &str, user: &str) -> String {
     )
 }
 
-/// Archived-project list scope: same shape as [`read_scope_where`] but
-/// without the `projects.archived_at IS NULL` leg, so the archived
-/// project's own pages are visible. Only used for the list read of an
-/// archived project (NEWPIDASH-240); every other read returns 409 before
-/// fetching, so this never widens detail access.
+/// Archived-project list scope: like [`read_scope_where`] but without
+/// the `projects.archived_at IS NULL` leg, so the archived project's
+/// own pages are visible. It also carries `pp_scope.deleted_at IS NULL`
+/// on the traversal join, which the active scope omits (traversal joins
+/// carry no soft-delete predicate there) — conservative: only live
+/// links list. Only used for the list read of an archived project
+/// (NEWPIDASH-240); every other read returns 409 before fetching, so
+/// this never widens detail access.
 fn read_scope_where_archived(slug: &str, user: &str) -> String {
     format!(
         "pages.deleted_at IS NULL \
@@ -5284,6 +5287,10 @@ pub async fn page_move(
     // target. The `pages` row, `page_versions` and `page_logs` are
     // untouched. One conditional `update_many` runs per call, so no
     // explicit transaction is needed; each statement is atomic on its own.
+    // A self-move (target == source) is a no-op: the page is already
+    // linked, so the write is skipped entirely below — otherwise the
+    // soft-delete branch would unlink the page from its only project
+    // and the read-back would 404.
     let existing_target: Option<uuid::Uuid> = match project_pages::Entity::find()
         .select_only()
         .column(project_pages::Column::Id)
@@ -5298,7 +5305,9 @@ pub async fn page_move(
         Err(_) => return Denial::ServerError.into_response(),
     };
     let now = chrono::Utc::now().fixed_offset();
-    if existing_target.is_some() {
+    if target_project_id == source_project_id {
+        // No-op: page stays linked; fall through to the read-back.
+    } else if existing_target.is_some() {
         if let Err(_) = project_pages::Entity::update_many()
             .col_expr(
                 project_pages::Column::DeletedAt,
