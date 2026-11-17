@@ -383,6 +383,14 @@ fn orm_fk_denial(error: sea_orm::DbErr) -> Denial {
 /// One multi-row `INSERT ... ON CONFLICT DO NOTHING` over a values list
 /// (the old `gen_random_uuid()` + `unnest($N::uuid[])` twin, still one
 /// statement; `replace_members` precedent).
+///
+/// `exec_without_returning` is required: `exec()` maps the Postgres
+/// 0-row statement (every row conflicted on the partial unique)
+/// to `DbErr::RecordNotInserted`, which `orm_fk_denial` would turn
+/// into 500. Django's `bulk_create(ignore_conflicts=True)` at
+/// `issue.py:232-246 / 272-286` instead returns 201 and keeps
+/// enqueueing activity per input id. Only `ON CONFLICT DO NOTHING`'s
+/// 0-row case is a no-op here; 23503 FK failures still map to 400.
 async fn insert_bridge_rows(
     pool: &sqlx::PgPool,
     project_id: &uuid::Uuid,
@@ -414,7 +422,7 @@ async fn insert_bridge_rows(
                 .do_nothing()
                 .to_owned(),
         )
-        .exec(&pidash_db::pool::sea_orm_connection(pool))
+        .exec_without_returning(&pidash_db::pool::sea_orm_connection(pool))
         .await
         .map_err(orm_fk_denial)?;
     Ok(())
