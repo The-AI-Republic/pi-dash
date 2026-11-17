@@ -5308,7 +5308,7 @@ pub async fn page_move(
     if target_project_id == source_project_id {
         // No-op: page stays linked; fall through to the read-back.
     } else if existing_target.is_some() {
-        if let Err(_) = project_pages::Entity::update_many()
+        if project_pages::Entity::update_many()
             .col_expr(
                 project_pages::Column::DeletedAt,
                 sea_orm::sea_query::Expr::value(Some(now)),
@@ -5326,11 +5326,12 @@ pub async fn page_move(
             .filter(project_pages::Column::DeletedAt.is_null())
             .exec(&orm(pool))
             .await
+            .is_err()
         {
             return Denial::ServerError.into_response();
         }
     } else {
-        if let Err(_) = project_pages::Entity::update_many()
+        if project_pages::Entity::update_many()
             .col_expr(
                 project_pages::Column::ProjectId,
                 sea_orm::sea_query::Expr::value(target_project_id),
@@ -5348,6 +5349,7 @@ pub async fn page_move(
             .filter(project_pages::Column::DeletedAt.is_null())
             .exec(&orm(pool))
             .await
+            .is_err()
         {
             return Denial::ServerError.into_response();
         }
