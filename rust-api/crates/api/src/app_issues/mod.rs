@@ -402,6 +402,10 @@ pub enum Denial {
     BadFilter(String, String),
     /// 502, truncated request-body read (the shared bad-gateway shape).
     TruncatedBody,
+    /// 403, `{"error": ..., "reason": "not_issue_runner"}` (NEWPIDASH-261:
+    /// a human who may not move the issue's state under the project's
+    /// `issue_run_policy`).
+    NotIssueRunner,
     /// 500, generic branch.
     ServerError,
 }
@@ -440,6 +444,10 @@ impl Denial {
             Denial::TruncatedBody => (
                 StatusCode::BAD_GATEWAY,
                 crate::edge::BAD_GATEWAY_BODY.to_owned(),
+            ),
+            Denial::NotIssueRunner => (
+                StatusCode::FORBIDDEN,
+                pidash_services::domain::project_settings::not_issue_runner_body(),
             ),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,

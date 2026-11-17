@@ -378,6 +378,22 @@ pub const NOT_ISSUE_RUNNER: &str = "not_issue_runner";
 /// Human message for [`NOT_ISSUE_RUNNER`].
 pub const NOT_ISSUE_RUNNER_MESSAGE: &str = "Only the issue's creator and assignees can do this in this project. Ask the creator to assign you, or ask a project admin to change the project's 'Who can run issues' setting.";
 
+/// The 403 body for [`NOT_ISSUE_RUNNER`], in the run-ai refusal shape
+/// (`{"error": message, "reason": code}`, error first — as
+/// `run_ai_refusal` renders).
+pub fn not_issue_runner_body() -> String {
+    let mut map = serde_json::Map::with_capacity(2);
+    map.insert(
+        "error".to_owned(),
+        Value::String(NOT_ISSUE_RUNNER_MESSAGE.to_owned()),
+    );
+    map.insert(
+        "reason".to_owned(),
+        Value::String(NOT_ISSUE_RUNNER.to_owned()),
+    );
+    serde_json::to_string(&Value::Object(map)).expect("not-issue-runner body")
+}
+
 /// Pure decision behind [`can_run_issue`]: whether a human with the
 /// given facts may move the issue's state or start/cancel/release a
 /// run under `policy`. `member_role` is the caller's active project
@@ -811,6 +827,10 @@ mod tests {
         assert_eq!(
             NOT_ISSUE_RUNNER_MESSAGE,
             "Only the issue's creator and assignees can do this in this project. Ask the creator to assign you, or ask a project admin to change the project's 'Who can run issues' setting."
+        );
+        assert_eq!(
+            not_issue_runner_body(),
+            r#"{"error":"Only the issue's creator and assignees can do this in this project. Ask the creator to assign you, or ask a project admin to change the project's 'Who can run issues' setting.","reason":"not_issue_runner"}"#
         );
     }
 

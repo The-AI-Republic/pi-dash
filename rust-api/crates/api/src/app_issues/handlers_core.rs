@@ -3965,6 +3965,46 @@ fn v_state(validated: &BTreeMap<&'static str, Validated>) -> (bool, Option<Uuid>
     }
 }
 
+/// NEWPIDASH-261: refuse a human state move the caller may not make
+/// under the project's `issue_run_policy`, before any write (so a
+/// state move that would also dispatch is refused as a whole). Runs
+/// after validation, so an invalid body still 400s first. A request
+/// that does not touch the state (or re-states the current one) is
+/// not gated; other edits keep today's rules.
+async fn gate_web_state_change(
+    pool: &sqlx::PgPool,
+    actor: Uuid,
+    issue_id: Uuid,
+    project_id: Uuid,
+    current_state: Option<Uuid>,
+    touched: bool,
+    requested: Option<Uuid>,
+) -> Result<(), Denial> {
+    if !touched || requested == current_state {
+        return Ok(());
+    }
+    let orm = orm(pool);
+    let issue = issues::Entity::find_by_id(issue_id)
+        .one(&orm)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)?;
+    let project = projects::Entity::find_by_id(project_id)
+        .one(&orm)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)?;
+    let allowed =
+        pidash_services::domain::project_settings::can_run_issue(&orm, actor, &issue, &project)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+    if allowed {
+        Ok(())
+    } else {
+        Err(Denial::NotIssueRunner)
+    }
+}
+
 /// The dual-source parent resolution (same precedence, no group needed).
 fn v_parent(validated: &BTreeMap<&'static str, Validated>) -> Option<Uuid> {
     // Key precedence like `v_state`: a present-but-null `parent` clears,
@@ -4793,6 +4833,19 @@ async fn partial_update_inner(
     let prev = crate::issue_transition::capture_prior_state_pool(&pool, Some(pk))
         .await
         .map_err(|_| Denial::ServerError)?;
+    // NEWPIDASH-261: a human state move is gated by the project's
+    // `issue_run_policy` (PATCH only; the epic twin shares this inner).
+    let (state_touched, requested_state, _) = v_state(&validated);
+    gate_web_state_change(
+        &pool,
+        user_id,
+        pk,
+        tenant.project_id,
+        looked_up.save.state_id,
+        state_touched,
+        requested_state,
+    )
+    .await?;
     let mut row = looked_up.save;
     apply_validated_to_existing(&mut row, &validated, &filtered)?;
     if row.state_id.is_none() {
@@ -4975,6 +5028,19 @@ pub async fn put_update_issue(
     let prev = crate::issue_transition::capture_prior_state_pool(&pool, Some(pk))
         .await
         .map_err(|_| Denial::ServerError)?;
+    // NEWPIDASH-261: same human state gate as PATCH (PUT is the same
+    // "every way a person changes state" covered by the issue).
+    let (state_touched, requested_state, _) = v_state(&validated);
+    gate_web_state_change(
+        &pool,
+        user_id,
+        pk,
+        project_id,
+        looked_up.state_id,
+        state_touched,
+        requested_state,
+    )
+    .await?;
     let mut row = looked_up;
     apply_validated_to_existing(&mut row, &validated, &filtered)?;
     if row.state_id.is_none() {

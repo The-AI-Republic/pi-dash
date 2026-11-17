@@ -1544,6 +1544,73 @@ async fn fetch_newest_runs_on_issue(
     .map_err(|error| db_error(error, "fetch-runs"))
 }
 
+/// NEWPIDASH-261: the v1 state-change gate. Returns `Some(body)` when
+/// the body attempts a state move the actor may not make under the
+/// project's `issue_run_policy` (the caller answers 403 with the
+/// body, before any write — so a move that would dispatch is refused
+/// as a whole). Agent self-actions (an explicit `X-Pi-Dash-Run-Id`
+/// resolving to a run on this issue, `agent_run` context) are never
+/// gated; the headerless inference still gates as human, exactly like
+/// the work-type lock above. Bodies that do not touch `state`, or
+/// re-state the current value, are not gated; unparseable `state`
+/// values fall through to the operations validation (400).
+#[allow(clippy::too_many_arguments)]
+async fn gate_v1_state_change(
+    pool: &PgPool,
+    actor: Uuid,
+    issue_id: Uuid,
+    project_id: Uuid,
+    current_state: Option<Uuid>,
+    body: &Value,
+    from_form: bool,
+    agent_context: bool,
+) -> Result<Option<String>, Denial> {
+    if agent_context {
+        return Ok(None);
+    }
+    let requested = match body.get("state") {
+        None => return Ok(None),
+        Some(Value::Null) => None,
+        Some(Value::String(text)) => {
+            if from_form && text.is_empty() {
+                None
+            } else {
+                match text.parse::<Uuid>() {
+                    Ok(id) => Some(id),
+                    Err(_) => return Ok(None),
+                }
+            }
+        }
+        Some(_) => return Ok(None),
+    };
+    if requested == current_state {
+        return Ok(None);
+    }
+    use pidash_db::entity::projects as projects_entity;
+    let orm = pidash_db::pool::sea_orm_connection(pool);
+    let issue = issues::Entity::find_by_id(issue_id)
+        .one(&orm)
+        .await
+        .map_err(|error| db_error(error, "run-policy-issue"))?
+        .ok_or(Denial::ServerError)?;
+    let project = projects_entity::Entity::find_by_id(project_id)
+        .one(&orm)
+        .await
+        .map_err(|error| db_error(error, "run-policy-project"))?
+        .ok_or(Denial::ServerError)?;
+    let allowed =
+        pidash_services::domain::project_settings::can_run_issue(&orm, actor, &issue, &project)
+            .await
+            .map_err(|error| db_error(error, "run-policy-check"))?;
+    if allowed {
+        Ok(None)
+    } else {
+        Ok(Some(
+            pidash_services::domain::project_settings::not_issue_runner_body(),
+        ))
+    }
+}
+
 async fn patch_issue_inner(
     state: &AppState,
     headers: &HeaderMap,
@@ -1643,6 +1710,28 @@ async fn patch_issue_inner(
                 ));
             }
         }
+    }
+    // NEWPIDASH-261: gate human state moves by `issue_run_policy`
+    // before any write (whole-change refusal). Explicit agent
+    // self-actions skip the gate.
+    let agent_context = moved_by_run.is_some() && header_run_id_present;
+    let current_state = current
+        .state
+        .as_deref()
+        .and_then(|raw| raw.parse::<Uuid>().ok());
+    if let Some(body) = gate_v1_state_change(
+        &pre.pool,
+        pre.actor.id,
+        *pk,
+        project_id,
+        current_state,
+        &parsed_body.value,
+        parsed_body.from_form,
+        agent_context,
+    )
+    .await?
+    {
+        return Err(Denial::ForbiddenBody(body));
     }
     let orm = state.orm().ok_or(Denial::ServerError)?;
     let ctx = domain_write_ctx(&pre, &project_id);
