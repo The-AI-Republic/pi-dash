@@ -1210,14 +1210,15 @@ fn p_rich_condition(
 }
 
 /// The legacy `issue_filters(params, "GET")` predicates over the `issue`
-/// alias, truncated in UTC (this slice's current truncation; the
-/// actor-zone fix follows the `app_issues` pattern separately).
+/// alias, truncated in the actor's zone (Django's `TimezoneMixin` +
+/// `TruncDate`: `created_at__date` etc. are in the acting user's zone).
 /// `shared` is the set of relation aliases the rich tree also filters
 /// through (NEWPIDASH-195 / NEWPIDASH-218); their legacy predicates
 /// resolve over `legacy_join_alias`.
 fn p_legacy_condition(
     query: &QueryMap,
     shared: &std::collections::BTreeSet<&'static str>,
+    tz: &chrono_tz::Tz,
 ) -> Result<Option<Condition>, Denial> {
     let flat: HashMap<String, String> = query
         .keys()
@@ -1230,10 +1231,7 @@ fn p_legacy_condition(
     let mut any = false;
     for (name, value) in legacy.predicates() {
         cond = cond.add(crate::app_issues::list_engine::legacy_expr(
-            name,
-            value,
-            &chrono_tz::UTC,
-            shared,
+            name, value, tz, shared,
         )?);
         any = true;
     }
@@ -1326,7 +1324,7 @@ fn profile_filtered_set(
                 .copied()
                 .collect()
         };
-    let legacy = p_legacy_condition(query, &shared)?;
+    let legacy = p_legacy_condition(query, &shared, tz)?;
     // Rendered filter text decides the relation joins (the text engine's
     // scan): INNER only on a plain positive rich occurrence or a positive
     // legacy predicate on an unshared alias; a rich `or`-only alias joins
