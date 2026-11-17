@@ -25,11 +25,16 @@ vi.mock("../../../../features/runners/chat/RunnerChatPage.js", async (importOrig
   const original = await importOriginal<typeof import("../../../../features/runners/chat/RunnerChatPage.js")>();
   return {
     ...original,
-    RunnerChatPage: (props: { runnerId: string; requestedSessionId: string | null }) => (
+    RunnerChatPage: (props: {
+      runnerId: string;
+      requestedSessionId: string | null;
+      initialMessage?: string | null;
+    }) => (
       <div
         data-testid="descriptor-chat-slot"
         data-runner={props.runnerId}
         data-session={props.requestedSessionId ?? ""}
+        data-initial-message={props.initialMessage ?? ""}
       />
     ),
   };
@@ -71,10 +76,11 @@ afterEach(() => {
 
 describe("DesktopAssistant", () => {
   it("mounts the local chat for the Pi Dash Agent when the agent is available", async () => {
-    render({ requestedSessionId: "s-1" });
+    render({ requestedSessionId: "s-1", initialMessage: "hello from Home" });
     const slot = await screen.findByTestId("descriptor-chat-slot");
     expect(slot).toHaveAttribute("data-runner", "pidash-builtin");
     expect(slot).toHaveAttribute("data-session", "s-1");
+    expect(slot).toHaveAttribute("data-initial-message", "hello from Home");
   });
 
   it("shows the server's reason when the agent is unavailable, and no chat", async () => {

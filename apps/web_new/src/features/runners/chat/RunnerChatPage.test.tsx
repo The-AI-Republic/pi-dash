@@ -69,7 +69,7 @@ const runner = makeRunner();
 const openSession = makeSession({ id: "open", last_message_at: "2026-10-18T11:00:00Z" });
 const closedSession = makeSession({ id: "closed", status: "closed", last_message_at: "2026-10-18T12:00:00Z" });
 const newChatStart = vi.fn(async () => undefined);
-const send = vi.fn(async () => undefined);
+const send = vi.fn(async (_draft: string, _restore: (draft: string) => void): Promise<void> => undefined);
 const stop = vi.fn(async () => undefined);
 const close = vi.fn(async () => undefined);
 const dismissSendError = vi.fn();
@@ -180,6 +180,38 @@ beforeEach(() => {
   hooks.useDictationConfig.mockReturnValue({ data: undefined, isPending: false });
   globalThis.localStorage.clear();
   setChatTransport(null);
+});
+
+describe("Home message handoff", () => {
+  it("waits for the local transport and sends once in a fresh conversation", async () => {
+    const consumed = vi.fn();
+    const props = { initialMessage: "hello from Home", onInitialMessageConsumed: consumed };
+    const view = renderPage(props);
+    expect(send).not.toHaveBeenCalled();
+    expect(hooks.useChatActions).toHaveBeenLastCalledWith(expect.objectContaining({ session: null }));
+    expect(hooks.useWarmUp).toHaveBeenLastCalledWith(expect.objectContaining({ enabled: false }));
+    act(() => setChatTransport({ ...getChatTransport(), ownsRunner: () => true }));
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    expect(send).toHaveBeenCalledWith("hello from Home", expect.any(Function));
+    expect(consumed).toHaveBeenCalledTimes(1);
+    rerenderPage(view, props);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a refused first message in the composer", async () => {
+    setChatTransport({ ...getChatTransport(), ownsRunner: () => true });
+    send.mockImplementationOnce(async (draft: string, restore: (value: string) => void) => restore(draft));
+    renderPage({ initialMessage: "keep this draft" });
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("keep this draft"));
+    expect(hooks.useChatActions).toHaveBeenLastCalledWith(expect.objectContaining({ session: null }));
+  });
+
+  it("drops a pending handoff if the viewer changes contacts before local setup", () => {
+    const view = renderPage({ initialMessage: "for the original contact" });
+    rerenderPage(view, { runnerId: "another", initialMessage: null });
+    act(() => setChatTransport({ ...getChatTransport(), ownsRunner: () => true }));
+    expect(send).not.toHaveBeenCalled();
+  });
 });
 
 describe("runnerChatDocumentTitle", () => {

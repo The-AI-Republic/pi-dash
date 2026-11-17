@@ -44,6 +44,9 @@ export interface DesktopAssistantProps {
   workspaceSlug: string;
   /** Local session id from the thread address, or null on the landing. */
   requestedSessionId: string | null;
+  /** First message carried by the Home composer. */
+  initialMessage?: string | null;
+  onInitialMessageConsumed?: () => void;
   /** A history pick rewrites the thread address; the page re-reads it. */
   onSelectSession: (sessionId: string) => void;
 }
@@ -51,6 +54,8 @@ export interface DesktopAssistantProps {
 export function DesktopAssistant({
   workspaceSlug,
   requestedSessionId,
+  initialMessage = null,
+  onInitialMessageConsumed,
   onSelectSession,
 }: DesktopAssistantProps): React.ReactElement | null {
   // The availability read the runners rail's contact uses, on the same
@@ -95,6 +100,8 @@ export function DesktopAssistant({
         workspaceSlug={workspaceSlug}
         runnerId={BUILTIN_CHAT_ID}
         requestedSessionId={requestedSessionId}
+        initialMessage={initialMessage}
+        {...(onInitialMessageConsumed === undefined ? {} : { onInitialMessageConsumed })}
         onSelectSession={onSelectSession}
       />
     </RunnersAreaProvider>
