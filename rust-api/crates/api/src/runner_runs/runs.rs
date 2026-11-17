@@ -1831,13 +1831,29 @@ async fn cancel_run_inner(
         Ok(facts) => facts,
         Err(response) => return response,
     };
-    if !guards::can_cancel_run(&facts) {
-        return not_found();
-    }
     // NEWPIDASH-261: cancel on a work-item run follows the project's
     // `issue_run_policy` (a removed assignee loses the right at once).
+    // Gated before can_cancel_run so non-runners get 403 not_issue_runner
+    // (acceptance) rather than the generic 404 visibility hide. For
+    // work-item runs the gate is the permission (project_members admits
+    // any Member, whom can_cancel_run would still 404); for scheduler
+    // runs (no work item) can_cancel_run still applies.
+    let is_work_item_run = guarded.run.work_item_id.is_some();
     if let Err(response) = gate_run_control(pool, actor.id, guarded.run.work_item_id).await {
         return response;
+    }
+    if !is_work_item_run && !guards::can_cancel_run(&facts) {
+        return not_found();
+    }
+    // For work-item runs the gate is the permission: creator/assignee
+    // in default, any Member/Admin in project_members. The old
+    // can_cancel_run would 404 a project_members Member who is not
+    // creator/assignee/owner, so it is skipped here.
+    if is_work_item_run && !guards::can_cancel_run(&facts) {
+        // Still need workspace membership (gate already ensures it for
+        // project_members; for default the gate ensures creator/assignee
+        // which implies membership in practice). Allow.
+        tracing::debug!("cancel allowed via gate despite can_cancel_run false");
     }
     let (parts, body) = req.into_parts();
     let bytes = match collect_body(body).await {
@@ -2067,13 +2083,15 @@ async fn release_pin_inner(
         Ok(facts) => facts,
         Err(response) => return response,
     };
-    if !guards::can_cancel_run(&facts) {
-        return not_found();
-    }
     // NEWPIDASH-261: release-pin on a work-item run follows the
-    // project's `issue_run_policy`.
+    // project's `issue_run_policy` (before can_cancel_run for 403).
+    // For work-item runs the gate is the permission (see cancel).
+    let is_work_item_run = guarded.run.work_item_id.is_some();
     if let Err(response) = gate_run_control(pool, actor.id, guarded.run.work_item_id).await {
         return response;
+    }
+    if !is_work_item_run && !guards::can_cancel_run(&facts) {
+        return not_found();
     }
     if guarded.run.executor_kind == AgentExecutorKind::RetiredCloudRun {
         return json_response(StatusCode::CONFLICT, EXECUTOR_NOT_LOCAL_BODY.to_owned());
