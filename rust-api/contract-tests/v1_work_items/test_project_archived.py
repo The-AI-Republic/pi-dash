@@ -113,10 +113,8 @@ def test_archived_detail_uuid_409(archived_world):
 def test_archived_detail_by_identifier_409(archived_world):
     api, world = archived_world
     identifier = world["project"]["identifier"]
-    # SQL-seeded issue has sequence_id 1 (the default).
-    # Read the real sequence for robustness.
-    seq = api.get(f"{_base(world)}/").json().get("results", [{}])[0].get("sequence_id", 1) if False else 1
-    # Sequence 1 is the seeded default; use it directly.
+    # The SQL-seeded issue carries the seeder's default sequence_id 1.
+    seq = 1
     response = api.get(
         f"/api/v1/workspaces/{world['workspace']['slug']}/work-items/{identifier}-{seq}/"
     )

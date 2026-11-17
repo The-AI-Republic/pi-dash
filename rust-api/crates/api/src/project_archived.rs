@@ -12,9 +12,17 @@
 //! The check runs after authentication (401) and the permission gate
 //! (403) and before any issue query, so a non-member still gets 403.
 //! Archive state is read from `projects.archived_at` — no schema change.
+//! A soft-deleted project (`deleted_at IS NULL` fails) is never archived
+//! here: the resolve paths 404 for it, so the check skips it too. Both
+//! probes are SeaORM (`select_only` + `into_model`): two-column narrow
+//! reads by name, so a new column cannot stale this gate.
 
-use chrono::{DateTime, SecondsFormat, Utc};
-use sqlx::{PgPool, Row};
+use chrono::{DateTime, FixedOffset, SecondsFormat, Utc};
+use pidash_db::entity::{projects, workspaces};
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QuerySelect, RelationTrait,
+};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 /// A project that is archived: its identifier and the archive instant.
@@ -46,21 +54,37 @@ pub fn archived_body(info: &ArchivedProject) -> String {
     )
 }
 
+/// One row of the gate probe: the project's identifier and archive instant.
+#[derive(Clone, Debug, PartialEq, FromQueryResult)]
+struct ArchivedRow {
+    identifier: String,
+    archived_at: Option<DateTime<FixedOffset>>,
+}
+
+fn from_row(row: ArchivedRow) -> Option<ArchivedProject> {
+    row.archived_at.map(|archived_at| ArchivedProject {
+        identifier: row.identifier,
+        archived_at: archived_at.with_timezone(&Utc),
+    })
+}
+
 /// Fetch the archived project by UUID, if it is archived.
 pub async fn archived_by_id(
     pool: &PgPool,
     project_id: Uuid,
 ) -> Result<Option<ArchivedProject>, sqlx::Error> {
-    let row = sqlx::query(
-        "SELECT identifier, archived_at FROM projects WHERE id = $1 AND archived_at IS NOT NULL",
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.map(|r| ArchivedProject {
-        identifier: r.get("identifier"),
-        archived_at: r.get("archived_at"),
-    }))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = projects::Entity::find()
+        .select_only()
+        .columns([projects::Column::Identifier, projects::Column::ArchivedAt])
+        .filter(projects::Column::Id.eq(project_id))
+        .filter(projects::Column::DeletedAt.is_null())
+        .filter(projects::Column::ArchivedAt.is_not_null())
+        .into_model::<ArchivedRow>()
+        .one(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    Ok(row.and_then(from_row))
 }
 
 /// Fetch the archived project addressed by identifier inside a workspace,
@@ -76,20 +100,20 @@ pub async fn archived_by_identifier(
     project_identifier: &str,
 ) -> Result<Option<ArchivedProject>, sqlx::Error> {
     let upper = project_identifier.trim().to_uppercase();
-    let row = sqlx::query(
-        "SELECT p.identifier, p.archived_at FROM projects p \
-         JOIN workspaces w ON w.id = p.workspace_id \
-         WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL \
-         AND p.archived_at IS NOT NULL",
-    )
-    .bind(workspace_slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.map(|r| ArchivedProject {
-        identifier: r.get("identifier"),
-        archived_at: r.get("archived_at"),
-    }))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = projects::Entity::find()
+        .select_only()
+        .columns([projects::Column::Identifier, projects::Column::ArchivedAt])
+        .join(JoinType::InnerJoin, projects::Relation::Workspaces.def())
+        .filter(workspaces::Column::Slug.eq(workspace_slug))
+        .filter(projects::Column::Identifier.eq(upper))
+        .filter(projects::Column::DeletedAt.is_null())
+        .filter(projects::Column::ArchivedAt.is_not_null())
+        .into_model::<ArchivedRow>()
+        .one(&db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?;
+    Ok(row.and_then(from_row))
 }
 
 #[cfg(test)]

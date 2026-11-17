@@ -3819,17 +3819,10 @@ async fn history(
         Ok(membership) => membership,
         Err(error) => return error.into_response(),
     };
-    // Class permission first, decorator second — Django's order.
+    // Class permission first, decorator second — Django's order. The
+    // archived check runs once, after both gates (401 → 403 → 409).
     if let Err(error) = check_entity(&membership, true) {
         return error.into_response();
-    }
-    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
-        Ok(info) => info,
-        Err(_) => return Denial::ServerError.into_response(),
-    };
-    if let Some(info) = archived {
-        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
-            .into_response();
     }
     if let Err(error) = check_allow(&membership, &[20, 15, 5]) {
         return error.into_response();
