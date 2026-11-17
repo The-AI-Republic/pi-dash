@@ -12,6 +12,7 @@ import uuid
 
 import pytest
 
+from _harness.diffs import expect
 from .conftest import page_url, pages_base
 
 pytestmark = pytest.mark.contract
@@ -54,12 +55,14 @@ PATCH_ROW_KEYS = DETAIL_ROW_KEYS - {"is_favorite", "label_ids", "project_ids", "
 
 
 def test_list_shape(user_client, world):
+    from _harness.diffs import is_rust as _is_rust
     response = user_client.get(page_url(world))
     assert response.status_code == 200
     rows = response.json()
     assert isinstance(rows, list) and len(rows) == 1
     row = rows[0]
-    assert set(row) == LIST_ROW_KEYS, f"list row keys drifted: {sorted(row)}"
+    expected = LIST_ROW_KEYS | {"project_status", "project_archived_at"} if _is_rust() else LIST_ROW_KEYS
+    assert set(row) == expected, f"list row keys drifted: {sorted(row)}"
     assert row["id"] == world["page"]["id"]
     assert row["name"] == "Contract page"
     assert row["owned_by"] == world["owner"]["id"]
@@ -177,6 +180,7 @@ def test_create_search_mismatch_404s_but_row_exists(user_client, world, db):
 
 
 def test_create_in_archived_project_404s_but_rows_exist(member_client, world, db):
+    from _harness.diffs import expect
     # An archived URL project makes the create re-read miss: get_queryset()
     # filters projects__archived_at__isnull=True together with the active
     # membership (page/base.py:92-96), so .get() raises DoesNotExist, which
@@ -184,18 +188,30 @@ def test_create_in_archived_project_404s_but_rows_exist(member_client, world, db
     # and the project_pages link were written and page_transaction published
     # (page/base.py:141-149). Write-then-404, like the ?search= mismatch
     # above (PIDASHCONV-1411).
+    # NEWPIDASH-240 (DIFF-49): the Rust create answers 409 project_archived
+    # before writing (no row); Django still 404s with the write-then-404.
     db.execute("UPDATE projects SET archived_at = now() WHERE id=%s", (world["project"]["id"],))
     name = f"Archived project {uuid.uuid4().hex[:8]}"
     response = member_client.post(page_url(world), json={"name": name})
-    assert response.status_code == 404
-    assert response.json() == {"error": "The required object does not exist."}
-    page_id = db.fetchval("SELECT id FROM pages WHERE name=%s AND deleted_at IS NULL", (name,))
-    assert page_id is not None
-    links = db.fetchval(
-        "SELECT count(*) FROM project_pages WHERE page_id=%s AND project_id=%s AND deleted_at IS NULL",
-        (str(page_id), world["project"]["id"]),
-    )
-    assert links == 1
+    # Per-backend status — Django 404, Rust 409 (DIFF-49).
+    assert response.status_code == expect("DIFF-49", django=404, rust=409)
+    if response.status_code == 404:
+        assert response.json() == {"error": "The required object does not exist."}
+    elif response.status_code == 409:
+        assert response.json()["code"] == "project_archived"
+    from _harness.diffs import is_rust
+    if is_rust():
+        # Rust 409 answers before any write, so no row.
+        page_id = db.fetchval("SELECT id FROM pages WHERE name=%s AND deleted_at IS NULL", (name,))
+        assert page_id is None
+    else:
+        page_id = db.fetchval("SELECT id FROM pages WHERE name=%s AND deleted_at IS NULL", (name,))
+        assert page_id is not None
+        links = db.fetchval(
+            "SELECT count(*) FROM project_pages WHERE page_id=%s AND project_id=%s AND deleted_at IS NULL",
+            (str(page_id), world["project"]["id"]),
+        )
+        assert links == 1
 
 
 def test_search_nul_rejected_on_list_and_retrieve(user_client, world):
