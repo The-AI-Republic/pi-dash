@@ -46,8 +46,8 @@
 //!   authenticated, so anon on those routes answers the same ANON body.
 //! - Undecorated default actions (no `@allow_permission`, no class
 //!   override) run under the `IsAuthenticated` default only: any
-//!   authenticated caller reaches the body (see [`Gate::Open`] and the
-//!   PUT quirk below).
+//!   authenticated caller reaches the body (see [`Gate::Open`]).
+//!   Module PUT is NOT one of those: it is gated (DIFF-51).
 //!
 //! Denial bodies (byte-exact, compact DRF rendering):
 //!
@@ -86,13 +86,10 @@
 //!
 //! Ported quirks (translate, don't redesign):
 //!
-//! - PUT has no gate: `ModuleViewSet` defines no custom `update` and no
-//!   `get_permissions` override anywhere in `base.py`, so PUT on
-//!   `modules/<pk>/` falls to DRF `ModelViewSet.update` under
-//!   `IsAuthenticated` only — any authenticated user (any role, any
-//!   project membership) can full-update a module, bypassing both the
-//!   role gate and the `archived_at` guard in `partial_update`
-//!   (`:651-721`). Pinned here as [`Gate::Open`].
+//! - PUT was the undecorated `ModelViewSet` default under
+//!   `IsAuthenticated` only; NEWPIDASH-281 (DIFF-51) gates it like
+//!   `partial_update` (`[ADMIN, MEMBER]` + archived guard). The old
+//!   `Gate::Open` pin is fixed, not ported.
 //! - `ModuleIssueViewSet` detail retrieve/update/partial_update
 //!   (`modules/<module_id>/issues/<issue_id>/` GET/PUT/PATCH) are likewise
 //!   undecorated `ModelViewSet` defaults under `IsAuthenticated` only.
@@ -165,9 +162,9 @@ pub enum Gate {
     /// [`VIEWSET_FORBIDDEN_BODY`].
     Lite,
     /// No gate beyond the `IsAuthenticated` default (undecorated
-    /// `ModelViewSet` defaults: module PUT, module-issue detail
-    /// GET/PUT/PATCH). Any authenticated caller passes; anonymous
-    /// answers [`ANON_BODY`]. There is no 403 body for this gate.
+    /// `ModelViewSet` defaults: module-issue detail GET/PUT/PATCH).
+    /// Any authenticated caller passes; anonymous answers
+    /// [`ANON_BODY`]. There is no 403 body for this gate.
     Open,
 }
 
@@ -210,12 +207,13 @@ pub static GATES: &[RouteGate] = &[
         },
         source: "base.py:395 (ModuleViewSet.retrieve; NEWFRONT-334 adds GUEST)",
     },
-    // PUT quirk: no custom update, IsAuthenticated only.
     RouteGate {
         method: "PUT",
         path: "workspaces/<slug>/projects/<project_id>/modules/<pk>/",
-        gate: Gate::Open,
-        source: "base.py (no update method; ModelViewSet.update default)",
+        gate: Gate::Project {
+            roles: ADMIN_MEMBER,
+        },
+        source: "base.py:651 DIFF-51 fix (was ModelViewSet.update default)",
     },
     RouteGate {
         method: "PATCH",
@@ -894,13 +892,10 @@ mod tests {
 
     #[test]
     fn open_gates_allow_any_authenticated_caller() {
-        // The PUT quirk and the undecorated module-issue detail defaults:
-        // even a GUEST with no project membership reaches the body.
+        // The undecorated module-issue detail defaults: even a GUEST
+        // with no project membership reaches the body. (Module PUT was
+        // the fourth row here; it is now gated like PATCH per DIFF-51.)
         let rows = [
-            (
-                "PUT",
-                "workspaces/<slug>/projects/<project_id>/modules/<pk>/",
-            ),
             (
                 "GET",
                 "workspaces/<slug>/projects/<project_id>/modules/<module_id>/issues/<issue_id>/",

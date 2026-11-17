@@ -15,6 +15,8 @@ and fails the suite); the cases below are the tripwires:
 
 import os
 
+from _harness.diffs import expect, is_rust
+
 from .conftest import module_url, modules_url, session_headers
 
 
@@ -84,3 +86,89 @@ def test_unauthenticated_denied(api, tenant_a, project_a, module_a):
     ]:
         r = getattr(api, method)(url, **kwargs)
         assert r.status_code == 401, (method, url, r.text)
+
+
+# ---------------------------------------------------------------------------
+# NEWPIDASH-281 (DIFF-51): PUT modules/<pk>/ gated like PATCH
+# ---------------------------------------------------------------------------
+# Harness: expect("DIFF-51", django=..., rust=...) branches on
+# PIDASH_CONTRACT_BACKEND (django default, rust for the Rust run).
+# Django arm pins the old IsAuthenticated-only 200; Rust arm pins the
+# fixed 403/400. Every case still fails if either backend drifts.
+
+FORBIDDEN = {"error": "You don't have the required permissions."}
+ARCHIVED = {"error": "Archived module cannot be updated"}
+
+
+def _module_name(api, tenant, project_id, module_id, headers):
+    r = api.get(module_url(tenant, project_id, module_id), headers=headers)
+    assert r.status_code == 200, r.text
+    return r.json()["name"]
+
+
+def test_put_denied_for_guest(api, seed, tenant_a, project_a, auth_a, module_a):
+    guest = seed.user()
+    seed.member(tenant_a["workspace"]["id"], guest["id"], role=5)
+    seed.project_member(project_a, tenant_a["workspace"]["id"], guest["id"], role=5)
+    headers = session_headers(
+        seed, guest, guest["password"], os.environ["CONTRACT_SECRET_KEY"]
+    )
+    before = _module_name(api, tenant_a, project_a, module_a, auth_a)
+    r = api.put(
+        module_url(tenant_a, project_a, module_a), headers=headers,
+        json={"name": "Should Not Stick"},
+    )
+    assert r.status_code == expect("DIFF-51", django=200, rust=403), r.text
+    if is_rust():
+        assert r.json() == FORBIDDEN, r.text
+        assert _module_name(api, tenant_a, project_a, module_a, auth_a) == before
+    else:
+        assert r.json()["name"] == "Should Not Stick"
+
+
+def test_put_denied_for_non_member(api, seed, tenant_a, project_a, auth_a, module_a):
+    outsider = seed.user()
+    seed.member(tenant_a["workspace"]["id"], outsider["id"], role=15)
+    headers = session_headers(
+        seed, outsider, outsider["password"], os.environ["CONTRACT_SECRET_KEY"]
+    )
+    before = _module_name(api, tenant_a, project_a, module_a, auth_a)
+    r = api.put(
+        module_url(tenant_a, project_a, module_a), headers=headers,
+        json={"name": "Should Not Stick"},
+    )
+    assert r.status_code == expect("DIFF-51", django=200, rust=403), r.text
+    if is_rust():
+        assert r.json() == FORBIDDEN, r.text
+        assert _module_name(api, tenant_a, project_a, module_a, auth_a) == before
+    else:
+        assert r.json()["name"] == "Should Not Stick"
+
+
+def test_put_archived_rejected(api, seed, db, tenant_a, project_a, auth_a):
+    mid = seed.module(
+        tenant_a["workspace"]["id"], project_a, name="Frozen Put",
+        status="completed",
+    )
+    archive_url = f"{modules_url(tenant_a, project_a)}{mid}/archive/"
+    r = api.post(archive_url, headers=auth_a)
+    assert r.status_code == 200, r.text
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT name FROM modules WHERE id = %s", (mid,),
+        )
+        before = cur.fetchone()[0]
+    r = api.put(
+        module_url(tenant_a, project_a, mid), headers=auth_a,
+        json={"name": "Should Not Stick"},
+    )
+    assert r.status_code == expect("DIFF-51", django=200, rust=400), r.text
+    if is_rust():
+        assert r.json() == ARCHIVED, r.text
+        with db.cursor() as cur:
+            cur.execute(
+                "SELECT name FROM modules WHERE id = %s", (mid,),
+            )
+            assert cur.fetchone()[0] == before
+    else:
+        assert r.json()["name"] == "Should Not Stick"
