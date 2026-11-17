@@ -86,7 +86,7 @@ export interface CommentThreadProps {
    * run. Undefined hides the action; a null workspace id (the workspace
    * read still landing) hides it too.
    */
-  commentAndRun?: { workspaceId: string | null; disabled: boolean } | undefined;
+  commentAndRun?: { workspaceId: string | null; disabled: boolean; disabledReason?: string | undefined } | undefined;
 }
 
 function useCommentHighlight(comments: IssueComment[]): string | null {
@@ -161,6 +161,7 @@ export function CommentThread({
       : {
           submit: (input: ComposerPost) => postCommentAndRun(runWorkspaceId, input),
           disabled: runDisabled,
+          ...(commentAndRun?.disabledReason === undefined ? {} : { disabledReason: commentAndRun.disabledReason }),
         };
 
   const copyLink = async (comment: IssueComment): Promise<void> => {

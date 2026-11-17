@@ -110,6 +110,15 @@ export interface ProjectUpdateInput {
    * or fall_back. Project admins only, like the other agent settings.
    */
   dedicated_runner_lost_action?: string;
+  /**
+   * Typed per-project settings (NEWPIDASH-261): the nested partial
+   * the server merges into `projects.settings`. Only the
+   * `issue_run_policy` key is registered; project/workspace admins
+   * only (403 otherwise).
+   */
+  settings?: {
+    issue_run_policy?: "creator_and_assignees" | "project_members";
+  };
 }
 
 /**

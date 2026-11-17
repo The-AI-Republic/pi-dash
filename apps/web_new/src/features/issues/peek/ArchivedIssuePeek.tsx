@@ -88,7 +88,13 @@ export function ArchivedIssuePeek({
         />
         <section aria-label="Properties" className="flex min-w-0 flex-col gap-(--space-4)">
           <p className="text-meta font-medium text-(--text-muted)">Properties</p>
-          <IssuePropertiesSidebar workspaceSlug={workspaceSlug} projectId={projectId} issue={issue} editable={false} />
+          <IssuePropertiesSidebar
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            issue={issue}
+            editable={false}
+            canRun={true}
+          />
         </section>
         <div data-slot="activity" className="min-w-0">
           <CommentThread

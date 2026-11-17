@@ -160,6 +160,7 @@ export function NotificationDetailHost({
               projectId={selection.projectId}
               issue={issue.data}
               editable={editable}
+              canRun={true}
             />
           }
         />
