@@ -85,7 +85,10 @@ export function DesktopAssistant({
   if (access === "denied") return <RunnersNotAuthorized scope="workspace" />;
 
   let reason: string | null = null;
-  if (availability.isError) {
+  // A failed refresh must not tear down a working local conversation.
+  // Initial reads still show their failure; a later successful profile
+  // remains authoritative for the availability view until the next answer.
+  if (availability.isError && availability.data === undefined) {
     const error = availability.error;
     reason = error instanceof Error && error.message !== "" ? error.message : LOCAL_AGENT_UNAVAILABLE_FALLBACK;
   } else if (availability.data !== undefined) {

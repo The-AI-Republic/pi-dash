@@ -6,7 +6,7 @@
 // the local chat for the Pi Dash Agent and the reason panel, and a role
 // without runners access is denied exactly as in the runners area.
 import { QueryClientProvider } from "@tanstack/react-query";
-import { render as renderRaw, screen, waitFor } from "@testing-library/react";
+import { act, render as renderRaw, screen, waitFor } from "@testing-library/react";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -43,6 +43,7 @@ vi.mock("../../../../features/runners/chat/RunnerChatPage.js", async (importOrig
 const { createAppClient, resetAppClient } = await import("../../../../core/api/client.js");
 const { testClient } = await import("../../../../features/runners/chat/harness.js");
 const { DesktopAssistant } = await import("./DesktopAssistant.js");
+const { localChatQueryKey } = await import("../../../../features/runners/chat/localContact.js");
 
 const Provider = QueryClientProvider as unknown as React.ComponentType<{
   client: ReturnType<typeof testClient>;
@@ -51,11 +52,12 @@ const Provider = QueryClientProvider as unknown as React.ComponentType<{
 
 function render(props: Partial<React.ComponentProps<typeof DesktopAssistant>> = {}) {
   const client = testClient();
-  return renderRaw(
+  const view = renderRaw(
     <Provider client={client}>
       <DesktopAssistant workspaceSlug="acme" requestedSessionId={null} onSelectSession={vi.fn()} {...props} />
     </Provider>
   );
+  return { ...view, client };
 }
 
 function profile(available: boolean, reason_code = ""): { available: boolean; reason_code: string } {
@@ -90,6 +92,17 @@ describe("DesktopAssistant", () => {
       "The Pi Dash Agent is switched off on this server."
     );
     expect(screen.queryByTestId("descriptor-chat-slot")).toBeNull();
+  });
+
+  it("keeps a working local chat mounted when a later profile refresh fails", async () => {
+    const { client } = render();
+    await screen.findByTestId("descriptor-chat-slot");
+    contracts.getPidashAgentProfile.mockRejectedValueOnce(new Error("Request timed out"));
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: localChatQueryKey() });
+    });
+    expect(screen.getByTestId("descriptor-chat-slot")).toBeInTheDocument();
+    expect(screen.queryByTestId("assistant-desktop-unavailable")).toBeNull();
   });
 
   it("reads a failed profile check as unavailable in its own words", async () => {
