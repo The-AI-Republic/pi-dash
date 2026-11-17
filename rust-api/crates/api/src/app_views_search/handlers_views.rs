@@ -3594,15 +3594,17 @@ async fn view_issues_list(
         .map_err(|_| Denial::ServerError)?;
     let mut legacy_parts: Vec<String> = Vec::new();
     for (name, value) in legacy.predicates() {
-        // UTC keeps this slice's current truncation; its own actor-zone
-        // fix follows the app_issues pattern separately.
-        let fragment = crate::app_issues::legacy_sql(&mut binder, name, value, &chrono_tz::UTC)
-            .map_err(|e| match e {
+        // NEWPIDASH-286 (NEWPIDASH-211 twin): Django's `__date` truncates
+        // in the actor zone (`TimezoneMixin`), so legacy date predicates
+        // truncate in the actor zone here too, like the rich tree.
+        let fragment = crate::app_issues::legacy_sql(&mut binder, name, value, &timezone).map_err(
+            |e| match e {
                 crate::app_issues::Denial::BadError(msg) => Denial::BadError(msg),
                 crate::app_issues::Denial::BadDetail(msg) => Denial::BadDetail(msg),
                 crate::app_issues::Denial::BadFilter(msg, code) => Denial::BadFilter(msg, code),
                 _ => Denial::ServerError,
-            })?;
+            },
+        )?;
         legacy_parts.push(fragment);
     }
     let legacy_where = if legacy_parts.is_empty() {
