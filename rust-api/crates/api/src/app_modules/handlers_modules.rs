@@ -26,10 +26,10 @@
 //!   `distribution`, `recent_visited_task` deferred publish.
 //! - `partial_update` (`:651-721`): ADMIN/MEMBER gate, archived guard,
 //!   before-save snapshot into `model_activity`, annotated-row re-read.
-//! - `update` (no override): DRF `ModelViewSet.update` default over the
-//!   write serializer under `IsAuthenticated` only (ported quirk — any
-//!   authenticated caller, no archived guard), rendering the bare write
-//!   shape, not the annotated row.
+//! - `update`: gated like `partial_update` (ADMIN/MEMBER + archived
+//!   guard), rendering the annotated row (NEWPIDASH-281, DIFF-51 —
+//!   the old system's `IsAuthenticated`-only PUT is fixed here, not
+//!   ported).
 //! - `destroy` (`:723-759`): ADMIN + creator fast-path gate, per-issue
 //!   `issue_activity.deleted` publishes, soft-delete module + bridges,
 //!   soft-delete requester favorites + hard-delete all recent visits, 204 empty.
@@ -48,11 +48,10 @@
 //!
 //! # Ported bugs (translate, don't redesign — also listed in the PR)
 //!
-//! * PUT has no gate and no archived guard: any authenticated user can
-//!   full-update, and it renders the bare write shape
-//!   (`WRITE_RESPONSE_ORDER`, incl `created_by`/`updated_by`/
-//!   `project`/`workspace`/`lead`/`members`/`member_ids`), never the
-//!   annotated row.
+//! * PUT is gated like `partial_update` (DIFF-51, NEWPIDASH-281):
+//!   ADMIN/MEMBER + `archived_at` guard, rendering the annotated
+//!   row. The old system's `IsAuthenticated`-only bare-write shape
+//!   is not ported.
 //! * `list` ignores `fields=` for the projection (the constructor kwarg is
 //!   overwritten with `expand`); a non-empty `?fields=` still flips the row
 //!   to the 29-key `ModuleSerializer.Meta.fields` shape, an empty/absent
@@ -161,6 +160,15 @@ fn gate_for_partial_update() -> &'static gates::Gate {
         "workspaces/<slug>/projects/<project_id>/modules/<pk>/",
     )
     .expect("module partial_update gate")
+    .gate
+}
+
+fn gate_for_update() -> &'static gates::Gate {
+    &gates::gate_for(
+        "PUT",
+        "workspaces/<slug>/projects/<project_id>/modules/<pk>/",
+    )
+    .expect("module update gate")
     .gate
 }
 
@@ -1532,6 +1540,9 @@ fn not_dict_body(value: &Value) -> String {
 
 /// `Http404` for the default update's `get_object()` miss
 /// (`No Module matches the given query.`, verified live).
+/// Retained for reference; `module_update` now mirrors `partial_update`'s
+/// `MODULE_NOT_FOUND_BODY` (DIFF-51).
+#[allow(dead_code)]
 const NO_MODULE_DETAIL_BODY: &str = "{\"detail\":\"No Module matches the given query.\"}";
 
 /// DRF `CharField` string coercion: strings pass, ints/floats stringify,
@@ -3247,6 +3258,9 @@ async fn fetch_live_member_ids(
 /// One write-shape row (`ModuleWriteSerializer` over the stored module,
 /// `WRITE_RESPONSE_ORDER`): FKs as PK strings, `members` + `member_ids`
 /// as id arrays, datetimes in the active zone.
+/// Retained for the DIFF-51 audit trail; `module_update` no longer
+/// renders this shape.
+#[allow(dead_code)]
 async fn fetch_write_row(
     pool: &sqlx::PgPool,
     module_id: &uuid::Uuid,
@@ -3481,9 +3495,11 @@ fn parse_date_opt(date: &Option<String>) -> Option<chrono::NaiveDate> {
         .and_then(|text| chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").ok())
 }
 
-/// DRF default `update` over `ModuleWriteSerializer` (no custom method in
-/// `ModuleViewSet`): `IsAuthenticated` only, no archived guard, bare
-/// write-shape response.
+/// `ModuleViewSet.update` (DRF default `update` over
+/// `ModuleWriteSerializer`): fixed to gate like `partial_update`
+/// (NEWPIDASH-281, DIFF-51) — ADMIN/MEMBER + `archived_at` guard —
+/// rendering the annotated row like `partial_update`. The old
+/// `IsAuthenticated`-only bare-write shape is not ported.
 async fn module_update(
     State(state): State<AppState>,
     Path((slug, project_raw, pk_raw)): Path<(String, String, String)>,
@@ -3497,21 +3513,26 @@ async fn module_update(
     if is_noncanonical_uuid(&pk_raw) {
         return Ok(proxy_segment(state, method, uri, headers).await);
     }
-    let pool = pool_of(&state)?;
-    let user_id = actor_user_id(extension)?;
-    let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
-    let facts = fetch_allow_facts(&pool, &slug, &project_id, &user_id, &[]).await?;
-    check_gate(&gates::Gate::Open, &slug, &facts)?;
-    let timezone = actor_timezone(&pool, &user_id).await?;
+    let (pool, user_id, project_id, timezone) =
+        module_context(&state, &slug, &project_raw, extension, gate_for_update()).await?;
     let module_id = parse_uuid_or_invalid(&pk_raw)?;
-    // `get_object()` over the base queryset (no archived filter):
-    // a miss raises `Http404`, the DRF detail body.
+    // Current row over `.filter(pk=pk)` (no archived filter, `:653`),
+    // mirroring `partial_update` so the archived guard sees the same rows.
     let rows =
         fetch_module_rows(&pool, &project_id, &slug, &user_id, Some(&module_id), false).await?;
-    if rows.is_empty() {
+    let current = match rows.into_iter().next() {
+        Some(row) => row,
+        None => {
+            return Ok(json_response(
+                StatusCode::NOT_FOUND,
+                queries::MODULE_NOT_FOUND_BODY.to_owned(),
+            ));
+        }
+    };
+    if current.get("archived_at").is_some_and(|v| !v.is_null()) {
         return Ok(json_response(
-            StatusCode::NOT_FOUND,
-            NO_MODULE_DETAIL_BODY.to_owned(),
+            StatusCode::BAD_REQUEST,
+            queries::ARCHIVED_MODULE_UPDATE_BODY.to_owned(),
         ));
     }
     let data = match body.0.as_object() {
@@ -3523,6 +3544,8 @@ async fn module_update(
             ));
         }
     };
+    // PUT is a full update: `partial=false` requires `name` (DRF PUT
+    // semantics). PATCH uses `partial=true`.
     let input = match validate_write(&pool, &data, false).await {
         Ok(input) => input,
         Err(errors) => return Ok(json_response(StatusCode::BAD_REQUEST, errors)),
@@ -3563,9 +3586,12 @@ async fn module_update(
         )
         .await?;
     }
+    let rows =
+        fetch_module_rows(&pool, &project_id, &slug, &user_id, Some(&module_id), false).await?;
+    let row = rows.into_iter().next().ok_or(Denial::ServerError)?;
     Ok(json_response(
         StatusCode::OK,
-        fetch_write_row(&pool, &module_id, &timezone).await?,
+        shape_row(&row, SHARED_ROW_ORDER, &timezone),
     ))
 }
 
@@ -4347,13 +4373,14 @@ mod tests {
                 "{method} {path}"
             );
         }
-        // PUT is the open quirk: no custom action, `IsAuthenticated` only.
+        // PUT is gated like PATCH (NEWPIDASH-281, DIFF-51).
         let put = gates::gate_for(
             "PUT",
             "workspaces/<slug>/projects/<project_id>/modules/<pk>/",
         )
         .expect("put gate");
-        assert!(matches!(put.gate, gates::Gate::Open));
+        assert!(matches!(put.gate, gates::Gate::Project { .. }));
+        assert!(matches!(gate_for_update(), gates::Gate::Project { .. }));
         assert!(matches!(
             gate_for_destroy(),
             gates::Gate::ProjectCreator { .. }

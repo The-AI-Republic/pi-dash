@@ -4,9 +4,10 @@ Routes (apps/api/pi_dash/app/urls/module.py):
   GET/POST /api/workspaces/<slug>/projects/<project_id>/modules/
   GET/PUT/PATCH/DELETE /api/workspaces/<slug>/projects/<project_id>/modules/<pk>/
 
-PUT has no custom action: it falls back to DRF's default update over
-ModuleWriteSerializer, so its key set differs from the annotated
-create/PATCH shapes. Pinned here on purpose.
+PUT in Django is DRF's default ``update`` over ``ModuleWriteSerializer``
+(bare write shape). The new system gates PUT like PATCH and renders the
+annotated row (NEWPIDASH-281, DIFF-51); the per-backend shape below pins
+both via ``expect``.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -19,6 +20,7 @@ from .conftest import (
     session_headers,
 )
 
+from _harness.diffs import expect, is_rust
 from _harness.seed import estimate, estimate_point
 
 # PUT renders the bare ModuleWriteSerializer instance (fields="__all__"
@@ -102,18 +104,29 @@ def test_retrieve_missing(api, tenant_a, project_a, auth_a):
 
 
 def test_put_shape(api, seed, tenant_a, project_a, auth_a, module_a):
-    """PUT uses DRF's default update (no custom action), so the response
-    is the write serializer, not the annotated row."""
+    """PUT shape diverges per DIFF-51: the old system renders the bare
+    write serializer, the new system renders the annotated row."""
     r = api.put(
         module_url(tenant_a, project_a, module_a), headers=auth_a,
         json={"name": "Renamed", "description": "via put"},
     )
     assert r.status_code == 200, r.text
     body = r.json()
-    assert set(body) == WRITE_MODULE_KEYS, sorted(set(body) ^ WRITE_MODULE_KEYS)
+    expected_keys = expect(
+        "DIFF-51",
+        django=WRITE_MODULE_KEYS,
+        rust=MODULE_ROW_KEYS,
+    )
+    assert set(body) == expected_keys, sorted(set(body) ^ expected_keys)
     assert body["name"] == "Renamed"
     assert body["description"] == "via put"
-    assert body["project"] == project_a
+    if is_rust():
+        assert body["project_id"] == project_a
+        assert body["is_favorite"] is False
+        assert body["total_issues"] == 0
+        assert body["member_ids"] == []
+    else:
+        assert body["project"] == project_a
 
 
 def test_partial_update(api, tenant_a, project_a, auth_a, module_a):
