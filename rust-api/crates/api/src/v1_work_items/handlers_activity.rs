@@ -2539,6 +2539,7 @@ async fn expand_issue(
         expanded_labels: &[],
         blockers: Some(&blockers),
         relations: None,
+        active_run: None,
         expansions: &[],
     })
     .map_err(|_| Denial::ServerError)?;

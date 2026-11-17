@@ -449,9 +449,22 @@ def test_web_runs_create_direct_issue_201(user_client, seeder, daemon_world):
     )
     assert again.status_code == 409
     assert again.headers["allow"] == "GET, POST, HEAD, OPTIONS"
-    assert again.json() == {
-        "error": "work item already has an active run", "code": "active_run_exists",
-    }
+    # DIFF-44: Rust names the blocking run; Django stays bare.
+    if is_rust():
+        refused = again.json()
+        assert refused["error"] == "work item already has an active run"
+        assert refused["code"] == "active_run_exists"
+        block = refused["active_run"]
+        assert block["id"] == body["id"]
+        assert block["status"] in (
+            "queued", "assigned", "waiting_for_worktree", "running",
+            "cancel_requested", "awaiting_approval", "awaiting_reauth",
+        )
+        assert block["age_seconds"] >= 0
+    else:
+        assert again.json() == {
+            "error": "work item already has an active run", "code": "active_run_exists",
+        }
 
 
 def test_web_runs_create_direct_cloud_default(user_client, seeder, daemon_world):

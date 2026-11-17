@@ -1265,6 +1265,14 @@ pub fn run_ai_refusal(reason: Option<&str>) -> (StatusCode, String) {
     (status, body)
 }
 
+/// Enrich an active-run refusal body with the blocking run
+/// (NEWPIDASH-251): reuses the runner-dispatch fetch/enrich helpers
+/// so web and v1 spell the block identically. Unchanged when no
+/// blocker can be named.
+async fn run_ai_enriched_body(pool: &sqlx::PgPool, issue_id: Uuid, body: String) -> String {
+    crate::runner_runs::dispatch::active_run_enriched_body(pool, Some(issue_id), &body).await
+}
+
 /// The v1 dedicated refusal (`:1244-1251`): the full §11.2 body.
 async fn dedicated_refusal_response(
     pool: &PgPool,
@@ -1771,7 +1779,19 @@ async fn run_ai_inner(
                     Err(denial) => return Err(denial),
                 }
             }
-            _ => run_ai_refusal(outcome.reason.as_deref()),
+            _ => {
+                let (status, body) = run_ai_refusal(outcome.reason.as_deref());
+                // The active-run refusal names the blocking run so
+                // coordinators can tell "really running" from "stuck"
+                // (NEWPIDASH-251); other reasons render unchanged.
+                if outcome.reason.as_deref() == Some("active_run_exists") {
+                    return Ok(json_response(
+                        status,
+                        run_ai_enriched_body(&pre.pool, issue.id, body).await,
+                    ));
+                }
+                (status, body)
+            }
         };
         return Ok(json_response(status, body));
     };
