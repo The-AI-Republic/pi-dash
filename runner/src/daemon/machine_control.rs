@@ -62,8 +62,8 @@ impl MachineControl {
 
     /// Session lifecycle: pick a live workspace token → open with backoff
     /// → poll until evicted or an auth error → reopen. Uses the same
-    /// schedule as `HttpLoop` (PDASHOSS01-306): opens back off 30 s → 6 h,
-    /// polls 1 s → 6 h, both jittered, reset on success or a reconnect kick
+    /// schedule as `HttpLoop` (PDASHOSS01-306): opens back off 30 s → 5 m,
+    /// polls 1 s → 5 m, both jittered, reset on success or a reconnect kick
     /// (wake, network change, `pidash reconnect`).
     ///
     /// One session per machine, opened with any workspace's token (design
