@@ -16,7 +16,7 @@ Before you review anything, bring the {{ repo.code_review_term }} branch up to d
 - Conflicts: resolve them so the base's newer structure wins and the PR's change is re-applied on top. Run this repo's own checks, then push the merge commit.
 - Too large to resolve with confidence — the base rewrote the code the PR changes: do not review stale code. Abort the merge, leave the branch untouched, comment on the issue with what changed on the base and what needs redoing, and move the issue back to **In Progress** so the change can be rebuilt on the current base.
 - Record in the workpad the base SHA you were checked against (`git rev-parse origin/<base>`, or the short SHA after the sync), so a later run can tell whether the verdict is still current. For a stacked PR, note in the workpad whether the parent PR has merged.
-- If a prior review verdict exists and the base has moved since that verdict, redo the review on the synced branch — a verdict on an old base does not carry over. If this pass merges the PR (agent-close), re-check mergeability first: if the base moved after any earlier verdict, sync and re-review before merging.
+- If a prior review verdict exists and the base has moved since that verdict, redo the review on the synced branch — a verdict on an old base does not carry over.
 
 Software work products come in these review kinds — prefer them over GENERIC when they match:
 

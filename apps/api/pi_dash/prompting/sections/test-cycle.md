@@ -99,24 +99,20 @@ If no route yields a place to act as the user, that is an honest
 ## Step 3 — Decide where the task goes next
 
 The test pass concludes with the next-state decision from "Task
-lifecycle" (match the target `group` first in "Available states", then the
-name), then the outcome report from "Ending the run". The outcome
+lifecycle" (match the target state by name in "Available states"), then the
+outcome report from "Ending the run". The outcome
 describes this run — `done` means "this run's turn is done" — and only an
 explicit `--stop-ticking` stops the issue's clock:
 
-- **pass, human gate** — every acceptance criterion is met, and
-  accepting the deliverable and closing are a human's call. This is the default everywhere the
-  project has not explicitly said otherwise. Post your results comment,
-  **leave the issue In Test**, and yield `done --stop-ticking`: the
-  stage is satisfied, so no further test run has anything to add until
-  a human acts.
-- **pass, agent close** — every criterion is met **and the project
-  explicitly lets agents accept and close** (the issue, a project page,
-  or the project's own instructions say so — never assume it). Accept
-  the deliverable as the work-type guidance describes, post the results
-  comment, and move the issue to the
-  `completed` state ("Done"). Yield `done` — the move itself takes the
-  issue out of the ticking states, so no flag is needed.
+- **pass** — every acceptance criterion is met. Post your results
+  comment, do **not** accept the deliverable, and move the issue to
+  **AI Completed** (match by name "AI Completed" — it shares
+  the `completed` group with "Done", so the group alone does not
+  identify it). Yield `done` — the move takes the issue out of the
+  ticking states, so no flag is needed. Only a human moves an issue
+  from AI Completed to Done. If the project has no state named
+  "AI Completed", keep the old ending instead: **leave the issue In
+  Test** and yield `done --stop-ticking` — never fall back to "Done".
 - **defects** — real defects that need fixing. Record per-criterion
   verdicts and list the defects as open items in the workpad `### Path to
   done` block, post the results comment, and move the issue **back to In

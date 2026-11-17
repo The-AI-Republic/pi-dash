@@ -1102,13 +1102,25 @@ mod tests {
         assert!(body.contains("`waiting_on_human --stop-ticking`"));
         assert!(body.contains("`done --stop-ticking`"));
         assert!(!body.contains("waiting on a human reviewer / nothing changed"));
+        // NEWPIDASH-305: an approved review with no test state moves the
+        // issue to AI Completed (never to Done); the old "leave In
+        // Review" ending survives only when there is no AI Completed state.
+        assert!(body.contains("Move the issue to **AI Completed**"));
+        assert!(body.contains("never\n  move it to \"Done\""));
+        assert!(body.contains("--state \"AI Completed\""));
     }
 
     #[test]
     fn test_kind_pass_stops_clock_explicitly_or_moves_on() {
         let body = composed_text(recipes::KIND_TEST);
         assert!(body.contains("`done --stop-ticking`"));
-        assert!(body.contains("explicitly lets agents accept and close"));
+        // NEWPIDASH-305: a test pass moves the issue to AI Completed
+        // (the agent's terminal state); the "agent close -> Done"
+        // branch is gone, and Done stays a human-only move.
+        assert!(body.contains("move the issue to\n  **AI Completed**"));
+        assert!(body.contains("never fall back to \"Done\""));
+        assert!(body.contains("--state \"AI Completed\""));
+        assert!(!body.contains("explicitly lets agents accept and close"));
         assert!(!body.contains("--state \"Done\""));
         assert!(body.contains("**nothing changed, waiting on an external process**"));
         assert!(body.contains("**nothing changed, waiting on a human**"));
@@ -1183,10 +1195,13 @@ mod tests {
             "never force-push",
             "base SHA",
             "In Progress",
-            "re-check mergeability",
         ] {
             assert!(body.contains(phrase), "review carries {phrase:?}");
         }
+        // NEWPIDASH-305: no agent-close merge step any more (a pass
+        // moves the issue to AI Completed; only a human closes).
+        assert!(!body.contains("re-check mergeability"));
+        assert!(!body.contains("agent-close"));
         assert!(
             body.find("Sync the PR branch with its base")
                 < body.find("Software work products come in these review kinds"),
@@ -1205,11 +1220,13 @@ mod tests {
             "never force-push",
             "base SHA",
             "In Progress",
-            "re-check mergeability",
             "A merge into the base after the test ran means syncing and re-checking first",
         ] {
             assert!(body.contains(phrase), "test carries {phrase:?}");
         }
+        // NEWPIDASH-305: no agent-close merge step any more (see above).
+        assert!(!body.contains("re-check mergeability"));
+        assert!(!body.contains("agent-close"));
         assert!(
             body.find("Sync the PR branch with its base") < body.find("Gates and CI runs are"),
             "sync precedes gates paragraph"

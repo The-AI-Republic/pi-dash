@@ -51,10 +51,14 @@ explicit `--stop-ticking` stops the issue's clock:
   exercised from the user's side. Yield `done` — your turn is done and
   the issue moved on.
 - **approved, no `test` state** — the project has no `test`-group state
-  to move on to. Leave the issue In Review (never move it to
-  `completed`/Done — a human closes it) and yield `done --stop-ticking`:
-  the review stage is satisfied, so no further review run has anything
-  to add until a human acts.
+  to move on to. Move the issue to **AI Completed** (match by name
+  "AI Completed" — it shares the `completed` group with "Done"; never
+  move it to "Done" — a human closes it) and yield `done`: the move
+  takes the issue out of the ticking states, so no flag is needed. If
+  the project has no state named "AI Completed" either, leave the
+  issue In Review and yield `done --stop-ticking`: the review stage is
+  satisfied, so no further review run has anything to add until a
+  human acts.
 - **changes needed** — real defects you could not auto-fix. List them as
   open items in the workpad `### Path to done` block, post the summary
   comment, and move the issue **back to In Progress** (the `started`

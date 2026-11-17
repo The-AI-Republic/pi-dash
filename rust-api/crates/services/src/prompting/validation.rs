@@ -86,6 +86,7 @@ fn issue_sample(kind: &str, populated: bool) -> serde_json::Value {
                     {"name": "In Progress", "group": "started", "description": "Active"},
                     {"name": "In Review", "group": "review", "description": "Awaiting human review"},
                     {"name": "In Test", "group": "test", "description": "Testing / QA"},
+                    {"name": "AI Completed", "group": "completed", "description": "Finished by agent"},
                     {"name": "Done", "group": "completed", "description": "Finished"},
                 ],
             },
