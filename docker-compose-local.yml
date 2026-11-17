@@ -24,7 +24,12 @@ services:
       RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST}
 
   pi-dash-minio:
-    image: minio/minio
+    # MinIO stopped publishing minio/minio (Docker Hub) and quay.io now
+    # refuses anonymous pulls. pgsty/minio is the maintained
+    # community build of the same server: same CLI, root user and /data
+    # layout, so existing upload volumes keep working. Pinned by tag and
+    # multi-arch digest; re-pin deliberately, never float on latest.
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372
     restart: unless-stopped
     networks:
       - dev_env
