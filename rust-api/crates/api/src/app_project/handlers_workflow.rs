@@ -823,8 +823,10 @@ fn validate_bool(value: &Value) -> Result<bool, String> {
 /// DRF `re_decimal = re.compile(r'\.0*\s*$')` substitution, then
 /// `int(…)`: strings over 1000 chars → the size error; bools, floats
 /// with a fraction, and non-numerics → invalid. Values outside `i64`
-/// (Python ints are unbounded) surface as [`IntValue::TooBig`], which
-/// dies at the column like Python's `DataError` 500.
+/// (Python ints are unbounded) surface as [`IntValue::TooBig`]; on a
+/// serializer path the field's min/max validators reject it (400),
+/// while raw-ORM paths (no serializer) die at the column like
+/// Python's `DataError` 500.
 #[derive(Debug)]
 enum IntValue {
     Value(i64),
@@ -856,8 +858,9 @@ fn validate_int(value: &Value) -> Result<IntValue, String> {
     match trimmed.parse::<i64>() {
         Ok(int) => Ok(IntValue::Value(int)),
         Err(_) => {
-            // `i128` still parses what `i64` cannot: Python would accept
-            // it and die at the column (`DataError` 500).
+            // `i128` still parses what `i64` cannot. Python would
+            // accept the int; the caller decides whether the field's
+            // min/max validators (400) or the column (500) rejects it.
             if trimmed.parse::<i128>().is_ok() {
                 Ok(IntValue::TooBig)
             } else {
@@ -957,6 +960,28 @@ fn invalid_data_body(value: &Value) -> String {
 /// application-level): DRF renders the `min_value` message.
 fn key_min_error() -> String {
     "Ensure this value is greater than or equal to 0.".to_owned()
+}
+
+/// `MaxValueValidator(2147483647)` on the point key (contributed by
+/// `IntegerField` itself): DRF renders the `max_value` message. The
+/// `int4` upper bound is a serializer 400, not a column `DataError` 500
+/// (NEWPIDASH-289); the lower tail still fails `MinValueValidator(0)`
+/// first, so no `>= -2147483648` message ever surfaces for this field.
+fn key_max_error() -> String {
+    "Ensure this value is less than or equal to 2147483647.".to_owned()
+}
+
+/// Whether an out-of-`i64` integer spelling (`IntValue::TooBig`) is
+/// negative. The unbounded-int tail keeps its sign only in the raw text
+/// (`IntValue::TooBig` carries none): negative failures take the field's
+/// `min_value` message, positive ones the `max_value` message (Python
+/// parses the full int, then the validators run).
+fn is_negative_int_spelling(raw: &Value) -> bool {
+    match raw {
+        Value::Number(number) => number.to_string().starts_with('-'),
+        Value::String(text) => text.trim_start().starts_with('-'),
+        _ => false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2172,18 +2197,29 @@ struct BulkPointInput {
 fn validate_bulk_point(item: &Map<String, Value>) -> Result<BulkPointInput, Value> {
     let mut errors = Map::new();
     let mut key: Option<i64> = None;
-    let mut too_big = false;
-    // `key`: optional int, `MinValueValidator(0)`, default 0.
+    // `key`: optional int, `MinValueValidator(0)` + `MaxValueValidator`
+    // (`int4` upper bound), default 0. Both bounds are serializer 400s
+    // (NEWPIDASH-289), never a column `DataError` 500.
     if let Some(raw) = item.get("key") {
         match validate_int(raw) {
             Ok(IntValue::Value(int)) => {
                 if int < 0 {
                     push_field_error(&mut errors, "key", key_min_error());
+                } else if int > 2_147_483_647 {
+                    push_field_error(&mut errors, "key", key_max_error());
                 } else {
                     key = Some(int);
                 }
             }
-            Ok(IntValue::TooBig) => too_big = true,
+            Ok(IntValue::TooBig) => {
+                // Unbounded int: Python parses it, then the field's
+                // min/max validators reject it (400), by sign.
+                if is_negative_int_spelling(raw) {
+                    push_field_error(&mut errors, "key", key_min_error());
+                } else {
+                    push_field_error(&mut errors, "key", key_max_error());
+                }
+            }
             Err(message) => push_field_error(&mut errors, "key", message),
         }
     }
@@ -2211,11 +2247,6 @@ fn validate_bulk_point(item: &Map<String, Value>) -> Result<BulkPointInput, Valu
     // but the helper runs faithfully.
     if let Some(errors) = ser::estimate_point_validate(false, value.as_deref()) {
         return Err(errors);
-    }
-    if too_big {
-        // Python accepts the unbounded int and dies at the column
-        // (`DataError` 500) — the same 500, without the insert.
-        return Err(Value::String("too-big".to_owned()));
     }
     Ok(BulkPointInput {
         // Raw-dict construction (`estimate/base.py:86-88`): `key` via
@@ -2369,12 +2400,6 @@ async fn bulk_create(
                 item_errors.push(Value::Object(Map::new()));
                 validated.push(input);
             }
-            Err(Value::String(marker)) if marker == "too-big" => {
-                // Unbounded-int key: Python dies at the column (500).
-                // DIFF-23: validation runs before any insert, so no
-                // estimate row persists (Django leaves one behind).
-                return Err(Denial::ServerError);
-            }
             Err(errors) => {
                 item_errors.push(errors);
                 failed = true;
@@ -2387,12 +2412,9 @@ async fn bulk_create(
             Value::Array(item_errors).to_string(),
         ));
     }
-    // `key` is validated to `i64`; pre-check the `int4` range so an
-    // out-of-range tail answers the 500 before any insert (DIFF-23:
-    // Django answers 500 after the estimate row already persists).
-    for input in &validated {
-        i32::try_from(input.key).map_err(|_| Denial::ServerError)?;
-    }
+    // `key` is validated to `0..=i32::MAX` by `validate_bulk_point`, so
+    // the `int4` conversion below cannot fail (NEWPIDASH-289: both
+    // tails are serializer 400s, not column `DataError` 500s).
     let estimate_id = uuid::Uuid::new_v4();
     let now = utc_now_micros();
     use sea_orm::ActiveValue::Set;
@@ -2423,8 +2445,8 @@ async fn bulk_create(
     for chunk in validated.chunks(10) {
         let mut models: Vec<ep_entity::ActiveModel> = Vec::with_capacity(chunk.len());
         for input in chunk {
-            // `key` is validated to `i64`; the `int4` column rejects the
-            // out-of-range tail exactly like Django's `DataError` 500.
+            // `key` is validated to `0..=i32::MAX` (NEWPIDASH-289), so
+            // this conversion cannot fail.
             let key = i32::try_from(input.key).map_err(|_| Denial::ServerError)?;
             models.push(ep_entity::ActiveModel {
                 id: Set(uuid::Uuid::new_v4()),
@@ -2977,23 +2999,32 @@ struct PointPatch {
 
 /// Validate one point `partial_update` payload through
 /// `EstimatePointSerializer` (`estimate.py:20-32`): partial, so only
-/// present keys validate — `key` int ≥ 0, `value` ≤255 non-blank,
-/// `description` blank-ok — in model order (`key`, `description`,
-/// `value`). Audit keys ignored (see module docs).
-fn validate_point_patch(data: &Map<String, Value>) -> (PointPatch, Map<String, Value>, bool) {
+/// present keys validate — `key` int in `0..=i32::MAX`, `value` ≤255
+/// non-blank, `description` blank-ok — in model order (`key`,
+/// `description`, `value`). Audit keys ignored (see module docs).
+fn validate_point_patch(data: &Map<String, Value>) -> (PointPatch, Map<String, Value>) {
     let mut errors = Map::new();
     let mut patch = PointPatch::default();
-    let mut too_big = false;
     if let Some(raw) = data.get("key") {
         match validate_int(raw) {
             Ok(IntValue::Value(int)) => {
                 if int < 0 {
                     push_field_error(&mut errors, "key", key_min_error());
+                } else if int > 2_147_483_647 {
+                    push_field_error(&mut errors, "key", key_max_error());
                 } else {
                     patch.key = Some(int);
                 }
             }
-            Ok(IntValue::TooBig) => too_big = true,
+            Ok(IntValue::TooBig) => {
+                // Unbounded int: the field's min/max validators reject
+                // it (400), by sign (NEWPIDASH-289).
+                if is_negative_int_spelling(raw) {
+                    push_field_error(&mut errors, "key", key_min_error());
+                } else {
+                    push_field_error(&mut errors, "key", key_max_error());
+                }
+            }
             Err(message) => push_field_error(&mut errors, "key", message),
         }
     }
@@ -3009,7 +3040,7 @@ fn validate_point_patch(data: &Map<String, Value>) -> (PointPatch, Map<String, V
             Err(message) => push_field_error(&mut errors, "value", message),
         }
     }
-    (patch, errors, too_big)
+    (patch, errors)
 }
 
 /// `EstimatePointEndpoint.partial_update` (`estimate/base.py:170-183`):
@@ -3067,7 +3098,7 @@ async fn point_partial_update(
         .0
         .as_object()
         .ok_or_else(|| Denial::Raw(StatusCode::BAD_REQUEST, invalid_data_body(&body.0)))?;
-    let (patch, errors, too_big) = validate_point_patch(data);
+    let (patch, errors) = validate_point_patch(data);
     if !errors.is_empty() {
         return Ok(json_response(
             StatusCode::BAD_REQUEST,
@@ -3081,14 +3112,12 @@ async fn point_partial_update(
     if let Some(errors) = ser::estimate_point_validate(attrs_empty, patch.value.as_deref()) {
         return Ok(json_response(StatusCode::BAD_REQUEST, errors.to_string()));
     }
-    if too_big {
-        // Unbounded-int key: Python dies at the column (`DataError` 500).
-        return Err(Denial::ServerError);
-    }
     let now = utc_now_micros();
     // `COALESCE($x, column)`: `None` keeps the stored value.
     let mut update = ep_entity::Entity::update_many();
     if let Some(key) = patch.key {
+        // Validated to `0..=i32::MAX` (NEWPIDASH-289), so this
+        // conversion cannot fail.
         let key = i32::try_from(key).map_err(|_| Denial::ServerError)?;
         update = update.col_expr(ep_entity::Column::Key, sea_orm::sea_query::Expr::value(key));
     }
@@ -3764,6 +3793,53 @@ mod tests {
             failed.to_string(),
             r#"{"key":["Ensure this value is greater than or equal to 0."]}"#
         );
+        // Above the int4 max → the max-value message, not a 500
+        // (NEWPIDASH-289; probe-run against Django 4.2.30).
+        let failed = validate_bulk_point(&object(&[
+            ("key", json!(2_147_483_648_i64)),
+            ("value", json!("v")),
+        ]))
+        .expect_err("max value");
+        assert_eq!(
+            failed.to_string(),
+            r#"{"key":["Ensure this value is less than or equal to 2147483647."]}"#
+        );
+        // The numeric-string spelling takes the same max rejection.
+        let failed = validate_bulk_point(&object(&[
+            ("key", json!("2147483648")),
+            ("value", json!("v")),
+        ]))
+        .expect_err("max value string");
+        assert_eq!(
+            failed.to_string(),
+            r#"{"key":["Ensure this value is less than or equal to 2147483647."]}"#
+        );
+        // Unbounded ints fail by sign: +huge → max, -huge → min.
+        let failed = validate_bulk_point(&object(&[
+            ("key", json!("99999999999999999999999")),
+            ("value", json!("v")),
+        ]))
+        .expect_err("huge positive");
+        assert_eq!(
+            failed.to_string(),
+            r#"{"key":["Ensure this value is less than or equal to 2147483647."]}"#
+        );
+        let failed = validate_bulk_point(&object(&[
+            ("key", json!("-99999999999999999999999")),
+            ("value", json!("v")),
+        ]))
+        .expect_err("huge negative");
+        assert_eq!(
+            failed.to_string(),
+            r#"{"key":["Ensure this value is greater than or equal to 0."]}"#
+        );
+        // At the max → valid.
+        let input = validate_bulk_point(&object(&[
+            ("key", json!(2_147_483_647)),
+            ("value", json!("v")),
+        ]))
+        .expect("at max");
+        assert_eq!(input.key, 2_147_483_647);
         // Valid item: raw (unstripped) value stored, defaults applied.
         let input = validate_bulk_point(&object(&[("value", json!("  v  "))])).expect("valid");
         assert_eq!(input.key, 0);
@@ -3877,7 +3953,7 @@ mod tests {
     #[test]
     fn point_patch_empty_dict_demands_points() {
         // Partial `{}` → `validate({})` → the required-points 400.
-        let (patch, errors, _) = validate_point_patch(&object(&[]));
+        let (patch, errors) = validate_point_patch(&object(&[]));
         assert!(errors.is_empty());
         let empty = patch.key.is_none() && patch.value.is_none() && patch.description.is_none();
         let failed = ser::estimate_point_validate(empty, None).expect("required");
@@ -3885,6 +3961,32 @@ mod tests {
             failed.to_string(),
             r#"{"non_field_errors":["Estimate points are required"]}"#
         );
+        // Above the int4 max → the max-value 400 object, not a 500
+        // (NEWPIDASH-289, same serializer premise as bulk create).
+        let (patch, errors) = validate_point_patch(&object(&[("key", json!(2_147_483_648_i64))]));
+        assert!(patch.key.is_none());
+        assert_eq!(
+            Value::Object(errors).to_string(),
+            r#"{"key":["Ensure this value is less than or equal to 2147483647."]}"#
+        );
+        let (patch, errors) =
+            validate_point_patch(&object(&[("key", json!("99999999999999999999999"))]));
+        assert!(patch.key.is_none());
+        assert_eq!(
+            Value::Object(errors).to_string(),
+            r#"{"key":["Ensure this value is less than or equal to 2147483647."]}"#
+        );
+        let (patch, errors) =
+            validate_point_patch(&object(&[("key", json!("-99999999999999999999999"))]));
+        assert!(patch.key.is_none());
+        assert_eq!(
+            Value::Object(errors).to_string(),
+            r#"{"key":["Ensure this value is greater than or equal to 0."]}"#
+        );
+        // At the max → the patch carries the key.
+        let (patch, errors) = validate_point_patch(&object(&[("key", json!(2_147_483_647))]));
+        assert!(errors.is_empty());
+        assert_eq!(patch.key, Some(2_147_483_647));
     }
 
     #[test]
