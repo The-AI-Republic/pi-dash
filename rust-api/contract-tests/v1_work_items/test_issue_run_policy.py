@@ -5,7 +5,7 @@ The v1 PATCH (`{"state": <uuid>}`) and the run-ai trigger follow the
 project's `issue_run_policy`: default mode allows only the creator and
 current assignees; `project_members` allows any Member/Admin. Django
 has no such gate, so the member-denied cases pin both behaviours via
-DIFF-48 (Django moves/trigger proceeds, Rust answers 403
+DIFF-53 (Django moves/trigger proceeds, Rust answers 403
 `not_issue_runner` and writes nothing). Agent self-actions (an explicit
 `X-Pi-Dash-Run-Id` on this issue) skip the state gate on Rust.
 """
@@ -94,13 +94,13 @@ def test_assignee_moves_state(api, world, seeder, settings):
 
 
 def test_other_member_cannot_move_state(api, world, seeder):
-    # DIFF-48: Django moves (200), Rust refuses (403, whole change).
+    # DIFF-53: Django moves (200), Rust refuses (403, whole change).
     member, client = _member_client(seeder, world)
     try:
         issue = world["issue"]
         target = _other_state(_states(api, world), issue["state"])
         resp = client.patch(issue_url(world, issue["id"]), json={"state": target})
-        assert resp.status_code == expect("DIFF-48", django=200, rust=403), (
+        assert resp.status_code == expect("DIFF-53", django=200, rust=403), (
             resp.text[:500]
         )
         if is_rust():
@@ -122,7 +122,7 @@ def test_removed_assignee_cannot_move_state(api, world, seeder, settings):
         assert resp.status_code == 200, resp.text[:500]
         target = _other_state(_states(api, world), issue["state"])
         resp = client.patch(issue_url(world, issue["id"]), json={"state": target})
-        assert resp.status_code == expect("DIFF-48", django=200, rust=403), (
+        assert resp.status_code == expect("DIFF-53", django=200, rust=403), (
             resp.text[:500]
         )
         if is_rust():
@@ -168,7 +168,7 @@ def test_project_members_allows_member(api, world, seeder, settings):
 
 
 def test_run_ai_refused_for_other_member(api, world, seeder):
-    # DIFF-48: the run-ai trigger is gated before any run is created.
+    # DIFF-53: the run-ai trigger is gated before any run is created.
     # Django proceeds to dispatch (any nonno-runner reason); Rust answers
     # 403 `not_issue_runner` and creates nothing.
     member, client = _member_client(seeder, world)
@@ -185,7 +185,7 @@ def test_run_ai_refused_for_other_member(api, world, seeder):
             assert resp.status_code == 403, resp.text[:500]
             assert resp.json() == {"error": MESSAGE, "reason": REASON}
         else:
-            # DIFF-48: Django has no such refusal; it proceeds to
+            # DIFF-53: Django has no such refusal; it proceeds to
             # dispatch (201 created or a dispatch-side 409/400).
             assert resp.status_code in (201, 400, 409), resp.text[:500]
     finally:

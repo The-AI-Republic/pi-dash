@@ -34,24 +34,63 @@ export interface RowMenuButtonProps {
   issueKey: string;
   /** Extra classes for the trigger wrapper (hover reveal, alignment). */
   className?: string | undefined;
+  /**
+   * Virtualized rows mount the menu on first interaction: a plain trigger
+   * renders at rest and the menu machinery mounts on first hover, click
+   * or keyboard activation. A mounted menu per row made every scroll frame
+   * that brings rows into view blow the 2,000-row scroll budget.
+   */
+  defer?: boolean | undefined;
 }
 
 /**
  * The hover ellipsis. The kit button carries the accessible name
  * "Actions for WEB-12"; the dialog it opens stays mounted beside it.
  */
-export function RowMenuButton({ state, issueKey, className }: RowMenuButtonProps): React.ReactElement | null {
+export function RowMenuButton({
+  state,
+  issueKey,
+  className,
+  defer = false,
+}: RowMenuButtonProps): React.ReactElement | null {
+  const [active, setActive] = React.useState(false);
+  const [open, setOpen] = React.useState(false);
   if (state.entries.length === 0) return null;
+
+  const trigger = (
+    <IconButton label={rowMenuLabel(issueKey)} size="small" data-testid="row-menu-trigger">
+      <Ellipsis size={16} strokeWidth={1.5} aria-hidden="true" />
+    </IconButton>
+  );
+  const activate = (nextOpen: boolean): void => {
+    setOpen(nextOpen);
+    setActive(true);
+  };
+
   return (
     <div data-row-menu="true" className={className}>
-      <Menu
-        trigger={
-          <IconButton label={rowMenuLabel(issueKey)} size="small" data-testid="row-menu-trigger">
-            <Ellipsis size={16} strokeWidth={1.5} aria-hidden="true" />
-          </IconButton>
-        }
-        items={menuItemsFor(state)}
-      />
+      {defer && !active ? (
+        React.cloneElement(trigger, {
+          "aria-haspopup": "menu",
+          "aria-expanded": false,
+          onPointerEnter: () => setActive(true),
+          onPointerDown: (event: React.PointerEvent) => {
+            if (event.pointerType === "touch") activate(true);
+          },
+          onClick: (event: React.MouseEvent) => {
+            event.preventDefault();
+            activate(true);
+          },
+          onKeyDown: (event: React.KeyboardEvent) => {
+            if (event.key === "Enter" || event.key === " " || event.key === "ArrowDown") {
+              event.preventDefault();
+              activate(true);
+            }
+          },
+        } as Record<string, unknown>)
+      ) : (
+        <Menu trigger={trigger} items={menuItemsFor(state)} {...(defer ? { open, onOpenChange: setOpen } : {})} />
+      )}
       {createPortal(state.overlays, document.body)}
     </div>
   );

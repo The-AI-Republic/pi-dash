@@ -29,7 +29,6 @@ from .engine import (
 )
 from .machines import (
     DaemonDevMachineEndpoint,
-    DevMachineEngineSignOutEndpoint,
     DevMachineMergeEndpoint,
     DevMachineReplaceCandidatesEndpoint,
 )
@@ -97,7 +96,6 @@ from .sessions import (
 
 __all__ = [
     "DaemonDevMachineEndpoint",
-    "DevMachineEngineSignOutEndpoint",
     "DevMachineMergeEndpoint",
     "DevMachineReplaceCandidatesEndpoint",
     "EngineCredentialRevokeEndpoint",

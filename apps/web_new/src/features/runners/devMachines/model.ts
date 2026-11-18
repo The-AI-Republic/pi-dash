@@ -182,27 +182,22 @@ export function pidashAgentState(
   return { label: "Pi Dash Agent available", tone: "success" };
 }
 
-/** Sign-in states with a live or renewable credential to revoke. */
-const SIGNED_IN_STATES: ReadonlySet<string> = new Set(["active", "expiring", "expired"]);
-
 /** Which engine and machine settings a row can offer. */
 export interface MachineSettings {
   rename: boolean;
   pause: boolean;
   teamRuns: boolean;
-  signOutPidashAgent: boolean;
 }
 
 /**
  * Settings available for one machine. A revoked machine offers none.
  * Pause and the team-runs opt-in govern the machine's engine, so they
  * need a live engine runner on it and their field on the payload (an
- * older server simply hides them). Sign-out revokes the machine's engine
- * credential, which exists without any engine runner, so it needs only
- * a signed-in state to revoke.
+ * older server simply hides them). The engine has no sign-in of its own
+ * (desktop_unified_signin U-3), so no machine setting signs it out.
  */
 export function machineSettings(
-  machine: Pick<DevMachine, "revoked_at" | "engine_paused_by_owner" | "engine_team_runs" | "engine_sign_in_state">,
+  machine: Pick<DevMachine, "revoked_at" | "engine_paused_by_owner" | "engine_team_runs">,
   context: MachinePidashAgentContext
 ): MachineSettings {
   const live = machine.revoked_at === null;
@@ -211,8 +206,6 @@ export function machineSettings(
     rename: live,
     pause: engine && machine.engine_paused_by_owner !== undefined,
     teamRuns: engine && machine.engine_team_runs !== undefined,
-    signOutPidashAgent:
-      live && machine.engine_sign_in_state !== undefined && SIGNED_IN_STATES.has(machine.engine_sign_in_state),
   };
 }
 

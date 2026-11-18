@@ -60,7 +60,9 @@ use sea_orm::{ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter,
 use serde_json::Value;
 use uuid::Uuid;
 
-use pidash_db::entity::{project_members, project_user_properties, projects, workspaces};
+use pidash_db::entity::{
+    project_members, project_user_properties, projects, scheduler_bindings, workspaces,
+};
 use pidash_db::orm_tx::{into_sqlx, TxConn};
 
 /// Run a sea-query statement on the connection; rows affected.
@@ -738,6 +740,35 @@ pub async fn unarchive(
     actor_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     stamp_archived_at(db, project_id, None, now, actor_id).await
+}
+
+/// NEWPIDASH-239: disable every live scheduler binding of a project
+/// (`scheduler_bindings.enabled = false` plus the save stamps). Runs in
+/// the caller's transaction beside the `archived_at` stamp, so the two
+/// commit or roll back together. Bindings stay installed (no uninstall
+/// or delete) and the workspace-level `schedulers` definitions are
+/// untouched. Already-disabled rows are left alone (no `updated_at`
+/// bump). Returns the rows disabled.
+pub async fn disable_project_bindings(
+    db: &impl ConnectionTrait,
+    project_id: Uuid,
+    now: DateTime<Utc>,
+    actor_id: Uuid,
+) -> Result<u64, sqlx::Error> {
+    scheduler_bindings::Entity::update_many()
+        .col_expr(scheduler_bindings::Column::Enabled, Expr::value(false))
+        .col_expr(scheduler_bindings::Column::UpdatedAt, Expr::value(now))
+        .col_expr(
+            scheduler_bindings::Column::UpdatedById,
+            Expr::value(Some(actor_id)),
+        )
+        .filter(scheduler_bindings::Column::ProjectId.eq(project_id))
+        .filter(scheduler_bindings::Column::Enabled.eq(true))
+        .filter(scheduler_bindings::Column::DeletedAt.is_null())
+        .exec(db)
+        .await
+        .map(|done| done.rows_affected)
+        .map_err(into_sqlx)
 }
 
 /// `WorkspaceFileAssetEndpoint.entity_asset_save`

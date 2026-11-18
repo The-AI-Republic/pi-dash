@@ -93,6 +93,120 @@ pub const ACTIVE_RUN_EXISTS_BODY: &str =
 pub const QUEUED_ENTRY_DETAIL: &str =
     "a run is active on this work item; the next run is queued and starts when it ends";
 
+/// The run blocking a dispatch (NEWPIDASH-251): the newest active run
+/// occupying the one-active-run slot, so the 409 can name it instead
+/// of refusing silently. Shape is additive — existing keys are kept.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BlockingRun {
+    pub id: Uuid,
+    pub status: String,
+    pub runner_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+    pub assigned_at: Option<DateTime<Utc>>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub age_seconds: i64,
+}
+
+/// Render the blocking run for the `active_run` refusal block.
+pub fn blocking_run_json(run: &BlockingRun) -> Value {
+    use pidash_services::integrations::serializers::isoformat;
+
+    serde_json::json!({
+        "id": run.id.to_string(),
+        "status": run.status,
+        "runner_id": run.runner_id.map(|id| id.to_string()),
+        "created_at": isoformat(&run.created_at),
+        "assigned_at": run.assigned_at.as_ref().map(isoformat),
+        "started_at": run.started_at.as_ref().map(isoformat),
+        "age_seconds": run.age_seconds,
+    })
+}
+
+/// Fetch the newest active run for `work_item_id`, or `None` when the
+/// item has no run in an active status (or the fetch fails — the
+/// caller falls back to the un-enriched body).
+pub async fn fetch_blocking_run(pool: &PgPool, work_item_id: Option<Uuid>) -> Option<BlockingRun> {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+
+    let work_item_id = work_item_id?;
+    let statuses: Vec<String> = [
+        AgentRunStatus::Queued,
+        AgentRunStatus::Assigned,
+        AgentRunStatus::WaitingForWorktree,
+        AgentRunStatus::Running,
+        AgentRunStatus::CancelRequested,
+        AgentRunStatus::AwaitingApproval,
+        AgentRunStatus::AwaitingReauth,
+    ]
+    .iter()
+    .map(|status| status.value().to_owned())
+    .collect();
+    #[derive(Debug, sea_orm::FromQueryResult)]
+    struct Row {
+        id: Uuid,
+        status: String,
+        runner_id: Option<Uuid>,
+        created_at: sea_orm::prelude::DateTimeWithTimeZone,
+        assigned_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+        started_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    }
+
+    let row = orm::agent_run::Entity::find()
+        .select_only()
+        .column_as(orm::agent_run::Column::Id, "id")
+        .column_as(orm::agent_run::Column::Status, "status")
+        .column_as(orm::agent_run::Column::RunnerId, "runner_id")
+        .column_as(orm::agent_run::Column::CreatedAt, "created_at")
+        .column_as(orm::agent_run::Column::AssignedAt, "assigned_at")
+        .column_as(orm::agent_run::Column::StartedAt, "started_at")
+        .filter(orm::agent_run::Column::WorkItemId.eq(work_item_id))
+        .filter(orm::agent_run::Column::Status.is_in(statuses))
+        .order_by_desc(orm::agent_run::Column::CreatedAt)
+        .into_model::<Row>()
+        .one(&sea_orm_connection(pool))
+        .await
+        .ok()??;
+    let created_at = row.created_at.with_timezone(&Utc);
+    Some(BlockingRun {
+        id: row.id,
+        status: row.status,
+        runner_id: row.runner_id,
+        created_at,
+        assigned_at: row.assigned_at.map(|at| at.with_timezone(&Utc)),
+        started_at: row.started_at.map(|at| at.with_timezone(&Utc)),
+        age_seconds: (Utc::now() - created_at).num_seconds().max(0),
+    })
+}
+
+/// Merge the blocking-run block into a refusal body: the fallback
+/// bytes are kept verbatim when there is no blocker (never
+/// reserialized — pinned cases stay byte-identical), and get an
+/// additive `active_run` key when one exists.
+pub fn enrich_with_active_run(fallback: &str, run: Option<&BlockingRun>) -> String {
+    let Some(run) = run else {
+        return fallback.to_owned();
+    };
+    let parsed: Result<Value, _> = serde_json::from_str(fallback);
+    match parsed {
+        Ok(Value::Object(mut map)) => {
+            map.insert("active_run".to_owned(), blocking_run_json(run));
+            serde_json::to_string(&Value::Object(map)).expect("enriched refusal body")
+        }
+        _ => fallback.to_owned(),
+    }
+}
+
+/// Refusal body for an active-run 409: the fallback plus the blocking
+/// run, when one can be named.
+pub async fn active_run_enriched_body(
+    pool: &PgPool,
+    work_item_id: Option<Uuid>,
+    fallback: &str,
+) -> String {
+    let run = fetch_blocking_run(pool, work_item_id).await;
+    enrich_with_active_run(fallback, run.as_ref())
+}
+
 /// `run_kind` stamped on direct dispatches (`runs.py:266`).
 const RUN_KIND_DIRECT: &str = "direct";
 /// `AgentRun.trigger` model default (`runner/models.py:965-969`): the
@@ -1305,7 +1419,11 @@ pub async fn post_direct(
     if let Err(error) = insert {
         // `except IntegrityError` → 409, whatever the constraint.
         let denial = if pidash_db::orm_tx::is_integrity_violation(&error) {
-            json_response(StatusCode::CONFLICT, ACTIVE_RUN_EXISTS_BODY.to_owned())
+            // The aborted tx cannot query; answer from the pool
+            // (a separate connection) so the 409 names the blocker.
+            let body =
+                active_run_enriched_body(pool, ctx.work_item_id, ACTIVE_RUN_EXISTS_BODY).await;
+            json_response(StatusCode::CONFLICT, body)
         } else {
             server_error()
         };
@@ -1325,7 +1443,9 @@ pub async fn post_direct(
         .await
     {
         let denial = if pidash_db::orm_tx::is_integrity_violation(&error) {
-            json_response(StatusCode::CONFLICT, ACTIVE_RUN_EXISTS_BODY.to_owned())
+            let body =
+                active_run_enriched_body(pool, ctx.work_item_id, ACTIVE_RUN_EXISTS_BODY).await;
+            json_response(StatusCode::CONFLICT, body)
         } else {
             server_error()
         };
@@ -1680,11 +1800,12 @@ async fn post_issue_dispatch(
         )
         .await;
         let Some(response) = response else {
-            return rollback_then(
-                tx,
-                json_response(StatusCode::CONFLICT, mode.dispatch_failed_body().to_owned()),
-            )
-            .await;
+            // Generic dispatch failure: when a run occupies the slot
+            // the 409 names it (NEWPIDASH-251); the fallback body is
+            // byte-identical otherwise.
+            let fallback = mode.dispatch_failed_body();
+            let body = active_run_enriched_body(pool, Some(work_item_id), fallback).await;
+            return rollback_then(tx, json_response(StatusCode::CONFLICT, body)).await;
         };
         return rollback_then(tx, response).await;
     };
@@ -1993,5 +2114,39 @@ mod dispatch_tests {
         ));
         let too_wide: Value = serde_json::from_str(&(u128::MAX.to_string() + "0")).unwrap();
         assert_eq!(coerce_filter_uuid(Some(&too_wide)), UuidCoerce::Invalid);
+    }
+
+    #[test]
+    fn enrich_keeps_fallback_bytes_without_blocker() {
+        // No blocker: byte-identical fallback (pinned cases hold).
+        let body = enrich_with_active_run(ACTIVE_RUN_EXISTS_BODY, None);
+        assert_eq!(body, ACTIVE_RUN_EXISTS_BODY);
+    }
+
+    #[test]
+    fn enrich_adds_active_run_block_keeping_keys() {
+        let run = BlockingRun {
+            id: Uuid::new_v4(),
+            status: "running".to_string(),
+            runner_id: Some(Uuid::new_v4()),
+            created_at: chrono::Utc::now(),
+            assigned_at: None,
+            started_at: Some(chrono::Utc::now()),
+            age_seconds: 42,
+        };
+        let body = enrich_with_active_run(ACTIVE_RUN_EXISTS_BODY, Some(&run));
+        let parsed: Value = serde_json::from_str(&body).expect("enriched body is JSON");
+        assert_eq!(
+            parsed["error"].as_str().unwrap(),
+            "work item already has an active run"
+        );
+        assert_eq!(parsed["code"].as_str().unwrap(), "active_run_exists");
+        assert_eq!(
+            parsed["active_run"]["id"].as_str().unwrap(),
+            run.id.to_string()
+        );
+        assert_eq!(parsed["active_run"]["status"].as_str().unwrap(), "running");
+        assert_eq!(parsed["active_run"]["age_seconds"].as_i64().unwrap(), 42);
+        assert!(parsed["active_run"]["assigned_at"].is_null());
     }
 }

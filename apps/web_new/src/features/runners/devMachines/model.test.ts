@@ -178,32 +178,25 @@ describe("machineSettings", () => {
       rename: true,
       pause: false,
       teamRuns: false,
-      signOutPidashAgent: false,
     });
-    expect(
-      machineSettings(
-        machine({ engine_paused_by_owner: false, engine_team_runs: true, engine_sign_in_state: "active" }),
-        engine
-      )
-    ).toEqual({ rename: true, pause: true, teamRuns: true, signOutPidashAgent: true });
-    expect(machineSettings(machine({ engine_sign_in_state: "signed_out" }), engine).signOutPidashAgent).toBe(false);
+    expect(machineSettings(machine({ engine_paused_by_owner: false, engine_team_runs: true }), engine)).toEqual({
+      rename: true,
+      pause: true,
+      teamRuns: true,
+    });
     expect(
       machineSettings(machine({ revoked_at: "2026-01-01T00:00:00Z", engine_paused_by_owner: false }), engine)
     ).toEqual({
       rename: false,
       pause: false,
       teamRuns: false,
-      signOutPidashAgent: false,
     });
   });
 
   it("hides pause and team runs on a machine with no engine runner", () => {
     expect(
-      machineSettings(
-        machine({ engine_paused_by_owner: false, engine_team_runs: false, engine_sign_in_state: "active" }),
-        { hasPidashAgent: false }
-      )
-    ).toEqual({ rename: true, pause: false, teamRuns: false, signOutPidashAgent: true });
+      machineSettings(machine({ engine_paused_by_owner: false, engine_team_runs: false }), { hasPidashAgent: false })
+    ).toEqual({ rename: true, pause: false, teamRuns: false });
   });
 });
 

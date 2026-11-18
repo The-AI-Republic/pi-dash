@@ -175,15 +175,15 @@ Pi Dash は AI エージェントを同梱していません。お好みのも�
 
 ### 4. コーディングエージェント向け Pi Dash スキル（オプション）
 
-[`pi-dash-skill`](https://github.com/The-AI-Republic/pi-dash-skill) は、ポータブルなエージェントスキルをパッケージ化したものです。これにより、Claude Code や Codex が `pidash` CLI を介して、コーディングセッションから直接 Pi Dash の Issue を作成、一覧表示、移動、検査できます。
+[`skill/`](skill/) は、ポータブルなエージェントスキルをパッケージ化したものです。これにより、Claude Code や Codex が `pidash` CLI を介して、コーディングセッションから直接 Pi Dash の Issue を作成、一覧表示、移動、検査できます。
 
 ```bash
 npx @airepublic/pidash-skill-installer           # Claude Code、Codex、またはその両方にインストールします
 ```
 
-インストーラーはターゲット（デフォルト: すべて）を尋ね、必要に応じて GitHub からスキルを取得します。クローンは不要です。プロンプトをスキップするには `--all`、`--claude-code`、または `--codex` を渡してください。
+インストーラーはターゲット（デフォルト: すべて）を尋ねます。スキルは npm パッケージに同梱されているため、クローンは不要です。プロンプトをスキップするには `--all`、`--claude-code`、または `--codex` を渡してください。
 
-Codex ユーザーは、Codex セッション内から組み込みの `$skill-installer` を介してインストールすることもできます。環境変数のオーバーライド（`CLAUDE_HOME` / `CODEX_HOME`）、クローンベースのインストール方法、その他の代替手段については [pi-dash-skill README](https://github.com/The-AI-Republic/pi-dash-skill#readme) を参照してください。
+Codex ユーザーは、Codex セッション内から組み込みの `$skill-installer` を介してインストールすることもできます。環境変数のオーバーライド（`CLAUDE_HOME` / `CODEX_HOME`）、クローンベースのインストール方法、その他の代替手段については [skill README](skill/README.md) を参照してください。
 
 ## ⚙️ 使用技術
 

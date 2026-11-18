@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Machine settings dialogs (Pi Dash Agent design §4.10, §11): the rename
-// form, and the confirmation shared by "Sign out the engine" and
-// "Replaced by". While a write is in flight every dismissal path is inert;
+// form, and the confirmation shared by "Replaced by" and "Remove from
+// project". While a write is in flight every dismissal path is inert;
 // a failure keeps the dialog open for a retry while the page toasts.
 
 import { Button, Dialog, Input } from "@pidash/kit";
@@ -94,12 +94,6 @@ export const REMOVE_PIDASH_AGENT_COPY: MachineConfirmCopy = {
   title: REMOVE_PIDASH_AGENT_TITLE,
   body: REMOVE_PIDASH_AGENT_BODY,
   confirm: REMOVE_PIDASH_AGENT_LABEL,
-};
-
-export const SIGN_OUT_PIDASH_AGENT_COPY: MachineConfirmCopy = {
-  title: "Sign out the Pi Dash Agent?",
-  body: "This revokes the Pi Dash Agent's credential on this computer only. It stops taking runs until someone signs it in again on the computer (`pidash login --engine` or the desktop app). Pi Dash and the computer's own-agent runners stay signed in.",
-  confirm: "Sign out Pi Dash Agent",
 };
 
 /** Confirmation copy for merging a replaced computer into its successor. */

@@ -11,11 +11,15 @@ export type {
   AboutInfo,
   AgentAppIdentity,
   AgentRuntimeApi,
+  AuthSyncEvent,
+  AuthSyncRecord,
   BundledNotice,
   DesktopNotices,
   CliInstallProgress,
   CliSetupApi,
   CliStatus,
+  DaemonAuthEvent,
+  DaemonAuthState,
   DaemonCliInfo,
   DaemonDiscovery,
   DaemonPidashAgentRunner,
@@ -53,6 +57,7 @@ export type {
   UpdaterApi,
 } from "./types.js";
 export { platform } from "@pidash/platform-target";
+
 export {
   bakedHostedOrigin,
   desktopShareUrl,

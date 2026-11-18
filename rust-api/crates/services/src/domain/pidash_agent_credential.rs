@@ -24,7 +24,7 @@
 
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
-use pidash_db::entity::{dev_machine, engine_credential, users};
+use pidash_db::entity::{dev_machine, engine_credential, machine_token, users};
 use pidash_db::orm_tx::into_sqlx;
 use sea_orm::sea_query::Expr;
 use sea_orm::{
@@ -72,9 +72,29 @@ pub const PAUSE_PROFILE_UNAVAILABLE: &str = "profile_unavailable";
 /// renewal refusal wire code.
 pub const SILENT_RENEWAL_REFUSED: &str = "engine_silent_renewal_refused";
 
-/// `silent_issue_allowed`'s store arm (`SILENT_RENEWAL_ALLOWED_STATES`).
+/// `silent_issue_allowed`'s store arm, by grant scope (desktop_unified_signin
+/// §6.3): a `cli` grant from `never` / `signed_out` / `expiring` /
+/// `expired`; an `engine` grant from `never` / `expiring` / `expired`.
 pub fn silent_renewal_allowed(state: &str) -> bool {
-    matches!(state, SIGN_IN_STATE_EXPIRING | SIGN_IN_STATE_EXPIRED)
+    matches!(
+        state,
+        SIGN_IN_STATE_NEVER | SIGN_IN_STATE_EXPIRING | SIGN_IN_STATE_EXPIRED
+    )
+}
+
+/// Human-facing grant scope words.
+pub const GRANT_SCOPE_CLI: &str = "cli";
+pub const GRANT_SCOPE_ENGINE: &str = "engine";
+
+/// The `cli`-grant store arm (`SILENT_CLI_ALLOWED_STATES`).
+pub fn silent_cli_allowed(state: &str) -> bool {
+    matches!(
+        state,
+        SIGN_IN_STATE_NEVER
+            | SIGN_IN_STATE_SIGNED_OUT
+            | SIGN_IN_STATE_EXPIRING
+            | SIGN_IN_STATE_EXPIRED
+    )
 }
 
 /// Sign-in states a daemon reports when it holds no credential of its own
@@ -165,17 +185,32 @@ pub fn engine_credential_payload(
 }
 
 /// The non-interactive-approval half of `silent_issue_allowed`, on
-/// already-read values: `expiring`/`expired` always; `active` when the
-/// daemon's last report says it holds no credential and that report is
-/// newer than the live credential's creation (or there is none).
+/// already-read values (desktop_unified_signin §6.3): by grant scope —
+/// `cli`: `never` / `signed_out` / `expiring` / `expired`; `engine`:
+/// `never` / `expiring` / `expired` and `signed_out` while the machine
+/// holds a live daemon credential (`machine_holds_live_token`). Also
+/// `active` when the daemon's last report says it holds no credential and
+/// that report is newer than the live credential's creation (or there is
+/// none).
 pub fn silent_issue_allowed_decision(
     state: &str,
     daemon_sign_in_state: Option<&str>,
     reported_at: Option<DateTime<Utc>>,
     live_created_at: Option<DateTime<Utc>>,
+    scope: &str,
+    machine_holds_live_token: bool,
 ) -> bool {
-    if silent_renewal_allowed(state) {
-        return true;
+    if scope == GRANT_SCOPE_CLI {
+        if silent_cli_allowed(state) {
+            return true;
+        }
+    } else {
+        if silent_renewal_allowed(state) {
+            return true;
+        }
+        if state == SIGN_IN_STATE_SIGNED_OUT && machine_holds_live_token {
+            return true;
+        }
     }
     if state != SIGN_IN_STATE_ACTIVE {
         return false;
@@ -348,18 +383,41 @@ async fn read_machine(
         .map_err(into_sqlx)
 }
 
-/// `silent_issue_allowed(machine, now)`: the whole function, reading the
-/// row itself (bridge for callers that hold only the machine id; the
-/// issuer below re-checks on the row it reads for the write).
+/// `silent_issue_allowed(machine, now, scope)`: the whole function,
+/// reading the row itself (bridge for callers that hold only the machine
+/// id; the issuer below re-checks on the row it reads for the write).
 pub async fn silent_issue_allowed(
     db: &impl ConnectionTrait,
     machine_id: Uuid,
     now: DateTime<Utc>,
+    scope: &str,
 ) -> Result<bool, sqlx::Error> {
     let Some(machine) = read_machine(db, machine_id).await? else {
         return Ok(false);
     };
-    silent_issue_allowed_for_row(db, &machine, now).await
+    silent_issue_allowed_for_row(db, &machine, now, scope).await
+}
+
+/// Whether the machine holds a live daemon credential (a machine token);
+/// the engine-scope `signed_out` arm of `silent_issue_allowed`.
+async fn machine_holds_live_token(
+    db: &impl ConnectionTrait,
+    machine_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<bool, sqlx::Error> {
+    use sea_orm::prelude::*;
+    let count = machine_token::Entity::find()
+        .filter(machine_token::Column::DevMachineId.eq(machine_id))
+        .filter(machine_token::Column::RevokedAt.is_null())
+        .filter(
+            machine_token::Column::ExpiresAt
+                .is_null()
+                .or(machine_token::Column::ExpiresAt.gt(at(now))),
+        )
+        .count(db)
+        .await
+        .map_err(into_sqlx)?;
+    Ok(count > 0)
 }
 
 /// `silent_issue_allowed`'s row half: derived state plus the daemon's last
@@ -368,6 +426,7 @@ async fn silent_issue_allowed_for_row(
     db: &impl ConnectionTrait,
     machine: &dev_machine::Model,
     now: DateTime<Utc>,
+    scope: &str,
 ) -> Result<bool, sqlx::Error> {
     let state = current_pidash_agent_sign_in_state(
         &machine.engine_sign_in_state,
@@ -387,26 +446,32 @@ async fn silent_issue_allowed_for_row(
         .await
         .map_err(into_sqlx)?
         .map(|row| utc(row.created_at));
+    let holds_token = state == SIGN_IN_STATE_SIGNED_OUT
+        && scope != GRANT_SCOPE_CLI
+        && machine_holds_live_token(db, machine.id, now).await?;
     Ok(silent_issue_allowed_decision(
         &state,
         reported,
         machine.engine_state_reported_at.map(utc),
         live_created_at,
+        scope,
+        holds_token,
     ))
 }
 
-/// `issue_pidash_agent_credential(user, dev_machine, silent)`: revoke the live
-/// credential (`superseded`), mint `ec_` + urlsafe, store hash and
-/// fingerprint and `now + 14d`, set the machine `active` with the new
-/// expiry, and clear an `engine_sign_in_required` pause (the engine has a
-/// valid credential again). The caller owns the transaction; run on a
-/// `TxConn` when it is part of a larger exchange.
+/// `issue_pidash_agent_credential(user, dev_machine, silent, scope)`:
+/// revoke the live credential (`superseded`), mint `ec_` + urlsafe, store
+/// hash and fingerprint and `now + 14d`, set the machine `active` with the
+/// new expiry, and clear an `engine_sign_in_required` pause (the engine
+/// has a valid credential again). The caller owns the transaction; run on
+/// a `TxConn` when it is part of a larger exchange.
 pub async fn issue_pidash_agent_credential(
     db: &impl ConnectionTrait,
     secret_key: &[u8],
     user_id: Uuid,
     machine_id: Uuid,
     silent: bool,
+    scope: &str,
     now: DateTime<Utc>,
 ) -> Result<IssuedEngineCredential, IssueError> {
     let Some(machine) = read_machine(db, machine_id)
@@ -422,7 +487,7 @@ pub async fn issue_pidash_agent_credential(
         return Err(IssueError::NotMachineOwner);
     }
     if silent
-        && !silent_issue_allowed_for_row(db, &machine, now)
+        && !silent_issue_allowed_for_row(db, &machine, now, scope)
             .await
             .map_err(IssueError::Database)?
     {
@@ -894,45 +959,99 @@ mod tests {
         let now = at_utc(2026, 11, 6);
         let created = now - chrono::Duration::days(2);
         let reported = now - chrono::Duration::days(1);
-        // expiring / expired always renew silently.
-        assert!(silent_issue_allowed_decision("expiring", None, None, None));
-        assert!(silent_issue_allowed_decision("expired", None, None, None));
+        // engine grant: never / expiring / expired always renew silently
+        // (desktop_unified_signin §6.3).
+        assert!(silent_issue_allowed_decision(
+            "never", None, None, None, "engine", false
+        ));
+        assert!(silent_issue_allowed_decision(
+            "expiring", None, None, None, "engine", false
+        ));
+        assert!(silent_issue_allowed_decision(
+            "expired", None, None, None, "engine", false
+        ));
         assert!(!silent_renewal_allowed("active"));
-        assert!(!silent_renewal_allowed("never"));
-        // never / signed_out / revoked never renew silently.
-        for state in ["never", "signed_out", "revoked"] {
-            assert!(!silent_issue_allowed_decision(
-                state,
-                Some("never"),
-                Some(reported),
-                Some(created)
-            ));
-        }
+        assert!(silent_renewal_allowed("never"));
+        // engine grant: signed_out only while the machine holds a live
+        // daemon credential (the pre-change engine-only logout migration).
+        assert!(silent_issue_allowed_decision(
+            "signed_out",
+            None,
+            None,
+            None,
+            "engine",
+            true
+        ));
+        assert!(!silent_issue_allowed_decision(
+            "signed_out",
+            None,
+            None,
+            None,
+            "engine",
+            false
+        ));
+        // cli grant: signed_out renews with no daemon credential at all.
+        assert!(silent_issue_allowed_decision(
+            "never", None, None, None, "cli", false
+        ));
+        assert!(silent_issue_allowed_decision(
+            "signed_out",
+            None,
+            None,
+            None,
+            "cli",
+            false
+        ));
+        // revoked never renews silently.
+        assert!(!silent_issue_allowed_decision(
+            "revoked",
+            Some("never"),
+            Some(reported),
+            Some(created),
+            "engine",
+            true
+        ));
+        assert!(!silent_issue_allowed_decision(
+            "revoked",
+            Some("never"),
+            Some(reported),
+            Some(created),
+            "cli",
+            true
+        ));
         // active needs a no-credential report newer than the live credential.
         assert!(silent_issue_allowed_decision(
             "active",
             Some("signed_out"),
             Some(reported),
-            Some(created)
+            Some(created),
+            "engine",
+            false
         ));
         assert!(silent_issue_allowed_decision(
             "active",
             Some("never"),
             Some(reported),
-            None
+            None,
+            "engine",
+            false
         ));
         assert!(silent_issue_allowed_decision(
             "active",
             Some("expired"),
             Some(reported),
-            Some(created)
+            Some(created),
+            "engine",
+            false
         ));
         // A report older than the live credential is stale: no renewal.
         assert!(!silent_issue_allowed_decision(
             "active",
             Some("signed_out"),
             Some(created),
-            Some(reported)
+            Some(reported),
+            "engine",
+            false
         ));
         // A report saying it still holds a credential: no renewal.
         for reported_state in ["active", "expiring"] {
@@ -940,7 +1059,9 @@ mod tests {
                 "active",
                 Some(reported_state),
                 Some(reported),
-                Some(created)
+                Some(created),
+                "engine",
+                false
             ));
         }
         // Missing report time or missing report: no renewal.
@@ -948,13 +1069,17 @@ mod tests {
             "active",
             Some("signed_out"),
             None,
-            Some(created)
+            Some(created),
+            "engine",
+            false
         ));
         assert!(!silent_issue_allowed_decision(
             "active",
             None,
             Some(reported),
-            None
+            None,
+            "engine",
+            false
         ));
     }
 
@@ -991,6 +1116,7 @@ mod tests {
             model: String::new(),
             reason_code: String::new(),
             top_up_url: String::new(),
+            context_window: None,
         };
         let (available, reason) = pidash_agent_profile_for_user(false, &profile(true));
         assert!(!available);

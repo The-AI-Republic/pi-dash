@@ -1,11 +1,11 @@
 """Contract tests: api-v1 project settings reads and PATCH (NEWPIDASH-278).
 
-Detail reads render the validated settings with defaults (DIFF-48:
+Detail reads render the validated settings with defaults (DIFF-53:
 ``{"issue_run_policy": "creator_and_assignees"}`` on Rust, the raw
 stored ``{}`` on Django). PATCH merges a nested
 ``settings`` object. Django's v1 update serializer has no settings
 field (the key is ignored) and reads echo the raw stored blob, so the
-strict PATCH validation on Rust is the deliberate difference DIFF-41.
+strict PATCH validation on Rust is the deliberate difference DIFF-51.
 """
 
 import sys
@@ -27,7 +27,7 @@ def test_detail_read_includes_settings_with_defaults(seed):
     url = base(seed) + f"/{seed['project']['id']}/"
     r = http.get(seed["keys"][KEY], url)
     assert r.json()["settings"] == expect(
-        "DIFF-48",
+        "DIFF-53",
         django={},
         rust={"issue_run_policy": "creator_and_assignees"},
     )
@@ -37,29 +37,29 @@ def test_patch_empty_settings_is_noop(seed):
     url = base(seed) + f"/{seed['project']['id']}/"
     r = http.patch(seed["keys"][KEY], url, json={"settings": {}}, expect=200)
     assert r.json()["settings"] == expect(
-        "DIFF-48",
+        "DIFF-53",
         django={},
         rust={"issue_run_policy": "creator_and_assignees"},
     )
 
 
 def test_patch_unknown_settings_key_is_400(seed):
-    # DIFF-41: Django's v1 update serializer ignores the key; Rust
+    # DIFF-51: Django's v1 update serializer ignores the key; Rust
     # validates.
     url = base(seed) + f"/{seed['project']['id']}/"
     with http.client(seed["keys"][KEY]) as c:
         r = c.patch(url, json={"settings": {"unknown_key": 1}})
-    assert r.status_code == expect("DIFF-41", django=200, rust=400)
+    assert r.status_code == expect("DIFF-51", django=200, rust=400)
     if is_rust():
         assert r.json() == {"settings": ["unknown setting: unknown_key"]}
 
 
 def test_patch_non_object_settings_is_400(seed):
-    # DIFF-41: same divergence as above for non-object fragments.
+    # DIFF-51: same divergence as above for non-object fragments.
     url = base(seed) + f"/{seed['project']['id']}/"
     with http.client(seed["keys"][KEY]) as c:
         r = c.patch(url, json={"settings": "x"})
-    assert r.status_code == expect("DIFF-41", django=200, rust=400)
+    assert r.status_code == expect("DIFF-51", django=200, rust=400)
     if is_rust():
         assert r.json() == {"settings": ["settings must be a JSON object"]}
 
@@ -81,19 +81,19 @@ def test_issue_run_policy_admin_can_change(seed):
         r = c.patch(url, json={"settings": {"issue_run_policy": "project_members"}})
     assert r.status_code == 200, r.text[:500]
     assert r.json()["settings"] == expect(
-        "DIFF-41",
+        "DIFF-51",
         django={},
         rust={"issue_run_policy": "project_members"},
     )
 
 
 def test_issue_run_policy_invalid_value_is_400(seed):
-    # DIFF-41: Django's v1 update serializer ignores the key; Rust
+    # DIFF-51: Django's v1 update serializer ignores the key; Rust
     # validates the enum.
     url = base(seed) + f"/{seed['project']['id']}/"
     with http.client(seed["keys"][KEY]) as c:
         r = c.patch(url, json={"settings": {"issue_run_policy": "bogus"}})
-    assert r.status_code == expect("DIFF-41", django=200, rust=400)
+    assert r.status_code == expect("DIFF-51", django=200, rust=400)
     if is_rust():
         assert r.json() == {
             "settings": [

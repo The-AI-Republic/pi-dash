@@ -500,6 +500,9 @@ fn estimate_type_exists_select(
     slug: &str,
     project_id: &uuid::Uuid,
 ) -> sea_orm::Select<estimates::Entity> {
+    // Gated on the project's selected estimate (base.py:417-422,
+    // archive.py:311-316): projects.estimate_id = estimates.id with
+    // type='points' and deleted_at IS NULL, plus tenant scope.
     estimates::Entity::find()
         .select_only()
         .column(estimates::Column::Id)
@@ -508,6 +511,14 @@ fn estimate_type_exists_select(
         .filter(projects::Column::Id.eq(*project_id))
         .filter(workspaces::Column::Slug.eq(slug))
         .filter(estimates::Column::Type.eq("points"))
+        .filter(estimates::Column::DeletedAt.is_null())
+        .filter(projects::Column::DeletedAt.is_null())
+        .filter(
+            Condition::all().add(
+                mcol("projects", projects::Column::EstimateId)
+                    .equals(mref("estimates", estimates::Column::Id)),
+            ),
+        )
 }
 
 /// `_rewrite_project_kwarg` (`app/views/base.py:49-80`): authenticated
@@ -2331,8 +2342,8 @@ pub(crate) async fn fetch_sub_issues(
     Ok(count as i64)
 }
 
-/// `estimate_type` gate (`base.py:417-422`): a points estimate exists for
-/// the project.
+/// `estimate_type` gate (`base.py:417-422`): the project's selected
+/// estimate is a live points estimate.
 /// Shared with sibling handler issue 407 (archived detail).
 pub(crate) async fn fetch_estimate_type(
     pool: &sqlx::PgPool,
@@ -4016,6 +4027,12 @@ mod modules1_seaorm_tests {
         assert!(sql.contains(r#""workspaces"."slug" = "#), "{sql}");
         assert!(sql.contains(r#""projects"."id" = "#), "{sql}");
         assert!(sql.contains(r#""estimates"."type" = "#), "{sql}");
+        assert!(sql.contains(r#""estimates"."deleted_at" IS NULL"#), "{sql}");
+        assert!(sql.contains(r#""projects"."deleted_at" IS NULL"#), "{sql}");
+        assert!(
+            sql.contains(r#""projects"."estimate_id" = "estimates"."id"#),
+            "{sql}"
+        );
     }
 
     fn module_rows_stmt(

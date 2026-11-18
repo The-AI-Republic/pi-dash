@@ -5,7 +5,7 @@ The runner runs (`/api/runners/runs/`) follow the project's
 assignees; `project_members` allows any Member/Admin. Django has no
 such gate (the setting is Rust-only; Django stores the bag
 unvalidated), so the member-denied cases pin both behaviours via
-DIFF-48: Django proceeds (201/200), Rust answers 403
+DIFF-53: Django proceeds (201/200), Rust answers 403
 `not_issue_runner` and writes nothing. Covers cancel, release-pin,
 direct creation, app Run AI (`triggered_by=run_ai`) and Comment & Run
 (`triggered_by=comment_and_run`), plus the pod_once carve-out (D1):
@@ -149,7 +149,7 @@ def _delete_created_runs(seeder):
 
 
 def test_cancel_denied_for_other_member(settings, seeder, daemon_world, machine_flow):
-    # DIFF-48: Django cancels (200), Rust refuses (403, whole change).
+    # DIFF-53: Django cancels (200), Rust refuses (403, whole change).
     issue = _ticking_issue(seeder, daemon_world)
     _set_creator(seeder, issue["id"], daemon_world["owner"]["id"])
     run = seeder.create_agent_run(
@@ -168,7 +168,7 @@ def test_cancel_denied_for_other_member(settings, seeder, daemon_world, machine_
     ctx, client = _member_client(settings, member)
     try:
         resp = web_post(client, f"{WEB}/runs/{run['id']}/cancel/", {})
-        assert resp.status_code == expect("DIFF-48", django=200, rust=403), (
+        assert resp.status_code == expect("DIFF-53", django=200, rust=403), (
             resp.text[:500]
         )
         if is_rust():
@@ -238,7 +238,7 @@ def test_cancel_allowed_in_project_members(settings, seeder, daemon_world, machi
 
 
 def test_release_denied_for_other_member(settings, seeder, daemon_world, machine_flow):
-    # DIFF-48: Django releases (200), Rust refuses (403, nothing written).
+    # DIFF-53: Django releases (200), Rust refuses (403, nothing written).
     issue = _ticking_issue(seeder, daemon_world)
     _set_creator(seeder, issue["id"], daemon_world["owner"]["id"])
     run = seeder.create_daemon_run(
@@ -256,7 +256,7 @@ def test_release_denied_for_other_member(settings, seeder, daemon_world, machine
     ctx, client = _member_client(settings, member)
     try:
         resp = web_post(client, f"{WEB}/runs/{run['id']}/release-pin/", {})
-        assert resp.status_code == expect("DIFF-48", django=200, rust=403), (
+        assert resp.status_code == expect("DIFF-53", django=200, rust=403), (
             resp.text[:500]
         )
         if is_rust():
@@ -305,7 +305,7 @@ def test_release_allowed_in_project_members(settings, seeder, daemon_world, mach
 
 
 def test_direct_denied_for_other_member(settings, seeder, daemon_world):
-    # DIFF-48: Django creates (201), Rust refuses (403, no run).
+    # DIFF-53: Django creates (201), Rust refuses (403, no run).
     issue = _ticking_issue(seeder, daemon_world)
     _set_creator(seeder, issue["id"], daemon_world["owner"]["id"])
     member = _member(seeder, daemon_world, role=15)
@@ -321,7 +321,7 @@ def test_direct_denied_for_other_member(settings, seeder, daemon_world):
                 "work_item": issue["id"],
             },
         )
-        assert resp.status_code == expect("DIFF-48", django=201, rust=403), (
+        assert resp.status_code == expect("DIFF-53", django=201, rust=403), (
             resp.text[:500]
         )
         if is_rust():
@@ -404,7 +404,7 @@ def test_direct_guest_denied(settings, seeder, daemon_world):
 
 
 def test_run_ai_denied_for_other_member(settings, seeder, daemon_world):
-    # DIFF-48: Django dispatches (201/202/409), Rust refuses (403, no run).
+    # DIFF-53: Django dispatches (201/202/409), Rust refuses (403, no run).
     issue = _ticking_issue(seeder, daemon_world)
     _set_creator(seeder, issue["id"], daemon_world["owner"]["id"])
     member = _member(seeder, daemon_world, role=15)
@@ -423,7 +423,7 @@ def test_run_ai_denied_for_other_member(settings, seeder, daemon_world):
                 _runs_table_count(seeder, daemon_world["workspace"]["id"]) == before
             )
         else:
-            # DIFF-48: Django has no such refusal; it proceeds.
+            # DIFF-53: Django has no such refusal; it proceeds.
             assert resp.status_code in (201, 202, 409), resp.text[:500]
     finally:
         ctx.__exit__(None, None, None)
@@ -447,7 +447,7 @@ def test_run_ai_allowed_for_assignee(settings, seeder, daemon_world, machine_flo
 
 
 def test_comment_and_run_denied_for_other_member(settings, seeder, daemon_world):
-    # DIFF-48: Django proceeds, Rust refuses (403, no run, no comment).
+    # DIFF-53: Django proceeds, Rust refuses (403, no run, no comment).
     issue = _ticking_issue(seeder, daemon_world)
     _set_creator(seeder, issue["id"], daemon_world["owner"]["id"])
     member = _member(seeder, daemon_world, role=15)
@@ -554,7 +554,7 @@ def test_pod_once_denied_in_default_mode(settings, seeder, daemon_world, machine
                 "pin": "pod_once",
             },
         )
-        assert resp.status_code == expect("DIFF-48", django=201, rust=403), (
+        assert resp.status_code == expect("DIFF-53", django=201, rust=403), (
             resp.text[:500]
         )
         if is_rust():

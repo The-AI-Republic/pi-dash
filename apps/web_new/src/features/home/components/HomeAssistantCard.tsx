@@ -19,6 +19,7 @@ import * as React from "react";
 import { Button, cn } from "@pidash/kit";
 import type { AssistantThread } from "@pidash/api-client";
 
+import { hasLocalChat } from "../../../core/platform/local-chat.js";
 import { usePermissions } from "../../../core/session/index.js";
 import { CrossAppLink } from "../../../shared/coexistence/index.js";
 import { notifyError } from "../../../shared/shell/index.js";
@@ -69,12 +70,14 @@ const COMPOSER_MAX_HEIGHT = 200;
 export function HomeAssistantCard({ workspaceSlug }: HomeAssistantCardProps): React.ReactElement | null {
   const permissions = usePermissions(workspaceSlug);
   const canView = !permissions.isLoading && permissions.canEdit;
-  const threads = useAssistantThreads(workspaceSlug, canView);
+  const localChat = hasLocalChat();
+  const threads = useAssistantThreads(workspaceSlug, canView && !localChat);
   const config = useAssistantConfig(workspaceSlug, canView);
   const start = useStartConversation();
   const navigate = useNavigate();
   const [draft, setDraft] = React.useState("");
   const composerRef = React.useRef<HTMLTextAreaElement | null>(null);
+  const localStartRef = React.useRef(false);
 
   // The composer grows with its content up to COMPOSER_MAX_HEIGHT, then
   // scrolls inside the box (ChatGPT/Claude style).
@@ -86,16 +89,34 @@ export function HomeAssistantCard({ workspaceSlug }: HomeAssistantCardProps): Re
   }, [draft]);
 
   if (!canView) return null;
-  if (threads.data === undefined || config.data === undefined) return null;
+  if ((!localChat && threads.data === undefined) || config.data === undefined) return null;
   const configured = !needsLaneSetup(config.data);
-  const recent = recentConversations(threads.data);
+  // Desktop conversations have machine-local addresses and their history
+  // lives in the native chat. Cloud thread links cannot select them.
+  const recent = localChat ? [] : recentConversations(threads.data);
 
   const ask = (): void => {
     const content = draft.trim();
-    const outcome = cardAskOutcome(content, configured, start.isPending);
+    const outcome = cardAskOutcome(content, configured, start.isPending || localStartRef.current);
     if (outcome === "blank" || outcome === "busy") return;
     if (outcome === "keyless") {
       notifyError(API_KEY_REQUIRED_TITLE, API_KEY_REMINDER);
+      return;
+    }
+    if (localChat) {
+      localStartRef.current = true;
+      setDraft("");
+      // This address is replaced with the local session id after the
+      // native chat accepts the one-shot message; no cloud thread is made.
+      void navigate({
+        to: "/$ws/assistant/$threadId",
+        params: { ws: workspaceSlug, threadId: crypto.randomUUID() },
+        state: { pendingMessage: content },
+      }).catch((error) => {
+        localStartRef.current = false;
+        setDraft(content);
+        notifyError(START_FAILED_TITLE, startFailureDetail(error));
+      });
       return;
     }
     start.mutate(

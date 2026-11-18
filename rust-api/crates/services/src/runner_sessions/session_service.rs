@@ -847,9 +847,13 @@ pub fn cancel_barrier_update_sql(id_count: usize) -> String {
 }
 
 /// The `error` detail every reaped run finalizes with (`:262-265`).
+/// NEWPIDASH-253 (DIFF-42) rewords it in plain words: the daemon
+/// restarted and no longer knows this run. The old
+/// `reaped by heartbeat: ...` text is still recognised by the failure
+/// classifier for rows written before this change.
 pub fn reap_error_detail(in_flight_id: Option<&str>) -> String {
     format!(
-        "reaped by heartbeat: runner reported in_flight_run={} but cloud had this run marked busy",
+        "run reaped: the runner daemon restarted and no longer knows this run (runner reported in_flight_run={} but cloud had this run marked busy)",
         in_flight_id.unwrap_or("(none)")
     )
 }
@@ -2216,15 +2220,25 @@ mod tests {
                 ],
             );
         }
-        // The reaped row carries the exact FAILED payload.
+        // The reaped row carries the FAILED payload. NEWPIDASH-253
+        // (DIFF-42) rewords the detail in plain words, so the Django
+        // fixture's old literal no longer equals the new text; the pin
+        // holds on status/code + the in-flight id.
         let stale = fx()["reap_poll_path"]["stale_after"].clone();
         assert_eq!(stale["status"], "failed");
         assert_eq!(stale["error_code"], "heartbeat_reaped");
-        assert_eq!(
-            stale["error"],
-            Value::String(reap_error_detail(Some(
-                "66ea9c4d-ef41-4d9a-9819-51e0e22d12c6"
-            )))
+        assert!(
+            stale["error"]
+                .as_str()
+                .expect("error")
+                .contains("66ea9c4d-ef41-4d9a-9819-51e0e22d12c6"),
+            "stale error carries the in-flight id: {}",
+            stale["error"]
+        );
+        assert!(
+            reap_error_detail(Some("66ea9c4d-ef41-4d9a-9819-51e0e22d12c6"))
+                .contains("daemon restarted and no longer knows this run"),
+            "new detail is plain-words (DIFF-42)"
         );
         assert_eq!(fx()["reap_poll_path"]["fresh_after_status"], "running");
         assert_eq!(fx()["reap_poll_path"]["inflight_after_status"], "running");
@@ -2270,10 +2284,17 @@ mod tests {
         // With an in-flight exclusion bound, the IN list starts at $4.
         assert!(stale_pairs_sql(&full, true, 2).contains("IN ($4, $5)"));
         // The `(none)` detail is the barrier UPDATE's error literal.
+        // NEWPIDASH-253 (DIFF-42) rewords it in plain words, so the
+        // Django fixture still carries the old literal; pin the
+        // identifying parts instead.
         let update = fx_sql("reap_cancel_barrier", 6);
         assert!(
-            update.contains(&reap_error_detail(None)),
-            "barrier error literal"
+            update.contains("in_flight_run=(none)") && update.contains("heartbeat_reaped"),
+            "barrier error literal: {update}"
+        );
+        assert!(
+            reap_error_detail(None).contains("daemon restarted and no longer knows this run"),
+            "new detail is plain-words (DIFF-42)"
         );
         let barrier = fx()["reap_cancel_barrier"].clone();
         assert_eq!(barrier["status_after"], "cancelled");
@@ -2362,6 +2383,20 @@ mod tests {
     }
 
     #[test]
+    fn reap_detail_states_plain_words() {
+        // NEWPIDASH-253 (DIFF-42): the reap says in plain words what
+        // happened — the daemon restarted and no longer knows this run.
+        let detail = reap_error_detail(None);
+        assert_eq!(
+            detail,
+            "run reaped: the runner daemon restarted and no longer knows this run (runner reported in_flight_run=(none) but cloud had this run marked busy)"
+        );
+        let with_id = reap_error_detail(Some("66ea9c4d-ef41-4d9a-9819-51e0e22d12c6"));
+        assert!(with_id.contains("66ea9c4d-ef41-4d9a-9819-51e0e22d12c6"));
+        assert!(with_id.contains("daemon restarted and no longer knows this run"));
+    }
+
+    #[test]
     fn reap_finalize_call_matches_d15_boundary_and_fixture() {
         use crate::runner_runs::finalization::{
             finalize_lock_passes, finalize_update_sql, lock_run_for_finalize_sql,
@@ -2430,7 +2465,16 @@ mod tests {
             .map(|segment| segment.trim_end_matches('"').rsplit('"').next().unwrap())
             .collect();
         assert_eq!(set_columns, columns);
-        assert!(update.contains(&detail));
+        // NEWPIDASH-253 (DIFF-42): the fixture UPDATE carries Django's
+        // old literal; the new detail adds the plain-words half.
+        assert!(
+            update.contains("66ea9c4d-ef41-4d9a-9819-51e0e22d12c6"),
+            "update carries the in-flight id: {update}"
+        );
+        assert!(
+            detail.contains("daemon restarted and no longer knows this run"),
+            "new detail is plain-words (DIFF-42)"
+        );
         assert!(update.contains("\"code\": \"heartbeat_reaped\""));
         assert!(update.contains("'runner_offline'"));
         // The rendered D-15 UPDATE binds one param per clause, id last.

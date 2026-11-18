@@ -51,6 +51,7 @@ pub mod overlay;
 pub mod paginator;
 pub mod permissions;
 pub mod pidash_agent;
+pub mod project_archived;
 pub mod project_move_handoff;
 pub mod prompting;
 pub mod response_headers;

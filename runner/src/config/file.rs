@@ -122,6 +122,22 @@ fn on_disk_auth(paths: &Paths) -> super::schema::AuthSection {
         .unwrap_or_default()
 }
 
+/// The `[auth_event]` table of the `config.toml` on disk, read without
+/// loading the rest (no keychain, no validation): `Hello` reports it on
+/// every call (desktop_unified_signin §6.1). `None` when there is no file,
+/// no table, or it does not parse. The table holds no credentials.
+pub fn load_auth_event(paths: &Paths) -> Option<super::schema::AuthEvent> {
+    #[derive(serde::Deserialize)]
+    struct OnlyAuthEvent {
+        #[serde(default)]
+        auth_event: Option<super::schema::AuthEvent>,
+    }
+    fs::read_to_string(paths.config_path())
+        .ok()
+        .and_then(|text| toml::from_str::<OnlyAuthEvent>(&text).ok())
+        .and_then(|a| a.auth_event)
+}
+
 /// Rewrite `config.toml` as a sign-in does: under `credentials_store =
 /// "auto"`, credentials still in the file move into the OS keychain when it
 /// answers (design §4.3 "migrate on next login"). Returns the config and
@@ -341,6 +357,7 @@ mod tests {
         let cfg = Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),
@@ -564,6 +581,26 @@ model_default = "o4-mini"
     }
 
     #[test]
+    fn load_auth_event_reads_only_the_event_table() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        assert!(load_auth_event(&paths).is_none(), "no file");
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::write(
+            paths.config_path(),
+            "version = 2\n\n[daemon]\ncloud_url = \"https://x\"\n\n[auth_event]\nseq = 3\nkind = \"signed_out\"\nreason = \"removed\"\nat = \"2026-11-16T00:00:00Z\"\n\n[auth_event.account]\nemail = \"a@example.com\"\ncloud_url = \"https://x\"\n",
+        )
+        .unwrap();
+        let event = load_auth_event(&paths).unwrap();
+        assert_eq!(Some(event.clone()), load_config(&paths).unwrap().auth_event);
+        assert_eq!(event.seq, 3);
+        assert_eq!(
+            event.reason,
+            Some(crate::config::schema::AuthEventReason::Removed)
+        );
+    }
+
+    #[test]
     fn mutate_config_round_trips_under_lock() {
         // mutate_config takes the exclusive flock on .config.lock, applies
         // the closure to the loaded config, and writes it back atomically.
@@ -573,6 +610,7 @@ model_default = "o4-mini"
         let cfg = Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),
@@ -625,6 +663,7 @@ model_default = "o4-mini"
         let cfg = Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),
@@ -665,6 +704,7 @@ model_default = "o4-mini"
         let cfg = Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),
@@ -708,6 +748,7 @@ model_default = "o4-mini"
         let cfg = Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),

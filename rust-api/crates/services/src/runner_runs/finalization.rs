@@ -1554,7 +1554,7 @@ mod tests {
         let comment = hooks.failure_comment.as_ref().expect("failure comment");
         assert_eq!(comment.detail, "boom detail");
         assert!(comment
-            .render("", false)
+            .render("", false, None)
             .comment
             .comment_html
             .contains("Run failed."));
@@ -1595,9 +1595,24 @@ mod tests {
                 UpdateCapacityMarker,
             ]
         );
-        // Infra detail: still re-read — it is only silenced once the clock
-        // effect says the clock keeps running (a backstop stop is reported).
+        // Infra detail (stalled): still re-read — it is only silenced
+        // once the clock effect says the clock keeps running (a backstop
+        // stop is reported). NEWPIDASH-253 (DIFF-42) drops the
+        // daemon-shutdown prefix, so daemon details are no longer infra.
         inputs.error = "daemon shutdown requested: restart";
+        let outcome = plan_terminal_effects(&inputs);
+        let TerminalEffectsOutcome::Applied(plan) = outcome else {
+            panic!("expected Applied");
+        };
+        let comment = plan
+            .hooks
+            .as_ref()
+            .expect("hooks")
+            .failure_comment
+            .as_ref()
+            .expect("planned");
+        assert!(!comment.infra, "daemon detail posts (DIFF-42)");
+        inputs.error = "agent stalled: no events for >30s";
         let outcome = plan_terminal_effects(&inputs);
         let TerminalEffectsOutcome::Applied(plan) = outcome else {
             panic!("expected Applied");

@@ -91,6 +91,7 @@ pub struct PidashAgentProfile {
     pub model: String,
     pub reason_code: String,
     pub top_up_url: String,
+    pub context_window: Option<u32>,
 }
 
 /// Describe the model endpoint the Pi Dash Agent may call
@@ -112,6 +113,10 @@ pub fn pidash_agent_profile_for_user(has_api_key: bool) -> PidashAgentProfile {
             model: String::new(),
             reason_code: REASON_BYOK_UNSUPPORTED.to_owned(),
             top_up_url: String::new(),
+            // CE leaves it empty: the OSS build has no OpenHub catalog to fill
+            // it from. Known models use the engine's built-in catalog; unknown
+            // models are refused at turn time by the fallback check.
+            context_window: None,
         }
     } else {
         PidashAgentProfile {
@@ -121,6 +126,7 @@ pub fn pidash_agent_profile_for_user(has_api_key: bool) -> PidashAgentProfile {
             model: String::new(),
             reason_code: REASON_LLM_CONFIG_MISSING.to_owned(),
             top_up_url: String::new(),
+            context_window: None,
         }
     }
 }

@@ -39,6 +39,7 @@ export function registerLocalChatTransport(): void {
           workspaceSlug: workspaceSlugFromPath(globalThis.location.pathname),
           client: getAppClient(),
           runtime: platform.agentRuntime,
+          cli: platform.cliSetup,
         }),
       refreshModelCredential: () =>
         refreshModelCredential({

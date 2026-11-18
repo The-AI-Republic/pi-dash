@@ -127,6 +127,7 @@ impl RunnerInstance {
         let state = StateHandle::new(crate::config::schema::Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon,
             runners: vec![config.clone()],

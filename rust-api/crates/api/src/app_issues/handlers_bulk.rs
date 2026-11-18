@@ -138,6 +138,14 @@ pub async fn bulk_operation(
         return Ok(status_response(StatusCode::FORBIDDEN, ENTITY_DENIED_BODY));
     }
     archive_allow(&base.pool, &base.slug, &base.project_id, &base.user_id).await?;
+    if let Some(info) = crate::project_archived::archived_by_id(&base.pool, base.project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     let (data, is_html) = request_data(&headers, &body)?;
     let (ids, properties) = match validate_operation_body(&data, is_html) {
         Ok(valid) => valid,
@@ -199,6 +207,14 @@ pub async fn bulk_subscribe(
     let base = bulk_base(&state, &slug, &project_raw, extension).await?;
     if !lite_allowed(&base.pool, &slug, &base.project_id, &base.user_id).await? {
         return Ok(status_response(StatusCode::FORBIDDEN, ENTITY_DENIED_BODY));
+    }
+    if let Some(info) = crate::project_archived::archived_by_id(&base.pool, base.project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
     }
     let (data, _) = request_data(&headers, &body)?;
     let ids = match validate_subscribe_body(&data) {

@@ -165,6 +165,7 @@ impl IpcServer {
                 self.spawn_ctx.reload_credentials().await?;
                 Ok(Response::Ack)
             }
+            Request::SessionHandoff { challenge } => self.spawn_ctx.session_handoff(&challenge).await,
             Request::MachineRunLimitSet { limit } => {
                 if !(1..=65535).contains(&limit) {
                     return Ok(Response::Error(crate::ipc::protocol::RpcError {
@@ -368,7 +369,9 @@ impl IpcServer {
                 Ok(Response::Ack)
             }
             Request::RunnerDisconnect => {
-                self.primary_state.shutdown();
+                self.primary_state.shutdown_with_reason(
+                    crate::daemon::state::DaemonShutdownTrigger::ControlSocket,
+                );
                 Ok(Response::Ack)
             }
             Request::RunnerRemoveLocal { runner } => {
@@ -901,6 +904,7 @@ mod tests {
                 cli: None,
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
             }),
             paths: paths.clone(),
             instances: Arc::new(std::sync::RwLock::new(HashMap::new())),
@@ -1054,6 +1058,7 @@ sleep 1
                 cli: None,
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
             },
         )
         .unwrap();
@@ -1074,7 +1079,10 @@ sleep 1
             &paths,
             &insts.iter().collect::<Vec<_>>(),
         );
-        spawn_ctx.local_chat = Arc::new(PidashAgentChatProfile::for_tests(engine, codex_home.clone()));
+        spawn_ctx.local_chat = Arc::new(PidashAgentChatProfile::for_tests(
+            engine,
+            codex_home.clone(),
+        ));
         let server = IpcServer {
             path: paths.ipc_socket_path(),
             primary_state: crate::daemon::state::StateHandle::new(Config {
@@ -1084,6 +1092,7 @@ sleep 1
                 cli: None,
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
             }),
             paths: paths.clone(),
             instances: Arc::new(std::sync::RwLock::new(
@@ -1315,6 +1324,7 @@ sleep 1
                 cli: None,
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
             }),
             paths: paths.clone(),
             instances: Arc::new(std::sync::RwLock::new(HashMap::new())),
@@ -1407,6 +1417,7 @@ sleep 1
             }),
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
         }
     }
 
@@ -1510,6 +1521,7 @@ sleep 1
                 cli: None,
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
             }),
             paths: paths.clone(),
             instances: Arc::new(std::sync::RwLock::new(HashMap::new())),

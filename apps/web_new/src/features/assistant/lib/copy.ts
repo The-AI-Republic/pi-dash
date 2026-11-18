@@ -92,6 +92,11 @@ export const NEW_CONVERSATION_LABEL = "New chat";
 export const CONVERSATION_RAIL_BRAND = "Pi Dash AI";
 /** Fallback label for a tool-activity link the server sent without one. */
 export const TOOL_LINK_FALLBACK = "View";
+/**
+ * Heading of the desktop panel shown when the Pi Dash Agent is
+ * unavailable (NEWPIDASH-300). The server's reason sentence follows.
+ */
+export const DESKTOP_AGENT_UNAVAILABLE_TITLE = "The Pi Dash Agent isn't available";
 
 /**
  * Dashboard card suggestion chips (AGT-048), in display order. Picking one

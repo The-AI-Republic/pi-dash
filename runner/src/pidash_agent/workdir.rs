@@ -360,6 +360,7 @@ mod tests {
             cli: None,
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
         }
     }
 

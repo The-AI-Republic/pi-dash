@@ -75,6 +75,8 @@ const DESKTOP_BUNDLE_ORIGINS: &[&str] = &[
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub profile: Profile,
+    /// Edition marker returned in instance configuration. Cloud overlays set this false.
+    pub is_self_managed: bool,
     pub secret_key: String,
     /// True when no `SECRET_KEY` was set and one was generated (sessions do
     /// not survive restarts then — same as Python's random fallback).
@@ -98,6 +100,9 @@ pub struct Settings {
     pub storage: StorageSettings,
     pub runner: RunnerSettings,
     pub pidash_agent: PidashAgentSettings,
+    /// Desktop session handoff kill switch (desktop_unified_signin §5.1):
+    /// default ON; off refuses the handoff endpoints.
+    pub desktop_session_handoff_enabled: bool,
     pub default_agent_executor: String,
     pub session: SessionSettings,
     pub urls: UrlSettings,
@@ -342,6 +347,16 @@ impl<'a> Ctx<'a> {
         Ok(matches!(
             self.req_string(key, inline)?.to_ascii_lowercase().as_str(),
             "1" | "true" | "yes"
+        ))
+    }
+
+    /// `value.lower() not in ("0", "false", "no")`: default-on kill
+    /// switches — anything but an explicit off (including `""` and junk
+    /// like `"off"`) is on, exactly as Django reads them.
+    fn flag_not_off(&self, key: &str, inline: &str) -> Result<bool, ConfigError> {
+        Ok(!matches!(
+            self.req_string(key, inline)?.to_lowercase().as_str(),
+            "0" | "false" | "no"
         ))
     }
 
@@ -956,6 +971,7 @@ impl Settings {
 
         Ok(Self {
             profile,
+            is_self_managed: true,
             secret_key,
             secret_key_generated,
             debug,
@@ -1119,6 +1135,8 @@ impl Settings {
                 desktop_min_version: ctx
                     .req_string("DESKTOP_MIN_VERSION_FOR_MANAGED_RUNNER", "")?,
             },
+            desktop_session_handoff_enabled: ctx
+                .flag_not_off("DESKTOP_SESSION_HANDOFF_ENABLED", "true")?,
             default_agent_executor: ctx.req_string("DEFAULT_AGENT_EXECUTOR", "local_runner")?,
             session: SessionSettings {
                 cookie_age_secs: ctx.req_int("SESSION_COOKIE_AGE", ConfigValue::from(604800))?,
@@ -1249,6 +1267,7 @@ impl Settings {
             "MANAGED_RUNNER_GRACEFUL_STOP_SECS",
             "MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS",
             "DESKTOP_MIN_VERSION_FOR_MANAGED_RUNNER",
+            "DESKTOP_SESSION_HANDOFF_ENABLED",
             "DEFAULT_AGENT_EXECUTOR",
             "AGENT_RUN_TERMINAL_RECONCILE_INTERVAL_SECONDS",
             "SESSION_COOKIE_AGE",
@@ -1294,6 +1313,7 @@ mod tests {
     fn empty_map_resolves_to_registry_defaults() {
         let s = Settings::from_map_with(&HashMap::new(), Profile::Common, &NoOverlay)
             .expect("defaults resolve");
+        assert!(s.is_self_managed);
         assert!(s.secret_key_generated);
         assert_eq!(s.secret_key.len(), 64);
         assert!(!s.debug);
@@ -1316,6 +1336,27 @@ mod tests {
         )
         .expect("resolves");
         assert_eq!(s2.email_backend, SMTP_BACKEND);
+    }
+
+    #[test]
+    fn desktop_handoff_switch_is_on_unless_explicitly_off() {
+        // `common.py`: `get_config(..., "true").lower() not in ("0", "false", "no")`.
+        let resolve = |value: Option<&str>| {
+            let map = match value {
+                Some(v) => vars(&[("DESKTOP_SESSION_HANDOFF_ENABLED", v)]),
+                None => HashMap::new(),
+            };
+            Settings::from_map_with(&map, Profile::Common, &NoOverlay)
+                .expect("resolves")
+                .desktop_session_handoff_enabled
+        };
+        assert!(resolve(None), "default on");
+        for on in ["1", "true", "TRUE", "yes", "on", "off", "", "anything"] {
+            assert!(resolve(Some(on)), "{on:?} is on");
+        }
+        for off in ["0", "false", "False", "no", "NO"] {
+            assert!(!resolve(Some(off)), "{off:?} is off");
+        }
     }
 
     #[test]

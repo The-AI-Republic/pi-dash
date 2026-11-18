@@ -5,7 +5,7 @@ project's `issue_run_policy`: default mode allows only the issue's
 creator and its current assignees; `project_members` allows any
 Member/Admin (guests excluded). Django has no such gate (the setting
 is Rust-only; Django stores the bag unvalidated), so the member-denied
-cases pin both behaviours via DIFF-48: Django moves (204), Rust
+cases pin both behaviours via DIFF-53: Django moves (204), Rust
 answers 403 `not_issue_runner` without writing.
 """
 
@@ -87,13 +87,13 @@ def test_assignee_moves_state(world):
 
 
 def test_other_member_cannot_move_state(world):
-    # DIFF-48: Django moves (204), Rust refuses (403, whole change).
+    # DIFF-53: Django moves (204), Rust refuses (403, whole change).
     client, user, ws, project = world.full_stack()
     member_user, member_client = world.add_member(ws, project, ws_role=15, proj_role=15)
     issue = _make_issue(client, ws, project)
     target = _other_state(_states(client, ws, project), issue["state_id"])
     resp = _patch_issue(member_client, ws, project, issue["id"], {"state_id": target})
-    assert resp.status_code == expect("DIFF-48", django=204, rust=403), resp.text[:500]
+    assert resp.status_code == expect("DIFF-53", django=204, rust=403), resp.text[:500]
     if is_rust():
         assert resp.json() == {"error": MESSAGE, "reason": REASON}
         assert (
@@ -103,7 +103,7 @@ def test_other_member_cannot_move_state(world):
 
 
 def test_removed_assignee_cannot_move_state(world):
-    # DIFF-48: un-assigning withdraws the right at once.
+    # DIFF-53: un-assigning withdraws the right at once.
     client, user, ws, project = world.full_stack()
     member_user, member_client = world.add_member(ws, project, ws_role=15, proj_role=15)
     issue = _make_issue(client, ws, project)
@@ -117,7 +117,7 @@ def test_removed_assignee_cannot_move_state(world):
     assert resp.status_code == 204, resp.text[:500]
     target = _other_state(_states(client, ws, project), issue["state_id"])
     resp = _patch_issue(member_client, ws, project, issue["id"], {"state_id": target})
-    assert resp.status_code == expect("DIFF-48", django=204, rust=403), resp.text[:500]
+    assert resp.status_code == expect("DIFF-53", django=204, rust=403), resp.text[:500]
     if is_rust():
         assert resp.json() == {"error": MESSAGE, "reason": REASON}
         assert (
@@ -189,13 +189,13 @@ def _bulk(client, ws, project, issue_ids, properties):
 
 
 def test_bulk_state_denied_as_a_whole(world):
-    # DIFF-48: Django moves (200), Rust refuses (403, nothing written).
+    # DIFF-53: Django moves (200), Rust refuses (403, nothing written).
     client, user, ws, project = world.full_stack()
     member_user, member_client = world.add_member(ws, project, ws_role=15, proj_role=15)
     issue = _make_issue(client, ws, project)
     target = _other_state(_states(client, ws, project), issue["state_id"])
     resp = _bulk(member_client, ws, project, [issue["id"]], {"state_id": target})
-    assert resp.status_code == expect("DIFF-48", django=200, rust=403), resp.text[:500]
+    assert resp.status_code == expect("DIFF-53", django=200, rust=403), resp.text[:500]
     if is_rust():
         assert resp.json() == {"error": MESSAGE, "reason": REASON}
         assert (

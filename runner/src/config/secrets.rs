@@ -1008,6 +1008,7 @@ mod tests {
                 credentials_store: mode,
                 ..Default::default()
             },
+            auth_event: None,
         }
     }
 
@@ -1298,7 +1299,7 @@ mod tests {
         migrate_credentials_store(&p).unwrap();
         let beta = format!("{ITEM_WORKSPACE_PREFIX}beta");
         keyring.break_item(&beta);
-        // `pidash auth logout --engine`: forgets the engine credential only.
+        // A scoped sign-out: forgets the engine credential only.
         {
             let _forget =
                 forget_unreadable(&p, ForgetScope::Items(vec![ITEM_ENGINE_CREDENTIAL.into()]));

@@ -298,3 +298,81 @@ def test_revalidate_flags_core_override_with_git_wording(db, workspace, create_u
     call_command("revalidate_section_overrides", "--clear", stdout=StringIO())
     legacy.refresh_from_db()
     assert legacy.needs_attention is True
+
+
+# ----------------------------------------------------------------------
+# Software review/test: sync the PR branch with its base (NEWPIDASH-277)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_software_review_syncs_pr_branch_with_base():
+    populated = sample_contexts(recipes.KIND_REVIEW)[0]
+    text = compose(
+        recipes.KIND_REVIEW,
+        workspace=None,
+        project=None,
+        user=None,
+        context=populated,
+        work_type="software",
+    ).text
+    for phrase in (
+        "Sync the PR branch with its base",
+        "git fetch origin",
+        "git merge origin/<base>",
+        "merge, never rebase",
+        "never force-push",
+        "base SHA",
+        "In Progress",
+    ):
+        assert phrase in text, f"missing {phrase!r}"
+    # The sync step precedes the review-kind guidance.
+    assert text.index(
+        "Sync the PR branch with its base"
+    ) < text.index("Software work products come in these review kinds")
+    # Mergeability re-check on agent-close.
+    assert "re-check mergeability" in text
+
+
+@pytest.mark.unit
+def test_software_test_syncs_pr_branch_with_base():
+    populated = sample_contexts(recipes.KIND_TEST)[0]
+    text = compose(
+        recipes.KIND_TEST,
+        workspace=None,
+        project=None,
+        user=None,
+        context=populated,
+        work_type="software",
+    ).text
+    for phrase in (
+        "Sync the PR branch with its base",
+        "git fetch origin",
+        "git merge origin/<base>",
+        "merge, never rebase",
+        "never force-push",
+        "base SHA",
+        "In Progress",
+    ):
+        assert phrase in text, f"missing {phrase!r}"
+    assert text.index("Sync the PR branch with its base") < text.index("Gates and CI runs are")
+    assert "re-check mergeability" in text
+    # Base moved after the test ran: sync and re-check first.
+    assert "A merge into the base after the test ran means syncing and re-checking first" in text
+
+
+@pytest.mark.unit
+def test_general_review_and_test_have_no_sync_step():
+    for kind in (recipes.KIND_REVIEW, recipes.KIND_TEST):
+        for ctx in sample_contexts(kind):
+            text = compose(
+                kind,
+                workspace=None,
+                project=None,
+                user=None,
+                context=ctx,
+                work_type="general",
+            ).text
+            assert "Sync the PR branch with its base" not in text
+            assert "git fetch origin" not in text
+            assert "git merge origin" not in text

@@ -2068,6 +2068,9 @@ pub async fn enqueue_best_effort(
 /// `POST .../<project_id>/archive/` (`views/project.py:528-538`): stamp
 /// `archived_at`, soft-delete the workspace's project favorites, answer
 /// 204. Misses raise `DoesNotExist` into the base-handler 404.
+/// NEWPIDASH-239: the same transaction also sets `enabled = false` on
+/// every live scheduler binding of the project (the ticker and
+/// `run-now` guards cover re-enabled or pre-existing archives).
 pub async fn archive_project_inner(
     state: &AppState,
     headers: &HeaderMap,
@@ -2091,8 +2094,9 @@ pub async fn archive_project_inner(
     // runs after permissions; an unknown zone 400s only for survivors).
     activate_timezone(pre.actor.timezone.as_deref())?;
     let now = chrono::Utc::now();
+    let mut tx = pre.pool.begin().await.map_err(|_| Denial::ServerError)?;
     let updated: u64 = pidash_services::domain::projects::archive_v1_project(
-        &pidash_db::pool::sea_orm_connection(&pre.pool),
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
         project_id,
         workspace_id,
         pre.actor.id,
@@ -2103,19 +2107,31 @@ pub async fn archive_project_inner(
     if updated == 0 {
         return Err(Denial::NotFound);
     }
+    pidash_services::domain::projects::disable_project_bindings(
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
+        project_id,
+        now,
+        pre.actor.id,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
     // `UserFavorite` cleanup (`views/project.py:537`): every favorite of
     // the project in this workspace soft-deletes (no `entity_type`
     // predicate on this path, exactly as written).
     // `user_favorites` is not a write-guard covered table, so the write
     // goes directly through SeaORM.
-    user_favorites::Entity::update_many()
-        .col_expr(user_favorites::Column::DeletedAt, Expr::value(now))
-        .filter(user_favorites::Column::WorkspaceId.eq(workspace_id))
-        .filter(user_favorites::Column::ProjectId.eq(project_id))
-        .filter(user_favorites::Column::DeletedAt.is_null())
-        .exec(&orm(&pre.pool))
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        user_favorites::Entity::update_many()
+            .col_expr(user_favorites::Column::DeletedAt, Expr::value(now))
+            .filter(user_favorites::Column::WorkspaceId.eq(workspace_id))
+            .filter(user_favorites::Column::ProjectId.eq(project_id))
+            .filter(user_favorites::Column::DeletedAt.is_null())
+            .exec(&conn)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+    }
+    tx.commit().await.map_err(|_| Denial::ServerError)?;
     Ok(no_content())
 }
 

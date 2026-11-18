@@ -6,6 +6,18 @@ customizable: overridable
 
 ## Reviewing software deliverables (work type: software)
 
+### Sync the PR branch with its base before reviewing
+
+Before you review anything, bring the {{ repo.code_review_term }} branch up to date with its base. Every review verdict must describe code that can actually merge into today's base — review only the synced branch, never a stale one.
+
+- `git fetch origin`, then check out the PR's head branch. The base is the PR's base branch; when that is not visible, fall back to `{{ repo.base_branch }}` (or the repository's default branch when no base is set). For a stacked PR — the base is another PR's branch, not the project base — sync against that same base branch.
+- `git merge origin/<base>` — merge, never rebase, and never force-push. The PR branch is shared and may already carry review history; a merge commit preserves both sides.
+- Clean merge: run this repo's own checks (the test guidance names them: README/CONTRIBUTING, `.github/workflows/`, package manifests) on the merged tree. Push the merge commit if it is not a no-op.
+- Conflicts: resolve them so the base's newer structure wins and the PR's change is re-applied on top. Run this repo's own checks, then push the merge commit.
+- Too large to resolve with confidence — the base rewrote the code the PR changes: do not review stale code. Abort the merge, leave the branch untouched, comment on the issue with what changed on the base and what needs redoing, and move the issue back to **In Progress** so the change can be rebuilt on the current base.
+- Record in the workpad the base SHA you were checked against (`git rev-parse origin/<base>`, or the short SHA after the sync), so a later run can tell whether the verdict is still current. For a stacked PR, note in the workpad whether the parent PR has merged.
+- If a prior review verdict exists and the base has moved since that verdict, redo the review on the synced branch — a verdict on an old base does not carry over. If this pass merges the PR (agent-close), re-check mergeability first: if the base moved after any earlier verdict, sync and re-review before merging.
+
 Software work products come in these review kinds — prefer them over GENERIC when they match:
 
 - **CODE** — the issue produced a {{ repo.code_review_term }} (look for a `pr_url` in done_payload, or a feature branch ahead of the base branch).

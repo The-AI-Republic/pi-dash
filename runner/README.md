@@ -348,7 +348,6 @@ pidash engine status                   # available / signed out / expiring / una
 pidash engine pause                    # this computer's engine takes no new work …
 pidash engine resume                   # … until resumed
 pidash login --engine                  # renew the engine's 14-day credential alone
-pidash auth logout --engine            # sign the engine out; the daemon stays signed in
 pidash auth status                     # both credentials, expiry, engine sign-in state
 pidash config set engine-task-root ~/pidash-tasks   # or `default`
 ```
@@ -360,6 +359,16 @@ pidash config set engine-task-root ~/pidash-tasks   # or `default`
   those **in memory only**, refreshes them when under 60 s remain, and hands
   them to the engine through its auth helper `pidash __engine model-token`
   (over the local socket). Nothing short-lived is written to disk.
+- **One sign-in.** There is no engine-only sign-out: `pidash auth logout`
+  signs the daemon and the engine out together, and the next sign-in on
+  either side signs both in again. The engine credential is renewed silently
+  by a signed-in desktop app (from `never` and `signed_out` too), and on a
+  computer with no app `pidash login --engine` renews it alone.
+  Signing in as another account parks the previous account's machine
+  identity (machine id + runner blocks, under
+  `<config dir>/parked/<cloud>/<account>.toml`) and restores the new
+  account's own, restarting the daemon — nothing is deleted
+  (`.ai_design/desktop_unified_signin/design.md` §6.4).
 - **An engine runner** is `[runner.agent] kind = "engine"` with no paths: the
   daemon supplies the engine binary, a private `CODEX_HOME` at
   `<data dir>/engine/<account>/codex-home` (never `~/.codex`) and the Codex
@@ -445,10 +454,10 @@ Stable runner releases set `LATEST_RUNNER_VERSION` in Cloud SSM automatically (`
 
 ## Reconnecting and deleted runners
 
-When a runner can't reach Pi Dash (connection refused, DNS failure, timeout, any 5xx, a proxy error page, or 429), the daemon retries with exponential backoff: 30 s, 1 m, 2 m, … up to a 6-hour cap, with ±20% jitter on every wait so runners don't all reconnect at once. A server outage never removes a runner. `pidash status` shows why a runner is offline and when it will try again:
+When a runner can't reach Pi Dash (connection refused, DNS failure, timeout, any 5xx, a proxy error page, or 429), the daemon retries with exponential backoff: 30 s, 1 m, 2 m, 4 m, up to a 5-minute cap, with ±20% jitter on every wait so runners don't all reconnect at once. The cap is deliberately short so CLI-only machines (no desktop app to kick them) recover within minutes after the cloud returns instead of hours. A server outage never removes a runner. `pidash status` shows why a runner is offline and when it will try again:
 
 ```
-  laptop — DISCONNECTED project=WEB (server unreachable; next retry in 1h 52m; last connected 3h ago; 9 failed attempts)
+  laptop — DISCONNECTED project=WEB (server unreachable; next retry in 4m 12s; last connected 3h ago; 9 failed attempts)
 ```
 
 These retry immediately and start the backoff over:
