@@ -2800,8 +2800,9 @@ impl RunnerLoop {
                     decision,
                     ..
                 } => {
+                    let key = cloud_approval_key(&self.approvals, approval_id).await;
                     self.approvals
-                        .decide(&approval_id.to_string(), decision, DecisionSource::Cloud)
+                        .decide(&key, decision, DecisionSource::Cloud)
                         .await;
                     self.state.note_approvals_changed();
                 }
@@ -5538,6 +5539,20 @@ enum Outcome {
     Retry { code: &'static str },
 }
 
+/// Map a cloud `Decide` UUID back to the local approval id it was derived
+/// from. Engine-issued handles (e.g. `rpc:<uuid>:<json id>`) are not UUIDs, so
+/// the cloud only ever sees `uuid_or(handle)`; without this reverse lookup the
+/// decision would be parked as an early decision and never reach the engine.
+async fn cloud_approval_key(approvals: &ApprovalRouter, cloud_id: uuid::Uuid) -> String {
+    approvals
+        .list_pending()
+        .await
+        .into_iter()
+        .map(|rec| rec.approval_id)
+        .find(|local| uuid_or(local) == cloud_id)
+        .unwrap_or_else(|| cloud_id.to_string())
+}
+
 /// Best-effort: if codex hands us a non-UUID approval id (it shouldn't, per
 /// schema), derive a stable v5 UUID from it so the cloud sees the same id on
 /// retries instead of a fresh random one each time.
@@ -5565,6 +5580,47 @@ mod tests {
     use chrono::TimeZone;
     use std::path::PathBuf;
     use tokio::sync::Notify;
+
+    #[tokio::test]
+    async fn cloud_decide_resolves_engine_rpc_approval_handle() {
+        let approvals = ApprovalRouter::new();
+        let handle = format!("rpc:{}:7", uuid::Uuid::new_v4());
+        approvals
+            .open(ApprovalRecord {
+                approval_id: handle.clone(),
+                runner_id: uuid::Uuid::new_v4(),
+                run_id: uuid::Uuid::new_v4(),
+                kind: crate::cloud::protocol::ApprovalKind::CommandExecution,
+                payload: serde_json::json!({}),
+                reason: None,
+                requested_at: Utc::now(),
+                expires_at: None,
+                status: ApprovalStatus::Pending,
+            })
+            .await;
+
+        // The cloud only ever saw (and echoes back) the derived v5 UUID.
+        let key = cloud_approval_key(&approvals, uuid_or(&handle)).await;
+        assert_eq!(key, handle);
+        let resolved = approvals
+            .decide(
+                &key,
+                crate::cloud::protocol::ApprovalDecision::Accept,
+                DecisionSource::Cloud,
+            )
+            .await;
+        assert!(
+            resolved.is_some(),
+            "cloud decision must resolve the pending engine approval"
+        );
+
+        // Unknown ids fall through unchanged (early-decision buffering).
+        let other = uuid::Uuid::new_v4();
+        assert_eq!(
+            cloud_approval_key(&approvals, other).await,
+            other.to_string()
+        );
+    }
 
     fn paths_for(root: &std::path::Path) -> Paths {
         Paths {
