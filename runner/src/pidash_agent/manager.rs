@@ -404,10 +404,13 @@ impl PidashAgentManager {
         // A background install can resolve the pinned binary after this
         // manager was constructed. Keep an existing startup path stable,
         // but pick up the first successful install without a daemon restart.
+        // Startup paths need validation too: an installer can remove and
+        // repair the executable while this daemon keeps running.
         let binary = self
             .binary
             .as_deref()
-            .or_else(|| super::locate::resolved().map(|engine| engine.binary.as_path()));
+            .or_else(|| super::locate::resolved().map(|engine| engine.binary.as_path()))
+            .filter(|binary| binary.is_file());
         let credential = self.tokens.engine_credential();
         let st = self.state();
         let local = match &credential {
@@ -569,13 +572,13 @@ mod tests {
     }
 
     fn manager(url: &str, root: &std::path::Path, cli: CliSection) -> Arc<PidashAgentManager> {
+        let binary = root.join("pidash-agent-engine");
+        std::fs::write(&binary, "engine fixture").unwrap();
         PidashAgentManager::new(
             Some(url),
             paths(root),
             WorkspaceTokens::from_cli(Some(&cli)),
-            Some(PathBuf::from(
-                "/lib/pidash/engine/0.153.4/pidash-agent-engine",
-            )),
+            Some(binary),
         )
     }
 
@@ -915,13 +918,38 @@ mod tests {
     }
 
     #[test]
+    fn a_removed_engine_is_unavailable_until_the_same_binary_is_restored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let binary = tmp.path().join("pidash-agent-engine");
+        std::fs::write(&binary, "engine fixture").unwrap();
+        let m = PidashAgentManager::new(
+            None,
+            paths(tmp.path()),
+            WorkspaceTokens::from_cli(Some(&cli(chrono::Duration::days(10)))),
+            Some(binary.clone()),
+        );
+        m.apply_profile(serde_json::from_str(&profile_json(true, "")).unwrap());
+        assert_eq!(m.status().state, EngineState::Available);
+
+        std::fs::remove_file(&binary).unwrap();
+        assert_eq!(m.status().state, EngineState::Unavailable);
+        assert_eq!(
+            m.status().reason_code.as_deref(),
+            Some(reason::ENGINE_NOT_INSTALLED)
+        );
+
+        std::fs::write(&binary, "restored engine fixture").unwrap();
+        assert_eq!(m.status().state, EngineState::Available);
+    }
+
+    #[test]
     fn a_binary_installed_after_startup_makes_the_engine_available() {
         // Resolution is process-wide and immutable once successful. Run in
         // a child so this test does not change other tests' engine lookup.
         const CHILD: &str = "PIDASH_TEST_LATE_ENGINE_INSTALL";
         if std::env::var_os(CHILD).is_none() {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "engine::manager::tests::a_binary_installed_after_startup_makes_the_engine_available"])
+                .args(["--exact", "pidash_agent::manager::tests::a_binary_installed_after_startup_makes_the_engine_available"])
                 .env(CHILD, "1")
                 .output()
                 .unwrap();
@@ -930,9 +958,16 @@ mod tests {
                 "{}",
                 String::from_utf8_lossy(&output.stdout)
             );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
+        let installed = tmp.path().join("pidash-agent-engine");
+        let config = crate::config::schema::PidashAgentSection {
+            binary: Some(installed.clone()),
+            ..Default::default()
+        };
+        assert!(super::super::locate::init_at_daemon_start(&config).is_err());
         let m = PidashAgentManager::new(
             None,
             paths(tmp.path()),
@@ -944,13 +979,9 @@ mod tests {
             m.status().reason_code.as_deref(),
             Some(reason::ENGINE_NOT_INSTALLED)
         );
-        let installed = tmp.path().join("pidash-agent-engine");
         std::fs::write(&installed, "fake engine").unwrap();
-        super::super::locate::init_at_daemon_start(&crate::config::schema::PidashAgentSection {
-            binary: Some(installed.clone()),
-            ..Default::default()
-        })
-        .unwrap();
+        // The installer only writes the file. It does not re-initialize
+        // discovery, write a cargo-dist receipt, or restart the daemon.
         let status = m.status();
         assert_eq!(status.state, EngineState::Available);
         assert_eq!(status.binary, Some(installed.display().to_string()));

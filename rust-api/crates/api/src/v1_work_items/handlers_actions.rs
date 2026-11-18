@@ -649,9 +649,10 @@ pub struct IssueRow {
     pub state_group: Option<String>,
 }
 
-/// The [`fetch_issue`] statement: INNER JOIN `workspaces` (the slug),
-/// LEFT JOIN `states` (nullable FK), plain soft-delete scope, `LIMIT 1`.
-fn issue_row_select(slug: &str, project_id: &Uuid, pk: &Uuid) -> sea_orm::Select<issues::Entity> {
+/// The [`IssueRow`] projection: the issue columns plus the LEFT JOINed
+/// `states` name/group (nullable FK). Shared by [`fetch_issue`] and
+/// [`fetch_issue_by_id`].
+fn issue_row_columns() -> sea_orm::Select<issues::Entity> {
     issues::Entity::find()
         .select_only()
         .columns([
@@ -664,8 +665,14 @@ fn issue_row_select(slug: &str, project_id: &Uuid, pk: &Uuid) -> sea_orm::Select
         ])
         .column_as(states::Column::Name, "state_name")
         .column_as(states::Column::Group, "state_group")
-        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
         .join(JoinType::LeftJoin, issues::Relation::States.def())
+}
+
+/// The [`fetch_issue`] statement: INNER JOIN `workspaces` (the slug),
+/// LEFT JOIN `states` (nullable FK), plain soft-delete scope, `LIMIT 1`.
+fn issue_row_select(slug: &str, project_id: &Uuid, pk: &Uuid) -> sea_orm::Select<issues::Entity> {
+    issue_row_columns()
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
         .filter(workspaces::Column::Slug.eq(slug))
         .filter(issues::Column::ProjectId.eq(*project_id))
         .filter(issues::Column::Id.eq(*pk))
@@ -684,6 +691,19 @@ pub async fn fetch_issue(
         .one(&sea_orm_connection(pool))
         .await
         .map_err(|error| db_error(error, "fetch-issue"))
+}
+
+/// `Issue.all_objects.filter(pk=pk).first()` with the [`fetch_issue`]
+/// columns: no workspace/project scope and no soft-delete filter, as the
+/// web re-tick endpoint (`runner/views/runs.py:733`) reads it.
+pub async fn fetch_issue_by_id(pool: &PgPool, pk: &Uuid) -> Result<Option<IssueRow>, Denial> {
+    issue_row_columns()
+        .filter(issues::Column::Id.eq(*pk))
+        .limit(1)
+        .into_model::<IssueRow>()
+        .one(&sea_orm_connection(pool))
+        .await
+        .map_err(|error| db_error(error, "fetch-issue-by-id"))
 }
 
 /// `AgentRun.objects.select_related("runner").filter(pk=run_id).first()`
@@ -1509,45 +1529,55 @@ async fn retick_inner(
             refused.body,
         ));
     }
-    let project = fetch_project(&pre.pool, &project_id)
+    let (status, body) = retick_issue(state, &pre.pool, pre.actor.id, &issue).await?;
+    Ok(json_response(status, body))
+}
+
+/// `scheduling.re_tick_ticker(issue, actor=...)` plus the shared re-tick
+/// payload, after the caller's auth/lookup arms. Shared by the v1
+/// `IssueReTickAPIEndpoint` and the web `AgentReTickEndpoint`
+/// (`POST /api/runners/re-tick/`, `runner/views/runs.py:699-753`), whose
+/// payloads are identical; the web one used to proxy this tail to Django,
+/// which the all-Rust stack answers with a 502.
+pub async fn retick_issue(
+    state: &AppState,
+    pool: &PgPool,
+    actor_id: Uuid,
+    issue: &IssueRow,
+) -> Result<(StatusCode, String), Denial> {
+    let project_id = issue.project_id.ok_or(Denial::ServerError)?;
+    let project = fetch_project(pool, &project_id)
         .await?
         .ok_or(Denial::ServerError)?;
     let now = Utc::now();
-    let jitter = draw_jitter(&issue, &project.policy);
-    let (deps, matcher) = dispatch_deps(
-        state,
-        &pre.pool,
-        pre.actor.id,
-        &issue,
-        &project,
-        now.timestamp(),
-    )
-    .await?;
+    let jitter = draw_jitter(issue, &project.policy);
+    let (deps, matcher) =
+        dispatch_deps(state, pool, actor_id, issue, &project, now.timestamp()).await?;
     let out = pidash_jobs::orchestration::re_tick_ticker(
-        &pre.pool,
+        pool,
         deps,
         &matcher,
         now,
         jitter,
         issue.id,
-        Some(pre.actor.id),
+        Some(actor_id),
     )
     .await
     .map_err(|error| db_error(error, "retick-driver"))?;
     let outcome = out.outcome;
-    let pool =
+    let pool_size =
         pidash_db::tasks_ticker::pool_size_or_default(project.policy.agent_default_max_ticks);
-    let (status, body) = retick_response(
+    let response = retick_response(
         outcome.granted,
         &outcome.reason,
         outcome.run_id,
-        outcome.ticker.as_ref().map(|ticker| (ticker, pool)),
+        outcome.ticker.as_ref().map(|ticker| (ticker, pool_size)),
     );
     // Drain after the body is built: the re-tick body carries no run
     // status, and the committed row must be assigned before the
     // response returns (PIDASHCONV-1494).
-    drain_dispatch_decisions(&pre.pool, state, &out.dispatch_decisions, "retick-drain").await?;
-    Ok(json_response(status, body))
+    drain_dispatch_decisions(pool, state, &out.dispatch_decisions, "retick-drain").await?;
+    Ok(response)
 }
 
 /// `POST .../work-items/<pk>/wait/` (`views/issue.py:987-1069`).

@@ -12,8 +12,9 @@
 //! racing `pidash engine install` to strand it); runners driving the user's
 //! own agent are never affected.
 //!
-//! Installs without a receipt (MSI, which places the engine itself; source
-//! builds; extracted archives) are left alone.
+//! Installs without a receipt (desktop bundles, MSI, source builds and
+//! extracted archives) are not downloaded over. The daemon's independent
+//! discovery still picks up an engine their installer places later.
 
 use std::future::Future;
 use std::time::Duration;
@@ -52,7 +53,7 @@ pub async fn install_missing(config: PidashAgentSection) {
         .unwrap_or(false);
     if !managed {
         tracing::info!(
-            "Pi Dash Agent not installed and this pidash has no install receipt; run `pidash engine install`"
+            "Pi Dash Agent download skipped: no install receipt; watching for a local installation"
         );
         return;
     }
