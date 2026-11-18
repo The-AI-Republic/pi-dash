@@ -1254,9 +1254,10 @@ async fn post_token(State(state): State<AppState>, headers: HeaderMap, body: Byt
         }
         // Engine profile unavailable => 409 engine_unavailable.
         let (available, pause_reason) =
-            pidash_services::domain::pidash_agent_credential::pidash_agent_profile_for_user_available(
-                state.settings(),
-            );
+            match crate::pidash_agent::endpoints::device_grant_availability(&state, user_id).await {
+                Ok(availability) => availability,
+                Err(response) => return response,
+            };
         if !available {
             let state = pidash_services::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
                 &machine.engine_sign_in_state,
