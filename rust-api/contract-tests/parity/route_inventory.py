@@ -420,7 +420,6 @@ def _gap_for_unmatched(dj: dict) -> str:
         return "G3"
     if (
         path in {
-            "/api/runners/dev-machines/{machine_id}/engine-sign-out/",
             "/api/v1/runner/dev-machines/{dev_machine_id}/",
             "/api/v1/runner/dev-machines/{dev_machine_id}/merge-into/",
             "/api/v1/runner/dev-machines/{dev_machine_id}/replace-candidates/",

@@ -13,7 +13,7 @@ import { useQuery } from "@tanstack/react-query";
 import { getPidashAgentProfile } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
-import { platform } from "../../../core/platform/index.js";
+import { hasLocalChat } from "../../../core/platform/local-chat.js";
 import { BUILTIN_CHAT_ID } from "./localTransport.js";
 import { agentReasonMessage } from "../../../shared/lib/agentReasons.js";
 import { PIDASH_AGENT_NAME } from "../../../shared/lib/runnerIdentity.js";
@@ -39,14 +39,14 @@ export function pidashAgentContactAvailability(profile: { available: boolean; re
   return { unavailableReason: profile.available ? null : agentReasonMessage(profile.reason_code) };
 }
 
-/** True when this build can serve chat from the machine itself. */
-export function hasLocalChat(): boolean {
-  return platform.localChat !== undefined;
-}
+export { hasLocalChat };
 
 export function localChatQueryKey() {
   return ["runners", "local-agent", "availability"] as const;
 }
+
+/** Shown when the availability check fails without words of its own. */
+export const LOCAL_AGENT_UNAVAILABLE_FALLBACK = "Pi Dash Agent is unavailable.";
 
 /**
  * The built-in contact, or an empty list when this build has no local
@@ -69,7 +69,7 @@ export function usePidashAgentContact(): PidashAgentContact[] {
   if (availability.isError) {
     const error = availability.error;
     unavailableReason =
-      error instanceof Error && error.message !== "" ? error.message : "Pi Dash Agent is unavailable.";
+      error instanceof Error && error.message !== "" ? error.message : LOCAL_AGENT_UNAVAILABLE_FALLBACK;
   } else if (availability.data !== undefined) {
     unavailableReason = pidashAgentContactAvailability(availability.data).unavailableReason;
   }

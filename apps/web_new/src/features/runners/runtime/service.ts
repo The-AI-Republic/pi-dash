@@ -11,15 +11,15 @@
 //
 // - the signed-in account, which scopes local chat history and is what
 //   discovery classifies the daemon against;
-// - discovery, and setting the daemon up when there is none — only after
-//   the user accepted the consent screen (§4.7);
-// - keeping the engine signed in: renewed silently only when the daemon
-//   reports `expiring` or `expired`; `never`, `signed_out` and `revoked`
-//   need an explicit sign-in (§4.3, §4.6);
+// - discovery, and automatically setting up the daemon for the signed-in account;
+// - keeping the engine signed in: signed in or renewed silently from every
+//   state but `revoked`, with no engine sign-in of its own
+//   (desktop_unified_signin §6.3);
 // - "Run on this computer": turning the Pi Dash Agent on for a project
 //   the first time a run uses it (§5, enrol on use);
 // - the app half of a sign-out: approval modes stashed, chat history
-//   deleted only when asked; the daemon stays signed in.
+//   deleted only when asked; the computer signs out with the app
+//   (desktop_unified_signin §4).
 //
 // Every entry takes the API client plus the platform capability and is
 // inert without the capability, so web and cloud builds make no call.
@@ -46,7 +46,8 @@ import type {
 import type { RuntimeSignOutChoice } from "../../../core/session/index.js";
 import { agentReasonMessage } from "../../../shared/lib/agentReasons.js";
 import { restoreApprovalModes, stashApprovalModes } from "./approvalModes.js";
-import { requestDaemonSetup, type SetUpReason } from "./setupPrompt.js";
+import { publishSetupStatus } from "./setupStatus.js";
+import { sameCloud } from "./sync.js";
 
 /** Server executor kind for the Pi Dash Agent. */
 export const PIDASH_AGENT_EXECUTOR_KIND = "managed_runner";
@@ -63,8 +64,6 @@ export const SILENT_RENEW_RETRY_MS = 10 * 60 * 1000;
  * during a long outage, defeating the daemon's backoff. */
 export const RECONNECT_MIN_INTERVAL_MS = 30_000;
 
-export const PIDASH_AGENT_TURN_ON_TEXT = "Turn on the Pi Dash Agent in Pi Dash Agent settings to chat with it.";
-export const PIDASH_AGENT_SIGNED_OUT_TEXT = "The Pi Dash Agent is signed out. Sign it in from Pi Dash Agent settings.";
 export const PIDASH_AGENT_STILL_CONNECTING_TEXT =
   "The Pi Dash Agent on this computer has not connected yet. Try Run again shortly.";
 
@@ -96,6 +95,7 @@ export interface HeartbeatPoll {
 export interface RuntimeDeps {
   client: ApiClient;
   runtime?: AgentRuntimeApi | undefined;
+  cli?: CliSetupApi | undefined;
 }
 
 interface Identity {
@@ -128,10 +128,19 @@ const state: RuntimeState = {
   topUpUrl: "",
 };
 
+let setupFlight: { identity: Identity; promise: Promise<void> } | null = null;
+
+export function daemonSetupInProgress(): boolean {
+  return setupFlight !== null;
+}
+
 /** Drop all runtime state. Tests only; the app resumes instead. */
 export function resetRuntimeServiceForTests(): void {
+  setupFlight = null;
+  publishSetupStatus(null);
   state.account = "";
   state.identity = null;
+  publishSetupStatus(null);
   state.discovery = null;
   state.lastSilentAttempt = 0;
   state.silentInFlight = null;
@@ -196,16 +205,11 @@ export function daemonAccountKey(hello: DaemonHello | null): string | undefined 
   return hello?.account?.user_id ?? hello?.account?.email ?? undefined;
 }
 
-/** Whether the sign-out dialog should offer to sign out the computer too. */
-export function canSignOutComputer(): boolean {
-  return compatibleHello() !== null;
-}
-
 /**
  * Why the app's engine features are off, in the user's words; `null` when
  * the daemon is compatible. Every other part of the app keeps working.
  */
-export function discoveryProblem(discovery: DaemonDiscovery | null): string | null {
+export function discoveryProblem(discovery: DaemonDiscovery | null, appCloudUrl?: string | undefined): string | null {
   if (!discovery) return "Looking for Pi Dash on this computer…";
   switch (discovery.kind) {
     case "compatible":
@@ -220,29 +224,34 @@ export function discoveryProblem(discovery: DaemonDiscovery | null): string | nu
       return "Pi Dash on this computer is not answering right now. The app will try again.";
     case "signed_out":
       return "Pi Dash on this computer is signed out.";
-    case "account_mismatch":
+    case "account_mismatch": {
+      // A daemon on another cloud: the app cannot follow (§6.2), so the
+      // notice names the cloud instead of the account.
+      if (appCloudUrl !== undefined && !sameCloud(appCloudUrl, discovery.daemon_cloud_url)) {
+        return `Pi Dash on this computer is signed in to ${discovery.daemon_cloud_url}.`;
+      }
       return `Pi Dash on this computer is signed in as ${discovery.daemon_account}.`;
+    }
   }
 }
 
 /**
  * What the app may do about the engine's sign-in, by the state the daemon
- * reports: `expiring`/`expired` renew silently, `never` needs a one-click
- * "Turn on", `signed_out`/`revoked` an explicit sign-in, anything else
- * nothing.
+ * reports (desktop_unified_signin §4, §6.3): the engine has no sign-in of
+ * its own, so `never`, `signed_out`, `expiring` and `expired` are all
+ * signed in or renewed silently while the app is signed in. `revoked`
+ * still needs an interactive sign-in — which the app never offers — so the
+ * daemon reports the engine unavailable instead of the app asking.
  */
-export type PidashAgentAction = "renew_silently" | "turn_on" | "sign_in" | "none";
+export type PidashAgentAction = "renew_silently" | "none";
 
 export function pidashAgentActionFor(signIn: DaemonPidashAgentSignInState | undefined): PidashAgentAction {
   switch (signIn) {
     case "expiring":
     case "expired":
-      return "renew_silently";
     case "never":
-      return "turn_on";
     case "signed_out":
-    case "revoked":
-      return "sign_in";
+      return "renew_silently";
     default:
       return "none";
   }
@@ -331,6 +340,7 @@ export function resumeRuntime(
   const current = state.identity;
   if (current?.userId === user.id && current.email === user.email && current.cloudUrl === user.cloudUrl) return;
   if (current?.userId !== user.id) {
+    publishSetupStatus(null);
     state.discovery = null;
     state.lastSilentAttempt = 0;
     state.topUpUrl = "";
@@ -366,37 +376,64 @@ export type DaemonSetUpStep = "install_cli" | "sign_in" | "service" | "engine" |
  * steps so the result is a terminal install: install the tool the app
  * carries, sign it in to the workspace with a grant the app's session
  * approves (skipped when the daemon is already this account's), install
- * and start the user service, install the engine. Run only after the user
- * accepted the consent screen.
+ * and start the user service, install the Pi Dash Agent. Concurrent launch
+ * and chat requests share one setup operation.
  */
-export async function setUpDaemon(
-  input: {
-    workspaceSlug: string;
-    cli: CliSetupApi | undefined;
-    onStep?: ((step: DaemonSetUpStep) => void) | undefined;
-  } & RuntimeDeps
+export function setUpDaemon(
+  input: { workspaceSlug: string; onStep?: ((step: DaemonSetUpStep) => void) | undefined } & RuntimeDeps
 ): Promise<void> {
   const { client, runtime, cli, workspaceSlug } = input;
-  const onStep = input.onStep ?? (() => undefined);
   const identity = state.identity;
-  if (!runtime || !identity) throw new Error("The local agent is signed out.");
-  if (!cli) throw new Error("This build cannot set up Pi Dash on this computer.");
-  onStep("install_cli");
-  const status = await cli.detect();
-  if (!status.installed) await cli.install();
-  if (!compatibleHello(await rediscover(runtime))) {
-    onStep("sign_in");
-    const grant = await startDeviceGrant(client);
-    await approveDeviceCode(client, grant.user_code, { interactive: false, workspaceSlug });
-    // The tool finishes the exchange and owns everything it writes.
-    await cli.login({ deviceCode: grant.device_code, cloudUrl: identity.cloudUrl, workspace: workspaceSlug });
+  if (!runtime || !identity) return Promise.reject(new Error("The local agent is signed out."));
+  if (setupFlight) {
+    if (setupFlight.identity === identity) return setupFlight.promise;
+    return Promise.reject(new Error("Pi Dash is finishing setup for another account. Try again shortly."));
   }
-  onStep("service");
-  await runtime.installService();
-  onStep("engine");
-  await runtime.ensurePidashAgent();
-  await discoverDaemon(runtime);
-  onStep("done");
+  const assertAccount = (): void => {
+    if (state.identity !== identity) throw new Error("The signed-in account changed during Pi Dash setup.");
+  };
+  const onStep = (step: DaemonSetUpStep): void => {
+    assertAccount();
+    publishSetupStatus(step === "done" ? null : { kind: "running", step });
+    input.onStep?.(step);
+  };
+  const promise = Promise.resolve().then(async () => {
+    try {
+      assertAccount();
+      if (!cli) throw new Error("This build cannot set up Pi Dash on this computer.");
+      onStep("install_cli");
+      const status = await cli.detect();
+      assertAccount();
+      if (!status.installed) await cli.install();
+      assertAccount();
+      const found = await rediscover(runtime);
+      assertAccount();
+      if (!compatibleHello(found)) {
+        if (found?.kind !== "no_daemon" && found?.kind !== "signed_out") {
+          throw new Error(discoveryProblem(found, identity.cloudUrl) ?? "Cannot connect to Pi Dash on this computer.");
+        }
+        onStep("sign_in");
+        const grant = await startDeviceGrant(client);
+        assertAccount();
+        await approveDeviceCode(client, grant.user_code, { interactive: false, workspaceSlug });
+        assertAccount();
+        await cli.login({ deviceCode: grant.device_code, cloudUrl: identity.cloudUrl, workspace: workspaceSlug });
+      }
+      onStep("service");
+      await runtime.installService();
+      onStep("engine");
+      await runtime.ensurePidashAgent();
+      await discoverDaemon(runtime);
+      onStep("done");
+    } catch (error) {
+      if (state.identity === identity) publishSetupStatus({ kind: "failed", error });
+      throw error;
+    } finally {
+      setupFlight = null;
+    }
+  });
+  setupFlight = { identity, promise };
+  return promise;
 }
 
 /**
@@ -421,26 +458,48 @@ export async function signInWorkspace(
 }
 
 /**
- * A daemon the app can use, set up on the user's say-so when there is
- * none. Throws the reason when there is still none.
+ * Sign the computer's daemon in to this account with no workspace named
+ * (desktop_unified_signin §4): the server auto-picks the grant's workspace
+ * and the tool picks the one it serves. The new account's silent sign-in
+ * signs the daemon — and the engine with it (§6.3) — in at once, switching
+ * accounts when the daemon is signed in as someone else (§6.4).
+ * `force` rebinds a daemon on another cloud to the app's cloud (§6.2).
  */
-export async function ensureDaemon(
-  reason: SetUpReason,
-  workspaceSlug: string,
-  deps: RuntimeDeps
-): Promise<DaemonHello> {
+export async function signInDaemonForAccount(
+  input: { cli: CliSetupApi | undefined; force?: boolean | undefined } & RuntimeDeps
+): Promise<void> {
+  const { client, runtime, cli, force } = input;
+  const identity = state.identity;
+  if (!runtime || !identity) throw new Error("The local agent is signed out.");
+  if (!cli) throw new Error("This build cannot sign Pi Dash on this computer in.");
+  const grant = await startDeviceGrant(client);
+  await approveDeviceCode(client, grant.user_code, { interactive: false });
+  // The tool finishes the exchange and owns everything it writes; an
+  // account switch parks and restores identities and restarts the daemon.
+  await cli.login({ deviceCode: grant.device_code, cloudUrl: identity.cloudUrl, workspace: "", force });
+  await runtime.reloadCredentials().catch(() => undefined);
+  await rediscover(runtime);
+}
+
+/**
+ * A daemon the app can use, automatically set up for the signed-in account.
+ * Chat waits for any setup already started by the workspace supervisor.
+ */
+export async function ensureDaemon(workspaceSlug: string, deps: RuntimeDeps): Promise<DaemonHello> {
   const { runtime } = deps;
   if (!runtime) throw new Error("Pi Dash is not available on this build.");
+  if (setupFlight) await setupFlight.promise;
   const found = await rediscover(runtime);
   const ready = compatibleHello(found);
   if (ready) return ready;
   if (found?.kind === "no_daemon" || found?.kind === "signed_out") {
-    if (await requestDaemonSetup({ reason, workspaceSlug })) {
-      const after = compatibleHello();
-      if (after) return after;
-    }
+    await setUpDaemon({ ...deps, workspaceSlug });
+    const after = compatibleHello();
+    if (after) return after;
   }
-  throw new Error(discoveryProblem(state.discovery) ?? "Pi Dash is not set up on this computer.");
+  throw new Error(
+    discoveryProblem(state.discovery, state.identity?.cloudUrl) ?? "Pi Dash is not set up on this computer."
+  );
 }
 
 /** Refuse when the engine cannot take work, with the sentence the user needs. */
@@ -448,9 +507,12 @@ function assertPidashAgentUsable(hello: DaemonHello): void {
   if (hello.engine === "unavailable") {
     throw new PidashAgentUnavailableError(hello.engine_detail?.reason_code ?? "");
   }
-  const action = pidashAgentActionFor(pidashAgentSignInState(hello));
-  if (action === "turn_on") throw new Error(PIDASH_AGENT_TURN_ON_TEXT);
-  if (action === "sign_in") throw new Error(PIDASH_AGENT_SIGNED_OUT_TEXT);
+  // The engine has no sign-in of its own (desktop_unified_signin U-3): a
+  // revoked engine is not something the app can sign in, so the daemon's
+  // unavailability is the story, never an ask to sign in.
+  if (pidashAgentSignInState(hello) === "revoked") {
+    throw new PidashAgentUnavailableError(hello.engine_detail?.reason_code ?? "");
+  }
 }
 
 /**
@@ -461,10 +523,13 @@ function assertPidashAgentUsable(hello: DaemonHello): void {
 export async function ensureChatRuntime(input: { workspaceSlug: string } & RuntimeDeps): Promise<void> {
   const { runtime, workspaceSlug } = input;
   if (!runtime) return;
-  await ensureDaemon("chat", workspaceSlug, input);
+  await ensureDaemon(workspaceSlug, input);
   await renewPidashAgentIfAllowed(input);
   const hello = compatibleHello();
-  if (!hello) throw new Error(discoveryProblem(state.discovery) ?? "Pi Dash is not set up on this computer.");
+  if (!hello)
+    throw new Error(
+      discoveryProblem(state.discovery, state.identity?.cloudUrl) ?? "Pi Dash is not set up on this computer."
+    );
   assertPidashAgentUsable(hello);
 }
 
@@ -502,7 +567,7 @@ export async function turnOnPidashAgentForProject(
 ): Promise<DaemonPidashAgentRunner | DaemonLocalRunner> {
   const { runtime, workspaceSlug, project, workingDir } = input;
   if (!runtime) throw new Error("Pi Dash is not available on this build.");
-  await ensureDaemon("engine", workspaceSlug, input);
+  await ensureDaemon(workspaceSlug, input);
   const existing = await localPidashAgentRunner(runtime, workspaceSlug, project);
   if (existing) return existing;
   return runtime.addPidashAgentRunner({ workspace: workspaceSlug, project, workingDir });
@@ -529,7 +594,7 @@ export async function prepareAgentRun(
   ]);
   if ((issue.agent_executor ?? project.default_agent_executor) !== PIDASH_AGENT_EXECUTOR_KIND) return;
   wakeDaemonForReconnect(runtime);
-  await turnOnPidashAgentForProject({ client, runtime, workspaceSlug, project: project.identifier });
+  await turnOnPidashAgentForProject({ client, runtime, cli: input.cli, workspaceSlug, project: project.identifier });
   const attempts = input.heartbeatPoll?.maxAttempts ?? HEARTBEAT_POLL_ATTEMPTS;
   const intervalMs = input.heartbeatPoll?.intervalMs ?? HEARTBEAT_POLL_INTERVAL_MS;
   const sleep = input.heartbeatPoll?.sleep ?? defaultSleep;
@@ -547,6 +612,32 @@ export async function prepareAgentRun(
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Release the runtime for an app-only account switch (desktop_unified_signin
+ * §4 row 6: the CLI signed in as someone else, so the app signs its current
+ * account out locally and follows). Unlike `disposeRuntimeForSignOut` the
+ * computer stays signed in — the daemon is the side being followed — and no
+ * sign-out event is recorded. The approval modes are stashed for the old
+ * account and the runtime identity is dropped, so `resumeRuntime` starts
+ * clean for the new one. Never rejects.
+ */
+export async function releaseRuntimeForAccountSwitch(input: Pick<RuntimeDeps, "runtime">): Promise<void> {
+  const { runtime } = input;
+  if (!runtime) return;
+  const account = getRuntimeAccount();
+  try {
+    await stashApprovalModes({ account, runtime });
+  } catch {
+    // A lost preference must not block the switch.
+  }
+  state.identity = null;
+  publishSetupStatus(null);
+  state.discovery = null;
+  state.topUpUrl = "";
+  state.lastSilentAttempt = 0;
+  state.account = "";
 }
 
 /**
@@ -574,18 +665,45 @@ export async function disposeRuntimeForSignOut(
       // Deleting history failed; the sign-out itself still goes ahead.
     }
   }
-  if (choice.signOutComputer) {
+  // Unified sign-in (desktop_unified_signin §4): the app's sign-out always
+  // signs the computer out. When the server cannot be reached the logout
+  // runs `--local-only`, so the computer is signed out regardless. A failed
+  // logout is retried by the sync supervisor, whose sign-out is the newest
+  // event (§6.2).
+  try {
+    await runtime.signOutComputer();
+  } catch {
     try {
-      await runtime.signOutComputer();
+      await runtime.signOutComputer({ localOnly: true });
     } catch {
-      // Signing out Pi Dash on this computer failed; the sign-out itself
-      // still goes ahead.
+      // Even the local clear failed; the sync supervisor retries the logout.
     }
+  }
+  // The app's own sign-out event (design §6.2): the newest event wins, so
+  // a CLI logout that failed above is retried, never undone. Written in the
+  // host's store, which survives the webview wipe that follows.
+  try {
+    const prior = await runtime.getAuthSyncRecord().catch(() => null);
+    await runtime.setAuthSyncRecord({
+      own_event: {
+        kind: "signed_out",
+        account: {
+          user_id: account || undefined,
+          email: state.identity?.email,
+          cloud_url: state.identity?.cloudUrl ?? "",
+        },
+        at: new Date().toISOString(),
+      },
+      last_seen_seq: prior?.last_seen_seq ?? null,
+    });
+  } catch {
+    // The record is best-effort: the supervisor re-derives it on the next check.
   }
   // The account stays readable until the page navigates away; discovery
   // is forgotten so nothing acts on the daemon for the old session (an
   // answer still in flight is dropped as stale).
   state.identity = null;
+  publishSetupStatus(null);
   state.discovery = null;
   state.topUpUrl = "";
 }

@@ -173,6 +173,8 @@ pub enum Denial {
     NotFoundError(String),
     /// 409, view-inline `{"error": ...}` with a custom message.
     ConflictError(String),
+    /// 409, archived project (NEWPIDASH-236, pre-rendered body).
+    ProjectArchived(String),
     /// 500, generic branch.
     ServerError,
 }
@@ -206,6 +208,7 @@ impl Denial {
                 StatusCode::CONFLICT,
                 format!("{{\"error\":{}}}", json_string(message)),
             ),
+            Denial::ProjectArchived(body) => (StatusCode::CONFLICT, body.clone()),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 SERVER_ERROR_BODY.to_owned(),
@@ -610,11 +613,18 @@ async fn require_gate(
     let gate = gate_for(route, "POST");
     let facts = entity_facts(pool, workspace_id, workspace_slug, user_id, project_id).await?;
     let scope = TenantScope::new(pidash_types::WorkspaceId::from(workspace_slug.to_owned()));
-    if super::perms::decide(gate, "POST", &scope, &facts) {
-        Ok(())
-    } else {
-        Err(Denial::Forbidden)
+    if !super::perms::decide(gate, "POST", &scope, &facts) {
+        return Err(Denial::Forbidden);
     }
+    if let Some(info) = crate::project_archived::archived_by_id(pool, *project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1265,6 +1275,14 @@ pub fn run_ai_refusal(reason: Option<&str>) -> (StatusCode, String) {
     (status, body)
 }
 
+/// Enrich an active-run refusal body with the blocking run
+/// (NEWPIDASH-251): reuses the runner-dispatch fetch/enrich helpers
+/// so web and v1 spell the block identically. Unchanged when no
+/// blocker can be named.
+async fn run_ai_enriched_body(pool: &sqlx::PgPool, issue_id: Uuid, body: String) -> String {
+    crate::runner_runs::dispatch::active_run_enriched_body(pool, Some(issue_id), &body).await
+}
+
 /// The v1 dedicated refusal (`:1244-1251`): the full §11.2 body.
 async fn dedicated_refusal_response(
     pool: &PgPool,
@@ -1771,7 +1789,19 @@ async fn run_ai_inner(
                     Err(denial) => return Err(denial),
                 }
             }
-            _ => run_ai_refusal(outcome.reason.as_deref()),
+            _ => {
+                let (status, body) = run_ai_refusal(outcome.reason.as_deref());
+                // The active-run refusal names the blocking run so
+                // coordinators can tell "really running" from "stuck"
+                // (NEWPIDASH-251); other reasons render unchanged.
+                if outcome.reason.as_deref() == Some("active_run_exists") {
+                    return Ok(json_response(
+                        status,
+                        run_ai_enriched_body(&pre.pool, issue.id, body).await,
+                    ));
+                }
+                (status, body)
+            }
         };
         return Ok(json_response(status, body));
     };

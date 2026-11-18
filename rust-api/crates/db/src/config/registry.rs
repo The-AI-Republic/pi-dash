@@ -335,6 +335,8 @@ fn infra_entries(into: &mut HashMap<String, ConfigEntry>) {
         ("MANAGED_RUNNER_GRACEFUL_STOP_SECS", V::from(30)),
         ("MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS", V::from(300)),
         ("DESKTOP_MIN_VERSION_FOR_MANAGED_RUNNER", V::from("")),
+        // Desktop session handoff kill switch (desktop_unified_signin §5.1): default on.
+        ("DESKTOP_SESSION_HANDOFF_ENABLED", V::from("true")),
         // In-house Cloud Agent executor.
         ("DEFAULT_AGENT_EXECUTOR", V::from("local_runner")),
         ("AGENT_RUN_TERMINAL_RECONCILE_INTERVAL_SECONDS", V::from(30)),

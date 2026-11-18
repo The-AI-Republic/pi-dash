@@ -197,6 +197,8 @@ enum Denial {
     UnsupportedMediaType(String),
     /// 502, truncated request-body read (the shared bad-gateway shape).
     TruncatedBody,
+    /// 409, archived project (NEWPIDASH-236, pre-rendered body).
+    ProjectArchived(String),
     /// 500, generic branch.
     ServerError,
 }
@@ -238,6 +240,7 @@ impl Denial {
                 StatusCode::BAD_GATEWAY,
                 crate::edge::BAD_GATEWAY_BODY.to_owned(),
             ),
+            Denial::ProjectArchived(body) => (StatusCode::CONFLICT, body.clone()),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 super::SERVER_ERROR_BODY.to_owned(),
@@ -356,11 +359,18 @@ async fn check_allow(
     let allowed = access::allows(&orm(pool), slug, *project_id, *user_id, allowed)
         .await
         .map_err(|_| Denial::ServerError)?;
-    if allowed {
-        Ok(())
-    } else {
-        Err(Denial::Forbidden)
+    if !allowed {
+        return Err(Denial::Forbidden);
     }
+    if let Some(info) = crate::project_archived::archived_by_id(pool, *project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
+    Ok(())
 }
 
 /// View-body tenant facts: the actor's render timezone

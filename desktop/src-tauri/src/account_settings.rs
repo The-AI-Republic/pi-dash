@@ -8,7 +8,7 @@
 //! `localStorage` goes with the cookies. The local-chat approval mode lives
 //! there, so without a copy on this side a user who chose "Ask" came back from
 //! a sign-out running under the full-access default, with nothing telling them
-//! so. The overlay hands the modes over just before the wipe and asks for them
+//! so. The webview hands the modes over just before the wipe and asks for them
 //! again once the same account is signed back in.
 //!
 //! Stored as `managed/accounts/<account-key>/settings.json`, keyed like the

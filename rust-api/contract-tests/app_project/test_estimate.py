@@ -116,6 +116,41 @@ def test_bulk_create_missing_points_400(world, db):
         assert cur.fetchone()["n"] == expect("DIFF-23", django=1, rust=0)
 
 
+def test_bulk_create_key_above_int4_max_400(world, db):
+    # NEWPIDASH-289: a point key above the int4 max is a serializer 400
+    # on both backends (`EstimatePointSerializer.key` MaxValueValidator),
+    # not a column `DataError` 500. Status and body match; only the
+    # orphan-estimate persistence differs (DIFF-23).
+    client, _, ws, project = world.full_stack()
+    resp = client.post(
+        f"/api/workspaces/{ws['slug']}/projects/{project['id']}/estimates/",
+        json={"estimate": {"name": "BigKey", "type": "points"},
+              "estimate_points": [{"key": 2147483648, "value": "1"}]})
+    assert resp.status_code == 400
+    assert resp.json() == [
+        {"key": ["Ensure this value is less than or equal to 2147483647."]}]
+    listed = client.get(
+        f"/api/workspaces/{ws['slug']}/projects/{project['id']}/estimates/")
+    assert listed.status_code == 200
+    assert len([r for r in listed.json() if r["name"] == "BigKey"]) == expect(
+        "DIFF-23", django=1, rust=0)
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM estimates WHERE name=%s AND project_id=%s",
+            ("BigKey", str(project["id"])))
+        assert cur.fetchone()["n"] == expect("DIFF-23", django=1, rust=0)
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM estimate_points ep "
+            "JOIN estimates e ON e.id=ep.estimate_id "
+            "WHERE e.name=%s AND e.project_id=%s",
+            ("BigKey", str(project["id"])))
+        assert cur.fetchone()["n"] == 0
+    # Boundary: int4 max itself is accepted.
+    created = _make_estimate(client, ws, project, name="MaxKey", points=[
+        {"key": 2147483647, "value": "1"}])
+    assert created["points"][0]["key"] == 2147483647
+
+
 def test_bulk_list_shape(world):
     client, _, ws, project = world.full_stack()
     created = _make_estimate(client, ws, project)

@@ -28,6 +28,9 @@ vi.mock("../../../core/platform/index.js", () => ({
     };
   },
 }));
+vi.mock("../../../core/platform/local-chat.js", () => ({
+  hasLocalChat: () => platformState.localChat,
+}));
 
 const { createAppClient, resetAppClient } = await import("../../../core/api/client.js");
 const { testClient } = await import("./harness.js");

@@ -80,6 +80,11 @@ export function useMagicGenerate() {
 function markSignedIn(result: SignInResult): SignInResult {
   if (result.ok) {
     useSessionStore.getState().markAuthenticated();
+    // Unified sign-in (desktop_unified_signin §6.2): a fresh sign-in stamps
+    // the reconciler's marker so it can stamp the app's own sign-in event;
+    // a session restore never does, so a launch never masquerades as a
+    // sign-in. Best-effort and fire-and-forget: the sign-in stands without it.
+    void platform.agentRuntime?.markFreshSignIn().catch(() => undefined);
   }
   return result;
 }

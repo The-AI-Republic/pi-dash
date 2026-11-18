@@ -26,7 +26,6 @@ export { APPROVAL_MODE_STORAGE_PREFIX, restoreApprovalModes, stashApprovalModes 
 export type { ApprovalModeCarryInput } from "./runtime/approvalModes.js";
 export { isPidashAgentAvailable, projectAvailabilityQueryOptions, runtimeKeys } from "./runtime/queries.js";
 export {
-  canSignOutComputer,
   compatibleHello,
   currentDiscovery,
   daemonAccountKey,
@@ -85,13 +84,25 @@ export {
 export type { ReplaceCandidate, ReplaceOutcome, ReplacePrompt, ReplaceDeps } from "./runtime/desktop-replace.js";
 export { MigrationNoticesDialog } from "./runtime/MigrationNoticesDialog.js";
 export { ReplaceMachineDialog } from "./runtime/ReplaceMachineDialog.js";
-export { registerSetUpPrompt, requestDaemonSetup } from "./runtime/setupPrompt.js";
-export type { SetUpReason, SetUpRequest } from "./runtime/setupPrompt.js";
 export { confirmRuntimeSignOut, registerSignOutPrompt } from "./runtime/signOutPrompt.js";
 export { RuntimeSignOutDialog } from "./runtime/SignOutDialog.js";
 export { registerRuntimeSignOutLifecycle, RuntimeSignOutLifecycle } from "./runtime/SignOutLifecycle.js";
 export { RUNTIME_REFRESH_INTERVAL_MS, RuntimeSupervisor } from "./runtime/Supervisor.js";
 export type { RuntimeSupervisorProps } from "./runtime/Supervisor.js";
+export {
+  AUTH_SYNC_INTERVAL_MS,
+  AuthSyncSupervisor,
+  CLI_SIGN_OUT_MESSAGE,
+  CLI_SIGN_OUT_TITLE,
+} from "./runtime/SyncSupervisor.js";
+export {
+  reconcile,
+  sameAccount,
+  sameCloud,
+  type SyncDecision,
+  type SyncMe,
+  type SyncSnapshot,
+} from "./runtime/sync.js";
 
 export { decideProjectRunnersAccess, decideWorkspaceRunnersAccess, type RunnersAccess } from "./access.js";
 export { buildRunnersAreaValue, RunnersAreaProvider, useRunnersArea, type RunnersAreaValue } from "./area.js";

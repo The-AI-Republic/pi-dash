@@ -160,7 +160,6 @@ describe("DevMachinesTable", () => {
     expect(within(details).getByRole("button", { name: "Rename" })).toBeInTheDocument();
     expect(within(details).queryByRole("button", { name: "Pause the Pi Dash Agent" })).not.toBeInTheDocument();
     expect(within(details).queryByRole("switch")).not.toBeInTheDocument();
-    expect(within(details).queryByRole("button", { name: "Sign out Pi Dash Agent" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: MACHINE_DETAILS_HIDE }));
     expect(screen.queryByTestId("dev-machine-details")).not.toBeInTheDocument();
   });
@@ -179,8 +178,8 @@ describe("DevMachinesTable", () => {
     expect(onSetting).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "pause", paused: false }));
     fireEvent.click(screen.getByRole("switch"));
     expect(onSetting).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "team-runs", enabled: true }));
-    fireEvent.click(screen.getByRole("button", { name: "Sign out Pi Dash Agent" }));
-    expect(onSetting).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "sign-out-pidash-agent" }));
+    // The engine has no sign-in of its own: no machine setting signs it out.
+    expect(screen.queryByRole("button", { name: "Sign out Pi Dash Agent" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Rename" }));
     expect(onSetting).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "rename" }));
     fireEvent.click(screen.getByRole("button", { name: "Remove the Pi Dash Agent from P" }));

@@ -93,6 +93,86 @@ async fn fetch_assigned_runner_detail(
         .map_err(|_| Error::Failed("render-decoded"))
 }
 
+/// Newest run in an active status (NEWPIDASH-251): the run occupying
+/// the one-active-run slot, with the runner's last heartbeat. `None`
+/// when the issue has no active run (key omitted from the detail).
+async fn fetch_active_run(
+    pool: &PgPool,
+    issue_id: Uuid,
+) -> Result<Option<shape::ActiveRunSummary>, Error> {
+    use pidash_db::entity::{agent_run, runner};
+    use sea_orm::EntityTrait;
+
+    #[derive(Debug, FromQueryResult)]
+    struct ActiveRunRow {
+        id: Uuid,
+        status: String,
+        runner_id: Option<Uuid>,
+        created_at: sea_orm::prelude::DateTimeWithTimeZone,
+        assigned_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+        started_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    }
+
+    use pidash_types::runner_runs::AgentRunStatus;
+
+    let statuses: Vec<String> = [
+        AgentRunStatus::Queued,
+        AgentRunStatus::Assigned,
+        AgentRunStatus::WaitingForWorktree,
+        AgentRunStatus::Running,
+        AgentRunStatus::CancelRequested,
+        AgentRunStatus::AwaitingApproval,
+        AgentRunStatus::AwaitingReauth,
+    ]
+    .iter()
+    .map(|status| status.value().to_owned())
+    .collect();
+    let orm = pidash_db::pool::sea_orm_connection(pool);
+    let Some(run) = agent_run::Entity::find()
+        .select_only()
+        .column_as(agent_run::Column::Id, "id")
+        .column_as(agent_run::Column::Status, "status")
+        .column_as(agent_run::Column::RunnerId, "runner_id")
+        .column_as(agent_run::Column::CreatedAt, "created_at")
+        .column_as(agent_run::Column::AssignedAt, "assigned_at")
+        .column_as(agent_run::Column::StartedAt, "started_at")
+        .filter(agent_run::Column::WorkItemId.eq(issue_id))
+        .filter(agent_run::Column::Status.is_in(statuses))
+        .order_by_desc(agent_run::Column::CreatedAt)
+        .into_model::<ActiveRunRow>()
+        .one(&orm)
+        .await
+        .map_err(|_| Error::Failed("render-decoded"))?
+    else {
+        return Ok(None);
+    };
+    let heartbeat = match run.runner_id {
+        Some(runner_id) => match runner::Entity::find_by_id(runner_id).one(&orm).await {
+            Ok(Some(model)) => model.last_heartbeat_at.map(|at| at.with_timezone(&Utc)),
+            Ok(None) => None,
+            Err(_) => return Err(Error::Failed("render-decoded")),
+        },
+        None => None,
+    };
+    let created = run.created_at.with_timezone(&Utc);
+    Ok(Some(shape::ActiveRunSummary {
+        id: run.id.to_string(),
+        status: run.status,
+        runner_id: run.runner_id.map(|id| id.to_string()),
+        created_at: crate::integrations::serializers::isoformat(&created),
+        assigned_at: run
+            .assigned_at
+            .map(|at| crate::integrations::serializers::isoformat(&at.with_timezone(&Utc))),
+        started_at: run
+            .started_at
+            .map(|at| crate::integrations::serializers::isoformat(&at.with_timezone(&Utc))),
+        age_seconds: (Utc::now() - created).num_seconds().max(0),
+        runner_last_heartbeat_at: heartbeat
+            .as_ref()
+            .map(crate::integrations::serializers::isoformat),
+    }))
+}
+
 /// A decoded `issues` row: every column the renderer or the write paths
 /// read, datetimes already rendered as DRF strings in the request timezone
 /// (the `app_issues` precedent — rendering here is a byte-exact
@@ -1471,6 +1551,16 @@ pub async fn render_decoded(
         expansions.push((name, value));
     }
 
+    // Newest active run (NEWPIDASH-251): single payloads,
+    // `?fields=`-gated. Fetched only when the gate passes; the key
+    // is omitted when no run occupies the slot.
+    let run_gate = !req.is_list && (requested.is_empty() || requested.contains(&"active_run"));
+    let active_run = if run_gate {
+        fetch_active_run(pool, issue_id).await?
+    } else {
+        None
+    };
+
     // Every `RenderError` arm is 500-class: `Fields` is unreachable
     // (query strings only build `Include` specs), the binary/NaN arms
     // reproduce Django 500s, and the `Missing*` arms are unreachable by
@@ -1486,6 +1576,7 @@ pub async fn render_decoded(
         expanded_labels: &expanded_labels,
         blockers: blockers.as_ref(),
         relations: relations.as_ref(),
+        active_run: active_run.as_ref(),
         expansions: &expansions,
     })
     .map_err(|_| Error::Failed("render-decoded"))?;

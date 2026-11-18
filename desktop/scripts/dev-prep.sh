@@ -3,22 +3,18 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 #
-# Populates desktop/src-tauri/dist/ with the layered overlay-merged web SPA
-# for bundled-dev mode (the default of `cargo tauri dev`) and for local
+# Populates desktop/src-tauri/dist/ with the apps/web_new desktop bundle for
+# bundled-dev mode (the default of `cargo tauri dev`) and for local
 # `cargo tauri build`. Invoked automatically via tauri.conf.json's
 # beforeDevCommand / beforeBuildCommand.
 #
-# The web tree is assembled by merge-web-tree.sh: this checkout, then any
-# PIDASH_DESKTOP_EXTRA_OVERLAYS (an edition's overrides), then
-# desktop-overlay/ (last writer wins).
+# The desktop shell ships one frontend: apps/web_new built with
+# PIDASH_TARGET=desktop. The old apps/web tree and desktop-overlay/ are no
+# longer part of the desktop bundle (NEWFRONT-92/M-01).
 #
 # PIDASH_DESKTOP_VERIFY_HOOK, when set, is run with the built client
 # directory as its only argument after the generic checks below pass, so an
 # edition can assert things about its own bundle.
-#
-# Build artifacts live in desktop/.dev-tree/ (gitignored; override with
-# PIDASH_DESKTOP_DEV_TREE, e.g. to keep an edition's merged tree separate).
-# pnpm and turbo caches stay warm across runs, so post-first-run is ~10–30s.
 #
 # Skip-paths:
 #   PIDASH_DESKTOP_HOT_RELOAD=1 — webview opens at PI_DASH_URL directly,
@@ -26,16 +22,14 @@
 #   PIDASH_SKIP_DEV_PREP=1 — caller has already populated dist/ (CI, or
 #       a manually-managed local artifact). Cannot verify the SPA was
 #       built against the correct API base; loud warning is printed.
-#   No apps/web in this checkout AND dist/ already looks valid — auto-skip
-#       with the same warning, so external pipelines and partial clones
-#       don't break.
+#
+# pnpm and the Vite/turbo caches stay warm across runs.
 
 set -euo pipefail
 
 SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 DESKTOP_DIR="$( dirname "$SCRIPT_DIR" )"
 OSS_DIR="$( dirname "$DESKTOP_DIR" )"
-DEV_TREE="${PIDASH_DESKTOP_DEV_TREE:-$DESKTOP_DIR/.dev-tree}"
 DIST="$DESKTOP_DIR/src-tauri/dist"
 
 HOT_RELOAD="${PIDASH_DESKTOP_HOT_RELOAD:-}"
@@ -76,58 +70,23 @@ if [[ "$SKIP" == "1" ]]; then
     exit 0
 fi
 
-if ! command -v rsync >/dev/null 2>&1; then
-    echo "[dev-prep] ERROR: rsync is required for bundled-dev mode but was not found in PATH." >&2
-    echo "[dev-prep] Install rsync, or set PIDASH_DESKTOP_HOT_RELOAD=1 to use a dev server instead." >&2
-    exit 1
-fi
-
-# The web app in this checkout is the source-of-truth for the SPA. If it's
-# missing (a partial clone), the only way `cargo tauri build` can still
-# produce a usable artifact is to reuse whatever dist/ is already on disk.
-# Allow that, but tell the operator what they're getting.
-# NEWFRONT-18 (F-07): the flagged web_new build below does not use apps/web,
-# so this requirement applies to the legacy path only.
-if [[ ! -d "$OSS_DIR/apps/web" && "${PIDASH_DESKTOP_WEB:-}" != "web_new" ]]; then
-    if [[ -f "$DIST/index.html" ]] \
-        && [[ $(wc -c < "$DIST/index.html" 2>/dev/null || echo 0) -ge 4096 ]] \
-        && [[ -d "$DIST/assets" ]] \
-        && [[ -n "$(ls -A "$DIST/assets" 2>/dev/null)" ]]; then
-        echo "[dev-prep] No apps/web under $OSS_DIR, but dist/ already looks valid."
-        echo "[dev-prep] Reusing existing dist/ (set PIDASH_SKIP_DEV_PREP=1 to silence this in CI)."
-        print_bake_info
-        exit 0
-    fi
-    echo "[dev-prep] ERROR: expected the web app at $OSS_DIR/apps/web" >&2
-    echo "[dev-prep] Either use a full pi-dash checkout," >&2
-    echo "[dev-prep] OR populate dist/ from a known-good frontend bundle and set PIDASH_SKIP_DEV_PREP=1." >&2
-    exit 1
-fi
-
-# VITE_API_BASE_URL is the API origin baked into the SPA at build time —
+# VITE_API_BASE_URL is the API origin the SPA learns at build time —
 # it is NOT the same thing as PI_DASH_URL (the origin main.rs's sign-in
 # deep-link handler navigates to). Conflating the two silently ships a
 # binary whose SPA hits the wrong host. Require devs to set
 # VITE_API_BASE_URL explicitly for non-default targets; only the
-# bundled-dev convenience default (a local API, as in apps/web/.env.example)
-# applies when unset.
+# bundled-dev convenience default (a local API) applies when unset.
 API_BASE="${VITE_API_BASE_URL:-http://localhost:8000}"
 
-# The public web origin baked into the SPA. Two things read it: the desktop
-# sign-in card (ce/components/desktop/sign-in-card.tsx, via WEB_URL) and
-# desktop-overlay's desktopWebUrl(), which builds shareable work-item links —
-# bundled pages run on a Tauri origin, so a link resolved against
-# window.location.origin would come out as tauri://localhost. Nothing else in a
-# desktop build sets it, so default it to the sign-in origin, the same server
-# the deep-link hand-off targets. Already in turbo.json globalEnv, so the build
-# cache key tracks it.
-#
-# The last fallback is main.rs's own bundled-dev default for PI_DASH_URL. It
-# must never come out empty: desktopWebUrl() throws on an empty origin, and
-# because the value is exported to the build below, an empty one would also
-# mask whatever apps/web/.env provides (dotenv does not override a variable
-# that is already set). Release builds are unaffected — main.rs and build.rs
-# both refuse to compile without PI_DASH_URL.
+# The public web origin baked into the SPA (VITE_WEB_BASE_URL → the
+# runtime's hosted base). web_new resolves shareable links and the
+# desktop browser hand-off against it, and refuses rather than guessing an
+# origin — bundled pages run on a Tauri origin, so anything resolved
+# against window.location.origin would come out as tauri://localhost. It
+# also has to be baked for build.rs's release guard. Default it to the
+# sign-in origin, the same server the deep-link hand-off targets, and fall
+# back to main.rs's own bundled-dev default for PI_DASH_URL so the value is
+# never empty.
 WEB_BASE="${VITE_WEB_BASE_URL:-${PI_DASH_URL:-http://localhost:8000}}"
 
 VERIFY_HOOK="${PIDASH_DESKTOP_VERIFY_HOOK:-}"
@@ -136,197 +95,98 @@ if [[ -n "$VERIFY_HOOK" && ! -f "$VERIFY_HOOK" ]]; then
     exit 1
 fi
 
-# NEWFRONT-18 (F-07): flagged desktop build of the new frontend. When
-# PIDASH_DESKTOP_WEB=web_new, the desktop shell bundles apps/web_new built
-# with PIDASH_TARGET=desktop instead of the overlay-merged apps/web tree.
-# Anything else (including unset) falls through to the legacy path below,
-# which this branch leaves untouched. NEWFRONT-92 (M-01) later makes the
-# new frontend the default and removes the legacy path; the duplicated
-# validate-and-swap steps below reunite with it then.
-if [[ "${PIDASH_DESKTOP_WEB:-}" == "web_new" ]]; then
-    if [[ ! -d "$OSS_DIR/apps/web_new" ]]; then
-        echo "[dev-prep] ERROR: PIDASH_DESKTOP_WEB=web_new but $OSS_DIR/apps/web_new is missing" >&2
+# The legacy frontend switch is retired (NEWFRONT-92/M-01): apps/web_new is
+# the only desktop frontend, so an environment that still asks for the old
+# overlay-merged tree would otherwise build something this script no longer
+# produces. Refuse loudly instead of silently shipping web_new.
+case "${PIDASH_DESKTOP_WEB:-}" in
+    ""|web_new) ;;
+    *)
+        echo "[dev-prep] ERROR: PIDASH_DESKTOP_WEB=${PIDASH_DESKTOP_WEB} is no longer supported." >&2
+        echo "[dev-prep] The desktop bundles apps/web_new; unset PIDASH_DESKTOP_WEB (or set it to web_new)." >&2
         exit 1
-    fi
+        ;;
+esac
 
-    echo "[dev-prep] OSS source:  $OSS_DIR"
-    echo "[dev-prep] Dist target: $DIST"
-    echo "[dev-prep] API base:    $API_BASE  (VITE_API_BASE_URL → baked into SPA)"
-    echo "[dev-prep] Web base:    ${WEB_BASE:-<unset>}  (VITE_WEB_BASE_URL → baked into SPA)"
-    echo "[dev-prep] Frontend:    web_new (PIDASH_DESKTOP_WEB=web_new, PIDASH_TARGET=desktop)"
-    echo "[dev-prep] Preparing bundled CLI"
-    bash "$SCRIPT_DIR/prepare-agent.sh"
-    echo "[dev-prep] Sign-in target: ${PI_DASH_URL:-<unset, main.rs default>}  (PI_DASH_URL → main.rs deep-link)"
 
-    if command -v corepack >/dev/null 2>&1; then
-        corepack enable >/dev/null 2>&1 || true
-        corepack prepare --activate >/dev/null 2>&1 || true
-    fi
-
-    echo "[dev-prep] pnpm install"
-    ( cd "$OSS_DIR" && VITE_API_BASE_URL="$API_BASE" VITE_WEB_BASE_URL="$WEB_BASE" pnpm install --frozen-lockfile )
-
-    # web_new imports "@pidash/kit/kit.css" (apps/web_new/src/styles/app.css)
-    # and the package exports it from ./dist/kit.css, which is gitignored.
-    # `pnpm --filter web_new build:desktop` alone does not build workspace
-    # dependencies, so a clean checkout fails with
-    # "Package path ./kit.css is exported from package .../@pidash/kit,
-    # but no valid target file was found". Build both workspace deps first,
-    # mirroring .github/workflows/web-new.yml (builds kit + api-client
-    # before web_new). The legacy branch below gets the same guarantee
-    # from turbo's build.dependsOn ^build; the explicit pnpm builds here
-    # always rebuild, so a stale dist/ cannot be bundled either.
-    echo "[dev-prep] pnpm --filter @pidash/kit build"
-    ( cd "$OSS_DIR" && VITE_API_BASE_URL="$API_BASE" VITE_WEB_BASE_URL="$WEB_BASE" pnpm --filter @pidash/kit build )
-
-    echo "[dev-prep] pnpm --filter @pidash/api-client build"
-    ( cd "$OSS_DIR" && VITE_API_BASE_URL="$API_BASE" VITE_WEB_BASE_URL="$WEB_BASE" pnpm --filter @pidash/api-client build )
-
-    echo "[dev-prep] pnpm --filter web_new build:desktop"
-    ( cd "$OSS_DIR" && VITE_API_BASE_URL="$API_BASE" VITE_WEB_BASE_URL="$WEB_BASE" PIDASH_TARGET=desktop pnpm --filter web_new build:desktop )
-
-    NEW_CLIENT="$OSS_DIR/apps/web_new/dist/desktop"
-    NEW_INDEX="$NEW_CLIENT/index.html"
-    if [[ ! -f "$NEW_INDEX" ]]; then
-        echo "[dev-prep] ERROR: $NEW_INDEX was not produced by the web_new desktop build" >&2
-        exit 1
-    fi
-
-    # web_new ships a tiny SPA shell (index.html only bootstraps assets/),
-    # so the legacy byte threshold cannot tell a good build from a broken
-    # one. Instead require the shell to reference its asset bundle; the
-    # assets/ and desktop-marker checks below complete the picture.
-    if ! grep -F -q 'assets/' "$NEW_INDEX"; then
-        echo "[dev-prep] ERROR: $NEW_INDEX does not reference its assets/ bundle — looks like a broken build" >&2
-        exit 1
-    fi
-    if [[ ! -d "$NEW_CLIENT/assets" ]] || [[ -z "$(ls -A "$NEW_CLIENT/assets" 2>/dev/null)" ]]; then
-        echo "[dev-prep] ERROR: $NEW_CLIENT/assets is missing or empty" >&2
-        exit 1
-    fi
-    # Unlike the legacy tree, web_new resolves its API origin at runtime
-    # (platform.fetch routes /api/* through the Rust native HTTP layer), so
-    # there is no baked-in base URL to assert. Instead prove the bundle is
-    # the desktop target: only core/platform/tauri.ts can emit this marker,
-    # and the build-time alias excludes it from the web bundle (F-04).
-    if ! grep -R -F -q --include='*.html' --include='*.js' --include='*.mjs' --include='*.css' --include='*.json' "desktop_api_request" "$NEW_CLIENT"; then
-        echo "[dev-prep] ERROR: $NEW_CLIENT has no desktop platform marker" >&2
-        echo "[dev-prep] The bundle was built without PIDASH_TARGET=desktop; refusing to ship a web bundle in the desktop shell." >&2
-        exit 1
-    fi
-    if [[ -n "$VERIFY_HOOK" ]]; then
-        echo "[dev-prep] Running verify hook: $VERIFY_HOOK"
-        if ! bash "$VERIFY_HOOK" "$NEW_CLIENT"; then
-            echo "[dev-prep] ERROR: verify hook rejected the built frontend" >&2
-            exit 1
-        fi
-    fi
-
-    NEW_STAGING="$DIST.new"
-    NEW_BACKUP="$DIST.prev"
-
-    restore_new_dist() {
-        if [[ ! -e "$DIST" && -d "$NEW_BACKUP" ]]; then
-            mv "$NEW_BACKUP" "$DIST" 2>/dev/null || true
-            echo "[dev-prep] Restored the previous dist/ after an interrupted swap." >&2
-        fi
-    }
-    trap restore_new_dist EXIT INT TERM
-
-    echo "[dev-prep] Copying $NEW_CLIENT → $NEW_STAGING"
-    rm -rf "$NEW_STAGING"
-    mkdir -p "$NEW_STAGING"
-    cp -a "$NEW_CLIENT/." "$NEW_STAGING/"
-
-    {
-        echo "frontend=web_new"
-        echo "api_base=$API_BASE"
-        echo "web_base=${WEB_BASE:-<unset>}"
-        echo "pi_dash_url=${PI_DASH_URL:-<unset>}"
-        echo "oss_sha=${PI_DASH_OSS_SHA:-<unset>}"
-        echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    } > "$NEW_STAGING/bake-info.txt"
-
-    rm -rf "$NEW_BACKUP"
-    if [[ -e "$DIST" ]]; then
-        mv "$DIST" "$NEW_BACKUP"
-    fi
-    if ! mv "$NEW_STAGING" "$DIST"; then
-        restore_new_dist
-        echo "[dev-prep] ERROR: could not move $NEW_STAGING into $DIST" >&2
-        exit 1
-    fi
-    rm -rf "$NEW_BACKUP"
-
-    echo "[dev-prep] Done. $(ls "$DIST/assets" | wc -l) assets, api_base=$API_BASE, frontend=web_new."
-    exit 0
+if [[ ! -d "$OSS_DIR/apps/web_new" ]]; then
+    echo "[dev-prep] ERROR: expected the desktop frontend at $OSS_DIR/apps/web_new" >&2
+    echo "[dev-prep] Use a full pi-dash checkout, OR populate dist/ from a known-good" >&2
+    echo "[dev-prep] bundle and set PIDASH_SKIP_DEV_PREP=1." >&2
+    exit 1
 fi
 
 echo "[dev-prep] OSS source:  $OSS_DIR"
-echo "[dev-prep] Build tree:  $DEV_TREE"
 echo "[dev-prep] Dist target: $DIST"
 echo "[dev-prep] API base:    $API_BASE  (VITE_API_BASE_URL → baked into SPA)"
-echo "[dev-prep] Web base:    $WEB_BASE  (VITE_WEB_BASE_URL → sign-in card + shareable links)"
+echo "[dev-prep] Web base:    ${WEB_BASE:-<unset>}  (VITE_WEB_BASE_URL → baked into SPA)"
+echo "[dev-prep] Frontend:    web_new (PIDASH_TARGET=desktop)"
 echo "[dev-prep] Preparing bundled CLI"
 bash "$SCRIPT_DIR/prepare-agent.sh"
 echo "[dev-prep] Sign-in target: ${PI_DASH_URL:-<unset, main.rs default>}  (PI_DASH_URL → main.rs deep-link)"
 
-bash "$SCRIPT_DIR/merge-web-tree.sh" "$DEV_TREE"
-
-cd "$DEV_TREE"
-
-# Honor OSS pi-dash's pinned packageManager (corepack reads it from
-# package.json) so we don't end up with a pnpm version that drifts from
-# the OSS lockfile's generator.
 if command -v corepack >/dev/null 2>&1; then
     corepack enable >/dev/null 2>&1 || true
     corepack prepare --activate >/dev/null 2>&1 || true
 fi
 
 echo "[dev-prep] pnpm install"
-VITE_API_BASE_URL="$API_BASE" VITE_WEB_BASE_URL="$WEB_BASE" pnpm install --frozen-lockfile
+( cd "$OSS_DIR" && VITE_API_BASE_URL="$API_BASE" VITE_WEB_BASE_URL="$WEB_BASE" pnpm install --frozen-lockfile )
 
-# turbo run build --filter=web follows turbo.json's build.dependsOn ^build
-# and builds every workspace package web depends on. pnpm --filter=web
-# build alone would skip those and produce either a resolution failure or
-# a bundle importing stale dist/ from a prior cache.
-#
-# --force: .dev-tree/ lives inside this git repo but is gitignored, so
-# turbo's git-based input hashing sees each package as just its
-# package.json and replays cached output no matter what the overlays
-# changed (edition locales into @pi-dash/i18n, desktop-overlay routes
-# into web, …). Rebuilding everything costs a minute or two; shipping a
-# stale bundle cost a lot more.
-echo "[dev-prep] turbo run build --filter=web --force"
-VITE_API_BASE_URL="$API_BASE" VITE_WEB_BASE_URL="$WEB_BASE" pnpm exec turbo run build --filter=web --force
+# web_new imports "@pidash/kit/kit.css" (apps/web_new/src/styles/app.css)
+# and the package exports it from ./dist/kit.css, which is gitignored.
+# `pnpm --filter web_new build:desktop` alone does not build workspace
+# dependencies, so a clean checkout fails with
+# "Package path ./kit.css is exported from package .../@pidash/kit,
+# but no valid target file was found". Build both workspace deps first,
+# mirroring .github/workflows/web-new.yml (builds kit + api-client
+# before web_new) (PIDESKAPP-185).
+echo "[dev-prep] pnpm --filter @pidash/kit build"
+( cd "$OSS_DIR" && VITE_API_BASE_URL="$API_BASE" VITE_WEB_BASE_URL="$WEB_BASE" pnpm --filter @pidash/kit build )
 
-CLIENT="$DEV_TREE/apps/web/build/client"
+echo "[dev-prep] pnpm --filter @pidash/api-client build"
+( cd "$OSS_DIR" && VITE_API_BASE_URL="$API_BASE" VITE_WEB_BASE_URL="$WEB_BASE" pnpm --filter @pidash/api-client build )
+
+echo "[dev-prep] pnpm --filter web_new build:desktop"
+( cd "$OSS_DIR" && VITE_API_BASE_URL="$API_BASE" VITE_WEB_BASE_URL="$WEB_BASE" PIDASH_TARGET=desktop pnpm --filter web_new build:desktop )
+
+CLIENT="$OSS_DIR/apps/web_new/dist/desktop"
 INDEX="$CLIENT/index.html"
 if [[ ! -f "$INDEX" ]]; then
-    echo "[dev-prep] ERROR: $INDEX was not produced by the web build" >&2
+    echo "[dev-prep] ERROR: $INDEX was not produced by the web_new desktop build" >&2
     exit 1
 fi
 
-# Same threshold the build.rs guard uses — sanity-check here too so a
-# bad build fails in this script (with useful context) rather than later
-# in cargo's build.rs panic.
-INDEX_SIZE=$(wc -c < "$INDEX")
-if (( INDEX_SIZE < 4096 )); then
-    echo "[dev-prep] ERROR: $INDEX is only $INDEX_SIZE bytes — looks like a broken build" >&2
+# web_new ships a tiny SPA shell (index.html only bootstraps assets/), so a
+# byte threshold cannot tell a good build from a broken one. Require the
+# shell to reference its asset bundle; the assets/ and desktop-marker checks
+# below complete the picture.
+if ! grep -F -q 'assets/' "$INDEX"; then
+    echo "[dev-prep] ERROR: $INDEX does not reference its assets/ bundle — looks like a broken build" >&2
     exit 1
 fi
 if [[ ! -d "$CLIENT/assets" ]] || [[ -z "$(ls -A "$CLIENT/assets" 2>/dev/null)" ]]; then
     echo "[dev-prep] ERROR: $CLIENT/assets is missing or empty" >&2
     exit 1
 fi
+# Prove the bundle is the desktop target: only core/platform/tauri.ts can
+# emit this marker, and the build-time alias excludes it from the web
+# bundle (F-04). A web bundle in the shell would still render, with no
+# native transport, no cookie jar and no browser hand-off.
+if ! grep -R -F -q --include='*.html' --include='*.js' --include='*.mjs' --include='*.css' --include='*.json' "desktop_api_request" "$CLIENT"; then
+    echo "[dev-prep] ERROR: $CLIENT has no desktop platform marker" >&2
+    echo "[dev-prep] The bundle was built without PIDASH_TARGET=desktop; refusing to ship a web bundle in the desktop shell." >&2
+    exit 1
+fi
+# build.rs's release guard checks the same two values from the bundle, so
+# fail here with useful context instead of later inside cargo.
 if ! grep -R -F -q --include='*.html' --include='*.js' --include='*.mjs' --include='*.css' --include='*.json' "$API_BASE" "$CLIENT"; then
     echo "[dev-prep] ERROR: built frontend does not contain VITE_API_BASE_URL=$API_BASE" >&2
-    echo "[dev-prep] The SPA may be using a stale constants build or falling back to the webview origin for API calls." >&2
     exit 1
 fi
 if ! grep -R -F -q --include='*.html' --include='*.js' --include='*.mjs' --include='*.css' --include='*.json' "$WEB_BASE" "$CLIENT"; then
     echo "[dev-prep] ERROR: built frontend does not contain VITE_WEB_BASE_URL=$WEB_BASE" >&2
-    echo "[dev-prep] Every \"Copy link\" in the app would fail: shareable links are resolved against this origin." >&2
+    echo "[dev-prep] Every \"Copy link\" and the unmigrated-screen browser hand-off would fail: addresses resolve against this origin." >&2
     exit 1
 fi
 if [[ -n "$VERIFY_HOOK" ]]; then
@@ -340,11 +200,12 @@ fi
 # dist/ replacement. Build into a sibling staging dir, move the live dist/
 # aside, then move the staging dir into place. rename(2) cannot replace a
 # non-empty directory in one call, so the swap is two renames — but the
-# previous bundle survives as $BACKUP for the whole window, and the trap below
-# puts it back if we are interrupted (SIGINT, SIGTERM, OOM kill) between them.
-# Without that, an interruption left no dist/ at all — including the committed
-# index.html placeholder that tauri.conf.json's frontendDist requires — and the
-# next cargo build failed until the operator ran `git checkout .../dist`.
+# previous bundle survives as $BACKUP for the whole window, and the trap
+# below puts it back if we are interrupted (SIGINT, SIGTERM, OOM kill)
+# between them. Without that, an interruption left no dist/ at all —
+# including the committed index.html placeholder that tauri.conf.json's
+# frontendDist requires — and the next cargo build failed until the
+# operator ran `git checkout .../dist`.
 STAGING="$DIST.new"
 BACKUP="$DIST.prev"
 
@@ -361,12 +222,13 @@ rm -rf "$STAGING"
 mkdir -p "$STAGING"
 cp -a "$CLIENT/." "$STAGING/"
 
-# Record what this dist/ was built against so subsequent SKIP-mode runs
-# can surface the bake info in their logs. build.rs hands api_base to
-# main.rs for its startup mismatch warning; the rest is operator-facing.
+# Record what this dist/ was built against so subsequent SKIP-mode runs can
+# surface it, and so build.rs can hand api_base to main.rs for its startup
+# mismatch warning.
 {
+    echo "frontend=web_new"
     echo "api_base=$API_BASE"
-    echo "web_base=$WEB_BASE"
+    echo "web_base=${WEB_BASE:-<unset>}"
     echo "pi_dash_url=${PI_DASH_URL:-<unset>}"
     echo "oss_sha=${PI_DASH_OSS_SHA:-<unset>}"
     echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -377,11 +239,11 @@ if [[ -e "$DIST" ]]; then
     mv "$DIST" "$BACKUP"
 fi
 if ! mv "$STAGING" "$DIST"; then
-    # Put the previous bundle back rather than leaving no dist/ behind.
     restore_dist
     echo "[dev-prep] ERROR: could not move $STAGING into $DIST" >&2
     exit 1
 fi
 rm -rf "$BACKUP"
 
-echo "[dev-prep] Done. index.html=${INDEX_SIZE}B, $(ls "$DIST/assets" | wc -l) assets, api_base=$API_BASE."
+INDEX_SIZE=$(wc -c < "$DIST/index.html")
+echo "[dev-prep] Done. index.html=${INDEX_SIZE}B, $(ls "$DIST/assets" | wc -l) assets, api_base=$API_BASE, web_base=$WEB_BASE, frontend=web_new."

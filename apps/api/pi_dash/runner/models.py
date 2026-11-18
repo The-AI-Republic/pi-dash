@@ -1248,6 +1248,67 @@ class EngineCredential(models.Model):
         return self.expires_at <= (now or timezone.now())
 
 
+class DesktopHandoffCode(models.Model):
+    """Single-use code that turns a daemon credential into a desktop session.
+
+    desktop_unified_signin §5. The daemon asks for a code over its local
+    socket with a ``challenge`` — base64url(SHA-256(verifier)) — and hands
+    the code to the app; the app redeems it with the verifier, which never
+    leaves the app's process. Only the code's hash is stored: the raw code
+    is shown once, to the daemon that asked for it, and is useless without
+    the verifier. Bound to one user and one machine, valid 60 seconds, and
+    consumed on the first redeem attempt whatever the outcome — so a leaked
+    code cannot be replayed. The server keeps only the challenge, never the
+    verifier.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    code_hash = models.CharField(max_length=128, unique=True, db_index=True)
+    fingerprint = models.CharField(max_length=16, blank=True, default="")
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="desktop_handoff_codes",
+    )
+    dev_machine = models.ForeignKey(
+        DevMachine,
+        on_delete=models.CASCADE,
+        related_name="desktop_handoff_codes",
+    )
+    #: The daemon credential the code was issued with (design §5.1): a code
+    #: is refused once that credential is revoked or expired. Nullable only
+    #: for the schema; issue always sets it and redeem refuses a code
+    #: without one.
+    machine_token = models.ForeignKey(
+        MachineToken,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="desktop_handoff_codes",
+    )
+    #: base64url(SHA-256(verifier)) from the app that asked for the code.
+    challenge = models.CharField(max_length=128)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    consumed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "desktop_handoff_code"
+        ordering = ("-created_at",)
+        indexes = [
+            models.Index(fields=["user", "dev_machine", "created_at"], name="handoff_user_machine_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"desktop handoff {self.fingerprint} ({self.dev_machine_id})"
+
+    def is_expired(self, now=None) -> bool:
+        return self.expires_at <= (now or timezone.now())
+
+    def is_live(self, now=None) -> bool:
+        return self.consumed_at is None and not self.is_expired(now)
+
+
 class AgentRun(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False, db_index=True)
     workspace = models.ForeignKey(

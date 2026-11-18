@@ -138,6 +138,7 @@ pub mod cycles;
 pub mod deploy_boards;
 pub mod description_versions;
 pub mod descriptions;
+pub mod desktop_handoff_code;
 pub mod dev_machine;
 pub mod device_sessions;
 pub mod devices;

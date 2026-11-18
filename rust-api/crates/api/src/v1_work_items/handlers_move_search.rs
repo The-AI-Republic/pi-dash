@@ -201,6 +201,8 @@ pub enum Denial {
     /// 413, the `RequestBodySizeLimitMiddleware` JSON body past 5 MiB
     /// (a plain `JsonResponse`, so default separators — with spaces).
     RequestTooLarge,
+    /// 409, archived project (NEWPIDASH-236, pre-rendered body).
+    ProjectArchived(String),
     /// 500, generic branch.
     ServerError,
 }
@@ -245,6 +247,7 @@ impl Denial {
                 StatusCode::PAYLOAD_TOO_LARGE,
                 r#"{"error": "REQUEST_BODY_TOO_LARGE", "detail": "The size of the request body exceeds the maximum allowed size."}"#.to_owned(),
             ),
+            Denial::ProjectArchived(body) => (StatusCode::CONFLICT, body.clone()),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 SERVER_ERROR_BODY.to_owned(),
@@ -1378,11 +1381,18 @@ async fn require_gate(
     let gate = gate_for(route, "POST");
     let facts = entity_facts(pool, workspace_id, workspace_slug, user_id, project_id).await?;
     let scope = TenantScope::new(pidash_types::WorkspaceId::from(workspace_slug.to_owned()));
-    if super::perms::decide(gate, "POST", &scope, &facts) {
-        Ok(())
-    } else {
-        Err(Denial::Forbidden)
+    if !super::perms::decide(gate, "POST", &scope, &facts) {
+        return Err(Denial::Forbidden);
     }
+    if let Some(info) = crate::project_archived::archived_by_id(pool, *project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

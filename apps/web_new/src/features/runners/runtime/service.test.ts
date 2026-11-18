@@ -38,15 +38,12 @@ import type {
   DaemonLocalRunner,
 } from "../../../core/platform/index.js";
 import {
-  canSignOutComputer,
   compatibleHello,
   daemonAccountKey,
   discoverDaemon,
   discoveryProblem,
   disposeRuntimeForSignOut,
-  PIDASH_AGENT_SIGNED_OUT_TEXT,
   PIDASH_AGENT_STILL_CONNECTING_TEXT,
-  PIDASH_AGENT_TURN_ON_TEXT,
   PidashAgentUnavailableError,
   pidashAgentActionFor,
   ensureChatRuntime,
@@ -64,7 +61,6 @@ import {
   turnOnPidashAgentForProject,
   type DaemonSetUpStep,
 } from "./service.js";
-import { registerSetUpPrompt } from "./setupPrompt.js";
 
 const CLOUD = "https://cloud.test";
 const client = { baseUrl: CLOUD } as unknown as ApiClient;
@@ -174,7 +170,6 @@ function agentProfile(overrides: Partial<PidashAgentProfile> = {}): PidashAgentP
 
 beforeEach(() => {
   resetRuntimeServiceForTests();
-  registerSetUpPrompt(null);
   vi.mocked(startDeviceGrant).mockReset();
   vi.mocked(approveDeviceCode).mockReset();
   vi.mocked(getProject).mockReset();
@@ -185,17 +180,15 @@ beforeEach(() => {
   vi.mocked(getPidashAgentProfile).mockResolvedValue(agentProfile());
 });
 
-afterEach(() => {
-  registerSetUpPrompt(null);
-});
+afterEach(() => {});
 
 describe("pidashAgentActionFor", () => {
   it("maps each engine sign-in state to what the app may do", () => {
     expect(pidashAgentActionFor("expiring")).toBe("renew_silently");
     expect(pidashAgentActionFor("expired")).toBe("renew_silently");
-    expect(pidashAgentActionFor("never")).toBe("turn_on");
-    expect(pidashAgentActionFor("signed_out")).toBe("sign_in");
-    expect(pidashAgentActionFor("revoked")).toBe("sign_in");
+    expect(pidashAgentActionFor("never")).toBe("renew_silently");
+    expect(pidashAgentActionFor("signed_out")).toBe("renew_silently");
+    expect(pidashAgentActionFor("revoked")).toBe("none");
     expect(pidashAgentActionFor("active")).toBe("none");
     expect(pidashAgentActionFor(undefined)).toBe("none");
   });
@@ -274,15 +267,15 @@ describe("resume and discovery", () => {
 });
 
 describe("silent engine renewal", () => {
-  it("renews only when the daemon reports expiring or expired", async () => {
-    for (const signIn of ["active", "never", "signed_out", "revoked"] as const) {
+  it("signs in or renews from every state but active and revoked, with no prompt", async () => {
+    for (const signIn of ["active", "revoked"] as const) {
       resetRuntimeServiceForTests();
       const runtime = fakeRuntime(compatible(signIn));
       resume(runtime);
       await refreshRuntime({ client, runtime });
       expect(runtime.pidashAgentLogin).not.toHaveBeenCalled();
     }
-    for (const signIn of ["expiring", "expired"] as const) {
+    for (const signIn of ["expiring", "expired", "never", "signed_out"] as const) {
       resetRuntimeServiceForTests();
       const runtime = fakeRuntime(compatible(signIn));
       resume(runtime);
@@ -332,19 +325,25 @@ describe("ensureChatRuntime", () => {
     expect(runtime.addPidashAgentRunner).not.toHaveBeenCalled();
   });
 
-  it("refuses with the explicit sign-in the engine state needs", async () => {
+  it("signs in a never or signed-out engine silently, with no prompt", async () => {
     const turnOn = fakeRuntime(compatible("never"));
     resume(turnOn);
-    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime: turnOn })).rejects.toThrow(
-      PIDASH_AGENT_TURN_ON_TEXT
-    );
+    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime: turnOn })).resolves.toBeUndefined();
+    expect(turnOn.pidashAgentLogin).toHaveBeenCalledTimes(1);
     resetRuntimeServiceForTests();
     const signedOut = fakeRuntime(compatible("signed_out"));
     resume(signedOut);
-    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime: signedOut })).rejects.toThrow(
-      PIDASH_AGENT_SIGNED_OUT_TEXT
+    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime: signedOut })).resolves.toBeUndefined();
+    expect(signedOut.pidashAgentLogin).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a revoked engine as unavailable, never asking for a sign-in", async () => {
+    const runtime = fakeRuntime(compatible("revoked"));
+    resume(runtime);
+    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime })).rejects.toBeInstanceOf(
+      PidashAgentUnavailableError
     );
-    expect(signedOut.pidashAgentLogin).not.toHaveBeenCalled();
+    expect(runtime.pidashAgentLogin).not.toHaveBeenCalled();
   });
 
   it("names the engine's unavailability reason", async () => {
@@ -361,8 +360,7 @@ describe("ensureChatRuntime", () => {
   });
 
   it("refuses a daemon signed in as someone else without offering set-up", async () => {
-    const prompt = vi.fn();
-    registerSetUpPrompt(prompt);
+    const cli = fakeCli();
     const runtime = fakeRuntime({
       kind: "account_mismatch",
       daemon_account: "other@test",
@@ -370,39 +368,70 @@ describe("ensureChatRuntime", () => {
       hosts_runners: false,
     });
     resume(runtime);
-    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime })).rejects.toThrow("other@test");
-    expect(prompt).not.toHaveBeenCalled();
+    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime, cli })).rejects.toThrow("other@test");
+    expect(cli.install).not.toHaveBeenCalled();
   });
 
-  it("asks for set-up when there is no daemon and refuses when declined", async () => {
-    const prompt = vi.fn((_request: unknown, done: (ok: boolean) => void) => done(false));
-    registerSetUpPrompt(prompt);
+  it("automatically installs for the first chat without a mounted setup UI", async () => {
     const runtime = fakeRuntime(NO_DAEMON);
+    const cli = fakeCli(false);
     resume(runtime);
-    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime })).rejects.toThrow(
-      "Pi Dash is not set up on this computer yet."
-    );
-    expect(prompt).toHaveBeenCalledWith({ reason: "chat", workspaceSlug: "ws" }, expect.any(Function));
-    expect(runtime.installService).not.toHaveBeenCalled();
-  });
-
-  it("refuses without a consent dialog: nothing is set up silently", async () => {
-    const runtime = fakeRuntime(NO_DAEMON);
-    resume(runtime);
-    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime })).rejects.toThrow("not set up");
-    expect(runtime.installService).not.toHaveBeenCalled();
-  });
-
-  it("continues once the user accepted set-up", async () => {
-    const runtime = fakeRuntime(NO_DAEMON);
-    const cli = fakeCli();
-    registerSetUpPrompt((request, done) => {
+    runtime.ensurePidashAgent.mockImplementation(async () => {
       runtime.discover.mockResolvedValue(compatible());
-      void setUpDaemon({ client, runtime, cli, workspaceSlug: request.workspaceSlug }).then(() => done(true));
+    });
+    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime, cli })).resolves.toBeUndefined();
+    expect(cli.install).toHaveBeenCalledTimes(1);
+    expect(cli.login).toHaveBeenCalledTimes(1);
+    expect(runtime.installService).toHaveBeenCalledTimes(1);
+  });
+
+  it("waits for background setup instead of starting a second install", async () => {
+    const runtime = fakeRuntime(NO_DAEMON);
+    const cli = fakeCli(false);
+    let finish!: () => void;
+    cli.install.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        })
+    );
+    runtime.ensurePidashAgent.mockImplementation(async () => {
+      runtime.discover.mockResolvedValue(compatible());
     });
     resume(runtime);
-    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime })).resolves.toBeUndefined();
+    const background = setUpDaemon({ workspaceSlug: "ws", client, runtime, cli });
+    const chat = ensureChatRuntime({ workspaceSlug: "ws", client, runtime, cli });
+    await vi.waitFor(() => expect(cli.install).toHaveBeenCalledTimes(1));
+    expect(runtime.ensurePidashAgent).not.toHaveBeenCalled();
+    finish();
+    await Promise.all([background, chat]);
+    expect(cli.login).toHaveBeenCalledTimes(1);
     expect(runtime.installService).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows retry after a failed automatic install", async () => {
+    const runtime = fakeRuntime(NO_DAEMON);
+    const cli = fakeCli(false);
+    cli.install.mockRejectedValueOnce(new Error("download failed"));
+    runtime.ensurePidashAgent.mockImplementation(async () => {
+      runtime.discover.mockResolvedValue(compatible());
+    });
+    resume(runtime);
+    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime, cli })).rejects.toThrow("download failed");
+    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime, cli })).resolves.toBeUndefined();
+    expect(cli.install).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops setup if the account changes during installation", async () => {
+    const runtime = fakeRuntime(NO_DAEMON);
+    const cli = fakeCli(false);
+    cli.install.mockImplementation(async () => {
+      resume(runtime, "u2");
+    });
+    resume(runtime);
+    await expect(setUpDaemon({ workspaceSlug: "ws", client, runtime, cli })).rejects.toThrow("account changed");
+    expect(cli.login).not.toHaveBeenCalled();
+    expect(runtime.installService).not.toHaveBeenCalled();
   });
 });
 
@@ -491,8 +520,8 @@ describe("refreshModelCredential", () => {
     }
   });
 
-  it("rejects with the sign-in reason when the daemon allows no renewal", async () => {
-    for (const signIn of ["active", "never", "signed_out", "revoked"] as const) {
+  it("rejects with the sign-in reason only when the daemon allows no renewal", async () => {
+    for (const signIn of ["active", "revoked"] as const) {
       resetRuntimeServiceForTests();
       const runtime = fakeRuntime(compatible(signIn));
       resume(runtime);
@@ -674,18 +703,6 @@ describe("signInWorkspace and sign-out gating", () => {
     expect(daemonAccountKey({ ...hello(), account: { cloud_url: CLOUD, email: "e@test" } })).toBe("e@test");
     expect(daemonAccountKey(null)).toBeUndefined();
   });
-
-  it("offers computer sign-out only when the daemon is the account's", async () => {
-    const runtime = fakeRuntime(compatible());
-    resume(runtime);
-    await discoverDaemon(runtime);
-    expect(canSignOutComputer()).toBe(true);
-    resetRuntimeServiceForTests();
-    expect(canSignOutComputer()).toBe(false);
-    resume(runtime);
-    await discoverDaemon(fakeRuntime(NO_DAEMON));
-    expect(canSignOutComputer()).toBe(false);
-  });
 });
 
 describe("disposeRuntimeForSignOut", () => {
@@ -710,11 +727,13 @@ describe("disposeRuntimeForSignOut", () => {
     expect(chat.clearHistory).toHaveBeenCalledWith("u1");
   });
 
-  it("leaves the daemon and engine signed in and forgets discovery", async () => {
+  it("signs the computer out with the app and forgets discovery", async () => {
     const runtime = fakeRuntime();
     resume(runtime);
     await discoverDaemon(runtime);
     await disposeRuntimeForSignOut({ client, runtime, choice: { deleteChatHistory: false, signOutComputer: false } });
+    expect(runtime.signOutComputer).toHaveBeenCalledTimes(1);
+    expect(runtime.signOutComputer).toHaveBeenCalledWith();
     expect(runtime.pidashAgentLogin).not.toHaveBeenCalled();
     expect(compatibleHello()).toBeNull();
     await expect(discoverDaemon(runtime)).resolves.toBeNull();
@@ -733,18 +752,20 @@ describe("disposeRuntimeForSignOut", () => {
     ).resolves.toBeUndefined();
   });
 
-  it("signs out the computer only when ticked, and never rejects when it fails", async () => {
+  it("always signs out the computer, falling back to local-only, and never rejects", async () => {
     const runtime = fakeRuntime();
     resume(runtime);
     await disposeRuntimeForSignOut({ client, runtime, choice: { deleteChatHistory: false, signOutComputer: false } });
-    expect(runtime.signOutComputer).not.toHaveBeenCalled();
-    resume(runtime);
-    await disposeRuntimeForSignOut({ client, runtime, choice: { deleteChatHistory: false, signOutComputer: true } });
     expect(runtime.signOutComputer).toHaveBeenCalledTimes(1);
+    expect(runtime.signOutComputer).toHaveBeenCalledWith();
+    resume(runtime);
+    runtime.signOutComputer.mockRejectedValueOnce(new Error("server unreachable"));
+    await disposeRuntimeForSignOut({ client, runtime, choice: { deleteChatHistory: false, signOutComputer: false } });
+    expect(runtime.signOutComputer).toHaveBeenCalledWith({ localOnly: true });
     resume(runtime);
     runtime.signOutComputer.mockRejectedValue(new Error("logout failed"));
     await expect(
-      disposeRuntimeForSignOut({ client, runtime, choice: { deleteChatHistory: false, signOutComputer: true } })
+      disposeRuntimeForSignOut({ client, runtime, choice: { deleteChatHistory: false, signOutComputer: false } })
     ).resolves.toBeUndefined();
   });
 });

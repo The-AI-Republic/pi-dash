@@ -12,7 +12,7 @@
 // moves older
 // builds' private daemon trees to it (PIDESKAPP-223, design §13), asks
 // once per machine whether it replaces an offline one (§4.10), and hosts
-// the "Set up Pi Dash on this computer" consent dialog.
+// automatic setup progress and errors.
 //
 // Opening a project enrols nothing and shows no notice: the daemon hosts
 // the engine whether or not the app is open, and a project gets its
@@ -25,7 +25,14 @@ import { platform } from "../../../core/platform/index.js";
 import { useMe } from "../../../core/session/index.js";
 import { migrateLegacyTrees } from "./desktop-migration.js";
 import { offerReplace } from "./desktop-replace.js";
-import { compatibleHello, currentDiscovery, refreshRuntime, resumeRuntime, signInWorkspace } from "./service.js";
+import {
+  compatibleHello,
+  currentDiscovery,
+  refreshRuntime,
+  resumeRuntime,
+  signInWorkspace,
+  ensureDaemon,
+} from "./service.js";
 
 /** Background daemon re-check cadence (plus every window focus). */
 export const RUNTIME_REFRESH_INTERVAL_MS = 60_000;
@@ -33,8 +40,9 @@ export const RUNTIME_REFRESH_INTERVAL_MS = 60_000;
 export interface RuntimeSupervisorProps {
   /** Registers the local chat transport once the runtime resumes (desktop chat slice). */
   registerChatTransport?: (() => void) | undefined;
-  /** The consent dialog host; tests replace it. */
-  setupDialog?: React.ComponentType | undefined;
+  workspaceSlug: string;
+  /** Non-modal setup progress; tests replace it. */
+  setupStatus?: React.ComponentType<{ workspaceSlug: string }> | undefined;
   /** The migration-notices host; tests stub it. */
   noticesDialog?: ((props: { account: string }) => React.ReactElement) | undefined;
   /** The replace-machine host; tests stub it. */
@@ -49,10 +57,9 @@ function registerLocalChatTransportLazily(): void {
   );
 }
 
-// The consent dialog and its kit controls load on demand, off the
-// first-paint chain; most builds never take this path.
-const LazyDaemonSetupDialog = React.lazy(() =>
-  import("./DaemonSetupDialog.js").then((module) => ({ default: module.DaemonSetupDialog }))
+// Setup progress loads off the first-paint chain.
+const LazyDaemonSetupStatus = React.lazy(() =>
+  import("./DaemonSetupStatus.js").then((module) => ({ default: module.DaemonSetupStatus }))
 );
 const LazyMigrationNoticesDialog = React.lazy(() =>
   import("./MigrationNoticesDialog.js").then((module) => ({ default: module.MigrationNoticesDialog }))
@@ -63,7 +70,7 @@ const LazyReplaceMachineDialog = React.lazy(() =>
 
 export function RuntimeSupervisor(props: RuntimeSupervisorProps): React.ReactElement | null {
   const registerChatTransport = props.registerChatTransport ?? registerLocalChatTransportLazily;
-  const SetupDialog = props.setupDialog ?? LazyDaemonSetupDialog;
+  const SetupStatus = props.setupStatus ?? LazyDaemonSetupStatus;
   const NoticesDialog = props.noticesDialog ?? LazyMigrationNoticesDialog;
   const ReplaceDialog = props.replaceDialog ?? LazyReplaceMachineDialog;
   const client = getAppClient();
@@ -80,9 +87,23 @@ export function RuntimeSupervisor(props: RuntimeSupervisorProps): React.ReactEle
     registerChatTransport?.();
     let active = true;
     let migrated = false;
+    let settingUp = false;
     const askedFor = new Set<string>();
     const refresh = async (): Promise<void> => {
       await refreshRuntime({ client, runtime }).catch(() => undefined);
+      if (!active) return;
+      // A missing daemon is a new installation. Signed-out daemon events
+      // are reconciled by AuthSyncSupervisor so explicit CLI logout wins.
+      if (currentDiscovery()?.kind === "no_daemon" && !settingUp) {
+        settingUp = true;
+        try {
+          await ensureDaemon(props.workspaceSlug, { client, runtime, cli: platform.cliSetup });
+        } catch {
+          return; // The status surface reports the failure and offers retry.
+        } finally {
+          settingUp = false;
+        }
+      }
       if (!active) return;
       if (!migrated) {
         const cli = platform.cliSetup;
@@ -139,12 +160,12 @@ export function RuntimeSupervisor(props: RuntimeSupervisorProps): React.ReactEle
       unsubscribe();
       globalThis.window.removeEventListener("online", tick);
     };
-  }, [runtime, userId, email, cloudUrl, client, registerChatTransport]);
+  }, [runtime, userId, email, cloudUrl, client, registerChatTransport, props.workspaceSlug]);
 
   if (!runtime || !userId) return null;
   return (
     <React.Suspense fallback={null}>
-      <SetupDialog />
+      <SetupStatus workspaceSlug={props.workspaceSlug} />
       <NoticesDialog account={userId} />
       <ReplaceDialog />
     </React.Suspense>

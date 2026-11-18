@@ -341,6 +341,14 @@ async fn resolve_allow_gate(
     let user_id = actor_user_id(extension).ok_or(Denial::Unauthorized)?;
     let project_id = rewrite_project_id(&pool, slug, project_raw).await?;
     allow_roles(&pool, slug, &project_id, &user_id, allowed).await?;
+    if let Some(info) = crate::project_archived::archived_by_id(&pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     let timezone = actor_timezone(&pool, &user_id).await?;
     Ok((
         pool,
@@ -366,6 +374,14 @@ async fn resolve_entity_gate(
         .await
         .map_err(IntoResponse::into_response)?;
     entity_access(&pool, slug, &project_id, &user_id, write).await?;
+    if let Some(info) = crate::project_archived::archived_by_id(&pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError.into_response())?
+    {
+        return Err(
+            Denial::ProjectArchived(crate::project_archived::archived_body(&info)).into_response(),
+        );
+    }
     let timezone = actor_timezone(&pool, &user_id)
         .await
         .map_err(IntoResponse::into_response)?;

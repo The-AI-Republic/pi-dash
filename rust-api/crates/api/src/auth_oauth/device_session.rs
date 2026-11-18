@@ -190,7 +190,7 @@ fn invalid_token() -> Response {
 /// The authenticated caller: an `APIToken` bridge (`request.auth` is the
 /// raw token string) or a machine token (`request.auth_machine_token` is
 /// set, `request.auth` the raw `mt_` value).
-enum Caller {
+pub(crate) enum Caller {
     Api { user_id: Uuid, raw: String },
     Machine { user_id: Uuid, token_id: Uuid },
 }
@@ -200,7 +200,7 @@ enum Caller {
 /// No usable credential is DRF's `NotAuthenticated` (401); a bad one is
 /// `AuthenticationFailed` (403 here — see [`INVALID_TOKEN_BODY`]).
 #[allow(clippy::result_large_err)]
-async fn authenticate(
+pub(crate) async fn authenticate(
     pool: &sqlx::PgPool,
     secret_key: &[u8],
     headers: &HeaderMap,
@@ -710,6 +710,17 @@ async fn post_machine_token(
         Err(denial) => return denial,
     }
 
+    // Resolve the installed edition before opening the write transaction.
+    // A cloud account can serve the agent without a server-held BYOK key.
+    let agent_available = if matches!(&caller, Caller::Api { .. }) {
+        match crate::pidash_agent::endpoints::device_grant_availability(&state, user_id).await {
+            Ok((available, _)) => available,
+            Err(response) => return response,
+        }
+    } else {
+        false
+    };
+
     // `with transaction.atomic()` over get-or-create, rotate and bridge
     // deactivation (`device.py:453-467`).
     let mut tx = match pool.begin().await {
@@ -720,7 +731,7 @@ async fn post_machine_token(
     let outcome = exchange_in_transaction(
         &mut tx,
         state.settings().secret_key.as_bytes(),
-        state.settings(),
+        agent_available,
         &caller,
         user_id,
         workspace_id,
@@ -818,7 +829,7 @@ fn machine_token_response_body(
 async fn exchange_in_transaction(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     secret_key: &[u8],
-    settings: &pidash_db::config::Settings,
+    agent_available: bool,
     caller: &Caller,
     user_id: Uuid,
     workspace_id: Uuid,
@@ -1050,12 +1061,7 @@ async fn exchange_in_transaction(
                     .unwrap_or(None);
                 m.map(|m| m.revoked_at.is_some()).unwrap_or(true)
             };
-            if !machine_revoked
-                && pidash_services::domain::pidash_agent_credential::pidash_agent_profile_for_user_available(
-                    settings,
-                )
-                .0
-            {
+            if !machine_revoked && agent_available {
                 let silent = !interactive_approval;
                 // Check silent allowed via machine's current state.
                 let machine_for_silent = {
@@ -1071,6 +1077,7 @@ async fn exchange_in_transaction(
                             &pidash_db::orm_tx::TxConn::new(tx) as &_,
                             m.id,
                             now,
+                            "cli",
                         )
                         .await
                         .unwrap_or(false)
@@ -1089,6 +1096,7 @@ async fn exchange_in_transaction(
                             user_id,
                             params.dev_machine_id,
                             silent,
+                            "cli",
                             now,
                         )
                         .await;

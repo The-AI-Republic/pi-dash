@@ -57,6 +57,9 @@ pub mod reason {
 /// handed it separately through the agent-token endpoint. `reason_code` is
 /// empty exactly when `available` is true. `top_up_url` is where a user
 /// adds credit for this lane; the overlay fills it, CE leaves it empty.
+/// `context_window` is the real context window for `model` when the cloud
+/// overlay knows it (NEWPIDASH-247); CE never fills it, so the engine falls
+/// back to its built-in catalog (if any) for known models.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PidashAgentProfile {
     pub available: bool,
@@ -65,6 +68,7 @@ pub struct PidashAgentProfile {
     pub model: String,
     pub reason_code: String,
     pub top_up_url: String,
+    pub context_window: Option<u32>,
 }
 
 /// CE credential failure (`PidashAgentUnavailable`): raising rather than
@@ -193,6 +197,7 @@ pub trait AssistantModelSeam: Send + Sync + std::fmt::Debug {
                 model: profile.model,
                 reason_code: profile.reason_code,
                 top_up_url: profile.top_up_url,
+                context_window: profile.context_window,
             }
         })
     }
@@ -471,6 +476,7 @@ mod tests {
                     model: "hub-default".to_string(),
                     reason_code: String::new(),
                     top_up_url: "https://gateway.example.com/account/credits".to_string(),
+                    context_window: None,
                 }
             })
         }

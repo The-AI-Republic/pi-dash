@@ -8,7 +8,7 @@
 //!   D-26 issues; the domain gate is PIDASHCONV-658.
 //!
 //! * [`models_links`] — `IssueLink`, `IssueRelation`,
-//!   `GithubPullRequestLink`, `GitCodeReviewLink`, `FileAsset` (reuse)
+//!   `GitCodeReviewLink`, `FileAsset` (reuse)
 //!   (PIDASHCONV-645).
 //!
 //! * [`models_engage`] — `IssueComment`, `CommentReaction`,
@@ -32,8 +32,7 @@ pub use models_engage::{
     issue_subscriber::IssueSubscriber, issue_vote::IssueVote,
 };
 pub use models_links::{
-    file_asset::FileAsset, git_code_review_link::GitCodeReviewLink,
-    github_pull_request_link::GithubPullRequestLink, issue_link::IssueLink,
+    file_asset::FileAsset, git_code_review_link::GitCodeReviewLink, issue_link::IssueLink,
     issue_relation::IssueRelation,
 };
 pub use models_read::{

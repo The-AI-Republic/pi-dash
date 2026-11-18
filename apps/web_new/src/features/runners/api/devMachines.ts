@@ -4,8 +4,9 @@
 // Dev-machine reads and writes (NEWFRONT-555, RUN-037–040). The machines
 // table polls on its own short cadence; every write re-reads the subtree so
 // the row, its counts and the runner list agree once the request settles.
-// Pi Dash Agent design §4.10, §8: rename, engine controls, engine
-// sign-out and the merge of a replaced computer ride the same writer.
+// Pi Dash Agent design §4.10, §8: rename, engine controls and the merge of
+// a replaced computer ride the same writer. There is no engine sign-out any
+// more (desktop_unified_signin U-3).
 
 import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -15,7 +16,6 @@ import {
   mergeDevMachineInto,
   revokeDevMachine,
   rotateDevMachine,
-  signOutDevMachinePidashAgent,
   updateDevMachine,
   type ApiClient,
   type DevMachinePatch,
@@ -88,13 +88,6 @@ export interface DevMachineSettingsInput {
 export function useUpdateDevMachine(workspaceSlug: string, workspaceId: string) {
   return useMachineWrite(workspaceSlug, (client, input: DevMachineSettingsInput) =>
     updateDevMachine(client, input.machineId, workspaceId, input.patch)
-  );
-}
-
-/** Revoke the machine's engine credential only. */
-export function useSignOutDevMachinePidashAgent(workspaceSlug: string, workspaceId: string) {
-  return useMachineWrite(workspaceSlug, (client, machineId: string) =>
-    signOutDevMachinePidashAgent(client, machineId, workspaceId)
   );
 }
 

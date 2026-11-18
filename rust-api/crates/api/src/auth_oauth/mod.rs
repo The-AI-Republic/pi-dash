@@ -37,6 +37,7 @@
 pub mod device_flow;
 pub mod device_session;
 pub mod guards;
+pub mod handoff;
 pub mod login;
 pub mod oauth_gitea;
 pub mod oauth_github;
@@ -80,7 +81,9 @@ pub(crate) fn avatar_s3_client() -> reqwest::Client {
 
 /// Routes for the ported device families (PIDASHCONV-342 + PIDASHCONV-343).
 pub fn routes() -> axum::Router<crate::state::AppState> {
-    device_flow::routes().merge(device_session::routes())
+    device_flow::routes()
+        .merge(device_session::routes())
+        .merge(handoff::routes())
 }
 
 /// Shared `delete_old_avatar` row write (`adapter/base.py:244-248`,

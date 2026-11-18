@@ -145,6 +145,10 @@ pub enum Denial {
     RoleDenied,
     /// 404, `handle_exception`'s `ObjectDoesNotExist` branch.
     ObjectNotFound,
+    /// 409, the NEWPIDASH-236 `project_archived` envelope (pre-rendered
+    /// bytes from [`crate::project_archived::archived_body`]) — run-now
+    /// on an archived project's binding (NEWPIDASH-239).
+    ProjectArchived(String),
     /// A view-built body with its status (write 400/409/412s).
     Body(StatusCode, Value),
     /// A response the web app's shared write path already rendered.
@@ -183,6 +187,7 @@ impl Denial {
                 crate::permissions::PERMISSION_DENIED_BODY.to_owned(),
             ),
             Denial::ObjectNotFound => (StatusCode::NOT_FOUND, OBJECT_NOT_FOUND_BODY.to_owned()),
+            Denial::ProjectArchived(body) => (StatusCode::CONFLICT, body.clone()),
             Denial::Body(status, body) => (
                 *status,
                 serde_json::to_string(body).expect("serializable denial"),

@@ -13,9 +13,8 @@
 //! model-credential reads through the assistant seam, and the engine
 //! profile's `MANAGED_RUNNER_ENABLED` read through `AppState` settings.
 //!
-//! The web `engine-sign-out` route lives with the machine teardown
-//! handlers (`runner_enroll/teardown.rs`), next to the machine revoke it
-//! mirrors.
+//! The web engine-only sign-out was removed (desktop_unified_signin): the
+//! engine signs out with the daemon.
 
 pub mod endpoints;
 

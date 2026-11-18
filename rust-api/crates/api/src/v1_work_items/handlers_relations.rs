@@ -190,6 +190,8 @@ pub enum Denial {
     UnsupportedMediaType(String),
     /// 404, view-inline body (unresolvable refs carry `unresolved` too).
     NotFound(String),
+    /// 409, archived project (NEWPIDASH-236, pre-rendered body).
+    ProjectArchived(String),
     /// 500, generic branch.
     ServerError,
 }
@@ -227,6 +229,7 @@ impl Denial {
                 format!("{{\"detail\":{}}}", json_string(message)),
             ),
             Denial::NotFound(body) => (StatusCode::NOT_FOUND, body.clone()),
+            Denial::ProjectArchived(body) => (StatusCode::CONFLICT, body.clone()),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 SERVER_ERROR_BODY.to_owned(),
@@ -470,11 +473,18 @@ async fn require_entity_gate(
     let facts = project_base_facts(pool, workspace_id, workspace_slug, user_id, project_id).await?;
     let scope = TenantScope::new(pidash_types::WorkspaceId::from(workspace_slug.to_owned()));
     let gate = gate_for(route, method);
-    if decide(gate, method, &scope, &facts) {
-        Ok(())
-    } else {
-        Err(Denial::Forbidden)
+    if !decide(gate, method, &scope, &facts) {
+        return Err(Denial::Forbidden);
     }
+    if let Some(info) = crate::project_archived::archived_by_id(pool, *project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

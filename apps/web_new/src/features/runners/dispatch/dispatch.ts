@@ -19,7 +19,7 @@ import {
   type ReTickResponse,
 } from "@pidash/api-client";
 
-import type { AgentRuntimeApi } from "../../../core/platform/index.js";
+import { platform, type AgentRuntimeApi } from "../../../core/platform/index.js";
 import { prepareAgentRun, type HeartbeatPoll } from "../runtime/service.js";
 
 /** Which server pipeline renders the run's prompt. */
@@ -50,7 +50,13 @@ export function isQueuedDispatch(result: AgentRunCreateResult): result is AgentR
  */
 export async function triggerAgentRun(input: TriggerAgentRunInput): Promise<AgentRunCreateResult> {
   const { client, runtime, workspaceId, workspaceSlug, projectId, issueId, mode, heartbeatPoll } = input;
-  await prepareAgentRun({ client, runtime, target: { workspaceSlug, projectId, issueId }, heartbeatPoll });
+  await prepareAgentRun({
+    client,
+    runtime,
+    cli: platform.cliSetup,
+    target: { workspaceSlug, projectId, issueId },
+    heartbeatPoll,
+  });
   const payload = { workspace: workspaceId, work_item: issueId };
   return mode === "run_ai" ? runAi(client, payload) : commentAndRun(client, payload);
 }

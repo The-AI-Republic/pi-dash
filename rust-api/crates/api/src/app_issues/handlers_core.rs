@@ -353,6 +353,14 @@ async fn core_gate(
     if !decide_allow(&spec, &scope, &facts) {
         return Err(Denial::Forbidden);
     }
+    if let Some(info) = crate::project_archived::archived_by_id(pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     tenant_facts(pool, slug, &project_id, user_id, project_check)
         .await
         .map(|tenant| CoreTenant {

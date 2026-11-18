@@ -64,6 +64,9 @@ export interface RunnerChatPageProps {
   runnerId: string;
   /** `?sessionId=` when a specific conversation is linked. */
   requestedSessionId: string | null;
+  /** One-shot Home composer handoff; starts a fresh local conversation. */
+  initialMessage?: string | null;
+  onInitialMessageConsumed?: () => void;
   /** Writes an explicit selection into the address. */
   onSelectSession: (sessionId: string) => void;
 }
@@ -78,11 +81,17 @@ export function RunnerChatPage({
   workspaceSlug,
   runnerId,
   requestedSessionId,
+  initialMessage = null,
+  onInitialMessageConsumed,
   onSelectSession,
 }: RunnerChatPageProps): React.ReactElement {
   const area = useRunnersArea();
   const runner = useChatRunner(workspaceSlug, runnerId, area.allowed);
   const sessions = useChatSessions(workspaceSlug, area.workspaceId, runnerId, area.allowed);
+  const initialMessageRef = React.useRef(initialMessage);
+  const initialRunnerRef = React.useRef(runnerId);
+  const freshHandoffRef = React.useRef(initialMessage !== null);
+  const [initializingHandoff, setInitializingHandoff] = React.useState(initialMessage !== null);
   const [pendingId, setPendingId] = React.useState<string | null>(null);
   const [precreated, setPrecreated] = React.useState<ChatSession | null>(null);
   // The list snapshot that was current when the session was created; until
@@ -95,6 +104,11 @@ export function RunnerChatPage({
     setPendingId(null);
     setPrecreated(null);
     listAtCreateRef.current = undefined;
+    if (initialRunnerRef.current !== runnerId) {
+      initialMessageRef.current = null;
+      freshHandoffRef.current = false;
+      setInitializingHandoff(false);
+    }
   }, [runnerId]);
 
   // Once the address carries the pick, the in-memory override is redundant.
@@ -104,13 +118,15 @@ export function RunnerChatPage({
 
   const session = React.useMemo(
     () =>
-      selectSession({
-        sessions: sessions.data,
-        pendingId,
-        requestedId: requestedSessionId,
-        precreated,
-      }),
-    [pendingId, precreated, requestedSessionId, sessions.data]
+      initializingHandoff || (freshHandoffRef.current && precreated === null && pendingId === null)
+        ? null
+        : selectSession({
+            sessions: sessions.data,
+            pendingId,
+            requestedId: requestedSessionId,
+            precreated,
+          }),
+    [initializingHandoff, pendingId, precreated, requestedSessionId, sessions.data]
   );
 
   // A created session is dropped once a *later* list read has answered and
@@ -135,6 +151,7 @@ export function RunnerChatPage({
   // fallback, so a click or a deep link that lands while the create runs
   // still wins; New chat adds an explicit pick itself through `select`.
   const onCreated = React.useCallback((created: ChatSession) => {
+    freshHandoffRef.current = false;
     listAtCreateRef.current = listSnapshotRef.current;
     setPrecreated(created);
   }, []);
@@ -148,7 +165,7 @@ export function RunnerChatPage({
     session,
     pendingId,
     requestedId: requestedSessionId,
-    enabled: area.allowed,
+    enabled: area.allowed && !initializingHandoff,
     onCreated,
   });
 
@@ -376,6 +393,17 @@ export function RunnerChatPage({
     onSelectSession: select,
     onCreated,
   });
+
+  React.useEffect(() => {
+    const content = initialMessageRef.current;
+    if (content === null || !area.allowed || surface.ownsRunner?.(runnerId) !== true) return;
+    // Consume before sending: rerenders, StrictMode and a refreshed route
+    // cannot replay the Home message. The normal send path keeps a failed
+    // draft and opens a new local session rather than reusing history.
+    initialMessageRef.current = null;
+    onInitialMessageConsumed?.();
+    void actions.send(content, setDraft).finally(() => setInitializingHandoff(false));
+  }, [actions.send, area.allowed, onInitialMessageConsumed, runnerId, surface]);
 
   const speech = useDictationConfig(area.allowed);
   const dictationAvailable = dictationOffered(speech.data);

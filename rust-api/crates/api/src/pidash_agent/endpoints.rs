@@ -213,6 +213,65 @@ async fn llm_has_key(sea: &impl sea_orm::ConnectionTrait, user_id: Uuid) -> Resu
         .is_some_and(|row| pidash_db::assistant::models::has_secret(&row.api_key_encrypted)))
 }
 
+/// Resolve the account profile through the installed edition for native-agent
+/// authentication and enrollment, matching the profile endpoint.
+#[allow(clippy::result_large_err)]
+pub(crate) async fn account_agent_profile(
+    state: &AppState,
+    user_id: Uuid,
+) -> Result<pidash_services::extensions::PidashAgentProfile, Response> {
+    let pool = pool_of(state)?;
+    let sea = pidash_db::pool::sea_orm_connection(pool);
+    let has_key = llm_has_key(&sea, user_id).await?;
+    Ok(state
+        .assistant_seam()
+        .pidash_agent_profile(user_id, has_key)
+        .await)
+}
+
+/// Device grants must use the installed edition's profile, just like the
+/// model-token and profile endpoints. The CE-only availability kernel must
+/// never gate a cloud account's device login.
+#[allow(clippy::result_large_err)]
+pub(crate) async fn device_grant_availability(
+    state: &AppState,
+    user_id: Uuid,
+) -> Result<(bool, &'static str), Response> {
+    let enabled = state.settings().pidash_agent.enabled;
+    if !enabled {
+        return Ok((
+            false,
+            pidash_services::domain::pidash_agent_credential::PAUSE_ENGINE_DISABLED,
+        ));
+    }
+    let pool = pool_of(state)?;
+    let sea = pidash_db::pool::sea_orm_connection(pool);
+    let has_key = llm_has_key(&sea, user_id).await?;
+    Ok(device_grant_availability_from_seam(
+        state.assistant_seam().as_ref(),
+        enabled,
+        user_id,
+        has_key,
+    )
+    .await)
+}
+
+async fn device_grant_availability_from_seam(
+    seam: &dyn pidash_services::extensions::AssistantModelSeam,
+    enabled: bool,
+    user_id: Uuid,
+    has_key: bool,
+) -> (bool, &'static str) {
+    if !enabled {
+        return (
+            false,
+            pidash_services::domain::pidash_agent_credential::PAUSE_ENGINE_DISABLED,
+        );
+    }
+    let profile = seam.pidash_agent_profile(user_id, has_key).await;
+    pidash_agent_profile_for_user(enabled, &profile)
+}
+
 /// The model-token throttle identity: the credential's hash bucket when
 /// a bearer is presented, else the client identity (DRF's `get_ident`:
 /// the `X-Forwarded-For` value with all whitespace removed, else the
@@ -556,6 +615,16 @@ pub async fn engine_profile(State(state): State<AppState>, headers: HeaderMap) -
         "top_up_url".to_owned(),
         serde_json::Value::String(profile.top_up_url.clone()),
     );
+    // Real limits for the catalog writer (NEWPIDASH-247). CE always answers
+    // null here; the cloud overlay fills it from the OpenHub catalog.
+    match profile.context_window {
+        Some(window) => {
+            body.insert("context_window".to_owned(), serde_json::json!(window));
+        }
+        None => {
+            body.insert("context_window".to_owned(), serde_json::Value::Null);
+        }
+    }
     for (key, value) in payload_map(
         &machine.engine_sign_in_state,
         machine
@@ -656,6 +725,113 @@ mod tests {
     use axum::http::HeaderMap;
 
     use super::*;
+
+    #[derive(Debug)]
+    struct GrantProfileSeam {
+        available: bool,
+        user: Uuid,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl pidash_services::extensions::AssistantModelSeam for GrantProfileSeam {
+        fn generate_title(
+            &self,
+            _: pidash_services::extensions::TitleRequest,
+        ) -> pidash_services::extensions::SeamFuture<
+            '_,
+            Result<String, pidash_services::extensions::TitleError>,
+        > {
+            Box::pin(async { Err(pidash_services::extensions::TitleError::ServerError) })
+        }
+
+        fn pidash_agent_profile(
+            &self,
+            user: Uuid,
+            has_key: bool,
+        ) -> pidash_services::extensions::SeamFuture<
+            '_,
+            pidash_services::extensions::PidashAgentProfile,
+        > {
+            assert_eq!(user, self.user);
+            assert!(!has_key, "cloud device grants do not require a BYOK key");
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                pidash_services::extensions::PidashAgentProfile {
+                    available: self.available,
+                    lane: "openhub".into(),
+                    base_url: "https://gateway.example.test/v1".into(),
+                    model: "free-model".into(),
+                    reason_code: String::new(),
+                    top_up_url: String::new(),
+                    context_window: Some(128000),
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn device_grant_availability_uses_cloud_profile_without_byok() {
+        let user = Uuid::new_v4();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seam = GrantProfileSeam {
+            available: true,
+            user,
+            calls: calls.clone(),
+        };
+        assert_eq!(
+            device_grant_availability_from_seam(&seam, true, user, false).await,
+            (true, "")
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn device_grant_availability_keeps_ce_unavailable() {
+        for has_key in [false, true] {
+            assert_eq!(
+                device_grant_availability_from_seam(
+                    &crate::assistant::model_seam::CeAssistantSeam::new(std::sync::Arc::new(
+                        pidash_db::config::Settings::test_defaults()
+                    )),
+                    true,
+                    Uuid::new_v4(),
+                    has_key,
+                )
+                .await,
+                (false, "profile_unavailable")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn device_grant_availability_honors_disabled_instance() {
+        let user = Uuid::new_v4();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seam = GrantProfileSeam {
+            available: true,
+            user,
+            calls: calls.clone(),
+        };
+        assert_eq!(
+            device_grant_availability_from_seam(&seam, false, user, false).await,
+            (false, "engine_disabled")
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn device_grant_availability_honors_unavailable_cloud_profile() {
+        let user = Uuid::new_v4();
+        let seam = GrantProfileSeam {
+            available: false,
+            user,
+            calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        assert_eq!(
+            device_grant_availability_from_seam(&seam, true, user, false).await,
+            (false, "profile_unavailable")
+        );
+    }
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
         pairs
