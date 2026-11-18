@@ -2,7 +2,8 @@
 
 An agent skill that teaches Claude Code or Codex to use Pi Dash through the
 `pidash` CLI — creating, searching, updating, and commenting on issues, linking
-pull requests, and reading project pages without leaving the coding session.
+pull requests, and reading project pages without leaving the coding session. When
+the CLI is not installed, the skill covers the Pi Dash MCP connector instead.
 
 The skill is one portable `SKILL.md` package in [`pidash/`](pidash/). It lives in
 this repository next to the CLI it documents ([`runner/`](../runner/)), so a CLI
@@ -131,6 +132,8 @@ confirm.
   when the skill activates.
 - `pidash/references/pidash-workflows.md` — the full command reference that
   `SKILL.md` tells the agent to read before its first write.
+- `pidash/references/pidash-mcp.md` — the same for the Pi Dash MCP connector:
+  which `pidash_*` tool does what, and where the connector differs from the CLI.
 - `pidash/agents/openai.yaml` — Codex interface manifest. Not copied into
   Claude Code installs.
 - `test/` — installer and skill-content tests (`npm test`).
@@ -141,7 +144,11 @@ When a pull request adds, renames, or changes an agent-facing `pidash` command
 in `runner/src/cli/`, update `pidash/SKILL.md` and
 `pidash/references/pidash-workflows.md` in the same pull request. `npm test`
 checks that every `pidash` command and flag the skill mentions still exists in the CLI
-source.
+source. The connector's tool
+definitions are not in this repository, so nothing checks
+`pidash/references/pidash-mcp.md` against them — when a connector tool is added,
+renamed, or changes its arguments, update that file by hand, alongside
+[`docs/mcp-connector.md`](../docs/mcp-connector.md).
 
 To publish: bump `version` in `package.json`, then run `npm publish` from this
 directory. `npm pack --dry-run` shows exactly what will ship.

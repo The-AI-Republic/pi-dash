@@ -15,7 +15,11 @@ const SKILL_PKG_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SKILL_DIR = join(SKILL_PKG_DIR, "pidash");
 const INSTALLER = join(SKILL_PKG_DIR, "install.mjs");
 const CLI_SRC_DIR = resolve(SKILL_PKG_DIR, "..", "runner", "src", "cli");
-const SKILL_DOCS = [join(SKILL_DIR, "SKILL.md"), join(SKILL_DIR, "references", "pidash-workflows.md")];
+const SKILL_DOCS = [
+  join(SKILL_DIR, "SKILL.md"),
+  join(SKILL_DIR, "references", "pidash-workflows.md"),
+  join(SKILL_DIR, "references", "pidash-mcp.md"),
+];
 
 function runInstaller(args, homes) {
   return spawnSync(process.execPath, [INSTALLER, ...args], {
@@ -231,4 +235,29 @@ test("every flag the skill mentions is declared in the CLI source", () => {
 
   assert.ok(mentioned.size > 30, `only found ${mentioned.size} flag mentions`);
   assert.deepEqual(undeclared, []);
+});
+
+test("every reference file SKILL.md points to exists and is installed", () => {
+  const skillText = readFileSync(join(SKILL_DIR, "SKILL.md"), "utf8");
+  const referenced = [...new Set([...skillText.matchAll(/references\/[a-z0-9-]+\.md/g)].map((m) => m[0]))];
+
+  assert.ok(referenced.includes("references/pidash-workflows.md"));
+  assert.ok(referenced.includes("references/pidash-mcp.md"));
+  withTempHomes((homes) => {
+    runInstaller(["--all"], homes);
+    for (const reference of referenced) {
+      assert.ok(existsSync(join(SKILL_DIR, reference)), `${reference} is missing from the skill`);
+      for (const home of [homes.claude, homes.codex]) {
+        assert.ok(existsSync(join(home, "skills", "pidash", reference)), `${reference} was not installed`);
+      }
+    }
+  });
+});
+
+test("the MCP reference names connector tools, not CLI commands, in its tool table", () => {
+  const text = readFileSync(join(SKILL_DIR, "references", "pidash-mcp.md"), "utf8");
+  const tools = new Set([...text.matchAll(/`(pidash_[a-z_]+)`/g)].map((m) => m[1]));
+
+  assert.ok(tools.has("pidash_create_issue"));
+  assert.ok(tools.size >= 25, `only found ${tools.size} connector tools`);
 });

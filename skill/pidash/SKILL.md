@@ -1,15 +1,18 @@
 ---
 name: pidash
-description: Use when the user wants to work with Pi Dash from the current coding workspace through the pidash CLI — create, read, update, list, search, move, label, or relate issues (work items); post or read issue comments; attach a pull request or merge request to an issue; read or write project pages; inspect workflow states, labels, runners, or schedulers; start an agent run on an issue; or connect the current repo to a Pi Dash project.
+description: Use when the user wants to work with Pi Dash, through the pidash CLI or the Pi Dash MCP connector (pidash_* tools) — create, read, update, list, search, move, label, or relate issues (work items); post or read issue comments; attach a pull request or merge request to an issue; read or write project pages; inspect workflow states, labels, runners, or schedulers; start an agent run on an issue; or connect the current repo to a Pi Dash project.
 metadata:
   short-description: Use Pi Dash from a coding agent
 ---
 
 # Pi Dash
 
-Use the local `pidash` CLI to work with Pi Dash from the current coding workspace.
+Pi Dash can be reached two ways. Pick one per session:
 
-Read `references/pidash-workflows.md` before the first write (create, patch, move, comment, relate) in a session. It carries the full command reference; this file is the short version.
+- **The `pidash` CLI** — use it whenever `pidash --version` works. It covers everything in this skill. Read `references/pidash-workflows.md` before the first write (create, patch, move, comment, relate) in a session; it carries the full command reference.
+- **The Pi Dash MCP connector** — tools named `pidash_*` (your client may prefix them). Use it when the CLI is not installed. Read `references/pidash-mcp.md` before the first write; it maps each task to a tool and lists where the connector behaves differently from the CLI and what it cannot do.
+
+The sections below are written for the CLI. [Rules That Matter](#rules-that-matter) applies to both surfaces.
 
 ## Preflight
 
@@ -20,7 +23,7 @@ pidash --version
 pidash workspace me
 ```
 
-If `pidash` is missing or `workspace me` fails with an auth error (exit code 3), ask the user to run `pidash auth login`. Do not try to log in yourself — it is an interactive device-code flow.
+If `pidash` is missing and `pidash_*` tools are available, switch to the connector (`references/pidash-mcp.md`) and check access with `pidash_workspace_me` instead. Otherwise, if `pidash` is missing or `workspace me` fails with an auth error (exit code 3), ask the user to run `pidash auth login`. Do not try to log in yourself — it is an interactive device-code flow.
 
 ## Conventions
 
