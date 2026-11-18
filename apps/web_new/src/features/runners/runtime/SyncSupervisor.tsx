@@ -38,6 +38,7 @@ import { platform, type AgentRuntimeApi, type AuthSyncRecord, type DaemonHello }
 import { resetRegisteredStores, sessionKeys, useMe, useSessionStore } from "../../../core/session/index.js";
 import { notifyInfo } from "../../../shared/shell/index.js";
 import { performSignOut } from "../../auth/index.js";
+import { daemonSetupInProgress } from "./service.js";
 import { reconcile, sameAccount, type SyncDecision, type SyncMe } from "./sync.js";
 import type { SwitchWarningCopy } from "./SwitchWarningDialog.js";
 
@@ -287,11 +288,11 @@ function AuthSyncSupervisorInner({ runtime }: { runtime: AgentRuntimeApi }): Rea
   );
 
   const tick = React.useCallback(async () => {
-    if (!runtime || ticking.current || cliOp.current) return;
+    if (!runtime || ticking.current || cliOp.current || daemonSetupInProgress()) return;
     ticking.current = true;
     try {
       const hello = await runtime.daemonHello().catch(() => null as DaemonHello | null);
-      if (!hello) return;
+      if (!hello || daemonSetupInProgress()) return;
       // Stamp the app's own sign-in from a fresh marker (never from a
       // restore), once per sign-in.
       let record = await runtime.getAuthSyncRecord().catch(() => null);
