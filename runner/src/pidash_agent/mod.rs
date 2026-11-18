@@ -13,7 +13,8 @@
 //! | extracted archive        | `<dir of pidash>/engine/<version>/`               |
 //!
 //! - [`locate`] finds the engine relative to the running executable (or the
-//!   `[engine] binary` config override) once, at daemon start.
+//!   `[engine] binary` config override), including installations completed
+//!   after daemon start, independently of installer receipts.
 //! - [`install`] places a release's engine directory, for `pidash engine
 //!   install` and for `pidash update` before it replaces `pidash`.
 //! - [`auto_install`] installs a missing engine at daemon start on an

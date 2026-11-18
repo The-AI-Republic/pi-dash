@@ -1,10 +1,10 @@
 mod activity_watchdog;
 pub mod drain_journal;
 pub mod execution;
-pub mod pidash_agent_ops;
-pub(crate) mod pidash_agent_reconcile;
 pub mod machine_control;
 pub mod observability;
+pub mod pidash_agent_ops;
+pub(crate) mod pidash_agent_reconcile;
 pub mod process_guard;
 pub mod receipt;
 pub mod reconnect_triggers;
@@ -28,7 +28,7 @@ pub struct Options {
 }
 
 pub async fn run(config: Config, creds: Credentials, paths: Paths, opts: Options) -> Result<()> {
-    // Resolve the Pi Dash Agent once and keep that path for the life of
+    // Keep the first successfully resolved Pi Dash Agent path for the life of
     // this process (`crate::pidash_agent::locate::resolved`), so a `pidash update`
     // that installs a newer engine never swaps the binary under a run.
     if let Err(crate::pidash_agent::locate::LocateError::NotInstalled { .. }) =
@@ -40,7 +40,12 @@ pub async fn run(config: Config, creds: Credentials, paths: Paths, opts: Options
             config.engine.clone(),
         ));
     }
-    supervisor::Supervisor::new(config, creds, paths, opts)
+    // Desktop/package-manager installs have no cargo-dist receipt. They
+    // still need discovery when the engine is installed after service start.
+    let discovery = tokio::spawn(crate::pidash_agent::locate::discover_missing());
+    let result = supervisor::Supervisor::new(config, creds, paths, opts)
         .run()
-        .await
+        .await;
+    discovery.abort();
+    result
 }
