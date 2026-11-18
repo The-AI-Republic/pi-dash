@@ -426,3 +426,86 @@ async fn resumed_bridge_runs_turn_on_resumed_thread() {
     assert_eq!(cursor.thread_id, "th_saved");
     wait_completed(&mut bridge, &mut cursor).await;
 }
+
+#[tokio::test]
+async fn modern_approval_round_trip_preserves_rpc_id_and_decision() {
+    use pidash::cloud::protocol::ApprovalDecision;
+    let script = r#"
+import json, sys
+
+def emit(value):
+    print(json.dumps(value), flush=True)
+
+request_id = json.loads(sys.argv[1])
+expected = sys.argv[2]
+method = sys.argv[3]
+buffered = sys.argv[4] == 'early'
+request = {'jsonrpc': '2.0', 'id': request_id, 'method': method, 'params': {'command': 'touch approved-file', 'itemId': 'it_1'}}
+json.loads(sys.stdin.readline())
+if buffered:
+    emit(request)
+emit({'jsonrpc': '2.0', 'id': 1, 'result': {'capabilities': {}}})
+json.loads(sys.stdin.readline())
+json.loads(sys.stdin.readline())
+emit({'jsonrpc': '2.0', 'id': 2, 'result': {'threadId': 'th_approval'}})
+json.loads(sys.stdin.readline())
+# Status notifications can precede the real request. They must never
+# park the bridge on an invented approval ID.
+emit({'method': 'thread/status/changed', 'params': {'status': {'activeFlags': ['waitingOnApproval']}}})
+emit({'method': 'item/started', 'params': {'item': {'id': 'it_1', 'type': 'commandExecution', 'status': 'inProgress', 'command': 'touch approved-file'}}})
+if not buffered:
+    emit(request)
+reply = json.loads(sys.stdin.readline())
+assert reply == {'jsonrpc': '2.0', 'id': request_id, 'result': {'decision': expected}}, reply
+emit({'method': 'turn/completed', 'params': {'conclusion': 'success', 'done': {'status': 'ok'}}})
+"#;
+    for (id, decision, expected, method, order) in [
+        (
+            "71",
+            ApprovalDecision::Accept,
+            "accept",
+            "item/commandExecution/requestApproval",
+            "late",
+        ),
+        (
+            "\"file:1\"",
+            ApprovalDecision::Decline,
+            "decline",
+            "item/fileChange/requestApproval",
+            "late",
+        ),
+        (
+            "\"command:session\"",
+            ApprovalDecision::AcceptForSession,
+            "acceptForSession",
+            "item/commandExecution/requestApproval",
+            "early",
+        ),
+    ] {
+        let mut cmd = Command::new("python3");
+        cmd.args(["-u", "-c", script, id, expected, method, order]);
+        let server = AppServer::spawn_command(cmd).await.expect("spawn");
+        let mut bridge = Bridge::from_server(server, None);
+        let payload = RunPayload {
+            run_id: Uuid::new_v4(),
+            prompt: "approval test".into(),
+            model: None,
+        };
+        let cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut cursor = bridge.run(&payload, &cwd).await.unwrap();
+        let approval_id = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let frame = bridge.next_frame().await.expect("server request");
+                for event in cursor.translate(frame) {
+                    if let BridgeEvent::ApprovalRequest { approval_id, .. } = event {
+                        return approval_id;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("approval received");
+        bridge.send_approval(&approval_id, decision).await.unwrap();
+        wait_completed(&mut bridge, &mut cursor).await;
+    }
+}

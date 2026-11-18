@@ -61,7 +61,6 @@ import {
   turnOnPidashAgentForProject,
   type DaemonSetUpStep,
 } from "./service.js";
-import { registerSetUpPrompt } from "./setupPrompt.js";
 
 const CLOUD = "https://cloud.test";
 const client = { baseUrl: CLOUD } as unknown as ApiClient;
@@ -171,7 +170,6 @@ function agentProfile(overrides: Partial<PidashAgentProfile> = {}): PidashAgentP
 
 beforeEach(() => {
   resetRuntimeServiceForTests();
-  registerSetUpPrompt(null);
   vi.mocked(startDeviceGrant).mockReset();
   vi.mocked(approveDeviceCode).mockReset();
   vi.mocked(getProject).mockReset();
@@ -182,9 +180,7 @@ beforeEach(() => {
   vi.mocked(getPidashAgentProfile).mockResolvedValue(agentProfile());
 });
 
-afterEach(() => {
-  registerSetUpPrompt(null);
-});
+afterEach(() => {});
 
 describe("pidashAgentActionFor", () => {
   it("maps each engine sign-in state to what the app may do", () => {
@@ -364,8 +360,7 @@ describe("ensureChatRuntime", () => {
   });
 
   it("refuses a daemon signed in as someone else without offering set-up", async () => {
-    const prompt = vi.fn();
-    registerSetUpPrompt(prompt);
+    const cli = fakeCli();
     const runtime = fakeRuntime({
       kind: "account_mismatch",
       daemon_account: "other@test",
@@ -373,39 +368,70 @@ describe("ensureChatRuntime", () => {
       hosts_runners: false,
     });
     resume(runtime);
-    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime })).rejects.toThrow("other@test");
-    expect(prompt).not.toHaveBeenCalled();
+    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime, cli })).rejects.toThrow("other@test");
+    expect(cli.install).not.toHaveBeenCalled();
   });
 
-  it("asks for set-up when there is no daemon and refuses when declined", async () => {
-    const prompt = vi.fn((_request: unknown, done: (ok: boolean) => void) => done(false));
-    registerSetUpPrompt(prompt);
+  it("automatically installs for the first chat without a mounted setup UI", async () => {
     const runtime = fakeRuntime(NO_DAEMON);
+    const cli = fakeCli(false);
     resume(runtime);
-    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime })).rejects.toThrow(
-      "Pi Dash is not set up on this computer yet."
-    );
-    expect(prompt).toHaveBeenCalledWith({ reason: "chat", workspaceSlug: "ws" }, expect.any(Function));
-    expect(runtime.installService).not.toHaveBeenCalled();
-  });
-
-  it("refuses without a consent dialog: nothing is set up silently", async () => {
-    const runtime = fakeRuntime(NO_DAEMON);
-    resume(runtime);
-    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime })).rejects.toThrow("not set up");
-    expect(runtime.installService).not.toHaveBeenCalled();
-  });
-
-  it("continues once the user accepted set-up", async () => {
-    const runtime = fakeRuntime(NO_DAEMON);
-    const cli = fakeCli();
-    registerSetUpPrompt((request, done) => {
+    runtime.ensurePidashAgent.mockImplementation(async () => {
       runtime.discover.mockResolvedValue(compatible());
-      void setUpDaemon({ client, runtime, cli, workspaceSlug: request.workspaceSlug }).then(() => done(true));
+    });
+    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime, cli })).resolves.toBeUndefined();
+    expect(cli.install).toHaveBeenCalledTimes(1);
+    expect(cli.login).toHaveBeenCalledTimes(1);
+    expect(runtime.installService).toHaveBeenCalledTimes(1);
+  });
+
+  it("waits for background setup instead of starting a second install", async () => {
+    const runtime = fakeRuntime(NO_DAEMON);
+    const cli = fakeCli(false);
+    let finish!: () => void;
+    cli.install.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        })
+    );
+    runtime.ensurePidashAgent.mockImplementation(async () => {
+      runtime.discover.mockResolvedValue(compatible());
     });
     resume(runtime);
-    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime })).resolves.toBeUndefined();
+    const background = setUpDaemon({ workspaceSlug: "ws", client, runtime, cli });
+    const chat = ensureChatRuntime({ workspaceSlug: "ws", client, runtime, cli });
+    await vi.waitFor(() => expect(cli.install).toHaveBeenCalledTimes(1));
+    expect(runtime.ensurePidashAgent).not.toHaveBeenCalled();
+    finish();
+    await Promise.all([background, chat]);
+    expect(cli.login).toHaveBeenCalledTimes(1);
     expect(runtime.installService).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows retry after a failed automatic install", async () => {
+    const runtime = fakeRuntime(NO_DAEMON);
+    const cli = fakeCli(false);
+    cli.install.mockRejectedValueOnce(new Error("download failed"));
+    runtime.ensurePidashAgent.mockImplementation(async () => {
+      runtime.discover.mockResolvedValue(compatible());
+    });
+    resume(runtime);
+    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime, cli })).rejects.toThrow("download failed");
+    await expect(ensureChatRuntime({ workspaceSlug: "ws", client, runtime, cli })).resolves.toBeUndefined();
+    expect(cli.install).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops setup if the account changes during installation", async () => {
+    const runtime = fakeRuntime(NO_DAEMON);
+    const cli = fakeCli(false);
+    cli.install.mockImplementation(async () => {
+      resume(runtime, "u2");
+    });
+    resume(runtime);
+    await expect(setUpDaemon({ workspaceSlug: "ws", client, runtime, cli })).rejects.toThrow("account changed");
+    expect(cli.login).not.toHaveBeenCalled();
+    expect(runtime.installService).not.toHaveBeenCalled();
   });
 });
 

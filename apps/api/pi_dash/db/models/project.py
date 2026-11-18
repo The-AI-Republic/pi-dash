@@ -196,6 +196,11 @@ class Project(BaseModel):
     # Validated against the work-type registry at the serializer boundary
     # rather than with model choices, so a new work type needs no migration.
     default_work_type = models.CharField(max_length=32, blank=True, default="")
+    # Namespaced settings bag owned by the new system (NEWPIDASH-278);
+    # Django never reads or writes it beyond storing it. The constant
+    # default is metadata-only on Postgres 11+ and gives existing rows
+    # ``{}`` with no data migration (mirrors ``Profile.settings``).
+    settings = models.JSONField(default=dict)
 
     def __init__(self, *args, **kwargs):
         # Track if timezone is provided, if so, don't override it with the workspace timezone when saving

@@ -44,6 +44,9 @@ export interface DesktopAssistantProps {
   workspaceSlug: string;
   /** Local session id from the thread address, or null on the landing. */
   requestedSessionId: string | null;
+  /** First message carried by the Home composer. */
+  initialMessage?: string | null;
+  onInitialMessageConsumed?: () => void;
   /** A history pick rewrites the thread address; the page re-reads it. */
   onSelectSession: (sessionId: string) => void;
 }
@@ -51,6 +54,8 @@ export interface DesktopAssistantProps {
 export function DesktopAssistant({
   workspaceSlug,
   requestedSessionId,
+  initialMessage = null,
+  onInitialMessageConsumed,
   onSelectSession,
 }: DesktopAssistantProps): React.ReactElement | null {
   // The availability read the runners rail's contact uses, on the same
@@ -80,7 +85,10 @@ export function DesktopAssistant({
   if (access === "denied") return <RunnersNotAuthorized scope="workspace" />;
 
   let reason: string | null = null;
-  if (availability.isError) {
+  // A failed refresh must not tear down a working local conversation.
+  // Initial reads still show their failure; a later successful profile
+  // remains authoritative for the availability view until the next answer.
+  if (availability.isError && availability.data === undefined) {
     const error = availability.error;
     reason = error instanceof Error && error.message !== "" ? error.message : LOCAL_AGENT_UNAVAILABLE_FALLBACK;
   } else if (availability.data !== undefined) {
@@ -95,6 +103,8 @@ export function DesktopAssistant({
         workspaceSlug={workspaceSlug}
         runnerId={BUILTIN_CHAT_ID}
         requestedSessionId={requestedSessionId}
+        initialMessage={initialMessage}
+        {...(onInitialMessageConsumed === undefined ? {} : { onInitialMessageConsumed })}
         onSelectSession={onSelectSession}
       />
     </RunnersAreaProvider>

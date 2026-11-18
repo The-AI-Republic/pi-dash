@@ -75,6 +75,8 @@ const DESKTOP_BUNDLE_ORIGINS: &[&str] = &[
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub profile: Profile,
+    /// Edition marker returned in instance configuration. Cloud overlays set this false.
+    pub is_self_managed: bool,
     pub secret_key: String,
     /// True when no `SECRET_KEY` was set and one was generated (sessions do
     /// not survive restarts then — same as Python's random fallback).
@@ -969,6 +971,7 @@ impl Settings {
 
         Ok(Self {
             profile,
+            is_self_managed: true,
             secret_key,
             secret_key_generated,
             debug,
@@ -1310,6 +1313,7 @@ mod tests {
     fn empty_map_resolves_to_registry_defaults() {
         let s = Settings::from_map_with(&HashMap::new(), Profile::Common, &NoOverlay)
             .expect("defaults resolve");
+        assert!(s.is_self_managed);
         assert!(s.secret_key_generated);
         assert_eq!(s.secret_key.len(), 64);
         assert!(!s.debug);

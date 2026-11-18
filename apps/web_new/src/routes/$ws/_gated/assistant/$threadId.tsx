@@ -12,6 +12,7 @@ import { createFileRoute, useNavigate, useRouterState } from "@tanstack/react-ro
 import * as React from "react";
 
 import { hasLocalChat } from "../../../../core/platform/local-chat.js";
+import { readPendingMessage } from "../../../../features/assistant/lib/navigation.js";
 import { ConversationGate } from "../../../../features/assistant/components/ConversationGate.js";
 
 // Desktop chat (NEWPIDASH-300) splits off the initial bundle (size gate);
@@ -45,6 +46,10 @@ function ConversationComponent(): React.ReactElement {
           key={ws}
           workspaceSlug={ws}
           requestedSessionId={threadId}
+          initialMessage={readPendingMessage(state)}
+          onInitialMessageConsumed={() => {
+            void navigate({ href: "", replace: true, state: {} });
+          }}
           onSelectSession={(sessionId) => {
             if (sessionId === threadId) return;
             void navigate({
