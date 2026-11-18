@@ -143,6 +143,7 @@ export {
   ProjectDetails,
   ProjectDetailsList,
   ProjectRoleMap,
+  ProjectSettings,
   ProjectUserProperties,
   WorkspaceUserProperties,
   getMyProjectRoles,

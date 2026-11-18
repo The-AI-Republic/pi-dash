@@ -32,7 +32,7 @@ DETAIL_KEYS = [
     "is_time_tracking_enabled", "issue_views_view", "logo_props",
     "member_role", "members", "members_can_edit_states", "module_view",
     "name", "network", "next_work_item_sequence", "page_view",
-    "project_lead", "repo_url", "sort_order", "timezone", "updated_at",
+    "project_lead", "repo_url", "settings", "sort_order", "timezone", "updated_at",
     "updated_by", "workspace",
 ]
 

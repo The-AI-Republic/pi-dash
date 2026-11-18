@@ -51,6 +51,18 @@ export type Project = z.infer<typeof Project>;
 export const ProjectList = z.array(Project);
 export type ProjectList = z.infer<typeof ProjectList>;
 
+/**
+ * The typed per-project settings bag (`projects.settings`, NEWPIDASH-278):
+ * a nested JSON object the server validates against the registered keys
+ * and renders with defaults filled in. Optional on the row schemas so
+ * backends that predate the column still parse; absent reads as `{}`.
+ * Keys are open strings for now — the first key
+ * (`issue_run_policy`, NEWPIDASH-261) will narrow this to an object
+ * with a typed value.
+ */
+export const ProjectSettings = z.record(z.string(), z.unknown());
+export type ProjectSettings = z.infer<typeof ProjectSettings>;
+
 export async function listProjects(client: ApiClient, slug: string): Promise<ProjectList> {
   const body = await client.getJson<unknown>(`/api/workspaces/${slug}/projects/`);
   return client.parse(ProjectList, body, `GET /api/workspaces/${slug}/projects/`);
@@ -118,6 +130,8 @@ export const ProjectDetail = z.object({
    * the setting still parse; absent reads as the default.
    */
   dedicated_runner_lost_action: z.optional(z.string()),
+  /** Typed settings bag (NEWPIDASH-278); absent reads as `{}`. */
+  settings: z.optional(ProjectSettings),
 });
 export type ProjectDetail = z.infer<typeof ProjectDetail>;
 
@@ -200,6 +214,8 @@ export const ProjectDetails = z.object({
   agent_executor_options: z.array(AgentExecutorOption),
   default_agent_executor: z.string(),
   dedicated_runner_lost_action: z.optional(z.string()),
+  /** Typed settings bag (NEWPIDASH-278); absent reads as `{}`. */
+  settings: z.optional(ProjectSettings),
 });
 export type ProjectDetails = z.infer<typeof ProjectDetails>;
 

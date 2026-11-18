@@ -114,6 +114,19 @@ pub const NOT_FOUND_BODY: &str = r#"{"error":"The requested resource does not ex
 /// (`db/models/project.py:213-218`).
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
 
+/// Map a settings PATCH failure to the v1 denial shapes: 400s are
+/// the serializer field-errors body, 403s the `{"error": ...}` view
+/// body, a corrupt stored blob the generic 500.
+pub fn settings_patch_denial(
+    error: pidash_services::domain::project_settings::SettingsError,
+) -> Denial {
+    match error.status() {
+        403 => Denial::ForbiddenError("You don't have the required permissions.".to_owned()),
+        500 => Denial::ServerError,
+        _ => Denial::FieldErrors(error.body()),
+    }
+}
+
 /// Handler failure with its exact status + body.
 #[derive(Debug)]
 pub enum Denial {
@@ -821,6 +834,7 @@ const READ_FIELD_ORDER: &[&str] = &[
     "agent_ticking_enabled",
     "default_agent_executor",
     "dedicated_runner_lost_action",
+    "settings",
     "created_by",
     "updated_by",
     "workspace",
@@ -1158,6 +1172,14 @@ pub async fn render_project(
         "dedicated_runner_lost_action",
         Value::String(row_string(row, "dedicated_runner_lost_action")?),
     );
+    // NEWPIDASH-278: validated settings with defaults filled in.
+    let settings_raw: Value = row
+        .try_get("", "settings")
+        .map_err(|_| Denial::ServerError)?;
+    let settings = pidash_services::domain::project_settings::parse_row_settings(&settings_raw)
+        .map(|parsed| pidash_services::domain::project_settings::render(&parsed.settings))
+        .map_err(|_| Denial::ServerError)?;
+    put(&mut map, "settings", settings);
     put(
         &mut map,
         "created_by",
@@ -3467,6 +3489,36 @@ pub async fn patch_project_inner(
             DEFAULT_WORK_TYPE_LOCKED_MESSAGE.to_owned(),
         ));
     }
+    // NEWPIDASH-278: nested `settings` partial update. Not a v1
+    // serializer field — `coerce_write` ignores the key — so it is
+    // handled here: per-key permission (403), strict validation
+    // (400), then the atomic merge after the update write below.
+    let settings_merge = match merged.get("settings") {
+        None => None,
+        Some(fragment) => {
+            let facts =
+                project_base_facts(&pre.pool, &workspace_id, slug, &pre.actor.id, &project_id)
+                    .await?;
+            let project_role = if facts.is_project_admin {
+                pidash_auth::permissions::ROLE_ADMIN
+            } else {
+                pidash_auth::permissions::ROLE_GUEST
+            };
+            let workspace_role = if facts.is_workspace_admin {
+                pidash_auth::permissions::ROLE_ADMIN
+            } else {
+                pidash_auth::permissions::ROLE_GUEST
+            };
+            match pidash_services::domain::project_settings::authorize_and_validate(
+                fragment,
+                project_role,
+                workspace_role,
+            ) {
+                Ok(merge) => Some(merge),
+                Err(error) => return Err(settings_patch_denial(error)),
+            }
+        }
+    };
     let data = coerce_write(&pre.pool, &merged, true, true).await?;
     // Inherited `validate()` first (`ProjectCreateSerializer.validate`).
     let name = field_str(&data, "name");
@@ -3534,6 +3586,17 @@ pub async fn patch_project_inner(
         was_default,
     )
     .await?;
+    if let Some(merge) = &settings_merge {
+        pidash_services::domain::project_settings::apply_settings_merge(
+            &orm(&pre.pool),
+            merge,
+            chrono::Utc::now(),
+            pre.actor.id,
+            project_id,
+        )
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    }
     // `intake_view` newly truthy + no default `Intake` → create it
     // (`views/project.py:431-438`, pre-save name in the title).
     let intake_view_now: bool = {
@@ -4359,6 +4422,17 @@ mod tests {
                 "default_state",
             ]
         );
+        // `settings` (NEWPIDASH-278): Django renders it after
+        // `default_work_type` (which the Rust render does not carry);
+        // here it follows `dedicated_runner_lost_action`.
+        let settings_at = READ_FIELD_ORDER
+            .iter()
+            .position(|key| *key == "settings")
+            .expect("settings");
+        assert_eq!(
+            READ_FIELD_ORDER[settings_at - 1],
+            "dedicated_runner_lost_action"
+        );
         assert_eq!(ALLOWED_SUMMARY_FIELDS.len(), 8);
     }
 
@@ -4493,6 +4567,10 @@ mod live_tests {
         );
         sel.expr_as(Expr::value(true), Alias::new("agent_ticking_enabled"));
         sel.expr_as(Expr::value("codex"), Alias::new("default_agent_executor"));
+        sel.expr_as(
+            Expr::value("fail_to_backlog"),
+            Alias::new("dedicated_runner_lost_action"),
+        );
         sel.expr_as(Expr::value(None::<uuid::Uuid>), Alias::new("created_by_id"));
         sel.expr_as(Expr::value(None::<uuid::Uuid>), Alias::new("updated_by_id"));
         sel.expr_as(Expr::value(ws_id), Alias::new("workspace_id"));
@@ -4509,6 +4587,7 @@ mod live_tests {
             Expr::value(None::<uuid::Uuid>),
             Alias::new("default_state_id"),
         );
+        sel.expr_as(Expr::value(serde_json::json!({})), Alias::new("settings"));
         let row: Row =
             sea_orm::ConnectionTrait::query_one(&orm(&pool), DbBackend::Postgres.build(&sel))
                 .await
