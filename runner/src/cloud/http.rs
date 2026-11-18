@@ -1228,6 +1228,28 @@ pub struct PollStatus {
     pub agent_health: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_last_activity_at: Option<DateTime<Utc>>,
+    // ----- machine capacity (NEWPIDASH-241 T2) -----
+    // Held attempt token + capacity snapshot for the in-flight run, so the
+    // cloud can persist `capacity_wait` through every poll and exempt fresh
+    // waits from the 180s reaper. Both absent for legacy polls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_assignment_token: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<PollCapacity>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PollCapacity {
+    pub phase: String,
+    pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_position: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
 }
 
 /// Wire-side wrapper used to express the three states of `observed_run_id`:
@@ -1292,6 +1314,8 @@ impl PollStatus {
             turn_count: None,
             agent_health: None,
             agent_last_activity_at: None,
+            held_assignment_token: None,
+            capacity: None,
         }
     }
 
@@ -1318,6 +1342,8 @@ impl PollStatus {
             turn_count: None,
             agent_health: None,
             agent_last_activity_at: None,
+            held_assignment_token: None,
+            capacity: None,
         }
     }
 
@@ -1399,6 +1425,14 @@ pub struct HttpLoop {
     pub in_flight_rx: watch::Receiver<Option<Uuid>>,
     pub shutdown: Arc<tokio::sync::Notify>,
     pub attach_body: AttachBody,
+    /// Optional durable receipt store (NEWPIDASH-241 T4). When present,
+    /// every inbound frame commits check+insert+sequence before any HTTP
+    /// ACK leaves; pending dedupe stays in-memory.
+    pub receipt_store: Option<Arc<crate::daemon::receipt::ReceiptStore>>,
+    /// Optional machine FIFO coordinator (NEWPIDASH-241 T2): poll reports
+    /// the held attempt token + capacity snapshot so the cloud persists
+    /// `capacity_wait` through every poll.
+    pub coordinator: Option<Arc<crate::daemon::run_queue::Coordinator>>,
     /// Optional handle to the daemon's state. When `Some`, `poll_once`
     /// builds a `PollStatus::from_state` (carrying the per-active-run
     /// observability snapshot). When `None`, falls back to `from_wire`,
@@ -1553,6 +1587,29 @@ impl HttpLoop {
         shutdown: Arc<tokio::sync::Notify>,
         attach_body: AttachBody,
     ) -> Self {
+        Self::new_with_receipt(
+            client,
+            mailbox,
+            ack_rx,
+            status_rx,
+            in_flight_rx,
+            shutdown,
+            attach_body,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_receipt(
+        client: RunnerCloudClient,
+        mailbox: mpsc::Sender<InboundEnvelope>,
+        ack_rx: mpsc::UnboundedReceiver<AckEntry>,
+        status_rx: watch::Receiver<WireStatus>,
+        in_flight_rx: watch::Receiver<Option<Uuid>>,
+        shutdown: Arc<tokio::sync::Notify>,
+        attach_body: AttachBody,
+        receipt_store: Option<Arc<crate::daemon::receipt::ReceiptStore>>,
+    ) -> Self {
         Self {
             client,
             mailbox,
@@ -1561,6 +1618,8 @@ impl HttpLoop {
             in_flight_rx,
             shutdown,
             attach_body,
+            receipt_store,
+            coordinator: None,
             state: None,
             teardown_rx: None,
             reconnect_kick: None,
@@ -1596,6 +1655,26 @@ impl HttpLoop {
     /// Attach the reconnect kick (see the `reconnect_kick` field).
     pub fn with_reconnect_kick(mut self, kick: Arc<tokio::sync::Notify>) -> Self {
         self.reconnect_kick = Some(kick);
+        self
+    }
+
+    /// Attach the durable receipt store (NEWPIDASH-241 T4): every frame
+    /// is committed to SQLite before any HTTP ACK leaves.
+    pub fn with_receipt_store(
+        mut self,
+        receipt_store: Option<Arc<crate::daemon::receipt::ReceiptStore>>,
+    ) -> Self {
+        self.receipt_store = receipt_store;
+        self
+    }
+
+    /// Attach the machine FIFO coordinator (NEWPIDASH-241 T2) so poll
+    /// reports the held attempt token + capacity snapshot.
+    pub fn with_coordinator(
+        mut self,
+        coordinator: Option<Arc<crate::daemon::run_queue::Coordinator>>,
+    ) -> Self {
+        self.coordinator = coordinator;
         self
     }
 
@@ -1650,7 +1729,7 @@ impl HttpLoop {
 
     /// Run `ensure_access_token` then `open_session` until a session is
     /// open. Fatal-for-runner errors propagate. Everything else retries on
-    /// [`ReconnectPolicy`]: transient failures back off 30 s → 6 h with
+    /// [`ReconnectPolicy`]: transient failures back off 30 s → 5 m with
     /// jitter, and `runner_gone` answers retry every ~30 s until enough of
     /// them confirm the deletion, which returns
     /// [`TransportError::RunnerDeletedInCloud`]. A local teardown
@@ -1991,6 +2070,34 @@ impl HttpLoop {
             }
             None => PollStatus::from_wire(wire_status, in_flight),
         };
+        // Machine capacity (NEWPIDASH-241 T2): report the held attempt
+        // token + snapshot when the coordinator holds this run.
+        let status = match (self.coordinator.as_ref(), in_flight) {
+            (Some(coord), Some(run_id)) => {
+                let mut s = status;
+                if let Some(token) = coord.held_token(run_id) {
+                    s.held_assignment_token = Some(token);
+                }
+                if let Some(phase) = coord.held_phase(run_id) {
+                    let counts = coord.counts();
+                    let phase = if phase == "waiting" {
+                        "waiting_for_capacity".to_string()
+                    } else {
+                        "preparing".to_string()
+                    };
+                    s.capacity = Some(PollCapacity {
+                        phase,
+                        revision: counts.revision,
+                        queued_at: coord.queued_at_rfc3339(run_id),
+                        queue_position: coord.position(run_id).map(|p| p as u64),
+                        active: Some(counts.active as u64),
+                        limit: Some(counts.limit as u64),
+                    });
+                }
+                s
+            }
+            _ => status,
+        };
         let resp = self
             .client
             .poll(acks, status, self.long_poll_interval_secs)
@@ -2004,6 +2111,31 @@ impl HttpLoop {
     async fn dispatch(&mut self, msg: PollMessage) -> Result<(), TransportError> {
         let stream_id = msg.stream_id.clone();
         let runner_id = self.client.runner_id();
+        // NEWPIDASH-241 T4: durable receipt-before-ACK. Committed = SQLite
+        // commit precedes any HTTP ACK; pending dedupe stays in-memory.
+        if let Some(store) = self.receipt_store.as_ref() {
+            match store.record_before_ack(&msg.mid, std::slice::from_ref(&stream_id), None, false) {
+                Ok(crate::daemon::receipt::ReceiptResult::AlreadyCommitted { .. })
+                | Ok(crate::daemon::receipt::ReceiptResult::Tombstone) => {
+                    tracing::debug!(runner = %runner_id, mid = %msg.mid, kind = ?msg.kind, "durable duplicate acked");
+                    self.inline_acks.push_back(stream_id);
+                    return Ok(());
+                }
+                Ok(crate::daemon::receipt::ReceiptResult::Pending) => {
+                    // Join stream list without ACK (in-memory pending on HttpLoop owner)
+                    tracing::debug!(runner = %runner_id, mid = %msg.mid, "pending duplicate joins stream list");
+                    return Ok(());
+                }
+                Ok(crate::daemon::receipt::ReceiptResult::Committed { .. }) => {
+                    // Committed before ACK; fall through to dispatch
+                }
+                Err(e) => {
+                    tracing::warn!(runner = %runner_id, "receipt store error: {e}; storage_blocked");
+                    // Fail closed when enabled: do not ACK, retry
+                    return Err(TransportError::Local(format!("storage_blocked: {e}")));
+                }
+            }
+        }
         // At-least-once delivery (design.md §8): a frame the daemon
         // already executed can reappear via PEL replay or stream
         // retries. Drop duplicates by `mid` before they reach the
@@ -2166,7 +2298,7 @@ pub struct CreateRunnerRequest<'a> {
     pub host_label: &'a str,
     pub name: Option<&'a str>,
     pub pod: Option<&'a str>,
-    /// `Some("engine")` creates a built-in engine runner (design §5); the
+    /// `Some("engine")` creates a Pi Dash Agent runner (design §5); the
     /// server then assigns the name and requires a live engine credential.
     /// `None` keeps the request byte-identical to before.
     pub agent_kind: Option<&'a str>,
@@ -3007,6 +3139,41 @@ mod tests {
         assert!(!obj.contains_key("agent_pid"));
         assert!(!obj.contains_key("approvals_pending"));
         assert!(!obj.contains_key("tokens"));
+        // Machine capacity is absent for legacy polls.
+        assert!(!obj.contains_key("held_assignment_token"));
+        assert!(!obj.contains_key("capacity"));
+    }
+
+    #[test]
+    fn poll_status_carries_capacity_snapshot_when_set() {
+        // NEWPIDASH-241 T2: held token + capacity snapshot ride the poll
+        // so the cloud persists capacity_wait every poll.
+        let tok = Uuid::new_v4();
+        let mut s = PollStatus::from_wire(WireStatus::Busy, Some(Uuid::nil()));
+        s.held_assignment_token = Some(tok);
+        s.capacity = Some(PollCapacity {
+            phase: "waiting_for_capacity".to_string(),
+            revision: 7,
+            queued_at: Some("2026-11-16T04:00:00+00:00".to_string()),
+            queue_position: Some(3),
+            active: Some(2),
+            limit: Some(3),
+        });
+        let v = serde_json::to_value(&s).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(
+            obj.get("held_assignment_token"),
+            Some(&serde_json::json!(tok.to_string()))
+        );
+        let cap = obj.get("capacity").unwrap().as_object().unwrap();
+        assert_eq!(
+            cap.get("phase"),
+            Some(&serde_json::json!("waiting_for_capacity"))
+        );
+        assert_eq!(cap.get("revision"), Some(&serde_json::json!(7)));
+        assert_eq!(cap.get("queue_position"), Some(&serde_json::json!(3)));
+        assert_eq!(cap.get("active"), Some(&serde_json::json!(2)));
+        assert_eq!(cap.get("limit"), Some(&serde_json::json!(3)));
     }
 
     #[test]
@@ -3202,6 +3369,7 @@ mod reconnect_loop_tests {
         StateHandle::new(crate::config::schema::Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: Default::default(),
             runners: vec![],

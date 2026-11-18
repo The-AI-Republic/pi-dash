@@ -1225,15 +1225,13 @@ fn page_view_props() -> Value {
 /// Postgres [`SeedStore`]: the exact Django query shapes. Timestamps are
 /// one clock (`RunInput::now`) the way `auto_now_add`/`auto_now` stamp
 /// statement time; uuids are v4 like the model default. The dispatch
-/// inputs (`cloud`, `managed`, `toolsets`, `assistant_seam`) feed the
+/// inputs (`managed`, `assistant_seam`) feed the
 /// per-issue post-save fire ([`SeedStore::drive_seed_transition`]) —
 /// the `LiveFireTickSeam` field shape, worker-installed.
 pub struct PgSeedStore {
     pool: sqlx::PgPool,
     now: DateTime<Utc>,
-    cloud: pidash_db::config::CloudAgentSettings,
-    managed: pidash_db::config::ManagedRunnerSettings,
-    toolsets: std::sync::Arc<dyn pidash_services::extensions::CloudAgentToolsetsSeam>,
+    managed: pidash_db::config::PidashAgentSettings,
     assistant_seam: std::sync::Arc<dyn pidash_services::extensions::AssistantModelSeam>,
 }
 
@@ -1241,17 +1239,13 @@ impl PgSeedStore {
     pub fn new(
         pool: sqlx::PgPool,
         now: DateTime<Utc>,
-        cloud: pidash_db::config::CloudAgentSettings,
-        managed: pidash_db::config::ManagedRunnerSettings,
-        toolsets: std::sync::Arc<dyn pidash_services::extensions::CloudAgentToolsetsSeam>,
+        managed: pidash_db::config::PidashAgentSettings,
         assistant_seam: std::sync::Arc<dyn pidash_services::extensions::AssistantModelSeam>,
     ) -> Self {
         Self {
             pool,
             now,
-            cloud,
             managed,
-            toolsets,
             assistant_seam,
         }
     }
@@ -1877,13 +1871,11 @@ impl SeedStore for PgSeedStore {
         state_id: uuid::Uuid,
         now: DateTime<Utc>,
     ) -> Result<(), String> {
-        use crate::admission::RedisAdmissionCache;
         use crate::orchestration::live_inputs::{
             creator_universe, fetch_presence, gate_fn, gate_verdicts, profile_fn, JobsMatcher,
         };
         use crate::orchestration::{LiveCreationStore, StoreDeps};
-        use pidash_db::dispatch::status::AgentRunTrigger;
-        use pidash_services::dispatch::consume_admission_token;
+        use pidash_db::agent_runs::status::AgentRunTrigger;
         use pidash_services::orchestration::creation::{
             resolve_fallback_creator, resolve_pod_for_issue,
         };
@@ -1904,20 +1896,12 @@ impl SeedStore for PgSeedStore {
                 .map_err(Self::db_err)?,
         );
         let verdicts = std::sync::Arc::new(gate_verdicts(&self.assistant_seam, &presence).await);
-        let cloud = self.cloud.clone();
-        let managed = self.managed.clone();
-        let toolsets = self.toolsets.clone();
-        let now_unix_secs = now.timestamp();
         // Built fresh per store (probe, drive and bounce take owned
         // deps; the driver consults preflight at most once per drive).
         let make_deps = || StoreDeps {
-            cloud: cloud.clone(),
-            managed: managed.clone(),
-            cache: RedisAdmissionCache::from_env(),
+            managed: self.managed.clone(),
             has_usable_llm_config: gate_fn(verdicts.clone()),
-            toolsets: toolsets.clone(),
             llm_profile: profile_fn(presence.clone()),
-            now_unix_secs,
         };
         // `fire_state_transition` (`signals.py:74-107`): prior state
         // None (a create has no pre-save row), the seeded state, the
@@ -2033,7 +2017,7 @@ impl SeedStore for PgSeedStore {
             // recovered; the savepoint rollback erases the probe's
             // writes, and its log lines are dropped (the re-run emits
             // the real bounce's lines once).
-            let (tx_back, _, _, _, _, _) = probe_store.into_parts();
+            let (tx_back, _, _, _) = probe_store.into_parts();
             tx = tx_back;
             match probed {
                 Ok(triple) => {
@@ -2067,8 +2051,7 @@ impl SeedStore for PgSeedStore {
             consulted: false,
         };
         let outcome = fire_state_transition(&mut drive_store, &mut stub, &request).await;
-        let (tx, pool, cache, mut dispatches, mut deferred, mut terminal_effects) =
-            drive_store.into_parts();
+        let (tx, pool, mut dispatches, mut terminal_effects) = drive_store.into_parts();
         // Only a state-*lookup* storage failure propagates (Python's
         // `try` wraps the handler call alone, `signals.py:89-98`): the
         // probe, the re-run and their `resolve_*` reads are handler
@@ -2079,7 +2062,7 @@ impl SeedStore for PgSeedStore {
         // Only a consulted stub owes the re-run: early returns
         // (parked, queued, no creator/pod, race lost) consult
         // nothing, and Python bounces on none of them.
-        let (tx, dispatches, deferred, terminal_effects) = if !proceed && stub.consulted {
+        let (tx, dispatches, terminal_effects) = if !proceed && stub.consulted {
             // The re-run IS the real bounce when it still says so
             // (same services fn, same tx, post-reconcile state);
             // when eligibility flipped concurrently it proceeds and
@@ -2131,13 +2114,12 @@ impl SeedStore for PgSeedStore {
                 Ok(())
             }
             .await;
-            let (tx, _, _, redispatches, redeferred, reterminal) = bounce_store.into_parts();
+            let (tx, _, redispatches, reterminal) = bounce_store.into_parts();
             match rerun_outcome {
                 Ok(()) => {
                     dispatches.extend(redispatches);
-                    deferred.extend(redeferred);
                     terminal_effects.extend(reterminal);
-                    (tx, dispatches, deferred, terminal_effects)
+                    (tx, dispatches, terminal_effects)
                 }
                 Err(error) => {
                     // The drive's writes go with the bounce's: roll the
@@ -2155,7 +2137,7 @@ impl SeedStore for PgSeedStore {
                 }
             }
         } else {
-            (tx, dispatches, deferred, terminal_effects)
+            (tx, dispatches, terminal_effects)
         };
         match outcome {
             FireOutcome::NoTransition => {
@@ -2180,7 +2162,7 @@ impl SeedStore for PgSeedStore {
                 // dispatch never fails the save.
                 for run_id in dispatches {
                     if let Err(error) =
-                        crate::dispatch::dispatch_agent_run(pool, &cloud, run_id, now).await
+                        crate::run_dispatch::dispatch_agent_run(pool, run_id, now).await
                     {
                         tracing::error!(
                             %error,
@@ -2189,9 +2171,6 @@ impl SeedStore for PgSeedStore {
                             "workspace_seed: post-commit dispatch failed; the save stands",
                         );
                     }
-                }
-                for consume in &deferred {
-                    consume_admission_token(&cache, consume);
                 }
                 if !terminal_effects.is_empty() {
                     // Python's transition never finalizes a run:
@@ -2530,17 +2509,13 @@ pub fn register_workspace_seed(
     registry: &mut Registry,
     pool: sqlx::PgPool,
     seed_data_dir: PathBuf,
-    cloud: pidash_db::config::CloudAgentSettings,
-    managed: pidash_db::config::ManagedRunnerSettings,
-    toolsets: std::sync::Arc<dyn pidash_services::extensions::CloudAgentToolsetsSeam>,
+    managed: pidash_db::config::PidashAgentSettings,
     assistant_seam: std::sync::Arc<dyn pidash_services::extensions::AssistantModelSeam>,
 ) {
     let handler: Handler = Arc::new(move |job: crate::queue::JobRow| {
         let pool = pool.clone();
         let seed_data_dir = seed_data_dir.clone();
-        let cloud = cloud.clone();
         let managed = managed.clone();
-        let toolsets = toolsets.clone();
         let assistant_seam = assistant_seam.clone();
         Box::pin(async move {
             let workspace_id: uuid::Uuid = job
@@ -2551,7 +2526,7 @@ pub fn register_workspace_seed(
                 .and_then(|s| uuid::Uuid::parse_str(s).ok())
                 .ok_or_else(|| "workspace_seed: args[0] must be a workspace uuid".to_owned())?;
             let now = Utc::now();
-            let store = PgSeedStore::new(pool, now, cloud, managed, toolsets, assistant_seam);
+            let store = PgSeedStore::new(pool, now, managed, assistant_seam);
             let input = RunInput::now_for(&seed_data_dir, workspace_id, now);
             match run(&store, &input).await {
                 Ok(report) => {

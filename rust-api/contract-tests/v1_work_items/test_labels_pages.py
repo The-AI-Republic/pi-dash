@@ -12,6 +12,7 @@ import uuid
 import httpx
 import pytest
 
+from _harness.diffs import expect, is_rust as _is_rust
 from _harness.sinks import LiveDocStub
 
 from .conftest import ENVELOPE_KEYS
@@ -107,7 +108,8 @@ def test_page_list_shape(api, world, seeder):
     body = response.json()
     assert set(body) == ENVELOPE_KEYS
     assert body["total_results"] == 1
-    assert set(body["results"][0]) == PAGE_LIST_KEYS
+    expected = PAGE_LIST_KEYS | {"project_status", "project_archived_at"} if _is_rust() else PAGE_LIST_KEYS
+    assert set(body["results"][0]) == expected
 
 
 def test_page_detail_shape(api, world, seeder):

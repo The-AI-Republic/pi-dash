@@ -42,7 +42,7 @@
 //! assistant `actual_relation` / `inverse_relation` helpers, plus
 //! `py_strip` for `strip()` parity; [`clock`] additionally reuses the L1
 //! event/decision/outcome/phase types, `prompting::recipes::kind_for`, the
-//! `db::tasks_ticker` row helpers and `db::dispatch::AgentRunStatus` (the
+//! `db::tasks_ticker` row helpers and `db::agent_runs::AgentRunStatus` (the
 //! only intra-crate calls here; no D-11 edge).
 //!
 //! Fixture ids replayed by the unit tests: FX-ORCH-03
@@ -113,8 +113,7 @@ pub use creation::{
     PROJECT_MOVE_HANDOFF_CONFIG_KEY, PROJECT_SELECT_SQL, PROMPT_UPDATE_SQL, REASON_CREATED,
     REASON_RENDER_FAILED, RUNNER_SELECT_SQL, RUNNER_STATUS_OFFLINE, RUNNER_STATUS_REVOKED,
     RUN_CONFIG_UPDATE_SQL, RUN_INSERT_SQL, RUN_VIEW_COLUMNS, STATE_SELECT_SQL, STATUS_QUEUED,
-    SUPPRESSED_ISSUE_MOVED_AGAIN, TERMINAL_EVENT_EXISTS_SQL, TERMINAL_EVENT_INSERT_SQL,
-    TERMINAL_EVENT_SEQ_SQL, TICKER_RESUME_SELECT_SQL, USER_FLAGS_SELECT_SQL,
+    SUPPRESSED_ISSUE_MOVED_AGAIN, TICKER_RESUME_SELECT_SQL, USER_FLAGS_SELECT_SQL,
     WORK_ITEM_ID_SELECT_SQL,
 };
 

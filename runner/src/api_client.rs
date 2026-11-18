@@ -450,6 +450,7 @@ mod resolve_tests {
         Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://cloud.example/".into(),
@@ -459,6 +460,7 @@ mod resolve_tests {
                 agent_observability_v1: false,
                 agent_watchdog: Default::default(),
                 auto_update: true,
+                max_concurrent_agent_runs: 3,
             },
             runners: vec![RunnerConfig {
                 name: "r1".into(),

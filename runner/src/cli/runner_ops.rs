@@ -13,9 +13,9 @@ use std::path::{Path, PathBuf};
 use crate::cloud::http::{EnrollResponse, RunnerCredentials, write_runner_credentials};
 use crate::config::file;
 use crate::config::schema::{
-    AgentKind, AgentSection, ApprovalPolicySection, ClaudeCodeSection, CodexSection, Config,
-    CursorAgentSection, DaemonConfig, GrokSection, MuseCodeSection, OpenClawSection, RunnerConfig,
-    WorkspaceSection,
+    AgentKind, AgentSection, ApprovalPolicySection, AuthEvent, AuthEventAccount, AuthEventKind,
+    AuthEventReason, ClaudeCodeSection, CodexSection, Config, CursorAgentSection, DaemonConfig,
+    GrokSection, MuseCodeSection, OpenClawSection, RunnerConfig, WorkspaceSection,
 };
 use crate::util::paths::Paths;
 use std::io::IsTerminal;
@@ -77,7 +77,7 @@ fn model_applies_to_agent(kind: AgentKind, model: &str) -> bool {
             !m.is_empty()
         }
         // The engine's model comes from the server's profile (design §4.3).
-        AgentKind::Engine => false,
+        AgentKind::PidashAgent => false,
     }
 }
 
@@ -166,7 +166,7 @@ pub fn agent_sections_for(
         AgentKind::OpenClaw => openclaw.model_default = model,
         AgentKind::Grok => grok.model_default = model,
         AgentKind::MuseCode => muse_code.model_default = model,
-        AgentKind::Engine => {}
+        AgentKind::PidashAgent => {}
     }
     (codex, claude_code, cursor_agent, openclaw, grok, muse_code)
 }
@@ -206,6 +206,7 @@ pub fn write_cli_token(paths: &Paths, cloud_url: &str, token: &str, force: bool)
         Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: cloud_url.to_string(),
@@ -215,6 +216,7 @@ pub fn write_cli_token(paths: &Paths, cloud_url: &str, token: &str, force: bool)
                 agent_observability_v1: false,
                 agent_watchdog: Default::default(),
                 auto_update: true,
+                max_concurrent_agent_runs: 3,
             },
             runners: vec![],
             cli: None,
@@ -269,6 +271,73 @@ pub fn store_workspace_token(
     )
 }
 
+/// Everything one `pidash auth login` stores, in one locked config write
+/// (desktop_unified_signin §6.1): the workspace token, the engine credential
+/// when the server issued one, the account, and the `signed_in` event.
+pub struct SignIn<'a> {
+    pub cloud_url: &'a str,
+    pub slug: &'a str,
+    pub token: &'a str,
+    pub as_default: bool,
+    pub force: bool,
+    pub engine: Option<(
+        &'a crate::pidash_agent::api::IssuedPidashAgentCredential,
+        crate::config::schema::EngineSignInState,
+    )>,
+    pub email: Option<&'a str>,
+    pub user_id: Option<&'a str>,
+}
+
+/// Store a sign-in ([`SignIn`]) and its `signed_in` event together, so the
+/// credentials and the event never tear apart.
+pub fn store_sign_in(paths: &Paths, sign_in: &SignIn<'_>) -> Result<Config> {
+    file::mutate_config_or_init(
+        paths,
+        || Some(bootstrap_config(sign_in.cloud_url)),
+        |cfg| {
+            apply_cloud_binding(cfg, sign_in.cloud_url, sign_in.force)?;
+            let mut cli = cfg.cli.take().unwrap_or_default();
+            cli.set_workspace_token(sign_in.slug, sign_in.token, sign_in.as_default);
+            if let Some((credential, state)) = sign_in.engine {
+                cli.engine_credential = Some(crate::config::schema::PidashAgentCredential {
+                    token: credential.token.clone(),
+                    expires_at: credential.expires_at,
+                });
+                cli.engine_sign_in_state = Some(state);
+            }
+            if let Some(email) = sign_in.email {
+                cli.account_email = Some(email.to_string());
+            }
+            if let Some(user_id) = sign_in.user_id {
+                cli.account_user_id = Some(user_id.to_string());
+            }
+            cfg.cli = Some(cli);
+            apply_auth_event(
+                cfg,
+                &AuthEventDraft {
+                    kind: AuthEventKind::SignedIn,
+                    reason: None,
+                    email: sign_in.email.map(str::to_string),
+                    user_id: sign_in.user_id.map(str::to_string),
+                    cloud_url: sign_in.cloud_url.to_string(),
+                },
+            );
+            Ok(())
+        },
+    )
+}
+
+/// Refuse a sign-in to another cloud than the one this computer is bound
+/// to, unless `force` — without writing anything, so a login can check it
+/// before it signs the current account out. [`bind_cloud`] repeats the
+/// check under the config lock.
+pub fn check_cloud_binding(paths: &Paths, cloud_url: &str, force: bool) -> Result<()> {
+    let Ok(Some(mut cfg)) = file::load_config_opt(paths) else {
+        return Ok(());
+    };
+    apply_cloud_binding(&mut cfg, cloud_url, force)
+}
+
 /// Make sure `config.toml` exists and is bound to `cloud_url`, before a
 /// login asks the user to approve anything. A different cloud is refused
 /// unless `force`, which rebinds and drops the old cloud's tokens.
@@ -285,6 +354,7 @@ fn bootstrap_config(cloud_url: &str) -> Config {
     Config {
         engine: Default::default(),
         auth: Default::default(),
+        auth_event: None,
         version: 2,
         daemon: DaemonConfig {
             cloud_url: cloud_url.to_string(),
@@ -330,6 +400,89 @@ pub fn store_account(paths: &Paths, email: Option<&str>, user_id: Option<&str>) 
             cli.account_user_id = Some(user_id.to_string());
         }
         cfg.cli = Some(cli);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// Is `email`/`user_id` the account this computer is signed in as, compared
+/// case-insensitively by e-mail (the user id decides when both have one)?
+/// A config that never recorded an account counts as the same account
+/// rather than locking the user out.
+pub fn same_account(
+    email: Option<&str>,
+    user_id: Option<&str>,
+    stored_email: &Option<String>,
+    stored_id: &Option<String>,
+) -> bool {
+    if let (Some(want), Some(have)) = (
+        user_id.filter(|s| !s.is_empty()),
+        stored_id.as_deref().filter(|s| !s.is_empty()),
+    ) {
+        return want == have;
+    }
+    match (
+        email.filter(|s| !s.is_empty()),
+        stored_email.as_deref().filter(|s| !s.is_empty()),
+    ) {
+        (Some(want), Some(have)) => want.trim().eq_ignore_ascii_case(have.trim()),
+        _ => true,
+    }
+}
+
+/// One sign-in event, to record (desktop_unified_signin §6.1). `reason`
+/// is only for `signed_out`.
+#[derive(Debug, Clone)]
+pub struct AuthEventDraft {
+    pub kind: AuthEventKind,
+    pub reason: Option<AuthEventReason>,
+    pub email: Option<String>,
+    pub user_id: Option<String>,
+    pub cloud_url: String,
+}
+
+/// Record one sign-in event on `cfg`: `seq` only increases on this
+/// computer. Applied inside the same config write as the credentials it
+/// describes, so the two never tear apart (design §6.1).
+pub fn apply_auth_event(cfg: &mut Config, draft: &AuthEventDraft) {
+    let seq = cfg.auth_event.as_ref().map(|e| e.seq + 1).unwrap_or(1);
+    cfg.auth_event = Some(AuthEvent {
+        seq,
+        kind: draft.kind,
+        reason: draft.reason,
+        account: Some(AuthEventAccount {
+            user_id: draft.user_id.clone(),
+            email: draft.email.clone(),
+            cloud_url: draft.cloud_url.clone(),
+        }),
+        at: chrono::Utc::now(),
+    });
+}
+
+/// Append one sign-in event under the config lock (the login side; the
+/// logout side folds it into the credential clear below).
+pub fn record_auth_event(
+    paths: &Paths,
+    kind: AuthEventKind,
+    reason: Option<AuthEventReason>,
+    email: Option<&str>,
+    user_id: Option<&str>,
+    cloud_url: &str,
+) -> Result<()> {
+    if !paths.config_path().exists() {
+        return Ok(());
+    }
+    file::mutate_config(paths, |cfg| {
+        apply_auth_event(
+            cfg,
+            &AuthEventDraft {
+                kind,
+                reason,
+                email: email.map(str::to_string),
+                user_id: user_id.map(str::to_string),
+                cloud_url: cloud_url.to_string(),
+            },
+        );
         Ok(())
     })?;
     Ok(())
@@ -422,14 +575,18 @@ pub fn write_cli_default_project(paths: &Paths, project: &str) -> Result<()> {
 /// Clear every workspace token (`[cli].token` and `[[cli.workspaces]]`) from
 /// `config.toml`. Used by `pidash auth logout`.
 /// Leaves `[[runner]]` blocks untouched so the daemon keeps running
-/// under its own identity. No-op if no config exists.
-pub fn clear_cli_token(paths: &Paths) -> Result<()> {
+/// under its own identity. No-op if no config exists. When `event` is
+/// given, the sign-in event is recorded in the same write (design §6.1).
+pub fn clear_cli_token(paths: &Paths, event: Option<&AuthEventDraft>) -> Result<()> {
     if !paths.config_path().exists() {
         return Ok(());
     }
     file::mutate_config(paths, |cfg| {
         if let Some(ref mut cli) = cfg.cli {
             cli.clear_all_tokens();
+        }
+        if let Some(draft) = event {
+            apply_auth_event(cfg, draft);
         }
         Ok(())
     })?;
@@ -441,12 +598,12 @@ pub fn clear_cli_token(paths: &Paths) -> Result<()> {
 /// `[auth] credentials_store` says.
 pub fn store_engine_credential(
     paths: &Paths,
-    credential: Option<&crate::engine::api::IssuedEngineCredential>,
+    credential: Option<&crate::pidash_agent::api::IssuedPidashAgentCredential>,
     state: crate::config::schema::EngineSignInState,
 ) -> Result<Config> {
     file::mutate_config(paths, |cfg| {
         let cli = cfg.cli.get_or_insert_with(Default::default);
-        cli.engine_credential = credential.map(|c| crate::config::schema::EngineCredential {
+        cli.engine_credential = credential.map(|c| crate::config::schema::PidashAgentCredential {
             token: c.token.clone(),
             expires_at: c.expires_at,
         });
@@ -456,8 +613,14 @@ pub fn store_engine_credential(
 }
 
 /// Forget one workspace's token (`pidash auth logout --workspace <slug>`).
-/// Returns whether the workspace had a token.
-pub fn clear_workspace_token(paths: &Paths, slug: &str) -> Result<bool> {
+/// Returns whether the workspace had a token. When `event` is given, the
+/// sign-in event is recorded in the same write (the last workspace's
+/// logout, design §6.1).
+pub fn clear_workspace_token(
+    paths: &Paths,
+    slug: &str,
+    event: Option<&AuthEventDraft>,
+) -> Result<bool> {
     if !paths.config_path().exists() {
         return Ok(false);
     }
@@ -465,6 +628,9 @@ pub fn clear_workspace_token(paths: &Paths, slug: &str) -> Result<bool> {
     file::mutate_config(paths, |cfg| {
         if let Some(ref mut cli) = cfg.cli {
             removed = cli.remove_workspace_token(slug);
+        }
+        if let Some(draft) = event {
+            apply_auth_event(cfg, draft);
         }
         Ok(())
     })?;
@@ -652,6 +818,7 @@ pub async fn apply_enroll_response(
         Some(Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: bootstrap_cloud_url.clone(),
@@ -661,6 +828,7 @@ pub async fn apply_enroll_response(
                 agent_observability_v1: false,
                 agent_watchdog: Default::default(),
                 auto_update: true,
+                max_concurrent_agent_runs: 3,
             },
             runners: vec![],
             cli: None,
@@ -703,10 +871,10 @@ pub async fn apply_enroll_response(
         // caller checked before enrolling, but outside this lock: two adds
         // at the same time both pass that check. (The runner cap is checked
         // by `Config::validate` on this same write.)
-        if new_runner_for_closure.agent.kind == AgentKind::Engine
+        if new_runner_for_closure.agent.kind == AgentKind::PidashAgent
             && let Some(existing) = cfg.runners.iter().find(|r| {
                 r.runner_id != new_runner_for_closure.runner_id
-                    && r.agent.kind == AgentKind::Engine
+                    && r.agent.kind == AgentKind::PidashAgent
                     && r.workspace_slug == new_runner_for_closure.workspace_slug
                     && r.project_slug.as_deref().is_some_and(|p| {
                         new_runner_for_closure
@@ -717,7 +885,7 @@ pub async fn apply_enroll_response(
             })
         {
             anyhow::bail!(
-                "the built-in engine is already on for {} in {} (runner {})",
+                "the Pi Dash Agent is already on for {} in {} (runner {})",
                 existing.project_slug.as_deref().unwrap_or_default(),
                 existing.workspace_slug.as_deref().unwrap_or_default(),
                 existing.name
@@ -737,7 +905,7 @@ pub async fn apply_enroll_response(
         Err(e) => return Err(e.context("persisting [[runner]] block under config lock")),
     };
     // A runner added again is no longer one the user removed locally.
-    crate::engine::tombstones::forget(paths, runner_id);
+    crate::pidash_agent::tombstones::forget(paths, runner_id);
     let new_runner = cfg_after
         .runners
         .iter()
@@ -1150,7 +1318,7 @@ mod tests {
             &paths,
             &resp,
             "https://example.com",
-            enroll_options(tmp.path().join("wd1"), AgentKind::Engine),
+            enroll_options(tmp.path().join("wd1"), AgentKind::PidashAgent),
         )
         .await
         .unwrap();
@@ -1158,7 +1326,7 @@ mod tests {
             &paths,
             &resp,
             "https://example.com",
-            enroll_options(tmp.path().join("wd2"), AgentKind::Engine),
+            enroll_options(tmp.path().join("wd2"), AgentKind::PidashAgent),
         )
         .await
         .unwrap();
@@ -1178,7 +1346,7 @@ mod tests {
             &paths,
             &resp,
             "https://example.com",
-            enroll_options(tmp.path().join("wd1"), AgentKind::Engine),
+            enroll_options(tmp.path().join("wd1"), AgentKind::PidashAgent),
         )
         .await
         .unwrap();
@@ -1190,7 +1358,7 @@ mod tests {
             &paths,
             &resp,
             "https://example.com",
-            enroll_options(tmp.path().join("wd1"), AgentKind::Engine),
+            enroll_options(tmp.path().join("wd1"), AgentKind::PidashAgent),
         )
         .await
         .unwrap_err();
@@ -1405,7 +1573,7 @@ mod tests {
         });
         file::write_config(&paths, &cfg).unwrap();
 
-        clear_cli_token(&paths).unwrap();
+        clear_cli_token(&paths, None).unwrap();
         let after = file::load_config(&paths).unwrap();
         assert!(after.cli.as_ref().and_then(|c| c.token.as_ref()).is_none());
         assert_eq!(after.runners.len(), 1, "runner block must be preserved");
@@ -1435,12 +1603,52 @@ mod tests {
         );
 
         // Signing out one workspace leaves the other.
-        assert!(clear_workspace_token(&paths, "beta").unwrap());
+        assert!(clear_workspace_token(&paths, "beta", None).unwrap());
         assert_eq!(load_workspace_token(&paths, Some("beta")).unwrap(), None);
         assert_eq!(load_cli_token(&paths).unwrap().as_deref(), Some("mt_a"));
 
         // A different cloud is refused before anything is approved.
         assert!(bind_cloud(&paths, "https://other.example.com", false).is_err());
+    }
+
+    #[test]
+    fn a_sign_in_stores_credentials_account_and_event_in_one_write() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let credential = crate::pidash_agent::api::IssuedPidashAgentCredential {
+            token: "ec_new".into(),
+            expires_at: None,
+        };
+        store_sign_in(
+            &paths,
+            &SignIn {
+                cloud_url: "https://example.com",
+                slug: "acme",
+                token: "mt_a",
+                as_default: true,
+                force: false,
+                engine: Some((
+                    &credential,
+                    crate::config::schema::EngineSignInState::Active,
+                )),
+                email: Some("dev@example.com"),
+                user_id: Some("u-1"),
+            },
+        )
+        .unwrap();
+        let cfg = file::load_config(&paths).unwrap();
+        let cli = cfg.cli.unwrap();
+        assert_eq!(cli.token.as_deref(), Some("mt_a"));
+        assert_eq!(cli.engine_credential.unwrap().token, "ec_new");
+        assert_eq!(cli.account_user_id.as_deref(), Some("u-1"));
+        let event = cfg.auth_event.unwrap();
+        assert_eq!(event.seq, 1);
+        assert_eq!(event.kind, AuthEventKind::SignedIn);
+
+        // Another cloud is refused before anything is written.
+        assert!(check_cloud_binding(&paths, "https://other.example.com", false).is_err());
+        assert!(check_cloud_binding(&paths, "https://other.example.com", true).is_ok());
+        assert!(check_cloud_binding(&paths, "https://example.com", false).is_ok());
     }
 
     #[test]
@@ -1452,5 +1660,50 @@ mod tests {
         let cli = file::load_config(&paths).unwrap().cli.unwrap();
         assert_eq!(cli.account_email.as_deref(), Some("dev@example.com"));
         assert_eq!(cli.account_user_id.as_deref(), Some("u-1"));
+    }
+
+    #[test]
+    fn auth_events_only_increase_and_share_the_token_clear() {
+        let tmp = tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        bind_cloud(&paths, "https://example.com", false).unwrap();
+        store_workspace_token(&paths, "https://example.com", "acme", "mt_a", true, false).unwrap();
+
+        record_auth_event(
+            &paths,
+            AuthEventKind::SignedIn,
+            None,
+            Some("dev@example.com"),
+            Some("u-1"),
+            "https://example.com",
+        )
+        .unwrap();
+        let first = file::load_config(&paths).unwrap().auth_event.unwrap();
+        assert_eq!(first.seq, 1);
+        assert_eq!(first.kind, AuthEventKind::SignedIn);
+        assert!(first.reason.is_none());
+        assert_eq!(
+            first.account.unwrap().email.as_deref(),
+            Some("dev@example.com")
+        );
+
+        // The sign-out event rides the same write as the token clear.
+        clear_cli_token(
+            &paths,
+            Some(&AuthEventDraft {
+                kind: AuthEventKind::SignedOut,
+                reason: Some(AuthEventReason::Logout),
+                email: Some("dev@example.com".into()),
+                user_id: Some("u-1".into()),
+                cloud_url: "https://example.com".into(),
+            }),
+        )
+        .unwrap();
+        let after = file::load_config(&paths).unwrap();
+        assert!(after.cli.as_ref().and_then(|c| c.token.as_ref()).is_none());
+        let second = after.auth_event.unwrap();
+        assert_eq!(second.seq, 2, "seq only increases");
+        assert_eq!(second.kind, AuthEventKind::SignedOut);
+        assert_eq!(second.reason, Some(AuthEventReason::Logout));
     }
 }

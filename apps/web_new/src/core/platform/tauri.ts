@@ -15,11 +15,13 @@ import type {
   AboutInfo,
   AgentAppIdentity,
   AgentRuntimeApi,
+  AuthSyncRecord,
   BundledNotice,
   CliSetupApi,
   CliStatus,
   DaemonDiscovery,
-  DaemonEngineRunner,
+  DaemonHello,
+  DaemonPidashAgentRunner,
   DaemonLocalRunner,
   DeepLinkApi,
   DesktopNotices,
@@ -54,6 +56,7 @@ interface TauriEventApi {
 
 interface TauriWindow {
   __PIDASH_NATIVE_HTTP__?: unknown;
+  __PIDASH_NATIVE_SESSION__?: { refresh?: unknown; strict?: unknown };
   __TAURI__?: { core?: TauriInvokeCore; event?: TauriEventApi };
 }
 
@@ -62,13 +65,49 @@ function tauriWindow(): (Window & TauriWindow) | undefined {
   return globalThis.window as Window & TauriWindow;
 }
 
+type NativeSessionAdvert = { refresh: boolean; strict: boolean };
+
+function nativeSession(): NativeSessionAdvert {
+  const win = tauriWindow();
+  const session = win?.__PIDASH_NATIVE_SESSION__ as { refresh?: unknown; strict?: unknown } | undefined;
+  return {
+    refresh: session?.refresh === true,
+    strict: session?.strict === true,
+  };
+}
+
 /** The desktop shell advertises its API origin; without it we are not desktop. */
-function nativeApiOrigin(): { origin: string; core: TauriInvokeCore } | undefined {
+function nativeApiOrigin(): { origin: string; core: TauriInvokeCore; session: NativeSessionAdvert } | undefined {
   const win = tauriWindow();
   const origin = win?.__PIDASH_NATIVE_HTTP__;
   const core = win?.__TAURI__?.core;
   if (typeof origin !== "string" || !core) return undefined;
-  return { origin, core };
+  return { origin, core, session: nativeSession() };
+}
+
+/**
+ * A credentialed request cannot take the native route. In the bundled app
+ * the webview's own networking would send it without the session cookies
+ * and the server would answer 401, so it fails here instead, naming both
+ * origins: they differ when the web bundle and the binary were built for
+ * different servers (`VITE_API_BASE_URL` / `PI_DASH_URL`).
+ */
+export class DesktopTransportError extends Error {
+  readonly requestOrigin: string;
+
+  constructor(
+    readonly url: string,
+    readonly apiOrigin: string
+  ) {
+    const target = new URL(url, globalThis.location.href);
+    super(
+      `Credentialed request to ${target.origin}${target.pathname} cannot use the desktop app's native transport, ` +
+        `which only serves ${apiOrigin}/api/ and ${apiOrigin}/auth/. ` +
+        `Request origin: ${target.origin}; configured API origin: ${apiOrigin}.`
+    );
+    this.name = "DesktopTransportError";
+    this.requestOrigin = target.origin;
+  }
 }
 
 function isApiPath(pathname: string): boolean {
@@ -267,8 +306,15 @@ function desktopFetch(input: RequestInfo | URL, init?: DesktopRequestInit): Prom
     return globalThis.fetch(input, init as RequestInit);
   }
   if (target.origin !== native.origin || !isApiPath(target.pathname)) {
-    // Presigned storage uploads and anything off the API allowlist keep the
-    // page transport, with its own progress and cancellation behavior.
+    // Presigned storage uploads (`credentials: "omit"`) and anything off the
+    // API allowlist keep the page transport. In the bundled app a
+    // credentialed (`include`) request that misses the native route would go
+    // out without cookies and 401 unexplained: fail loudly.
+    const credentials = init?.credentials ?? request?.credentials;
+    if (credentials === "include" && native.session.strict) {
+      // Reject rather than throw: fetch's contract is a promise.
+      return Promise.reject(new DesktopTransportError(target.toString(), native.origin));
+    }
     return globalThis.fetch(input, init as RequestInit);
   }
   const merged: DesktopRequestInit = {
@@ -374,6 +420,18 @@ function desktopStream(url: string, init: StreamInit = {}): EventStream {
   const native = nativeApiOrigin();
   if (!native) {
     throw new Error("Desktop streams need the desktop shell");
+  }
+  // EventSource is always credentialed in this codebase; a mismatch in strict
+  // mode fails loudly instead of falling back to a plain EventSource that
+  // would 401 without cookies.
+  try {
+    const target = new URL(url, globalThis.location.href);
+    if ((target.origin !== native.origin || !isApiPath(target.pathname)) && native.session.strict) {
+      throw new DesktopTransportError(target.toString(), native.origin);
+    }
+  } catch (error) {
+    if (error instanceof DesktopTransportError) throw error;
+    // Unparseable URL: let the native layer fail as before.
   }
   const core = native.core;
   const queue: StreamMessage[] = [];
@@ -565,15 +623,16 @@ const desktopAgentRuntime: AgentRuntimeApi = {
       },
     }),
   localRunners: async () => (await invokeNative<DaemonLocalRunner[] | null>("daemon_runners")) ?? [],
-  addEngineRunner: (input: { workspace: string; project: string; workingDir?: string | undefined }) =>
-    invokeNative<DaemonEngineRunner>("daemon_engine_runner_add", {
+  daemonActiveRuns: async () => (await invokeNative<number | null>("daemon_active_runs")) ?? 0,
+  addPidashAgentRunner: (input: { workspace: string; project: string; workingDir?: string | undefined }) =>
+    invokeNative<DaemonPidashAgentRunner>("daemon_engine_runner_add", {
       workspace: input.workspace,
       project: input.project,
       workingDir: input.workingDir || null,
     }),
   installService: () => invokeNative("daemon_install_service"),
-  ensureEngine: () => invokeNative("daemon_ensure_engine"),
-  engineLogin: (deviceCode: string) => invokeNative("pidash_cli_engine_login", { deviceCode }),
+  ensurePidashAgent: () => invokeNative("daemon_ensure_engine"),
+  pidashAgentLogin: (deviceCode: string) => invokeNative("pidash_cli_engine_login", { deviceCode }),
   reloadCredentials: () => invokeNative("daemon_credentials_reload"),
   requestReconnect: () => invokeNative("daemon_reconnect"),
   saveApprovalModes: (account: string, modes: Record<string, string>) =>
@@ -592,7 +651,16 @@ const desktopAgentRuntime: AgentRuntimeApi = {
     invokeNative<NoticesView>("desktop_notices_record", { account, notices }),
   dismissNotices: (account: string, keys: string[]) =>
     invokeNative<NoticesView>("desktop_notices_dismiss", { account, keys }),
-  signOutComputer: () => invokeNative("pidash_cli_logout", { engine: false }),
+  signOutComputer: (opts?: { localOnly?: boolean | undefined }) =>
+    invokeNative("pidash_cli_logout", { localOnly: opts?.localOnly ?? false }),
+  daemonHello: () => invokeNative<DaemonHello>("daemon_hello"),
+  desktopSessionHandoff: (expectedUserId: string) =>
+    invokeNative<{ user_id?: string | undefined; email?: string | undefined }>("desktop_session_handoff", {
+      expectedUserId,
+    }),
+  getAuthSyncRecord: async () => (await invokeNative<AuthSyncRecord | null>("auth_sync_get")) ?? null,
+  setAuthSyncRecord: (record: AuthSyncRecord) => invokeNative("auth_sync_set", { record }),
+  markFreshSignIn: () => invokeNative("auth_sync_mark_sign_in"),
 };
 
 const desktopSessionTeardown: SessionTeardownApi = {
@@ -835,6 +903,7 @@ const desktopCliSetup: CliSetupApi = {
       deviceCode: input.deviceCode,
       cloudUrl: input.cloudUrl,
       workspace: input.workspace,
+      force: input.force ?? false,
     }),
 };
 

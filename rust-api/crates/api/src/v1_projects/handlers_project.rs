@@ -2046,6 +2046,9 @@ pub async fn enqueue_best_effort(
 /// `POST .../<project_id>/archive/` (`views/project.py:528-538`): stamp
 /// `archived_at`, soft-delete the workspace's project favorites, answer
 /// 204. Misses raise `DoesNotExist` into the base-handler 404.
+/// NEWPIDASH-239: the same transaction also sets `enabled = false` on
+/// every live scheduler binding of the project (the ticker and
+/// `run-now` guards cover re-enabled or pre-existing archives).
 pub async fn archive_project_inner(
     state: &AppState,
     headers: &HeaderMap,
@@ -2069,8 +2072,9 @@ pub async fn archive_project_inner(
     // runs after permissions; an unknown zone 400s only for survivors).
     activate_timezone(pre.actor.timezone.as_deref())?;
     let now = chrono::Utc::now();
+    let mut tx = pre.pool.begin().await.map_err(|_| Denial::ServerError)?;
     let updated: u64 = pidash_services::domain::projects::archive_v1_project(
-        &pidash_db::pool::sea_orm_connection(&pre.pool),
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
         project_id,
         workspace_id,
         pre.actor.id,
@@ -2081,19 +2085,31 @@ pub async fn archive_project_inner(
     if updated == 0 {
         return Err(Denial::NotFound);
     }
+    pidash_services::domain::projects::disable_project_bindings(
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
+        project_id,
+        now,
+        pre.actor.id,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
     // `UserFavorite` cleanup (`views/project.py:537`): every favorite of
     // the project in this workspace soft-deletes (no `entity_type`
     // predicate on this path, exactly as written).
     // `user_favorites` is not a write-guard covered table, so the write
     // goes directly through SeaORM.
-    user_favorites::Entity::update_many()
-        .col_expr(user_favorites::Column::DeletedAt, Expr::value(now))
-        .filter(user_favorites::Column::WorkspaceId.eq(workspace_id))
-        .filter(user_favorites::Column::ProjectId.eq(project_id))
-        .filter(user_favorites::Column::DeletedAt.is_null())
-        .exec(&orm(&pre.pool))
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        user_favorites::Entity::update_many()
+            .col_expr(user_favorites::Column::DeletedAt, Expr::value(now))
+            .filter(user_favorites::Column::WorkspaceId.eq(workspace_id))
+            .filter(user_favorites::Column::ProjectId.eq(project_id))
+            .filter(user_favorites::Column::DeletedAt.is_null())
+            .exec(&conn)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+    }
+    tx.commit().await.map_err(|_| Denial::ServerError)?;
     Ok(no_content())
 }
 
@@ -2946,8 +2962,7 @@ pub async fn create_project_inner(
     let shared = ser::SharedChecks {
         executor: executor.as_deref(),
         work_type: work_type.as_deref(),
-        cloud_configured: state.settings().cloud_agent.enabled,
-        managed_enabled: state.settings().managed_runner.enabled,
+        managed_enabled: state.settings().pidash_agent.enabled,
         name: name.as_deref(),
         identifier: identifier_raw.as_deref(),
         project_lead_is_member: lead_member,
@@ -2990,11 +3005,11 @@ pub async fn create_project_inner(
         // (deprecated choices become local_runner). An absent key falls
         // back to the instance default (always local_runner since #2903).
         match field_str(&data, "default_agent_executor") {
-            Some(written) => match pidash_types::dispatch::normalize_executor_write(&written) {
+            Some(written) => match pidash_types::agent_runs::normalize_executor_write(&written) {
                 Some(kind) => kind.value().to_owned(),
                 None => "local_runner".to_owned(),
             },
-            None => pidash_types::dispatch::get_default_agent_executor()
+            None => pidash_types::agent_runs::get_default_agent_executor()
                 .value()
                 .to_owned(),
         }
@@ -3471,8 +3486,7 @@ pub async fn patch_project_inner(
     let shared = ser::SharedChecks {
         executor: executor.as_deref(),
         work_type: work_type.as_deref(),
-        cloud_configured: state.settings().cloud_agent.enabled,
-        managed_enabled: state.settings().managed_runner.enabled,
+        managed_enabled: state.settings().pidash_agent.enabled,
         name: name.as_deref(),
         identifier: identifier_raw.as_deref(),
         project_lead_is_member: lead_member,
@@ -3709,7 +3723,7 @@ pub async fn apply_project_update(
     }
     if let Some(v) = field_str(data, "default_agent_executor") {
         // #2903: deprecated choices translate to local_runner on write.
-        let stored = match pidash_types::dispatch::normalize_executor_write(&v) {
+        let stored = match pidash_types::agent_runs::normalize_executor_write(&v) {
             Some(kind) => kind.value().to_owned(),
             None => v,
         };

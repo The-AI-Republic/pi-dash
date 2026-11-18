@@ -1,10 +1,10 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Dev-machines table (NEWFRONT-555, RUN-037; built-in engine design §4.11,
+// Dev-machines table (NEWFRONT-555, RUN-037; Pi Dash Agent design §4.11,
 // §11). One row per computer with the derived status, the built-in
 // engine's state, its runner counts and the row actions. Expanding a row
-// lists the computer's built-in engine (one entry per project) and its
+// lists the computer's Pi Dash Agent (one entry per project) and its
 // own-agent runners, with the computer's engine settings. Loading,
 // failure and empty each occupy a full-width row inside the same table,
 // so the page chrome never collapses while the list is unsettled.
@@ -14,8 +14,8 @@ import type { DevMachine, Runner } from "@pidash/api-client";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import * as React from "react";
 
-import { BUILT_IN_ENGINE } from "../../../shared/lib/runnerIdentity.js";
-import { REMOVE_ENGINE_LABEL } from "../components/RunnerConfirmDialog.js";
+import { PIDASH_AGENT_NAME } from "../../../shared/lib/runnerIdentity.js";
+import { REMOVE_PIDASH_AGENT_LABEL } from "../components/RunnerConfirmDialog.js";
 import { RunnerStatusBadge, runnerStatusOf } from "../components/RunnerStatusBadge.js";
 import {
   DEV_MACHINE_STATUS_LABELS,
@@ -23,7 +23,7 @@ import {
   devMachineName,
   devMachineStatus,
   devMachineSubline,
-  engineState,
+  pidashAgentState,
   machineActions,
   machineSettings,
   machineTime,
@@ -48,18 +48,17 @@ export const MACHINE_ACTION_LABELS: Record<MachineAction, string> = {
 
 export const MACHINE_DETAILS_SHOW = "Show runners and settings";
 export const MACHINE_DETAILS_HIDE = "Hide runners and settings";
-export const MACHINE_ENGINE_HEADING = BUILT_IN_ENGINE;
+export const MACHINE_PIDASH_AGENT_HEADING = PIDASH_AGENT_NAME;
 export const MACHINE_OWN_AGENTS_HEADING = "Own-agent runners";
-export const MACHINE_ENGINE_NONE = "The built-in engine is not turned on for any project on this computer.";
+export const MACHINE_PIDASH_AGENT_NONE = "The Pi Dash Agent is not turned on for any project on this computer.";
 export const MACHINE_OWN_AGENTS_NONE = "No own-agent runners on this computer.";
 export const MACHINE_RUNNERS_LOADING = "Loading runners…";
 export const MACHINE_RENAME_LABEL = "Rename";
-export const MACHINE_PAUSE_LABEL = "Pause the built-in engine";
-export const MACHINE_RESUME_LABEL = "Resume the built-in engine";
+export const MACHINE_PAUSE_LABEL = "Pause the Pi Dash Agent";
+export const MACHINE_RESUME_LABEL = "Resume the Pi Dash Agent";
 export const MACHINE_TEAM_RUNS_LABEL = "Teammates can start runs on my issues";
 export const MACHINE_TEAM_RUNS_HINT =
-  "Off: only your own runs, and automatic runs on your issues, use this computer's engine and your wallet.";
-export const MACHINE_SIGN_OUT_ENGINE_LABEL = "Sign out the engine";
+  "Off: only your own runs, and automatic runs on your issues, use this computer's Pi Dash Agent and your wallet.";
 
 /** "Replaced by <machine>": the merge offer for a wiped computer. */
 export function replacedByLabel(targetName: string): string {
@@ -71,13 +70,12 @@ export type MachineSettingRequest =
   | { kind: "rename"; machine: DevMachine }
   | { kind: "pause"; machine: DevMachine; paused: boolean }
   | { kind: "team-runs"; machine: DevMachine; enabled: boolean }
-  | { kind: "sign-out-engine"; machine: DevMachine }
   | { kind: "replace"; machine: DevMachine; target: DevMachine }
-  | { kind: "remove-engine"; machine: DevMachine; runner: Runner };
+  | { kind: "remove-pidash-agent"; machine: DevMachine; runner: Runner };
 
 /** Accessible name of one engine's "Remove from project" button on the machine row. */
-export function removeEngineLabel(projectIdentifier: string): string {
-  return `Remove the built-in engine from ${projectIdentifier}`;
+export function removePidashAgentLabel(projectIdentifier: string): string {
+  return `Remove the Pi Dash Agent from ${projectIdentifier}`;
 }
 
 export interface DevMachinesTableProps {
@@ -131,11 +129,11 @@ function RunnerLine({
           <Button
             size="small"
             variant="secondary"
-            aria-label={removeEngineLabel(runnerProject(runner))}
+            aria-label={removePidashAgentLabel(runnerProject(runner))}
             disabled={disabled}
             onClick={onRemove}
           >
-            {REMOVE_ENGINE_LABEL}
+            {REMOVE_PIDASH_AGENT_LABEL}
           </Button>
         )}
       </span>
@@ -203,7 +201,7 @@ function MachineDetails({
   busy,
   onSetting,
 }: MachineDetailsProps): React.ReactElement {
-  const settings = machineSettings(machine, { hasEngine: (runners?.engines.length ?? 0) > 0 });
+  const settings = machineSettings(machine, { hasPidashAgent: (runners?.engines.length ?? 0) > 0 });
   const replacement = replacementCandidate(machine, machines);
   const disabled = busy || onSetting === undefined;
   const request = (next: MachineSettingRequest): void => onSetting?.(next);
@@ -211,15 +209,15 @@ function MachineDetails({
     <div className="flex flex-col gap-(--space-4) bg-(--subtle) px-(--space-6) py-(--space-4)">
       <div className="grid gap-(--space-4) md:grid-cols-2">
         <RunnerGroup
-          heading={MACHINE_ENGINE_HEADING}
-          empty={MACHINE_ENGINE_NONE}
+          heading={MACHINE_PIDASH_AGENT_HEADING}
+          empty={MACHINE_PIDASH_AGENT_NONE}
           loaded={runnersLoaded}
           rows={runners?.engines ?? []}
           label={runnerProject}
           onRemove={
             onSetting === undefined || machine.revoked_at !== null
               ? undefined
-              : (runner) => request({ kind: "remove-engine", machine, runner })
+              : (runner) => request({ kind: "remove-pidash-agent", machine, runner })
           }
           disabled={disabled}
         />
@@ -264,16 +262,6 @@ function MachineDetails({
             onClick={() => request({ kind: "pause", machine, paused: machine.engine_paused_by_owner !== true })}
           >
             {machine.engine_paused_by_owner === true ? MACHINE_RESUME_LABEL : MACHINE_PAUSE_LABEL}
-          </Button>
-        ) : null}
-        {settings.signOutEngine ? (
-          <Button
-            size="small"
-            variant="secondary"
-            disabled={disabled}
-            onClick={() => request({ kind: "sign-out-engine", machine })}
-          >
-            {MACHINE_SIGN_OUT_ENGINE_LABEL}
           </Button>
         ) : null}
         {replacement === null ? null : (
@@ -360,9 +348,9 @@ export function DevMachinesTable({
         <tbody>
           {rows.map((machine) => {
             const status = devMachineStatus(machine);
-            const engine = engineState(
+            const engine = pidashAgentState(
               machine,
-              { hasEngine: (grouped.get(machine.id)?.engines.length ?? 0) > 0 },
+              { hasPidashAgent: (grouped.get(machine.id)?.engines.length ?? 0) > 0 },
               formatDate
             );
             const merged = mergedIntoText(machine, rows);

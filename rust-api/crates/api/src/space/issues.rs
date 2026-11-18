@@ -1254,7 +1254,7 @@ async fn group_values(
 
 /// Per-group totals over the filtered set with the archived/draft totals
 /// predicate (`views/issue.py:170-177,196-203` minus the intake leg;
-/// [`count_filter_sql`](list_q::count_filter_sql), DIFF-37): one
+/// [`count_filter_sql`](list_q::count_filter_sql), DIFF-52): one
 /// `(group, count)` row per group value, raw counts (the `1-if-zero` rule
 /// lives in the kernel [`total_dict`](paginator::total_dict)).
 async fn group_total_pairs(

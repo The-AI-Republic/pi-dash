@@ -1,5 +1,5 @@
 """Contract: published-board grouped per-group totals include every row the
-group returns (NEWPIDASH-276, DIFF-37).
+group returns (NEWPIDASH-276, DIFF-52).
 
 Django counts group members with the intake/archived/draft ``count_filter``
 (intake status 1/-1/2 or no intake row) while the rows queryset carries no
@@ -66,8 +66,8 @@ def test_grouped_total_counts_pending_intake_rows(anon_client, world, seeder):
     total = bucket["total_results"]
     # Rows include the pending intake issue on both backends.
     assert len(rows) == 4
-    # Header semantics: Django 3, fixed 4 (DIFF-37).
-    assert total == expect("DIFF-37", django=3, rust=4)
+    # Header semantics: Django 3, fixed 4 (DIFF-52).
+    assert total == expect("DIFF-52", django=3, rust=4)
     # Top-level total already counts rows on both backends.
     assert body["total_count"] == 4
 
@@ -76,7 +76,7 @@ def test_grouped_total_counts_snoozed_intake_rows(anon_client, world, seeder):
     _seed_group(world, seeder, pending_status=0)
     _body, bucket = _get_group(anon_client, world, {"group_by": "state_id"})
     assert len(bucket["results"]) == 4
-    assert bucket["total_results"] == expect("DIFF-37", django=3, rust=4)
+    assert bucket["total_results"] == expect("DIFF-52", django=3, rust=4)
 
 
 def test_grouped_total_pages_derive_from_truthful_counts(anon_client, world, seeder):
@@ -99,9 +99,9 @@ def test_grouped_total_pages_derive_from_truthful_counts(anon_client, world, see
     assert response.status_code == 200
     body = response.json()
     bucket = body["results"][state_id]
-    assert bucket["total_results"] == expect("DIFF-37", django=2, rust=3)
+    assert bucket["total_results"] == expect("DIFF-52", django=2, rust=3)
     # ceil(2/2)=1 page (short: row 3 unreachable by count) vs ceil(3/2)=2.
-    assert body["total_pages"] == expect("DIFF-37", django=1, rust=2)
+    assert body["total_pages"] == expect("DIFF-52", django=1, rust=2)
     # First page carries 2 rows either way (window is row-based).
     assert len(bucket["results"]) == 2
 
@@ -114,8 +114,8 @@ def test_subgrouped_totals_count_pending_intake_rows(anon_client, world, seeder)
     assert response.status_code == 200
     body = response.json()
     group = body["results"][world["state"]["id"]]
-    assert group["total_results"] == expect("DIFF-37", django=3, rust=4)
+    assert group["total_results"] == expect("DIFF-52", django=3, rust=4)
     cell = group["results"]["none"]
     # All four issues share priority "none" (seeder default + world seed).
-    assert cell["total_results"] == expect("DIFF-37", django=3, rust=4)
+    assert cell["total_results"] == expect("DIFF-52", django=3, rust=4)
     assert len(cell["results"]) == 4

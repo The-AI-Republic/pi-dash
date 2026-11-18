@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,13 +24,13 @@ use crate::daemon::drain_journal;
 use crate::daemon::run_event_mirror::RunEventMirror;
 use crate::daemon::runner_instance::RunnerInstance;
 use crate::daemon::runner_out::RunnerOut;
-use crate::daemon::state::{AgentHealthReport, StateHandle};
+use crate::daemon::state::{AgentHealthReport, DaemonShutdownTrigger, StateHandle};
 use crate::daemon::workspace_tokens::WorkspaceTokens;
 use crate::history::index::{RunSummary, RunsIndex};
 use crate::history::jsonl::{HistoryEntry, HistoryWriter};
 use crate::ipc::protocol::{
-    CurrentRunSummary, HelloAccount, HelloInfo, HelloWorkspace, IPC_VERSION, RunnerChanges,
-    version_lt,
+    AuthEventAccountInfo, AuthEventInfo, AuthState, CurrentRunSummary, HelloAccount, HelloInfo,
+    HelloWorkspace, IPC_VERSION, Response, RunnerChanges, version_lt,
 };
 use crate::ipc::server::IpcServer;
 use crate::util::containment::{self, RunGroup};
@@ -98,6 +98,24 @@ impl Supervisor {
             state,
             approvals: _supervisor_approvals,
         } = self;
+        // Credential presence at startup: surface the same warning the
+        // pre-pickup gate uses, so an operator sees it without waiting for an
+        // Assign to be rejected. Presence-only; never validated.
+        for runner_cfg in &config.runners {
+            // Managed Codex runners carry Pi Dash-managed auth and skip the
+            // presence check, like Engine.
+            if crate::agent::auth::is_managed_codex(&runner_cfg.codex) {
+                continue;
+            }
+            if !crate::agent::auth::has_credentials(runner_cfg.agent.kind) {
+                tracing::warn!(
+                    runner = %runner_cfg.name,
+                    agent = %runner_cfg.agent.kind.display_name(),
+                    "credentials missing on this runner; runs will be refused at pickup until fixed: {}",
+                    crate::agent::auth::fix_hint(runner_cfg.agent.kind)
+                );
+            }
+        }
         // NEWPIDASH-255: reap run containment left by a previous daemon
         // (no run is live at start, so every leftover is orphaned) and
         // execute run-end hooks such a daemon never got to (parity-stack
@@ -119,7 +137,7 @@ impl Supervisor {
         // One dev-machine token per workspace (design §4.9): each runner
         // authenticates with its block's workspace token, the machine
         // session with any live one.
-        let tokens = WorkspaceTokens::from_cli(config.cli.as_ref());
+        let tokens = WorkspaceTokens::from_cli(config.cli.as_ref()).with_persistence(paths.clone());
 
         let mut instances: Vec<RunnerInstance> = Vec::new();
         for runner_cfg in &config.runners {
@@ -178,22 +196,44 @@ impl Supervisor {
         // Shared context for bringing a runner's tasks up — used by the
         // startup loop below and by the machine control session's
         // cloud-driven `create_runner` hot-add path.
-        // The machine's built-in engine (design §4.3): credential, profile,
+        // The machine's Pi Dash Agent (design §4.3): credential, profile,
         // in-memory model token and machine-level state.
-        let engine = crate::engine::manager::EngineManager::new(
+        let engine = crate::pidash_agent::manager::PidashAgentManager::new(
             transport.as_ref().map(|t| t.cloud_url()),
             paths.clone(),
             tokens.clone(),
-            crate::engine::locate::resolved().map(|e| e.binary.clone()),
+            crate::pidash_agent::locate::resolved().map(|e| e.binary.clone()),
         );
         let engine_handle = transport.as_ref().map(|_| {
             let engine = engine.clone();
             let shutdown = state.shutdown_notified();
             tokio::spawn(async move { engine.run(shutdown).await })
         });
+        // Durable FIFO coordinator (NEWPIDASH-241 T3): one SQLite store +
+        // fs2 lock under data_dir. Failure enters storage_blocked: Assigns
+        // fail closed (NACK, no execution) until restart with fixed storage.
+        let (run_coordinator, run_queue_blocked) = match crate::daemon::run_queue::Coordinator::new(
+            paths.data_dir.clone(),
+            config.daemon.max_concurrent_agent_runs,
+        ) {
+            Ok(c) => (Some(Arc::new(c)), false),
+            Err(e) => {
+                tracing::warn!("run queue storage_blocked: {e}");
+                (None, true)
+            }
+        };
+        // Durable receipt-before-ACK (T4): one SQLite store shared by every
+        // HttpLoop; a frame commits before any HTTP ACK leaves.
+        let run_receipt =
+            crate::daemon::receipt::ReceiptStore::open(paths.data_dir.join("run_receipts.sqlite3"))
+                .map(Arc::new)
+                .map_err(|e| {
+                    tracing::warn!("run receipts storage unavailable: {e}");
+                })
+                .ok();
         let spawn_ctx = RunnerSpawnCtx {
             engine: engine.clone(),
-            local_chat: Arc::new(crate::ipc::engine_chat::EngineChatProfile::new(
+            local_chat: Arc::new(crate::ipc::pidash_agent_chat::PidashAgentChatProfile::new(
                 config.daemon.dev_machine_id,
             )),
             transport: transport.clone(),
@@ -208,6 +248,9 @@ impl Supervisor {
             activation_lock: Arc::new(tokio::sync::Mutex::new(())),
             engine_ops_lock: Arc::new(tokio::sync::Mutex::new(())),
             pending_idle_restarts: Default::default(),
+            run_coordinator: run_coordinator.clone(),
+            run_queue_blocked,
+            run_receipt: run_receipt.clone(),
         };
 
         let ipc = IpcServer {
@@ -219,6 +262,7 @@ impl Supervisor {
             paths: paths.clone(),
             instances: ipc_instances,
             spawn_ctx: spawn_ctx.clone(),
+            run_coordinator: run_coordinator.clone(),
         };
         let ipc_handle = tokio::spawn(async move {
             if let Err(e) = ipc.run().await {
@@ -230,15 +274,45 @@ impl Supervisor {
         // on shutdown, BEFORE any runner loop starts: no session is
         // open yet, so the cloud cannot have redelivered one of these
         // runs and the replay cannot race live work. Leftovers (cloud
-        // unreachable) are retried in the background.
+        // unreachable) are retried in the background. The previous systemd
+        // exit (NEWPIDASH-253) is read once here and carried to both the
+        // replay and this daemon's own shutdown drain.
+        let previous_exit = if opts.offline {
+            None
+        } else {
+            crate::service::systemd::previous_exit_result().await
+        };
+        if let Some(prev) = previous_exit.as_deref() {
+            tracing::info!(
+                previous_exit = prev,
+                "previous systemd exit observed at startup"
+            );
+        }
         let mut replay_retry_handle: Option<tokio::task::JoinHandle<()>> = None;
         if !opts.offline {
-            replay_drain_journal_once(&paths, &hello_runners).await;
-            if !drain_journal::load(&paths).is_empty() {
+            replay_drain_journal_once(&paths, &hello_runners, previous_exit.clone()).await;
+            // Legacy journal dispositions first, then SQLite outbox retry:
+            // managed terminal signals redeliver their exact payload.
+            if let Some(coord) = run_coordinator.as_ref() {
+                replay_terminal_outbox_once(coord, &hello_runners).await;
+            }
+            // Always-on retry loop (NEWPIDASH-251): normal RunFailed
+            // sends journaled mid-run (not only shutdown drains) must
+            // replay without waiting for the next daemon start. The
+            // loop is long-lived: it never exits on an empty journal,
+            // only on the shutdown abort just before the drain below.
+            {
                 let replay_paths = paths.clone();
                 let replay_runners = hello_runners.clone();
+                let replay_previous = previous_exit.clone();
                 replay_retry_handle = Some(tokio::spawn(async move {
-                    replay_drain_journal_retry_loop(replay_paths, replay_runners).await;
+                    replay_drain_journal_retry_loop(
+                        replay_paths,
+                        replay_runners,
+                        replay_previous,
+                        DRAIN_JOURNAL_RETRY_INTERVAL,
+                    )
+                    .await;
                 }));
             }
         }
@@ -250,6 +324,20 @@ impl Supervisor {
         for inst in &instances {
             let tasks = spawn_instance_tasks(inst, &spawn_ctx).await;
             spawn_ctx.register_tasks(inst.runner_id, tasks);
+        }
+        // Restart orphan sweep (NEWPIDASH-241 T6): waiting entries whose
+        // runner no longer exists can never be re-hydrated — durable-cancel
+        // them so they cannot block the FIFO forever. The cloud re-queues
+        // the run through the reaper.
+        if let Some(coord) = run_coordinator.as_ref() {
+            let live: std::collections::HashSet<uuid::Uuid> =
+                instances.iter().map(|i| i.runner_id).collect();
+            for entry in coord.waiting_entries() {
+                if !live.contains(&entry.runner_id) {
+                    tracing::warn!(run_id=%entry.run_id, "waiting entry for removed runner; durable cancel");
+                    let _ = coord.cancel_waiting(entry.run_id);
+                }
+            }
         }
 
         // Machine-level control session: lets the cloud push
@@ -290,12 +378,12 @@ impl Supervisor {
             let ctx = spawn_ctx.clone();
             let shutdown = state.shutdown_notified();
             Some(tokio::spawn(async move {
-                crate::daemon::engine_reconcile::run(ctx, shutdown).await
+                crate::daemon::pidash_agent_reconcile::run(ctx, shutdown).await
             }))
         };
 
         // Wake from sleep / network change: retry every cloud connection
-        // now instead of waiting out a backoff of up to 6 hours.
+        // now instead of waiting out a backoff of up to 5 minutes.
         let triggers_handle = if opts.offline {
             None
         } else {
@@ -309,14 +397,24 @@ impl Supervisor {
 
         let shutdown = state.shutdown_notified();
         let sig = crate::util::signal::shutdown();
-        tokio::select! {
+        let shutdown_trigger = tokio::select! {
             _ = shutdown.notified() => {
-                tracing::info!("shutdown requested via IPC");
+                // The trigger was recorded before notify_waiters by the
+                // caller (IPC RunnerDisconnect or invariant restart).
+                state.shutdown_reason().unwrap_or(DaemonShutdownTrigger::ControlSocket)
             }
-            r = sig => {
-                if let Err(e) = r { tracing::warn!("signal watcher failed: {e:#}"); }
-            }
-        }
+            r = sig => match r {
+                Ok(signal) => DaemonShutdownTrigger::from_signal(signal),
+                Err(e) => {
+                    tracing::warn!("signal watcher failed: {e:#}");
+                    DaemonShutdownTrigger::Unknown
+                }
+            },
+        };
+        tracing::info!(
+            trigger = shutdown_trigger.as_str(),
+            "daemon shutdown trigger"
+        );
 
         // Stop the journal replay retry task BEFORE draining: a retry
         // pass running concurrently with the drain could remove() an
@@ -339,7 +437,13 @@ impl Supervisor {
         // better than losing the entire shutdown sequence.
         if let Err(_elapsed) = tokio::time::timeout(
             Duration::from_secs(5),
-            drain_in_flight_runs(hello_runners.clone(), &paths),
+            drain_in_flight_runs(
+                hello_runners.clone(),
+                &paths,
+                run_coordinator.clone(),
+                shutdown_trigger,
+                previous_exit.clone(),
+            ),
         )
         .await
         {
@@ -417,10 +521,10 @@ async fn build_runner_instance(
 /// All fields are cheap clones of the supervisor's shared state.
 #[derive(Clone)]
 pub(crate) struct RunnerSpawnCtx {
-    /// The machine's built-in engine (PIDESKAPP-121).
-    pub(crate) engine: Arc<crate::engine::manager::EngineManager>,
+    /// The machine's Pi Dash Agent (PIDESKAPP-121).
+    pub(crate) engine: Arc<crate::pidash_agent::manager::PidashAgentManager>,
     /// The machine-level engine profile local chat runs on (design §12.1).
-    pub(crate) local_chat: Arc<crate::ipc::engine_chat::EngineChatProfile>,
+    pub(crate) local_chat: Arc<crate::ipc::pidash_agent_chat::PidashAgentChatProfile>,
     transport: Option<SharedHttpTransport>,
     /// Workspace → dev-machine token (design §4.9). Replaces the single
     /// `shared_machine_token`; shared with the machine control session.
@@ -443,6 +547,15 @@ pub(crate) struct RunnerSpawnCtx {
     pub(crate) engine_ops_lock: Arc<tokio::sync::Mutex<()>>,
     /// Runners waiting to be restarted with new credentials once idle.
     pending_idle_restarts: Arc<std::sync::Mutex<std::collections::HashSet<uuid::Uuid>>>,
+    /// Durable FIFO coordinator (NEWPIDASH-241 T3). None only in unit tests
+    /// that never touch the queue; production always has one.
+    pub(crate) run_coordinator: Option<Arc<crate::daemon::run_queue::Coordinator>>,
+    /// True when the queue store failed to open (storage_blocked): Assigns
+    /// fail closed (NACK, no execution) until restart with fixed storage.
+    pub(crate) run_queue_blocked: bool,
+    /// Durable receipt-before-ACK store (NEWPIDASH-241 T4). Shared across
+    /// runners; None only in unit tests.
+    pub(crate) run_receipt: Option<Arc<crate::daemon::receipt::ReceiptStore>>,
 }
 
 /// How often a busy runner whose credentials changed is checked for idle.
@@ -753,16 +866,94 @@ impl RunnerSpawnCtx {
                 cloud_url: self.daemon.cloud_url.clone(),
             })
         };
+        // The persisted record, read from disk so a sign-in or sign-out in a
+        // terminal since startup is reported at once. A daemon older than
+        // this build has no record (design §8): the app starts recording
+        // from the first `seq` the updated CLI reports.
+        let auth_event = crate::config::file::load_auth_event(&self.paths).map(|e| AuthEventInfo {
+            seq: e.seq,
+            kind: e.kind.as_str().to_string(),
+            reason: e.reason.as_ref().map(|r| r.as_str().to_string()),
+            account: e.account.map(|a| AuthEventAccountInfo {
+                user_id: a.user_id,
+                email: a.email,
+                cloud_url: a.cloud_url,
+            }),
+            at: e.at,
+        });
         HelloInfo {
             daemon_version: crate::RUNNER_VERSION.to_string(),
             ipc_version: IPC_VERSION,
             cloud_url: self.daemon.cloud_url.clone(),
             account,
+            auth_state: Some(if self.tokens.session_candidates().is_empty() {
+                AuthState::SignedOut
+            } else {
+                AuthState::SignedIn
+            }),
+            auth_event,
             workspaces,
             machine_id: self.daemon.dev_machine_id,
             engine: engine.state,
             engine_detail: Some(engine),
         }
+    }
+
+    /// Desktop session handoff (desktop_unified_signin §5): trade the app's
+    /// `challenge` for a single-use code with one workspace daemon
+    /// credential. The daemon hands the code to the app over this socket
+    /// only; the code is never logged (it is useless without the app's
+    /// verifier, which never leaves the app's process).
+    pub(crate) async fn session_handoff(&self, challenge: &str) -> Result<Response> {
+        let cloud_url = self.daemon.cloud_url.clone();
+        if cloud_url.is_empty() {
+            anyhow::bail!("this computer is not bound to a Pi Dash cloud");
+        }
+        let (_, token) = self
+            .tokens
+            .session_candidates()
+            .into_iter()
+            .find(|(_, t)| t.starts_with("mt_"))
+            .ok_or_else(|| anyhow::anyhow!("this computer is signed out"))?;
+        let url = format!("{cloud_url}/api/v1/auth/desktop-handoff/");
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()?;
+        let resp = client
+            .post(&url)
+            .header("X-Api-Key", token)
+            .json(&serde_json::json!({ "challenge": challenge }))
+            .send()
+            .await
+            .with_context(|| format!("POST {url}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            // Status (and the server's error code), never the code or verifier.
+            let detail = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string));
+            anyhow::bail!(
+                "the handoff was refused (HTTP {status}{})",
+                detail.map(|d| format!(": {d}")).unwrap_or_default()
+            );
+        }
+        let body: serde_json::Value = resp.json().await.context("parsing the handoff response")?;
+        let code = body
+            .get("code")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("the handoff response carried no code"))?;
+        Ok(Response::SessionHandoff {
+            code: code.to_string(),
+            user_id: body
+                .get("user_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            email: body
+                .get("email")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        })
     }
 
     fn all_instances(&self) -> Vec<RunnerInstance> {
@@ -1045,7 +1236,9 @@ fn agent_binary_for(config: &crate::config::schema::RunnerConfig) -> &str {
         crate::config::schema::AgentKind::OpenClaw => &config.openclaw.binary,
         crate::config::schema::AgentKind::Grok => &config.grok.binary,
         crate::config::schema::AgentKind::MuseCode => &config.muse_code.binary,
-        crate::config::schema::AgentKind::Engine => crate::engine::agent::binary_display(),
+        crate::config::schema::AgentKind::PidashAgent => {
+            crate::pidash_agent::agent::binary_display()
+        }
     }
 }
 
@@ -1098,6 +1291,8 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
     let attach_working_dir = resolve_working_dir(inst);
     let inst_chat_active = inst.chat_active.clone();
     let inst_engine = ctx.engine.clone();
+    let inst_coordinator = ctx.run_coordinator.clone();
+    let inst_queue_blocked = ctx.run_queue_blocked;
     let h = tokio::spawn(async move {
         let run = RunnerLoop {
             runner_paths,
@@ -1116,6 +1311,8 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
             current_chat: None,
             local_chat_active: inst_chat_active,
             engine: inst_engine,
+            coordinator: inst_coordinator,
+            queue_blocked: inst_queue_blocked,
         };
         if let Err(e) = run.run().await {
             tracing::error!("runner loop exited: {e:#}");
@@ -1145,7 +1342,9 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
         )
         .with_state(inst.state.clone())
         .with_teardown_rx(inst.remove_tx.subscribe())
-        .with_reconnect_kick(inst.state.reconnect_notified());
+        .with_reconnect_kick(inst.state.reconnect_notified())
+        .with_receipt_store(ctx.run_receipt.clone())
+        .with_coordinator(ctx.run_coordinator.clone());
         let close_client = client.clone();
         let local_state = inst.state.clone();
         let daemon_state = ctx.daemon_state.clone();
@@ -1166,13 +1365,25 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
                 {
                     // Only this workspace is signed out: its other runners
                     // and the machine session stop offering the token, and
-                    // `pidash status` reports `workspace_signed_out`.
-                    let workspace = tokens.mark_revoked(token);
+                    // `pidash status` reports `workspace_signed_out`. The
+                    // last one going records the daemon's sign-out.
+                    let workspace =
+                        tokens.mark_fatal(token, crate::daemon::workspace_tokens::fatal_reason(&e));
                     tracing::error!(
                         runner = %runner_name,
                         workspace = workspace.as_deref().unwrap_or("(default)"),
                         "workspace token revoked; this workspace's runners are signed out \
                          until `pidash auth login --workspace <slug>`"
+                    );
+                    return;
+                }
+                if matches!(e, TransportError::DevMachineRevoked) {
+                    // The computer was removed on the web: no token of it
+                    // works any more (design §6.1 `removed`).
+                    tokens.mark_machine_removed();
+                    tracing::error!(
+                        runner = %runner_name,
+                        "this computer was removed on the web; signed out"
                     );
                     return;
                 }
@@ -1199,7 +1410,7 @@ async fn spawn_instance_tasks(inst: &RunnerInstance, ctx: &RunnerSpawnCtx) -> Sp
                     tracing::error!(
                         "http loop hit a local invariant failure; requesting daemon restart"
                     );
-                    daemon_state.shutdown();
+                    daemon_state.shutdown_with_reason(DaemonShutdownTrigger::Invariant);
                 }
             }
         });
@@ -1255,6 +1466,48 @@ async fn purge_cloud_deleted_runner(
     }
 }
 
+/// The `DaemonRestart` detail for a shutdown (NEWPIDASH-253): keeps the
+/// legacy `daemon shutdown requested` prefix (so stores written before
+/// trigger carriage still classify as `daemon_restart`) and states the
+/// trigger (plus the previous systemd exit when known). Examples:
+/// `daemon shutdown requested (SIGTERM; previous exit: oom-kill)`,
+/// `daemon shutdown requested (control socket disconnect)`.
+pub(crate) fn daemon_shutdown_detail(
+    trigger: DaemonShutdownTrigger,
+    previous_exit: Option<&str>,
+) -> String {
+    match previous_exit {
+        Some(prev) if !prev.trim().is_empty() => {
+            format!(
+                "daemon shutdown requested ({}; previous exit: {})",
+                trigger.as_str(),
+                prev.trim()
+            )
+        }
+        _ => format!("daemon shutdown requested ({})", trigger.as_str()),
+    }
+}
+
+/// Append the freshly-read previous systemd exit to a journaled detail
+/// (NEWPIDASH-253): replay attaches the successor's knowledge of the
+/// previous exit to failures the dead daemon journaled. No-op when the
+/// detail already carries a previous exit or there is nothing to add.
+pub(crate) fn with_previous_exit(detail: &str, previous_exit: Option<&str>) -> String {
+    match previous_exit {
+        Some(prev) if !prev.trim().is_empty() && !detail.contains("previous exit") => {
+            // Insert before the closing paren when the detail carries a
+            // trigger parenthetical already, so `… (SIGTERM)` becomes
+            // `… (SIGTERM; previous exit: oom-kill)`.
+            if let Some(stripped) = detail.strip_suffix(')') {
+                format!("{stripped}; previous exit: {})", prev.trim())
+            } else {
+                format!("{detail} (previous exit: {})", prev.trim())
+            }
+        }
+        _ => detail.to_string(),
+    }
+}
+
 /// On daemon shutdown, send `RunFailed{DaemonRestart}` for every
 /// runner that currently reports an in-flight run. Without this the
 /// cloud is left guessing — its heartbeat reaper eventually fails the
@@ -1273,13 +1526,22 @@ async fn purge_cloud_deleted_runner(
 /// a serial loop (each attempt potentially walking through the shared
 /// reqwest Client's 60s timeout) would starve later runners entirely.
 ///
-/// Every in-flight run is journaled BEFORE the sends are attempted and
-/// removed only on a confirmed send, so a run whose `RunFailed` misses
+/// Every in-flight run is recorded BEFORE the sends are attempted and
+/// cleared only on a confirmed send, so a run whose `RunFailed` misses
 /// the 2s window (or a SIGKILL mid-drain) is replayed by the next
 /// daemon start instead of being silently dropped — a dropped signal
 /// leaves the cloud showing the run busy forever, pinned to a runner
-/// that no longer knows about it.
-async fn drain_in_flight_runs(runners: Arc<RwLock<HelloRunnerMap>>, paths: &Paths) -> usize {
+/// that no longer knows about it. The record splits by ownership:
+/// managed queue attempts persist their exact payload to the SQLite
+/// terminal outbox (coordinator-owned, retried verbatim on restart);
+/// legacy in-flight runs use the drain journal.
+async fn drain_in_flight_runs(
+    runners: Arc<RwLock<HelloRunnerMap>>,
+    paths: &Paths,
+    coord: Option<Arc<crate::daemon::run_queue::Coordinator>>,
+    trigger: DaemonShutdownTrigger,
+    previous_exit: Option<String>,
+) -> usize {
     // Snapshot under the read lock so the lock is dropped before any
     // network I/O; concurrent writers (config reloads, etc.) are not
     // expected during shutdown but this keeps the contract clean.
@@ -1291,20 +1553,45 @@ async fn drain_in_flight_runs(runners: Arc<RwLock<HelloRunnerMap>>, paths: &Path
             .collect()
     };
     let now = Utc::now();
-    const DETAIL: &str = "daemon shutdown requested";
-    let pending: Vec<drain_journal::PendingRunFailure> = snapshot
-        .iter()
-        .filter_map(|(runner_id, in_flight, _)| {
-            Some(drain_journal::PendingRunFailure {
-                runner_id: *runner_id,
-                run_id: (*in_flight)?,
+    let detail = daemon_shutdown_detail(trigger, previous_exit.as_deref());
+    // Split by ownership: managed queue attempts persist their exact
+    // DaemonRestart payload to the SQLite terminal outbox before sending;
+    // legacy in-flight runs use the drain journal (unchanged).
+    let mut managed: Vec<(uuid::Uuid, uuid::Uuid)> = Vec::new();
+    let mut pending: Vec<drain_journal::PendingRunFailure> = Vec::new();
+    for (runner_id, in_flight, _) in &snapshot {
+        let Some(run_id) = in_flight else {
+            continue;
+        };
+        let is_managed = coord.as_ref().is_some_and(|c| c.holds_run(*run_id));
+        if is_managed {
+            let msg = ClientMsg::RunFailed {
+                run_id: *run_id,
                 reason: FailureReason::DaemonRestart,
-                detail: DETAIL.to_string(),
+                detail: Some(detail.clone()),
+                ended_at: now,
+                tokens: None,
+                model: None,
+            };
+            let payload = serde_json::to_vec(&msg).unwrap_or_default();
+            if let Some(c) = coord.as_ref() {
+                let key = format!("drain-{}", run_id);
+                let _ = c.persist_terminal(*run_id, &payload, &key);
+            }
+            managed.push((*runner_id, *run_id));
+        } else {
+            pending.push(drain_journal::PendingRunFailure {
+                runner_id: *runner_id,
+                run_id: *run_id,
+                reason: FailureReason::DaemonRestart,
+                detail: detail.clone(),
                 ended_at: now,
                 recorded_at: now,
-            })
-        })
-        .collect();
+                trigger: Some(trigger.as_str().to_string()),
+                previous_exit: previous_exit.clone(),
+            });
+        }
+    }
     // spawn_blocking keeps the sync fs I/O off the runtime workers and,
     // more importantly, keeps the caller's 5s shutdown deadline honest:
     // sync I/O has no await point for the timeout to fire at, so a
@@ -1334,7 +1621,7 @@ async fn drain_in_flight_runs(runners: Arc<RwLock<HelloRunnerMap>>, paths: &Path
             let msg = ClientMsg::RunFailed {
                 run_id,
                 reason: FailureReason::DaemonRestart,
-                detail: Some(DETAIL.to_string()),
+                detail: Some(detail.clone()),
                 ended_at: now,
                 tokens: None,
                 model: None,
@@ -1369,6 +1656,14 @@ async fn drain_in_flight_runs(runners: Arc<RwLock<HelloRunnerMap>>, paths: &Path
         .into_iter()
         .flatten()
         .collect();
+    // Managed delivered terminals clear their SQLite outbox rows
+    // (coordinator owns clearing). Legacy rows were never journaled as
+    // managed, so clearing them here is a no-op for the journal path.
+    for run_id in &delivered {
+        if let Some(c) = coord.as_ref() {
+            let _ = c.complete_terminal(*run_id);
+        }
+    }
     // spawn_blocking for the same reasons as record_all above; it also
     // means the cleanup completes even if the caller's 5s deadline
     // drops this future between join_all and here.
@@ -1442,8 +1737,15 @@ fn is_permanent_run_failed_rejection(e: &anyhow::Error) -> bool {
 /// The first pass runs from `Supervisor::run` BEFORE the per-runner
 /// loops start, so nothing can be redelivered or in flight yet; later
 /// passes come from a background retry loop where the in-flight guard
-/// does the work.
-async fn replay_drain_journal_once(paths: &Paths, runners: &Arc<RwLock<HelloRunnerMap>>) -> usize {
+/// does the work. `previous_exit` is the successor's freshly-read
+/// previous systemd exit (NEWPIDASH-253): replay attaches it to
+/// journaled details that do not carry one yet (see
+/// [`with_previous_exit`]).
+async fn replay_drain_journal_once(
+    paths: &Paths,
+    runners: &Arc<RwLock<HelloRunnerMap>>,
+    previous_exit: Option<String>,
+) -> usize {
     let entries = drain_journal::load(paths);
     if entries.is_empty() {
         return 0;
@@ -1482,6 +1784,7 @@ async fn replay_drain_journal_once(paths: &Paths, runners: &Arc<RwLock<HelloRunn
             }
             let out = out.clone();
             let in_flight = state.rx_in_flight.clone();
+            let previous_exit = previous_exit.clone();
             sends.push(async move {
                 // Re-check at the last instant before sending: the guard
                 // above ran under the runners lock, but on retry-loop
@@ -1495,10 +1798,14 @@ async fn replay_drain_journal_once(paths: &Paths, runners: &Arc<RwLock<HelloRunn
                     );
                     return ReplayOutcome::Resolved(entry.run_id);
                 }
+                let replayed_detail = with_previous_exit(
+                    &entry.detail,
+                    previous_exit.as_deref().or(entry.previous_exit.as_deref()),
+                );
                 let msg = ClientMsg::RunFailed {
                     run_id: entry.run_id,
                     reason: entry.reason,
-                    detail: Some(entry.detail.clone()),
+                    detail: Some(replayed_detail),
                     ended_at: entry.ended_at,
                     tokens: None,
                     model: None,
@@ -1553,6 +1860,76 @@ async fn replay_drain_journal_once(paths: &Paths, runners: &Arc<RwLock<HelloRunn
     delivered
 }
 
+/// Retry SQLite terminal-outbox records once at startup: managed queue
+/// attempts redeliver their exact persisted payload (same bytes/key),
+/// never re-executing. Records for removed runners are cleared (the
+/// cloud reaper handles the run). Runs redelivered in flight are
+/// resolved without a second signal.
+async fn replay_terminal_outbox_once(
+    coord: &crate::daemon::run_queue::Coordinator,
+    runners: &Arc<RwLock<HelloRunnerMap>>,
+) -> usize {
+    let pending = coord.terminal_pending();
+    if pending.is_empty() {
+        return 0;
+    }
+    let guard = runners.read().await;
+    let mut sends = Vec::new();
+    for entry in pending {
+        let Some(payload) = entry.pending_terminal_payload.clone() else {
+            let _ = coord.complete_terminal(entry.run_id);
+            continue;
+        };
+        let Some((out, state, _)) = guard.get(&entry.runner_id) else {
+            tracing::warn!(run_id=%entry.run_id, "dropping outbox terminal: runner no longer configured");
+            let _ = coord.complete_terminal(entry.run_id);
+            continue;
+        };
+        if *state.rx_in_flight.borrow() == Some(entry.run_id) {
+            tracing::info!(run_id=%entry.run_id, "dropping outbox terminal: run redelivered");
+            let _ = coord.complete_terminal(entry.run_id);
+            continue;
+        }
+        let out = out.clone();
+        sends.push(async move {
+            let msg: Result<ClientMsg, _> = serde_json::from_slice(&payload);
+            match msg {
+                Ok(m) => match send_run_failed_bounded(out, m, Duration::from_secs(10)).await {
+                    RunFailedSend::Delivered => {
+                        tracing::info!(run_id=%entry.run_id, "redelivered SQLite outbox terminal");
+                        let _ = coord.complete_terminal(entry.run_id);
+                        true
+                    }
+                    RunFailedSend::Failed(e) if is_permanent_run_failed_rejection(&e) => {
+                        tracing::warn!(run_id=%entry.run_id, "dropping outbox terminal: cloud rejected permanently: {e:#}");
+                        let _ = coord.complete_terminal(entry.run_id);
+                        false
+                    }
+                    RunFailedSend::Failed(e) => {
+                        tracing::warn!(run_id=%entry.run_id, "outbox retry failed, keeps terminal_pending: {e:#}");
+                        false
+                    }
+                    RunFailedSend::TimedOut => {
+                        tracing::warn!(run_id=%entry.run_id, "outbox retry timed out, keeps terminal_pending");
+                        false
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(run_id=%entry.run_id, "unparsable outbox payload; dropping record: {e:#}");
+                    let _ = coord.complete_terminal(entry.run_id);
+                    false
+                }
+            }
+        });
+    }
+    drop(guard);
+    futures_util::future::join_all(sends)
+        .await
+        .into_iter()
+        .filter(|d| *d)
+        .count()
+}
+
 /// How one replayed journal entry ended up.
 enum ReplayOutcome {
     /// The `RunFailed` reached the cloud; the entry is done.
@@ -1564,17 +1941,32 @@ enum ReplayOutcome {
     Retry,
 }
 
+/// Delay between journal replay passes. The retry loop is long-lived:
+/// it never exits on an empty journal — only `Supervisor::run`'s
+/// shutdown abort stops it — so an entry journaled mid-run
+/// (NEWPIDASH-251) still replays on the next tick, not only at the
+/// next daemon start.
+const DRAIN_JOURNAL_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+
 /// Background retry for journal entries the startup pass could not
-/// deliver (cloud unreachable, token mid-refresh). Exits as soon as
-/// the journal is empty; entries past the TTL are dropped by
-/// [`replay_drain_journal_once`].
-async fn replay_drain_journal_retry_loop(paths: Paths, runners: Arc<RwLock<HelloRunnerMap>>) {
+/// deliver (cloud unreachable, token mid-refresh), and for entries
+/// journaled mid-run (NEWPIDASH-251: normal `RunFailed` sends that
+/// exhaust their HTTP retries). Long-lived: an empty journal only
+/// skips that tick; entries past the TTL are dropped by
+/// [`replay_drain_journal_once`]. Exits only when the owning task is
+/// aborted on shutdown (see the abort-before-drain in `Supervisor::run`).
+async fn replay_drain_journal_retry_loop(
+    paths: Paths,
+    runners: Arc<RwLock<HelloRunnerMap>>,
+    previous_exit: Option<String>,
+    interval: Duration,
+) {
     loop {
-        tokio::time::sleep(Duration::from_secs(60)).await;
+        tokio::time::sleep(interval).await;
         if drain_journal::load(&paths).is_empty() {
-            return;
+            continue;
         }
-        replay_drain_journal_once(&paths, &runners).await;
+        replay_drain_journal_once(&paths, &runners, previous_exit.clone()).await;
     }
 }
 
@@ -1652,7 +2044,7 @@ fn attach_body_for_instance(
     working_dir: Option<std::path::PathBuf>,
 ) -> AttachBody {
     let mut agent_versions = HashMap::new();
-    let kind_key = format!("{:?}", inst.config.agent.kind).to_ascii_lowercase();
+    let kind_key = inst.config.agent.kind.as_str().to_owned();
     // The agent binary's own version when we managed to probe it, falling back
     // to the runner's version so the key is never absent (older cloud builds
     // read it positionally). `try_read` keeps this function sync and lock-free:
@@ -1807,9 +2199,13 @@ struct RunnerLoop {
     /// assign lane consults it so a managed run and a local chat never modify
     /// the same working copy at the same time (issue AC6).
     local_chat_active: Arc<std::sync::atomic::AtomicBool>,
-    /// The machine's built-in engine, for the current profile lane the
+    /// The machine's Pi Dash Agent, for the current profile lane the
     /// free-quota classifier is tied to. Threaded into each `AssignWorker`.
-    engine: Arc<crate::engine::manager::EngineManager>,
+    engine: Arc<crate::pidash_agent::manager::PidashAgentManager>,
+    /// Machine FIFO coordinator (NEWPIDASH-241). None only in tests.
+    coordinator: Option<Arc<crate::daemon::run_queue::Coordinator>>,
+    /// True when the queue store is blocked (fail closed, no execution).
+    queue_blocked: bool,
 }
 
 struct CurrentRun {
@@ -1881,6 +2277,60 @@ enum ChatCommand {
 }
 
 impl RunnerLoop {
+    /// Decide whether an `Assign` to this runner should be NACKed before
+    /// `Accept` for a credential reason. Returns `Some(reason)` when the
+    /// assign must be turned down without starting the agent.
+    ///
+    /// Pure helper so the Assign-reject decision is unit-testable without
+    /// driving the whole loop. The production call site passes
+    /// `crate::agent::auth::has_credentials(kind)` and `is_managed_codex`.
+    /// Managed Codex runners carry Pi Dash-managed auth and skip the
+    /// presence check, like `Engine`.
+    fn agent_auth_missing_rejection(
+        agent_kind: AgentKind,
+        has_credentials: bool,
+        managed_codex: bool,
+    ) -> Option<FailureReason> {
+        match agent_kind {
+            AgentKind::OpenClaw | AgentKind::PidashAgent => None,
+            AgentKind::Codex if managed_codex => None,
+            _ if !has_credentials => Some(FailureReason::AgentAuthMissing),
+            _ => None,
+        }
+    }
+
+    /// Backwards-compatible alias for the Muse-only name.
+    #[allow(dead_code)]
+    fn muse_assign_rejection(
+        agent_kind: AgentKind,
+        has_credentials: bool,
+    ) -> Option<FailureReason> {
+        Self::agent_auth_missing_rejection(agent_kind, has_credentials, false)
+    }
+
+    /// The detail string and warning fix hint for an auth-missing NACK.
+    /// Names the agent, runner, machine (`hostname`), and exact fix per
+    /// the issue example: “Claude Code on runner X (machine Y) has no
+    /// credentials: …”.
+    fn agent_auth_missing_detail(
+        agent_kind: AgentKind,
+        runner_name: &str,
+        machine: &str,
+    ) -> String {
+        format!(
+            "assign rejected: {} credentials missing on runner {runner_name} (machine {machine}): {}",
+            agent_kind.display_name(),
+            crate::agent::auth::fix_hint(agent_kind)
+        )
+    }
+
+    /// Backwards-compatible wrapper for the Muse-only call site.
+    #[allow(dead_code)]
+    fn muse_auth_missing_detail(runner_name: &str) -> String {
+        let machine = hostname().unwrap_or_else(|| "unknown".to_string());
+        Self::agent_auth_missing_detail(AgentKind::MuseCode, runner_name, &machine)
+    }
+
     /// NACK an `Assign` this runner cannot take right now. The cloud frees a
     /// runner the moment its previous run goes terminal in the database,
     /// which can precede the local agent actually stopping (most commonly a
@@ -1894,11 +2344,18 @@ impl RunnerLoop {
     /// loop. Delivery failure is logged only — the session-open redeliver
     /// path remains the backstop for a lost NACK.
     fn nack_assign(&self, run_id: uuid::Uuid, detail: String) {
+        self.nack_assign_with(run_id, detail, FailureReason::AssignRejectedBusy);
+    }
+
+    /// Same as [`nack_assign`](Self::nack_assign) but with an explicit
+    /// `FailureReason`. Used for `AgentAuthMissing` where the cloud re-queues
+    /// identically to `AssignRejectedBusy` but distinguishes the case.
+    fn nack_assign_with(&self, run_id: uuid::Uuid, detail: String, reason: FailureReason) {
         let out = self.out.clone();
         tokio::spawn(async move {
             let msg = ClientMsg::RunFailed {
                 run_id,
-                reason: FailureReason::AssignRejectedBusy,
+                reason,
                 detail: Some(detail),
                 ended_at: Utc::now(),
                 tokens: None,
@@ -1949,7 +2406,112 @@ impl RunnerLoop {
         tx
     }
 
+    /// Reserve this runner for a run and spawn its worker. Shared by the
+    /// Assign arm and restart re-hydration so outer-loop semantics (early
+    /// `in_flight` stamp, single-tenant guard, completion wakeup) cannot
+    /// diverge between the two paths.
+    async fn reserve_and_spawn(
+        &mut self,
+        run_id: uuid::Uuid,
+        prompt: String,
+        repo_url: Option<String>,
+        expected_codex_model: Option<String>,
+    ) {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (done_tx, done_rx) = oneshot::channel();
+        self.current_run = Some(CurrentRun {
+            run_id,
+            cancel: cancel.clone(),
+            done_rx,
+        });
+        self.state
+            .set_current_run(Some(CurrentRunSummary {
+                run_id,
+                thread_id: None,
+                status: "preparing".to_string(),
+                started_at: Utc::now(),
+                events: 0,
+            }))
+            .await;
+        let runner_paths = self.runner_paths.clone();
+        let daemon_paths = self.paths.clone();
+        let runner_config = self.runner_config.clone();
+        let state = self.state.clone();
+        let approvals = self.approvals.clone();
+        let out = self.out.clone();
+        let engine = self.engine.clone();
+        let coordinator = self.coordinator.clone();
+        let queue_blocked = self.queue_blocked;
+        tokio::spawn(async move {
+            let mut worker = AssignWorker {
+                runner_paths,
+                daemon_paths,
+                runner_config,
+                state,
+                approvals,
+                out,
+                cancel,
+                engine,
+                coordinator,
+                queue_blocked,
+            };
+            if let Err(e) = worker
+                .run(run_id, prompt, repo_url, expected_codex_model)
+                .await
+            {
+                tracing::error!("run {run_id} failed: {e:#}");
+                let _ = worker
+                    .out
+                    .send(ClientMsg::RunFailed {
+                        run_id,
+                        reason: FailureReason::Internal,
+                        detail: Some(format!("{e:#}")),
+                        ended_at: Utc::now(),
+                        tokens: None,
+                        model: None,
+                    })
+                    .await;
+                worker.state.set_current_run(None).await;
+            }
+            let _ = done_tx.send(());
+        });
+    }
+
     async fn run(mut self) -> Result<()> {
+        // Restart re-hydration (NEWPIDASH-241 T6): awaiting entries that
+        // survived a crash become this loop's current run again — the
+        // worker blocks oldest-first and never replays started work
+        // (non-waiting phases never load). Malformed payloads fail closed
+        // (durable cancel, no execution).
+        if let Some(coord) = self.coordinator.as_ref()
+            && let Some(entry) = coord.waiting_for(self.runner_paths.runner_id)
+        {
+            let parsed: Result<serde_json::Value, _> =
+                serde_json::from_slice(&entry.assignment_payload);
+            match parsed {
+                Ok(v) if v.get("prompt").and_then(|p| p.as_str()).is_some() => {
+                    let prompt = v
+                        .get("prompt")
+                        .and_then(|p| p.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let repo_url = v
+                        .get("repo_url")
+                        .and_then(|r| r.as_str())
+                        .map(|s| s.to_string());
+                    let model = v
+                        .get("expected_codex_model")
+                        .and_then(|m| m.as_str())
+                        .map(|s| s.to_string());
+                    self.reserve_and_spawn(entry.run_id, prompt, repo_url, model)
+                        .await;
+                }
+                _ => {
+                    tracing::error!(run_id=%entry.run_id, "waiting payload unparsable; durable cancel, no execution");
+                    let _ = coord.cancel_waiting(entry.run_id);
+                }
+            }
+        }
         loop {
             let frame = {
                 let inbound = self.inbound.recv();
@@ -1959,7 +2521,14 @@ impl RunnerLoop {
                 tokio::select! {
                     biased;
                     () = wait_done(&mut self.current_run) => {
-                        self.current_run = None;
+                        // Machine FIFO: release the slot so the oldest
+                        // waiting runner can start (coordinator owns
+                        // reservation clearing; worker no longer clears).
+                        if let Some(finished) = self.current_run.take()
+                            && let Some(coord) = self.coordinator.as_ref()
+                        {
+                            let _ = coord.complete(finished.run_id);
+                        }
                         continue;
                     }
                     () = wait_chat_done(&mut self.current_chat) => {
@@ -2061,6 +2630,7 @@ impl RunnerLoop {
                     prompt,
                     repo_url,
                     expected_codex_model,
+                    assignment_token,
                     ..
                 } => {
                     // Cross-lane exclusion: a runner has one working dir shared
@@ -2117,77 +2687,96 @@ impl RunnerLoop {
                         );
                         continue;
                     }
-                    let cancel = tokio_util::sync::CancellationToken::new();
-                    let (done_tx, done_rx) = oneshot::channel();
-                    self.current_run = Some(CurrentRun {
-                        run_id,
-                        cancel: cancel.clone(),
-                        done_rx,
-                    });
-                    // Stamp ``rx_in_flight = Some(run_id)`` synchronously, before
-                    // the worker does anything slow. The cloud put this run
-                    // into a BUSY status the moment it sent the Assign;
-                    // ``reap_stale_busy_runs`` (services/session_service.py)
-                    // will fail any BUSY run whose runner Hellos with
-                    // ``in_flight_run=null``. Without this early stamp, a
-                    // session reconnect during workspace setup (which can
-                    // take 30s+ for a fresh clone) reports null truthfully
-                    // and the run gets reaped before it ever starts.
-                    // The worker re-stamps a fuller summary at the
-                    // ``set_current_run`` site below; same run_id, so the
-                    // watch channel doesn't toggle in/out of None.
-                    self.state
-                        .set_current_run(Some(CurrentRunSummary {
+                    // Pre-pickup credential check: without the agent's
+                    // credentials the agent would fail at
+                    // `run.lifecycle.started` before any work, and the failure
+                    // would burn the issue's tick budget. Reject the Assign
+                    // before `Accept` (and before spawning the agent) so the
+                    // cloud re-queues it for another runner.
+                    // Managed Codex runners carry Pi Dash-managed auth and
+                    // skip the presence check, like Engine.
+                    if let Some(reason) = Self::agent_auth_missing_rejection(
+                        self.runner_config.agent.kind,
+                        crate::agent::auth::has_credentials(self.runner_config.agent.kind),
+                        crate::agent::auth::is_managed_codex(&self.runner_config.codex),
+                    ) {
+                        let machine = hostname().unwrap_or_else(|| "unknown".to_string());
+                        let detail = Self::agent_auth_missing_detail(
+                            self.runner_config.agent.kind,
+                            &self.runner_config.name,
+                            &machine,
+                        );
+                        tracing::warn!(
+                            %run_id,
+                            runner = %self.runner_config.name,
+                            agent = %self.runner_config.agent.kind.display_name(),
+                            "assign rejected: {} credentials missing on this runner; refusing pickup before Accept (not starting agent)",
+                            self.runner_config.agent.kind.display_name(),
+                        );
+                        self.nack_assign_with(run_id, detail, reason);
+                        continue;
+                    }
+                    // Durable held check: covers the startup window before
+                    // re-hydration reserves the runner (current_run is still
+                    // None while the waiting entry already exists).
+                    if let Some(coord) = self.coordinator.as_ref()
+                        && coord.runner_held(self.runner_paths.runner_id)
+                    {
+                        tracing::warn!(%run_id, "assign while runner already holds an attempt; rejecting");
+                        self.nack_assign(
                             run_id,
-                            thread_id: None,
-                            status: "preparing".to_string(),
-                            started_at: Utc::now(),
-                            events: 0,
+                            "assign rejected: runner already holds an attempt".to_string(),
+                        );
+                        continue;
+                    }
+                    // Machine FIFO (NEWPIDASH-241): storage failure fails
+                    // closed — NACK so the cloud re-queues, never execute.
+                    if self.queue_blocked {
+                        tracing::warn!(%run_id, "assign while run queue storage_blocked; rejecting");
+                        self.nack_assign(
+                            run_id,
+                            "run queue storage_blocked: durable queue unavailable".to_string(),
+                        );
+                        continue;
+                    }
+                    // Durable enqueue before any workspace prep: allocate
+                    // the FIFO sequence and persist the payload. The worker
+                    // below holds this runner without starting until the
+                    // coordinator admits it (oldest-first).
+                    if let Some(coord) = self.coordinator.as_ref() {
+                        let payload = serde_json::to_vec(&serde_json::json!({
+                            "prompt": prompt,
+                            "repo_url": repo_url,
+                            "expected_codex_model": expected_codex_model,
                         }))
-                        .await;
-                    let runner_paths = self.runner_paths.clone();
-                    let daemon_paths = self.paths.clone();
-                    let runner_config = self.runner_config.clone();
-                    let state = self.state.clone();
-                    let approvals = self.approvals.clone();
-                    let out = self.out.clone();
-                    let engine = self.engine.clone();
-                    tokio::spawn(async move {
-                        let mut worker = AssignWorker {
-                            runner_paths,
-                            daemon_paths,
-                            runner_config,
-                            state,
-                            approvals,
-                            out,
-                            cancel,
-                            engine,
-                        };
-                        if let Err(e) = worker
-                            .run(run_id, prompt, repo_url, expected_codex_model)
-                            .await
-                        {
-                            tracing::error!("run {run_id} failed: {e:#}");
-                            let _ = worker
-                                .out
-                                .send(ClientMsg::RunFailed {
-                                    run_id,
-                                    reason: FailureReason::Internal,
-                                    detail: Some(format!("{e:#}")),
-                                    ended_at: Utc::now(),
-                                    tokens: None,
-                                    model: None,
-                                })
-                                .await;
-                            worker.state.set_current_run(None).await;
+                        .unwrap_or_default();
+                        if let Err(e) = coord.enqueue_assign(
+                            self.runner_paths.runner_id,
+                            run_id,
+                            assignment_token,
+                            payload,
+                        ) {
+                            tracing::error!(%run_id, error = %e, "durable enqueue failed; rejecting");
+                            self.nack_assign(
+                                run_id,
+                                format!("run queue storage_blocked: enqueue failed: {e}"),
+                            );
+                            continue;
                         }
-                        let _ = done_tx.send(());
-                    });
+                    }
+                    self.reserve_and_spawn(run_id, prompt, repo_url, expected_codex_model)
+                        .await;
                 }
                 ServerMsg::Cancel { run_id, reason } => {
                     tracing::info!(%run_id, ?reason, "cancel received");
                     if let Some(run) = &self.current_run {
                         if run.run_id == run_id {
+                            // Durable cancel first (waiting runs must never
+                            // start workspace prep or an agent), then signal
+                            // the worker (blocked or executing) to stop.
+                            if let Some(coord) = self.coordinator.as_ref() {
+                                let _ = coord.cancel_waiting(run_id);
+                            }
                             run.cancel.cancel();
                         } else {
                             tracing::warn!(
@@ -2211,8 +2800,9 @@ impl RunnerLoop {
                     decision,
                     ..
                 } => {
+                    let key = cloud_approval_key(&self.approvals, approval_id).await;
                     self.approvals
-                        .decide(&approval_id.to_string(), decision, DecisionSource::Cloud)
+                        .decide(&key, decision, DecisionSource::Cloud)
                         .await;
                     self.state.note_approvals_changed();
                 }
@@ -3756,10 +4346,13 @@ struct AssignWorker {
     approvals: ApprovalRouter,
     out: RunnerOut,
     cancel: tokio_util::sync::CancellationToken,
-    /// The machine's built-in engine, for the current profile lane the
+    /// The machine's Pi Dash Agent, for the current profile lane the
     /// free-quota classifier is tied to. Read live per event, so a profile
     /// refresh mid-run still gates correctly.
-    engine: Arc<crate::engine::manager::EngineManager>,
+    engine: Arc<crate::pidash_agent::manager::PidashAgentManager>,
+    /// Machine FIFO coordinator (NEWPIDASH-241). None only in tests.
+    coordinator: Option<Arc<crate::daemon::run_queue::Coordinator>>,
+    queue_blocked: bool,
 }
 
 struct RunMetadata {
@@ -3795,8 +4388,8 @@ impl AssignWorker {
     /// so the two aren't conflated in telemetry.
     fn crash_reason(&self) -> FailureReason {
         match self.runner_config.agent.kind {
-            // The built-in engine is Codex, driven by the same driver.
-            AgentKind::Codex | AgentKind::Engine => FailureReason::CodexCrash,
+            // The Pi Dash Agent is Codex, driven by the same driver.
+            AgentKind::Codex | AgentKind::PidashAgent => FailureReason::CodexCrash,
             AgentKind::ClaudeCode
             | AgentKind::CursorAgent
             | AgentKind::OpenClaw
@@ -3812,6 +4405,25 @@ impl AssignWorker {
         repo_url: Option<String>,
         expected_codex_model: Option<String>,
     ) -> Result<()> {
+        // Machine FIFO gate (NEWPIDASH-241 T6): hold this runner without
+        // workspace preparation or agent start until the coordinator
+        // admits it (oldest-first). Waiting cancellation never reaches
+        // workspace prep or an agent. Storage failure fails closed.
+        if self.queue_blocked {
+            anyhow::bail!("run queue storage_blocked: durable queue unavailable");
+        }
+        if let Some(coord) = self.coordinator.as_ref() {
+            match coord.admit_blocking(run_id, &self.cancel).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    // Cancelled while waiting: no workspace prep, no agent,
+                    // no RunFailed (cancel already acked by RunnerLoop).
+                    tracing::info!(%run_id, "assign cancelled while waiting for machine capacity");
+                    return Ok(());
+                }
+                Err(e) => anyhow::bail!("queue admission failed: {e}"),
+            }
+        }
         self.handle_assign(run_id, prompt, repo_url, expected_codex_model)
             .await
     }
@@ -4110,12 +4722,12 @@ impl AssignWorker {
             {
                 Outcome::Done { status_label } => break status_label,
                 Outcome::Retry { code } => {
-                    if attempt >= crate::engine::free_quota::MAX_RETRIES {
+                    if attempt >= crate::pidash_agent::free_quota::MAX_RETRIES {
                         // The backoff budget is spent: fail with a clear
                         // message instead of failing on the first busy notice.
-                        let detail = crate::engine::free_quota::retry_exhausted_detail(
+                        let detail = crate::pidash_agent::free_quota::retry_exhausted_detail(
                             code,
-                            crate::engine::free_quota::MAX_RETRIES,
+                            crate::pidash_agent::free_quota::MAX_RETRIES,
                         );
                         let enriched = self.build_failure_detail(&detail, &bridge).await;
                         hist.append(&HistoryEntry::Footer {
@@ -4138,7 +4750,7 @@ impl AssignWorker {
                         break "failed".to_string();
                     }
                     attempt += 1;
-                    let delay = crate::engine::free_quota::backoff(attempt);
+                    let delay = crate::pidash_agent::free_quota::backoff(attempt);
                     tracing::info!(%run_id, %code, attempt, ?delay, "free-quota backoff: retrying the turn");
                     tokio::select! {
                         _ = self.cancel.cancelled() => break "cancelled".to_string(),
@@ -4566,16 +5178,20 @@ impl AssignWorker {
                     crate::codex::gateway::gateway_will_retry_notice(&method, &params)
                 {
                     let mut base: Option<String> = None;
-                    match crate::engine::free_quota::classify(&self.engine_lane(), status, &text) {
+                    match crate::pidash_agent::free_quota::classify(
+                        &self.engine_lane(),
+                        status,
+                        &text,
+                    ) {
                         // OpenHub free-lane stop codes: the run fails with
                         // the code's clear reason, keeping resets_at.
-                        Some(crate::engine::free_quota::Disposition::Stop(reason)) => {
+                        Some(crate::pidash_agent::free_quota::Disposition::Stop(reason)) => {
                             base = Some(reason);
                         }
                         // Free-lane retry codes: stop the engine's futile
                         // rapid retry, back off, and restart the turn. The
                         // run itself never fails on these notices.
-                        Some(crate::engine::free_quota::Disposition::Retry { code }) => {
+                        Some(crate::pidash_agent::free_quota::Disposition::Retry { code }) => {
                             bridge.interrupt().await.ok();
                             run_events.flush_before_lifecycle(&self.out).await;
                             hist.append(&HistoryEntry::Lifecycle {
@@ -4811,12 +5427,16 @@ impl AssignWorker {
                 // existing cleaning.
                 let disposition = crate::codex::gateway::gateway_status_text(&raw_base).and_then(
                     |(status, text)| {
-                        crate::engine::free_quota::classify(&self.engine_lane(), status, &text)
+                        crate::pidash_agent::free_quota::classify(
+                            &self.engine_lane(),
+                            status,
+                            &text,
+                        )
                     },
                 );
                 let base = match disposition {
-                    Some(crate::engine::free_quota::Disposition::Stop(reason)) => reason,
-                    Some(crate::engine::free_quota::Disposition::Retry { code }) => {
+                    Some(crate::pidash_agent::free_quota::Disposition::Stop(reason)) => reason,
+                    Some(crate::pidash_agent::free_quota::Disposition::Retry { code }) => {
                         run_events.flush_before_lifecycle(&self.out).await;
                         hist.append(&HistoryEntry::Lifecycle {
                             ts: Utc::now(),
@@ -4859,8 +5479,53 @@ impl AssignWorker {
     }
 
     async fn send(&self, msg: ClientMsg) {
+        // Clone the journal-relevant fields BEFORE the send consumes
+        // `msg`: an undelivered RunFailed (NEWPIDASH-251) would
+        // otherwise be discarded with only a warn log, leaving the
+        // run non-terminal cloud-side forever. The clone is cheap
+        // (RunFailed carries one short detail string) and only made
+        // for that variant.
+        let failed_signal: Option<(uuid::Uuid, FailureReason, DateTime<Utc>, Option<String>)> =
+            match &msg {
+                ClientMsg::RunFailed {
+                    run_id,
+                    reason,
+                    detail,
+                    ended_at,
+                    ..
+                } => Some((*run_id, *reason, *ended_at, detail.clone())),
+                _ => None,
+            };
         if let Err(err) = self.out.send(msg).await {
             tracing::warn!(error = %err, "failed to send runner lifecycle message");
+            if let Some((run_id, reason, ended_at, detail)) = failed_signal {
+                // Journal the signal so the (always-on) replay loop
+                // redelivers it until the cloud acknowledges; the
+                // server's first-writer-wins finalize makes a late
+                // redelivery after a sweep reap a no-op ack.
+                let entry = drain_journal::PendingRunFailure {
+                    runner_id: self.out.runner_id(),
+                    run_id,
+                    reason,
+                    detail: detail.clone().unwrap_or_default(),
+                    ended_at,
+                    recorded_at: Utc::now(),
+                    trigger: None,
+                    previous_exit: None,
+                };
+                let journal_paths = self.daemon_paths.clone();
+                match tokio::task::spawn_blocking(move || {
+                    drain_journal::record_all(&journal_paths, std::slice::from_ref(&entry))
+                })
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        tracing::warn!("failed to journal undelivered RunFailed: {e:#}")
+                    }
+                    Err(e) => tracing::warn!("drain journal task panicked: {e:#}"),
+                }
+            }
         }
     }
 }
@@ -4872,6 +5537,20 @@ enum Outcome {
     /// failure. `code` names it (`free_lane_busy` /
     /// `free_quota_unavailable`) for the exhausted-retries message.
     Retry { code: &'static str },
+}
+
+/// Map a cloud `Decide` UUID back to the local approval id it was derived
+/// from. Engine-issued handles (e.g. `rpc:<uuid>:<json id>`) are not UUIDs, so
+/// the cloud only ever sees `uuid_or(handle)`; without this reverse lookup the
+/// decision would be parked as an early decision and never reach the engine.
+async fn cloud_approval_key(approvals: &ApprovalRouter, cloud_id: uuid::Uuid) -> String {
+    approvals
+        .list_pending()
+        .await
+        .into_iter()
+        .map(|rec| rec.approval_id)
+        .find(|local| uuid_or(local) == cloud_id)
+        .unwrap_or_else(|| cloud_id.to_string())
 }
 
 /// Best-effort: if codex hands us a non-UUID approval id (it shouldn't, per
@@ -4901,6 +5580,47 @@ mod tests {
     use chrono::TimeZone;
     use std::path::PathBuf;
     use tokio::sync::Notify;
+
+    #[tokio::test]
+    async fn cloud_decide_resolves_engine_rpc_approval_handle() {
+        let approvals = ApprovalRouter::new();
+        let handle = format!("rpc:{}:7", uuid::Uuid::new_v4());
+        approvals
+            .open(ApprovalRecord {
+                approval_id: handle.clone(),
+                runner_id: uuid::Uuid::new_v4(),
+                run_id: uuid::Uuid::new_v4(),
+                kind: crate::cloud::protocol::ApprovalKind::CommandExecution,
+                payload: serde_json::json!({}),
+                reason: None,
+                requested_at: Utc::now(),
+                expires_at: None,
+                status: ApprovalStatus::Pending,
+            })
+            .await;
+
+        // The cloud only ever saw (and echoes back) the derived v5 UUID.
+        let key = cloud_approval_key(&approvals, uuid_or(&handle)).await;
+        assert_eq!(key, handle);
+        let resolved = approvals
+            .decide(
+                &key,
+                crate::cloud::protocol::ApprovalDecision::Accept,
+                DecisionSource::Cloud,
+            )
+            .await;
+        assert!(
+            resolved.is_some(),
+            "cloud decision must resolve the pending engine approval"
+        );
+
+        // Unknown ids fall through unchanged (early-decision buffering).
+        let other = uuid::Uuid::new_v4();
+        assert_eq!(
+            cloud_approval_key(&approvals, other).await,
+            other.to_string()
+        );
+    }
 
     fn paths_for(root: &std::path::Path) -> Paths {
         Paths {
@@ -4972,13 +5692,13 @@ mod tests {
         insts: &[&RunnerInstance],
     ) -> RunnerSpawnCtx {
         RunnerSpawnCtx {
-            engine: crate::engine::manager::EngineManager::new(
+            engine: crate::pidash_agent::manager::PidashAgentManager::new(
                 transport.as_ref().map(|t| t.cloud_url()),
                 paths.clone(),
                 tokens.clone(),
                 None,
             ),
-            local_chat: Arc::new(crate::ipc::engine_chat::EngineChatProfile::new(
+            local_chat: Arc::new(crate::ipc::pidash_agent_chat::PidashAgentChatProfile::new(
                 daemon.dev_machine_id,
             )),
             transport,
@@ -5011,6 +5731,7 @@ mod tests {
             daemon_state: StateHandle::new(crate::config::schema::Config {
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
                 version: 2,
                 daemon: Default::default(),
                 runners: vec![],
@@ -5022,6 +5743,9 @@ mod tests {
             activation_lock: Arc::new(tokio::sync::Mutex::new(())),
             engine_ops_lock: Arc::new(tokio::sync::Mutex::new(())),
             pending_idle_restarts: Default::default(),
+            run_coordinator: None,
+            run_queue_blocked: false,
+            run_receipt: None,
         }
     }
 
@@ -5043,6 +5767,7 @@ mod tests {
             &Config {
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
                 version: 2,
                 daemon: DaemonConfig::default(),
                 runners: vec![gone_cfg.clone(), keep_cfg.clone()],
@@ -5097,6 +5822,7 @@ mod tests {
             &Config {
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
                 version: 2,
                 daemon: DaemonConfig::default(),
                 runners,
@@ -5617,7 +6343,7 @@ mod tests {
                 runner_paths,
                 daemon_paths: paths,
                 runner_config: config.clone(),
-                engine: crate::engine::manager::EngineManager::new(
+                engine: crate::pidash_agent::manager::PidashAgentManager::new(
                     None,
                     engine_paths,
                     WorkspaceTokens::default(),
@@ -5626,6 +6352,7 @@ mod tests {
                 state: StateHandle::new(Config {
                     engine: Default::default(),
                     auth: Default::default(),
+                    auth_event: None,
                     version: 2,
                     daemon: Default::default(),
                     runners: vec![config.clone()],
@@ -5634,6 +6361,8 @@ mod tests {
                 approvals: ApprovalRouter::new(),
                 out: RunnerOut::new(config.runner_id, tx),
                 cancel: tokio_util::sync::CancellationToken::new(),
+                coordinator: None,
+                queue_blocked: false,
             };
             worker
                 .run(
@@ -5682,6 +6411,7 @@ mod tests {
             state: StateHandle::new(Config {
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
                 version: 2,
                 daemon: Default::default(),
                 runners: vec![config.clone()],
@@ -5963,6 +6693,7 @@ mod tests {
         let daemon_state = StateHandle::new(crate::config::schema::Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: Default::default(),
             runners: vec![],
@@ -6004,6 +6735,59 @@ mod tests {
         ];
         expected.sort_by_key(|(id, _)| *id);
         assert_eq!(received, expected);
+    }
+
+    #[test]
+    fn daemon_shutdown_detail_states_trigger_and_previous_exit() {
+        use crate::daemon::state::DaemonShutdownTrigger;
+        assert_eq!(
+            daemon_shutdown_detail(DaemonShutdownTrigger::SigTerm, None),
+            "daemon shutdown requested (SIGTERM)"
+        );
+        assert_eq!(
+            daemon_shutdown_detail(DaemonShutdownTrigger::SigTerm, Some("oom-kill")),
+            "daemon shutdown requested (SIGTERM; previous exit: oom-kill)"
+        );
+        assert_eq!(
+            daemon_shutdown_detail(DaemonShutdownTrigger::SigInt, None),
+            "daemon shutdown requested (SIGINT)"
+        );
+        assert_eq!(
+            daemon_shutdown_detail(DaemonShutdownTrigger::ControlSocket, None),
+            "daemon shutdown requested (control socket disconnect)"
+        );
+        assert_eq!(
+            daemon_shutdown_detail(DaemonShutdownTrigger::Invariant, None),
+            "daemon shutdown requested (local invariant failure)"
+        );
+        assert_eq!(
+            daemon_shutdown_detail(DaemonShutdownTrigger::SigTerm, Some("  ")),
+            "daemon shutdown requested (SIGTERM)"
+        );
+    }
+
+    #[test]
+    fn with_previous_exit_appends_without_duplicating() {
+        assert_eq!(
+            with_previous_exit("daemon shutdown requested (SIGTERM)", Some("oom-kill")),
+            "daemon shutdown requested (SIGTERM; previous exit: oom-kill)"
+        );
+        // Already carrying one: no-op.
+        assert_eq!(
+            with_previous_exit(
+                "daemon shutdown requested (SIGTERM; previous exit: oom-kill)",
+                Some("oom-kill")
+            ),
+            "daemon shutdown requested (SIGTERM; previous exit: oom-kill)"
+        );
+        assert_eq!(
+            with_previous_exit("daemon shutdown requested", Some("oom-kill")),
+            "daemon shutdown requested (previous exit: oom-kill)"
+        );
+        assert_eq!(
+            with_previous_exit("daemon shutdown requested (SIGTERM)", None),
+            "daemon shutdown requested (SIGTERM)"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6054,7 +6838,8 @@ mod tests {
                 .collect(),
         ));
 
-        let sent = drain_in_flight_runs(runners, &paths).await;
+        let sent =
+            drain_in_flight_runs(runners, &paths, None, DaemonShutdownTrigger::SigTerm, None).await;
         assert_eq!(sent, 1, "exactly one runner had an in-flight run");
         assert!(
             drain_journal::load(&paths).is_empty(),
@@ -6076,7 +6861,10 @@ mod tests {
             } => {
                 assert_eq!(run_id, active_run_id);
                 assert!(matches!(reason, FailureReason::DaemonRestart));
-                assert_eq!(detail.as_deref(), Some("daemon shutdown requested"));
+                assert_eq!(
+                    detail.as_deref(),
+                    Some("daemon shutdown requested (SIGTERM)")
+                );
             }
             other => panic!("expected RunFailed, got {other:?}"),
         }
@@ -6116,7 +6904,8 @@ mod tests {
                 .collect(),
         ));
 
-        let sent = drain_in_flight_runs(runners, &paths).await;
+        let sent =
+            drain_in_flight_runs(runners, &paths, None, DaemonShutdownTrigger::Unknown, None).await;
         assert_eq!(sent, 0);
         assert!(drain_journal::load(&paths).is_empty());
         let stray =
@@ -6167,7 +6956,14 @@ mod tests {
                 .collect(),
         ));
 
-        let sent = drain_in_flight_runs(runners, &paths).await;
+        let sent = drain_in_flight_runs(
+            runners,
+            &paths,
+            None,
+            DaemonShutdownTrigger::SigTerm,
+            Some("oom-kill".to_string()),
+        )
+        .await;
         assert_eq!(sent, 0, "send must fail with a dropped receiver");
 
         let journal = drain_journal::load(&paths);
@@ -6175,6 +6971,137 @@ mod tests {
         assert_eq!(journal[0].runner_id, inst.runner_id);
         assert_eq!(journal[0].run_id, run_id);
         assert!(matches!(journal[0].reason, FailureReason::DaemonRestart));
+        // NEWPIDASH-253: trigger + previous exit carried through the journal.
+        assert_eq!(journal[0].trigger.as_deref(), Some("SIGTERM"));
+        assert_eq!(journal[0].previous_exit.as_deref(), Some("oom-kill"));
+        assert_eq!(
+            journal[0].detail,
+            "daemon shutdown requested (SIGTERM; previous exit: oom-kill)"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn undelivered_run_failed_is_journaled_by_assign_worker_send() {
+        // NEWPIDASH-251: a normal (non-drain) RunFailed whose send
+        // exhausts its retries must land in the journal so the
+        // replay loop redelivers it, not be discarded with a warn.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        paths.ensure().unwrap();
+        let config = runner_config("journaltest", "WEB", tmp.path().join("wd"));
+        let runner_paths = paths.for_runner(config.runner_id);
+        runner_paths.ensure().unwrap();
+        let (out_tx, out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+        drop(out_rx); // force every send to fail
+        let worker = AssignWorker {
+            runner_paths,
+            daemon_paths: paths.clone(),
+            runner_config: config.clone(),
+            state: StateHandle::new(Config {
+                engine: Default::default(),
+                auth: Default::default(),
+                version: 2,
+                daemon: Default::default(),
+                runners: vec![config.clone()],
+                cli: None,
+                auth_event: None,
+            }),
+            approvals: ApprovalRouter::new(),
+            out: RunnerOut::new(config.runner_id, out_tx),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            engine: crate::pidash_agent::manager::PidashAgentManager::new(
+                None,
+                paths.clone(),
+                WorkspaceTokens::default(),
+                None,
+            ),
+            coordinator: None,
+            queue_blocked: false,
+        };
+        let run_id = uuid::Uuid::new_v4();
+        let ended_at = Utc::now();
+        worker
+            .send(ClientMsg::RunFailed {
+                run_id,
+                reason: FailureReason::AgentCrash,
+                detail: Some(
+                    "timed out waiting for muse exec's run.lifecycle.started record".into(),
+                ),
+                ended_at,
+                tokens: None,
+                model: None,
+            })
+            .await;
+
+        let journal = drain_journal::load(&paths);
+        assert_eq!(journal.len(), 1, "undelivered RunFailed must be journaled");
+        assert_eq!(journal[0].runner_id, config.runner_id);
+        assert_eq!(journal[0].run_id, run_id);
+        assert!(matches!(journal[0].reason, FailureReason::AgentCrash));
+        assert_eq!(
+            journal[0].detail,
+            "timed out waiting for muse exec's run.lifecycle.started record"
+        );
+        assert_eq!(journal[0].ended_at, ended_at);
+        assert!(journal[0].trigger.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delivered_run_failed_is_not_journaled() {
+        // The healthy path journals nothing: a delivered RunFailed
+        // leaves the journal empty so replay has nothing to do.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        paths.ensure().unwrap();
+        let config = runner_config("healthytest", "WEB", tmp.path().join("wd"));
+        let runner_paths = paths.for_runner(config.runner_id);
+        runner_paths.ensure().unwrap();
+        let (out_tx, mut out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+        let worker = AssignWorker {
+            runner_paths,
+            daemon_paths: paths.clone(),
+            runner_config: config.clone(),
+            state: StateHandle::new(Config {
+                engine: Default::default(),
+                auth: Default::default(),
+                version: 2,
+                daemon: Default::default(),
+                runners: vec![config.clone()],
+                cli: None,
+                auth_event: None,
+            }),
+            approvals: ApprovalRouter::new(),
+            out: RunnerOut::new(config.runner_id, out_tx),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            engine: crate::pidash_agent::manager::PidashAgentManager::new(
+                None,
+                paths.clone(),
+                WorkspaceTokens::default(),
+                None,
+            ),
+            coordinator: None,
+            queue_blocked: false,
+        };
+        worker
+            .send(ClientMsg::RunFailed {
+                run_id: uuid::Uuid::new_v4(),
+                reason: FailureReason::Timeout,
+                detail: Some("agent stalled".into()),
+                ended_at: Utc::now(),
+                tokens: None,
+                model: None,
+            })
+            .await;
+        // The send went out on the channel (delivered).
+        let env = tokio::time::timeout(std::time::Duration::from_secs(5), out_rx.recv())
+            .await
+            .expect("timed out waiting for RunFailed")
+            .expect("channel closed before RunFailed arrived");
+        assert!(matches!(env.body, ClientMsg::RunFailed { .. }));
+        assert!(
+            drain_journal::load(&paths).is_empty(),
+            "delivered RunFailed must not be journaled"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6195,9 +7122,11 @@ mod tests {
                 runner_id: inst.runner_id,
                 run_id,
                 reason: FailureReason::DaemonRestart,
-                detail: "daemon shutdown requested".into(),
+                detail: "daemon shutdown requested (SIGTERM)".into(),
                 ended_at,
                 recorded_at: ended_at,
+                trigger: Some("SIGTERM".into()),
+                previous_exit: None,
             }],
         )
         .unwrap();
@@ -6216,7 +7145,10 @@ mod tests {
                 .collect(),
         ));
 
-        let delivered = replay_drain_journal_once(&paths, &runners).await;
+        // NEWPIDASH-253: replay attaches the successor's previous
+        // oom-kill to the journaled SIGTERM detail.
+        let delivered =
+            replay_drain_journal_once(&paths, &runners, Some("oom-kill".to_string())).await;
         assert_eq!(delivered, 1);
         assert!(drain_journal::load(&paths).is_empty());
 
@@ -6229,10 +7161,15 @@ mod tests {
             ClientMsg::RunFailed {
                 run_id: got,
                 reason,
+                detail,
                 ..
             } => {
                 assert_eq!(got, run_id);
                 assert!(matches!(reason, FailureReason::DaemonRestart));
+                assert_eq!(
+                    detail.as_deref(),
+                    Some("daemon shutdown requested (SIGTERM; previous exit: oom-kill)")
+                );
             }
             other => panic!("expected RunFailed, got {other:?}"),
         }
@@ -6271,6 +7208,8 @@ mod tests {
                 detail: "daemon shutdown requested".into(),
                 ended_at: now,
                 recorded_at: now,
+                trigger: None,
+                previous_exit: None,
             }],
         )
         .unwrap();
@@ -6289,7 +7228,7 @@ mod tests {
                 .collect(),
         ));
 
-        let delivered = replay_drain_journal_once(&paths, &runners).await;
+        let delivered = replay_drain_journal_once(&paths, &runners, None).await;
         assert_eq!(delivered, 0);
         assert!(
             drain_journal::load(&paths).is_empty(),
@@ -6320,14 +7259,107 @@ mod tests {
                 detail: "daemon shutdown requested".into(),
                 ended_at: now,
                 recorded_at: now,
+                trigger: None,
+                previous_exit: None,
             }],
         )
         .unwrap();
         let runners: Arc<RwLock<HelloRunnerMap>> = Arc::new(RwLock::new(HashMap::new()));
 
-        let delivered = replay_drain_journal_once(&paths, &runners).await;
+        let delivered = replay_drain_journal_once(&paths, &runners, None).await;
         assert_eq!(delivered, 0);
         assert!(drain_journal::load(&paths).is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retry_loop_replays_entry_journaled_after_empty_tick() {
+        // NEWPIDASH-251 review: the retry loop must stay alive across
+        // empty ticks. An entry journaled AFTER the first (empty) tick
+        // must still replay without a daemon restart. The old
+        // `return` on empty killed the task at the first tick, so this
+        // entry would have sat in the journal until the next restart.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        let (out_tx, mut out_rx) = mpsc::channel::<Envelope<ClientMsg>>(8);
+        let inst = RunnerInstance::new(
+            runner_config("midrun", "WEB", tmp.path().join("wd")),
+            &paths,
+            out_tx,
+        );
+        let runners: Arc<RwLock<HelloRunnerMap>> = Arc::new(RwLock::new(
+            std::iter::once(&inst)
+                .map(|i| {
+                    (
+                        i.runner_id,
+                        (
+                            i.out.clone(),
+                            i.state.clone(),
+                            i.config.project_slug.clone(),
+                        ),
+                    )
+                })
+                .collect(),
+        ));
+        let handle = tokio::spawn(replay_drain_journal_retry_loop(
+            paths.clone(),
+            runners.clone(),
+            None,
+            Duration::from_millis(20),
+        ));
+        // Let a few empty ticks elapse. With the buggy `return` the
+        // task would already be finished after the first one.
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(
+            !handle.is_finished(),
+            "retry loop must not exit on an empty journal"
+        );
+        // Journal a mid-run failure (pre-start style) after startup.
+        let run_id = uuid::Uuid::new_v4();
+        let now = Utc::now();
+        drain_journal::record_all(
+            &paths,
+            &[drain_journal::PendingRunFailure {
+                runner_id: inst.runner_id,
+                run_id,
+                reason: FailureReason::AgentCrash,
+                detail: "timed out waiting for muse exec's run.lifecycle.started record".into(),
+                ended_at: now,
+                recorded_at: now,
+                trigger: None,
+                previous_exit: None,
+            }],
+        )
+        .unwrap();
+        let env = tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
+            .await
+            .expect("timed out waiting for replayed mid-run RunFailed")
+            .expect("channel closed");
+        match env.body {
+            ClientMsg::RunFailed {
+                run_id: got,
+                reason,
+                detail,
+                ..
+            } => {
+                assert_eq!(got, run_id);
+                assert!(matches!(reason, FailureReason::AgentCrash));
+                assert_eq!(
+                    detail.as_deref(),
+                    Some("timed out waiting for muse exec's run.lifecycle.started record")
+                );
+            }
+            other => panic!("expected RunFailed, got {other:?}"),
+        }
+        // The loop replays until the journal is empty, then keeps
+        // idling (still alive) until aborted on shutdown.
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(
+            drain_journal::load(&paths).is_empty(),
+            "replayed entry must be cleared from the journal"
+        );
+        assert!(!handle.is_finished(), "loop must keep idling after replay");
+        handle.abort();
+        let _ = handle.await;
     }
 
     /// The rig for driving bridge events through `handle_bridge_event`:
@@ -6338,7 +7370,7 @@ mod tests {
         use crate::codex::app_server::AppServer;
         use crate::codex::bridge::Bridge;
         use crate::config::schema::CliSection;
-        use crate::engine::test_server;
+        use crate::pidash_agent::test_server;
         use tokio::process::Command;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -6351,7 +7383,7 @@ mod tests {
         runner_paths.ensure().unwrap();
 
         let engine = match lane {
-            None => crate::engine::manager::EngineManager::new(
+            None => crate::pidash_agent::manager::PidashAgentManager::new(
                 None,
                 paths_for(tmp.path()),
                 WorkspaceTokens::default(),
@@ -6360,7 +7392,7 @@ mod tests {
             Some(lane) => {
                 let lane = lane.to_string();
                 let handler: test_server::Handler = Arc::new(move |req| {
-                    if req.path == crate::engine::api::PROFILE_PATH {
+                    if req.path == crate::pidash_agent::api::PROFILE_PATH {
                         (
                             200,
                             serde_json::json!({
@@ -6380,7 +7412,7 @@ mod tests {
                     workspace_slug: Some("acme".into()),
                     ..Default::default()
                 };
-                let manager = crate::engine::manager::EngineManager::new(
+                let manager = crate::pidash_agent::manager::PidashAgentManager::new(
                     Some(&server.url),
                     paths_for(tmp.path()),
                     WorkspaceTokens::from_cli(Some(&cli)),
@@ -6399,6 +7431,7 @@ mod tests {
             state: StateHandle::new(Config {
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
                 version: 2,
                 daemon: Default::default(),
                 runners: vec![config.clone()],
@@ -6408,6 +7441,8 @@ mod tests {
             out: RunnerOut::new(config.runner_id, tx),
             cancel: tokio_util::sync::CancellationToken::new(),
             engine,
+            coordinator: None,
+            queue_blocked: false,
         };
         let run_id = uuid::Uuid::new_v4();
         let hist = HistoryWriter::open(&runner_paths, run_id).await.unwrap();
@@ -6785,5 +7820,81 @@ mod tests {
             ),
             "unexpected status 503 Service Unavailable: boom, url: https://x/v1/responses, request id: r1"
         );
+    }
+
+    #[test]
+    fn muse_assign_with_missing_credentials_is_rejected_with_agent_auth_missing() {
+        // The pre-pickup gate: every supported kind + no creds → reject;
+        // with creds → accept; OpenClaw/Engine never blocked.
+        assert_eq!(
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::MuseCode, false, false),
+            Some(FailureReason::AgentAuthMissing)
+        );
+        assert_eq!(
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::MuseCode, true, false),
+            None
+        );
+        assert_eq!(
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::Codex, false, false),
+            Some(FailureReason::AgentAuthMissing)
+        );
+        assert_eq!(
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::ClaudeCode, false, false),
+            Some(FailureReason::AgentAuthMissing)
+        );
+        assert_eq!(
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::CursorAgent, false, false),
+            Some(FailureReason::AgentAuthMissing)
+        );
+        assert_eq!(
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::Grok, false, false),
+            Some(FailureReason::AgentAuthMissing)
+        );
+        assert_eq!(
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::OpenClaw, false, false),
+            None
+        );
+        assert_eq!(
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::PidashAgent, false, false),
+            None
+        );
+        // Managed Codex (Pi Dash-managed auth) skips the presence check
+        // even without user credentials, like Engine.
+        assert_eq!(
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::Codex, false, true),
+            None
+        );
+        assert_eq!(
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::Codex, true, true),
+            None
+        );
+        // Backwards-compatible alias still works for Muse.
+        assert_eq!(
+            RunnerLoop::muse_assign_rejection(AgentKind::MuseCode, false),
+            Some(FailureReason::AgentAuthMissing)
+        );
+    }
+
+    #[test]
+    fn muse_auth_missing_detail_names_runner_and_fix() {
+        let detail = RunnerLoop::muse_auth_missing_detail("build-box");
+        assert!(
+            detail.contains("build-box"),
+            "detail names runner: {detail}"
+        );
+        assert!(detail.contains("muse login"), "detail has fix: {detail}");
+        assert!(detail.contains("META_API_KEY"), "detail has fix: {detail}");
+        // Machine is included for the issue example format.
+        assert!(detail.contains("machine"), "detail names machine: {detail}");
+    }
+
+    #[test]
+    fn agent_auth_missing_detail_names_agent_runner_machine_and_fix() {
+        let detail =
+            RunnerLoop::agent_auth_missing_detail(AgentKind::ClaudeCode, "build-box", "my-machine");
+        assert!(detail.contains("Claude Code"), "names agent: {detail}");
+        assert!(detail.contains("build-box"), "names runner: {detail}");
+        assert!(detail.contains("my-machine"), "names machine: {detail}");
+        assert!(detail.contains("ANTHROPIC_API_KEY"), "names fix: {detail}");
     }
 }

@@ -533,6 +533,9 @@ async fn versions_response(
         Ok(gate) => gate,
         Err(denial) => return denial.into_response(),
     };
+    if let Err(denial) = super::require_not_archived(pool, &project_id).await {
+        return denial.into_response();
+    }
     let tz = match request_timezone(pool, &gate.user_id).await {
         Ok(tz) => tz,
         Err(denial) => return denial.into_response(),
@@ -605,6 +608,9 @@ pub async fn duplicate(
         Ok(gate) => gate,
         Err(denial) => return denial.into_response(),
     };
+    if let Err(denial) = super::require_not_archived(pool, &project_id).await {
+        return denial.into_response();
+    }
     // Before any write: `TimezoneMixin.initial` precedes the view body, so
     // an unknown zone 500s without cloning anything.
     let tz = match request_timezone(pool, &gate.user_id).await {

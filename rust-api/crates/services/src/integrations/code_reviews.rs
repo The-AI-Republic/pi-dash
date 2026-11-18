@@ -561,150 +561,6 @@ pub trait AdapterSource {
     fn adapter_for(&self, provider: &str) -> Result<&dyn ReviewAdapter, UnknownProvider>;
 }
 
-/// Idempotent backfill of `github_pull_request_links` rows created since
-/// migration 0152 into `git_code_review_links` (provider='github').
-///
-/// Rows are matched on `metadata.legacy_github_pull_request_link_id` — the
-/// key set by 0152 and by the dual-write mirror — so a second run is a no-op
-/// (returns 0). The function inserts only rows whose legacy id has no generic
-/// counterpart yet.
-///
-/// `pool` is a live Postgres pool. Returns the number of rows inserted.
-///
-/// PDASHOSS01-355 Step 1: this is the required backfill before reads switch
-/// to the generic table. Safe to run more than once; after the first run the
-/// count is 0.
-pub async fn backfill_github_pr_links(
-    pool: &sqlx::PgPool,
-) -> Result<u64, crate::integrations::accounts::StoreError> {
-    use sqlx::Row as _;
-    // Fetch legacy rows whose generic counterpart is missing.
-    // raw-sql: cross-table NOT EXISTS on metadata JSON key has no SeaORM equivalent (one-off backfill helper).
-    let legacy_rows = sqlx::query(
-        "SELECT id, project_id, workspace_id, issue_id, repo_owner, repo_name, pr_number, \
-         url, title, state, merged, draft, pr_updated_at, created_at, updated_at, created_by_id, updated_by_id \
-         FROM github_pull_request_links \
-         WHERE deleted_at IS NULL \
-           AND NOT EXISTS (SELECT 1 FROM git_code_review_links \
-                           WHERE metadata->>'legacy_github_pull_request_link_id' = github_pull_request_links.id::text)",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|e| crate::integrations::accounts::StoreError::Db(e.to_string()))?;
-
-    let mut inserted = 0u64;
-    for row in &legacy_rows {
-        let legacy_id: uuid::Uuid = row
-            .try_get("id")
-            .map_err(|e| crate::integrations::accounts::StoreError::Db(e.to_string()))?;
-        let project_id: uuid::Uuid = row
-            .try_get("project_id")
-            .map_err(|e| crate::integrations::accounts::StoreError::Db(e.to_string()))?;
-        let workspace_id: uuid::Uuid = row
-            .try_get("workspace_id")
-            .map_err(|e| crate::integrations::accounts::StoreError::Db(e.to_string()))?;
-        let issue_id: uuid::Uuid = row
-            .try_get("issue_id")
-            .map_err(|e| crate::integrations::accounts::StoreError::Db(e.to_string()))?;
-        let repo_owner: String = row
-            .try_get("repo_owner")
-            .map_err(|e| crate::integrations::accounts::StoreError::Db(e.to_string()))?;
-        let repo_name: String = row
-            .try_get("repo_name")
-            .map_err(|e| crate::integrations::accounts::StoreError::Db(e.to_string()))?;
-        let pr_number: i32 = row
-            .try_get("pr_number")
-            .map_err(|e| crate::integrations::accounts::StoreError::Db(e.to_string()))?;
-        let url: String = row
-            .try_get("url")
-            .map_err(|e| crate::integrations::accounts::StoreError::Db(e.to_string()))?;
-        let title: String = row
-            .try_get("title")
-            .map_err(|e| crate::integrations::accounts::StoreError::Db(e.to_string()))?;
-        let state: String = row
-            .try_get("state")
-            .map_err(|e| crate::integrations::accounts::StoreError::Db(e.to_string()))?;
-        let merged: bool = row
-            .try_get("merged")
-            .map_err(|e| crate::integrations::accounts::StoreError::Db(e.to_string()))?;
-        let draft: bool = row
-            .try_get("draft")
-            .map_err(|e| crate::integrations::accounts::StoreError::Db(e.to_string()))?;
-        let pr_updated_at: Option<chrono::DateTime<chrono::Utc>> = row
-            .try_get("pr_updated_at")
-            .map_err(|e| crate::integrations::accounts::StoreError::Db(e.to_string()))?;
-        let created_at: chrono::DateTime<chrono::Utc> = row
-            .try_get("created_at")
-            .map_err(|e| crate::integrations::accounts::StoreError::Db(e.to_string()))?;
-        let updated_at: chrono::DateTime<chrono::Utc> = row
-            .try_get("updated_at")
-            .map_err(|e| crate::integrations::accounts::StoreError::Db(e.to_string()))?;
-        let created_by_id: Option<uuid::Uuid> = row
-            .try_get("created_by_id")
-            .map_err(|e| crate::integrations::accounts::StoreError::Db(e.to_string()))?;
-        let updated_by_id: Option<uuid::Uuid> = row
-            .try_get("updated_by_id")
-            .map_err(|e| crate::integrations::accounts::StoreError::Db(e.to_string()))?;
-
-        let namespace = repo_owner.to_lowercase();
-        let repo_lower = repo_name.to_lowercase();
-        let external_iid = pr_number.to_string();
-        let generic_state = if merged {
-            "merged".to_owned()
-        } else if state == "closed" {
-            "closed".to_owned()
-        } else {
-            "open".to_owned()
-        };
-        // Try to resolve repo_external_id via GitRepository, if present.
-        // raw-sql: LOWER() case-insensitive repo lookup in backfill has no SeaORM equivalent.
-        let repo_external_id: String = sqlx::query_scalar(
-            "SELECT external_id FROM git_repositories WHERE provider='github' AND host_url='https://github.com' AND LOWER(namespace)=LOWER($1) AND LOWER(name)=LOWER($2) AND deleted_at IS NULL LIMIT 1",
-        )
-        .bind(&namespace)
-        .bind(&repo_lower)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| crate::integrations::accounts::StoreError::Db(e.to_string()))?
-        .unwrap_or_default();
-
-        let metadata =
-            serde_json::json!({"legacy_github_pull_request_link_id": legacy_id.to_string()});
-        let new_id = uuid::Uuid::new_v4();
-        // Use ON CONFLICT DO NOTHING to keep idempotency if a concurrent backfill inserts.
-        // raw-sql: INSERT ... ON CONFLICT DO NOTHING for idempotent backfill has no SeaORM equivalent.
-        let res = sqlx::query(
-            "INSERT INTO git_code_review_links (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, issue_id, provider, host_url, namespace, repo_name, repo_external_id, external_id, external_iid, url, title, state, merged, draft, remote_updated_at, metadata) \
-             VALUES ($1, $2, $3, $4, $5, NULL, $6, $7, $8, 'github', 'https://github.com', $9, $10, $11, '', $12, $13, $14, $15, $16, $17, $18, $19) \
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(new_id)
-        .bind(created_at)
-        .bind(updated_at)
-        .bind(created_by_id)
-        .bind(updated_by_id)
-        .bind(project_id)
-        .bind(workspace_id)
-        .bind(issue_id)
-        .bind(&namespace)
-        .bind(&repo_lower)
-        .bind(&repo_external_id)
-        .bind(&external_iid)
-        .bind(&url)
-        .bind(&title)
-        .bind(&generic_state)
-        .bind(merged)
-        .bind(draft)
-        .bind(pr_updated_at)
-        .bind(&metadata)
-        .execute(pool)
-        .await
-        .map_err(|e| crate::integrations::accounts::StoreError::Db(e.to_string()))?;
-        inserted += res.rows_affected();
-    }
-    Ok(inserted)
-}
-
 /// Detach pre-computation is trivial after PDASHOSS01-355: only the generic link is detached.
 pub struct DetachPlan;
 
@@ -1645,34 +1501,6 @@ mod tests {
         }
     }
 
-    #[allow(dead_code)]
-    fn probe_legacy(
-        issue: Uuid,
-    ) -> pidash_db::integrations::github_models::github_pull_request_link::GithubPullRequestLink
-    {
-        // Test helper for legacy row (kept for existing tests that still reference it after PDASHOSS01-355).
-        pidash_db::integrations::github_models::github_pull_request_link::GithubPullRequestLink {
-            id: Uuid::new_v4(),
-            created_at: stamp(),
-            updated_at: stamp(),
-            created_by_id: None,
-            updated_by_id: None,
-            deleted_at: None,
-            project_id: project_id(),
-            workspace_id: workspace_id(),
-            issue_id: issue,
-            repo_owner: "octo".into(),
-            repo_name: "hello".into(),
-            pr_number: 7,
-            url: "https://github.com/Octo/Hello/pull/7".into(),
-            title: "Fix it".into(),
-            state: "open".into(),
-            merged: false,
-            draft: false,
-            pr_updated_at: None,
-        }
-    }
-
     fn probe_link(issue: Uuid) -> GitCodeReviewLink {
         GitCodeReviewLink {
             id: Uuid::new_v4(),
@@ -1738,7 +1566,6 @@ mod tests {
         accounts: Mutex<Vec<GitProviderAccount>>,
         binding: Option<BindingHit>,
         repos: Mutex<Vec<GitRepository>>,
-        legacy: Mutex<Vec<pidash_db::integrations::github_models::github_pull_request_link::GithubPullRequestLink>>,
         links: Mutex<Vec<GitCodeReviewLink>>,
         conflict_on_insert: bool,
     }
@@ -1752,7 +1579,6 @@ mod tests {
                 accounts: Mutex::new(Vec::new()),
                 binding: None,
                 repos: Mutex::new(Vec::new()),
-                legacy: Mutex::new(Vec::new()),
                 links: Mutex::new(Vec::new()),
                 conflict_on_insert: false,
             }
@@ -1875,24 +1701,8 @@ mod tests {
             unimplemented!("code-review tests never flip sync")
         }
 
-        async fn set_github_syncs_enabled(
-            &self,
-            _project_id: Uuid,
-            _workspace_slug: &str,
-            _enabled: bool,
-        ) -> Result<u64, StoreError> {
-            unimplemented!("code-review tests never touch sync rows")
-        }
-
         async fn delete_binding(&self, _binding_id: Uuid) -> Result<(), StoreError> {
             unimplemented!("code-review tests never delete bindings")
-        }
-
-        async fn delete_github_syncs_for_project(
-            &self,
-            _project_id: Uuid,
-        ) -> Result<u64, StoreError> {
-            unimplemented!("code-review tests never delete sync rows")
         }
     }
 
@@ -2407,8 +2217,6 @@ mod tests {
         assert_eq!(link.repo_external_id, "repo-9");
         assert_eq!(link.external_id, "900");
         assert_eq!(link.issue_id, issue_id());
-        // PDASHOSS01-355: no legacy mirror is created.
-        assert_eq!(store.legacy.lock().unwrap().len(), 0);
     }
 
     #[tokio::test]
@@ -2434,8 +2242,6 @@ mod tests {
         assert!(!created);
         assert_eq!(link.title, "Fix it");
         assert_eq!(store.links.lock().unwrap().len(), 1);
-        // PDASHOSS01-355: no legacy shadow is created for existing rows.
-        assert_eq!(store.legacy.lock().unwrap().len(), 0);
     }
 
     #[tokio::test]
@@ -2520,8 +2326,6 @@ mod tests {
         assert!(created);
         assert_eq!(link.provider, "gitlab");
         assert_eq!(link.repo_external_id, "123");
-        // GitLab links never grow a legacy shadow.
-        assert!(store.legacy.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -2677,53 +2481,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detach_deletes_link_and_matching_legacy_only() {
-        // PDASHOSS01-355: detach only deletes the generic link; legacy table is untouched.
-        let store = MemStore::basic();
-        let link = probe_link(issue_id());
-        let legacy = probe_legacy(issue_id());
-        store.links.lock().unwrap().push(link.clone());
-        store.legacy.lock().unwrap().push(legacy.clone());
-        detach_code_review_link(&store, &link).await.unwrap();
-        assert!(store.links.lock().unwrap().is_empty());
-        assert_eq!(
-            store.legacy.lock().unwrap().len(),
-            1,
-            "legacy row left untouched (no legacy writes)"
-        );
-
-        // Foreign legacy row still survives (legacy never touched).
+    async fn detach_deletes_link_only() {
+        // PDASHOSS01-355: detach only deletes the generic link.
         let store = MemStore::basic();
         let link = probe_link(issue_id());
         store.links.lock().unwrap().push(link.clone());
-        store
-            .legacy
-            .lock()
-            .unwrap()
-            .push(probe_legacy(other_issue_id()));
         detach_code_review_link(&store, &link).await.unwrap();
         assert!(store.links.lock().unwrap().is_empty());
-        assert_eq!(store.legacy.lock().unwrap().len(), 1);
 
         // Non-GitHub links also only delete generic.
         let store = MemStore::basic();
         let mut link = probe_link(issue_id());
         link.provider = "gitlab".into();
         store.links.lock().unwrap().push(link.clone());
-        store.legacy.lock().unwrap().push(probe_legacy(issue_id()));
         detach_code_review_link(&store, &link).await.unwrap();
         assert!(store.links.lock().unwrap().is_empty());
-        assert_eq!(store.legacy.lock().unwrap().len(), 1);
 
         // Unparsable iid also only deletes generic.
         let store = MemStore::basic();
         let mut link = probe_link(issue_id());
         link.external_iid = "nope".into();
         store.links.lock().unwrap().push(link.clone());
-        store.legacy.lock().unwrap().push(probe_legacy(issue_id()));
         detach_code_review_link(&store, &link).await.unwrap();
         assert!(store.links.lock().unwrap().is_empty());
-        assert_eq!(store.legacy.lock().unwrap().len(), 1);
     }
 
     #[test]

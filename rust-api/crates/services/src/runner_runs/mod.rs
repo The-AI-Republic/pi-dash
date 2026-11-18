@@ -93,6 +93,7 @@
 //!   decoded), `description_stripped` via Django's `strip_tags`
 //!   (entities verbatim). Both are computed, exactly as saved.
 
+pub mod capacity;
 pub mod chat;
 pub mod failure_effects;
 pub mod finalization;
@@ -106,31 +107,30 @@ pub use finalization::{
     apply_done_payload_merge, effects_lock_passes, error_details_patch, finalize_error_code,
     finalize_lock_passes, finalize_update_sql, lock_issue_sql, lock_run_for_effects_sql,
     lock_run_for_finalize_sql, merge_done_payload, plan_finalize_values, plan_publish_effects,
-    plan_terminal_effects, plan_terminal_event, select_run_for_capacity_sql,
-    select_run_work_item_id_sql, terminal_event_exists_sql, terminal_event_insert_sql,
-    terminal_event_max_seq_sql, terminal_event_payload, update_capacity_marker_sql,
-    update_hooks_marker_sql, CapacityPlan, EffectsSql, FinalizeError, FinalizeValues, HooksPlan,
-    TerminalEffectsInputs, TerminalEffectsOutcome, TerminalEffectsPlan, TerminalEventPlan,
+    plan_terminal_effects, select_run_for_capacity_sql, select_run_work_item_id_sql,
+    update_capacity_marker_sql, update_hooks_marker_sql, CapacityPlan, EffectsSql, FinalizeError,
+    FinalizeValues, HooksPlan, TerminalEffectsInputs, TerminalEffectsOutcome, TerminalEffectsPlan,
 };
 pub use lifecycle::{
     clock_stopped_data, clock_stopped_message_html, clock_stopped_notification_insert_sql,
     clock_stopped_receivers, failure_comment_gate, ClockStoppedIssue, FailureCommentGate,
-    FailureCommentPlan, ReceiverCandidate, RenderedFailureComment, CLOCK_STOPPED_ENTITY_NAME,
-    CLOCK_STOPPED_SENDER,
+    FailureCommentPlan, ReceiverCandidate, RenderedFailureComment, RunnerIdentity,
+    CLOCK_STOPPED_ENTITY_NAME, CLOCK_STOPPED_SENDER,
 };
 pub use lifecycle::{
     comment_dedupe_exists_sql, failure_reread_sql, has_project_move_handoff,
     is_infra_failure_detail, live_state_by_runner_sql, lock_run_for_pause_sql,
     lock_run_for_requeue_sql, normalize_model, normalize_refusal_category, parent_thread_clear_sql,
     pause_comment_html, pause_drain_reread_sql, pause_lock_passes, pause_reread_sql,
-    pause_update_sql, payload_usage, plan_assign_rejected_busy, plan_failure_comment,
-    plan_pause_comment, plan_pause_update, plan_requeue_from_locked, plan_terminal_finalize,
-    plan_terminal_updates, requeue_lock_passes, requeue_update_keep_pin_sql, requeue_update_sql,
-    runner_busy_update_sql, terminal_extras, ticker_pending_entry_sql, usage_updates,
-    AssignRejectedBusyPlan, CommentInsert, CommentPlan, CommentSpeaker, LifecycleError,
-    LiveStateUsageFacts, PauseUpdatePlan, RequeuePlan, RequeueRunFacts, TerminalUpdateInputs,
-    TerminalUpdates, UsageUpdates, FIRE_TICK_TASK, INFRA_FAILURE_DETAIL_PREFIXES,
-    LLM_MODEL_MAX_CHARS, PROJECT_MOVE_HANDOFF_CONFIG_KEY, RUN_ERROR_MAX_CHARS,
+    pause_update_sql, payload_usage, plan_agent_auth_missing, plan_assign_rejected_busy,
+    plan_failure_comment, plan_pause_comment, plan_pause_update, plan_requeue_from_locked,
+    plan_terminal_finalize, plan_terminal_updates, requeue_lock_passes,
+    requeue_update_keep_pin_sql, requeue_update_sql, runner_busy_update_sql, terminal_extras,
+    ticker_pending_entry_sql, usage_updates, AgentAuthMissingPlan, AssignRejectedBusyPlan,
+    CommentInsert, CommentPlan, CommentSpeaker, LifecycleError, LiveStateUsageFacts,
+    PauseUpdatePlan, RequeuePlan, RequeueRunFacts, TerminalUpdateInputs, TerminalUpdates,
+    UsageUpdates, FIRE_TICK_TASK, INFRA_FAILURE_DETAIL_PREFIXES, LLM_MODEL_MAX_CHARS,
+    PROJECT_MOVE_HANDOFF_CONFIG_KEY, RUN_ERROR_MAX_CHARS,
 };
 pub use scheduler_hook::{
     plan_scheduler_hook, scheduler_binding_update_sql, BindingFacts, SchedulerHookPlan,
@@ -164,10 +164,6 @@ pub enum LifecycleEffect {
     DrainRunner { runner_id: Uuid },
     /// `drain_pod_by_id(pod_id)` (D-14).
     DrainPod { pod_id: Uuid },
-    /// `dispatch_waiting(workspace_id)` (D-11): synchronous, *not*
-    /// isolated — a failure propagates and the capacity marker stays
-    /// unset so the reconciler retries.
-    DispatchWaiting { workspace_id: Uuid },
     /// `complete_project_move_handoff(run_id)` (D-12): after the
     /// hooks transaction commits, isolated.
     CompleteProjectMoveHandoff { run_id: Uuid },

@@ -1012,9 +1012,12 @@ async fn run_now(
 }
 
 /// The run-now body past auth, the gates, the flag and token parsing:
-/// lock, precondition, conflict probe, write. Shared by the v1 handler
-/// above and the [`super::service`] entry (same statements, so the two
-/// surfaces cannot drift).
+/// archived check, lock, precondition, conflict probe, write. Shared
+/// by the v1 handler above and the [`super::service`] entry (same
+/// statements, so the two surfaces cannot drift). NEWPIDASH-239:
+/// run-now on an archived project's binding answers the
+/// NEWPIDASH-236 `project_archived` 409 (after the gates, before the
+/// lock), so a binding re-enabled by hand still cannot be fired.
 pub(crate) async fn run_now_core(
     context: &WriteContext,
     slug: &str,
@@ -1022,6 +1025,14 @@ pub(crate) async fn run_now_core(
     if_match: Option<String>,
 ) -> Result<Response, Denial> {
     let project_id = context.project_id.ok_or(Denial::ServerError)?;
+    let archived = crate::project_archived::archived_by_id(&context.pool, project_id)
+        .await
+        .map_err(|error| db_error(error, "v1-run-now-archived"))?;
+    if let Some(info) = archived {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     let mut tx = context
         .pool
         .begin()

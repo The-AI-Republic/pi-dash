@@ -40,7 +40,7 @@ function fakeRuntime(): AgentRuntimeApi {
   return {
     discover: vi.fn(async () => ({ kind: "not_answering" as const, reason: "test" })),
     localRunners: vi.fn(async () => []),
-    addEngineRunner: vi.fn(async () => ({
+    addPidashAgentRunner: vi.fn(async () => ({
       runner: "r",
       runner_id: "id",
       workspace: "ws",
@@ -48,8 +48,8 @@ function fakeRuntime(): AgentRuntimeApi {
       working_dir: "/t",
     })),
     installService: vi.fn(async () => undefined),
-    ensureEngine: vi.fn(async () => undefined),
-    engineLogin: vi.fn(async () => undefined),
+    ensurePidashAgent: vi.fn(async () => undefined),
+    pidashAgentLogin: vi.fn(async () => undefined),
     reloadCredentials: vi.fn(async () => undefined),
     requestReconnect: vi.fn(async () => undefined),
     saveApprovalModes: vi.fn(async () => undefined),
@@ -61,6 +61,14 @@ function fakeRuntime(): AgentRuntimeApi {
     recordNotices: vi.fn(async () => ({ notices: { legacy_folders: [], pod_member_projects: [] }, dismissed: [] })),
     dismissNotices: vi.fn(async () => ({ notices: { legacy_folders: [], pod_member_projects: [] }, dismissed: [] })),
     signOutComputer: vi.fn(async () => undefined),
+    daemonHello: vi.fn(async () => {
+      throw new Error("no daemon in this test");
+    }),
+    daemonActiveRuns: vi.fn(async () => 0),
+    desktopSessionHandoff: vi.fn(async () => ({})),
+    getAuthSyncRecord: vi.fn(async () => null),
+    setAuthSyncRecord: vi.fn(async () => undefined),
+    markFreshSignIn: vi.fn(async () => undefined),
   };
 }
 

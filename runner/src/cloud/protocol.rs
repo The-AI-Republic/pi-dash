@@ -301,6 +301,14 @@ pub enum ServerMsg {
         expected_codex_model: Option<String>,
         approval_policy_overrides: Option<BTreeMap<String, serde_json::Value>>,
         deadline: Option<DateTime<Utc>>,
+        /// Attempt identity minted by the Rust matcher (NEWPIDASH-241):
+        /// the daemon echoes it on capacity/lifecycle/poll calls.
+        /// `None` from old servers; old daemons ignore the additive fields.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assignment_token: Option<Uuid>,
+        /// `0` legacy, `1` machine queue.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assignment_protocol: Option<u16>,
     },
     Cancel {
         run_id: Uuid,
@@ -453,16 +461,16 @@ pub struct CreateRunnerCmd {
 pub struct MachinePollBody {
     /// Stream ids of the messages handled since the last poll.
     pub ack: Vec<String>,
-    /// The machine's built-in engine state (PIDESKAPP-121, design §8): the
+    /// The machine's Pi Dash Agent state (PIDESKAPP-121, design §8): the
     /// server sets `DevMachine.engine_auto_pause_reason` from it. Absent
     /// from daemons before the engine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub engine_state: Option<EngineStateReport>,
+    pub engine_state: Option<PidashAgentStateReport>,
 }
 
 /// `engine_state` in [`MachinePollBody`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EngineStateReport {
+pub struct PidashAgentStateReport {
     /// `available` / `signed_out` / `expiring` / `unavailable`.
     pub state: pidash_ipc::protocol::EngineState,
     /// Why it is not available (`engine_sign_in_required`,
@@ -476,7 +484,7 @@ pub struct EngineStateReport {
     pub credential_expires_at: Option<DateTime<Utc>>,
 }
 
-impl From<&pidash_ipc::protocol::EngineStatusInfo> for EngineStateReport {
+impl From<&pidash_ipc::protocol::EngineStatusInfo> for PidashAgentStateReport {
     fn from(s: &pidash_ipc::protocol::EngineStatusInfo) -> Self {
         Self {
             state: s.state,
@@ -543,6 +551,15 @@ pub enum FailureReason {
     /// re-queue the run for a fresh dispatch; older clouds fail it — either
     /// way it is not silently stuck.
     AssignRejectedBusy,
+    /// The runner rejected an `Assign` before sending `Accept` because the
+    /// agent's credentials are missing (for example Muse's `META_API_KEY` or
+    /// `~/.config/muse/auth.json`, Claude's `ANTHROPIC_API_KEY`, etc.)
+    /// and starting the agent would fail at `run.lifecycle.started` and burn
+    /// a tick. The cloud re-queues the run for another runner without
+    /// charging the issue's tick budget, matching `AssignRejectedBusy`'s
+    /// requeue semantics but with a distinct wire name (`agent_auth_missing`)
+    /// so the case is distinguishable in telemetry.
+    AgentAuthMissing,
 }
 
 #[cfg(test)]
@@ -559,6 +576,18 @@ mod tests {
         let back: FailureReason =
             serde_json::from_value(serde_json::json!("assign_rejected_busy")).unwrap();
         assert_eq!(back, FailureReason::AssignRejectedBusy);
+    }
+
+    /// The `agent_auth_missing` NACK reuses the same requeue path as
+    /// `assign_rejected_busy` on both clouds; its wire name must stay stable
+    /// so the cloud can branch on it without failing the run.
+    #[test]
+    fn agent_auth_missing_wire_name_is_stable() {
+        let json = serde_json::to_value(FailureReason::AgentAuthMissing).unwrap();
+        assert_eq!(json, serde_json::json!("agent_auth_missing"));
+        let back: FailureReason =
+            serde_json::from_value(serde_json::json!("agent_auth_missing")).unwrap();
+        assert_eq!(back, FailureReason::AgentAuthMissing);
     }
 
     /// The cloud's RunFailed endpoint branches on the literal string
@@ -678,6 +707,8 @@ mod tests {
             expected_codex_model: None,
             approval_policy_overrides: None,
             deadline: None,
+            assignment_token: None,
+            assignment_protocol: None,
         };
         let env = Envelope::new(msg);
         let s = serde_json::to_string(&env).unwrap();
@@ -746,7 +777,7 @@ mod tests {
     fn machine_poll_body_carries_the_engine_state() {
         let body = MachinePollBody {
             ack: vec!["1-0".into()],
-            engine_state: Some(EngineStateReport {
+            engine_state: Some(PidashAgentStateReport {
                 state: pidash_ipc::protocol::EngineState::SignedOut,
                 reason_code: Some("engine_sign_in_required".into()),
                 sign_in_state: pidash_ipc::protocol::EngineSignInState::Expired,

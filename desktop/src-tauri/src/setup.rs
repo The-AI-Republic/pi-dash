@@ -330,20 +330,21 @@ pub fn engine_login_invocation(device_code: String) -> (Vec<String>, Option<Stri
     )
 }
 
-/// `pidash auth logout` (`engine = true`: `--engine`, the engine only). The
-/// app's own sign-out never runs this unless the user ticked "Also sign out
-/// Pi Dash on this computer" (design §4.6).
+/// `pidash auth logout`. The app's sign-out always runs this (desktop
+/// unified sign-in, design §4); `local_only = true` clears the computer
+/// locally when the server cannot be reached, so the computer is signed
+/// out regardless.
 #[tauri::command]
 pub async fn pidash_cli_logout<R: Runtime>(
     app: AppHandle<R>,
-    engine: Option<bool>,
+    local_only: Option<bool>,
 ) -> Result<(), String> {
     blocking(move || {
         let cli = installed_cli()?;
         run_cli(
             &app,
             &cli,
-            &logout_invocation(engine.unwrap_or(false)),
+            &logout_invocation(local_only.unwrap_or(false)),
             None,
             None,
         )
@@ -351,10 +352,10 @@ pub async fn pidash_cli_logout<R: Runtime>(
     .await
 }
 
-pub fn logout_invocation(engine: bool) -> Vec<String> {
+pub fn logout_invocation(local_only: bool) -> Vec<String> {
     let mut args = vec!["auth".to_string(), "logout".to_string()];
-    if engine {
-        args.push("--engine".into());
+    if local_only {
+        args.push("--local-only".into());
     }
     args
 }
@@ -465,9 +466,9 @@ mod tests {
     }
 
     #[test]
-    fn logout_signs_out_the_engine_only_when_asked() {
+    fn logout_is_local_only_when_asked() {
         assert_eq!(logout_invocation(false), ["auth", "logout"]);
-        assert_eq!(logout_invocation(true), ["auth", "logout", "--engine"]);
+        assert_eq!(logout_invocation(true), ["auth", "logout", "--local-only"]);
     }
 
     /// A fake `pidash` records the argv and PATH each set-up step runs with:

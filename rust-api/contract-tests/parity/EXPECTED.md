@@ -137,10 +137,10 @@ G6 :: /api/workspaces/{slug}/workspace-themes/{pk}/ :: POST:serves-but-django-40
 
 ### G7 — engine runner endpoints pending NEWPIDASH-50 (0 rows)
 
-All seven Django routes of the engine-credential / machine-identity
-surface are Rust-owned: the four NEWPIDASH-50 engine-credential routes
-(engine-sign-out, engine/profile, engine/model-token,
-engine/credential/revoke) and the three NEWPIDASH-52 daemon dev-machine
+All six Django routes of the engine-credential / machine-identity
+surface are Rust-owned: the three NEWPIDASH-50 engine-credential routes
+(engine/profile, engine/model-token, engine/credential/revoke; the web
+engine-sign-out was removed by desktop_unified_signin) and the three NEWPIDASH-52 daemon dev-machine
 routes (GET/PATCH, merge-into, replace-candidates). Nothing pending.
 
 ```expected-routes
@@ -220,17 +220,18 @@ stays reserved in `WIRE_GAPS`.
 
 ```
 
-### W-cloud-agent (0 rows; wired)
+### W-cloud-agent (3 rows; retired by the agent-naming P3)
 
-Fix: PIDASHCONV-832 (wired `register_execute_tasks` in `worker()`:
-scan/sweep/expire execute in Rust on bin-local live seams. The run
-handler is overridden with an explicit forward — the model runtime
-(pydantic-ai) has no Rust counterpart, so Python keeps executing
-runs; PIDASHCONV-866 tracks true run ownership. The `W-cloud-agent`
-gap id stays reserved in `WIRE_GAPS`).
+P3 (agent-naming spec §5.2) deleted the retired cloud plane: Rust no
+longer registers the three cloud tasks. Django still lists them, so
+they diff as MISSING under the reserved `W-cloud-agent` gap id.
+`managed_runner.expire_waiting_runs` is NOT in this list: it moved to
+`jobs/src/runner_runs/waiting_expiry.rs` and stays OWNED.
 
 ```expected-jobs
-
+W-cloud-agent :: cloud_agent.run_agent_run :: absent-from-rust-table
+W-cloud-agent :: cloud_agent.scan_queued_runs :: absent-from-rust-table
+W-cloud-agent :: cloud_agent.sweep_stale_runs :: absent-from-rust-table
 ```
 
 ### W-mail (0 rows; wired by PIDASHCONV-865)
@@ -304,4 +305,9 @@ since the PIDASHCONV-1055 main→rust-dev merge (2d029396);
 PIDASHCONV-1087 deleted their `RUST_AHEAD_BEAT_ENTRIES` rows.
 
 Any other beat drift fails the check structurally — there is no
-"expected beat miss" list.
+"expected beat miss" list. The one exception is `RETIRED_BEAT_ENTRIES`
+in `job_inventory.py`: the two cloud beat entries
+(`cloud-agent-scan-queued-runs`, `cloud-agent-sweep-stale-runs`) that the
+agent-naming P3 retired in Rust while Django still schedules them. They
+diff RETIRED under `W-cloud-agent`; the row must go once Django drops
+the entry.

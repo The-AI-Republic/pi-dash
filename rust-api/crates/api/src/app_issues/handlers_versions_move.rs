@@ -112,10 +112,9 @@ use super::access;
 use super::queries_engage::VERSION_PAGE_KEYS;
 use super::render::{v2_page, V2Page};
 use super::{query_last, QueryMap};
-use crate::domain_hooks::{AppMoveAdmissionCache, AppMovePostCommitHook, AppTaskEnqueueHook};
+use crate::domain_hooks::{AppMovePostCommitHook, AppTaskEnqueueHook};
 use crate::issue_transition::AppTransitionHook;
 use crate::middleware::body_limit::read_request_bytes;
-use crate::orchestration::SpanCreationDeps;
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
 use crate::v1_cycles_modules::json::{
@@ -198,6 +197,8 @@ enum Denial {
     UnsupportedMediaType(String),
     /// 502, truncated request-body read (the shared bad-gateway shape).
     TruncatedBody,
+    /// 409, archived project (NEWPIDASH-236, pre-rendered body).
+    ProjectArchived(String),
     /// 500, generic branch.
     ServerError,
 }
@@ -239,6 +240,7 @@ impl Denial {
                 StatusCode::BAD_GATEWAY,
                 crate::edge::BAD_GATEWAY_BODY.to_owned(),
             ),
+            Denial::ProjectArchived(body) => (StatusCode::CONFLICT, body.clone()),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 super::SERVER_ERROR_BODY.to_owned(),
@@ -357,11 +359,18 @@ async fn check_allow(
     let allowed = access::allows(&orm(pool), slug, *project_id, *user_id, allowed)
         .await
         .map_err(|_| Denial::ServerError)?;
-    if allowed {
-        Ok(())
-    } else {
-        Err(Denial::Forbidden)
+    if !allowed {
+        return Err(Denial::Forbidden);
     }
+    if let Some(info) = crate::project_archived::archived_by_id(pool, *project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
+    Ok(())
 }
 
 /// View-body tenant facts: the actor's render timezone
@@ -1073,21 +1082,8 @@ async fn move_issue(
     });
     let transition: Arc<dyn IssueTransitionHook> = Arc::new(AppTransitionHook::new(&state, &pool));
     let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&pool));
-    let span_deps = SpanCreationDeps::from_state(&state);
-    let drain: Arc<dyn MovePostCommitHook> = Arc::new(AppMovePostCommitHook::new(
-        &pool,
-        &state,
-        span_deps.cache.clone(),
-    ));
-    let creation = CreationDeps {
-        pool: pool.clone(),
-        cloud: span_deps.cloud.clone(),
-        managed: span_deps.managed.clone(),
-        now_unix_secs: span_deps.now_unix_secs,
-        toolsets: span_deps.toolsets.clone(),
-        assistant_seam: span_deps.assistant_seam.clone(),
-        admission: Arc::new(AppMoveAdmissionCache::new(span_deps.cache)),
-    };
+    let drain: Arc<dyn MovePostCommitHook> = Arc::new(AppMovePostCommitHook::new(&pool, &state));
+    let creation = CreationDeps { pool: pool.clone() };
     let outcome = domain::run(&ctx, orm, |txn| {
         let transition = transition.clone();
         let enqueue = enqueue.clone();

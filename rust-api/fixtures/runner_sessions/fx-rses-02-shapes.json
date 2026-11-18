@@ -15,7 +15,8 @@
       "rid",
       "server_time",
       "long_poll_interval_secs",
-      "protocol_version"
+      "protocol_version",
+      "capabilities"
     ],
     "session_id_is_uuid4": "4941e665-a688-4b04-9f61-de965ee5e968",
     "welcome_sample": {
@@ -23,17 +24,20 @@
       "rid": "28a83b35-9dd5-42bc-9d94-d1a4cf880fb1",
       "server_time": "2026-10-02T22:22:34.118933+00:00",
       "long_poll_interval_secs": 25,
-      "protocol_version": 4
+      "protocol_version": 4,
+      "capabilities": [
+        "machine_run_queue_v1"
+      ]
     },
     "resume_ack": null,
     "redeliver": null,
-    "body_bytes_sample": "{\"session_id\":\"4941e665-a688-4b04-9f61-de965ee5e968\",\"welcome\":{\"type\":\"welcome\",\"rid\":\"28a83b35-9dd5-42bc-9d94-d1a4cf880fb1\",\"server_time\":\"2026-10-02T22:22:34.118933+00:00\",\"long_poll_interval_secs\":25,\"protocol_version\":4},\"resume_ack\":null,\"redeliver\":null}",
+    "body_bytes_sample": "{\"session_id\":\"4941e665-a688-4b04-9f61-de965ee5e968\",\"welcome\":{\"type\":\"welcome\",\"rid\":\"28a83b35-9dd5-42bc-9d94-d1a4cf880fb1\",\"server_time\":\"2026-10-02T22:22:34.118933+00:00\",\"long_poll_interval_secs\":25,\"protocol_version\":4,\"capabilities\":[\"machine_run_queue_v1\"]},\"resume_ack\":null,\"redeliver\":null}",
     "sql": [
       "BEGIN",
       "SET LOCAL lock_timeout = '5000ms'",
       "SET LOCAL statement_timeout = '20000ms'",
       "SELECT \"runner_session\".\"id\", \"runner_session\".\"runner_id\", \"runner_session\".\"protocol_version\", \"runner_session\".\"created_at\", \"runner_session\".\"last_seen_at\", \"runner_session\".\"revoked_at\", \"runner_session\".\"revoked_reason\" FROM \"runner_session\" WHERE (\"runner_session\".\"revoked_at\" IS NULL AND \"runner_session\".\"runner_id\" = '28a83b359dd542bc9d94d1a4cf880fb1'::uuid) ORDER BY \"runner_session\".\"created_at\" DESC LIMIT 1 FOR UPDATE",
-      "INSERT INTO \"runner_session\" (\"id\", \"runner_id\", \"protocol_version\", \"created_at\", \"last_seen_at\", \"revoked_at\", \"revoked_reason\") VALUES ('4941e665a6884b049f61de965ee5e968'::uuid, '28a83b359dd542bc9d94d1a4cf880fb1'::uuid, 4, '2026-10-02 22:22:34.055739+00:00'::timestamptz, '2026-10-02 22:22:34.047587+00:00'::timestamptz, NULL, '')",
+      "INSERT INTO \"runner_session\" (\"id\", \"runner_id\", \"protocol_version\", \"created_at\", \"last_seen_at\", \"revoked_at\", \"revoked_reason\", \"capabilities\") VALUES ('4941e665a6884b049f61de965ee5e968'::uuid, '28a83b359dd542bc9d94d1a4cf880fb1'::uuid, 4, '2026-10-02 22:22:34.055739+00:00'::timestamptz, '2026-10-02 22:22:34.047587+00:00'::timestamptz, NULL, '', '[]'::jsonb)",
       "UPDATE \"runner\" SET \"os\" = '', \"arch\" = '', \"runner_version\" = '', \"dev_metadata\" = '{}'::jsonb, \"last_heartbeat_at\" = '2026-10-02 22:22:34.057584+00:00'::timestamptz WHERE \"runner\".\"id\" = '28a83b359dd542bc9d94d1a4cf880fb1'::uuid",
       "SELECT \"agent_run\".\"id\" FROM \"agent_run\" WHERE (\"agent_run\".\"assigned_at\" < '2026-10-02 22:21:34.065541+00:00'::timestamptz AND \"agent_run\".\"runner_id\" = '28a83b359dd542bc9d94d1a4cf880fb1'::uuid AND \"agent_run\".\"status\" IN ('running', 'awaiting_approval', 'awaiting_reauth') AND \"agent_run\".\"status\" = 'cancel_requested') ORDER BY \"agent_run\".\"created_at\" DESC",
       "SELECT \"agent_run\".\"pod_id\" FROM \"agent_run\" WHERE (\"agent_run\".\"assigned_at\" < '2026-10-02 22:21:34.065541+00:00'::timestamptz AND \"agent_run\".\"runner_id\" = '28a83b359dd542bc9d94d1a4cf880fb1'::uuid AND \"agent_run\".\"status\" IN ('running', 'awaiting_approval', 'awaiting_reauth') AND \"agent_run\".\"status\" = 'cancel_requested') ORDER BY \"agent_run\".\"created_at\" DESC",
@@ -95,7 +99,10 @@
       "rid": "28a83b35-9dd5-42bc-9d94-d1a4cf880fb1",
       "server_time": "2026-10-02T22:22:34.147425+00:00",
       "long_poll_interval_secs": 25,
-      "protocol_version": 4
+      "protocol_version": 4,
+      "capabilities": [
+        "machine_run_queue_v1"
+      ]
     },
     "resume_ack": null,
     "redeliver": null,
@@ -106,7 +113,7 @@
       "SET LOCAL statement_timeout = '20000ms'",
       "SELECT \"runner_session\".\"id\", \"runner_session\".\"runner_id\", \"runner_session\".\"protocol_version\", \"runner_session\".\"created_at\", \"runner_session\".\"last_seen_at\", \"runner_session\".\"revoked_at\", \"runner_session\".\"revoked_reason\" FROM \"runner_session\" WHERE (\"runner_session\".\"revoked_at\" IS NULL AND \"runner_session\".\"runner_id\" = '28a83b359dd542bc9d94d1a4cf880fb1'::uuid) ORDER BY \"runner_session\".\"created_at\" DESC LIMIT 1 FOR UPDATE",
       "UPDATE \"runner_session\" SET \"revoked_at\" = '2026-10-02 22:22:34.136080+00:00'::timestamptz, \"revoked_reason\" = 'evicted_by_new_session' WHERE \"runner_session\".\"id\" = '4941e665a6884b049f61de965ee5e968'::uuid",
-      "INSERT INTO \"runner_session\" (\"id\", \"runner_id\", \"protocol_version\", \"created_at\", \"last_seen_at\", \"revoked_at\", \"revoked_reason\") VALUES ('1131b9c30ff14af59fea5ce9eacb094c'::uuid, '28a83b359dd542bc9d94d1a4cf880fb1'::uuid, 4, '2026-10-02 22:22:34.136728+00:00'::timestamptz, '2026-10-02 22:22:34.136643+00:00'::timestamptz, NULL, '')",
+      "INSERT INTO \"runner_session\" (\"id\", \"runner_id\", \"protocol_version\", \"created_at\", \"last_seen_at\", \"revoked_at\", \"revoked_reason\", \"capabilities\") VALUES ('1131b9c30ff14af59fea5ce9eacb094c'::uuid, '28a83b359dd542bc9d94d1a4cf880fb1'::uuid, 4, '2026-10-02 22:22:34.136728+00:00'::timestamptz, '2026-10-02 22:22:34.136643+00:00'::timestamptz, NULL, '', '[]'::jsonb)",
       "UPDATE \"runner\" SET \"capabilities\" = '[\"agent:muse_code\"]'::jsonb, \"os\" = 'darwin', \"arch\" = 'arm64', \"runner_version\" = '9.9.9', \"dev_metadata\" = '{\"codex_version\": \"v1.2.3\", \"working_dir\": \"/tmp/wd\"}'::jsonb, \"last_heartbeat_at\" = '2026-10-02 22:22:34.137006+00:00'::timestamptz WHERE \"runner\".\"id\" = '28a83b359dd542bc9d94d1a4cf880fb1'::uuid",
       "SELECT \"agent_run\".\"id\" FROM \"agent_run\" WHERE (\"agent_run\".\"assigned_at\" < '2026-10-02 22:21:34.137611+00:00'::timestamptz AND \"agent_run\".\"runner_id\" = '28a83b359dd542bc9d94d1a4cf880fb1'::uuid AND \"agent_run\".\"status\" IN ('running', 'awaiting_approval', 'awaiting_reauth') AND \"agent_run\".\"status\" = 'cancel_requested') ORDER BY \"agent_run\".\"created_at\" DESC",
       "SELECT \"agent_run\".\"pod_id\" FROM \"agent_run\" WHERE (\"agent_run\".\"assigned_at\" < '2026-10-02 22:21:34.137611+00:00'::timestamptz AND \"agent_run\".\"runner_id\" = '28a83b359dd542bc9d94d1a4cf880fb1'::uuid AND \"agent_run\".\"status\" IN ('running', 'awaiting_approval', 'awaiting_reauth') AND \"agent_run\".\"status\" = 'cancel_requested') ORDER BY \"agent_run\".\"created_at\" DESC",
@@ -181,7 +188,10 @@
       "long_poll_interval_secs": 25,
       "protocol_version": 4,
       "latest_runner_version": "1.2.3",
-      "min_runner_version": "1.0.0"
+      "min_runner_version": "1.0.0",
+      "capabilities": [
+        "machine_run_queue_v1"
+      ]
     },
     "welcome_key_order": [
       "type",
@@ -190,7 +200,8 @@
       "long_poll_interval_secs",
       "protocol_version",
       "latest_runner_version",
-      "min_runner_version"
+      "min_runner_version",
+      "capabilities"
     ]
   },
   "protocol_header": {
@@ -812,7 +823,7 @@
   },
   "open_201_dispatch_wire": {
     "status": 201,
-    "body_bytes": "{\"session_id\":\"3c493411-a8a6-420b-aaad-69fbd93fc69a\",\"welcome\":{\"type\":\"welcome\",\"rid\":\"da5e0788-02b9-48c3-9f91-87c3d2c3798e\",\"server_time\":\"2026-10-03T00:02:59.399590+00:00\",\"long_poll_interval_secs\":25,\"protocol_version\":4},\"resume_ack\":null,\"redeliver\":null}",
+    "body_bytes": "{\"session_id\":\"3c493411-a8a6-420b-aaad-69fbd93fc69a\",\"welcome\":{\"type\":\"welcome\",\"rid\":\"da5e0788-02b9-48c3-9f91-87c3d2c3798e\",\"server_time\":\"2026-10-03T00:02:59.399590+00:00\",\"long_poll_interval_secs\":25,\"protocol_version\":4,\"capabilities\":[\"machine_run_queue_v1\"]},\"resume_ack\":null,\"redeliver\":null}",
     "redis_cmds": [
       "xgroup_create",
       "xautoclaim",

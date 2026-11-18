@@ -235,6 +235,8 @@ enum Denial {
     UnsupportedMediaType(String),
     /// 502, truncated request-body read (the shared bad-gateway shape).
     TruncatedBody,
+    /// 409, archived project (NEWPIDASH-236, pre-rendered body).
+    ProjectArchived(String),
     /// 500, generic branch.
     ServerError,
 }
@@ -299,6 +301,7 @@ impl Denial {
                 StatusCode::BAD_GATEWAY,
                 crate::edge::BAD_GATEWAY_BODY.to_owned(),
             ),
+            Denial::ProjectArchived(body) => (StatusCode::CONFLICT, body.clone()),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 super::SERVER_ERROR_BODY.to_owned(),
@@ -469,11 +472,18 @@ async fn check_entity_gate(
         has_identifier_membership: false,
         has_project_identifier: false,
     };
-    if pidash_auth::permissions::project::decide_project_entity(method, &scope, &facts) {
-        Ok(())
-    } else {
-        Err(Denial::ForbiddenDetail)
+    if !pidash_auth::permissions::project::decide_project_entity(method, &scope, &facts) {
+        return Err(Denial::ForbiddenDetail);
     }
+    if let Some(info) = crate::project_archived::archived_by_id(pool, *project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
+    Ok(())
 }
 
 /// View-body tenant facts: the actor's timezone. (The project row itself
@@ -3745,9 +3755,6 @@ impl GitStore for ReviewStore {
             repos_orm::delete_project_bindings(&conn, plan.project_id)
                 .await
                 .map_err(|error| git_store_error("bind delete", error))?;
-            repos_orm::delete_project_github_syncs(&conn, plan.project_id)
-                .await
-                .map_err(|error| git_store_error("bind sync delete", error))?;
             repos_orm::insert_binding(
                 &conn,
                 repos_orm::NewBinding {
@@ -3833,31 +3840,11 @@ impl GitStore for ReviewStore {
             .ok_or(GitStoreError::NotFound("binding"))
     }
 
-    async fn set_github_syncs_enabled(
-        &self,
-        project_id: Uuid,
-        workspace_slug: &str,
-        enabled: bool,
-    ) -> Result<u64, GitStoreError> {
-        repos_orm::set_project_github_syncs_enabled(&self.db, project_id, workspace_slug, enabled)
-            .await
-            .map_err(|error| git_store_error("github syncs set enabled", error))
-    }
-
     async fn delete_binding(&self, binding_id: Uuid) -> Result<(), GitStoreError> {
         repos_orm::delete_binding(&self.db, binding_id)
             .await
             .map_err(|error| git_store_error("binding delete", error))?;
         Ok(())
-    }
-
-    async fn delete_github_syncs_for_project(
-        &self,
-        project_id: Uuid,
-    ) -> Result<u64, GitStoreError> {
-        repos_orm::delete_project_github_syncs(&self.db, project_id)
-            .await
-            .map_err(|error| git_store_error("github syncs delete", error))
     }
 }
 

@@ -323,11 +323,10 @@ pub fn sample_contexts(kind: &str) -> Vec<serde_json::Value> {
 ///
 /// Recipes carry work-type slots, so membership depends on the work type: a
 /// core section appears for every work type, a work-type section
-/// (`software.execute`) only where its work type fills the slot. Cloud
-/// recipes have no slots and contribute one entry per matching kind (the
-/// work type is irrelevant there and recorded as the default). Order:
-/// local recipes, then managed (an alias — contributes nothing new), then
-/// Cloud; work types key-sorted; each combination deduplicated in order.
+/// (`software.execute`) only where its work type fills the slot. Order:
+/// local recipes, then managed (an alias — contributes nothing new); work
+/// types key-sorted; each combination deduplicated in order. (The cloud
+/// recipes went with the retired cloud plane in P3 step B.)
 pub fn compositions_for_section(section_key: &str) -> Vec<(&'static str, &'static str)> {
     let mut combos: Vec<(&'static str, &'static str)> = Vec::new();
     for table in [recipes::RECIPES, recipes::MANAGED_RECIPES] {
@@ -343,12 +342,6 @@ pub fn compositions_for_section(section_key: &str) -> Vec<(&'static str, &'stati
                     combos.push(combo);
                 }
             }
-        }
-    }
-    for (kind, keys) in recipes::CLOUD_RECIPES {
-        let combo = (*kind, work_types::DEFAULT_WORK_TYPE);
-        if keys.contains(&section_key) && !combos.contains(&combo) {
-            combos.push(combo);
         }
     }
     combos
@@ -575,17 +568,8 @@ mod tests {
             .map(|k| k.as_str().expect("kind").to_owned())
             .collect();
         assert_eq!(kinds, expected);
-        let kinds: Vec<String> = kinds_for_section("cloud-intro")
-            .iter()
-            .map(|k| k.to_string())
-            .collect();
-        let expected: Vec<String> = data["kinds_for_cloud_intro"]
-            .as_array()
-            .expect("array")
-            .iter()
-            .map(|k| k.as_str().expect("kind").to_owned())
-            .collect();
-        assert_eq!(kinds, expected);
+        // P3 step B: the cloud intro check died with the cloud
+        // recipes (a deleted section key yields no kinds).
         assert!(kinds_for_section("definitely-not-a-registry-key").is_empty());
         assert_eq!(
             kinds_for_section("no-such-key").len(),

@@ -130,7 +130,7 @@ async fn print_credentials(paths: &Paths, cfg: &crate::config::schema::Config) {
             ),
             Some(e) => {
                 let days = (e - now).num_days();
-                let mark = if days < crate::engine::manager::EXPIRING_WITHIN_DAYS {
+                let mark = if days < crate::pidash_agent::manager::EXPIRING_WITHIN_DAYS {
                     "!"
                 } else {
                     "✓"

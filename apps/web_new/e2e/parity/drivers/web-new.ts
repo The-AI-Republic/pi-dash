@@ -3520,9 +3520,11 @@ export class WebNewDriver implements ParityDriver {
   // the link dialog reports validation through an alert.
 
   async homeAllOffVisible(): Promise<boolean> {
-    const empty = this.page.getByTestId("home-all-off").first();
-    if ((await empty.count()) === 0) return false;
-    return empty.isVisible().catch(() => false);
+    // NEWPIDASH-301 (DIFF-39): the new home renders no all-off
+    // illustration — an all-widgets-off home shows only the composer
+    // while Manage widgets stays reachable. The oracle home keeps its
+    // guidance illustration (see web.ts).
+    return false;
   }
 
   private homeLinksSection(): Locator {
@@ -18490,14 +18492,28 @@ export class WebNewDriver implements ParityDriver {
     await this.page.locator(`${selector}[data-settled="true"]`).first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  /** The dashboard card's single-line entry input. */
+  /**
+   * The dashboard card's entry composer. The new home renders a
+   * multi-line textarea composer with the Ask action inside it
+   * (NEWPIDASH-301, DIFF-39), while the oracle home keeps its
+   * single-line input.
+   */
   private assistantHomeCardInput() {
-    return this.page.locator('input[placeholder*="Ask Pi Dash to do something"]');
+    return this.page.locator('textarea[placeholder*="Ask Pi Dash to do something"]');
   }
 
   /** The dashboard card root: the card shell around the entry input. */
   private assistantHomeCard() {
     return this.page.locator("#home-assistant-card").first();
+  }
+
+  /**
+   * The recent-conversations section. The new home renders recents as
+   * their own section below the composer (NEWPIDASH-301, DIFF-39),
+   * while the oracle home lists them inside the card.
+   */
+  private assistantRecentConversations() {
+    return this.page.locator('[data-testid="home-recent-conversations"]').first();
   }
 
   /** The conversation's scrolling body that holds the transcript. */
@@ -18818,9 +18834,10 @@ export class WebNewDriver implements ParityDriver {
   }
   async assistantCardRecents(): Promise<{ title: string; href: string }[]> {
     if (!(await this.assistantCardVisible())) return [];
-    // Only the recents list counts: the keyless setup reminder is also an
-    // anchor inside the card and must not displace the newest thread.
-    const links = this.assistantHomeCard().locator("ul a");
+    // Only the sibling recents section counts: it lives outside the card
+    // (NEWPIDASH-301, DIFF-39), so the keyless setup link inside the card
+    // can never displace the newest thread.
+    const links = this.assistantRecentConversations().locator("ul a");
     const total = await links.count();
     const out: { title: string; href: string }[] = [];
     for (let i = 0; i < total; i++) {
@@ -18833,7 +18850,7 @@ export class WebNewDriver implements ParityDriver {
     return out;
   }
   async assistantCardClickRecent(index: number): Promise<void> {
-    await this.assistantHomeCard().locator("ul a").nth(index).click();
+    await this.assistantRecentConversations().locator("ul a").nth(index).click();
   }
   async assistantStubStream(threadId: string, frames: AssistantStreamFrame[]): Promise<void> {
     this.assistantStreamFrames.set(threadId, frames);

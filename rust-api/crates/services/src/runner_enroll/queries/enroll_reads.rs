@@ -961,7 +961,7 @@ pub async fn insert_runner(db: &impl ConnectionTrait, new: &NewRunner<'_>) -> Re
     .map(drop)
 }
 
-/// `live_engine_runner_for` (#2910): the machine's live engine runner on
+/// `live_pidash_agent_runner_for` (#2910): the machine's live engine runner on
 /// the project, oldest first, optionally locked. Returns `(id, name,
 /// generation, pod_id)`.
 pub struct LiveEngineHit {
@@ -971,7 +971,7 @@ pub struct LiveEngineHit {
     pub pod_id: Uuid,
 }
 
-pub async fn live_engine_runner_for(
+pub async fn live_pidash_agent_runner_for(
     db: &impl ConnectionTrait,
     machine_id: Uuid,
     project_id: Uuid,
@@ -1052,7 +1052,7 @@ pub async fn taken_names(
 
 /// `unique_runner_name` (#2910) over the ORM taken set.
 pub fn unique_runner_name(base: &str, taken: &std::collections::HashSet<String>) -> String {
-    use crate::runner_enroll::engine_naming::with_suffix;
+    use crate::runner_enroll::pidash_agent_naming::with_suffix;
     if !taken.contains(base) {
         return base.to_owned();
     }

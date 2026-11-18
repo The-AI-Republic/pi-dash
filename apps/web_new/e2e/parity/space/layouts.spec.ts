@@ -246,7 +246,7 @@ test(
   async ({ driver, seed }) => {
     // The header faithfully renders the server's per-group total. Django's
     // total wrongly excludes the intake-pending issue the rows still show
-    // (NEWFRONT-454); the fixed Rust total counts every row (DIFF-37, see
+    // (NEWFRONT-454); the fixed Rust total counts every row (DIFF-52, see
     // NEWPIDASH-276). Old pins the short total; new pins the truthful one.
     const anchor = requireAnchor(seed);
     const cookie = await signInSession(seed.email, seed.password);
@@ -307,7 +307,7 @@ test(
   async ({ driver, seed }) => {
     // Same server miscount as the list header (NEWFRONT-454): the column
     // renders the short group total while the rows beneath include the
-    // intake-pending issue. The fixed Rust total counts every row (DIFF-37,
+    // intake-pending issue. The fixed Rust total counts every row (DIFF-52,
     // see NEWPIDASH-276). Old pins the short total; new pins the truthful one.
     const anchor = requireAnchor(seed);
     const cookie = await signInSession(seed.email, seed.password);

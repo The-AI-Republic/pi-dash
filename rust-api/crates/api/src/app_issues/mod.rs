@@ -402,6 +402,8 @@ pub enum Denial {
     BadFilter(String, String),
     /// 502, truncated request-body read (the shared bad-gateway shape).
     TruncatedBody,
+    /// 409, archived project (NEWPIDASH-236, pre-rendered body).
+    ProjectArchived(String),
     /// 500, generic branch.
     ServerError,
 }
@@ -441,6 +443,7 @@ impl Denial {
                 StatusCode::BAD_GATEWAY,
                 crate::edge::BAD_GATEWAY_BODY.to_owned(),
             ),
+            Denial::ProjectArchived(body) => (StatusCode::CONFLICT, body.clone()),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 SERVER_ERROR_BODY.to_owned(),
@@ -496,6 +499,14 @@ pub async fn resolve_gate(
     let user_id = actor_user_id(extension).ok_or(Denial::Unauthorized)?;
     let project_id = resolve_project_id(pool, slug, project_raw).await?;
     allow_project(pool, slug, &project_id, &user_id).await?;
+    if let Some(info) = crate::project_archived::archived_by_id(pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     let tenant = tenant_context(pool, &project_id, &user_id).await?;
     Ok(Gate {
         user_id,

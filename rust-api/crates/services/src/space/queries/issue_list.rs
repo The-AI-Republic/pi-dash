@@ -70,7 +70,7 @@
 //!   (1, -1, 2)` OR no intake row at all — status `-2` (pending) and `0`
 //!   (snoozed) contribute zero to `total_results` while the row still
 //!   appears in `results`, so the header reads short of the rows beneath
-//!   it (NEWPIDASH-276). The fixed behaviour (DIFF-37) drops the intake
+//!   it (NEWPIDASH-276). The fixed behaviour (DIFF-52) drops the intake
 //!   leg: [`count_filter_sql`] counts every row the group returns.
 
 use serde::{Deserialize, Serialize};
@@ -761,7 +761,7 @@ pub const GROUP_MISMATCH_BODY: &str =
 /// and `:196-203`) also carries an intake leg (status 1/-1/2 or no intake
 /// row) that excludes pending (-2) and snoozed (0) intake issues from the
 /// totals while the rows still render them, so the group header reads
-/// short of the rows beneath it. The fixed behaviour (DIFF-37,
+/// short of the rows beneath it. The fixed behaviour (DIFF-52,
 /// NEWPIDASH-276) drops that leg so the totals count every row the group
 /// returns; the archived/draft legs are already implied by the base
 /// `WHERE` (`ISSUE_OBJECTS_WHERE`) and are kept for shape stability.
@@ -1546,7 +1546,7 @@ mod tests {
         assert!(
             squashed(FIXTURE_SQL).contains("Group by and sub group by cannot have same parameters")
         );
-        // DIFF-37 (NEWPIDASH-276): the totals count every row the group
+        // DIFF-52 (NEWPIDASH-276): the totals count every row the group
         // returns — no intake leg, so pending/snoozed intake issues are
         // counted instead of rendering uncounted.
         let count = count_filter_sql();

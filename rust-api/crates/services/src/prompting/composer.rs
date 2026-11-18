@@ -35,10 +35,11 @@
 //!   the isolation loop (re-render each non-default section alone; the
 //!   first failure is the culprit), which is also Python's path for the
 //!   common `UndefinedError` case that carries no lineno.
-//! * `composer.py:286-321` (`compose`), `324-344` (`compose_cloud`),
-//!   `347-364` (`compile_template`) — [`compose`], [`compose_cloud`],
-//!   [`compile_template`]. `compose_cloud` drops Python's
-//!   accepted-and-ignored `workspace` / `project` parameters.
+//! * `composer.py:286-321` (`compose`), `347-364` (`compile_template`)
+//!   — [`compose`], [`compile_template`].
+//!
+//! P3 step B deleted `compose_cloud` (`composer.py:324-344`) with
+//! the retired cloud plane.
 //! * `composer.py:372-380` (`_user_for_run`) — [`user_id_for_run`]: the
 //!   `run_is_human_triggered` predicate owns to the runner layer, so this
 //!   takes its boolean result plus the triggering user's id.
@@ -482,47 +483,6 @@ pub fn compose(
     }
 }
 
-/// Compose an immutable Cloud recipe without user/workspace overrides
-/// (`composer.py:324-344`).
-pub fn compose_cloud(
-    kind: &str,
-    context: &serde_json::Value,
-) -> Result<ComposedPrompt, PromptComposeError> {
-    let recipe =
-        recipes::cloud_recipe_for(kind).map_err(|e| PromptComposeError::new(e.message()))?;
-    let mut resolved = Vec::with_capacity(recipe.len());
-    for key in recipe {
-        let section =
-            registry::get_section(key).map_err(|e| PromptComposeError::new(e.message()))?;
-        resolved.push(ResolvedSection {
-            key: key.to_string(),
-            title: section.title.to_owned(),
-            customizable: section.customizable.to_owned(),
-            body: section.default_body.clone(),
-            source: SOURCE_DEFAULT.to_owned(),
-            version: 0,
-        });
-    }
-    let (template_body, manifest) = assemble(&resolved);
-    match renderer::render(&template_body, context) {
-        Ok(text) => Ok(ComposedPrompt {
-            text,
-            manifest,
-            template_body,
-            resolved,
-        }),
-        Err(err) => Err(PromptComposeError::new(attributed_detail(
-            err.message(),
-            &manifest,
-            &resolved,
-            Some(context),
-        ))),
-    }
-}
-
-/// Assemble the recipe for `kind` **without rendering** (Jinja markers
-/// intact), powering the "see the final template" view
-/// (`composer.py:347-364`). The returned `text` is the raw assembled body.
 pub fn compile_template(
     kind: &str,
     workspace_id: Option<&str>,
@@ -1015,24 +975,6 @@ mod tests {
     }
 
     #[test]
-    fn compose_cloud_resolves_defaults_only() {
-        // `FIX-compose / compose.cloud_direct_*`.
-        let ctx = crate::prompting::validation::sample_contexts(recipes::KIND_DIRECT)
-            .into_iter()
-            .next()
-            .expect("direct sample");
-        let composed = compose_cloud(recipes::KIND_DIRECT, &ctx).expect("cloud composes");
-        assert!(composed.manifest.iter().all(|e| e.source == SOURCE_DEFAULT));
-        assert!(composed.manifest.iter().all(|e| e.version == 0));
-        assert_eq!(
-            composed.manifest.len(),
-            recipes::cloud_recipe_for(recipes::KIND_DIRECT)
-                .expect("direct cloud recipe")
-                .len()
-        );
-    }
-
-    #[test]
     fn compose_unknown_kind_reports_recipe_message() {
         let err = compose(
             "nope",
@@ -1207,6 +1149,84 @@ mod tests {
         assert!(body.contains("do **not** split a child further (depth 1)"));
         assert!(body.contains("Move the parent to **Todo**"));
         assert!(body.contains("the clock would keep ticking and burn the parent's budget"));
+    }
+
+    fn composed_text_with_work_type(kind: &str, work_type: &str) -> String {
+        let ctx = crate::prompting::validation::sample_contexts(kind)
+            .into_iter()
+            .next()
+            .expect("populated sample first");
+        compose(
+            kind,
+            None,
+            None,
+            &OverrideIndex::new(),
+            &ctx,
+            None,
+            None,
+            Some(work_type),
+        )
+        .unwrap_or_else(|err| panic!("{kind} composes: {}", err.message()))
+        .text
+    }
+
+    #[test]
+    fn software_review_syncs_pr_branch_with_base() {
+        // NEWPIDASH-277: the sync step precedes the review-kind guidance
+        // and is software-only.
+        let body = composed_text_with_work_type(recipes::KIND_REVIEW, "software");
+        for phrase in [
+            "Sync the PR branch with its base",
+            "git fetch origin",
+            "git merge origin/<base>",
+            "merge, never rebase",
+            "never force-push",
+            "base SHA",
+            "In Progress",
+            "re-check mergeability",
+        ] {
+            assert!(body.contains(phrase), "review carries {phrase:?}");
+        }
+        assert!(
+            body.find("Sync the PR branch with its base")
+                < body.find("Software work products come in these review kinds"),
+            "sync precedes review kinds"
+        );
+    }
+
+    #[test]
+    fn software_test_syncs_pr_branch_with_base() {
+        let body = composed_text_with_work_type(recipes::KIND_TEST, "software");
+        for phrase in [
+            "Sync the PR branch with its base",
+            "git fetch origin",
+            "git merge origin/<base>",
+            "merge, never rebase",
+            "never force-push",
+            "base SHA",
+            "In Progress",
+            "re-check mergeability",
+            "A merge into the base after the test ran means syncing and re-checking first",
+        ] {
+            assert!(body.contains(phrase), "test carries {phrase:?}");
+        }
+        assert!(
+            body.find("Sync the PR branch with its base") < body.find("Gates and CI runs are"),
+            "sync precedes gates paragraph"
+        );
+    }
+
+    #[test]
+    fn general_review_and_test_have_no_sync_step() {
+        for kind in [recipes::KIND_REVIEW, recipes::KIND_TEST] {
+            let body = composed_text_with_work_type(kind, "general");
+            assert!(
+                !body.contains("Sync the PR branch with its base"),
+                "{kind} general has no sync step"
+            );
+            assert!(!body.contains("git fetch origin"), "{kind} has no fetch");
+            assert!(!body.contains("git merge origin"), "{kind} has no merge");
+        }
     }
 
     #[test]

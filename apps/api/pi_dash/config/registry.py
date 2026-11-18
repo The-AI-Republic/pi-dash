@@ -199,6 +199,8 @@ _ENV_INFRA = {
     "RUNNER_PIN_AUTO_RELEASE_SECS": 600,
     # Desktop-bundled managed runner (.ai_design/managed_runner/design.md §16).
     "MANAGED_RUNNER_ENABLED": "false",
+    # Desktop session handoff kill switch (desktop_unified_signin §5.1): default on.
+    "DESKTOP_SESSION_HANDOFF_ENABLED": "true",
     "MANAGED_RUNNER_QUEUED_MAX_AGE_SECS": 43200,
     "DEDICATED_RUN_QUEUED_MAX_AGE_SECS": 43200,
     "MANAGED_RUNNER_GRACEFUL_STOP_SECS": 30,

@@ -155,14 +155,19 @@ pub fn due_tickers_sql(now: &DateTime<Utc>) -> String {
 /// Due-binding id set (`scheduler.py:115-128`).
 ///
 /// `enabled AND scheduler is_enabled AND scheduler/project deleted_at NULL
-/// AND (next_run_at <= now OR next_run_at IS NULL)`, ordered by
-/// `next_run_at` (Postgres `ASC` puts NULLs last: never-fired bindings fire
-/// after past-due ones, exactly as the fixture fan-out order shows). NULL
-/// `next_run_at` means "never fired; due immediately" — Postgres NULL
-/// semantics exclude such rows from `<=`, so the explicit OR is required.
-/// The scheduler/project `deleted_at` guards cover the async-cascade window
-/// where a binding is still un-tombstoned but its parent is not
-/// (`db/mixins.py soft_delete_related_objects.delay`).
+/// AND project archived_at NULL AND (next_run_at <= now OR next_run_at IS
+/// NULL)`, ordered by `next_run_at` (Postgres `ASC` puts NULLs last:
+/// never-fired bindings fire after past-due ones, exactly as the fixture
+/// fan-out order shows). NULL `next_run_at` means "never fired; due
+/// immediately" — Postgres NULL semantics exclude such rows from `<=`,
+/// so the explicit OR is required. The scheduler/project `deleted_at`
+/// guards cover the async-cascade window where a binding is still
+/// un-tombstoned but its parent is not
+/// (`db/mixins.py soft_delete_related_objects.delay`). NEWPIDASH-239
+/// adds the archived-project guard: a binding whose project has
+/// `archived_at` set never fans out, even when re-enabled by hand. The
+/// project join stays LEFT, so a NULL `project_id` (workspace-only
+/// install) still passes the `archived_at IS NULL` leg.
 pub fn due_bindings_stmt(now: &DateTime<Utc>) -> SelectStatement {
     let mut query = Query::select();
     query
@@ -181,6 +186,7 @@ pub fn due_bindings_stmt(now: &DateTime<Utc>) -> SelectStatement {
         .and_where(Expr::col(("projects", "deleted_at")).is_null())
         .and_where(Expr::col(("schedulers", "deleted_at")).is_null())
         .and_where(Expr::col(("schedulers", "is_enabled")).eq(true))
+        .and_where(Expr::col(("projects", "archived_at")).is_null())
         .cond_where(
             Condition::any()
                 .add(
@@ -458,6 +464,9 @@ mod tests {
             "scheduler_bindings.deleted_at is null",
             "scheduler_bindings.enabled = true",
             "projects.deleted_at is null",
+            // NEWPIDASH-239: archived projects never fan out, even when
+            // the binding is still enabled.
+            "projects.archived_at is null",
             "schedulers.deleted_at is null",
             "schedulers.is_enabled = true",
             // NULL next_run_at = never fired = due immediately; Postgres

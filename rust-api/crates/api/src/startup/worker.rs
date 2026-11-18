@@ -27,9 +27,6 @@ use std::time::Duration;
 use futures_util::FutureExt as _;
 use pidash_db::config::Settings;
 use pidash_jobs::assistant::{register_turn_handler, TurnSeam};
-use pidash_jobs::dispatch_execute::{
-    NoPreInvokeRunHook, PassthroughRunModelRequestSeam, PreInvokeRunHookSeam, RunModelRequestSeam,
-};
 use pidash_jobs::{
     default_schedule, register_oss_handlers, BeatEntry, Handler, OssWorkerCtx, Registry,
     WorkerConfig,
@@ -115,8 +112,6 @@ pub struct WorkerBuilder<S = LiveTurnSeam> {
     seed_dir: PathBuf,
     assistant_seam: Arc<dyn AssistantModelSeam>,
     assistant_seam_is_default: bool,
-    pre_invoke_hook: Arc<dyn PreInvokeRunHookSeam>,
-    model_request_seam: Arc<dyn RunModelRequestSeam>,
     turn_seam: Arc<S>,
     turn_seam_is_default: bool,
     turn_soft_limit: i64,
@@ -205,8 +200,6 @@ impl WorkerBuilder<LiveTurnSeam> {
             seed_dir: seed_data_dir(),
             assistant_seam,
             assistant_seam_is_default: true,
-            pre_invoke_hook: Arc::new(NoPreInvokeRunHook),
-            model_request_seam: Arc::new(PassthroughRunModelRequestSeam),
             turn_seam,
             turn_seam_is_default: true,
             turn_soft_limit,
@@ -240,8 +233,6 @@ impl WorkerBuilder<LiveTurnSeam> {
             seed_dir: std::env::temp_dir(),
             assistant_seam: Arc::new(CeAssistantSeam::new(Arc::new(settings))),
             assistant_seam_is_default: true,
-            pre_invoke_hook: Arc::new(NoPreInvokeRunHook),
-            model_request_seam: Arc::new(PassthroughRunModelRequestSeam),
             turn_seam,
             turn_seam_is_default: true,
             turn_soft_limit,
@@ -318,25 +309,6 @@ impl<S: TurnSeam + 'static> WorkerBuilder<S> {
         self
     }
 
-    /// Replace the pre-invoke run hook the execute plane calls
-    /// between `resolve_model_for_run` and `model_started`
-    /// (PIDASHCONV-1741). CE default: [`NoPreInvokeRunHook`]
-    /// (no-op); the cloud binary installs its overlay
-    /// implementation here.
-    pub fn with_pre_invoke_hook(mut self, hook: Arc<dyn PreInvokeRunHookSeam>) -> Self {
-        self.pre_invoke_hook = hook;
-        self
-    }
-
-    /// Replace the run-model request wrapper the execute plane
-    /// consults per model invocation (PIDASHCONV-1741). CE
-    /// default: [`PassthroughRunModelRequestSeam`] (invoke-once);
-    /// the cloud binary installs its overlay implementation here.
-    pub fn with_model_request_seam(mut self, seam: Arc<dyn RunModelRequestSeam>) -> Self {
-        self.model_request_seam = seam;
-        self
-    }
-
     /// Replace the turn seam driving `assistant.run_turn` with a
     /// prebuilt one. The default is the live OSS seam, built from the
     /// pools, settings and Redis client in
@@ -352,8 +324,6 @@ impl<S: TurnSeam + 'static> WorkerBuilder<S> {
             seed_dir,
             assistant_seam,
             assistant_seam_is_default,
-            pre_invoke_hook,
-            model_request_seam,
             turn_seam: _,
             turn_seam_is_default: _,
             turn_soft_limit,
@@ -372,8 +342,6 @@ impl<S: TurnSeam + 'static> WorkerBuilder<S> {
             seed_dir,
             assistant_seam,
             assistant_seam_is_default,
-            pre_invoke_hook,
-            model_request_seam,
             turn_seam: seam,
             turn_seam_is_default: false,
             turn_soft_limit,
@@ -460,8 +428,6 @@ impl<S: TurnSeam + 'static> WorkerBuilder<S> {
             seed_dir,
             assistant_seam,
             assistant_seam_is_default: _,
-            pre_invoke_hook,
-            model_request_seam,
             turn_seam,
             turn_seam_is_default: _,
             turn_soft_limit,
@@ -483,8 +449,6 @@ impl<S: TurnSeam + 'static> WorkerBuilder<S> {
             mongo,
             seed_dir,
             assistant_seam,
-            pre_invoke_hook,
-            model_request_seam,
         };
         let mut registry = Registry::new();
         register_oss_handlers(&mut registry, &ctx)?;

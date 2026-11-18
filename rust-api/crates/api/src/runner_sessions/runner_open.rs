@@ -145,7 +145,6 @@ use pidash_services::runner_runs::LifecycleEffect;
 use pidash_services::runner_sessions::pubsub as pubsub_kernel;
 use pidash_services::runner_sessions::pubsub::PubsubStore;
 use pidash_services::runner_sessions::session_service as session_kernel;
-use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::runner_runs::AgentRunStatus;
 use pidash_types::runner_sessions::keys::runner as runner_keys;
 use pidash_types::runner_sessions::{
@@ -689,10 +688,6 @@ impl RunnerPorts for SessionPorts<'_> {
         self.live.agent_system_user_id().await
     }
 
-    async fn dispatch_waiting(&self, workspace_id: Uuid) -> Result<(), PortError> {
-        self.live.dispatch_waiting(workspace_id).await
-    }
-
     async fn emit_terminal_effects(&self, run_id: Uuid) -> Result<(), PortError> {
         self.live.emit_terminal_effects(run_id).await
     }
@@ -821,7 +816,7 @@ async fn execute_reap_finalize(
         return Err(TxnFail::Other);
     }
     let conn = TxConn::new(tx);
-    let Some(locked) = finalize_orm::lock_run_for_finalize(&conn, run_id, Some(runner_id), None)
+    let Some(_locked) = finalize_orm::lock_run_for_finalize(&conn, run_id, Some(runner_id), None)
         .await
         .map_err(TxnFail::from)?
     else {
@@ -830,17 +825,6 @@ async fn execute_reap_finalize(
     finalize_orm::finalize_update(&conn, &values, run_id, Utc::now())
         .await
         .map_err(TxnFail::from)?;
-    if locked.executor_kind == AgentExecutorKind::CloudAgent.value() {
-        finalize_orm::append_terminal_event_once(
-            &conn,
-            run_id,
-            AgentRunStatus::Failed,
-            &finalization::finalize_error_code(&values),
-            Utc::now(),
-        )
-        .await
-        .map_err(TxnFail::from)?;
-    }
     effects.extend(finalization::plan_publish_effects(run_id));
     Ok(())
 }
@@ -1122,11 +1106,19 @@ async fn open_transaction(
     // `create(… last_seen_at=now())`: the kwarg `now()` evaluates
     // first, then `auto_now_add` stamps `created_at` — the domain
     // driver keeps that order.
+    let capabilities = pidash_services::runner_runs::capacity::parse_session_capabilities(body);
+    let capabilities_value = serde_json::Value::Array(
+        capabilities
+            .into_iter()
+            .map(serde_json::Value::String)
+            .collect(),
+    );
     pidash_services::domain::tokens::open_runner_session(
         &pidash_db::orm_tx::TxConn::new(&mut tx),
         new_sid,
         runner.id,
         runner_session::DEFAULT_PROTOCOL_VERSION,
+        capabilities_value,
     )
     .await
     .map_err(TxnFail::from)?;
@@ -1315,6 +1307,8 @@ async fn open_redeliver(
                         work_item_id: row.work_item_id,
                         prompt: row.prompt,
                         run_config,
+                        assignment_token: row.assignment_token,
+                        assignment_protocol: row.assignment_protocol,
                     }),
                 }
             }

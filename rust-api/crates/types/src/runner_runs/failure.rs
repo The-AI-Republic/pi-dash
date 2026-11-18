@@ -301,12 +301,16 @@ fn error_code_map(key: &str) -> Option<RunFailureReason> {
 }
 
 /// `_INFRA_TEXT_PREFIXES` (`failure.py`), in tuple order: cloud-written
-/// detail prefixes (matched on the lowercased detail).
-const INFRA_TEXT_PREFIXES: [(&str, RunFailureReason); 6] = [
+/// detail prefixes (matched on the lowercased detail). NEWPIDASH-253
+/// (DIFF-42) adds the plain-words reap prefix alongside the legacy one;
+/// both map to RunnerOffline so rows written before/after the rewording
+/// classify the same.
+const INFRA_TEXT_PREFIXES: [(&str, RunFailureReason); 7] = [
     ("daemon shutdown requested", RunFailureReason::DaemonRestart),
     ("agent stalled: no events for >", RunFailureReason::Timeout),
     ("no agent frames for", RunFailureReason::Timeout),
     ("reaped by heartbeat", RunFailureReason::RunnerOffline),
+    ("run reaped:", RunFailureReason::RunnerOffline),
     ("cloud agent worker was lost", RunFailureReason::Timeout),
     (
         "pi dash agent never came online",
@@ -628,6 +632,37 @@ mod tests {
         assert_eq!(
             classify("İnvalid credentials", "agent_crash", ""),
             RunFailureReason::AgentProviderAuth
+        );
+    }
+
+    #[test]
+    fn plain_words_reap_classifies_as_runner_offline() {
+        // NEWPIDASH-253 (DIFF-42): the plain-words reap detail classifies
+        // the same as the legacy `reaped by heartbeat: ...` text.
+        assert_eq!(
+            classify(
+                "run reaped: the runner daemon restarted and no longer knows this run (runner reported in_flight_run=(none) but cloud had this run marked busy)",
+                "",
+                "",
+            ),
+            RunFailureReason::RunnerOffline
+        );
+        assert_eq!(
+            classify(
+                "reaped by heartbeat: runner reported in_flight_run=(none) but cloud had this run marked busy",
+                "",
+                "",
+            ),
+            RunFailureReason::RunnerOffline
+        );
+        // The daemon-shutdown trigger text still classifies as such.
+        assert_eq!(
+            classify(
+                "daemon shutdown requested (SIGTERM; previous exit: oom-kill)",
+                "",
+                "",
+            ),
+            RunFailureReason::DaemonRestart
         );
     }
 

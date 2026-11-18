@@ -22,17 +22,12 @@ pub struct Args {
     /// stay signed in. Without it, every workspace is signed out.
     #[arg(long)]
     pub workspace: Option<String>,
-
-    /// Sign out only the built-in engine: revoke this computer's engine
-    /// credential. The daemon and its runners stay signed in; engine
-    /// runners pause until `pidash login --engine`. The desktop app does not
-    /// renew an engine signed out this way.
-    #[arg(long, conflicts_with = "workspace")]
-    pub engine: bool,
 }
 
 /// Revoke this machine's engine credential (unless `local_only`) and
-/// forget it, recording `signed_out`. Returns whether one was held.
+/// forget it, recording `signed_out`. Part of a full logout (or the last
+/// workspace's): there is no engine-only sign-out any more
+/// (desktop_unified_signin U-3). Returns whether one was held.
 pub(crate) async fn sign_out_engine(paths: &Paths, local_only: bool) -> Result<bool> {
     let Some(cfg) = file::load_config_opt(paths)? else {
         return Ok(false);
@@ -50,7 +45,7 @@ pub(crate) async fn sign_out_engine(paths: &Paths, local_only: bool) -> Result<b
             .find(|t| t.starts_with("mt_"));
         match machine_token {
             Some(mt) if !cfg.daemon.cloud_url.is_empty() => {
-                let api = crate::engine::api::EngineApi::new(&cfg.daemon.cloud_url)?;
+                let api = crate::pidash_agent::api::PidashAgentApi::new(&cfg.daemon.cloud_url)?;
                 if let Err(e) = api.revoke_credential(&mt).await {
                     // Still forget it locally, so the user is not stuck.
                     tracing::warn!("revoking the engine credential failed: {e}");
@@ -78,32 +73,18 @@ pub(crate) async fn sign_out_engine(paths: &Paths, local_only: bool) -> Result<b
 pub async fn run(args: Args, paths: &Paths) -> Result<()> {
     // Signing out forgets keychain items the keychain can never return, so
     // a damaged keychain can't keep this computer signed in. Only the items
-    // of what is signed out: a workspace or engine sign-out never forgets
-    // another credential's item.
+    // of what is signed out: a workspace sign-out never forgets another
+    // credential's item.
     use crate::config::secrets::{ForgetScope, ITEM_ENGINE_CREDENTIAL, forget_unreadable};
     let engine_item = || vec![ITEM_ENGINE_CREDENTIAL.to_string()];
     let forget = forget_unreadable(
         paths,
-        if args.engine {
-            ForgetScope::Items(engine_item())
-        } else if args.workspace.is_some() {
+        if args.workspace.is_some() {
             ForgetScope::Items(Vec::new())
         } else {
             ForgetScope::All
         },
     );
-    if args.engine {
-        let held = sign_out_engine(paths, args.local_only).await?;
-        crate::service::reload::notify_credentials_changed(paths).await;
-        if held {
-            println!(
-                "Signed out the built-in engine. Run `pidash login --engine` to sign it in again."
-            );
-        } else {
-            println!("The built-in engine was not signed in; recorded it as signed out.");
-        }
-        return Ok(());
-    }
     let cfg = if paths.config_path().exists() {
         Some(file::load_config(paths)?)
     } else {
@@ -160,7 +141,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
                 // revoke it with, it is forgotten locally (with a warning).
                 if cfg.is_some() && sign_out_engine(paths, args.local_only).await? {
                     crate::service::reload::notify_credentials_changed(paths).await;
-                    println!("Not logged in to any workspace; signed out the built-in engine.");
+                    println!("Not logged in to any workspace; signed out the Pi Dash Agent.");
                 } else {
                     println!("Not logged in — nothing to revoke.");
                 }
@@ -216,15 +197,34 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         }
     }
 
+    // The persisted sign-in event (desktop_unified_signin §6.1), written in
+    // the same config write as the credential clear: a full logout and the
+    // last workspace's logout. A workspace sign-out that leaves others
+    // signed in writes no event — the account is still signed in (§6.2).
+    let event = (workspace.is_none() || last_workspace).then(|| runner_ops::AuthEventDraft {
+        kind: crate::config::schema::AuthEventKind::SignedOut,
+        reason: Some(if workspace.is_none() {
+            crate::config::schema::AuthEventReason::Logout
+        } else {
+            crate::config::schema::AuthEventReason::LastWorkspaceLogout
+        }),
+        email: cli.account_email.clone(),
+        user_id: cli.account_user_id.clone(),
+        cloud_url: cfg
+            .as_ref()
+            .map(|c| c.daemon.cloud_url.clone())
+            .unwrap_or_default(),
+    });
     match workspace {
         Some(slug) => {
-            runner_ops::clear_workspace_token(paths, slug)
+            runner_ops::clear_workspace_token(paths, slug, event.as_ref())
                 .with_context(|| format!("clearing workspace {slug:?}'s token"))?;
             println!("Signed out workspace {slug}.");
         }
         None => {
-            runner_ops::clear_cli_token(paths).context("clearing tokens from config.toml")?;
-            println!("Logged out (the built-in engine too).");
+            runner_ops::clear_cli_token(paths, event.as_ref())
+                .context("clearing tokens from config.toml")?;
+            println!("Logged out (the Pi Dash Agent too).");
         }
     }
     crate::service::reload::notify_credentials_changed(paths).await;
@@ -259,7 +259,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::schema::{
-        CliSection, Config, DaemonConfig, EngineCredential, EngineSignInState,
+        CliSection, Config, DaemonConfig, EngineSignInState, PidashAgentCredential,
     };
 
     fn paths(root: &std::path::Path) -> Paths {
@@ -269,6 +269,123 @@ mod tests {
             runtime_dir: root.join("runtime"),
             machine_context_dir: root.join("config"),
         }
+    }
+
+    #[tokio::test]
+    async fn full_logout_records_a_signed_out_auth_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = paths(tmp.path());
+        let cfg = Config {
+            version: 2,
+            daemon: DaemonConfig {
+                cloud_url: "https://cloud.invalid".into(),
+                ..DaemonConfig::default()
+            },
+            runners: vec![],
+            cli: Some(CliSection {
+                token: Some("mt_acme".into()),
+                workspace_slug: Some("acme".into()),
+                account_email: Some("dev@example.com".into()),
+                account_user_id: Some("u-1".into()),
+                ..Default::default()
+            }),
+            engine: Default::default(),
+            auth: Default::default(),
+            auth_event: None,
+        };
+        file::write_config(&p, &cfg).unwrap();
+
+        run(
+            Args {
+                local_only: true,
+                workspace: None,
+            },
+            &p,
+        )
+        .await
+        .unwrap();
+
+        let after = file::load_config(&p).unwrap();
+        assert!(after.cli.unwrap().workspace_tokens().is_empty());
+        let event = after.auth_event.expect("a full logout records an event");
+        assert_eq!(event.kind, crate::config::schema::AuthEventKind::SignedOut);
+        assert_eq!(
+            event.reason,
+            Some(crate::config::schema::AuthEventReason::Logout)
+        );
+        assert_eq!(event.seq, 1);
+        let account = event.account.expect("the event names the account");
+        assert_eq!(account.email.as_deref(), Some("dev@example.com"));
+        assert_eq!(account.user_id.as_deref(), Some("u-1"));
+    }
+
+    #[tokio::test]
+    async fn signing_out_the_last_workspace_records_signed_out() {
+        use crate::pidash_agent::test_server;
+        let server = test_server::start(std::sync::Arc::new(|_| (200, "{}".into()))).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let p = paths(tmp.path());
+        file::write_config(&p, &two_workspaces_and_engine(&server.url)).unwrap();
+
+        run(
+            Args {
+                local_only: false,
+                workspace: Some("acme".into()),
+            },
+            &p,
+        )
+        .await
+        .unwrap();
+
+        let after = file::load_config(&p).unwrap();
+        assert!(after.cli.unwrap().workspace_tokens().is_empty());
+        let event = after
+            .auth_event
+            .expect("the last workspace's logout records one");
+        assert_eq!(event.kind, crate::config::schema::AuthEventKind::SignedOut);
+        assert_eq!(
+            event.reason,
+            Some(crate::config::schema::AuthEventReason::LastWorkspaceLogout)
+        );
+    }
+
+    #[tokio::test]
+    async fn signing_out_one_of_two_workspaces_records_no_event() {
+        use crate::pidash_agent::test_server;
+        let server = test_server::start(std::sync::Arc::new(|_| (200, "{}".into()))).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let p = paths(tmp.path());
+        let mut cfg = two_workspaces_and_engine(&server.url);
+        cfg.cli
+            .as_mut()
+            .unwrap()
+            .workspaces
+            .push(crate::config::schema::WorkspaceCredential {
+                slug: "beta".into(),
+                token: "mt_beta".into(),
+            });
+        file::write_config(&p, &cfg).unwrap();
+
+        run(
+            Args {
+                local_only: false,
+                workspace: Some("beta".into()),
+            },
+            &p,
+        )
+        .await
+        .unwrap();
+
+        let after = file::load_config(&p).unwrap();
+        assert!(
+            after.auth_event.is_none(),
+            "the account is still signed in: no event"
+        );
+        assert_eq!(
+            after.cli.unwrap().token.as_deref(),
+            Some("mt_acme"),
+            "the other workspace is untouched"
+        );
     }
 
     #[tokio::test]
@@ -283,7 +400,7 @@ mod tests {
             },
             runners: vec![],
             cli: Some(CliSection {
-                engine_credential: Some(EngineCredential {
+                engine_credential: Some(PidashAgentCredential {
                     token: "ec_left_behind".into(),
                     expires_at: Some(chrono::Utc::now() + chrono::Duration::days(10)),
                 }),
@@ -292,6 +409,7 @@ mod tests {
             }),
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
         };
         file::write_config(&p, &cfg).unwrap();
 
@@ -299,7 +417,6 @@ mod tests {
             Args {
                 local_only: false,
                 workspace: None,
-                engine: false,
             },
             &p,
         )
@@ -328,7 +445,7 @@ mod tests {
             cli: Some(CliSection {
                 token: Some("mt_acme".into()),
                 workspace_slug: Some("acme".into()),
-                engine_credential: Some(EngineCredential {
+                engine_credential: Some(PidashAgentCredential {
                     token: "ec_live".into(),
                     expires_at: Some(chrono::Utc::now() + chrono::Duration::days(10)),
                 }),
@@ -337,12 +454,13 @@ mod tests {
             }),
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
         }
     }
 
     #[tokio::test]
     async fn signing_out_the_last_workspace_signs_the_engine_out_first() {
-        use crate::engine::test_server;
+        use crate::pidash_agent::test_server;
         let server = test_server::start(std::sync::Arc::new(|_| (200, "{}".into()))).await;
         let tmp = tempfile::tempdir().unwrap();
         let p = paths(tmp.path());
@@ -352,7 +470,6 @@ mod tests {
             Args {
                 local_only: false,
                 workspace: Some("acme".into()),
-                engine: false,
             },
             &p,
         )
@@ -362,7 +479,7 @@ mod tests {
         let reqs = server.requests.lock().unwrap().clone();
         let engine_revoke = reqs
             .iter()
-            .position(|r| r.path == crate::engine::api::CREDENTIAL_REVOKE_PATH)
+            .position(|r| r.path == crate::pidash_agent::api::CREDENTIAL_REVOKE_PATH)
             .expect("the engine credential was revoked");
         let token_revoke = reqs
             .iter()
@@ -380,7 +497,7 @@ mod tests {
 
     #[tokio::test]
     async fn signing_out_one_of_two_workspaces_leaves_the_engine_signed_in() {
-        use crate::engine::test_server;
+        use crate::pidash_agent::test_server;
         let server = test_server::start(std::sync::Arc::new(|_| (200, "{}".into()))).await;
         let tmp = tempfile::tempdir().unwrap();
         let p = paths(tmp.path());
@@ -399,7 +516,6 @@ mod tests {
             Args {
                 local_only: false,
                 workspace: Some("beta".into()),
-                engine: false,
             },
             &p,
         )
@@ -408,7 +524,7 @@ mod tests {
 
         assert!(
             server
-                .requests_to(crate::engine::api::CREDENTIAL_REVOKE_PATH)
+                .requests_to(crate::pidash_agent::api::CREDENTIAL_REVOKE_PATH)
                 .is_empty()
         );
         let cli = file::load_config(&p).unwrap().cli.unwrap();
@@ -436,7 +552,6 @@ mod tests {
             Args {
                 local_only: true,
                 workspace: None,
-                engine: false,
             },
             &p,
         )
@@ -457,7 +572,7 @@ mod tests {
     async fn a_broken_machine_token_item_is_revoked_before_it_is_forgotten() {
         use crate::config::schema::CredentialsStoreMode;
         use crate::config::secrets::{self, ITEM_WORKSPACE_PREFIX, MemoryKeyring};
-        use crate::engine::test_server;
+        use crate::pidash_agent::test_server;
         for workspace in [Some("beta"), None] {
             let server = test_server::start(std::sync::Arc::new(|_| (200, "{}".into()))).await;
             let tmp = tempfile::tempdir().unwrap();
@@ -483,7 +598,6 @@ mod tests {
                 Args {
                     local_only: false,
                     workspace: workspace.map(str::to_string),
-                    engine: false,
                 },
                 &p,
             )
@@ -510,48 +624,5 @@ mod tests {
                 assert!(!revoked.iter().any(|t| t == "mt_acme"));
             }
         }
-    }
-
-    #[tokio::test]
-    async fn an_engine_sign_out_keeps_a_workspaces_broken_item() {
-        use crate::config::schema::CredentialsStoreMode;
-        use crate::config::secrets::{self, ITEM_WORKSPACE_PREFIX, MemoryKeyring};
-        let tmp = tempfile::tempdir().unwrap();
-        let p = paths(tmp.path());
-        let keyring = MemoryKeyring::new();
-        secrets::use_backend_for(&p.config_dir, keyring.clone());
-        let mut cfg = two_workspaces_and_engine("https://cloud.invalid");
-        cfg.cli
-            .as_mut()
-            .unwrap()
-            .workspaces
-            .push(crate::config::schema::WorkspaceCredential {
-                slug: "beta".into(),
-                token: "mt_beta".into(),
-            });
-        cfg.auth.credentials_store = CredentialsStoreMode::Auto;
-        file::write_config(&p, &cfg).unwrap();
-        file::migrate_credentials_store(&p).unwrap();
-        let beta = format!("{ITEM_WORKSPACE_PREFIX}beta");
-        keyring.break_item(&beta);
-
-        run(
-            Args {
-                local_only: true,
-                workspace: None,
-                engine: true,
-            },
-            &p,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            keyring.items().get(&beta).map(String::as_str),
-            Some("mt_beta")
-        );
-        let after = file::load_config(&p).unwrap();
-        assert_eq!(after.auth.broken_keyring_items, vec![beta]);
-        assert!(after.cli.unwrap().engine_credential.is_none());
     }
 }

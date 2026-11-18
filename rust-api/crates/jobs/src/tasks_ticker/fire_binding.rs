@@ -89,7 +89,7 @@ pub const ASSIGNED_NEVER_STARTED_SECS: i64 = 180;
 /// `AttributeError` on `None.status`, so the caller surfaces it as
 /// [`FireError::OrphanedRun`] (task failure, no retry) rather than guessing.
 pub fn is_in_flight(last_run_id: Option<&Uuid>, last_run_status: Option<&str>) -> bool {
-    is_in_flight_at(last_run_id, last_run_status, None, None, None)
+    is_in_flight_at(last_run_id, last_run_status, None, None, None, None, None)
 }
 
 /// Same as [`is_in_flight`], but exempts an old `ASSIGNED` /
@@ -104,6 +104,8 @@ pub fn is_in_flight_at(
     assigned_at: Option<&DateTime<Utc>>,
     started_at: Option<&DateTime<Utc>>,
     now: Option<&DateTime<Utc>>,
+    capacity_wait: Option<&serde_json::Value>,
+    assignment_token: Option<Uuid>,
 ) -> bool {
     if last_run_id.is_none() {
         return false;
@@ -120,6 +122,17 @@ pub fn is_in_flight_at(
             if now_val.signed_duration_since(*assigned)
                 > chrono::Duration::seconds(ASSIGNED_NEVER_STARTED_SECS)
             {
+                // NEWPIDASH-241 T2: fresh authenticated same-attempt capacity
+                // waits remain protected beyond the cutoff.
+                if let (Some(cw), Some(now2)) = (capacity_wait, now) {
+                    if pidash_services::runner_runs::capacity::is_fresh_capacity_wait(
+                        cw,
+                        assignment_token,
+                        *now2,
+                    ) {
+                        return true;
+                    }
+                }
                 return false;
             }
         }
@@ -419,17 +432,21 @@ fn orm_sqlx(error: sea_orm::DbErr) -> sqlx::Error {
 /// pattern); the scheduler join is inner (non-nullable FK, as Django emits)
 /// and the run join is a left join (nullable `last_run` FK). NEWPIDASH-262
 /// adds `assigned_at` / `started_at` so the scheduler can exempt an old
-/// `ASSIGNED` never-started run from the in-flight check.
+/// `ASSIGNED` never-started run from the in-flight check. NEWPIDASH-239
+/// adds a left join to `projects` selecting `archived_at` so the claim can
+/// skip an archived project even when the binding is still enabled. The
+/// project join stays LEFT so a NULL `project_id` reads as unarchived.
 pub fn claim_select_sql() -> &'static str {
     "SELECT b.id AS id, b.enabled AS enabled, b.dtstart AS dtstart, \
      b.tzid AS tzid, b.rrule AS rrule, b.rdates AS rdates, b.exdates AS exdates, \
      b.next_run_at AS next_run_at, b.last_run_id AS last_run_id, \
      b.last_error AS last_error, s.is_enabled AS scheduler_is_enabled, \
-     r.status AS last_run_status, r.assigned_at AS last_run_assigned_at, \
-     r.started_at AS last_run_started_at \
+     r.status AS last_run_status, r.assigned_at AS last_run_assigned_at, r.started_at AS last_run_started_at, r.capacity_wait AS last_run_capacity_wait, r.assignment_token AS last_run_assignment_token, \
+     p.archived_at AS project_archived_at \
      FROM scheduler_bindings AS b \
      INNER JOIN schedulers AS s ON b.scheduler_id = s.id \
      LEFT JOIN agent_run AS r ON b.last_run_id = r.id \
+     LEFT JOIN projects AS p ON b.project_id = p.id \
      WHERE b.id = $1 AND b.deleted_at IS NULL \
      FOR UPDATE OF b"
 }
@@ -508,9 +525,11 @@ pub fn rollback_update_sql() -> &'static str {
 // builders, so the two cannot silently diverge (the scan.rs precedent).
 
 /// Phase 1 claim statement: the exact statement [`claim_select_sql`] records
-/// — inner scheduler join, left run join, `deleted_at IS NULL`, pk bind,
-/// `FOR UPDATE OF scheduler_bindings` (binding row only). NEWPIDASH-262
-/// also selects `assigned_at` / `started_at` for the in-flight exemption.
+/// — inner scheduler join, left run join, left project join,
+/// `deleted_at IS NULL`, pk bind, `FOR UPDATE OF scheduler_bindings`
+/// (binding row only). NEWPIDASH-262 also selects `assigned_at` /
+/// `started_at` for the in-flight exemption. NEWPIDASH-239 also selects
+/// `projects.archived_at` as `project_archived_at` for the archived skip.
 pub fn claim_select_stmt(binding_id: Uuid) -> SelectStatement {
     let mut query = Query::select();
     query
@@ -540,6 +559,18 @@ pub fn claim_select_stmt(binding_id: Uuid) -> SelectStatement {
             Expr::col(("agent_run", "started_at")),
             Alias::new("last_run_started_at"),
         )
+        .expr_as(
+            Expr::col(("agent_run", "capacity_wait")),
+            Alias::new("last_run_capacity_wait"),
+        )
+        .expr_as(
+            Expr::col(("agent_run", "assignment_token")),
+            Alias::new("last_run_assignment_token"),
+        )
+        .expr_as(
+            Expr::col(("projects", "archived_at")),
+            Alias::new("project_archived_at"),
+        )
         .from("scheduler_bindings")
         .inner_join(
             "schedulers",
@@ -548,6 +579,10 @@ pub fn claim_select_stmt(binding_id: Uuid) -> SelectStatement {
         .left_join(
             "agent_run",
             Expr::col(("scheduler_bindings", "last_run_id")).equals(("agent_run", "id")),
+        )
+        .left_join(
+            "projects",
+            Expr::col(("scheduler_bindings", "project_id")).equals(("projects", "id")),
         )
         .and_where(Expr::col(("scheduler_bindings", "id")).eq(binding_id))
         .and_where(Expr::col(("scheduler_bindings", "deleted_at")).is_null())
@@ -585,7 +620,8 @@ pub fn reacquire_select_stmt(binding_id: Uuid) -> SelectStatement {
 
 /// One phase-1 claim row: the binding's RRULE bundle and runtime state plus
 /// the joined `scheduler.is_enabled` and `last_run.status` (+ timestamps
-/// for the NEWPIDASH-262 in-flight exemption).
+/// for the NEWPIDASH-262 in-flight exemption, and the NEWPIDASH-239
+/// `projects.archived_at` for the archived skip).
 #[derive(Debug, Clone)]
 pub struct ClaimRow {
     pub id: Uuid,
@@ -602,6 +638,16 @@ pub struct ClaimRow {
     pub last_run_status: Option<String>,
     pub last_run_assigned_at: Option<DateTime<Utc>>,
     pub last_run_started_at: Option<DateTime<Utc>>,
+    pub last_run_capacity_wait: Option<serde_json::Value>,
+    pub last_run_assignment_token: Option<Uuid>,
+    pub project_archived_at: Option<DateTime<Utc>>,
+}
+
+/// NEWPIDASH-239: true when the binding's project carries `archived_at`.
+/// `None` (active project, or a NULL `project_id` left-joining to NULL)
+/// is never archived.
+pub fn is_project_archived(project_archived_at: Option<&DateTime<Utc>>) -> bool {
+    project_archived_at.is_some()
 }
 
 /// The re-fetched binding for dispatch: exactly the FK values the dispatcher
@@ -663,6 +709,10 @@ fn claim_row_from(row: &sea_orm::QueryResult) -> Result<ClaimRow, sea_orm::DbErr
         last_run_status: row.try_get::<Option<String>>("", "last_run_status")?,
         last_run_assigned_at: row.try_get::<Option<DateTime<Utc>>>("", "last_run_assigned_at")?,
         last_run_started_at: row.try_get::<Option<DateTime<Utc>>>("", "last_run_started_at")?,
+        last_run_capacity_wait: row
+            .try_get::<Option<serde_json::Value>>("", "last_run_capacity_wait")?,
+        last_run_assignment_token: row.try_get::<Option<Uuid>>("", "last_run_assignment_token")?,
+        project_archived_at: row.try_get::<Option<DateTime<Utc>>>("", "project_archived_at")?,
     })
 }
 
@@ -798,6 +848,16 @@ pub async fn phase1_claim(
     if !row.scheduler_is_enabled {
         return Ok(Phase1::Skipped);
     }
+    // NEWPIDASH-239: an archived project never fires, even when the
+    // binding is still enabled (covers re-enabled bindings and archives
+    // made before the archive-time disable). Skip without advancing.
+    if is_project_archived(row.project_archived_at.as_ref()) {
+        tracing::info!(
+            binding = %row.id,
+            "scheduler.fire: skip reason=project-archived"
+        );
+        return Ok(Phase1::Skipped);
+    }
     // A future `next_run_at` means this firing is racing the scanner: skip
     // without advancing (`scheduler.py:169-173`).
     if row.next_run_at.is_some_and(|next| next > *now) {
@@ -813,6 +873,8 @@ pub async fn phase1_claim(
                     row.last_run_assigned_at.as_ref(),
                     row.last_run_started_at.as_ref(),
                     Some(now),
+                    row.last_run_capacity_wait.as_ref(),
+                    row.last_run_assignment_token,
                 ) =>
             {
                 tracing::info!(
@@ -1212,7 +1274,9 @@ mod tests {
             Some("assigned"),
             Some(&assigned),
             None,
-            Some(&now)
+            Some(&now),
+            None,
+            None
         ));
         // Exactly at the bound: still in flight (bound is >).
         assert!(is_in_flight_at(
@@ -1220,7 +1284,9 @@ mod tests {
             Some("assigned"),
             Some(&exactly),
             None,
-            Some(&now)
+            Some(&now),
+            None,
+            None
         ));
         // Old assigned never-started: NOT in flight.
         assert!(!is_in_flight_at(
@@ -1228,7 +1294,9 @@ mod tests {
             Some("assigned"),
             Some(&old),
             None,
-            Some(&now)
+            Some(&now),
+            None,
+            None
         ));
         // Old assigned but started (started_at Some): still in flight.
         let started = Some(now - chrono::Duration::seconds(5));
@@ -1237,7 +1305,9 @@ mod tests {
             Some("assigned"),
             Some(&old),
             started.as_ref(),
-            Some(&now)
+            Some(&now),
+            None,
+            None
         ));
         // Old assigned with no assigned_at: no exemption (conservative).
         assert!(is_in_flight_at(
@@ -1245,7 +1315,9 @@ mod tests {
             Some("assigned"),
             None,
             None,
-            Some(&now)
+            Some(&now),
+            None,
+            None
         ));
         // Other statuses unaffected even when old.
         assert!(is_in_flight_at(
@@ -1253,7 +1325,9 @@ mod tests {
             Some("running"),
             Some(&old),
             None,
-            Some(&now)
+            Some(&now),
+            None,
+            None
         ));
         // Backwards compat: is_in_flight still strict.
         assert!(is_in_flight(Some(&run), Some("assigned")));
@@ -1485,6 +1559,7 @@ mod tests {
     // Phase 1 claim SQL (`scheduler.py:157-162`): SFU `OF` the binding table
     // only, `deleted_at` guard, inner scheduler join, left run join, pk param.
     // NEWPIDASH-262 adds assigned_at/started_at for the in-flight exemption.
+    // NEWPIDASH-239 adds the left project join selecting archived_at.
     #[test]
     fn claim_sql_has_sfu_and_guards() {
         let sql = claim_select_sql();
@@ -1494,6 +1569,8 @@ mod tests {
             "from scheduler_bindings as b",
             "inner join schedulers as s on",
             "left join agent_run as r on",
+            "left join projects as p on",
+            "p.archived_at as project_archived_at",
             "b.deleted_at is null",
             "b.id = $1",
             "for update of b",
@@ -1503,12 +1580,23 @@ mod tests {
         ] {
             assert!(lower.contains(fragment), "missing {fragment} in:\n{sql}");
         }
-        // No SKIP LOCKED here (claim-by-id, not a queue scan), no project
-        // or workspace joins in phase 1 (Python selects scheduler + last_run
-        // only).
-        for absent in ["skip locked", "projects", "workspaces", "users"] {
+        // No SKIP LOCKED here (claim-by-id, not a queue scan) and no
+        // workspace or user joins in phase 1 (Python selects scheduler +
+        // last_run only; NEWPIDASH-239 adds only the project join).
+        for absent in ["skip locked", "workspaces", "users"] {
             assert!(!lower.contains(absent), "unexpected {absent} in:\n{sql}");
         }
+    }
+
+    // NEWPIDASH-239: the archived skip is the `project_archived_at` flag —
+    // `Some` (archived) skips, `None` (active project, or a NULL project
+    // left-joining to NULL) fires. An enabled binding on an archived
+    // project is not fired; the same binding on an active project is.
+    #[test]
+    fn archived_project_skips_fire_active_fires() {
+        assert!(!is_project_archived(None));
+        let archived = Utc.with_ymd_and_hms(2026, 11, 13, 18, 57, 37).unwrap();
+        assert!(is_project_archived(Some(&archived)));
     }
 
     // Update statements pin their `update_fields` column sets
@@ -1708,6 +1796,11 @@ mod tests {
         assert!(claim.contains("last_run_status"), "alias:\n{claim}");
         assert!(claim.contains("last_run_assigned_at"), "alias:\n{claim}");
         assert!(claim.contains("last_run_started_at"), "alias:\n{claim}");
+        assert!(claim.contains("project_archived_at"), "alias:\n{claim}");
+        assert!(
+            lower.contains("left join \"projects\""),
+            "project join:\n{claim}"
+        );
         assert!(!lower.contains("skip locked"), "no queue lock:\n{claim}");
         let built = DbBackend::Postgres.build(&claim_select_stmt(id));
         assert!(built.sql.contains("$1"), "bind:\n{}", built.sql);

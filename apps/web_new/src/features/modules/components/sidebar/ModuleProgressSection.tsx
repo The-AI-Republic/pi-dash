@@ -17,7 +17,7 @@ import * as React from "react";
 
 import { getAppClient } from "../../../../core/api/client.js";
 import { useResolvedScheme } from "../../../../core/theme/index.js";
-import { useProjectRoles } from "../../../auth/index.js";
+import { useProjectRoles, useProjectRow } from "../../../auth/index.js";
 import { useRichFilters, useUpdateRichFilters } from "../../../issues/index.js";
 import { isProjectAuthorized } from "../../../projects/index.js";
 import { AreaChart, chartSlotColor, resolveChartScheme } from "../../../../shared/charts/index.js";
@@ -97,6 +97,7 @@ export function ModuleProgressSection({
 
   const detail = useQuery(moduleSidebarDetailQueryOptions(client, workspaceSlug, projectId, moduleId, archived));
   const estimates = useQuery(moduleSidebarEstimatesQueryOptions(client, workspaceSlug, projectId));
+  const project = useProjectRow(workspaceSlug, projectId);
 
   if (detail.data === undefined) return null;
   return (
@@ -108,7 +109,7 @@ export function ModuleProgressSection({
       readOnly={readOnly}
       archived={archived}
       editor={editor}
-      showPoints={showsModulePoints(estimates.data)}
+      showPoints={showsModulePoints(estimates.data, project.data?.estimate ?? null)}
       onRefetchDetails={() => {
         void detail.refetch();
       }}

@@ -1453,6 +1453,7 @@ mod tests {
         Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://pidash.example".into(),
@@ -1462,6 +1463,7 @@ mod tests {
                 agent_observability_v1: false,
                 agent_watchdog: Default::default(),
                 auto_update: true,
+                max_concurrent_agent_runs: 3,
             },
             runners,
             cli: Some(CliSection {

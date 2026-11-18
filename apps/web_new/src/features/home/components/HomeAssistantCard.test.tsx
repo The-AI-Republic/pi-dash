@@ -3,8 +3,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Dashboard assistant card (NEWFRONT-603, parity/specs/agents.md §9
-// AGT-048): quick entry with suggestions and recent conversations, the
-// keyless refusal notice, and the guest absence.
+// AGT-048; chat-first composer per NEWPIDASH-301): quick entry with
+// suggestions and recent conversations as their own section, the keyless
+// refusal notice, and the guest absence.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   createMemoryHistory,
@@ -21,8 +22,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER } from "../../../core/session/index.js";
 import { assistantKeys } from "../../assistant/index.js";
+import { cloudAssistantKeys } from "../../cloud-assistant/index.js";
 import { sessionKeys, setSessionClient } from "../../../core/session/queries.js";
 import { cardAskOutcome, HomeAssistantCard, recentConversations } from "./HomeAssistantCard.js";
+
+const localChat = vi.hoisted(() => ({ enabled: false }));
+vi.mock("../../../core/platform/local-chat.js", () => ({ hasLocalChat: () => localChat.enabled }));
 
 const notified = vi.hoisted(() => ({ error: vi.fn(), success: vi.fn() }));
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
@@ -84,6 +89,8 @@ function renderCard(options: {
   seedWorkspaces?: boolean;
   threads?: AssistantThread[];
   config?: LlmConfig;
+  list?: unknown;
+  quota?: unknown;
 }): void {
   setSessionClient({
     getJson: () => new Promise<never>(() => {}),
@@ -109,6 +116,8 @@ function renderCard(options: {
   }
   if (options.threads !== undefined) queryClient.setQueryData(assistantKeys.threads("acme"), options.threads);
   if (options.config !== undefined) queryClient.setQueryData(assistantKeys.config("acme"), options.config);
+  if (options.list !== undefined) queryClient.setQueryData(cloudAssistantKeys.connections(), options.list);
+  if (options.quota !== undefined) queryClient.setQueryData(cloudAssistantKeys.quota(), options.quota);
   // The card navigates into a started conversation, so it mounts under a
   // minimal router with that address registered.
   const rootRoute = createRootRouteWithContext<{ queryClient: QueryClient }>()();
@@ -143,6 +152,7 @@ let routerRef: { state: { location: { pathname: string } } } | null = null;
 
 afterEach(() => {
   routerRef = null;
+  localChat.enabled = false;
 });
 
 afterEach(() => {
@@ -173,6 +183,28 @@ describe("cardAskOutcome", () => {
 });
 
 describe("HomeAssistantCard", () => {
+  it("hands a desktop ask to local chat without creating or listing cloud conversations", async () => {
+    localChat.enabled = true;
+    renderCard({ config: CONFIGURED });
+    await screen.findByRole("region", { name: "Assistant" });
+    expect(screen.queryByTestId("home-recent-conversations")).toBeNull();
+    fireEvent.change(screen.getByRole("textbox", { name: "Ask the assistant" }), { target: { value: "hello native" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await screen.findByTestId("conversation");
+    expect(calls.filter((call) => call.method === "POST")).toEqual([]);
+    expect(calls.filter((call) => call.url.endsWith("/ai-assistant/threads/"))).toEqual([]);
+    expect((routerRef!.state.location as unknown as { state: { pendingMessage: string } }).state.pendingMessage).toBe(
+      "hello native"
+    );
+  });
+
+  it("does not show cloud history links on desktop even when cached", async () => {
+    localChat.enabled = true;
+    renderCard({ config: CONFIGURED, threads: [THREAD_1] });
+    await screen.findByRole("region", { name: "Assistant" });
+    expect(screen.queryByRole("link", { name: "Sprint summary" })).toBeNull();
+  });
+
   it("offers the entry, the pinned chips and up to five recents for members", async () => {
     const threads = Array.from({ length: 6 }, (_, index) =>
       makeThread({ id: `thread-${index}`, title: `Recent ${index}` })
@@ -180,8 +212,16 @@ describe("HomeAssistantCard", () => {
     renderCard({ threads: [ARCHIVED_THREAD, ...threads], config: CONFIGURED });
     const card = await screen.findByRole("region", { name: "Assistant" });
     expect(card).toHaveAttribute("data-assistant-state", "ready");
+    // Chat-first (NEWPIDASH-301): no visible Assistant title; the section
+    // keeps its accessible name, and recents are their own section.
+    expect(screen.queryByRole("heading", { name: "Assistant" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Recent conversations" })).toBeInTheDocument();
+    expect(card.contains(screen.getByTestId("home-recent-conversations"))).toBe(false);
     const input = screen.getByRole("textbox", { name: "Ask the assistant" });
     expect(input).toHaveValue("");
+    expect(input.tagName).toBe("TEXTAREA");
+    // The send control sits inside the composer box.
+    expect(screen.getByTestId("assistant-card-entry").contains(screen.getByRole("button", { name: "Ask" }))).toBe(true);
     expect(screen.getByRole("button", { name: "Ask" })).toBeDisabled();
     for (const chip of ["What's assigned to me?", "Create an issue in…", "Summarize open issues in…"]) {
       expect(screen.getByRole("button", { name: chip })).toBeInTheDocument();
@@ -268,8 +308,8 @@ describe("HomeAssistantCard", () => {
     fireEvent.change(input, { target: { value: "first" } });
     expect(screen.getByRole("button", { name: "Ask" })).toBeEnabled();
     fireEvent.keyDown(input, { key: "Enter" });
-    // The Ask button is disabled while starting, but the single-line input
-    // still takes keys; a second Enter must be absorbed, not start again.
+    // The Ask button is disabled while starting, but the composer still
+    // takes keys; a second Enter must be absorbed, not start again.
     fireEvent.change(input, { target: { value: "second" } });
     fireEvent.keyDown(input, { key: "Enter" });
     release(makeThread({ id: "44444444-4444-4444-8444-444444444444" }));
@@ -282,9 +322,43 @@ describe("HomeAssistantCard", () => {
     fireEvent.change(input, { target: { value: "chord" } });
     fireEvent.keyDown(input, { key: "Enter", ctrlKey: true });
     fireEvent.keyDown(input, { key: "Enter", metaKey: true });
+    fireEvent.keyDown(input, { key: "Enter", altKey: true });
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(calls.filter((call) => call.method === "POST")).toEqual([]);
     expect(routerRef?.state.location.pathname).toBe("/acme");
+  });
+
+  it("lets Shift+Enter break the line without sending", async () => {
+    renderCard({ threads: [], config: CONFIGURED });
+    const input = await screen.findByRole("textbox", { name: "Ask the assistant" });
+    fireEvent.change(input, { target: { value: "first" } });
+    fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(calls.filter((call) => call.method === "POST")).toEqual([]);
+    expect(screen.getByRole("textbox", { name: "Ask the assistant" })).toHaveValue("first");
+  });
+
+  it("grows the composer with its content up to the max height", async () => {
+    renderCard({ threads: [], config: CONFIGURED });
+    const input = (await screen.findByRole("textbox", { name: "Ask the assistant" })) as HTMLTextAreaElement;
+    // jsdom has no layout, so fake scrollHeight to observe the capped
+    // growth (NEWPIDASH-301): 64px content -> 64px box, 500px content ->
+    // COMPOSER_MAX_HEIGHT (200px) box.
+    let fakeHeight = 0;
+    Object.defineProperty(input, "scrollHeight", { configurable: true, get: () => fakeHeight });
+    fakeHeight = 64;
+    fireEvent.change(input, { target: { value: "line" } });
+    await waitFor(() => expect(input.style.height).toBe("64px"));
+    fakeHeight = 500;
+    fireEvent.change(input, { target: { value: "line\nline" } });
+    await waitFor(() => expect(input.style.height).toBe("200px"));
+  });
+
+  it("hides the recent-conversations section when there are none", async () => {
+    renderCard({ threads: [], config: CONFIGURED });
+    await screen.findByRole("region", { name: "Assistant" });
+    expect(screen.queryByRole("region", { name: "Recent conversations" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("home-recent-conversations")).not.toBeInTheDocument();
   });
 
   it("shows the start failure detail in the notice", async () => {
@@ -350,6 +424,68 @@ describe("HomeAssistantCard", () => {
   it("renders nothing while permissions load", () => {
     renderCard({ seedWorkspaces: false });
     expect(screen.queryByRole("region", { name: "Assistant" })).not.toBeInTheDocument();
+  });
+
+  it("shows the OpenHub model picker beside Ask for an OpenHub user (NEWPIDASH-303)", async () => {
+    renderCard({
+      threads: [],
+      config: { ...CONFIGURED, credential_mode: "openhub", has_openhub_access: true, model_name: "moonshotai/kimi-k3" },
+      list: {
+        connections: [
+          {
+            id: "123e4567-e89b-12d3-a456-426614174001",
+            kind: "openhub",
+            provider_kind: "openhub",
+            base_url: "",
+            model_name: "moonshotai/kimi-k3",
+            has_api_key: true,
+            is_selected: true,
+            last_verified_at: null,
+            created_at: null,
+            connected: true,
+            uses_chatgpt_plan: false,
+          },
+        ],
+        codex_model_options: [],
+        has_codex_credential: false,
+        openai_login_available: false,
+        openhub_model_options: ["moonshotai/kimi-k3", "openhub_free_llm"],
+        openhub_wallet_url: "",
+      },
+      quota: {
+        plan: "payg",
+        freeModels: ["openhub_free_llm"],
+        freeTokensUsed: null,
+        freeTokensLimit: null,
+        resetsAt: null,
+      },
+    });
+    const picker = await screen.findByRole("combobox", { name: "Assistant model" });
+    expect(screen.getByTestId("assistant-card-entry").contains(picker)).toBe(true);
+    expect(picker).toHaveValue("moonshotai/kimi-k3");
+    // The picker sits in the composer box next to Ask, and never sends.
+    const box = screen.getByRole("textbox", { name: "Ask the assistant" });
+    fireEvent.keyDown(picker, { key: "Enter" });
+    fireEvent.keyDown(box, { key: "Enter", ctrlKey: true });
+    expect(calls.some((call) => call.method === "POST")).toBe(false);
+  });
+
+  it("shows no OpenHub picker for a self-supplied lane", async () => {
+    renderCard({
+      threads: [],
+      config: CONFIGURED,
+      list: {
+        connections: [],
+        codex_model_options: [],
+        has_codex_credential: false,
+        openai_login_available: false,
+        openhub_model_options: ["openhub_free_llm"],
+        openhub_wallet_url: "",
+      },
+      quota: null,
+    });
+    await screen.findByRole("region", { name: "Assistant" });
+    expect(screen.queryByRole("combobox", { name: "Assistant model" })).not.toBeInTheDocument();
   });
 });
 

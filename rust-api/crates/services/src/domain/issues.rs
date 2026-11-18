@@ -67,8 +67,8 @@ use super::transition::IssueTransitionHook;
 use super::txn::WriteTxn;
 
 pub use super::issues_move::{
-    move_to_project, CreationDeps, MoveAdmissionCache, MoveDomainOutcome, MoveDrainError,
-    MoveInput, MovePostCommitHook, MoveRejection,
+    move_to_project, CreationDeps, MoveDomainOutcome, MoveDrainError, MoveInput,
+    MovePostCommitHook, MoveRejection,
 };
 use crate::app_issues::issue_move::{
     issue_activity_kwargs as move_issue_activity_kwargs, move_model_activity_kwargs,

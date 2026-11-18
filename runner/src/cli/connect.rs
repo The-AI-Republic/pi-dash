@@ -224,6 +224,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         None => Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: args.url.clone(),
@@ -233,6 +234,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
                 agent_observability_v1: false,
                 agent_watchdog: Default::default(),
                 auto_update: true,
+                max_concurrent_agent_runs: 3,
             },
             runners: vec![new_runner_block],
             cli: None,

@@ -137,6 +137,8 @@ pub enum Denial {
     Conflict(String),
     /// 413, oversized request body.
     RequestTooLarge,
+    /// 409, archived project (NEWPIDASH-236, pre-rendered body).
+    ProjectArchived(String),
     /// 500, generic branch.
     ServerError,
 }
@@ -175,6 +177,7 @@ impl Denial {
                 StatusCode::PAYLOAD_TOO_LARGE,
                 REQUEST_TOO_LARGE_BODY.to_owned(),
             ),
+            Denial::ProjectArchived(body) => (StatusCode::CONFLICT, body.clone()),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 SERVER_ERROR_BODY.to_owned(),
@@ -406,11 +409,18 @@ async fn require_entity_gate(
     let facts = project_base_facts(pool, workspace_id, workspace_slug, user_id, project_id).await?;
     let scope = TenantScope::new(pidash_types::WorkspaceId::from(workspace_slug.to_owned()));
     let gate = super::perms::gate_for(route, method);
-    if super::perms::decide(gate, method, &scope, &facts) {
-        Ok(())
-    } else {
-        Err(Denial::Forbidden)
+    if !super::perms::decide(gate, method, &scope, &facts) {
+        return Err(Denial::Forbidden);
     }
+    if let Some(info) = crate::project_archived::archived_by_id(pool, *project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
+    Ok(())
 }
 
 /// Parse a POST body the way DRF's `JSONParser` does for these views
@@ -1235,11 +1245,6 @@ impl GitStore for ReviewStore {
             .execute(&mut *tx)
             .await
             .map_err(|error| git_store_error("bind delete", error))?;
-        sqlx::query(pidash_services::integrations::repositories::GITHUB_SYNC_DELETE_SQL)
-            .bind(plan.project_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| git_store_error("bind sync delete", error))?;
         let id = Uuid::new_v4();
         let mut metadata = Map::new();
         metadata.insert("raw_url".to_owned(), Value::String(plan.raw_url.clone()));
@@ -1449,23 +1454,6 @@ impl GitStore for ReviewStore {
         )
     }
 
-    async fn set_github_syncs_enabled(
-        &self,
-        project_id: Uuid,
-        workspace_slug: &str,
-        enabled: bool,
-    ) -> Result<u64, GitStoreError> {
-        let done =
-            sqlx::query(pidash_services::integrations::repositories::GITHUB_SYNC_SET_ENABLED_SQL)
-                .bind(enabled)
-                .bind(project_id)
-                .bind(workspace_slug)
-                .execute(&self.pool)
-                .await
-                .map_err(|error| git_store_error("github syncs set enabled", error))?;
-        Ok(done.rows_affected())
-    }
-
     async fn delete_binding(&self, binding_id: Uuid) -> Result<(), GitStoreError> {
         sqlx::query(pidash_services::integrations::repositories::BINDING_DELETE_ONE_SQL)
             .bind(binding_id)
@@ -1473,18 +1461,6 @@ impl GitStore for ReviewStore {
             .await
             .map_err(|error| git_store_error("binding delete", error))?;
         Ok(())
-    }
-
-    async fn delete_github_syncs_for_project(
-        &self,
-        project_id: Uuid,
-    ) -> Result<u64, GitStoreError> {
-        let done = sqlx::query(pidash_services::integrations::repositories::GITHUB_SYNC_DELETE_SQL)
-            .bind(project_id)
-            .execute(&self.pool)
-            .await
-            .map_err(|error| git_store_error("github syncs delete", error))?;
-        Ok(done.rows_affected())
     }
 }
 

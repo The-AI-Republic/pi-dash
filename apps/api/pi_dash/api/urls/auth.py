@@ -5,6 +5,8 @@
 from django.urls import path
 
 from pi_dash.authentication.views.cli import (
+    DesktopHandoffIssueEndpoint,
+    DesktopHandoffRedeemEndpoint,
     DeviceCodeApproveEndpoint,
     DeviceCodeRevokeEndpoint,
     DeviceCodeStartEndpoint,
@@ -28,6 +30,16 @@ urlpatterns = [
         "auth/device/token/",
         DeviceCodeTokenEndpoint.as_view(),
         name="auth-device-token",
+    ),
+    path(
+        "auth/desktop-handoff/",
+        DesktopHandoffIssueEndpoint.as_view(),
+        name="auth-desktop-handoff",
+    ),
+    path(
+        "auth/desktop-handoff/redeem/",
+        DesktopHandoffRedeemEndpoint.as_view(),
+        name="auth-desktop-handoff-redeem-api",
     ),
     path(
         "auth/revoke/",
