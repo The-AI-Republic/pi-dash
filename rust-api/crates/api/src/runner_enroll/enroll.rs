@@ -48,13 +48,13 @@
 use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::Router;
 use axum::extract::{ConnectInfo, Extension, Path, State};
-use axum::http::{HeaderMap, HeaderValue, Request, StatusCode, header};
+use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
+use axum::Router;
 use chrono::{DateTime, Utc};
 use http_body_util::BodyExt as _;
-use pidash_db::orm_tx::{TxConn, is_integrity_violation};
+use pidash_db::orm_tx::{is_integrity_violation, TxConn};
 use sea_orm::DbErr;
 use serde_json::{Map, Value};
 use sqlx::postgres::Postgres;
@@ -76,7 +76,7 @@ use crate::state::AppState;
 pub use pidash_compat::datetime::render_isoformat;
 use pidash_compat::db::is_integrity_error;
 use pidash_compat::py::py_strip;
-pub use pidash_compat::response::{SERVER_ERROR_BODY, error_body, json_response, server_error};
+pub use pidash_compat::response::{error_body, json_response, server_error, SERVER_ERROR_BODY};
 
 // ---------------------------------------------------------------------------
 // Wire consts (`enrollment.py`, `register.py`)
