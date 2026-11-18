@@ -196,6 +196,43 @@ def test_retick_assigns_to_idle_runner(api_client):
     _assert_assigned(body["run_id"], runner)
 
 
+def test_web_retick_grants_and_assigns(web_client):
+    """Web re-tick (the issue page's Re-tick button) grants and assigns in-request.
+
+    ``POST /api/runners/re-tick/`` used to proxy its ``re_tick_ticker`` tail
+    to Django, so the all-Rust stack (no Django upstream) answered 502
+    ``bad_gateway`` to every valid re-tick.
+    """
+    w, client = web_client
+    pod = world.make_pod(w.workspace_id, w.project_id, is_default=True)
+    runner = _fresh_runner(w.user_id, w.workspace_id, pod)
+    issue = world.make_issue(w, "webretick", "In Progress")
+    world.set_ticker(issue, used=10)  # spent pool: the grant dispatches now
+
+    r = client.post("/api/runners/re-tick/", json={"work_item": issue})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert list(body)[:3] == ["granted", "reason", "run_id"], body
+    assert body["granted"] is True, body
+    assert body["run_id"] is not None, body
+    for key in ("used", "tick_count", "max_ticks", "enabled", "pending_entry", "next_run_at"):
+        assert key in body, body
+    _assert_assigned(body["run_id"], runner)
+
+
+def test_web_retick_refuses_when_pool_not_spent(web_client):
+    """A re-tick with budget left is a 200 no-op, not a proxy."""
+    w, client = web_client
+    issue = world.make_issue(w, "webreticknoop", "In Progress")
+    world.set_ticker(issue, used=0)
+
+    r = client.post("/api/runners/re-tick/", json={"work_item": issue})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["granted"] is False, body
+    assert body["run_id"] is None, body
+
+
 def test_fire_tick_continuation_assigns(api_client, broker):
     """A due tick with no active run creates a continuation already assigned."""
     w, _ = api_client

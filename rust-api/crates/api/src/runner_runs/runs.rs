@@ -13,9 +13,10 @@
 //!   (PIDASHCONV-1041 drives the dispatch tails through
 //!   [`super::dispatch`]); only the parser arms proxy (malformed JSON,
 //!   JSON non-objects).
-//! * `AgentReTickEndpoint.post` (`:517-560`) → [`retick`]: the missing /
-//!   malformed-UUID / not-found arms are owned; the `re_tick_ticker` tail
-//!   (D-12) proxies.
+//! * `AgentReTickEndpoint.post` (`:517-560`) → [`retick`]: fully owned.
+//!   The `re_tick_ticker` tail runs through the shared v1 core
+//!   ([`crate::v1_work_items::handlers_actions::retick_issue`]); only the
+//!   malformed-JSON / non-object parser arms proxy.
 //! * `AgentRunDetailEndpoint.get` (`:565-585`) → [`run_detail`], with
 //!   `?include_events=1`.
 //! * `AgentRunCancelEndpoint.post` (`:590-682`) → [`cancel_run`]: the
@@ -1672,8 +1673,8 @@ async fn create_run_inner(
 // `POST /api/runners/re-tick/` — budget grant (`runs.py:482-523`)
 // ---------------------------------------------------------------------------
 
-/// Re-tick: missing / malformed-UUID / not-found arms are owned; the
-/// `re_tick_ticker` tail (D-12) proxies.
+/// Re-tick: every arm is owned except the malformed-JSON / non-object
+/// parser arms; the `re_tick_ticker` tail runs natively.
 pub async fn retick(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
@@ -1737,7 +1738,20 @@ async fn retick_inner(
     if !is_workspace_member(role) {
         return json_response(StatusCode::NOT_FOUND, ISSUE_NOT_FOUND_BODY.to_owned());
     }
-    proxy_with_body(state, parts, bytes).await
+    // `scheduling.re_tick_ticker` tail, natively: the all-Rust stack has no
+    // Django upstream, so proxying it answered 502 to every valid re-tick.
+    use crate::v1_work_items::handlers_actions::{fetch_issue_by_id, retick_issue};
+    let issue = match fetch_issue_by_id(pool, &work_item_id).await {
+        Ok(Some(issue)) => issue,
+        Ok(None) => {
+            return json_response(StatusCode::NOT_FOUND, ISSUE_NOT_FOUND_BODY.to_owned());
+        }
+        Err(_) => return server_error(),
+    };
+    match retick_issue(&state, pool, actor.id, &issue).await {
+        Ok((status, body)) => json_response(status, body),
+        Err(_) => server_error(),
+    }
 }
 
 // ---------------------------------------------------------------------------
