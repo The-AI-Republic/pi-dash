@@ -13,6 +13,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const harness = vi.hoisted(() => ({
+  setupInProgress: false,
   client: { baseUrl: "https://cloud.test" },
   agentRuntime: undefined as
     | {
@@ -68,6 +69,7 @@ vi.mock("./service.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("./service.js")>();
   return {
     ...original,
+    daemonSetupInProgress: () => harness.setupInProgress,
     resumeRuntime: (input: unknown) => harness.resumeRuntime(input),
     signInDaemonForAccount: (input: unknown) => harness.signInDaemonForAccount(input),
     releaseRuntimeForAccountSwitch: (input: unknown) => harness.releaseRuntimeForAccountSwitch(input),
@@ -111,6 +113,7 @@ function renderSupervisor(queryClient = new QueryClient({ defaultOptions: { quer
 
 beforeEach(() => {
   vi.clearAllMocks();
+  harness.setupInProgress = false;
   harness.me = null;
   harness.agentRuntime = undefined;
   harness.focusListeners = [];
@@ -125,6 +128,26 @@ describe("AuthSyncSupervisor", () => {
     harness.agentRuntime = undefined;
     renderSupervisor();
     expect(screen.queryByText("Sign in and switch")).toBeNull();
+  });
+
+  it("leaves authentication alone while automatic setup signs in the CLI", () => {
+    const rt = runtime({});
+    harness.setupInProgress = true;
+    renderSupervisor();
+    expect(rt.daemonHello).not.toHaveBeenCalled();
+    expect(harness.signInDaemonForAccount).not.toHaveBeenCalled();
+  });
+
+  it("rechecks setup after discovery before reconciling authentication", async () => {
+    const rt = runtime({});
+    rt.daemonHello.mockImplementation(async () => {
+      harness.setupInProgress = true;
+      return {};
+    });
+    renderSupervisor();
+    await vi.waitFor(() => expect(rt.daemonHello).toHaveBeenCalled());
+    expect(rt.getAuthSyncRecord).not.toHaveBeenCalled();
+    expect(harness.signInDaemonForAccount).not.toHaveBeenCalled();
   });
 
   it("signs in through the handoff when the daemon signed in first (no user yet)", async () => {
