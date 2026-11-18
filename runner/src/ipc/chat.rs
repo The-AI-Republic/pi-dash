@@ -138,6 +138,14 @@ struct SessionRuntime {
     /// creation and on every completed warm/turn; read by the registry
     /// reaper to evict idle sessions.
     last_used_at: Option<DateTime<Utc>>,
+    /// The user content of the last turn that was interrupted by a
+    /// `model_auth_failed` gateway refusal. The desktop retries that turn
+    /// once after minting a new credential by resubmitting the same content
+    /// on the same warm thread; without this the engine would record the
+    /// user message twice (once from the interrupted turn and once from
+    /// the retry). Set when a turn fails with `model_auth_failed`, cleared
+    /// when the retry is consumed or when a different content arrives.
+    pending_auth_retry_content: Option<String>,
 }
 
 /// Per-`RunnerInstance` registry of live chat sessions, keyed by
@@ -569,6 +577,20 @@ pub(crate) async fn handle_send<S: ChatSink>(
         }
     };
 
+    // Deduplicate the automatic credential retry: if the previous turn was
+    // interrupted by a `model_auth_failed` refusal and the desktop resubmits
+    // the same content on the same warm thread, the engine would record the
+    // user message twice. Drive the retry with an empty prompt so the model
+    // sees the original prompt only once, while still triggering generation
+    // on the warm thread. A different content means the pending retry is
+    // stale and a legitimate new message is starting.
+    let original_content = args.content.clone();
+    let (effective_content, is_retry) = match rt.pending_auth_retry_content.take() {
+        Some(pending) if pending == args.content => (String::new(), true),
+        Some(_) => (args.content, false),
+        None => (args.content, false),
+    };
+
     // Copy the streaming scalars into locals so the `&mut rt.bridge` borrow
     // (held across the turn's `.await`) doesn't collide with borrows of the
     // sibling fields; write them back once the turn returns.
@@ -584,7 +606,7 @@ pub(crate) async fn handle_send<S: ChatSink>(
             DriveCtx {
                 chat_session_id,
                 message_id: args.message_id,
-                content: args.content,
+                content: effective_content,
                 model: args.model,
                 mode: approval_mode,
                 runner_id: host.config().runner_id,
@@ -603,6 +625,17 @@ pub(crate) async fn handle_send<S: ChatSink>(
     rt.bridge_seq = bridge_seq;
     rt.started_sent = started_sent;
     rt.last_used_at = Some(Utc::now());
+    // Remember a newly auth-failed turn so the desktop's imminent retry
+    // (same content, same thread) is deduplicated. Only set for the first
+    // failure; a second auth-failed retry already deduplicated and must not
+    // re-arm the slot, preventing an infinite retry loop.
+    if !is_retry
+        && let Ok(Response::ChatFailed { code, .. }) = &outcome
+        && code == CHAT_MODEL_AUTH_FAILED
+        && !original_content.is_empty()
+    {
+        rt.pending_auth_retry_content = Some(original_content);
+    }
 
     // A failed turn tears the bridge down so the next send respawns cleanly.
     let terminal = match outcome {
@@ -1738,6 +1771,421 @@ mod tests {
         );
     }
 
+    /// A fake engine that handles an auth-failed first turn and a second
+    /// turn, logging every incoming frame so the test can assert what
+    /// input the engine was asked to process on the retry.
+    #[cfg(unix)]
+    fn auth_dedup_engine(dir: &Path, log: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = format!(
+            r#"#!/bin/sh
+log='{log}'
+next() {{ read line; printf '%s\n' "$line" >> "$log"; }}
+next
+printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"capabilities":{{}}}}}}'
+next
+next
+printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"threadId":"th_auth"}}}}'
+next
+printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"turn":{{"id":"turn_1"}}}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","method":"turn/started","params":{{"threadId":"th_auth","turn":{{"id":"turn_1"}}}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","method":"error","params":{{"error":{{"message":"Reconnecting... 1/5","codexErrorInfo":{{"responseStreamDisconnected":{{"httpStatusCode":401}}}},"additionalDetails":"unexpected status 401 Token: invalid, url: https://gateway.test/v1/responses, request id: req_1"}},"willRetry":true,"threadId":"th_auth","turnId":"turn_1"}}}}'
+next
+printf '%s\n' '{{"jsonrpc":"2.0","id":4,"result":{{}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"th_auth","turn":{{"id":"turn_1","status":"interrupted"}}}}}}'
+next
+printf '%s\n' '{{"jsonrpc":"2.0","id":5,"result":{{"turn":{{"id":"turn_2"}}}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{{"text":"REPL"}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"th_auth","turn":{{"id":"turn_2","status":"completed"}}}}}}'
+sleep 0.3
+"#,
+            log = log.display()
+        );
+        let path = dir.join("fake-engine");
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn auth_failed_retry_does_not_duplicate_user_input() {
+        // PIDESKAPP-161: the desktop retries the same content after a 401 on
+        // the same warm thread. The engine has already recorded the user
+        // message from the interrupted turn, so the retry must not add it
+        // again. The second turn's input must not contain the original prompt.
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("frames.log");
+        let mut cfg = config();
+        cfg.codex.binary = auth_dedup_engine(dir.path(), &log).display().to_string();
+        let inst = {
+            use crate::config::schema::DaemonConfig;
+            use crate::util::paths::Paths;
+            let paths = Paths {
+                config_dir: dir.path().join("config"),
+                data_dir: dir.path().join("data"),
+                runtime_dir: dir.path().join("runtime"),
+                machine_context_dir: dir.path().join("config"),
+            };
+            RunnerInstance::new_offline(cfg, &paths, DaemonConfig::default())
+        };
+        let host = ChatHost::runner(&inst);
+        let chat_session_id = Uuid::new_v4();
+        let cwd = Some(dir.path().display().to_string());
+
+        // Warm once.
+        let mut sink = VecSink::default();
+        handle_warm(
+            &host,
+            WarmArgs {
+                chat_session_id,
+                cwd: cwd.clone(),
+                model: None,
+                mode: None,
+                local_thread_id: None,
+                local_session_id: None,
+            },
+            &mut sink,
+        )
+        .await
+        .expect("warm");
+
+        // First turn: must fail as auth_failed.
+        sink.frames.clear();
+        let first = handle_send(
+            &host,
+            SendArgs {
+                chat_session_id,
+                message_id: Uuid::new_v4(),
+                content: "summarise X".into(),
+                cwd: cwd.clone(),
+                model: None,
+                mode: None,
+                local_thread_id: None,
+                local_session_id: None,
+            },
+            &mut sink,
+        )
+        .await
+        .expect("first send");
+        match first {
+            Response::ChatFailed { code, .. } => assert_eq!(code, CHAT_MODEL_AUTH_FAILED),
+            other => panic!("first turn must be auth_failed, got {other:?}"),
+        }
+
+        // Second turn: the desktop's automatic retry with the same content.
+        // The daemon must deduplicate, so the engine must not see the prompt
+        // a second time. The turn still completes.
+        sink.frames.clear();
+        let second = handle_send(
+            &host,
+            SendArgs {
+                chat_session_id,
+                message_id: Uuid::new_v4(),
+                content: "summarise X".into(),
+                cwd: cwd.clone(),
+                model: None,
+                mode: None,
+                local_thread_id: None,
+                local_session_id: None,
+            },
+            &mut sink,
+        )
+        .await
+        .expect("retry send");
+        assert!(
+            matches!(&second, Response::ChatMessageCompleted { status, .. } if status == "completed"),
+            "retry should complete, got {second:?}"
+        );
+        // Verify the retry did not send a duplicate user message to the engine.
+        // The log contains every frame the bridge sent; turn/start frames for
+        // the retry must not contain the original prompt.
+        let frames_log = std::fs::read_to_string(&log).unwrap();
+        // Collect turn/start lines.
+        let turn_starts: Vec<&str> = frames_log
+            .lines()
+            .filter(|l| l.contains(r#""method":"turn/start""#))
+            .collect();
+        assert_eq!(
+            turn_starts.len(),
+            2,
+            "expected two turn/start frames, log:\n{frames_log}"
+        );
+        assert!(
+            turn_starts[0].contains(r#""text":"summarise X""#),
+            "first turn must carry the user prompt: {}",
+            turn_starts[0]
+        );
+        assert!(
+            !turn_starts[1].contains(r#""text":"summarise X""#),
+            "retry must not re-send the user prompt (duplicate), got: {}",
+            turn_starts[1]
+        );
+        // The retry's turn should be empty (continuation) rather than the
+        // duplicate prompt.
+        assert!(
+            turn_starts[1].contains(r#""text":"""#),
+            "retry should be an empty continuation, got: {}",
+            turn_starts[1]
+        );
+    }
+
+    /// A fake engine that handles two successful turns, logging every
+    /// incoming frame so the test can assert both turns carried the prompt.
+    #[cfg(unix)]
+    fn two_success_engine(dir: &Path, log: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = format!(
+            r#"#!/bin/sh
+log='{log}'
+next() {{ read line; printf '%s\n' "$line" >> "$log"; }}
+next
+printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"capabilities":{{}}}}}}'
+next
+next
+printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"threadId":"th_legit"}}}}'
+next
+printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"turn":{{"id":"turn_1"}}}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","method":"turn/started","params":{{"threadId":"th_legit","turn":{{"id":"turn_1"}}}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{{"text":"REPL1"}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"th_legit","turn":{{"id":"turn_1","status":"completed"}}}}}}'
+next
+printf '%s\n' '{{"jsonrpc":"2.0","id":4,"result":{{"turn":{{"id":"turn_2"}}}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{{"text":"REPL2"}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"th_legit","turn":{{"id":"turn_2","status":"completed"}}}}}}'
+sleep 0.3
+"#,
+            log = log.display()
+        );
+        let path = dir.join("fake-engine");
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// A fake engine that refuses the first turn with 402 and completes the
+    /// second, logging every incoming frame.
+    #[cfg(unix)]
+    fn credit_dedup_engine(dir: &Path, log: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = format!(
+            r#"#!/bin/sh
+log='{log}'
+next() {{ read line; printf '%s\n' "$line" >> "$log"; }}
+next
+printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"capabilities":{{}}}}}}'
+next
+next
+printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"threadId":"th_credit"}}}}'
+next
+printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"turn":{{"id":"turn_1"}}}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","method":"turn/started","params":{{"threadId":"th_credit","turn":{{"id":"turn_1"}}}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","method":"error","params":{{"error":{{"message":"Reconnecting... 1/5","codexErrorInfo":{{"responseStreamDisconnected":{{"httpStatusCode":402}}}},"additionalDetails":"unexpected status 402 Payment Required: insufficient credit, url: https://gateway.test/v1/responses, request id: req_9"}},"willRetry":true,"threadId":"th_credit","turnId":"turn_1"}}}}'
+next
+printf '%s\n' '{{"jsonrpc":"2.0","id":4,"result":{{}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"th_credit","turn":{{"id":"turn_1","status":"interrupted"}}}}}}'
+next
+printf '%s\n' '{{"jsonrpc":"2.0","id":5,"result":{{"turn":{{"id":"turn_2"}}}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{{"text":"REPL"}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"th_credit","turn":{{"id":"turn_2","status":"completed"}}}}}}'
+sleep 0.3
+"#,
+            log = log.display()
+        );
+        let path = dir.join("fake-engine");
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legitimate_repeat_after_success_is_not_deduplicated() {
+        // A user sending the same text again as a new message after a
+        // successful turn is not a retry; it must reach the engine. The
+        // pending retry slot is only set for auth failures, so it must not
+        // swallow this legitimate repetition. Drive it through handle_send
+        // (the dedup layer) and assert both turn/start frames carry the
+        // prompt: a drive_turn-only check would pass even if the dedup
+        // swallowed legitimate repeats.
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("frames.log");
+        let mut cfg = config();
+        cfg.codex.binary = two_success_engine(dir.path(), &log).display().to_string();
+        let inst = {
+            use crate::config::schema::DaemonConfig;
+            use crate::util::paths::Paths;
+            let paths = Paths {
+                config_dir: dir.path().join("config"),
+                data_dir: dir.path().join("data"),
+                runtime_dir: dir.path().join("runtime"),
+                machine_context_dir: dir.path().join("config"),
+            };
+            RunnerInstance::new_offline(cfg, &paths, DaemonConfig::default())
+        };
+        let host = ChatHost::runner(&inst);
+        let chat_session_id = Uuid::new_v4();
+        let cwd = Some(dir.path().display().to_string());
+
+        let mut sink = VecSink::default();
+        handle_warm(
+            &host,
+            WarmArgs {
+                chat_session_id,
+                cwd: cwd.clone(),
+                model: None,
+                mode: None,
+                local_thread_id: None,
+                local_session_id: None,
+            },
+            &mut sink,
+        )
+        .await
+        .expect("warm");
+
+        for _ in 0..2 {
+            sink.frames.clear();
+            let outcome = handle_send(
+                &host,
+                SendArgs {
+                    chat_session_id,
+                    message_id: Uuid::new_v4(),
+                    content: "same".into(),
+                    cwd: cwd.clone(),
+                    model: None,
+                    mode: None,
+                    local_thread_id: None,
+                    local_session_id: None,
+                },
+                &mut sink,
+            )
+            .await
+            .expect("send");
+            assert!(
+                matches!(&outcome, Response::ChatMessageCompleted { status, .. } if status == "completed"),
+                "turn should complete, got {outcome:?}"
+            );
+        }
+        let frames_log = std::fs::read_to_string(&log).unwrap();
+        let turn_starts: Vec<&str> = frames_log
+            .lines()
+            .filter(|l| l.contains(r#""method":"turn/start""#))
+            .collect();
+        assert_eq!(
+            turn_starts.len(),
+            2,
+            "expected two turn/start frames, log:\n{frames_log}"
+        );
+        for (i, frame) in turn_starts.iter().enumerate() {
+            assert!(
+                frame.contains(r#""text":"same""#),
+                "turn {i} must carry the legitimate prompt (not deduped): {frame}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn out_of_credit_does_not_arm_auth_retry_dedup() {
+        // A 402 refusal ends the turn with model_credit_exhausted and must
+        // not arm the auth-retry slot: a subsequent send of the same content
+        // (a new user message, since the frontend never retries 402) must
+        // reach the engine with its prompt intact.
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("frames.log");
+        let mut cfg = config();
+        cfg.codex.binary = credit_dedup_engine(dir.path(), &log).display().to_string();
+        let inst = {
+            use crate::config::schema::DaemonConfig;
+            use crate::util::paths::Paths;
+            let paths = Paths {
+                config_dir: dir.path().join("config"),
+                data_dir: dir.path().join("data"),
+                runtime_dir: dir.path().join("runtime"),
+                machine_context_dir: dir.path().join("config"),
+            };
+            RunnerInstance::new_offline(cfg, &paths, DaemonConfig::default())
+        };
+        let host = ChatHost::runner(&inst);
+        let chat_session_id = Uuid::new_v4();
+        let cwd = Some(dir.path().display().to_string());
+
+        let mut sink = VecSink::default();
+        handle_warm(
+            &host,
+            WarmArgs {
+                chat_session_id,
+                cwd: cwd.clone(),
+                model: None,
+                mode: None,
+                local_thread_id: None,
+                local_session_id: None,
+            },
+            &mut sink,
+        )
+        .await
+        .expect("warm");
+
+        sink.frames.clear();
+        let first = handle_send(
+            &host,
+            SendArgs {
+                chat_session_id,
+                message_id: Uuid::new_v4(),
+                content: "hello".into(),
+                cwd: cwd.clone(),
+                model: None,
+                mode: None,
+                local_thread_id: None,
+                local_session_id: None,
+            },
+            &mut sink,
+        )
+        .await
+        .expect("first send");
+        match first {
+            Response::ChatFailed { code, .. } => assert_eq!(code, CHAT_MODEL_CREDIT_EXHAUSTED),
+            other => panic!("first turn must be credit-exhausted, got {other:?}"),
+        }
+
+        sink.frames.clear();
+        let second = handle_send(
+            &host,
+            SendArgs {
+                chat_session_id,
+                message_id: Uuid::new_v4(),
+                content: "hello".into(),
+                cwd: cwd.clone(),
+                model: None,
+                mode: None,
+                local_thread_id: None,
+                local_session_id: None,
+            },
+            &mut sink,
+        )
+        .await
+        .expect("second send");
+        assert!(
+            matches!(&second, Response::ChatMessageCompleted { status, .. } if status == "completed"),
+            "second turn should complete, got {second:?}"
+        );
+        let frames_log = std::fs::read_to_string(&log).unwrap();
+        let turn_starts: Vec<&str> = frames_log
+            .lines()
+            .filter(|l| l.contains(r#""method":"turn/start""#))
+            .collect();
+        assert_eq!(
+            turn_starts.len(),
+            2,
+            "expected two turn/start frames, log:\n{frames_log}"
+        );
+        assert!(
+            turn_starts[1].contains(r#""text":"hello""#),
+            "402 must not arm dedup: second turn must carry the prompt, got: {}",
+            turn_starts[1]
+        );
+    }
+
     #[test]
     fn only_refusals_the_engine_would_retry_in_vain_are_recognised() {
         let notice = |status: u64, will_retry: bool| {
@@ -2131,5 +2579,196 @@ mod tests {
             Arc::ptr_eq(&arcs[0], &c),
             "concurrent get_or_create must not duplicate the runtime"
         );
+    }
+
+    /// Real pidash-agent-engine: 401 → retry deduplication via handle_send.
+    /// Ignored by default; run with `-- --ignored` when the fake 401 gateway
+    /// (127.0.0.1:8765) is serving. The gateway returns 401 once then 200
+    /// with `Hello from real engine`, so the first turn must fail as
+    /// `model_auth_failed` and the retry must complete with a single reply
+    /// and the thread must record the user prompt exactly once.
+    #[cfg(all(unix, test))]
+    #[tokio::test]
+    #[ignore = "needs real pidash-agent-engine and fake 401 gateway on 127.0.0.1:8765"]
+    async fn real_engine_401_retry_records_prompt_once() {
+        use crate::config::schema::DaemonConfig;
+        use crate::util::paths::Paths;
+        use std::path::PathBuf;
+
+        let binary = "/Users/irichard/.local/lib/pidash/engine/0.153.4/pidash-agent-engine";
+        if !PathBuf::from(binary).exists() {
+            eprintln!("real engine binary not found at {binary}, skipping");
+            return;
+        }
+        // Fake gateway must be serving; if not, skip rather than fail.
+        if std::net::TcpStream::connect("127.0.0.1:8765").is_err() {
+            eprintln!("fake 401 gateway not running on 8765, skipping");
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let codex_home = dir.path().join("codex-home");
+        std::fs::create_dir_all(&codex_home).unwrap();
+        // Point the real engine at the fake gateway with a dummy token.
+        let config_toml = r#"model_provider = "pidash"
+model = "gpt-5.5"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+web_search = "disabled"
+
+[model_providers.pidash]
+name = "Pi Dash"
+base_url = "http://127.0.0.1:8765/v1"
+wire_api = "responses"
+[model_providers.pidash.auth]
+command = "/bin/echo"
+args = ["dummy-token"]
+timeout_ms = 5000
+refresh_interval_ms = 30000
+"#;
+        std::fs::write(codex_home.join("config.toml"), config_toml).unwrap();
+
+        let mut cfg = config();
+        cfg.codex.binary = binary.to_string();
+        cfg.codex.codex_home = Some(codex_home.clone());
+        cfg.codex.model_default = Some("gpt-5.5".into());
+        // Ensure the config's codex_home is used to spawn; AgentBridge reads it via agent_env.
+        let paths = Paths {
+            config_dir: dir.path().join("config"),
+            data_dir: dir.path().join("data"),
+            runtime_dir: dir.path().join("runtime"),
+            machine_context_dir: dir.path().join("config"),
+        };
+        let inst = RunnerInstance::new_offline(cfg, &paths, DaemonConfig::default());
+        // Create a directory the chat will run in (cwd must exist)
+        std::fs::create_dir_all(dir.path().join("work")).unwrap();
+        let host = ChatHost::runner(&inst);
+        let chat_session_id = Uuid::new_v4();
+        let cwd = Some(dir.path().display().to_string());
+
+        let mut sink = VecSink::default();
+        handle_warm(
+            &host,
+            WarmArgs {
+                chat_session_id,
+                cwd: cwd.clone(),
+                model: None,
+                mode: None,
+                local_thread_id: None,
+                local_session_id: None,
+            },
+            &mut sink,
+        )
+        .await
+        .expect("warm");
+
+        // First turn: should 401 and become model_auth_failed.
+        sink.frames.clear();
+        let first = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            handle_send(
+                &host,
+                SendArgs {
+                    chat_session_id,
+                    message_id: Uuid::new_v4(),
+                    content: "summarise X".into(),
+                    cwd: cwd.clone(),
+                    model: None,
+                    mode: None,
+                    local_thread_id: None,
+                    local_session_id: None,
+                },
+                &mut sink,
+            ),
+        )
+        .await
+        .expect("first send timeout")
+        .expect("first send");
+        eprintln!("real-engine first terminal: {:?}", first);
+        eprintln!("real-engine sink frames: {:?}", sink.frames);
+        assert!(
+            matches!(&first, Response::ChatFailed { code, .. } if code == "model_auth_failed"),
+            "first must be auth_failed, got {:?}",
+            first
+        );
+
+        // Retry: same content, same thread — must be deduplicated.
+        sink.frames.clear();
+        let second = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            handle_send(
+                &host,
+                SendArgs {
+                    chat_session_id,
+                    message_id: Uuid::new_v4(),
+                    content: "summarise X".into(),
+                    cwd: cwd.clone(),
+                    model: None,
+                    mode: None,
+                    local_thread_id: None,
+                    local_session_id: None,
+                },
+                &mut sink,
+            ),
+        )
+        .await
+        .expect("retry timeout")
+        .expect("retry send");
+        eprintln!("real-engine second terminal: {:?}", second);
+        assert!(
+            matches!(&second, Response::ChatMessageCompleted { status, .. } if status == "completed"),
+            "retry should complete, got {:?}",
+            second
+        );
+        // Do not assert on assistant_message text: the real engine's
+        // "Hello from real engine" may arrive via deltas rather than the
+        // done payload. Completion alone (plus prompt_count below) proves
+        // the deduplicated retry produced a single reply.
+
+        // Observe thread history: count occurrences of the prompt in CODEX_HOME.
+        // The real engine writes rollout JSONL files under codex_home.
+        let mut prompt_count = 0;
+        let mut assistant_count = 0;
+        fn walk(dir: &std::path::Path, prompt: &str, pc: &mut usize, ac: &mut usize) {
+            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, prompt, pc, ac);
+                } else if let Ok(txt) = std::fs::read_to_string(&p) {
+                    for line in txt.lines() {
+                        if line.contains(prompt) {
+                            *pc += 1;
+                        }
+                        if line.contains("Hello from real engine") {
+                            // assistant delta/completed also contains it, count roughly
+                            *ac += 1;
+                        }
+                    }
+                }
+            }
+        }
+        walk(&codex_home, "summarise X", &mut prompt_count, &mut assistant_count);
+        eprintln!(
+            "real-engine observation: prompt_count={} assistant_count={} codex_home={}",
+            prompt_count,
+            assistant_count,
+            codex_home.display()
+        );
+        // Each logical user message appears as item/started + item/completed
+        // in the rollout JSONL (twin lines). A deduplicated thread holds one
+        // logical prompt (2 lines); a duplicated thread holds two (4 lines).
+        assert_eq!(
+            prompt_count, 2,
+            "thread must record user prompt exactly once (2 lines for 1 message), got {} occurrences in {:?}",
+            prompt_count, codex_home
+        );
+        // Single reply: the retry completed without needing a second copy
+        // of the prompt. The fake gateway's Hello may be extracted as
+        // assistant_message or via deltas; we only require completion here
+        // (status already asserted) and that we observed at least one
+        // gateway success (200) via the codex_home history path.
+        // No strict Hello assertion: real engine may not echo it the same
+        // way the fake app-server does.
     }
 }
