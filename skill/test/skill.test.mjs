@@ -140,9 +140,11 @@ const COMMAND_SOURCES = {
   scheduler: "scheduler.rs",
   run: "run_cmd.rs",
   config: "config_cmd.rs",
-  auth: null,
+  auth: "auth/mod.rs",
   ai: null,
   update: null,
+  doctor: null,
+  runner: null,
 };
 
 const toVariant = (kebab) =>

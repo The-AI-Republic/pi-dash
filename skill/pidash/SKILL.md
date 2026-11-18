@@ -29,6 +29,8 @@ If `pidash` is missing or `workspace me` fails with an auth error (exit code 3),
 - **Issues are addressed as `PROJ-123`.** Projects are addressed by identifier (`PROJ`) or UUID. States, labels, pods, and runners accept a name (case-insensitive) or a UUID.
 - **Long text goes through a file.** Use `--description-file` and `--body-file` instead of inlining multi-line markdown in a shell argument.
 - **Throttled (exit 6) means wait, not retry in a loop.**
+- **Empty bodies are refused.** `comment update`, `page update`, and `workpad update` reject an empty body unless `--allow-empty` is passed. Do not pass it to get past an error — an empty file usually means the step before it failed.
+- **Setup is the user's.** `pidash auth status` and `pidash doctor` are safe to run when something looks wrong. Do not run `pidash update`, `pidash runner ...`, or the service commands (`install`, `start`, `stop`, `restart`, `remove`) on your own initiative.
 
 ## Project Context
 

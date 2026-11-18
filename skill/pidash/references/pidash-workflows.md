@@ -35,6 +35,16 @@ If `pidash` is not installed, point the user at the Pi Dash install instructions
 
 If a command or flag in this file is rejected as unknown, the installed CLI predates it. Check `--help` for what this version supports and tell the user they can upgrade with `pidash update`.
 
+When something about the setup looks wrong, these read-only commands say what:
+
+```bash
+pidash auth status        # who this machine is logged in as, and its registered runners
+pidash doctor --json      # agent binary on PATH and authenticated, git configured, cloud reachable
+pidash update --check     # is a newer CLI available (changes nothing)
+```
+
+Report what they show and let the user act on it. Do not run `pidash update`, `pidash auth logout`, `pidash runner ...`, or the service commands (`install`, `start`, `stop`, `restart`, `remove`) on your own initiative — they change the machine's Pi Dash setup, not issue data.
+
 ## Output, errors, and exit codes
 
 Every data command prints JSON on stdout, with two exceptions: `pidash ai` prints a readable transcript unless `--json` is passed, and `page get --body-only` prints plain markdown. Notes and warnings (for example a truncated-list note) go to stderr, so stdout stays parseable.
@@ -130,6 +140,7 @@ pidash issue list --project PROJ [--state-group open] [--state "In Review"] [--l
 - `--state-group` takes `backlog`, `unstarted`, `started`, `review`, `test`, `completed`, `cancelled`, and on recent CLIs the shortcuts `open`, `closed`, `all`. Recent CLIs default to open issues when neither `--state` nor `--state-group` is given, so ask for `closed` or `all` explicitly when you need finished work.
 - `--parent none` returns top-level issues only; `--parent PROJ-10` returns that issue's sub-issues.
 - `--fields` trims each item. Use it — full issue payloads are large.
+- `--per-page <n>` sets the page size (the server default, 1000, is also the maximum). Ask for a small page when you only need the first few.
 - The result is one page. `next_page_results: true` means the list is truncated at `count` of `total_count`; pass `next_cursor` back as `--cursor` for the next page. Do not report a count as complete without checking this.
 
 ## Creating issues
@@ -145,6 +156,7 @@ Useful flags:
 - `--state "<state name>"` to start somewhere other than the project default.
 - `--parent PROJ-10` to create a sub-issue.
 - `--label bug,frontend` — every label must already exist in the project.
+- `--pod "<name>"` / `--runner "<name>"` to route the issue to a pod or dedicate it to one runner. Leave both off unless the user asks; see [Runners, pods, and agent runs](#runners-pods-and-agent-runs).
 
 After creating, tell the user which project was used:
 
@@ -175,6 +187,8 @@ pidash state list PROJ-123
 `state list` takes an issue identifier or a project UUID (not a project identifier like `PROJ`).
 
 `--description` and `--description-file` replace the whole description. To amend one, `issue get` it first, edit, and write the full text back. `--description ""` clears it.
+
+`--work-type <key>` (for example `software` or `general`) selects which guidance Pi Dash's own agents get when they work the issue; `--clear-work-type` returns it to the project default. The server validates the key, and refuses an agent's change while the issue is being worked.
 
 ## Labels
 
@@ -227,7 +241,8 @@ pidash comment update PROJ-123 <comment-uuid> --body-file <path>
 - When relaying the user's own words as a comment on their behalf, omit `--as-agent`.
 - `--image <path>` uploads and embeds an image; repeat it for several.
 - `--fold` marks a low-value status comment so the UI collapses it and future agent prompts skip it. Use it for progress chatter, never for a question or a result the human needs.
-- `comment update` edits a comment you own and replaces its whole body.
+- `comment update` edits a comment you own and replaces its whole body. An empty body is rejected unless you pass `--allow-empty`, so an accidentally empty file cannot wipe a comment.
+- `--body "<text>"` is fine for a one-line comment; use `--body-file` for anything longer.
 
 Write comments for a human who has not seen your session: what changed, what you need from them, and links.
 
@@ -263,7 +278,8 @@ pidash page archive <page-uuid> --project PROJ
 
 - `page list` returns metadata only; `page get` returns the body. `--body-only` prints plain markdown instead of the JSON envelope.
 - Check `page list` for project conventions before starting unfamiliar work in a project.
-- `page update --body-file` replaces the whole body. To amend a page, `page get --body-only` it, edit, and write it back.
+- `page update --body-file` replaces the whole body. To amend a page, `page get --body-only` it, edit, and write it back. An empty body is rejected unless you pass `--allow-empty`.
+- `page list` is paginated like `issue list`; watch for `next_page_results`.
 - Archiving is reversible with `page unarchive`.
 
 ## Runners, pods, and agent runs
@@ -280,6 +296,8 @@ pidash issue re-tick PROJ-123                       # re-grant an exhausted tick
 ```
 
 - `run-ai` starts a real agent run and spends budget. Do it only when the user asks. It exits non-zero when nothing could be dispatched; the error `detail` carries a machine-readable `reason` (`active_run_exists`, `no_pod`, `no_eligible_runner`, or an `assigned_runner_*` refusal) and, for dedicated-runner refusals, the `options` to offer the user next.
+- When `run-ai` is refused because the issue's dedicated runner is offline or paused, `pidash issue run-ai PROJ-123 --pod-once` runs this one run on any runner in the pod and leaves the issue dedicated. Offer it only when the work does not need that specific machine; otherwise report that the runner is unavailable and stop.
+- Check `pidash project runners --assignable-for PROJ-123` before choosing a runner, and do not pick one whose row says it is not assignable. A dedicated runner is a bottleneck by design — leave an issue on its pod unless it needs something only one runner has.
 - `re-tick` is a no-op unless the issue is in a ticking state and its budget is used up; check `granted` in the output.
 - These commands are newer than the rest — confirm with `--help` that the installed CLI has them.
 
@@ -293,7 +311,32 @@ pidash scheduler get <scheduler-id> [--project PROJ]
 pidash scheduler runs <scheduler-id> [--project PROJ] [--limit <n>]
 ```
 
+`<scheduler-id>` is a UUID or the scheduler's slug.
+
 Reading is safe. Writing is not casual: `scheduler install`, `run-now`, `uninstall`, and `update` of an install (cadence, enabled, pod, extra context) need project-admin rights and change what runs on the project for everyone; `scheduler create`, `edit`, `delete`, and `update` with `--prompt-file`, `--name`, or `--description` need workspace-admin rights and change a definition every installing project shares. Do these only when the user asked for that specific change, read `--help` for the exact flags, and show the user the `previous` values the command prints.
+
+The write commands, once the user has asked for the change:
+
+```bash
+# Put a scheduler on a project. --rrule is an RFC 5545 rule; "" means one shot at --dtstart.
+pidash scheduler install <scheduler-id> --project PROJ --rrule "FREQ=DAILY;BYHOUR=2" [--tzid America/New_York] [--dtstart <ISO 8601>] [--outcome-mode create_issue|apply_fix|fix_and_review] [--extra-context-file <path>] [--disabled]
+
+# Change one install: cadence, on/off, pod, or the project-specific extra context.
+pidash scheduler update <scheduler-id> --project PROJ [--rrule "..."] [--enable | --disable] [--extra-context-file <path>] [--if-updated-at <updated_at>]
+
+pidash scheduler run-now <scheduler-id> --project PROJ
+pidash scheduler uninstall <scheduler-id> --project PROJ
+
+# Workspace-wide definitions. The prompt is never taken inline: use --prompt-file (or --prompt - for stdin).
+pidash scheduler create --name "<name>" --slug <slug> --prompt-file <path>
+pidash scheduler edit <scheduler-id> [--prompt-file <path>] [--name "..."] [--enable | --disable] [--if-updated-at <updated_at>]
+pidash scheduler delete <scheduler-id>
+```
+
+- Pass `--if-updated-at` with the `updated_at` you read from `scheduler get`, so a concurrent edit is refused (412) instead of overwritten.
+- `uninstall` and `delete` ask for confirmation on a terminal. `--yes` skips the prompt — pass it only after the user has confirmed in this conversation.
+- `run-now` fires within about a minute, and fails with a 409 when the install is disabled or one of its runs is still active.
+- A new definition runs nowhere until it is installed on a project. Built-in schedulers can be installed but not edited or deleted.
 
 ## Asking the cloud assistant
 
