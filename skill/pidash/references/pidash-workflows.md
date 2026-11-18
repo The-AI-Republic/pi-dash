@@ -158,6 +158,28 @@ Useful flags:
 - `--label bug,frontend` — every label must already exist in the project.
 - `--pod "<name>"` / `--runner "<name>"` to route the issue to a pod or dedicate it to one runner. Leave both off unless the user asks; see [Runners, pods, and agent runs](#runners-pods-and-agent-runs).
 
+### Writing the title
+
+The title is what humans scan: list and board rows, notifications, search results, and the PR titles built from it. Write it as the TL;DR for a reader who has not seen your session or the code.
+
+- Say what is wrong or wanted, and for whom — the effect, not the mechanism.
+- Plain words. Keep it to about 80 characters.
+- Leave out file paths, function and type names, flags, error codes, and parenthesized internals. They belong in the description.
+- Start a bug title with what breaks, a feature or task title with what someone will be able to do.
+- A short bracketed tag the project already uses (for example `[security]`) is fine; keep the rest readable.
+
+| Too technical                                                                                       | Readable                                                                              |
+| --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| Windows: squatting the daemon's named pipe (predictable name, first-instance create) keeps Pi Dash down until logon | Pi Dash can stay down until next login on Windows if another app takes its pipe name |
+| `source` defaults to `builtin` for user-created schedulers in list serializer                        | Schedulers you create show up labeled "Built-in"                                      |
+| Deep-link handler logs full `pidash://auth/callback` URL incl. code and state                       | Sign-in codes are written to the desktop app's logs                                   |
+
+Put the precise detail in the description. A good opening line is a one-sentence technical summary (component, mechanism, file), followed by reproduction steps, evidence, and the proposed fix. Agents and search read the description; the title does not need to carry it.
+
+When you rewrite a title with `issue patch --title`, follow the same rules.
+
+### After creating
+
 After creating, tell the user which project was used:
 
 ```text
