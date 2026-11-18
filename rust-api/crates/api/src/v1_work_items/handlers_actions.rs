@@ -649,9 +649,10 @@ pub struct IssueRow {
     pub state_group: Option<String>,
 }
 
-/// The [`fetch_issue`] statement: INNER JOIN `workspaces` (the slug),
-/// LEFT JOIN `states` (nullable FK), plain soft-delete scope, `LIMIT 1`.
-fn issue_row_select(slug: &str, project_id: &Uuid, pk: &Uuid) -> sea_orm::Select<issues::Entity> {
+/// The [`IssueRow`] projection: the issue columns plus the LEFT JOINed
+/// `states` name/group (nullable FK). Shared by [`fetch_issue`] and
+/// [`fetch_issue_by_id`].
+fn issue_row_columns() -> sea_orm::Select<issues::Entity> {
     issues::Entity::find()
         .select_only()
         .columns([
@@ -664,8 +665,14 @@ fn issue_row_select(slug: &str, project_id: &Uuid, pk: &Uuid) -> sea_orm::Select
         ])
         .column_as(states::Column::Name, "state_name")
         .column_as(states::Column::Group, "state_group")
-        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
         .join(JoinType::LeftJoin, issues::Relation::States.def())
+}
+
+/// The [`fetch_issue`] statement: INNER JOIN `workspaces` (the slug),
+/// LEFT JOIN `states` (nullable FK), plain soft-delete scope, `LIMIT 1`.
+fn issue_row_select(slug: &str, project_id: &Uuid, pk: &Uuid) -> sea_orm::Select<issues::Entity> {
+    issue_row_columns()
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
         .filter(workspaces::Column::Slug.eq(slug))
         .filter(issues::Column::ProjectId.eq(*project_id))
         .filter(issues::Column::Id.eq(*pk))
@@ -690,19 +697,7 @@ pub async fn fetch_issue(
 /// columns: no workspace/project scope and no soft-delete filter, as the
 /// web re-tick endpoint (`runner/views/runs.py:733`) reads it.
 pub async fn fetch_issue_by_id(pool: &PgPool, pk: &Uuid) -> Result<Option<IssueRow>, Denial> {
-    issues::Entity::find()
-        .select_only()
-        .columns([
-            issues::Column::Id,
-            issues::Column::ProjectId,
-            issues::Column::WorkspaceId,
-            issues::Column::CreatedById,
-            issues::Column::AgentExecutor,
-            issues::Column::StateId,
-        ])
-        .column_as(states::Column::Name, "state_name")
-        .column_as(states::Column::Group, "state_group")
-        .join(JoinType::LeftJoin, issues::Relation::States.def())
+    issue_row_columns()
         .filter(issues::Column::Id.eq(*pk))
         .limit(1)
         .into_model::<IssueRow>()

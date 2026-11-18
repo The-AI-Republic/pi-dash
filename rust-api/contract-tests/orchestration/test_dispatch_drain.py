@@ -230,7 +230,29 @@ def test_web_retick_refuses_when_pool_not_spent(web_client):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["granted"] is False, body
+    assert body["reason"] == "budget_not_exhausted", body
     assert body["run_id"] is None, body
+    for key in ("used", "tick_count", "max_ticks", "enabled", "pending_entry", "next_run_at"):
+        assert key in body, body
+
+
+@pytest.mark.parametrize(
+    ("content", "status"),
+    [
+        (b"", 400),  # request.data == {}: work_item is required
+        (b"{not json", 400),  # DRF JSON parse error
+        (b"[]", 500),  # list has no .get (AttributeError)
+    ],
+)
+def test_web_retick_body_arms_never_502(web_client, content, status):
+    """Empty / malformed / non-object bodies are answered, never proxied."""
+    _w, client = web_client
+    r = client.post(
+        "/api/runners/re-tick/",
+        content=content,
+        headers={"Content-Type": "application/json"},
+    )
+    assert r.status_code == status, r.text
 
 
 def test_fire_tick_continuation_assigns(api_client, broker):

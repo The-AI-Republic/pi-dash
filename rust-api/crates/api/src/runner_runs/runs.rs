@@ -15,8 +15,9 @@
 //!   JSON non-objects).
 //! * `AgentReTickEndpoint.post` (`:517-560`) → [`retick`]: fully owned.
 //!   The `re_tick_ticker` tail runs through the shared v1 core
-//!   ([`crate::v1_work_items::handlers_actions::retick_issue`]); only the
-//!   malformed-JSON / non-object parser arms proxy.
+//!   ([`crate::v1_work_items::handlers_actions::retick_issue`]); the body
+//!   parses through [`super::read_request_data`] (only a non-JSON
+//!   content type proxies).
 //! * `AgentRunDetailEndpoint.get` (`:565-585`) → [`run_detail`], with
 //!   `?include_events=1`.
 //! * `AgentRunCancelEndpoint.post` (`:590-682`) → [`cancel_run`]: the
@@ -1673,8 +1674,8 @@ async fn create_run_inner(
 // `POST /api/runners/re-tick/` — budget grant (`runs.py:482-523`)
 // ---------------------------------------------------------------------------
 
-/// Re-tick: every arm is owned except the malformed-JSON / non-object
-/// parser arms; the `re_tick_ticker` tail runs natively.
+/// Re-tick: fully owned (only a non-JSON content type proxies); the
+/// `re_tick_ticker` tail runs natively.
 pub async fn retick(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
@@ -1691,6 +1692,7 @@ async fn retick_inner(
     extension: Option<Extension<SessionHandle>>,
     req: Request,
 ) -> Response {
+    use crate::v1_work_items::handlers_actions::{fetch_issue_by_id, retick_issue};
     let actor = match request_actor(&state, extension).await {
         Ok(Some(actor)) => actor,
         Ok(None) => return unauthorized(),
@@ -1700,17 +1702,16 @@ async fn retick_inner(
         Ok(pool) => pool,
         Err(response) => return response,
     };
-    let (parts, body) = req.into_parts();
-    let bytes = match collect_body(body).await {
-        Ok(bytes) => bytes,
+    // DRF `request.data`: an empty body is `{}` (the 400 below), bad JSON
+    // is the parser's 400. Proxying these answered 502 on the all-Rust
+    // stack, which has no Django upstream.
+    let parsed = match super::read_request_data(&state, req).await {
+        Ok(parsed) => parsed,
         Err(response) => return response,
     };
-    let parsed: Value = match serde_json::from_slice(&bytes) {
-        Ok(parsed) => parsed,
-        Err(_) => return proxy_with_body(state, parts, bytes).await,
-    };
+    // A non-dict body is the source's `AttributeError` on `.get` (500).
     if !parsed.is_object() {
-        return proxy_with_body(state, parts, bytes).await;
+        return server_error();
     }
     let work_item_id = match classify_retick_work_item(&parsed) {
         WorkItemRef::Missing => {
@@ -1724,14 +1725,16 @@ async fn retick_inner(
         }
         WorkItemRef::Id(id) => id,
     };
-    let row = match issue_lookup(pool, work_item_id).await {
-        Ok(row) => row,
-        Err(response) => return response,
+    // `Issue.all_objects.filter(pk=...).first()`: one read serves both the
+    // membership check and the `re_tick_ticker` tail.
+    let issue = match fetch_issue_by_id(pool, &work_item_id).await {
+        Ok(Some(issue)) => issue,
+        Ok(None) => {
+            return json_response(StatusCode::NOT_FOUND, ISSUE_NOT_FOUND_BODY.to_owned());
+        }
+        Err(_) => return server_error(),
     };
-    let Some((_, workspace_id)) = row else {
-        return json_response(StatusCode::NOT_FOUND, ISSUE_NOT_FOUND_BODY.to_owned());
-    };
-    let role = match workspace_role(pool, workspace_id, actor.id).await {
+    let role = match workspace_role(pool, issue.workspace_id, actor.id).await {
         Ok(role) => role,
         Err(response) => return response,
     };
@@ -1740,17 +1743,12 @@ async fn retick_inner(
     }
     // `scheduling.re_tick_ticker` tail, natively: the all-Rust stack has no
     // Django upstream, so proxying it answered 502 to every valid re-tick.
-    use crate::v1_work_items::handlers_actions::{fetch_issue_by_id, retick_issue};
-    let issue = match fetch_issue_by_id(pool, &work_item_id).await {
-        Ok(Some(issue)) => issue,
-        Ok(None) => {
-            return json_response(StatusCode::NOT_FOUND, ISSUE_NOT_FOUND_BODY.to_owned());
-        }
-        Err(_) => return server_error(),
-    };
     match retick_issue(&state, pool, actor.id, &issue).await {
         Ok((status, body)) => json_response(status, body),
-        Err(_) => server_error(),
+        Err(_) => {
+            tracing::warn!(issue_id = %issue.id, "web re-tick failed");
+            server_error()
+        }
     }
 }
 
