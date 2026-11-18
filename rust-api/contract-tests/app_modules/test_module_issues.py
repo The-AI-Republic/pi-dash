@@ -791,6 +791,70 @@ def test_create_module_issues_mixed_duplicate_and_new(
         assert cur.fetchone()[0] == 1
 
 
+# --- NEWPIDASH-280: rich top-level `or` must keep the module scope --------
+#
+# The module list spliced the rendered `filters` tree unparenthesised
+# after the scope fragment, so `{"or": [A, B]}` produced
+# `scope AND A OR B` and every row matching B in any workspace leaked
+# in (tier 1: tenant isolation). Django applies the tree via
+# `.filter(Q)`, which parenthesises it. The second workspace's urgent
+# issue matches disjunct B only in the unfixed query.
+
+def test_rich_or_keeps_module_scope(
+    api, seed, tenant_a, tenant_b, project_a, module_a, auth_a
+):
+    """NEWPIDASH-280: `{"or": [...]}` on the module list stays scoped.
+
+    Fails on the Rust binary before the fix (the second workspace's
+    urgent issue is returned: total_count 3 instead of 2); passes
+    after and against live Django.
+    """
+    ws_a = tenant_a["workspace"]["id"]
+    # Module holds A (urgent), B (label L2), C (neither).
+    label_l2 = seed.label(ws_a, project_a, name="NEWPIDASH-280 L2")
+    issue_a = seed.issue(ws_a, project_a, name="NEWPIDASH-280 A")
+    issue_b = seed.issue(ws_a, project_a, name="NEWPIDASH-280 B")
+    issue_c = seed.issue(ws_a, project_a, name="NEWPIDASH-280 C")
+    for issue_id in (issue_a, issue_b, issue_c):
+        seed.module_issue(ws_a, project_a, module_a, issue_id)
+    seed.issue_label(ws_a, project_a, issue_b, label_l2)
+    with seed.conn.cursor() as cur:
+        cur.execute(
+            "UPDATE issues SET priority = 'urgent' WHERE id = %s", (issue_a,)
+        )
+        seed.conn.commit()
+    # Second workspace with an urgent issue that matches only disjunct B.
+    # X sits in its own module there: a live bridge row keeps it past the
+    # INNER bridge join, so only the WHERE decides — the unfixed
+    # `scope AND A OR B` returns it (total_count 3), the fixed query and
+    # Django do not. (A bridgeless X would be joined out either way and
+    # the case would pass vacuously.)
+    ws_b = tenant_b["workspace"]["id"]
+    project_b = seed.project(ws_b)
+    issue_x = seed.issue(ws_b, project_b, name="NEWPIDASH-280 X")
+    module_b = seed.module(ws_b, project_b)
+    seed.module_issue(ws_b, project_b, module_b, issue_x)
+    with seed.conn.cursor() as cur:
+        cur.execute(
+            "UPDATE issues SET priority = 'urgent' WHERE id = %s", (issue_x,)
+        )
+        seed.conn.commit()
+
+    url = _module_issues_url(tenant_a, project_a, module_a)
+    filters = json.dumps(
+        {"or": [{"label_id__in": [label_l2]}, {"priority__in": ["urgent"]}]}
+    )
+    r = api.get(url, headers=auth_a, params={"filters": filters})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["total_count"] == 2, body
+    got = {row["id"] for row in body["results"]}
+    assert got == {issue_a, issue_b}, got
+    assert issue_x not in got
+    for row in body["results"]:
+        assert row["project_id"] == project_a, row
+
+
 def test_create_issue_modules_mixed_duplicate_and_new(
     api, seed, tenant_a, project_a, auth_a, module_a, issue_a
 ):

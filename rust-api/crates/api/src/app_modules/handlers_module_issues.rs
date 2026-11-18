@@ -850,6 +850,12 @@ fn module_filtered_set(
     if let Some(cond) = complex_filter(query, tz)? {
         let (fragment, values) = render_condition(&cond);
         complex_sql_text = binder.splice(&fragment, values);
+        // NEWPIDASH-280: the rendered tree can hold a top-level `OR`
+        // (`A OR B`). Spliced raw, the WHERE reads `scope AND A OR B` =
+        // `(scope AND A) OR B` and rows matching B in any workspace leak
+        // in. Django applies the tree via `.filter(Q)`, which
+        // parenthesises it — do the same so the scope always applies.
+        complex_sql_text = format!("({complex_sql_text})");
         fragments.push(complex_sql_text.clone());
     }
     let flat: HashMap<String, String> = query
@@ -2655,6 +2661,57 @@ mod tests {
         assert!(
             !filtered.from_where.contains("label_issue_legacy"),
             "unrelated relations gain no legacy copy: {}",
+            filtered.from_where
+        );
+    }
+
+    #[test]
+    fn rich_or_keeps_tenant_scope() {
+        // NEWPIDASH-280: a top-level `or` in the rich `filters` tree
+        // renders as `A OR B`. Spliced unparenthesised after the scope
+        // fragment, the WHERE becomes `scope AND A OR B`, which SQL
+        // reads as `(scope AND A) OR B` — every row matching B in any
+        // workspace leaks in. Django applies the tree via `.filter(Q)`,
+        // which parenthesises it. The fragment must sit in parens.
+        let mut query = empty_query();
+        query.insert(
+            "filters".to_owned(),
+            OneOrMany::One(
+                r#"{"or":[{"label_id__in":["00000000-0000-0000-0000-000000000001"]},{"priority__in":["urgent"]}]}"#
+                    .to_owned(),
+            ),
+        );
+        let filtered = module_filtered_set(
+            "slug",
+            &uuid::Uuid::nil(),
+            &uuid::Uuid::nil(),
+            &uuid::Uuid::nil(),
+            &query,
+            None,
+            None,
+            &chrono_tz::UTC,
+            None,
+        )
+        .expect("scope");
+        // The rendered tree is `("label.." ..) OR (.. priority ..)`: each
+        // disjunct carries its own parens, so asserting the first `(` only
+        // proves nothing — the unfixed `scope AND (A) OR (B)` passed that.
+        // The outer guard is the second `(` and the final `))`.
+        assert!(
+            filtered
+                .from_where
+                .contains(" AND ((\"label_issue\".\"label_id\""),
+            "rich or-tree must sit in its own parens against the scope: {}",
+            filtered.from_where
+        );
+        assert!(
+            filtered.from_where.contains("OR \"issue\".\"priority\" IN"),
+            "expected the priority disjunct in the WHERE: {}",
+            filtered.from_where
+        );
+        assert!(
+            filtered.from_where.ends_with("))"),
+            "rich fragment must close its outer paren at the end of the WHERE: {}",
             filtered.from_where
         );
     }
