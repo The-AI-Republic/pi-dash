@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Runner contracts: the overview list, the detail page, and the
-// revoke/delete row actions. Live agent telemetry rides along on the
+// revoke/pause/delete row actions. Live agent telemetry rides along on the
 // detail shape; slices derive the activity badge from it client-side.
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
@@ -176,6 +176,38 @@ export async function updateRunner(client: ApiClient, runnerId: string, patch: R
  */
 export async function revokeRunner(client: ApiClient, runnerId: string): Promise<Runner> {
   const path = `/api/runners/${runnerId}/revoke/`;
+  const envelope = await client.sendJson<unknown>("POST", path, {});
+  return client.parse(Runner, envelope.data, `POST ${path}`);
+}
+
+/** A run the runner already holds when it is paused; it still finishes. */
+export const RunnerInFlightRun = z.object({
+  id: uuid(),
+  status: z.string(),
+});
+export type RunnerInFlightRun = z.infer<typeof RunnerInFlightRun>;
+
+/** The pause answer: the runner plus the runs it will still finish. */
+export const RunnerPauseResult = z.extend(Runner, {
+  in_flight_runs: z.array(RunnerInFlightRun),
+});
+export type RunnerPauseResult = z.infer<typeof RunnerPauseResult>;
+
+/**
+ * Pause dispatch to one runner: it stays connected but takes no new
+ * work, and queued runs pinned to it are released to its pod. Runs it
+ * already holds finish and are listed in `in_flight_runs`. Owner or
+ * workspace admin; 409 `runner_revoked` on a revoked runner.
+ */
+export async function pauseRunner(client: ApiClient, runnerId: string): Promise<RunnerPauseResult> {
+  const path = `/api/runners/${runnerId}/pause/`;
+  const envelope = await client.sendJson<unknown>("POST", path, {});
+  return client.parse(RunnerPauseResult, envelope.data, `POST ${path}`);
+}
+
+/** Clear a runner's pause so dispatch resumes. Answers the runner. */
+export async function resumeRunner(client: ApiClient, runnerId: string): Promise<Runner> {
+  const path = `/api/runners/${runnerId}/resume/`;
   const envelope = await client.sendJson<unknown>("POST", path, {});
   return client.parse(Runner, envelope.data, `POST ${path}`);
 }

@@ -16,6 +16,7 @@ const view = { projectId: "p-1" as string | undefined };
 const deleteMutate = vi.fn(async () => undefined);
 const revokeMutate = vi.fn(async () => undefined);
 const updateMutate = vi.fn(async (_input: unknown) => undefined);
+const pauseMutate = vi.fn(async (_input: { runnerId: string; paused: boolean }): Promise<object> => ({}));
 const useRunners = vi.fn();
 const podsState = {
   data: [{ id: "p-1", name: "WEB_alpha" }] as unknown as Pod[] | undefined,
@@ -49,6 +50,7 @@ vi.mock("./api/mutations.js", () => ({
   useDeleteRunner: () => ({ mutateAsync: deleteMutate }),
   useRevokeRunner: () => ({ mutateAsync: revokeMutate }),
   useUpdateRunner: () => ({ mutateAsync: updateMutate }),
+  useSetRunnerPaused: () => ({ mutateAsync: pauseMutate }),
 }));
 vi.mock("../../core/session/index.js", () => ({ useMe: () => ({ data: { id: "user-1" } }) }));
 
@@ -73,6 +75,7 @@ beforeEach(() => {
   useRunners.mockReset();
   deleteMutate.mockClear();
   revokeMutate.mockClear();
+  pauseMutate.mockClear();
 });
 
 afterEach(() => {
@@ -114,6 +117,17 @@ describe("useRunnersOverview", () => {
     expect(deleteMutate).toHaveBeenCalledWith("r-1");
     await result.current.onRevoke("r-2");
     expect(revokeMutate).toHaveBeenCalledWith("r-2");
+  });
+
+  it("counts the runs a pause leaves on the runner, and none on resume", async () => {
+    useRunners.mockReturnValue({ data: [] });
+    const { result } = renderHook(() => useRunnersOverview("acme"), { wrapper });
+    pauseMutate.mockResolvedValueOnce({ id: "r-1", in_flight_runs: [{ id: "x", status: "running" }] });
+    await expect(result.current.onSetPaused("r-1", true)).resolves.toEqual({ inFlight: 1 });
+    expect(pauseMutate).toHaveBeenCalledWith({ runnerId: "r-1", paused: true });
+    pauseMutate.mockResolvedValueOnce({ id: "r-1" });
+    await expect(result.current.onSetPaused("r-1", false)).resolves.toEqual({ inFlight: 0 });
+    expect(pauseMutate).toHaveBeenCalledWith({ runnerId: "r-1", paused: false });
   });
 
   it("hands the screen the pods and their read progress", () => {

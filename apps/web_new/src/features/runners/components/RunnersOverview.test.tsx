@@ -14,6 +14,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const navigate = vi.fn(async () => undefined);
 const notifyError = vi.fn();
+const notifyInfo = vi.fn();
 
 vi.mock("@tanstack/react-router", async (importOriginal) => {
   const original = await importOriginal<typeof import("@tanstack/react-router")>();
@@ -45,18 +46,27 @@ vi.mock("./DeletePodDialog.js", () => ({
 }));
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/shell/index.js")>();
-  return { ...original, notifyError: (title: string, description?: string) => notifyError(title, description) };
+  return {
+    ...original,
+    notifyError: (title: string, description?: string) => notifyError(title, description),
+    notifyInfo: (title: string, description?: string) => notifyInfo(title, description),
+  };
 });
 
 import type { PodFilterState } from "../podFilter.js";
 import {
+  canPauseRunner,
   canRevokeRunner,
   DELETE_RUNNER_FAILED,
+  PAUSE_RUNNER_FAILED,
+  RESUME_RUNNER_FAILED,
+  RUNNER_PAUSED_TITLE,
   REVOKE_RUNNER_FAILED,
   RUNNERS_EMPTY_TEXT,
   RUNNER_ACTION_FAILED_TITLE,
   RunnersOverview,
   runnerHeartbeat,
+  runnerPausedInFlightText,
   runnerPlatform,
   runnerRowActions,
   runnerVersion,
@@ -86,6 +96,7 @@ function renderTable(
   handlers: {
     onDelete?: (id: string, options?: { purgeLocal?: boolean }) => Promise<void>;
     onRevoke?: (id: string) => Promise<void>;
+    onSetPaused?: (id: string, paused: boolean) => Promise<{ inFlight: number }>;
   } = {}
 ) {
   const onDelete = handlers.onDelete ?? vi.fn(async () => undefined);
@@ -100,6 +111,7 @@ function renderTable(
         podsFailed={false}
         onDelete={onDelete}
         onRevoke={onRevoke}
+        onSetPaused={handlers.onSetPaused}
       />
     </QueryClientProvider>
   );
@@ -109,6 +121,7 @@ function renderTable(
 beforeEach(() => {
   navigate.mockClear();
   notifyError.mockClear();
+  notifyInfo.mockClear();
 });
 
 describe("cell helpers", () => {
@@ -585,5 +598,77 @@ describe("pod members panel", () => {
         "The runner is unchanged. Try again."
       )
     );
+  });
+});
+
+describe("RunnersOverview per-runner pause", () => {
+  it("offers pause on any live runner of a server that reports paused_at", () => {
+    expect(canPauseRunner(runner({ paused_at: null, revoked_at: null }))).toBe(true);
+    expect(canPauseRunner(runner({ paused_at: "2026-11-18T00:00:00Z", revoked_at: null }))).toBe(true);
+    expect(canPauseRunner(runner({ revoked_at: null }))).toBe(false);
+    expect(canPauseRunner(runner({ paused_at: null, revoked_at: "2026-11-18T00:00:00Z" }))).toBe(false);
+    expect(canPauseRunner(runner({ paused_at: null, revoked_at: null, status: "revoked" }))).toBe(false);
+  });
+
+  it("words the in-flight notice and skips it when nothing is held", () => {
+    expect(runnerPausedInFlightText(0)).toBeNull();
+    expect(runnerPausedInFlightText(1)).toBe("1 run already on this runner will still finish.");
+    expect(runnerPausedInFlightText(3)).toBe("3 runs already on this runner will still finish.");
+  });
+
+  it("hides the toggle without a writer", () => {
+    renderTable([runner({ paused_at: null, revoked_at: null })]);
+    expect(screen.queryByRole("button", { name: "Pause" })).toBeNull();
+  });
+
+  it("pauses a runner and tells the user what it still holds", async () => {
+    const onSetPaused = vi.fn(async () => ({ inFlight: 2 }));
+    renderTable([runner({ paused_at: null, revoked_at: null })], { onSetPaused });
+    expect(screen.queryByTestId("runner-paused-badge")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Pause" }));
+    await waitFor(() => expect(onSetPaused).toHaveBeenCalledWith("r-1", true));
+    await waitFor(() =>
+      expect(notifyInfo).toHaveBeenCalledWith(RUNNER_PAUSED_TITLE, "2 runs already on this runner will still finish.")
+    );
+  });
+
+  it("pauses quietly when the runner holds nothing", async () => {
+    const onSetPaused = vi.fn(async () => ({ inFlight: 0 }));
+    renderTable([runner({ paused_at: null, revoked_at: null })], { onSetPaused });
+    await userEvent.click(screen.getByRole("button", { name: "Pause" }));
+    await waitFor(() => expect(onSetPaused).toHaveBeenCalled());
+    expect(notifyInfo).not.toHaveBeenCalled();
+  });
+
+  it("badges a paused runner and resumes it", async () => {
+    const onSetPaused = vi.fn(async () => ({ inFlight: 0 }));
+    renderTable([runner({ paused_at: "2026-11-18T00:00:00Z", revoked_at: null })], { onSetPaused });
+    expect(screen.getByTestId("runner-paused-badge")).toHaveTextContent("Paused");
+    await userEvent.click(screen.getByRole("button", { name: "Resume" }));
+    await waitFor(() => expect(onSetPaused).toHaveBeenCalledWith("r-1", false));
+  });
+
+  it("toasts a failed pause and a failed resume", async () => {
+    const failing = vi.fn(async () => {
+      throw new Error("nope");
+    });
+    renderTable(
+      [
+        runner({ id: "r-1", name: "a", paused_at: null, revoked_at: null }),
+        runner({ id: "r-2", name: "b", paused_at: "2026-11-18T00:00:00Z", revoked_at: null }),
+      ],
+      { onSetPaused: failing }
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Pause" }));
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith(RUNNER_ACTION_FAILED_TITLE, PAUSE_RUNNER_FAILED));
+    await userEvent.click(screen.getByRole("button", { name: "Resume" }));
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith(RUNNER_ACTION_FAILED_TITLE, RESUME_RUNNER_FAILED));
+  });
+
+  it("offers pause on a Pi Dash Agent too", () => {
+    renderTable([runner({ provisioning: "desktop_bundled", paused_at: null, revoked_at: null })], {
+      onSetPaused: vi.fn(async () => ({ inFlight: 0 })),
+    });
+    expect(screen.getByRole("button", { name: "Pause" })).toBeInTheDocument();
   });
 });

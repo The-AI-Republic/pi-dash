@@ -6,7 +6,16 @@
 // confirmation open until the write settles.
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { deleteRunner, revokeRunner, updateRunner, type RunnerPatch } from "@pidash/api-client";
+import {
+  deleteRunner,
+  pauseRunner,
+  resumeRunner,
+  revokeRunner,
+  updateRunner,
+  type Runner,
+  type RunnerPatch,
+  type RunnerPauseResult,
+} from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { runnersKeys } from "./keys.js";
@@ -50,6 +59,25 @@ export function useUpdateRunner(workspaceSlug: string) {
   return useMutation({
     mutationFn: (input: { runnerId: string; patch: RunnerPatch }) =>
       updateRunner(getAppClient(), input.runnerId, input.patch),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: runnersKeys.all(workspaceSlug) }),
+  });
+}
+
+/** One per-runner pause toggle: `paused` is the state to reach. */
+export interface SetRunnerPausedInput {
+  runnerId: string;
+  paused: boolean;
+}
+
+/**
+ * Pause or resume dispatch to one runner (RUN-010). A pause answers the
+ * runs the runner still holds; a resume answers the bare row.
+ */
+export function useSetRunnerPaused(workspaceSlug: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: SetRunnerPausedInput): Promise<RunnerPauseResult | Runner> =>
+      input.paused ? pauseRunner(getAppClient(), input.runnerId) : resumeRunner(getAppClient(), input.runnerId),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: runnersKeys.all(workspaceSlug) }),
   });
 }
