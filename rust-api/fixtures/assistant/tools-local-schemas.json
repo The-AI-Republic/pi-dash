@@ -172,7 +172,7 @@
   {
     "module": "issues",
     "name": "create_issue",
-    "description": "Create an issue. Requires Member or Admin role. Pass parent_issue_id to\nlink it as a sub-issue of another issue in the same project. Pass\nassigned_runner (UUID or name) to dedicate the issue to one runner and\nassigned_pod (UUID or name) to set its pod; eligibility follows the\nshared E-code rules and any E-code is returned to the model. (Assignees/labels:\nset them afterwards in the UI — not yet supported by this tool.)",
+    "description": "Create an issue. Requires Member or Admin role. Pass parent_issue_id to\nlink it as a sub-issue of another issue in the same project. Pass\nassigned_runner (UUID or name) to dedicate the issue to one runner and\nassigned_pod (UUID or name) to set its pod; eligibility follows the\nshared E-code rules and any E-code is returned to the model. (Assignees/labels:\nset them afterwards in the UI — not yet supported by this tool.)\nWrite name as a plain-language TL;DR a human understands at a glance.",
     "parameters_json_schema": {
       "additionalProperties": false,
       "properties": {
