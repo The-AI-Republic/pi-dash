@@ -1,7 +1,8 @@
 """Contract tests: api-v1 project settings reads and PATCH (NEWPIDASH-278).
 
-Detail reads render the validated settings with defaults (``{}``
-until the first key lands with NEWPIDASH-261). PATCH merges a nested
+Detail reads render the validated settings with defaults (DIFF-53:
+``{"issue_run_policy": "creator_and_assignees"}`` on Rust, the raw
+stored ``{}`` on Django). PATCH merges a nested
 ``settings`` object. Django's v1 update serializer has no settings
 field (the key is ignored) and reads echo the raw stored blob, so the
 strict PATCH validation on Rust is the deliberate difference DIFF-51.
@@ -25,13 +26,21 @@ def base(seed):
 def test_detail_read_includes_settings_with_defaults(seed):
     url = base(seed) + f"/{seed['project']['id']}/"
     r = http.get(seed["keys"][KEY], url)
-    assert r.json()["settings"] == {}
+    assert r.json()["settings"] == expect(
+        "DIFF-53",
+        django={},
+        rust={"issue_run_policy": "creator_and_assignees"},
+    )
 
 
 def test_patch_empty_settings_is_noop(seed):
     url = base(seed) + f"/{seed['project']['id']}/"
     r = http.patch(seed["keys"][KEY], url, json={"settings": {}}, expect=200)
-    assert r.json()["settings"] == {}
+    assert r.json()["settings"] == expect(
+        "DIFF-53",
+        django={},
+        rust={"issue_run_policy": "creator_and_assignees"},
+    )
 
 
 def test_patch_unknown_settings_key_is_400(seed):
@@ -61,4 +70,44 @@ def test_patch_settings_requires_project_access(seed):
     url = base(seed) + f"/{seed['project']['id']}/"
     with http.client(seed["keys"]["guest"]) as c:
         r = c.patch(url, json={"settings": {}})
+    assert r.status_code == 403, r.text[:500]
+
+
+def test_issue_run_policy_admin_can_change(seed):
+    # NEWPIDASH-261 first key (v1 PROJECT PATCH): owner (project ADMIN)
+    # may change it; Django ignores the key (200, settings unchanged).
+    url = base(seed) + f"/{seed['project']['id']}/"
+    with http.client(seed["keys"][KEY]) as c:
+        r = c.patch(url, json={"settings": {"issue_run_policy": "project_members"}})
+    assert r.status_code == 200, r.text[:500]
+    assert r.json()["settings"] == expect(
+        "DIFF-51",
+        django={},
+        rust={"issue_run_policy": "project_members"},
+    )
+
+
+def test_issue_run_policy_invalid_value_is_400(seed):
+    # DIFF-51: Django's v1 update serializer ignores the key; Rust
+    # validates the enum.
+    url = base(seed) + f"/{seed['project']['id']}/"
+    with http.client(seed["keys"][KEY]) as c:
+        r = c.patch(url, json={"settings": {"issue_run_policy": "bogus"}})
+    assert r.status_code == expect("DIFF-51", django=200, rust=400)
+    if is_rust():
+        assert r.json() == {
+            "settings": [
+                'invalid value for issue_run_policy: must be '
+                '"creator_and_assignees" or "project_members"'
+            ]
+        }
+
+
+def test_issue_run_policy_member_cannot_change(seed):
+    # `member_self` is a project ADMIN on `project` (see conftest);
+    # use `guest` (workspace member, no project membership): the PATCH
+    # gate denies on both backends before the settings check.
+    url = base(seed) + f"/{seed['project']['id']}/"
+    with http.client(seed["keys"]["guest"]) as c:
+        r = c.patch(url, json={"settings": {"issue_run_policy": "project_members"}})
     assert r.status_code == 403, r.text[:500]

@@ -292,7 +292,9 @@ function row(overrides: Partial<IssueListItem> = {}): IssueListItem {
     link_count: null,
     created_at: "2024-01-02T03:04:05Z",
     updated_at: "2024-02-03T04:05:06Z",
-    created_by: null,
+    // NEWPIDASH-261: fixtures model a default-policy project where the
+    // viewer is the creator, so state drags are not run-blocked.
+    created_by: "me-1",
     updated_by: null,
     is_draft: false,
     archived_at: null,
@@ -1243,7 +1245,7 @@ describe("KanbanBoard drag and drop", () => {
         projectIdentifier: "WEB",
         sequenceId: 42,
         viewerId: "me-1",
-        creatorId: null,
+        creatorId: "me-1",
         projectRole: 15,
       })
     );

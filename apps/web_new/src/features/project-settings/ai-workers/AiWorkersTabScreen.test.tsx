@@ -156,6 +156,32 @@ describe("ProjectSettingsAiWorkersTab", () => {
     expect(await screen.findByText("Fail the run and move the issue to Backlog")).toBeInTheDocument();
   });
 
+  it("shows the default run policy on rows without the setting", async () => {
+    setup(projectRow());
+    expect(await screen.findByText("Who can run issues")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Issue creator and assignees/ })).toBeInTheDocument();
+  });
+
+  it("saves an admin's run-policy change with one nested PATCH", async () => {
+    const user = userEvent.setup();
+    const { calls } = setup(projectRow());
+    await screen.findByText("Who can run issues");
+    await user.click(screen.getByRole("button", { name: /Issue creator and assignees/ }));
+    await user.click(await screen.findByRole("option", { name: "All project members" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(JSON.parse(calls[0]?.body ?? "{}")).toEqual({
+      settings: { issue_run_policy: "project_members" },
+    });
+  });
+
+  it("keeps the run-policy choice inert for members", async () => {
+    harness.role = ROLE_MEMBER;
+    setup(projectRow());
+    expect(await screen.findByText("Who can run issues")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Issue creator and assignees/ })).toBeDisabled();
+  });
+
   it("saves an admin's rule change with one PATCH", async () => {
     const user = userEvent.setup();
     const { calls, queryClient } = setup(projectRow({ dedicated_runner_lost_action: "fail_to_backlog" }));

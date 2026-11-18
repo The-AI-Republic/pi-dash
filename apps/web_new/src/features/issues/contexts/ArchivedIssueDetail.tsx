@@ -193,6 +193,7 @@ export function ArchivedIssueDetail({
                 projectId={projectId}
                 issue={archivedIssueForDetail(record, null)}
                 editable={false}
+                canRun={true}
               />
             </section>
             <div data-slot="activity" className="min-w-0" style={{ gridArea: "activity" }}>

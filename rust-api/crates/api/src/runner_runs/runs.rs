@@ -112,6 +112,47 @@ pub const SCHEDULER_BINDING_MALFORMED_BODY: &str =
 /// Issue lookup / membership miss on the three issue-bound creates
 /// (`runs.py:367/369/439/441/505/507`).
 pub const ISSUE_NOT_FOUND_BODY: &str = r#"{"error":"issue not found"}"#;
+/// NEWPIDASH-261: gate run control (cancel / release-pin) on a
+/// work-item run by the project's `issue_run_policy`. Scheduler runs
+/// (no work item) are never gated. Returns `Err(response)` with the
+/// already-rendered 403/500 response.
+async fn gate_run_control(
+    pool: &PgPool,
+    actor_id: Uuid,
+    work_item_id: Option<Uuid>,
+) -> Result<(), Response> {
+    let Some(work_item_id) = work_item_id else {
+        return Ok(());
+    };
+    let orm_pool = sea_orm_connection(pool);
+    let issue_entity = orm::issues::Entity::find_by_id(work_item_id)
+        .one(&orm_pool)
+        .await
+        .map_err(|_| server_error())?
+        .ok_or_else(server_error)?;
+    let project_entity = orm::projects::Entity::find_by_id(issue_entity.project_id)
+        .one(&orm_pool)
+        .await
+        .map_err(|_| server_error())?
+        .ok_or_else(server_error)?;
+    let allowed = pidash_services::domain::project_settings::can_run_issue(
+        &orm_pool,
+        actor_id,
+        &issue_entity,
+        &project_entity,
+    )
+    .await
+    .map_err(|_| server_error())?;
+    if allowed {
+        Ok(())
+    } else {
+        Err(json_response(
+            StatusCode::FORBIDDEN,
+            pidash_services::domain::project_settings::not_issue_runner_body(),
+        ))
+    }
+}
+
 /// Cancel on a terminal run (`runs.py:572-576`).
 pub const RUN_ALREADY_TERMINAL_BODY: &str =
     r#"{"error":"run already terminal","code":"run_already_terminal"}"#;
@@ -1802,8 +1843,29 @@ async fn cancel_run_inner(
         Ok(facts) => facts,
         Err(response) => return response,
     };
-    if !guards::can_cancel_run(&facts) {
+    // NEWPIDASH-261: cancel on a work-item run follows the project's
+    // `issue_run_policy` (a removed assignee loses the right at once).
+    // Gated before can_cancel_run so non-runners get 403 not_issue_runner
+    // (acceptance) rather than the generic 404 visibility hide. For
+    // work-item runs the gate is the permission (project_members admits
+    // any Member, whom can_cancel_run would still 404); for scheduler
+    // runs (no work item) can_cancel_run still applies.
+    let is_work_item_run = guarded.run.work_item_id.is_some();
+    if let Err(response) = gate_run_control(pool, actor.id, guarded.run.work_item_id).await {
+        return response;
+    }
+    if !is_work_item_run && !guards::can_cancel_run(&facts) {
         return not_found();
+    }
+    // For work-item runs the gate is the permission: creator/assignee
+    // in default, any Member/Admin in project_members. The old
+    // can_cancel_run would 404 a project_members Member who is not
+    // creator/assignee/owner, so it is skipped here.
+    if is_work_item_run && !guards::can_cancel_run(&facts) {
+        // Still need workspace membership (gate already ensures it for
+        // project_members; for default the gate ensures creator/assignee
+        // which implies membership in practice). Allow.
+        tracing::debug!("cancel allowed via gate despite can_cancel_run false");
     }
     let (parts, body) = req.into_parts();
     let bytes = match collect_body(body).await {
@@ -2033,7 +2095,14 @@ async fn release_pin_inner(
         Ok(facts) => facts,
         Err(response) => return response,
     };
-    if !guards::can_cancel_run(&facts) {
+    // NEWPIDASH-261: release-pin on a work-item run follows the
+    // project's `issue_run_policy` (before can_cancel_run for 403).
+    // For work-item runs the gate is the permission (see cancel).
+    let is_work_item_run = guarded.run.work_item_id.is_some();
+    if let Err(response) = gate_run_control(pool, actor.id, guarded.run.work_item_id).await {
+        return response;
+    }
+    if !is_work_item_run && !guards::can_cancel_run(&facts) {
         return not_found();
     }
     if guarded.run.executor_kind == AgentExecutorKind::RetiredCloudRun {

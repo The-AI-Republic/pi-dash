@@ -117,7 +117,9 @@ function issueRow() {
     link_count: 0,
     created_at: "2024-01-02T03:04:05Z",
     updated_at: "2024-02-03T04:05:06Z",
-    created_by: null,
+    // NEWPIDASH-261: fixtures model a default-policy project where the
+    // viewer (UUID) is the creator, so run controls are not run-blocked.
+    created_by: UUID,
     updated_by: null,
     is_draft: false,
     archived_at: null,

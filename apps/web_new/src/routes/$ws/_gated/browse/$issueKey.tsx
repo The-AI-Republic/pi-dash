@@ -30,6 +30,7 @@ import { IssueDetailRoot } from "../../../../features/issues/detail/IssueDetailR
 import { IssuePropertiesSidebar } from "../../../../features/issues/detail/sidebar/IssuePropertiesSidebar.js";
 import { SubIssuesWidget } from "../../../../features/issues/subIssues/SubIssuesWidget.js";
 import { IssueRunAIAction } from "../../../../features/issues/detail/IssueAgentActions.js";
+import { canRunIssue, runBlockedReason } from "../../../../features/issues/runPolicy.js";
 import { AgentStatusPanel } from "../../../../features/issues/detail/agent/AgentStatusPanel.js";
 import { DetailHeaderActions } from "../../../../features/issues/detail/DetailHeaderActions.js";
 import { DetailTypeActivity } from "../../../../features/issues/edition/DetailTypeSlots.js";
@@ -196,6 +197,17 @@ function BrowseIssueDetail({
     onDeleted: () => void navigate({ to: "/$ws/projects/$projectId/issues", params: { ws: workspaceSlug, projectId } }),
   });
   const writable = editable && issue.archived_at === null;
+  // NEWPIDASH-261: the run policy shapes the affordances; the server
+  // 403 stays the backstop (and the toast carries its reason).
+  const runInput = {
+    policy: project?.settings?.issue_run_policy,
+    viewerId: me.data?.id ?? null,
+    creatorId: issue.created_by,
+    assigneeIds: issue.assignee_ids,
+    memberRole: project?.member_role ?? null,
+  };
+  const canRun = canRunIssue(runInput);
+  const runReason = runBlockedReason(runInput);
   const identifier = projectIdentifier(project, issueKey);
   const menu = useQuickActions({
     workspaceSlug,
@@ -287,9 +299,10 @@ function BrowseIssueDetail({
             workspaceId={workspace?.id ?? null}
             projectId={projectId}
             issue={issue}
-            disabled={!writable}
+            disabled={!writable || !canRun}
             label="Manually Run AI"
             size="medium"
+            {...(runReason === undefined ? {} : { disabledReason: runReason })}
           />
         }
         onOpen={(row, identifier) =>
@@ -357,7 +370,11 @@ function BrowseIssueDetail({
               published={project?.anchor != null}
               assigneeIds={issue.assignee_ids}
               memberRole={project?.member_role ?? null}
-              commentAndRun={{ workspaceId: workspace?.id ?? null, disabled: !writable }}
+              commentAndRun={{
+                workspaceId: workspace?.id ?? null,
+                disabled: !writable || !canRun,
+                ...(runReason === undefined ? {} : { disabledReason: runReason }),
+              }}
             />
           </div>
         }
@@ -369,6 +386,7 @@ function BrowseIssueDetail({
               projectId={projectId}
               issue={issue}
               editable={editable}
+              canRun={canRun}
             />
           </>
         }

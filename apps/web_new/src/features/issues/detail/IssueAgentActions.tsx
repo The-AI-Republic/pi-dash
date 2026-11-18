@@ -30,6 +30,8 @@ export interface IssueRunAIActionProps extends AgentActionContext {
   label?: string | undefined;
   /** Match the surrounding action strip. */
   size?: "small" | "medium" | undefined;
+  /** Run-policy tooltip when the control is disabled for that reason. */
+  disabledReason?: string | undefined;
 }
 
 export interface IssueReTickActionProps extends AgentActionContext {}
@@ -53,6 +55,7 @@ export function IssueRunAIAction({
   disabled,
   label = "Start agent",
   size = "small",
+  disabledReason,
 }: IssueRunAIActionProps): React.ReactElement {
   const refresh = useIssueRefresh(workspaceSlug, issue.id);
   const { triggerRun, isSubmitting } = useTriggerAgentRun({ onSettledRefresh: refresh });
@@ -80,6 +83,7 @@ export function IssueRunAIAction({
       loading={isSubmitting}
       data-testid="issue-run-ai"
       onClick={startRun}
+      {...(disabledReason === undefined ? {} : { title: disabledReason })}
     >
       <span className="flex items-center gap-(--space-1)">
         <Play size={14} strokeWidth={1.5} aria-hidden="true" />

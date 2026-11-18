@@ -51,16 +51,35 @@ export type Project = z.infer<typeof Project>;
 export const ProjectList = z.array(Project);
 export type ProjectList = z.infer<typeof ProjectList>;
 
+/** Who may move an issue's state or run it (NEWPIDASH-261). */
+export const ISSUE_RUN_POLICY_CREATOR_AND_ASSIGNEES = "creator_and_assignees";
+export const ISSUE_RUN_POLICY_PROJECT_MEMBERS = "project_members";
+export const IssueRunPolicy = z.enum([ISSUE_RUN_POLICY_CREATOR_AND_ASSIGNEES, ISSUE_RUN_POLICY_PROJECT_MEMBERS]);
+export type IssueRunPolicy = z.infer<typeof IssueRunPolicy>;
+
+/**
+ * The `issue_run_policy` a stored bag behaves by. Anything but the
+ * known `project_members` value reads as the default
+ * `creator_and_assignees`, so older rows and unknown values never
+ * strand readers.
+ */
+export function issueRunPolicyOrDefault(value: string | undefined): IssueRunPolicy {
+  return value === ISSUE_RUN_POLICY_PROJECT_MEMBERS
+    ? ISSUE_RUN_POLICY_PROJECT_MEMBERS
+    : ISSUE_RUN_POLICY_CREATOR_AND_ASSIGNEES;
+}
+
 /**
  * The typed per-project settings bag (`projects.settings`, NEWPIDASH-278):
  * a nested JSON object the server validates against the registered keys
  * and renders with defaults filled in. Optional on the row schemas so
  * backends that predate the column still parse; absent reads as `{}`.
- * Keys are open strings for now — the first key
- * (`issue_run_policy`, NEWPIDASH-261) will narrow this to an object
- * with a typed value.
+ * Unknown keys pass through (`looseObject`) so future keys survive a
+ * read from this build, as the server preserves them.
  */
-export const ProjectSettings = z.record(z.string(), z.unknown());
+export const ProjectSettings = z.looseObject({
+  issue_run_policy: z.optional(IssueRunPolicy),
+});
 export type ProjectSettings = z.infer<typeof ProjectSettings>;
 
 export async function listProjects(client: ApiClient, slug: string): Promise<ProjectList> {

@@ -1770,6 +1770,37 @@ async fn run_ai_inner(
     let project = fetch_project(&pre.pool, &project_id)
         .await?
         .ok_or(Denial::ServerError)?;
+    // NEWPIDASH-261: gate the human trigger by the project's
+    // `issue_run_policy` before any run is created. Agent actions
+    // are already refused above (`refuse_agent_action`), so every
+    // caller reaching here is human.
+    {
+        let orm_pool = sea_orm_connection(&pre.pool);
+        let issue_row = issues::Entity::find_by_id(issue.id)
+            .one(&orm_pool)
+            .await
+            .map_err(|error| db_error(error, "run-policy-issue"))?
+            .ok_or(Denial::ServerError)?;
+        let project_row = projects::Entity::find_by_id(project_id)
+            .one(&orm_pool)
+            .await
+            .map_err(|error| db_error(error, "run-policy-project"))?
+            .ok_or(Denial::ServerError)?;
+        let allowed = pidash_services::domain::project_settings::can_run_issue(
+            &orm_pool,
+            pre.actor.id,
+            &issue_row,
+            &project_row,
+        )
+        .await
+        .map_err(|error| db_error(error, "run-policy-check"))?;
+        if !allowed {
+            return Ok(json_response(
+                StatusCode::FORBIDDEN,
+                pidash_services::domain::project_settings::not_issue_runner_body(),
+            ));
+        }
+    }
     let now = Utc::now();
     let jitter = draw_jitter(&issue, &project.policy);
     let (deps, matcher) = dispatch_deps(
