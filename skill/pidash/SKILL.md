@@ -73,6 +73,8 @@ The CLI does not read `.pidash/context.md` — you do, and you pass its project 
 
 **Search before creating.** Run `pidash issue search` on the title's key phrase first. If a strong match exists, show it to the user and ask whether to update it instead of filing a duplicate.
 
+**The title is the TL;DR for a human.** Someone who has not seen your session or the code should understand from the title alone what is wrong or wanted. Describe the effect a user or operator sees, not the mechanism: "Pi Dash can stay down until next login on Windows if another app takes its pipe name", not "named-pipe squatting (first-instance create) keeps daemon down". Plain words, about 80 characters at most, no file paths, function names, or parenthesized internals. Technical detail goes in the description, which can start with a one-line technical summary. The same applies when you rewrite a title with `issue patch --title`. See [Writing the title](references/pidash-workflows.md#writing-the-title).
+
 **Say which project you used.** After creating an issue, report it: `Created PROJ-123 in project <project name>.` If the user corrects the project, `pidash issue move` it rather than recreating it.
 
 **Reuse the project's vocabulary.** Check `pidash state list PROJ-123` before setting a state and `pidash label list` before attaching a label. Labels must already exist; create one with `pidash label create` only when nothing fits.
