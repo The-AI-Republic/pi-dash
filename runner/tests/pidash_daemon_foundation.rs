@@ -120,6 +120,23 @@ async fn desktop_install_without_receipt_discovers_engine_without_restart() {
         detail.reason_code.as_deref(),
         Some("engine_sign_in_required")
     );
+
+    // A successful discovery must not leave availability stuck in the
+    // opposite direction if an installer later removes or repairs the file.
+    std::fs::remove_file(&engine).unwrap();
+    let Response::EngineStatus(missing) = ipc.call(Request::EngineStatus).await.unwrap() else {
+        panic!("engine status expected");
+    };
+    assert_eq!(missing.reason_code.as_deref(), Some("engine_not_installed"));
+    std::fs::write(&engine, "repaired engine fixture").unwrap();
+    let Response::EngineStatus(restored) = ipc.call(Request::EngineStatus).await.unwrap() else {
+        panic!("engine status expected");
+    };
+    assert_eq!(
+        restored.reason_code.as_deref(),
+        Some("engine_sign_in_required")
+    );
+    assert_eq!(restored.binary, Some(engine.display().to_string()));
     assert_eq!(daemon.id(), pid);
     assert!(daemon.try_wait().unwrap().is_none());
     daemon.kill().await.unwrap();

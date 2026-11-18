@@ -214,7 +214,29 @@ pub fn init_at_daemon_start(
 ) -> Result<&'static ResolvedPidashAgent, LocateError> {
     let config = CONFIG.get_or_init(|| config.clone());
     if let Some(engine) = RESOLVED.get() {
-        return Ok(engine);
+        return if engine.binary.is_file() {
+            Ok(engine)
+        } else {
+            // Retain the pinned path even while absent. Never switch a
+            // running daemon to another layout/version during a repair.
+            Err(match &engine.source {
+                PidashAgentSource::ConfigOverride => {
+                    LocateError::OverrideMissing(engine.binary.clone())
+                }
+                PidashAgentSource::Installed(_) => LocateError::NotInstalled {
+                    version: engine
+                        .version
+                        .clone()
+                        .unwrap_or_else(|| super::engine_version().to_owned()),
+                    searched: engine
+                        .binary
+                        .parent()
+                        .map(Path::to_path_buf)
+                        .into_iter()
+                        .collect(),
+                },
+            })
+        };
     }
     match resolve(config) {
         Ok(engine) => Ok(remember(engine)),
@@ -227,12 +249,15 @@ pub fn init_at_daemon_start(
 
 /// The engine resolved for this daemon, if any. Retry a missing engine so
 /// the first status/chat request after installation can use it immediately,
-/// without waiting for the background discovery tick or restarting.
+/// without waiting for the background discovery tick or restarting. Validate
+/// a pinned path on every read so removal and restoration update availability
+/// too, without changing which engine this daemon is pinned to.
 pub fn resolved() -> Option<&'static ResolvedPidashAgent> {
-    RESOLVED.get().or_else(|| {
+    let engine = RESOLVED.get().or_else(|| {
         let config = CONFIG.get()?;
         resolve(config).ok().map(remember)
-    })
+    });
+    engine.filter(|engine| engine.binary.is_file())
 }
 
 /// Detect a late installation even while no client is polling the daemon.
@@ -287,6 +312,18 @@ mod tests {
         // Inspect the stored result directly: no status/read request should
         // be necessary to trigger discovery.
         assert_eq!(RESOLVED.get().unwrap().binary, binary);
+
+        std::fs::remove_file(&binary).unwrap();
+        assert!(resolved().is_none());
+        assert!(init_at_daemon_start(&config).is_err());
+        assert_eq!(
+            RESOLVED.get().unwrap().binary,
+            binary,
+            "keep the pinned path"
+        );
+        touch(&binary);
+        assert_eq!(resolved().unwrap().binary, binary);
+        assert!(init_at_daemon_start(&config).is_ok());
     }
 
     fn touch(path: &Path) {
