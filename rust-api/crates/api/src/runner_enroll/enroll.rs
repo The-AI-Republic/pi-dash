@@ -48,13 +48,13 @@
 use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::extract::{ConnectInfo, Extension, Path, State};
-use axum::http::{header, HeaderMap, HeaderValue, Request, StatusCode};
-use axum::response::{IntoResponse, Response};
 use axum::Router;
+use axum::extract::{ConnectInfo, Extension, Path, State};
+use axum::http::{HeaderMap, HeaderValue, Request, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use http_body_util::BodyExt as _;
-use pidash_db::orm_tx::{is_integrity_violation, TxConn};
+use pidash_db::orm_tx::{TxConn, is_integrity_violation};
 use sea_orm::DbErr;
 use serde_json::{Map, Value};
 use sqlx::postgres::Postgres;
@@ -76,7 +76,7 @@ use crate::state::AppState;
 pub use pidash_compat::datetime::render_isoformat;
 use pidash_compat::db::is_integrity_error;
 use pidash_compat::py::py_strip;
-pub use pidash_compat::response::{error_body, json_response, server_error, SERVER_ERROR_BODY};
+pub use pidash_compat::response::{SERVER_ERROR_BODY, error_body, json_response, server_error};
 
 // ---------------------------------------------------------------------------
 // Wire consts (`enrollment.py`, `register.py`)
@@ -355,7 +355,9 @@ pub fn ensure_ascii(compact_json: &str) -> String {
 /// `user_id`, `workspace_id`, `host_label`.
 pub fn ticket_payload_bytes(user_id: &Uuid, workspace_id: &Uuid, host_label: &str) -> String {
     let host = ensure_ascii(&serde_json::to_string(host_label).expect("host label serializes"));
-    format!("{{\"user_id\": \"{user_id}\", \"workspace_id\": \"{workspace_id}\", \"host_label\": {host}}}")
+    format!(
+        "{{\"user_id\": \"{user_id}\", \"workspace_id\": \"{workspace_id}\", \"host_label\": {host}}}"
+    )
 }
 
 /// The ticket cache key (`:837`).
@@ -1530,15 +1532,9 @@ struct AttemptDone {
 
 /// Refuse native-agent enrollment when the installed edition cannot serve
 /// this account. A cloud profile must not be gated by the CE-only defaults.
-async fn engine_refusal(state: &AppState, user_id: Uuid) -> Option<Response> {
-    let profile = match crate::pidash_agent::endpoints::account_agent_profile(state, user_id).await
-    {
-        Ok(profile) => profile,
-        Err(response) => return Some(response),
-    };
-    engine_refusal_for_profile(state.settings().pidash_agent.enabled, &profile)
-}
-
+/// The profile is resolved by the caller *before* the enrollment
+/// transaction opens: the lookup takes its own pool connection and may call
+/// the edition seam, neither of which may happen while `tx` holds one.
 fn engine_refusal_for_profile(
     enabled: bool,
     profile: &pidash_services::extensions::PidashAgentProfile,
@@ -1563,7 +1559,7 @@ fn engine_refusal_for_profile(
 /// attach, engine/manual branch, live-engine dedupe, runner insert,
 /// APIToken-path rotate + `deactivate_api_token`.
 async fn create_attempt(
-    state: &AppState,
+    engine_profile: Option<&pidash_services::extensions::PidashAgentProfile>,
     tx: &mut Transaction<'_, Postgres>,
     params: &CreateAttempt<'_>,
     settings: &pidash_db::config::Settings,
@@ -1601,7 +1597,14 @@ async fn create_attempt(
         }
         let machine_id = dev_machine_id.unwrap();
         if !legacy_machine {
-            if let Some(refusal) = engine_refusal(state, params.user_id).await {
+            // `agent_kind == "engine"` here (an empty kind only wants the
+            // agent on a legacy machine), so the caller resolved a profile.
+            let Some(profile) = engine_profile else {
+                return Attempt::Server;
+            };
+            if let Some(refusal) =
+                engine_refusal_for_profile(settings.pidash_agent.enabled, profile)
+            {
                 return Attempt::Refusal(refusal);
             }
             // Credential check (live now, not stored).
@@ -2051,6 +2054,17 @@ async fn create_runner_inner(
     };
 
     let settings = state.settings().clone();
+    // Resolve the installed edition's agent profile before any enrollment
+    // transaction: it needs its own pool connection (and may call the
+    // edition seam), which must not be acquired while `tx` holds one.
+    let engine_profile = if agent_kind == "engine" {
+        match crate::pidash_agent::endpoints::account_agent_profile(&state, user_id).await {
+            Ok(profile) => Some(profile),
+            Err(response) => return response,
+        }
+    } else {
+        None
+    };
     let mut attempts = 0u32;
     let mut finished: Option<AttemptDone> = None;
     while attempts < MAX_AUTO_NAME_RETRIES {
@@ -2060,7 +2074,7 @@ async fn create_runner_inner(
             Err(_) => return server_error(),
         };
         let attempt = create_attempt(
-            &state,
+            engine_profile.as_ref(),
             &mut tx,
             &CreateAttempt {
                 user_id,
