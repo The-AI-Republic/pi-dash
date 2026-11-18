@@ -976,11 +976,14 @@ mod tests {
         // Runners come up offline: only the mock is contacted.
         let mut ctx =
             RunnerSpawnCtx::for_tests_with_daemon(None, tokens.clone(), &paths, daemon, &[]);
+        let binary = tmp.path().join("engine/0.153.4/pidash-agent-engine");
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, "engine fixture").unwrap();
         ctx.engine = crate::pidash_agent::manager::PidashAgentManager::new(
             Some(&server.url),
             paths.clone(),
             tokens,
-            Some(tmp.path().join("engine/0.153.4/pidash-agent-engine")),
+            Some(binary),
         );
         let transport = SharedHttpTransport::new(server.url.clone()).unwrap();
         let control = MachineControl::new(
