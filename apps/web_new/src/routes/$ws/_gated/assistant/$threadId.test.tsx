@@ -13,7 +13,7 @@ import {
   Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
@@ -30,8 +30,21 @@ vi.mock("../../../../features/assistant/components/ConversationGate.js", () => (
   ),
 }));
 vi.mock("./DesktopAssistant.js", () => ({
-  DesktopAssistant: (props: { workspaceSlug: string; requestedSessionId: string | null }) => (
-    <div data-testid="desktop-slot" data-slug={props.workspaceSlug} data-session={props.requestedSessionId ?? ""} />
+  DesktopAssistant: (props: {
+    workspaceSlug: string;
+    requestedSessionId: string | null;
+    initialMessage?: string | null;
+    onInitialMessageConsumed?: () => void;
+  }) => (
+    <button
+      type="button"
+      data-testid="desktop-slot"
+      data-slug={props.workspaceSlug}
+      data-session={props.requestedSessionId ?? ""}
+      onClick={props.onInitialMessageConsumed}
+    >
+      {props.initialMessage}
+    </button>
   ),
 }));
 vi.mock("../../../../core/platform/local-chat.js", () => ({ hasLocalChat: () => localChat.value }));
@@ -101,8 +114,14 @@ describe("conversation route", () => {
         <RouterProvider router={router} />
       </QueryClientProvider>
     );
+    await router.navigate({ href: "/acme/assistant/sess-1", state: { pendingMessage: "hello native" } });
     const slot = await screen.findByTestId("desktop-slot");
     expect(slot).toHaveAttribute("data-slug", "acme");
     expect(slot).toHaveAttribute("data-session", "sess-1");
+    await waitFor(() => expect(slot).toHaveTextContent("hello native"));
+    fireEvent.click(slot);
+    await waitFor(() =>
+      expect((router.state.location.state as { pendingMessage?: string }).pendingMessage).toBeUndefined()
+    );
   });
 });

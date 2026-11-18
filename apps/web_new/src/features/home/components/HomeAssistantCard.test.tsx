@@ -26,6 +26,9 @@ import { cloudAssistantKeys } from "../../cloud-assistant/index.js";
 import { sessionKeys, setSessionClient } from "../../../core/session/queries.js";
 import { cardAskOutcome, HomeAssistantCard, recentConversations } from "./HomeAssistantCard.js";
 
+const localChat = vi.hoisted(() => ({ enabled: false }));
+vi.mock("../../../core/platform/local-chat.js", () => ({ hasLocalChat: () => localChat.enabled }));
+
 const notified = vi.hoisted(() => ({ error: vi.fn(), success: vi.fn() }));
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../shared/shell/index.js")>();
@@ -149,6 +152,7 @@ let routerRef: { state: { location: { pathname: string } } } | null = null;
 
 afterEach(() => {
   routerRef = null;
+  localChat.enabled = false;
 });
 
 afterEach(() => {
@@ -179,6 +183,28 @@ describe("cardAskOutcome", () => {
 });
 
 describe("HomeAssistantCard", () => {
+  it("hands a desktop ask to local chat without creating or listing cloud conversations", async () => {
+    localChat.enabled = true;
+    renderCard({ config: CONFIGURED });
+    await screen.findByRole("region", { name: "Assistant" });
+    expect(screen.queryByTestId("home-recent-conversations")).toBeNull();
+    fireEvent.change(screen.getByRole("textbox", { name: "Ask the assistant" }), { target: { value: "hello native" } });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    await screen.findByTestId("conversation");
+    expect(calls.filter((call) => call.method === "POST")).toEqual([]);
+    expect(calls.filter((call) => call.url.endsWith("/ai-assistant/threads/"))).toEqual([]);
+    expect((routerRef!.state.location as unknown as { state: { pendingMessage: string } }).state.pendingMessage).toBe(
+      "hello native"
+    );
+  });
+
+  it("does not show cloud history links on desktop even when cached", async () => {
+    localChat.enabled = true;
+    renderCard({ config: CONFIGURED, threads: [THREAD_1] });
+    await screen.findByRole("region", { name: "Assistant" });
+    expect(screen.queryByRole("link", { name: "Sprint summary" })).toBeNull();
+  });
+
   it("offers the entry, the pinned chips and up to five recents for members", async () => {
     const threads = Array.from({ length: 6 }, (_, index) =>
       makeThread({ id: `thread-${index}`, title: `Recent ${index}` })

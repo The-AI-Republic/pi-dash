@@ -445,6 +445,80 @@ def test_list_no_fields_shape(api, seed, tenant_a, project_a, auth_a):
         assert set(entry) == MODULE_ROW_KEYS, sorted(set(entry) ^ MODULE_ROW_KEYS)
 
 
+def test_module_detail_estimate_distribution_requires_selected_points(
+    api, seed, db, tenant_a, project_a, auth_a,
+):
+    """NEWPIDASH-283: estimate_distribution is gated on the *selected*
+    estimate being points (Django base.py:417-422, archive.py:311-316).
+
+    A points estimate row that is not selected (estimate_id NULL, or
+    selected is categories) must still render {} — the previous Rust
+    probe joined on estimates.project_id and returned a populated
+    distribution from a stale row.
+    """
+    ws = tenant_a["workspace"]["id"]
+    mid = seed.module(ws, project_a, name="NEWPIDASH-283 dist")
+    issue_id = seed.issue(ws, project_a, name="NEWPIDASH-283 issue")
+    est_points = estimate(db, project_a, ws)
+    ep = estimate_point(db, est_points["id"], project_a, ws, value="3")
+    est_categories = estimate(db, project_a, ws, type="categories")
+    url = module_url(tenant_a, project_a, mid)
+    try:
+        with db.cursor() as cur:
+            cur.execute(
+                "UPDATE projects SET estimate_id = %s WHERE id = %s",
+                (est_points["id"], project_a),
+            )
+            cur.execute(
+                "UPDATE issues SET estimate_point_id = %s WHERE id = %s",
+                (ep["id"], issue_id),
+            )
+        seed.module_issue(ws, project_a, mid, issue_id)
+        # Selected points: distribution is populated.
+        r = api.get(url, headers=auth_a)
+        assert r.status_code == 200, r.text
+        got = r.json()["estimate_distribution"]
+        assert got != {}, got
+        assert "assignees" in got and "labels" in got, got
+        # Unselecting (PATCH {"estimate": null}) leaves the row but clears
+        # the FK: Django returns {}.
+        with db.cursor() as cur:
+            cur.execute(
+                "UPDATE projects SET estimate_id = NULL WHERE id = %s",
+                (project_a,),
+            )
+        r = api.get(url, headers=auth_a)
+        assert r.status_code == 200, r.text
+        assert r.json()["estimate_distribution"] == {}, r.json()[
+            "estimate_distribution"
+        ]
+        # Selecting categories while the points row still exists stays {}.
+        with db.cursor() as cur:
+            cur.execute(
+                "UPDATE projects SET estimate_id = %s WHERE id = %s",
+                (est_categories["id"], project_a),
+            )
+        r = api.get(url, headers=auth_a)
+        assert r.status_code == 200, r.text
+        assert r.json()["estimate_distribution"] == {}, r.json()[
+            "estimate_distribution"
+        ]
+    finally:
+        with db.cursor() as cur:
+            cur.execute(
+                "UPDATE issues SET estimate_point_id = NULL WHERE project_id = %s",
+                (project_a,),
+            )
+            cur.execute(
+                "UPDATE projects SET estimate_id = NULL WHERE id = %s",
+                (project_a,),
+            )
+            cur.execute(
+                "DELETE FROM estimate_points WHERE project_id = %s", (project_a,),
+            )
+            cur.execute("DELETE FROM estimates WHERE project_id = %s", (project_a,))
+
+
 def test_retrieve_completion_chart_uses_actor_timezone(
     api, seed, db, tenant_a, project_a, auth_a,
 ):

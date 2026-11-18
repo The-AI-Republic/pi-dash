@@ -1,0 +1,50 @@
+name: Test skill
+
+# The pidash agent skill (skill/) documents the CLI in runner/src/cli. Its
+# tests cover the installer and check that every `pidash` command the skill
+# mentions still exists in the CLI source, so a CLI change that renames or
+# removes a command fails here until the skill is updated with it.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - "main"
+      - "preview"
+    types:
+      - "opened"
+      - "synchronize"
+      - "reopened"
+    paths:
+      - "skill/**"
+      - "runner/src/cli/**"
+      - ".github/workflows/pull-request-test-skill.yml"
+  push:
+    branches:
+      - "main"
+    paths:
+      - "skill/**"
+      - "runner/src/cli/**"
+      - ".github/workflows/pull-request-test-skill.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: skill installer + command check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run skill tests
+        working-directory: skill
+        run: npm test

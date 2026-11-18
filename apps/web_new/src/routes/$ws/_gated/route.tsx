@@ -208,7 +208,7 @@ export const Route = createFileRoute("/$ws/_gated")({
       return (
         <>
           <React.Suspense fallback={null}>
-            <LazyRuntimeSupervisor />
+            <LazyRuntimeSupervisor workspaceSlug={params.ws} />
           </React.Suspense>
           {/* Settings replace AppShell's chrome, not its workspace
               wirings: an expired session leaves them like any signed-in
@@ -225,7 +225,7 @@ export const Route = createFileRoute("/$ws/_gated")({
       <>
         {/* Background agent-runtime supervisor (RUN-044): desktop only, renders nothing on web. */}
         <React.Suspense fallback={null}>
-          <LazyRuntimeSupervisor />
+          <LazyRuntimeSupervisor workspaceSlug={params.ws} />
         </React.Suspense>
         <WorkspaceShell
           workspaceSlug={params.ws}

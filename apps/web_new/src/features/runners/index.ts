@@ -84,8 +84,6 @@ export {
 export type { ReplaceCandidate, ReplaceOutcome, ReplacePrompt, ReplaceDeps } from "./runtime/desktop-replace.js";
 export { MigrationNoticesDialog } from "./runtime/MigrationNoticesDialog.js";
 export { ReplaceMachineDialog } from "./runtime/ReplaceMachineDialog.js";
-export { registerSetUpPrompt, requestDaemonSetup } from "./runtime/setupPrompt.js";
-export type { SetUpReason, SetUpRequest } from "./runtime/setupPrompt.js";
 export { confirmRuntimeSignOut, registerSignOutPrompt } from "./runtime/signOutPrompt.js";
 export { RuntimeSignOutDialog } from "./runtime/SignOutDialog.js";
 export { registerRuntimeSignOutLifecycle, RuntimeSignOutLifecycle } from "./runtime/SignOutLifecycle.js";
