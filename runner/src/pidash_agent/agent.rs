@@ -75,7 +75,7 @@ pub fn prepare(runner: &RunnerConfig) -> anyhow::Result<RunnerConfig> {
     debug_assert_eq!(runner.agent.kind, AgentKind::PidashAgent);
     let engine = super::locate::resolved().ok_or_else(|| {
         anyhow::anyhow!(
-            "{}: the Pi Dash Agent was not found when the daemon started; run `pidash engine install` and restart the daemon",
+            "{}: the Pi Dash Agent is not installed yet; finish desktop setup or run `pidash engine install`; the daemon will detect it automatically",
             super::api::reason::ENGINE_NOT_INSTALLED
         )
     })?;

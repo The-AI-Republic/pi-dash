@@ -45,6 +45,88 @@ async fn runner_names(ipc: &mut Client) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn desktop_install_without_receipt_discovers_engine_without_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let paths = Paths::resolve(
+        Some(root.path().join("config")),
+        Some(root.path().join("data")),
+    )
+    .unwrap();
+    paths.ensure().unwrap();
+    let config: Config = serde_json::from_value(serde_json::json!({
+        "version": 2,
+        "daemon": {"cloud_url": "http://127.0.0.1:1", "auto_update": false,
+                   "dev_machine_id": uuid::Uuid::new_v4()},
+        "cli": {"token": "mt_fixture", "workspace_slug": "acme"},
+    }))
+    .unwrap();
+    file::write_config(&paths, &config).unwrap();
+
+    // As the desktop does, copy the CLI without running cargo-dist's
+    // installer (and therefore without creating an install receipt).
+    let bin_dir = root.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let cli = bin_dir.join(if cfg!(windows) {
+        "pidash.exe"
+    } else {
+        "pidash"
+    });
+    std::fs::copy(env!("CARGO_BIN_EXE_pidash"), &cli).unwrap();
+    let engine = pidash::pidash_agent::locate::install_root(&bin_dir, cfg!(windows))
+        .join(pidash::pidash_agent::engine_version())
+        .join(pidash::pidash_agent::ENGINE_BINARY_NAME);
+    assert!(!engine.exists());
+
+    let mut daemon = tokio::process::Command::new(&cli)
+        .env("PIDASH_CONFIG_DIR", &paths.config_dir)
+        .env("PIDASH_DATA_DIR", &paths.data_dir)
+        .args(["__run", "--offline"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let pid = daemon.id();
+    let mut ipc = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(client) = Client::connect(paths.ipc_socket_path()).await {
+                break client;
+            }
+            assert!(daemon.try_wait().unwrap().is_none());
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let Response::EngineStatus(before) = ipc.call(Request::EngineStatus).await.unwrap() else {
+        panic!("engine status expected");
+    };
+    assert_eq!(before.reason_code.as_deref(), Some("engine_not_installed"));
+
+    // No model turn is executed: the fixture represents an installed file,
+    // and this test verifies discovery and IPC status, not agent execution.
+    std::fs::create_dir_all(engine.parent().unwrap()).unwrap();
+    std::fs::write(&engine, "engine fixture").unwrap();
+    let Response::Hello(hello) = ipc.call(Request::Hello).await.unwrap() else {
+        panic!("hello expected");
+    };
+    let detail = hello.engine_detail.unwrap();
+    assert_eq!(detail.binary, Some(engine.display().to_string()));
+    // Missing engine credentials now become the next gate, proving the missing
+    // engine state cleared without a login, receipt, or restart.
+    assert_eq!(detail.state, EngineState::SignedOut);
+    assert_eq!(
+        detail.reason_code.as_deref(),
+        Some("engine_sign_in_required")
+    );
+    assert_eq!(daemon.id(), pid);
+    assert!(daemon.try_wait().unwrap().is_none());
+    daemon.kill().await.unwrap();
+    daemon.wait().await.unwrap();
+}
+
+#[tokio::test]
 async fn one_daemon_serves_two_workspaces_and_changes_runners_without_restarting() {
     let root = tempfile::tempdir().unwrap();
     let paths = Paths::resolve(

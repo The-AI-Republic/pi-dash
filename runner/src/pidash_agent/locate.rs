@@ -1,7 +1,8 @@
 //! Find the Pi Dash Agent for this `pidash`.
 //!
-//! The daemon resolves the engine once, at start ([`init_at_daemon_start`]),
-//! and keeps that path for its whole life ([`resolved`]). `pidash update`
+//! The daemon first looks for the engine at start ([`init_at_daemon_start`]),
+//! retries a missing engine independently of installer receipts, and keeps
+//! the first successful path for its whole life ([`resolved`]). `pidash update`
 //! installs a new engine version directory beside the old one and then swaps
 //! `pidash`, so a running daemon is never handed a different binary
 //! mid-run; the new engine is picked up from the next daemon start.
@@ -188,29 +189,35 @@ pub fn resolve(config: &PidashAgentSection) -> Result<ResolvedPidashAgent, Locat
 }
 
 static RESOLVED: OnceLock<ResolvedPidashAgent> = OnceLock::new();
+static CONFIG: OnceLock<PidashAgentSection> = OnceLock::new();
+
+fn remember(engine: ResolvedPidashAgent) -> &'static ResolvedPidashAgent {
+    RESOLVED.get_or_init(|| {
+        tracing::info!(
+            binary = %engine.binary.display(),
+            version = engine.version.as_deref().unwrap_or("override"),
+            source = ?engine.source,
+            "Pi Dash Agent resolved"
+        );
+        engine
+    })
+}
 
 /// Resolve the engine for this daemon process and keep the result.
 /// A missing engine is logged, not fatal: runners driving the user's own
 /// agent must keep working. Once an engine has been resolved, later calls
 /// return it unchanged, so a running daemon is never handed a different
-/// binary. A failed resolve is not remembered: after the daemon installs a
-/// missing engine (`super::auto_install`) it calls this again.
+/// binary. A failed resolve is not remembered: discovery keeps checking for
+/// an engine installed by the desktop, CLI, or package manager later.
 pub fn init_at_daemon_start(
     config: &PidashAgentSection,
 ) -> Result<&'static ResolvedPidashAgent, LocateError> {
+    let config = CONFIG.get_or_init(|| config.clone());
     if let Some(engine) = RESOLVED.get() {
         return Ok(engine);
     }
     match resolve(config) {
-        Ok(engine) => {
-            tracing::info!(
-                binary = %engine.binary.display(),
-                version = engine.version.as_deref().unwrap_or("override"),
-                source = ?engine.source,
-                "Pi Dash Agent resolved"
-            );
-            Ok(RESOLVED.get_or_init(|| engine))
-        }
+        Ok(engine) => Ok(remember(engine)),
         Err(err) => {
             tracing::warn!(error = %err, "Pi Dash Agent unavailable");
             Err(err)
@@ -218,10 +225,23 @@ pub fn init_at_daemon_start(
     }
 }
 
-/// The engine resolved for this daemon, if any. `None` before
-/// [`init_at_daemon_start`] has succeeded.
+/// The engine resolved for this daemon, if any. Retry a missing engine so
+/// the first status/chat request after installation can use it immediately,
+/// without waiting for the background discovery tick or restarting.
 pub fn resolved() -> Option<&'static ResolvedPidashAgent> {
-    RESOLVED.get()
+    RESOLVED.get().or_else(|| {
+        let config = CONFIG.get()?;
+        resolve(config).ok().map(remember)
+    })
+}
+
+/// Detect a late installation even while no client is polling the daemon.
+/// This only discovers files; permission to download them remains the
+/// installer's responsibility. Stop once the release's engine is pinned.
+pub async fn discover_missing() {
+    while resolved().is_none() {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
 }
 
 #[cfg(test)]
@@ -230,6 +250,44 @@ mod tests {
     use std::fs;
 
     const V: &str = "0.153.4";
+
+    #[tokio::test]
+    async fn background_discovery_finds_a_late_install_without_client_requests() {
+        const CHILD: &str = "PIDASH_TEST_BACKGROUND_ENGINE_DISCOVERY";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "pidash_agent::locate::tests::background_discovery_finds_a_late_install_without_client_requests"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let binary = tmp.path().join("engine");
+        let config = PidashAgentSection {
+            binary: Some(binary.clone()),
+            ..Default::default()
+        };
+        assert!(init_at_daemon_start(&config).is_err());
+        let discovery = tokio::spawn(discover_missing());
+        tokio::task::yield_now().await;
+        assert!(!discovery.is_finished());
+        touch(&binary);
+        tokio::time::timeout(std::time::Duration::from_secs(5), discovery)
+            .await
+            .expect("background discovery must notice the installation")
+            .unwrap();
+        // Inspect the stored result directly: no status/read request should
+        // be necessary to trigger discovery.
+        assert_eq!(RESOLVED.get().unwrap().binary, binary);
+    }
 
     fn touch(path: &Path) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();

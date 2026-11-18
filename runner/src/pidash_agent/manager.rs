@@ -921,7 +921,7 @@ mod tests {
         const CHILD: &str = "PIDASH_TEST_LATE_ENGINE_INSTALL";
         if std::env::var_os(CHILD).is_none() {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "engine::manager::tests::a_binary_installed_after_startup_makes_the_engine_available"])
+                .args(["--exact", "pidash_agent::manager::tests::a_binary_installed_after_startup_makes_the_engine_available"])
                 .env(CHILD, "1")
                 .output()
                 .unwrap();
@@ -930,9 +930,16 @@ mod tests {
                 "{}",
                 String::from_utf8_lossy(&output.stdout)
             );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
+        let installed = tmp.path().join("pidash-agent-engine");
+        let config = crate::config::schema::PidashAgentSection {
+            binary: Some(installed.clone()),
+            ..Default::default()
+        };
+        assert!(super::super::locate::init_at_daemon_start(&config).is_err());
         let m = PidashAgentManager::new(
             None,
             paths(tmp.path()),
@@ -944,13 +951,9 @@ mod tests {
             m.status().reason_code.as_deref(),
             Some(reason::ENGINE_NOT_INSTALLED)
         );
-        let installed = tmp.path().join("pidash-agent-engine");
         std::fs::write(&installed, "fake engine").unwrap();
-        super::super::locate::init_at_daemon_start(&crate::config::schema::PidashAgentSection {
-            binary: Some(installed.clone()),
-            ..Default::default()
-        })
-        .unwrap();
+        // The installer only writes the file. It does not re-initialize
+        // discovery, write a cargo-dist receipt, or restart the daemon.
         let status = m.status();
         assert_eq!(status.state, EngineState::Available);
         assert_eq!(status.binary, Some(installed.display().to_string()));
