@@ -468,6 +468,7 @@ impl AgentBridge {
                     &runner.claude_code.binary,
                     cwd,
                     selected_model(model_override, runner.claude_code.model_default.clone()),
+                    runner.claude_code.effort_default.clone(),
                     resume_session_id,
                 )
                 .await?;

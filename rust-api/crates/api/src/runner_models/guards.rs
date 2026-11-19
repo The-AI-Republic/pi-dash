@@ -49,6 +49,10 @@ pub const OPENHUB_AGENT: &str = "openhub";
 /// `CODEX_EFFORTS`).
 pub const CODEX_EFFORTS: [&str; 4] = ["low", "medium", "high", "xhigh"];
 
+/// Effort levels `claude --effort` accepts (the runner's
+/// `CLAUDE_CODE_EFFORTS`).
+pub const CLAUDE_CODE_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
 /// Reasoning-effort tiers `muse exec --reasoning-effort` accepts (the
 /// runner's `MUSE_CODE_EFFORTS`).
 pub const MUSE_CODE_EFFORTS: [&str; 8] = [
@@ -58,17 +62,19 @@ pub const MUSE_CODE_EFFORTS: [&str; 8] = [
 /// Every effort tier some runner agent accepts: the union of the per-agent
 /// sets. Used where the agent is not known (the agent-agnostic patch and
 /// the reconfigure body before the runner's agent is loaded). Muse's set is
-/// a superset of Codex's, so it is the union; `known_efforts_is_the_union`
+/// a superset of Codex's and Claude Code's, so it is the union;
+/// `known_efforts_is_the_union`
 /// pins that.
 pub const KNOWN_EFFORTS: [&str; 8] = MUSE_CODE_EFFORTS;
 
-/// The effort tiers valid for `agent`'s catalog rows. Muse Code has its own
-/// wider set; every other runner agent keeps the Codex tiers. `None` (agent
-/// unknown) is the union.
+/// The effort tiers valid for `agent`'s catalog rows. Claude Code and Muse
+/// Code have their own sets; every other runner agent keeps the Codex tiers.
+/// `None` (agent unknown) is the union.
 pub fn efforts_for_agent(agent: Option<&str>) -> &'static [&'static str] {
     match agent {
         None => &KNOWN_EFFORTS,
         Some("muse-code") => &MUSE_CODE_EFFORTS,
+        Some("claude-code") => &CLAUDE_CODE_EFFORTS,
         Some(_) => &CODEX_EFFORTS,
     }
 }
@@ -444,7 +450,11 @@ mod tests {
 
     #[test]
     fn known_efforts_is_the_union() {
-        for tier in CODEX_EFFORTS.iter().chain(MUSE_CODE_EFFORTS.iter()) {
+        for tier in CODEX_EFFORTS
+            .iter()
+            .chain(CLAUDE_CODE_EFFORTS.iter())
+            .chain(MUSE_CODE_EFFORTS.iter())
+        {
             assert!(
                 KNOWN_EFFORTS.contains(tier),
                 "{tier} missing from KNOWN_EFFORTS"
@@ -468,6 +478,24 @@ mod tests {
             &json!({"reasoning_efforts": ["none"]})
         )
         .is_ok());
+    }
+
+    #[test]
+    fn claude_code_rows_take_claude_levels_only() {
+        let parsed = validate_create(&json!({
+            "agent": "claude-code", "model": "claude-opus-4-8", "label": "Opus 4.8",
+            "reasoning_efforts": ["high", "xhigh", "max"],
+        }))
+        .expect("claude levels are valid on a claude-code row");
+        assert_eq!(parsed.reasoning_efforts, ["high", "xhigh", "max"]);
+        assert_eq!(
+            validate_patch_for_agent(
+                Some("claude-code"),
+                &json!({"reasoning_efforts": ["ultra"]})
+            )
+            .err(),
+            Some("invalid_effort")
+        );
     }
 
     #[test]

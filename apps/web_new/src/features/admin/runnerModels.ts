@@ -37,9 +37,14 @@ export const RUNNER_MODEL_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
 /** Effort values `muse exec --reasoning-effort` accepts (the server's `MUSE_CODE_EFFORTS`). */
 export const MUSE_CODE_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
 
-/** The effort checkboxes one agent's rows offer: Muse Code has its own wider set. */
+/** Effort values `claude --effort` accepts (the server's `CLAUDE_CODE_EFFORTS`). */
+export const CLAUDE_CODE_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+
+/** The effort checkboxes one agent's rows offer: Claude Code and Muse Code have their own sets. */
 export function effortsForAgent(agent: string): readonly string[] {
-  return agent === "muse-code" ? MUSE_CODE_EFFORTS : RUNNER_MODEL_EFFORTS;
+  if (agent === "muse-code") return MUSE_CODE_EFFORTS;
+  if (agent === "claude-code") return CLAUDE_CODE_EFFORTS;
+  return RUNNER_MODEL_EFFORTS;
 }
 
 /** Effort checkbox labels: the add-runner picker's, so the two never drift. */

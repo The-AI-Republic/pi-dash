@@ -27,6 +27,10 @@ use uuid::Uuid;
 /// soft warning, not a hard error.
 pub(crate) const CODEX_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh"];
 
+/// Claude Code effort levels, passed verbatim as `claude --effort` (the set
+/// `claude --help` lists).
+pub(crate) const CLAUDE_CODE_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
 /// Muse Code reasoning-effort tiers, passed verbatim as `muse exec
 /// --reasoning-effort` (the set `muse exec --help` lists).
 pub(crate) const MUSE_CODE_EFFORTS: &[&str] = &[
@@ -34,10 +38,11 @@ pub(crate) const MUSE_CODE_EFFORTS: &[&str] = &[
 ];
 
 /// The reasoning-effort tiers `kind` accepts, or `None` when the agent has no
-/// effort knob. Codex and Muse Code are the only agents that take one.
+/// effort knob. Codex, Claude Code and Muse Code are the agents that take one.
 pub(crate) fn efforts_for_agent(kind: AgentKind) -> Option<&'static [&'static str]> {
     match kind {
         AgentKind::Codex => Some(CODEX_EFFORTS),
+        AgentKind::ClaudeCode => Some(CLAUDE_CODE_EFFORTS),
         AgentKind::MuseCode => Some(MUSE_CODE_EFFORTS),
         _ => None,
     }
@@ -134,7 +139,7 @@ pub fn agent_sections_for(
         }
     };
 
-    // Reasoning effort applies to Codex and Muse Code only, and only alongside
+    // Reasoning effort applies to Codex, Claude Code and Muse Code only, and only alongside
     // an explicit model: the web picker pairs every tier with a model, so an
     // effort on the agent default could not be shown or kept there. It is
     // dropped when the model was absent or rejected above.
@@ -142,8 +147,8 @@ pub fn agent_sections_for(
         (_, None) => None,
         (None, Some(_)) => {
             warn_model_fallback(&format!(
-                "--reasoning-effort only applies to the codex and muse-code agents, \
-                 not {}; ignoring it.",
+                "--reasoning-effort only applies to the codex, claude-code and muse-code \
+                 agents, not {}; ignoring it.",
                 agent_kind.display_name()
             ));
             None
@@ -179,7 +184,10 @@ pub fn agent_sections_for(
             codex.model_default = model;
             codex.effort_default = effort;
         }
-        AgentKind::ClaudeCode => claude_code.model_default = model,
+        AgentKind::ClaudeCode => {
+            claude_code.model_default = model;
+            claude_code.effort_default = effort;
+        }
         AgentKind::CursorAgent => cursor_agent.model_default = model,
         AgentKind::OpenClaw => openclaw.model_default = model,
         AgentKind::Grok => grok.model_default = model,
@@ -1053,11 +1061,32 @@ mod tests {
     }
 
     #[test]
-    fn effort_ignored_for_non_codex_agents() {
-        let (_, claude, _, _, _, _) =
-            agent_sections_for(AgentKind::ClaudeCode, Some("claude-opus-4-8"), Some("high"));
-        // Model still applies; effort has no home on the claude section.
+    fn effort_ignored_for_agents_without_one() {
+        let (_, _, _, _, grok, _) =
+            agent_sections_for(AgentKind::Grok, Some("grok-4.3"), Some("high"));
+        // Model still applies; effort has no home on the grok section.
+        assert_eq!(grok.model_default.as_deref(), Some("grok-4.3"));
+    }
+
+    #[test]
+    fn claude_code_effort_is_applied_with_a_model() {
+        let (_, claude, _, _, _, _) = agent_sections_for(
+            AgentKind::ClaudeCode,
+            Some("claude-opus-4-8"),
+            Some("XHigh"),
+        );
         assert_eq!(claude.model_default.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(claude.effort_default.as_deref(), Some("xhigh"));
+        // No model: dropped, like Codex and Muse.
+        let (_, claude, _, _, _, _) = agent_sections_for(AgentKind::ClaudeCode, None, Some("max"));
+        assert_eq!(claude.effort_default, None);
+        // Not a Claude Code level.
+        let (_, claude, _, _, _, _) = agent_sections_for(
+            AgentKind::ClaudeCode,
+            Some("claude-opus-4-8"),
+            Some("ultra"),
+        );
+        assert_eq!(claude.effort_default, None);
     }
 
     #[test]

@@ -1974,6 +1974,12 @@ mod tests {
             &effort(Some("muse-code"), "ultra"),
             Some("codex")
         ));
+        // Claude Code takes `max` but not Muse's `ultra`.
+        assert!(effort_fits_agent(&effort(None, "max"), Some("claude-code")));
+        assert!(!effort_fits_agent(
+            &effort(None, "ultra"),
+            Some("claude-code")
+        ));
         // Unknown agent (old daemon): the union; "" always clears.
         assert!(effort_fits_agent(&effort(None, "max"), None));
         assert!(effort_fits_agent(&effort(None, ""), Some("codex")));

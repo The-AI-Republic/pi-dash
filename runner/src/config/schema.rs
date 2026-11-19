@@ -626,20 +626,22 @@ impl RunnerConfig {
     }
 
     /// The configured reasoning effort; `None` for agents without one
-    /// (only Codex and Muse Code take an effort tier).
+    /// (only Codex, Claude Code and Muse Code take an effort tier).
     pub fn configured_reasoning_effort(&self) -> Option<&str> {
         match self.agent.kind {
             AgentKind::Codex => self.codex.effort_default.as_deref(),
+            AgentKind::ClaudeCode => self.claude_code.effort_default.as_deref(),
             AgentKind::MuseCode => self.muse_code.effort_default.as_deref(),
             _ => None,
         }
     }
 
     /// The reasoning-effort slot of `kind`'s section; `None` for agents
-    /// without an effort knob (only Codex and Muse Code have one).
+    /// without an effort knob (only Codex, Claude Code and Muse Code have one).
     pub fn effort_slot_mut(&mut self, kind: AgentKind) -> Option<&mut Option<String>> {
         match kind {
             AgentKind::Codex => Some(&mut self.codex.effort_default),
+            AgentKind::ClaudeCode => Some(&mut self.claude_code.effort_default),
             AgentKind::MuseCode => Some(&mut self.muse_code.effort_default),
             _ => None,
         }
@@ -933,6 +935,12 @@ pub struct ClaudeCodeSection {
     pub binary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_default: Option<String>,
+    /// `claude --effort` level (`low` / `medium` / `high` / `xhigh` /
+    /// `max`). `None` omits the flag so Claude Code applies its own default.
+    /// Only meaningful alongside `model_default` (the web picker pairs
+    /// levels with models).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_default: Option<String>,
 }
 
 fn default_claude_binary() -> String {
@@ -944,6 +952,7 @@ impl Default for ClaudeCodeSection {
         Self {
             binary: default_claude_binary(),
             model_default: None,
+            effort_default: None,
         }
     }
 }

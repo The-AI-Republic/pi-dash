@@ -46,6 +46,7 @@ describe("agent sections", () => {
   it("offers Muse Code its own wider effort set", () => {
     expect(effortsForAgent("muse-code")).toEqual(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
     expect(effortsForAgent("codex")).toEqual(RUNNER_MODEL_EFFORTS);
+    expect(effortsForAgent("claude-code")).toEqual(["low", "medium", "high", "xhigh", "max"]);
     expect(formatEfforts(row({ agent: "muse-code", reasoning_efforts: ["minimal", "max"] }))).toBe("Minimal, Max");
   });
 
