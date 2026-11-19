@@ -420,17 +420,7 @@ export function RunnerChatPage({
         {...(localHistory ? { onRename: startRename, onDelete: startDelete, onClear: startClear } : {})}
       />
       <div className="flex min-w-0 flex-1 flex-col px-(--space-4) pb-(--space-4)">
-        <ChatHeader
-          summary={summary}
-          {...(session === null ? {} : { onClose: () => void actions.close() })}
-          {...(approvalsSupported
-            ? {
-                // The mode applies to the next thread, so a send in flight
-                // does not lock it.
-                actions: <ChatApprovalMode value={approvalMode} onChange={chooseMode} />,
-              }
-            : {})}
-        />
+        <ChatHeader summary={summary} {...(session === null ? {} : { onClose: () => void actions.close() })} />
         <ChatTranscript
           messages={stream.messages}
           loading={messages.isPending && session !== null}
@@ -489,6 +479,9 @@ export function RunnerChatPage({
           }}
           sending={actions.sending}
           dictationAvailable={dictationAvailable}
+          // The approval mode sits in the composer's toolbar. It applies to
+          // the next thread, so a send in flight does not lock it.
+          toolbar={approvalsSupported ? <ChatApprovalMode value={approvalMode} onChange={chooseMode} /> : undefined}
         />
       </div>
       {localHistory && renameTarget !== null ? (

@@ -2498,7 +2498,7 @@ describe("desktop runtime + gate reads (NEWFRONT-557)", () => {
     await expect(driver.desktopRuntimeApprovalPromptVisible()).resolves.toBe(true);
     await expect(driver.desktopRuntimeApprovalModeVisible()).resolves.toBe(true);
     expect(role).toHaveBeenCalledWith("alertdialog", { name: "Approval requested" });
-    expect(role).toHaveBeenCalledWith("group", { name: "Approval mode" });
+    expect(role).toHaveBeenCalledWith("combobox", { name: "Approval mode" });
     const absent = pageStub({ getByRole: vi.fn(() => stubLocator({ count: vi.fn(async () => 0) })) });
     await expect(new WebNewDriver(absent).desktopRuntimeApprovalPromptVisible()).resolves.toBe(false);
     await expect(new WebNewDriver(absent).desktopRuntimeApprovalModeVisible()).resolves.toBe(false);
