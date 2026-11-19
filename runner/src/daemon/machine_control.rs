@@ -26,7 +26,7 @@ use crate::cloud::http::{
     CreateRunnerRequest, MachineClient, PollMessage, SharedHttpTransport, TransportError,
     create_runner,
 };
-use crate::cloud::protocol::{CreateRunnerCmd, MachineMsg};
+use crate::cloud::protocol::{CreateRunnerCmd, MachineMsg, ReconfigureRunnerCmd};
 use crate::cloud::reconnect::{Backoff, jittered};
 use crate::config::schema::AgentKind;
 use crate::daemon::state::StateHandle;
@@ -247,6 +247,9 @@ impl MachineControl {
         }
         match serde_json::from_value::<MachineMsg>(msg.body) {
             Ok(MachineMsg::CreateRunner(cmd)) => self.handle_create_runner(client, cmd).await,
+            Ok(MachineMsg::ReconfigureRunner(cmd)) => {
+                self.handle_reconfigure_runner(client, cmd).await
+            }
             Ok(MachineMsg::Welcome { .. }) | Ok(MachineMsg::Ping {}) => {}
             Ok(MachineMsg::ConfigPush {}) => {
                 tracing::debug!("config_push received; not implemented yet — acked");
@@ -286,6 +289,54 @@ impl MachineControl {
         if let Err(e) = client.post_command_result(&request_id, &body).await {
             tracing::warn!(%request_id, "posting command result failed: {e}");
         }
+    }
+
+    async fn handle_reconfigure_runner(&self, client: &MachineClient, cmd: ReconfigureRunnerCmd) {
+        let request_id = cmd.request_id.clone();
+        let runner_id = cmd.runner_id;
+        tracing::info!(%request_id, %runner_id, "cloud-driven reconfigure_runner received");
+        let outcome = self.reconfigure_runner_inner(cmd).await;
+        let body = match &outcome {
+            Ok(name) => serde_json::json!({
+                "status": "ok",
+                "runner_id": runner_id.to_string(),
+                "runner_name": name,
+            }),
+            Err(e) => serde_json::json!({
+                "status": "error",
+                "runner_id": runner_id.to_string(),
+                "error": format!("{e:#}"),
+            }),
+        };
+        if let Err(e) = &outcome {
+            tracing::warn!(%request_id, %runner_id, "reconfigure_runner failed: {e:#}");
+        }
+        if request_id.is_empty() {
+            return;
+        }
+        if let Err(e) = client.post_command_result(&request_id, &body).await {
+            tracing::warn!(%request_id, "posting command result failed: {e}");
+        }
+    }
+
+    /// Apply a cloud edit through the same in-process reconfigure as
+    /// `pidash runner set-working-dir`. Answers the runner's local name.
+    async fn reconfigure_runner_inner(&self, cmd: ReconfigureRunnerCmd) -> Result<String> {
+        let cfg = crate::config::file::load_config(&self.spawn_ctx.paths)?;
+        let current = cfg
+            .runners
+            .iter()
+            .find(|r| r.runner_id == cmd.runner_id)
+            .ok_or_else(|| anyhow::anyhow!("runner {} is not on this machine", cmd.runner_id))?;
+        let changes = reconfigure_changes(&cfg, current, &cmd);
+        if changes.is_empty() {
+            return Ok(current.name.clone());
+        }
+        let block = self
+            .spawn_ctx
+            .reconfigure_runner_by_id(cmd.runner_id, changes)
+            .await?;
+        Ok(block.name)
     }
 
     async fn create_runner_inner(
@@ -479,6 +530,48 @@ fn existing_engine_runner(
 
 /// Kebab-case wire value → AgentKind, via the same clap ValueEnum
 /// parser `--agent` uses, so web and CLI accept identical spellings.
+/// The local changes a `reconfigure_runner` command asks for. The cloud
+/// always sends its name; it is applied only when it differs and no other
+/// runner on this machine already uses it (local names must be unique,
+/// and a clash must not block the rest of the edit).
+fn reconfigure_changes(
+    cfg: &crate::config::schema::Config,
+    current: &crate::config::schema::RunnerConfig,
+    cmd: &ReconfigureRunnerCmd,
+) -> crate::ipc::protocol::RunnerChanges {
+    let name = cmd
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && *name != current.name)
+        .filter(|name| {
+            let taken = cfg
+                .runners
+                .iter()
+                .any(|r| r.runner_id != current.runner_id && r.name == *name);
+            if taken {
+                tracing::warn!(
+                    runner = %current.name,
+                    "cloud name {name:?} is already used by another local runner; keeping the local name"
+                );
+            }
+            !taken
+        })
+        .map(str::to_string);
+    crate::ipc::protocol::RunnerChanges {
+        working_dir: cmd
+            .working_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|dir| !dir.is_empty())
+            .map(std::path::PathBuf::from),
+        name,
+        agent: cmd.agent.clone().filter(|agent| !agent.trim().is_empty()),
+        model: cmd.model.clone(),
+        reasoning_effort: cmd.reasoning_effort.clone(),
+    }
+}
+
 fn parse_agent_kind(raw: &str) -> Result<AgentKind> {
     if raw.is_empty() {
         return Ok(AgentKind::default());
@@ -598,6 +691,85 @@ mod tests {
         crate::config::file::write_config(&paths, &cfg).unwrap();
         let err = ensure_below_runner_cap(&paths).unwrap_err().to_string();
         assert!(err.contains("maximum of 50 runners"), "{err}");
+    }
+
+    #[test]
+    fn reconfigure_command_maps_to_local_changes() {
+        use crate::config::schema::*;
+        let tmp = tempfile::tempdir().unwrap();
+        let runner = |name: &str| RunnerConfig {
+            name: name.into(),
+            runner_id: Uuid::new_v4(),
+            workspace_slug: Some("acme".into()),
+            project_slug: Some("WEB".into()),
+            pod_id: None,
+            workspace: WorkspaceSection {
+                working_dir: tmp.path().join(name),
+            },
+            agent: AgentSection::default(),
+            codex: CodexSection::default(),
+            claude_code: ClaudeCodeSection::default(),
+            cursor_agent: CursorAgentSection::default(),
+            openclaw: OpenClawSection::default(),
+            grok: GrokSection::default(),
+            muse_code: MuseCodeSection::default(),
+            approval_policy: ApprovalPolicySection::default(),
+        };
+        let cfg = Config {
+            version: 2,
+            daemon: Default::default(),
+            runners: vec![runner("alpha"), runner("beta")],
+            cli: None,
+            engine: Default::default(),
+            auth: Default::default(),
+            auth_event: None,
+        };
+        let alpha = &cfg.runners[0];
+        let cmd = |name: &str| ReconfigureRunnerCmd {
+            request_id: "rid".into(),
+            runner_id: alpha.runner_id,
+            name: Some(name.into()),
+            working_dir: Some(" /w ".into()),
+            agent: Some(String::new()),
+            model: Some(String::new()),
+            reasoning_effort: None,
+        };
+
+        // Same name: not a change. Blank agent: unchanged. "" model: default.
+        let changes = reconfigure_changes(&cfg, alpha, &cmd("alpha"));
+        assert_eq!(changes.name, None);
+        assert_eq!(changes.working_dir, Some(std::path::PathBuf::from("/w")));
+        assert_eq!(changes.agent, None);
+        assert_eq!(changes.model.as_deref(), Some(""));
+        assert_eq!(changes.reasoning_effort, None);
+
+        // A cloud rename follows, unless another local runner has the name.
+        assert_eq!(
+            reconfigure_changes(&cfg, alpha, &cmd("gamma"))
+                .name
+                .as_deref(),
+            Some("gamma")
+        );
+        assert_eq!(reconfigure_changes(&cfg, alpha, &cmd("beta")).name, None);
+    }
+
+    #[test]
+    fn reconfigure_message_parses() {
+        let id = Uuid::new_v4();
+        let msg: MachineMsg = serde_json::from_value(serde_json::json!({
+            "type": "reconfigure_runner",
+            "request_id": "rid",
+            "runner_id": id.to_string(),
+            "name": "alpha",
+            "model": "gpt-5.5",
+        }))
+        .unwrap();
+        let MachineMsg::ReconfigureRunner(cmd) = msg else {
+            panic!("wrong variant");
+        };
+        assert_eq!(cmd.runner_id, id);
+        assert_eq!(cmd.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(cmd.agent, None);
     }
 
     #[test]

@@ -25,6 +25,8 @@ import { runnersBase, type RunnersScopeInput } from "../scope.js";
 import { runnerDisplayStatus } from "../status.js";
 import { CreatePodDialog } from "./CreatePodDialog.js";
 import { DeletePodDialog } from "./DeletePodDialog.js";
+import { EditRunnerDialog } from "./EditRunnerDialog.js";
+import { canEditRunner } from "../edit/model.js";
 import { EditPodDialog } from "./EditPodDialog.js";
 import { PodMembersPanel } from "./PodMembersPanel.js";
 import { REMOVE_PIDASH_AGENT_LABEL, RunnerConfirmDialog, type RunnerConfirmAction } from "./RunnerConfirmDialog.js";
@@ -219,6 +221,7 @@ export function RunnersOverview({
       });
     }
   }
+  const [editing, setEditing] = React.useState<Runner | null>(null);
 
   function closePodDialog(): void {
     setPodDialog(null);
@@ -350,6 +353,11 @@ export function RunnersOverview({
                           {runnerIsPaused(runner) ? "Resume" : "Pause"}
                         </Button>
                       ) : null}
+                      {canEditRunner(runner, userId) ? (
+                        <Button size="small" variant="secondary" onClick={() => setEditing(runner)}>
+                          Edit
+                        </Button>
+                      ) : null}
                       {actions.revoke ? (
                         <Button size="small" variant="danger" onClick={() => setPending({ action: "revoke", runner })}>
                           Revoke
@@ -380,6 +388,7 @@ export function RunnersOverview({
           </tbody>
         </table>
       </div>
+      <EditRunnerDialog workspaceSlug={scope.workspaceSlug} runner={editing} onClose={() => setEditing(null)} />
       <CreatePodDialog
         workspaceSlug={scope.workspaceSlug}
         open={podDialog?.mode === "create"}

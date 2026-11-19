@@ -806,6 +806,12 @@ pub const ROUTES: &[RouteRow] = &[
     // through to the GET proxy arm (NEWPIDASH-31).
     RouteRow { group: "runner_web", path: "/api/runners/{runner_id}/pause/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    // Runner reconfigure (edit working dir / agent / model through the
+    // machine control channel): POST + status GET, Rust-only.
+    RouteRow { group: "runner_web", path: "/api/runners/{runner_id}/reconfigure/",
+        owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+    RouteRow { group: "runner_web", path: "/api/runners/{runner_id}/reconfigure/{request_id}/",
+        owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/{runner_id}/resume/",
         owned: &["POST"], proxied: &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "runner_web", path: "/api/runners/{runner_id}/revive/",

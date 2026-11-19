@@ -25,7 +25,7 @@ use uuid::Uuid;
 /// cloud dropdown. Passed verbatim to codex `turn/start`; the exact set a
 /// given codex build honours can vary, so an unrecognized value here is a
 /// soft warning, not a hard error.
-const CODEX_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh"];
+pub(crate) const CODEX_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh"];
 
 /// Print an orange (256-color 208) warning to stderr. Used when a
 /// `--model` / `--reasoning-effort` value can't be applied to the chosen
@@ -59,7 +59,7 @@ fn warn_model_fallback(msg: &str) {
 /// A bare dash-terminated prefix (`"claude-"`, `"gpt-"`) is rejected — it
 /// is an incomplete slug, not a model — so it can't be written as a bogus
 /// `model_default`.
-fn model_applies_to_agent(kind: AgentKind, model: &str) -> bool {
+pub(crate) fn model_applies_to_agent(kind: AgentKind, model: &str) -> bool {
     let m = model.trim().to_ascii_lowercase();
     // `prefix` followed by at least one more character.
     let has = |prefix: &str| m.strip_prefix(prefix).is_some_and(|rest| !rest.is_empty());

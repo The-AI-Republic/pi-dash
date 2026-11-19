@@ -449,11 +449,30 @@ pub struct RunnerChanges {
     /// nests inside, another runner's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<std::path::PathBuf>,
+    /// New local name (the cloud's name after a rename). Must stay unique
+    /// on this machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// New agent kind, in the CLI spelling (`codex`, `claude-code`, …).
+    /// The Pi Dash Agent can be neither the source nor the target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// New default model for the runner's agent; `""` falls back to the
+    /// agent's own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// New Codex reasoning effort; `""` falls back to the model default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 impl RunnerChanges {
     pub fn is_empty(&self) -> bool {
         self.working_dir.is_none()
+            && self.name.is_none()
+            && self.agent.is_none()
+            && self.model.is_none()
+            && self.reasoning_effort.is_none()
     }
 }
 
@@ -1574,6 +1593,7 @@ mod tests {
             runner: "main".into(),
             changes: RunnerChanges {
                 working_dir: Some("/work/main".into()),
+                ..Default::default()
             },
         };
         assert_eq!(

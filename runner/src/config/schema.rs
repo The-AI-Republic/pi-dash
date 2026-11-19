@@ -610,6 +610,43 @@ pub struct RunnerConfig {
     pub approval_policy: ApprovalPolicySection,
 }
 
+impl RunnerConfig {
+    /// The default model configured for this runner's agent, if any. The
+    /// Pi Dash Agent's model comes from Pi Dash, so it has none here.
+    pub fn configured_model(&self) -> Option<&str> {
+        match self.agent.kind {
+            AgentKind::Codex => self.codex.model_default.as_deref(),
+            AgentKind::ClaudeCode => self.claude_code.model_default.as_deref(),
+            AgentKind::CursorAgent => self.cursor_agent.model_default.as_deref(),
+            AgentKind::OpenClaw => self.openclaw.model_default.as_deref(),
+            AgentKind::Grok => self.grok.model_default.as_deref(),
+            AgentKind::MuseCode => self.muse_code.model_default.as_deref(),
+            AgentKind::PidashAgent => None,
+        }
+    }
+
+    /// The configured Codex reasoning effort; `None` for other agents.
+    pub fn configured_reasoning_effort(&self) -> Option<&str> {
+        match self.agent.kind {
+            AgentKind::Codex => self.codex.effort_default.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// The model slot of `kind`'s section (the Pi Dash Agent has none).
+    pub fn model_slot_mut(&mut self, kind: AgentKind) -> Option<&mut Option<String>> {
+        match kind {
+            AgentKind::Codex => Some(&mut self.codex.model_default),
+            AgentKind::ClaudeCode => Some(&mut self.claude_code.model_default),
+            AgentKind::CursorAgent => Some(&mut self.cursor_agent.model_default),
+            AgentKind::OpenClaw => Some(&mut self.openclaw.model_default),
+            AgentKind::Grok => Some(&mut self.grok.model_default),
+            AgentKind::MuseCode => Some(&mut self.muse_code.model_default),
+            AgentKind::PidashAgent => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceSection {
     pub working_dir: PathBuf,

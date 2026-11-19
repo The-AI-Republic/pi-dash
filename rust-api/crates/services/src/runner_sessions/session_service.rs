@@ -233,9 +233,21 @@ fn parse_uuid_result(text: &str) -> Result<Option<Uuid>, uuid::Error> {
 /// only, `[:64]`); a *missing* `working_dir` keeps the current
 /// value while an explicit empty string clears it (`[:1024]`).
 /// Non-string `working_dir` values are ignored; a non-dict current
-/// value starts from `{}`.
+/// value starts from `{}`. The configured `model` (`[:128]`) and
+/// `reasoning_effort` (`[:32]`) follow the same rule: missing keeps,
+/// `""` (the agent default) clears, so the runner edit form can show
+/// what the daemon actually runs with.
 pub fn merge_dev_metadata(current: &Value, body: &Map<String, Value>) -> Map<String, Value> {
     let mut metadata = current.as_object().cloned().unwrap_or_default();
+    for (key, cap) in [("model", 128), ("reasoning_effort", 32)] {
+        if let Some(Value::String(value)) = body.get(key) {
+            if value.is_empty() {
+                metadata.remove(key);
+            } else {
+                metadata.insert(key.to_string(), Value::String(truncate_chars(value, cap)));
+            }
+        }
+    }
     if let Some(Value::String(version)) = body.get("engine_version") {
         if version.is_empty() {
             metadata.remove("codex_version");
@@ -1559,6 +1571,35 @@ mod tests {
     }
 
     // -- hello ------------------------------------------------------
+
+    #[test]
+    fn merge_dev_metadata_tracks_configured_model() {
+        let current =
+            serde_json::json!({"working_dir": "/w", "model": "old", "reasoning_effort": "low"});
+        // Missing keeps.
+        let kept = merge_dev_metadata(&current, &Map::new());
+        assert_eq!(kept["model"], "old");
+        assert_eq!(kept["reasoning_effort"], "low");
+        // Set and clear.
+        let merged = merge_dev_metadata(
+            &current,
+            &str_body(vec![("model", "gpt-5.5"), ("reasoning_effort", "")]),
+        );
+        assert_eq!(merged["model"], "gpt-5.5");
+        assert!(!merged.contains_key("reasoning_effort"));
+        assert_eq!(merged["working_dir"], "/w");
+        // Non-strings are ignored; long values truncate.
+        let long = "m".repeat(200);
+        let merged = merge_dev_metadata(
+            &current,
+            &body(vec![
+                ("model", Value::String(long)),
+                ("reasoning_effort", Value::from(3)),
+            ]),
+        );
+        assert_eq!(merged["model"].as_str().unwrap().chars().count(), 128);
+        assert_eq!(merged["reasoning_effort"], "low");
+    }
 
     #[test]
     fn merge_dev_metadata_replays_fixture_vectors() {
