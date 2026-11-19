@@ -1006,7 +1006,7 @@ describe("gateway refusals", () => {
     await expect(transport.sendChatMessage("s-1", "hello")).resolves.toBeDefined();
   });
 
-  it("delivers any other failure untouched, with no note", async () => {
+  it("shows other failure details without renewing credentials", async () => {
     const h = harness();
     const transport = transportFor(h);
     const next = handlers();
@@ -1014,8 +1014,23 @@ describe("gateway refusals", () => {
     await transport.sendChatMessage("s-1", "hello");
     h.fire(refused("engine_crashed", "boom"));
     await vi.waitFor(() => expect(next.onEvent).toHaveBeenCalledWith(expect.objectContaining({ kind: "chat_failed" })));
-    expect(notes(h)).toEqual([]);
+    expect(notes(h)).toEqual(["boom"]);
     expect(h.refreshModelCredential).not.toHaveBeenCalled();
     expect(h.api.send).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("local failure details", () => {
+  it("stores the daemon's reason before refreshing failed history", async () => {
+    const h = harness();
+    const transport = transportFor(h);
+    const next = handlers();
+    transport.subscribeChatEvents("s-1", 0, next);
+    h.fire(refused("agent_failed", "Model metadata is missing"));
+    await vi.waitFor(() => expect(next.onEvent).toHaveBeenCalled());
+    expect(h.api.appendEvent).toHaveBeenCalledWith("u-1", "s-1", {
+      role: "system",
+      content: "Model metadata is missing",
+    });
   });
 });
