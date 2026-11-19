@@ -475,15 +475,37 @@ pub const LEAN_WORKFLOW_RETIRED_MARKERS: &[&str] = &[
 
 /// Whether an active override of `section_key` is flagged because the
 /// lean workflow change rewrote that section (§9.5), returning the detail.
-/// Only an override whose body still uses the retired procedure is
-/// flagged, so the flag clears once an admin rewrites it (and `--clear`
-/// can clear it).
+/// An override is flagged while its body still uses the retired procedure,
+/// or drops a step only that section carries (the `implementation`
+/// hand-off), so the flag clears once an admin brings it up to date (and
+/// `--clear` can clear it).
 pub fn rewritten_section_detail(section_key: &str, body: &str) -> Option<&'static str> {
+    if !LEAN_WORKFLOW_REWRITTEN_KEYS.contains(&section_key) {
+        return None;
+    }
     let retired = LEAN_WORKFLOW_RETIRED_MARKERS
         .iter()
         .any(|marker| body.contains(marker));
-    (LEAN_WORKFLOW_REWRITTEN_KEYS.contains(&section_key) && retired)
+    (retired || lacks_required_procedure(section_key, body))
         .then_some(LEAN_WORKFLOW_REWRITTEN_DETAIL)
+}
+
+/// Sections that carry a step of the new procedure no other section
+/// repeats: an override that replaces one must keep that step. The
+/// `implementation` section is where an In Progress run is told to write
+/// the hand-off; without it, `finish --to "In Review"` is refused.
+pub const LEAN_WORKFLOW_REQUIRED_STEPS: &[(&str, &[&str])] = &[(
+    "implementation",
+    &["hand-off", "handoff", "Hand-off", "Handoff"],
+)];
+
+/// Whether an override of `section_key` drops a step of the new procedure
+/// that only that section carries ([`LEAN_WORKFLOW_REQUIRED_STEPS`]).
+fn lacks_required_procedure(section_key: &str, body: &str) -> bool {
+    LEAN_WORKFLOW_REQUIRED_STEPS
+        .iter()
+        .find(|(key, _)| *key == section_key)
+        .is_some_and(|(_, any_of)| !any_of.iter().any(|word| body.contains(word)))
 }
 
 /// Pure half of the revalidate loop (`revalidate_section_overrides.py:handle`):

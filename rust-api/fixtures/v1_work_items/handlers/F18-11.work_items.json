@@ -1741,7 +1741,7 @@
       "status": 400,
       "body": {
         "error": "unknown state \"Shipped\"",
-        "available": ["Backlog", "Todo", "In Progress", "In Review", "In Test", "AI Completed", "Done", "Cancelled"]
+        "available": ["Backlog", "Todo", "In Progress", "In Review", "In Test", "AI Completed"]
       }
     },
     "finish_disabled_stage": {
@@ -1755,7 +1755,7 @@
       "status": 400,
       "body": {
         "error": "\"In Review\" does not run an agent in this project; move the issue to a state that does, or finish in the current one",
-        "available": ["Backlog", "Todo", "In Progress", "In Test", "AI Completed", "Done", "Cancelled"]
+        "available": ["Backlog", "Todo", "In Progress", "In Test", "AI Completed"]
       }
     },
     "finish_bad_result": {

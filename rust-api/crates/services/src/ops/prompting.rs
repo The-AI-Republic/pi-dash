@@ -410,7 +410,9 @@ mod tests {
     #[test]
     fn rewritten_section_overrides_flag_for_review() {
         let old = "When done, run `pidash run yield --outcome done --stop-ticking`.";
-        let rewritten = "Plain text with no Jinja.";
+        // Up to date: no retired wording, and keeps the hand-off step that
+        // only `implementation` carries.
+        let rewritten = "Plain text with no Jinja. Write the hand-off.";
         for key in seed::LEAN_WORKFLOW_REWRITTEN_KEYS {
             let plan = plan_revalidate(&[active_override(key, old)], false);
             assert_eq!(plan.steps[0].action, seed::RevalidateAction::Flag, "{key}");
@@ -439,6 +441,18 @@ mod tests {
             assert_eq!(plan.steps[0].action, seed::RevalidateAction::Clear, "{key}");
         }
         let plan = plan_revalidate(&[active_override("review", rewritten)], false);
+        assert_eq!(plan.steps[0].action, seed::RevalidateAction::Keep);
+    }
+
+    /// An `implementation` override with its own guidelines and none of
+    /// the retired wording still drops the hand-off step, so it is flagged.
+    #[test]
+    fn implementation_override_without_the_hand_off_is_flagged() {
+        let custom = "Follow our team guidelines: small steps, checks first.";
+        let plan = plan_revalidate(&[active_override("implementation", custom)], false);
+        assert_eq!(plan.steps[0].action, seed::RevalidateAction::Flag);
+        // Other rewritten sections have no such step: the same body is kept.
+        let plan = plan_revalidate(&[active_override("autonomy", custom)], false);
         assert_eq!(plan.steps[0].action, seed::RevalidateAction::Keep);
     }
 

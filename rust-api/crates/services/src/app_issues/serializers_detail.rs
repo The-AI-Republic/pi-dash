@@ -374,9 +374,13 @@ pub fn agent_ticker_to_representation<'a>(
             .disarm_reason
             .parse::<TickerDisarmReason>()
             .is_ok_and(TickerDisarmReason::is_failure_stop);
-    let can_re_tick = (stage_runs_automatically(state, policy.stage_switches())
-        || is_paused_state(state))
-        && (ticker.cap_reached(pool) || failure_stopped);
+    // A stage switched off and back on while the issue sat in it leaves a
+    // `left_ticking_state` stop that Re-tick resumes (lean workflow §6.4).
+    let stage_stopped =
+        !ticker.enabled && ticker.disarm_reason == TickerDisarmReason::LeftTickingState.as_str();
+    let ticking = stage_runs_automatically(state, policy.stage_switches());
+    let can_re_tick = (ticking || is_paused_state(state))
+        && (ticker.cap_reached(pool) || failure_stopped || (ticking && stage_stopped));
     AgentTickerView {
         enabled: ticker.enabled,
         user_disabled: ticker.user_disabled,
@@ -1578,6 +1582,30 @@ mod tests {
         };
         assert!(!agent_ticker_to_representation(&capped, &review_off, Some(&review)).can_re_tick);
         assert!(agent_ticker_to_representation(&capped, &review_off, Some(&test)).can_re_tick);
+    }
+
+    #[test]
+    fn ticker_can_re_tick_a_stage_switched_back_on() {
+        let mut stopped = ticker_row(3, 0, 0);
+        stopped.enabled = false;
+        stopped.disarm_reason = TickerDisarmReason::LeftTickingState.as_str().to_owned();
+        let review = StateRef {
+            group: "review",
+            name: "In Review",
+        };
+        let done = StateRef {
+            group: "completed",
+            name: "Done",
+        };
+        assert!(agent_ticker_to_representation(&stopped, &policy(), Some(&review)).can_re_tick);
+        // Left for Done the ordinary way: nothing to resume.
+        assert!(!agent_ticker_to_representation(&stopped, &policy(), Some(&done)).can_re_tick);
+        // Still switched off: no.
+        let review_off = ProjectClockPolicy {
+            review_enabled: false,
+            ..policy()
+        };
+        assert!(!agent_ticker_to_representation(&stopped, &review_off, Some(&review)).can_re_tick);
     }
 
     #[test]

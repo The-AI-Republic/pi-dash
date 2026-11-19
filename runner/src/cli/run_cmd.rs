@@ -200,14 +200,27 @@ pub async fn cmd_yield(client: &ApiClient, args: YieldArgs) -> Result<(), CliErr
     Ok(())
 }
 
-/// Read one markdown file named on the command line.
+/// Read one markdown file named on the command line. An empty file is an
+/// error, not a silent "no comment": a `waiting_on_human` run would
+/// otherwise stop the clock without asking anyone anything, and an empty
+/// hand-off would fall back to an older one.
 fn read_markdown(flag: &str, path: &Path) -> Result<String, CliError> {
-    std::fs::read_to_string(path).map_err(|e| {
+    let text = std::fs::read_to_string(path).map_err(|e| {
         CliError::new(
             EXIT_INVALID,
             format!("failed reading {flag} {}: {e}", path.display()),
         )
-    })
+    })?;
+    if text.trim().is_empty() {
+        return Err(CliError::new(
+            EXIT_INVALID,
+            format!(
+                "{flag} {} is empty: write it, or leave the flag out",
+                path.display()
+            ),
+        ));
+    }
+    Ok(text)
 }
 
 /// The `finish` request body: the two files read in, blank values left out.
@@ -403,6 +416,11 @@ mod tests {
         );
         let missing = read_markdown("--handoff-file", &dir.join("nope.md")).unwrap_err();
         assert_eq!(missing.exit_code, EXIT_INVALID);
+        let empty = dir.join("empty.md");
+        std::fs::write(&empty, " \n\n").unwrap();
+        let err = read_markdown("--comment-file", &empty).unwrap_err();
+        assert_eq!(err.exit_code, EXIT_INVALID);
+        assert!(err.to_string().contains("is empty"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

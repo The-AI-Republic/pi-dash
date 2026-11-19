@@ -617,9 +617,7 @@ pub async fn load_stage_inputs(
     {
         Some(row) => {
             let settings: Value = row.try_get("", "settings")?;
-            crate::domain::project_settings::parse_row_settings(&settings)
-                .map(|parsed| parsed.settings.agent_stages)
-                .unwrap_or_default()
+            crate::domain::project_settings::agent_stages_of(&settings)
         }
         None => AgentStages::default(),
     };

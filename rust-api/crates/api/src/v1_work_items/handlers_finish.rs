@@ -47,7 +47,7 @@ use crate::state::AppState;
 
 use super::handlers_actions::{
     activate_timezone, db_error, fetch_project, fetch_yield_run, is_workspace_member, isoformat,
-    preamble, truncate_note, write_done_payload, Denial, HEADER_MISMATCH_BODY,
+    preamble, truncate_note, Denial, HEADER_MISMATCH_BODY,
 };
 use super::perms::{run_belongs_to, RUN_ID_HEADER};
 
@@ -188,6 +188,14 @@ pub fn parse_finish_body(data: &Value) -> Result<FinishRequest, Refusal> {
         .and_then(Value::as_str)
         .and_then(FinishResult::parse)
         .ok_or_else(|| bad_request("result is required", &[("allowed", Value::Array(allowed))]))?;
+    for key in ["comment", "handoff"] {
+        if matches!(obj.get(key), Some(Value::String(text)) if text.trim().is_empty()) {
+            return Err(bad_request(
+                &format!("{key} is empty: write it, or leave the flag out"),
+                &[],
+            ));
+        }
+    }
     let handoff = non_blank(obj.get("handoff"));
     if let Some(text) = handoff.as_deref() {
         if text.chars().count() > HANDOFF_MAX_CHARS {
@@ -234,6 +242,15 @@ impl StateChoice {
             && !stage_runs_automatically(Some(&self.as_ref()), switches)
     }
 
+    /// A closed state only a person may move an issue into: Cancelled, or a
+    /// completed state other than "AI Completed" (Done is a person's
+    /// confirmation of AI Completed, §7).
+    pub fn is_human_only(&self) -> bool {
+        self.group == "cancelled"
+            || (self.group == "completed"
+                && self.name != pidash_services::prompting::context::FINAL_STATE_NAME)
+    }
+
     /// The review or test phase (a move there needs a hand-off).
     pub fn is_review_or_test(&self) -> bool {
         phase_config_for(Some(&self.as_ref()))
@@ -251,7 +268,7 @@ pub fn valid_targets(
 ) -> Vec<String> {
     states
         .iter()
-        .filter(|s| Some(s.id) == current || !s.is_disabled_stage(switches))
+        .filter(|s| Some(s.id) == current || !(s.is_disabled_stage(switches) || s.is_human_only()))
         .map(|s| s.name.clone())
         .collect()
 }
@@ -278,6 +295,12 @@ pub fn resolve_target<'a>(
             &[("available", names())],
         ));
     };
+    if Some(target.id) != current && target.is_human_only() {
+        return Err(bad_request(
+            &format!("\"{to}\" is for a person to set; finish in \"AI Completed\" or the current state instead"),
+            &[("available", names())],
+        ));
+    }
     if Some(target.id) != current && target.is_disabled_stage(switches) {
         return Err(bad_request(
             &format!(
@@ -327,6 +350,28 @@ pub fn progress_payload(stored: Option<&Value>, req: &FinishRequest) -> Map<Stri
         payload.insert(STAGE_HANDOFF_KEY.to_owned(), Value::String(handoff.clone()));
     }
     payload
+}
+
+/// The keys the last write merges in: the result, its time, the note, and
+/// the derived `stop_ticking`.
+pub fn result_delta(req: &FinishRequest, yielded_at: &str) -> Map<String, Value> {
+    let mut delta = Map::new();
+    delta.insert(
+        "status".to_owned(),
+        Value::String(req.result.as_wire().to_owned()),
+    );
+    delta.insert(
+        "yielded_at".to_owned(),
+        Value::String(yielded_at.to_owned()),
+    );
+    if let Some(note) = req.note.as_ref() {
+        delta.insert("note".to_owned(), Value::String(note.clone()));
+    }
+    delta.insert(
+        "stop_ticking".to_owned(),
+        Value::Bool(req.result.stops_ticking()),
+    );
+    delta
 }
 
 /// Merge the finish keys into the run's stored payload (the last write).
@@ -386,6 +431,39 @@ pub struct FinishPlan<'a> {
     pub ticking: bool,
 }
 
+/// The issue's clock as `finish` finds it: `None` when the issue has no
+/// ticker yet, else whether it can fire again (not switched off by a
+/// person, budget left).
+pub type ClockView = Option<bool>;
+
+/// Whether the clock runs after this run ends.
+///
+/// - Moving into a stage that runs: its entry run follows whatever the
+///   result says (the run-ended check ignores a stop from a stage the
+///   issue left), unless a person switched the clock off or the budget is
+///   spent.
+/// - Staying in a stage that runs: only when the result does not stop it
+///   and the existing ticker can fire.
+/// - Anywhere else: no.
+pub fn clock_runs_after(
+    moved: bool,
+    target_runs: bool,
+    result: FinishResult,
+    project_ticking_enabled: bool,
+    clock: ClockView,
+) -> bool {
+    if !target_runs || !project_ticking_enabled {
+        return false;
+    }
+    match (moved, clock) {
+        (true, None) => true,
+        (true, Some(can_fire)) => can_fire,
+        (false, Some(can_fire)) => can_fire && !result.stops_ticking(),
+        (false, None) => false,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn plan_finish<'a>(
     req: &'a FinishRequest,
     payload: &Map<String, Value>,
@@ -393,7 +471,9 @@ pub fn plan_finish<'a>(
     current_state: Option<Uuid>,
     switches: StageSwitches,
     project_ticking_enabled: bool,
+    clock: ClockView,
 ) -> FinishPlan<'a> {
+    let moved = current_state != Some(target.id);
     FinishPlan {
         comment: req.comment.as_deref().filter(|text| {
             comment_owed(payload, FINISH_COMMENT_KEY, FINISH_COMMENT_DIGEST_KEY, text)
@@ -407,10 +487,14 @@ pub fn plan_finish<'a>(
                     text,
                 )
         }),
-        move_to: (current_state != Some(target.id)).then_some(target.id),
-        ticking: stage_runs_automatically(Some(&target.as_ref()), switches)
-            && !req.result.stops_ticking()
-            && project_ticking_enabled,
+        move_to: moved.then_some(target.id),
+        ticking: clock_runs_after(
+            moved,
+            stage_runs_automatically(Some(&target.as_ref()), switches),
+            req.result,
+            project_ticking_enabled,
+            clock,
+        ),
     }
 }
 
@@ -523,12 +607,18 @@ async fn finish_inner(
         return Ok(refusal.into_response());
     }
 
-    // Step 2: the hand-off (the result is written last, step 6).
+    // Step 2: the hand-off (the result is written last, step 6). Every
+    // write merges only its own keys into the stored payload, so a
+    // concurrent `yield` write is never overwritten from a stale snapshot.
     let mut payload = progress_payload(run.done_payload.as_ref(), &req);
-    let db = sea_orm_connection(&pre.pool);
-    write_done_payload(&db, run.facts.id, Value::Object(payload.clone()))
-        .await
-        .map_err(|error| db_error(error, "finish-write"))?;
+    if let Some(handoff) = req.handoff.as_ref() {
+        merge_done_payload(
+            &pre.pool,
+            run.facts.id,
+            &json!({ STAGE_HANDOFF_KEY: handoff }),
+        )
+        .await?;
+    }
 
     let mut forwarded = headers.clone();
     forwarded.insert(
@@ -542,6 +632,7 @@ async fn finish_inner(
     );
     let project_raw = project_id.to_string();
 
+    let clock = fetch_clock_view(&pre.pool, issue_id, &project.policy).await?;
     let plan = plan_finish(
         &req,
         &payload,
@@ -549,31 +640,37 @@ async fn finish_inner(
         current_state_id,
         switches,
         project.policy.agent_ticking_enabled.unwrap_or(true),
+        clock,
     );
 
     // Step 3: the comment.
     if let Some(comment) = plan.comment {
-        let id = post_agent_comment(
-            state,
-            &forwarded,
-            slug,
-            &project_raw,
-            issue_id,
-            comment,
-            &req.as_agent,
-            run.facts.id,
-        )
-        .await?;
+        // A comment this run already posted with the same body (an earlier
+        // attempt whose id write failed) is reused, not posted twice.
+        let existing = find_run_comment(&pre.pool, issue_id, run.facts.id, comment).await?;
+        let id = match existing {
+            Some(id) => Ok(id),
+            None => {
+                post_agent_comment(
+                    state,
+                    &forwarded,
+                    slug,
+                    &project_raw,
+                    issue_id,
+                    comment,
+                    &req.as_agent,
+                    run.facts.id,
+                )
+                .await?
+            }
+        };
         match id {
             Ok(id) => {
-                payload.insert(FINISH_COMMENT_KEY.to_owned(), Value::String(id));
-                payload.insert(
-                    FINISH_COMMENT_DIGEST_KEY.to_owned(),
-                    Value::String(text_digest(comment)),
-                );
-                write_done_payload(&db, run.facts.id, Value::Object(payload.clone()))
-                    .await
-                    .map_err(|error| db_error(error, "finish-write"))?;
+                let delta = json!({ FINISH_COMMENT_KEY: id, FINISH_COMMENT_DIGEST_KEY: text_digest(comment) });
+                merge_done_payload(&pre.pool, run.facts.id, &delta).await?;
+                if let Value::Object(delta) = delta {
+                    payload.extend(delta);
+                }
             }
             Err(response) => return Ok(response),
         }
@@ -581,27 +678,32 @@ async fn finish_inner(
 
     // Step 4: the hand-off, shown to humans where review and test read it.
     if let Some(handoff) = plan.handoff_comment {
-        let id = post_agent_comment(
-            state,
-            &forwarded,
-            slug,
-            &project_raw,
-            issue_id,
-            handoff,
-            &req.as_agent,
-            run.facts.id,
-        )
-        .await?;
+        // A comment this run already posted with the same body (an earlier
+        // attempt whose id write failed) is reused, not posted twice.
+        let existing = find_run_comment(&pre.pool, issue_id, run.facts.id, handoff).await?;
+        let id = match existing {
+            Some(id) => Ok(id),
+            None => {
+                post_agent_comment(
+                    state,
+                    &forwarded,
+                    slug,
+                    &project_raw,
+                    issue_id,
+                    handoff,
+                    &req.as_agent,
+                    run.facts.id,
+                )
+                .await?
+            }
+        };
         match id {
             Ok(id) => {
-                payload.insert(HANDOFF_COMMENT_KEY.to_owned(), Value::String(id));
-                payload.insert(
-                    HANDOFF_COMMENT_DIGEST_KEY.to_owned(),
-                    Value::String(text_digest(handoff)),
-                );
-                write_done_payload(&db, run.facts.id, Value::Object(payload.clone()))
-                    .await
-                    .map_err(|error| db_error(error, "finish-write"))?;
+                let delta = json!({ HANDOFF_COMMENT_KEY: id, HANDOFF_COMMENT_DIGEST_KEY: text_digest(handoff) });
+                merge_done_payload(&pre.pool, run.facts.id, &delta).await?;
+                if let Value::Object(delta) = delta {
+                    payload.extend(delta);
+                }
             }
             Err(response) => return Ok(response),
         }
@@ -630,10 +732,12 @@ async fn finish_inner(
     }
 
     // Step 6: the result, now that every step succeeded.
-    let done = merged_payload(Some(&Value::Object(payload)), &req, &isoformat(&Utc::now()));
-    write_done_payload(&db, run.facts.id, Value::Object(done))
-        .await
-        .map_err(|error| db_error(error, "finish-write"))?;
+    merge_done_payload(
+        &pre.pool,
+        run.facts.id,
+        &Value::Object(result_delta(&req, &isoformat(&Utc::now()))),
+    )
+    .await?;
 
     Ok(finish_response(
         run.facts.id,
@@ -689,6 +793,70 @@ async fn post_agent_comment(
         .ok_or(Denial::ServerError)?
         .to_owned();
     Ok(Ok(id))
+}
+
+/// Merge `delta`'s keys into `agent_run.done_payload` in one statement
+/// (`COALESCE(done_payload, '{}') || delta`), leaving every other key as
+/// the database has it.
+async fn merge_done_payload(pool: &PgPool, run_id: Uuid, delta: &Value) -> Result<(), Denial> {
+    use sea_orm::QueryFilter as _;
+    // raw-sql: SeaORM cannot express the jsonb `||` merge itself;
+    // `cust_with_values` binds the delta as one `$N`.
+    let merged = Expr::cust_with_values(
+        "COALESCE(\"done_payload\", '{}'::jsonb) || $1::jsonb",
+        [delta.clone()],
+    );
+    agent_run::Entity::update_many()
+        .col_expr(agent_run::Column::DonePayload, merged)
+        .filter(agent_run::Column::Id.eq(run_id))
+        .exec(&sea_orm_connection(pool))
+        .await
+        .map(|_| ())
+        .map_err(|error| db_error(error, "finish-write"))
+}
+
+/// The id of a live comment this run already posted on the issue with
+/// exactly this body, if any.
+async fn find_run_comment(
+    pool: &PgPool,
+    issue_id: Uuid,
+    run_id: Uuid,
+    markdown: &str,
+) -> Result<Option<String>, Denial> {
+    use pidash_db::entity::issue_comments;
+    let html = pidash_services::assistant::markdown::to_safe_html(Some(markdown));
+    let found: Option<Uuid> = issue_comments::Entity::find()
+        .select_only()
+        .column(issue_comments::Column::Id)
+        .filter(issue_comments::Column::IssueId.eq(issue_id))
+        .filter(issue_comments::Column::SpeakerAgentRunId.eq(run_id))
+        .filter(issue_comments::Column::CommentHtml.eq(html))
+        .filter(issue_comments::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&sea_orm_connection(pool))
+        .await
+        .map_err(|error| db_error(error, "finish-find-comment"))?;
+    Ok(found.map(|id| id.to_string()))
+}
+
+/// The issue's clock for the response's `ticking`: `None` without a
+/// ticker, else whether it can fire again.
+async fn fetch_clock_view(
+    pool: &PgPool,
+    issue_id: Uuid,
+    policy: &pidash_services::orchestration::clock::ProjectClockPolicy,
+) -> Result<ClockView, Denial> {
+    let rows = pidash_db::tasks_ticker::models::issue_agent_ticker::tickers_for_issue(
+        &sea_orm_connection(pool),
+        issue_id,
+    )
+    .await
+    .map_err(|error| db_error(error, "finish-ticker"))?;
+    let pool_size = pidash_services::orchestration::clock::pool_size(policy);
+    Ok(rows
+        .into_iter()
+        .find(|ticker| ticker.deleted_at.is_none())
+        .map(|ticker| !ticker.user_disabled && !ticker.cap_reached(pool_size)))
 }
 
 /// The issue's project and current state.
@@ -842,7 +1010,8 @@ mod tests {
         let err = resolve_target(&states, "Shipped", StageSwitches::ALL, None).unwrap_err();
         let (status, body) = body_of(err).await;
         assert_eq!(status, 400);
-        assert_eq!(body["available"].as_array().unwrap().len(), 6);
+        // Done and Cancelled are for a person: never offered to an agent.
+        assert_eq!(body["available"].as_array().unwrap().len(), 5);
         assert_eq!(
             resolve_target(&states, "In Review", StageSwitches::ALL, None)
                 .unwrap()
@@ -1066,6 +1235,7 @@ mod tests {
             Some(progress),
             StageSwitches::ALL,
             true,
+            Some(true),
         );
         assert_eq!((plan.comment, plan.handoff_comment), (None, None));
         // Changed text: the new text is posted, not silently dropped.
@@ -1079,6 +1249,7 @@ mod tests {
             Some(progress),
             StageSwitches::ALL,
             true,
+            Some(true),
         );
         assert_eq!(plan.comment, Some("new"));
         assert_eq!(plan.handoff_comment, Some("h2"));
@@ -1091,6 +1262,7 @@ mod tests {
             Some(progress),
             StageSwitches::ALL,
             true,
+            Some(true),
         );
         assert_eq!(plan.comment, None);
     }
@@ -1111,6 +1283,7 @@ mod tests {
             Some(progress),
             StageSwitches::ALL,
             true,
+            Some(true),
         );
         assert_eq!(
             plan,
@@ -1143,6 +1316,7 @@ mod tests {
             Some(progress),
             StageSwitches::ALL,
             true,
+            Some(true),
         );
         assert_eq!(plan.comment, None);
         assert_eq!(plan.handoff_comment, Some("h"));
@@ -1158,6 +1332,7 @@ mod tests {
             Some(progress),
             StageSwitches::ALL,
             true,
+            Some(true),
         );
         assert_eq!((plan.comment, plan.handoff_comment), (None, None));
         assert_eq!(plan.move_to, Some(review.id));
@@ -1170,6 +1345,7 @@ mod tests {
             Some(review.id),
             StageSwitches::ALL,
             true,
+            Some(true),
         );
         assert_eq!(
             (plan.comment, plan.handoff_comment, plan.move_to),
@@ -1193,6 +1369,7 @@ mod tests {
             Some(progress),
             StageSwitches::ALL,
             true,
+            Some(true),
         );
         assert_eq!(plan.comment, Some("answer"));
         assert_eq!(plan.handoff_comment, None, "stored, not posted");
@@ -1201,28 +1378,110 @@ mod tests {
     }
 
     #[test]
-    fn plan_ticking_matrix() {
+    fn ticking_matrix() {
+        use FinishResult::*;
+        // Moving into a stage that runs: its entry run follows even for a
+        // result that would stop the clock in place.
+        assert!(clock_runs_after(true, true, Done, true, None));
+        assert!(clock_runs_after(true, true, Blocked, true, Some(true)));
+        // ...unless a person switched the clock off or the budget is spent.
+        assert!(!clock_runs_after(true, true, Done, true, Some(false)));
+        // Staying: only when the result keeps it and the ticker can fire.
+        assert!(clock_runs_after(false, true, Progressed, true, Some(true)));
+        assert!(clock_runs_after(
+            false,
+            true,
+            WaitingOnExternal,
+            true,
+            Some(true)
+        ));
+        assert!(!clock_runs_after(
+            false,
+            true,
+            WaitingOnHuman,
+            true,
+            Some(true)
+        ));
+        assert!(!clock_runs_after(false, true, Blocked, true, Some(true)));
+        assert!(
+            !clock_runs_after(false, true, Progressed, true, Some(false)),
+            "at cap"
+        );
+        assert!(
+            !clock_runs_after(false, true, Progressed, true, None),
+            "no ticker"
+        );
+        // A state that does not run, or automated runs off: never.
+        assert!(!clock_runs_after(true, false, Done, true, None));
+        assert!(!clock_runs_after(true, true, Done, false, None));
+    }
+
+    #[test]
+    fn a_stop_result_with_a_move_still_reports_the_entry_run() {
         let states = project_states();
-        let progress = &states[1];
+        let progress = states[1].id;
         let review = &states[2];
-        let completed = &states[4];
-        let ticking = |to: &StateChoice, result: &str, enabled: bool| {
-            let req = finish_req(json!({"to": to.name, "result": result}));
-            let payload = merged_payload(None, &req, "t");
-            plan_finish(&req, &payload, to, None, StageSwitches::ALL, enabled).ticking
-        };
-        // Moving on to a stage that runs: its entry run follows.
-        assert!(ticking(review, "done", true));
-        // Staying with more to do, or waiting on something outside.
-        assert!(ticking(progress, "progressed", true));
-        assert!(ticking(progress, "waiting_on_external", true));
-        // A person must act: the clock stops.
-        assert!(!ticking(progress, "waiting_on_human", true));
-        assert!(!ticking(progress, "blocked", true));
-        // Left the stages: nothing ticks.
-        assert!(!ticking(completed, "done", true));
-        // The project switched automated runs off.
-        assert!(!ticking(review, "done", false));
+        let req = finish_req(json!({"to": "In Review", "result": "blocked", "handoff": "h"}));
+        let payload = progress_payload(None, &req);
+        let plan = plan_finish(
+            &req,
+            &payload,
+            review,
+            Some(progress),
+            StageSwitches::ALL,
+            true,
+            None,
+        );
+        assert!(plan.ticking);
+    }
+
+    #[tokio::test]
+    async fn a_blank_comment_or_hand_off_is_refused() {
+        for key in ["comment", "handoff"] {
+            let (status, body) = body_of(
+                parse_finish_body(
+                    &json!({"to": "In Progress", "result": "waiting_on_human", key: "  \n"}),
+                )
+                .unwrap_err(),
+            )
+            .await;
+            assert_eq!(status, 400, "{key}");
+            assert!(body["error"]
+                .as_str()
+                .unwrap()
+                .starts_with(&format!("{key} is empty")));
+        }
+        // Leaving the flag out is fine.
+        assert!(parse_finish_body(&json!({"to": "In Progress", "result": "progressed"})).is_ok());
+    }
+
+    #[tokio::test]
+    async fn done_and_cancelled_are_for_a_person() {
+        let mut states = project_states();
+        states.push(choice("Cancelled", "cancelled"));
+        let progress = states[1].id;
+        for name in ["Done", "Cancelled"] {
+            let (status, body) = body_of(
+                resolve_target(&states, name, StageSwitches::ALL, Some(progress)).unwrap_err(),
+            )
+            .await;
+            assert_eq!(status, 400, "{name}");
+            let available: Vec<&str> = body["available"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
+            assert!(!available.contains(&name), "{name}");
+            assert!(available.contains(&"AI Completed"));
+        }
+        // AI Completed is the agent's end state.
+        assert!(
+            resolve_target(&states, "AI Completed", StageSwitches::ALL, Some(progress)).is_ok()
+        );
+        // An issue a person already closed may stay where it is.
+        let done = states[5].id;
+        assert!(resolve_target(&states, "Done", StageSwitches::ALL, Some(done)).is_ok());
     }
 
     #[test]

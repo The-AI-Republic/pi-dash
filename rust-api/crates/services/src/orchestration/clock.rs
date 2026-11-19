@@ -248,9 +248,9 @@ impl ProjectClockPolicy {
     /// (`agent_stages`). A blob that does not parse keeps both stages
     /// enabled, so a bad write never silently turns a stage off.
     pub fn with_stages(mut self, settings: &serde_json::Value) -> Self {
-        let stages = crate::domain::project_settings::parse_row_settings(settings)
-            .map(|p| p.settings.agent_stages)
-            .unwrap_or_default();
+        // Read the one key on its own: a bad value under any other key
+        // (a legacy `issue_run_policy`, say) must not turn stages back on.
+        let stages = crate::domain::project_settings::agent_stages_of(settings);
         self.review_enabled = stages.review_enabled();
         self.test_enabled = stages.test_enabled();
         self
@@ -1011,7 +1011,11 @@ pub fn on_retick(
                 .disarm_reason
                 .parse::<TickerDisarmReason>()
                 .is_ok_and(TickerDisarmReason::is_failure_stop);
-        if failure_stopped {
+        // The stage was switched off while the issue sat in it (§6.4), and
+        // is on again (checked above): Re-tick is how a person resumes it.
+        let stage_stopped = !ticker.enabled
+            && ticker.disarm_reason == TickerDisarmReason::LeftTickingState.as_str();
+        if failure_stopped || stage_stopped {
             // The clock was stopped by the failure policy (needs-human /
             // repeated failure) with budget left in the pool. Re-tick is
             // the advertised "I fixed it, run again" lever, so re-arm and
@@ -1021,7 +1025,12 @@ pub fn on_retick(
             let mut decision = TickerDecision {
                 ticker: Some(ticker_id),
                 granted: true,
-                reason: "rearmed-after-failure".to_string(),
+                reason: if stage_stopped {
+                    "rearmed-after-stage-on"
+                } else {
+                    "rearmed-after-failure"
+                }
+                .to_string(),
                 ..TickerDecision::default()
             };
             if event.want_run && has_active_run {
@@ -2899,6 +2908,13 @@ mod tests {
             let policy = fx5_policy().with_stages(&blob);
             assert!(policy.review_enabled && policy.test_enabled, "{blob}");
         }
+        // A bad value under another key does not reset the stages.
+        let policy = fx5_policy().with_stages(&serde_json::json!({
+            "issue_run_policy": "legacy_value",
+            "agent_stages": {"mode": "custom", "review": false}
+        }));
+        assert!(!policy.review_enabled);
+        assert!(policy.test_enabled);
         assert!(ProjectClockPolicy::default().review_enabled);
         assert!(ProjectClockPolicy::default().test_enabled);
     }
@@ -2917,6 +2933,48 @@ mod tests {
         // In Progress has no switch.
         let progress = clock_issue(Some(in_progress()), policy_with_stages(false, false));
         assert_eq!(run_ended_guard(&progress, "coding-task"), None);
+    }
+
+    #[test]
+    fn retick_resumes_a_stage_switched_off_and_back_on() {
+        // Review was switched off with the issue In Review (the tick worker
+        // disarmed it, left_ticking_state), then switched on again.
+        let mut row = armed_row(2);
+        row.enabled = false;
+        row.disarm_reason = TickerDisarmReason::LeftTickingState.as_str().to_string();
+        let on = clock_issue(Some(in_review()), policy_with_stages(true, true));
+        let mut slot = Some(row.clone());
+        let outcome = reconcile(
+            &mut slot,
+            &on,
+            &TickerEvent::retick(true, None),
+            None,
+            false,
+            now(),
+            JITTER,
+            None,
+        )
+        .expect("retick reconciles");
+        assert_eq!(outcome.decision.reason, "rearmed-after-stage-on");
+        assert!(outcome.decision.dispatch_now);
+        let rearmed = slot.expect("row");
+        assert!(rearmed.enabled);
+        assert_eq!(rearmed.granted, row.granted, "no fresh pool");
+        // Still off: refused.
+        let off = clock_issue(Some(in_review()), policy_with_stages(false, true));
+        let mut slot = Some(row);
+        let outcome = reconcile(
+            &mut slot,
+            &off,
+            &TickerEvent::retick(true, None),
+            None,
+            false,
+            now(),
+            JITTER,
+            None,
+        )
+        .expect("retick reconciles");
+        assert_eq!(outcome.decision.reason, "not_ticking_state");
     }
 
     #[test]

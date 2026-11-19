@@ -157,6 +157,16 @@ impl AgentStages {
     }
 }
 
+/// The `agent_stages` value of a stored settings blob, read on its own:
+/// a bad value under any other key does not turn stages back on, and a
+/// missing or malformed `agent_stages` reads as the default (Auto).
+pub fn agent_stages_of(settings: &Value) -> AgentStages {
+    settings
+        .get("agent_stages")
+        .and_then(|value| serde_json::from_value::<AgentStages>(value.clone()).ok())
+        .unwrap_or_default()
+}
+
 /// The typed settings: the single definition of each key, its type
 /// and its default. Stored as one JSON object; missing keys read as
 /// their `#[serde(default)]` value.
