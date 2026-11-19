@@ -95,8 +95,8 @@ use pidash_db::orchestration::runs::ACTIVE_STATUSES;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::orchestration::{
-    stage_runs_automatically, ContinuationOutcome, StageSwitches, StateRef, TickerDecision,
-    TickerEvent, TransitionOutcome, CONTINUATION_ELIGIBLE_GROUPS,
+    phase_config_for, stage_runs_automatically, ContinuationOutcome, StageSwitches, StateRef,
+    TickerDecision, TickerEvent, TransitionOutcome, CONTINUATION_ELIGIBLE_GROUPS,
 };
 
 use crate::prompting::composer::OverrideRow;
@@ -748,11 +748,21 @@ pub async fn handle_issue_state_transition<S: EntriesSeam, P: PreflightSeam>(
         group: &state.group,
         name: &state.name,
     });
-    let switches = issue_stage_switches(seam, req.issue_id).await?;
+    // Registered stages, whatever the project's switches say. The switches
+    // are only read when a stage is involved (most moves touch none).
+    let from_stage = phase_config_for(from_ref.as_ref()).is_some();
+    let to_stage = phase_config_for(to_ref.as_ref()).is_some();
+    let switches = if from_stage || to_stage {
+        issue_stage_switches(seam, req.issue_id).await?
+    } else {
+        StageSwitches::ALL
+    };
     let from_ticking = stage_runs_automatically(from_ref.as_ref(), switches);
     let to_ticking = stage_runs_automatically(to_ref.as_ref(), switches);
+    // A move between two different stages, switched on or off: leaving
+    // In Progress for one of them remembers the implementation run.
     let cross_stage = match (&req.from_state, &req.to_state) {
-        (Some(from), Some(to)) => from_ticking && to_ticking && from.group != to.group,
+        (Some(from), Some(to)) => from_stage && to_stage && from.group != to.group,
         _ => false,
     };
 
@@ -769,8 +779,12 @@ pub async fn handle_issue_state_transition<S: EntriesSeam, P: PreflightSeam>(
         resume_parent = seam.latest_prior_run(req.issue_id).await?.map(|run| run.id);
     }
 
-    if from_ticking && !to_ticking {
-        let event = TickerEvent::left_bucket();
+    // Leaving any registered stage for one that does not run: the clock
+    // goes dormant. This includes leaving a stage that was switched off
+    // while its ticker was still armed (§6.4).
+    if from_stage && !to_ticking {
+        let mut event = TickerEvent::left_bucket();
+        event.resume_parent = resume_parent;
         reconcile_clock(
             seam,
             req.issue_id,
@@ -1073,7 +1087,11 @@ pub async fn handle_issue_comment<S: EntriesSeam>(
         group: &state.group,
         name: &state.name,
     });
-    let switches = issue_stage_switches(seam, issue.id).await?;
+    let switches = if phase_config_for(state_ref.as_ref()).is_some() {
+        issue_stage_switches(seam, issue.id).await?
+    } else {
+        StageSwitches::ALL
+    };
     if stage_runs_automatically(state_ref.as_ref(), switches) {
         let event = TickerEvent::human_run_requested(
             true,
@@ -3028,6 +3046,80 @@ mod tests {
         let run_id = outcome.created_run.expect("coding entry run");
         assert_eq!(seam.runs[&run_id].phase_kind, "coding-task");
         assert!(seam.tickers.contains_key(&uid(0x01)), "clock armed");
+    }
+
+    #[tokio::test]
+    async fn leaving_a_switched_off_stage_disarms_a_still_armed_clock() {
+        // Review was switched off while the issue sat In Review with an
+        // armed clock; the issue then moves to Done before the next tick.
+        let now = frozen_now();
+        let mut seam = FakeEntriesSeam::minimal();
+        set_switches(&mut seam, false, true);
+        set_issue_state(&mut seam, uid(0x33));
+        armed_ticker(&mut seam, now);
+
+        let from = seam.states[&uid(0x32)].clone();
+        let to = seam.states[&uid(0x33)].clone();
+        let mut preflight = FakePreflight::allow();
+        let outcome = handle_issue_state_transition(
+            &mut seam,
+            &mut preflight,
+            &transition_req(Some(from), Some(to), now),
+        )
+        .await
+        .expect("transition runs");
+        assert_eq!(outcome.reason, REASON_NOT_A_TRIGGER_STATE);
+        let row = seam.tickers.get(&uid(0x01)).expect("ticker kept");
+        assert!(!row.enabled, "disarmed");
+        assert_eq!(row.next_run_at, None);
+    }
+
+    #[tokio::test]
+    async fn leaving_in_progress_for_a_switched_off_stage_keeps_the_resume_parent() {
+        let now = frozen_now();
+        let mut seam = FakeEntriesSeam::minimal();
+        set_switches(&mut seam, false, true);
+        set_issue_state(&mut seam, uid(0x32));
+        armed_ticker(&mut seam, now);
+        let prior = uid(0x65);
+        let mut prior_run = run_view(prior, AgentRunStatus::Completed);
+        prior_run.phase_kind = "coding-task".to_owned();
+        seam.runs.insert(prior, prior_run);
+        seam.latest.insert(uid(0x01), prior);
+
+        let from = seam.states[&uid(0x30)].clone();
+        let to = seam.states[&uid(0x32)].clone();
+        let mut preflight = FakePreflight::allow();
+        handle_issue_state_transition(
+            &mut seam,
+            &mut preflight,
+            &transition_req(Some(from), Some(to), now),
+        )
+        .await
+        .expect("transition runs");
+        let row = seam.tickers.get(&uid(0x01)).expect("ticker kept");
+        assert_eq!(row.resume_parent_run_id, Some(prior));
+        assert_eq!(row.next_run_at, None, "dormant in a label stage");
+    }
+
+    #[tokio::test]
+    async fn moves_between_non_stages_never_read_the_stage_switches() {
+        // No clock policy for the project: any read would fail the move.
+        let now = frozen_now();
+        let mut seam = FakeEntriesSeam::minimal();
+        seam.policies.clear();
+        set_issue_state(&mut seam, uid(0x33));
+        let from = seam.states[&uid(0x31)].clone();
+        let to = seam.states[&uid(0x33)].clone();
+        let mut preflight = FakePreflight::allow();
+        let outcome = handle_issue_state_transition(
+            &mut seam,
+            &mut preflight,
+            &transition_req(Some(from), Some(to), now),
+        )
+        .await
+        .expect("no policy read for Todo -> Done");
+        assert_eq!(outcome.reason, REASON_NOT_A_TRIGGER_STATE);
     }
 
     #[tokio::test]

@@ -612,10 +612,18 @@ pub fn on_enter_or_move(
 
 /// `_on_left_bucket` (`scheduling.py:451-459`): the clock goes dormant; the
 /// pool (`used` / `granted`) is kept.
-pub fn on_left_bucket(ticker: Option<&mut IssueAgentTicker>) -> ClockOutcome {
+pub fn on_left_bucket(
+    ticker: Option<&mut IssueAgentTicker>,
+    resume_parent: Option<Uuid>,
+) -> ClockOutcome {
     let Some(ticker) = ticker else {
         return untouched(None, "no-ticker");
     };
+    // Leaving In Progress for a stage that is switched off still remembers
+    // the implementation run, so a later hand-back parents off it.
+    if let Some(resume_parent) = resume_parent {
+        ticker.resume_parent_run_id = Some(resume_parent);
+    }
     stop_clock(ticker, TickerDisarmReason::LeftTickingState.as_str());
     ticker.next_run_at = None;
     ClockOutcome {
@@ -1156,7 +1164,9 @@ pub fn reconcile(
                 .expect("enter/move always has a post-lock row");
             on_enter_or_move(row, issue, event, has_active_run, now, jitter_secs)
         }
-        k if k == TickerEventKind::LEFT_BUCKET => on_left_bucket(ticker.as_mut()),
+        k if k == TickerEventKind::LEFT_BUCKET => {
+            on_left_bucket(ticker.as_mut(), event.resume_parent)
+        }
         k if k == TickerEventKind::RUN_ENDED => {
             let run = run.ok_or(ClockError::RunEndedWithoutRun)?;
             on_run_ended(ticker.as_mut(), issue, event, run, now, jitter_secs)

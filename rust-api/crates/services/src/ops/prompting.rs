@@ -213,7 +213,9 @@ pub fn plan_revalidate(rows: &[ActiveOverride], clear: bool) -> RevalidatePlan {
                 // (`revalidate_section_overrides.py`, PDASHOSS01-234).
                 broken = true;
                 detail = issue;
-            } else if let Some(rewritten) = seed::rewritten_section_detail(&row.section_key) {
+            } else if let Some(rewritten) =
+                seed::rewritten_section_detail(&row.section_key, &row.body)
+            {
                 // The lean workflow change rewrote this section; an override
                 // written against the old procedure needs an admin's review
                 // (design §9.5).
@@ -347,7 +349,7 @@ mod tests {
             .find(|s| {
                 !s.is_locked()
                     && !validation::kinds_for_section(s.key).is_empty()
-                    && seed::rewritten_section_detail(s.key).is_none()
+                    && !seed::LEAN_WORKFLOW_REWRITTEN_KEYS.contains(&s.key)
             })
             .expect("registry carries a usable section");
         section.key.to_owned()
@@ -368,12 +370,15 @@ mod tests {
     /// A renderable core-section override that still carries git/PR
     /// wording is flagged with the neutrality detail; a work-type
     /// section override with the same body is not a neutrality problem
-    /// (PDASHOSS01-234) — it is flagged only because the lean workflow
-    /// change rewrote that section (design §9.5).
+    /// (PDASHOSS01-234) — it is flagged only because it still uses the
+    /// procedure the lean workflow change retired (design §9.5).
     #[test]
     fn non_neutral_core_override_flags_with_neutrality_detail() {
         let body = "Commit and push the branch, then open a PR.";
-        let mut work_type_row = active_override("software.execute", body);
+        let mut work_type_row = active_override(
+            "software.execute",
+            "Commit and push the branch, open a PR, then `pidash run yield --outcome done`.",
+        );
         work_type_row.id = "00000000-0000-0000-0000-000000000003".to_owned();
         let plan = plan_revalidate(
             &[active_override("implementation", body), work_type_row],
@@ -399,12 +404,15 @@ mod tests {
     }
 
     /// Overrides on sections the lean workflow change rewrote are flagged
-    /// with the review detail, and `--clear` never clears that flag; an
-    /// override on a new section key is kept (design §9.5).
+    /// while they still use the retired procedure; once an admin rewrites
+    /// one, it is no longer flagged and `--clear` clears the old flag
+    /// (design §9.5). An override on a new section key is kept.
     #[test]
     fn rewritten_section_overrides_flag_for_review() {
+        let old = "When done, run `pidash run yield --outcome done --stop-ticking`.";
+        let rewritten = "Plain text with no Jinja.";
         for key in seed::LEAN_WORKFLOW_REWRITTEN_KEYS {
-            let plan = plan_revalidate(&[active_override(key, "Plain text with no Jinja.")], false);
+            let plan = plan_revalidate(&[active_override(key, old)], false);
             assert_eq!(plan.steps[0].action, seed::RevalidateAction::Flag, "{key}");
             assert_eq!(
                 plan.steps[0].line.as_deref(),
@@ -416,15 +424,21 @@ mod tests {
                     .as_str()
                 ),
             );
-            let mut flagged = active_override(key, "Plain text with no Jinja.");
+            // Still old and already flagged: `--clear` keeps the flag.
+            let mut flagged = active_override(key, old);
             flagged.needs_attention = true;
             let plan = plan_revalidate(&[flagged], true);
             assert_eq!(plan.steps[0].action, seed::RevalidateAction::Keep, "{key}");
+            // Rewritten by an admin: not flagged again...
+            let plan = plan_revalidate(&[active_override(key, rewritten)], false);
+            assert_eq!(plan.steps[0].action, seed::RevalidateAction::Keep, "{key}");
+            // ...and an old flag on it clears with `--clear`.
+            let mut stale = active_override(key, rewritten);
+            stale.needs_attention = true;
+            let plan = plan_revalidate(&[stale], true);
+            assert_eq!(plan.steps[0].action, seed::RevalidateAction::Clear, "{key}");
         }
-        let plan = plan_revalidate(
-            &[active_override("review", "Plain text with no Jinja.")],
-            false,
-        );
+        let plan = plan_revalidate(&[active_override("review", rewritten)], false);
         assert_eq!(plan.steps[0].action, seed::RevalidateAction::Keep);
     }
 

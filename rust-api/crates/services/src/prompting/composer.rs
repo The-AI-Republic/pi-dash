@@ -1073,7 +1073,14 @@ mod tests {
         for kind in ISSUE_KINDS {
             for work_type in work_types::keys() {
                 let body = composed_text_with_work_type(kind, work_type);
-                assert!(!body.contains("--stop-ticking"), "{kind}/{work_type}");
+                // `--stop-ticking` survives only in the old-runner fallback
+                // (D11), where `yield` is the only way to stop the clock.
+                for line in body.lines().filter(|line| line.contains("--stop-ticking")) {
+                    assert!(
+                        line.contains("If `pidash run finish` is not a known command"),
+                        "{kind}/{work_type}: {line}"
+                    );
+                }
                 assert!(
                     body.contains("pidash run finish --to"),
                     "{kind}/{work_type}"
@@ -1099,9 +1106,80 @@ mod tests {
                     !template.contains("parent_done_payload"),
                     "{kind}/{work_type}"
                 );
-                assert!(!template.contains("--stop-ticking"), "{kind}/{work_type}");
+                for line in template
+                    .lines()
+                    .filter(|line| line.contains("--stop-ticking"))
+                {
+                    assert!(
+                        line.contains("If `pidash run finish` is not a known command"),
+                        "{kind}/{work_type}: {line}"
+                    );
+                }
             }
         }
+    }
+
+    /// The fallback for a runner without `finish` still stops the clock for
+    /// `waiting_on_human` / `blocked`, and an In Progress run posts its
+    /// hand-off as a comment there.
+    #[test]
+    fn old_runner_fallback_stops_the_clock_and_posts_the_hand_off() {
+        let coding = composed_text_with_work_type(recipes::KIND_CODING_TASK, "software");
+        let fallback = coding
+            .lines()
+            .find(|line| line.contains("If `pidash run finish` is not a known command"))
+            .expect("fallback line");
+        assert!(fallback.contains("pidash run yield --outcome <result>"));
+        assert!(fallback.contains(
+            "adding `--stop-ticking` when the result is `waiting_on_human` or `blocked`"
+        ));
+        assert!(fallback.contains("the hand-off as a second comment"));
+        let review = composed_text_with_work_type(recipes::KIND_REVIEW, "software");
+        let fallback = review
+            .lines()
+            .find(|line| line.contains("If `pidash run finish` is not a known command"))
+            .expect("fallback line");
+        assert!(
+            !fallback.contains("hand-off"),
+            "only In Progress writes one"
+        );
+    }
+
+    /// Auto never offers a stage the project lacks (it would cost the agent
+    /// a refused `finish` and a retry).
+    #[test]
+    fn auto_does_not_offer_a_missing_stage() {
+        use crate::prompting::context::{stages_context, ProjectStateView};
+        let state = |name: &str, group: &str| ProjectStateView {
+            name: name.to_owned(),
+            group: group.to_owned(),
+            description: None,
+        };
+        let no_test = vec![
+            state("In Progress", "started"),
+            state("In Review", "review"),
+            state("AI Completed", "completed"),
+        ];
+        let ctx = stages_context(
+            &AgentStages::default(),
+            &no_test,
+            Some("In Progress"),
+            Some("started"),
+        );
+        assert_eq!(ctx["review"], Value::Bool(true));
+        assert_eq!(ctx["test"], Value::Bool(false));
+        assert_eq!(
+            ctx["path"],
+            serde_json::json!(["In Progress", "In Review", "AI Completed"])
+        );
+        let mut sample = crate::prompting::validation::sample_contexts(recipes::KIND_CODING_TASK)
+            .into_iter()
+            .next()
+            .expect("sample");
+        sample["stages"] = ctx;
+        let body = compose_ctx(recipes::KIND_CODING_TASK, "software", &sample);
+        assert!(body.contains("- **In Review** — the work product can be wrong"));
+        assert!(!body.contains("- **In Test** — the work product has behaviour"));
     }
 
     /// The five project settings of design §7 as `(label, stages,
@@ -1292,7 +1370,8 @@ mod tests {
             .expect("sample");
         ctx["handoff"] = Value::from("");
         let body = compose_ctx(recipes::KIND_REVIEW, "software", &ctx);
-        assert!(body.contains("There is no hand-off"));
+        assert!(body.contains("There is no stored hand-off"));
+        assert!(!body.contains("a person moved the issue here"));
         assert!(!body.contains("Hand-off from the In Progress run"));
     }
 

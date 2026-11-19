@@ -180,7 +180,7 @@ Find them all with `grep -rn "ProjectClockPolicy {" --include=*.rs .`; every non
   - A select with two options: "Auto — the agent decides which stages a work item needs" and "Customize".
   - Under Customize, a dropdown with three checkable items. In Progress is checked and disabled. In Review and In Test toggle.
   - Helper text: "A stage that is off is only a label. Work items can still be moved there, but no agent run starts unless you start one."
-  - The block is disabled when "Automated runs" is off, like the other controls in the section.
+  - The block stays usable when "Automated runs" is off: a person moving a work item into a stage still starts one run then, so the switches still matter. It is disabled only for someone who cannot edit the project.
 
 ## 6. Server behaviour
 
@@ -804,6 +804,13 @@ Implemented in PR #3403 as one commit per issue (A, B, C).
 
 - `finish` lives in `api/src/v1_work_items/handlers_finish.rs`, not `handlers_actions.rs`. It posts comments and moves the issue by calling the existing v1 comment-create and issue-patch handlers with the run's `X-Pi-Dash-Run-Id`, so their gates, attribution and transition hooks apply unchanged.
 - `finish` takes an optional `as_agent` (CLI `--as-agent`) for the comment's speaker label; it defaults to `AI Agent`.
+- `finish` never refuses the issue's current state, even when that stage is switched off, so a manual run there can stay (§6.3 overrides the §6.5 refusal for that case).
+- `finish` writes `status` and `stop_ticking` last, after the comments and the move succeed; only the hand-off is stored up front. A refused step therefore leaves no stop signal for a later `yield` to inherit.
+- The retry guard stores a SHA-256 of each posted comment; a retry with different text posts the new text.
+- Leaving any registered stage for one that does not run sends `left_bucket`, so a ticker armed before its stage was switched off is disarmed when the issue moves on. Leaving In Progress for a switched-off stage still records the resume parent. The stage switches are read only when a move or Comment & Run involves a stage.
+- The old-runner fallback adds `--stop-ticking` to `yield` for `waiting_on_human` and `blocked`, and an In Progress run posts its hand-off as a comment. Review and test, with no stored hand-off, look for one in the comments.
+- In Auto, the prompt offers In Review or In Test only when the project has that state.
+- `revalidate_section_overrides` flags an override on a rewritten section only while its body still uses the retired procedure (`pidash run yield`, `--stop-ticking`, `parent_done_payload`, the removed workpad blocks). A rewritten override is not flagged again, and `--clear` clears an old flag.
 - The hand-off query tests `done_payload->>'stage_handoff' IS NOT NULL` instead of the jsonb `?` operator.
 - `stages.path` lists In Review or In Test only when the project has that state.
 - The auto-pause guard in `dispatch.rs` keeps the static registry check (`phase_config_for`): only In Progress auto-pauses, and it always runs automatically.

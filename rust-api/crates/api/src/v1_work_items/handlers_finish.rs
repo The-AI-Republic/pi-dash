@@ -5,21 +5,24 @@
 //! (`workpad update`, `comment add`, `issue patch --state`, `run yield`).
 //! The endpoint:
 //!
-//! 1. validates the target state (by exact name, never a stage the project
-//!    switched off), the result, and the hand-off rules;
-//! 2. merges the outcome into `agent_run.done_payload` — the same keys
-//!    `yield` writes, with `stop_ticking` *derived* from the result and
-//!    the hand-off stored as `stage_handoff`;
+//! 1. validates the target state (by exact name; never a move into a
+//!    stage the project switched off, though staying put is always
+//!    allowed), the result, and the hand-off rules;
+//! 2. stores the hand-off as `stage_handoff` in `agent_run.done_payload`;
 //! 3. posts the comment, attributed to the run;
 //! 4. posts the hand-off as a comment when the issue goes to review/test;
 //! 5. moves the issue through the v1 patch path with the run as mover, so
 //!    the transition (and an enabled stage's entry run) fires as for any
-//!    agent move.
+//!    agent move;
+//! 6. merges the outcome into `done_payload` — the same keys `yield`
+//!    writes, with `stop_ticking` *derived* from the result. Written last,
+//!    so a step refused on the way leaves no stop signal behind.
 //!
 //! The steps are not one transaction (the comment and issue operations
-//! own theirs). They are ordered so a retry is safe: the comments are
-//! skipped once their ids are recorded on the payload, and the move is a
-//! no-op when the issue already sits in the target state.
+//! own theirs). They are ordered so a retry is safe: a comment is skipped
+//! once its id is recorded with the same text (a changed text is posted
+//! again), and the move is a no-op when the issue already sits in the
+//! target state.
 //!
 //! Scheduler runs (no issue) are refused; they keep using `yield`.
 
@@ -60,6 +63,30 @@ pub const STAGE_HANDOFF_KEY: &str = "stage_handoff";
 pub const FINISH_COMMENT_KEY: &str = "finish_comment_id";
 /// `done_payload` key recording the posted hand-off comment (retry guard).
 pub const HANDOFF_COMMENT_KEY: &str = "handoff_comment_id";
+/// `done_payload` key holding the SHA-256 of the posted finish comment, so
+/// a retry with different text posts the new text instead of dropping it.
+pub const FINISH_COMMENT_DIGEST_KEY: &str = "finish_comment_sha256";
+/// `done_payload` key holding the SHA-256 of the posted hand-off comment.
+pub const HANDOFF_COMMENT_DIGEST_KEY: &str = "handoff_comment_sha256";
+
+/// Hex SHA-256 of a comment body (the retry guard's text check).
+pub fn text_digest(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(text.as_bytes()))
+}
+
+/// Whether `text` still has to be posted: no comment recorded yet, or the
+/// recorded one carried different text. A recorded id without a digest
+/// counts as posted.
+fn comment_owed(payload: &Map<String, Value>, id_key: &str, digest_key: &str, text: &str) -> bool {
+    if !payload.contains_key(id_key) {
+        return true;
+    }
+    match payload.get(digest_key).and_then(Value::as_str) {
+        Some(stored) => stored != text_digest(text),
+        None => false,
+    }
+}
 
 /// The five results a run may finish with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,24 +241,32 @@ impl StateChoice {
     }
 }
 
-/// The names an agent may finish into: every state except a disabled stage.
-pub fn valid_targets(states: &[StateChoice], switches: StageSwitches) -> Vec<String> {
+/// The names an agent may finish into: every state except a disabled
+/// stage, though the issue's current state is always allowed (a manual
+/// run in a switched-off stage may stay where it is, §6.3).
+pub fn valid_targets(
+    states: &[StateChoice],
+    switches: StageSwitches,
+    current: Option<Uuid>,
+) -> Vec<String> {
     states
         .iter()
-        .filter(|s| !s.is_disabled_stage(switches))
+        .filter(|s| Some(s.id) == current || !s.is_disabled_stage(switches))
         .map(|s| s.name.clone())
         .collect()
 }
 
-/// Resolve the target by exact name and refuse a disabled stage.
+/// Resolve the target by exact name and refuse a move into a disabled
+/// stage. Staying in the current state is never refused.
 pub fn resolve_target<'a>(
     states: &'a [StateChoice],
     to: &str,
     switches: StageSwitches,
+    current: Option<Uuid>,
 ) -> Result<&'a StateChoice, Refusal> {
     let names = || {
         Value::Array(
-            valid_targets(states, switches)
+            valid_targets(states, switches, current)
                 .into_iter()
                 .map(Value::String)
                 .collect(),
@@ -243,7 +278,7 @@ pub fn resolve_target<'a>(
             &[("available", names())],
         ));
     };
-    if target.is_disabled_stage(switches) {
+    if Some(target.id) != current && target.is_disabled_stage(switches) {
         return Err(bad_request(
             &format!(
                 "\"{to}\" does not run an agent in this project; move the issue to a state that does, or finish in the current one"
@@ -279,7 +314,22 @@ pub fn check_handoff(
     Ok(())
 }
 
-/// Merge the finish keys into the run's stored payload (step 2).
+/// The payload written before the steps that can fail: the stored payload
+/// plus the hand-off, but not the result. `status` and `stop_ticking` are
+/// written only once every step succeeded, so a refused comment or move
+/// never leaves a stop signal behind for a later `yield` to inherit.
+pub fn progress_payload(stored: Option<&Value>, req: &FinishRequest) -> Map<String, Value> {
+    let mut payload = match stored {
+        Some(Value::Object(map)) => map.clone(),
+        _ => Map::new(),
+    };
+    if let Some(handoff) = req.handoff.as_ref() {
+        payload.insert(STAGE_HANDOFF_KEY.to_owned(), Value::String(handoff.clone()));
+    }
+    payload
+}
+
+/// Merge the finish keys into the run's stored payload (the last write).
 pub fn merged_payload(
     stored: Option<&Value>,
     req: &FinishRequest,
@@ -345,14 +395,18 @@ pub fn plan_finish<'a>(
     project_ticking_enabled: bool,
 ) -> FinishPlan<'a> {
     FinishPlan {
-        comment: req
-            .comment
-            .as_deref()
-            .filter(|_| !payload.contains_key(FINISH_COMMENT_KEY)),
-        handoff_comment: req
-            .handoff
-            .as_deref()
-            .filter(|_| target.is_review_or_test() && !payload.contains_key(HANDOFF_COMMENT_KEY)),
+        comment: req.comment.as_deref().filter(|text| {
+            comment_owed(payload, FINISH_COMMENT_KEY, FINISH_COMMENT_DIGEST_KEY, text)
+        }),
+        handoff_comment: req.handoff.as_deref().filter(|text| {
+            target.is_review_or_test()
+                && comment_owed(
+                    payload,
+                    HANDOFF_COMMENT_KEY,
+                    HANDOFF_COMMENT_DIGEST_KEY,
+                    text,
+                )
+        }),
         move_to: (current_state != Some(target.id)).then_some(target.id),
         ticking: stage_runs_automatically(Some(&target.as_ref()), switches)
             && !req.result.stops_ticking()
@@ -448,7 +502,7 @@ async fn finish_inner(
         .ok_or(Denial::ServerError)?;
     let switches = project.policy.stage_switches();
     let choices = fetch_state_choices(&pre.pool, project_id).await?;
-    let target = match resolve_target(&choices, &req.to, switches) {
+    let target = match resolve_target(&choices, &req.to, switches, current_state_id) {
         Ok(target) => target.clone(),
         Err(refusal) => return Ok(refusal.into_response()),
     };
@@ -469,8 +523,8 @@ async fn finish_inner(
         return Ok(refusal.into_response());
     }
 
-    // Step 2: the payload.
-    let mut payload = merged_payload(run.done_payload.as_ref(), &req, &isoformat(&Utc::now()));
+    // Step 2: the hand-off (the result is written last, step 6).
+    let mut payload = progress_payload(run.done_payload.as_ref(), &req);
     let db = sea_orm_connection(&pre.pool);
     write_done_payload(&db, run.facts.id, Value::Object(payload.clone()))
         .await
@@ -513,6 +567,10 @@ async fn finish_inner(
         match id {
             Ok(id) => {
                 payload.insert(FINISH_COMMENT_KEY.to_owned(), Value::String(id));
+                payload.insert(
+                    FINISH_COMMENT_DIGEST_KEY.to_owned(),
+                    Value::String(text_digest(comment)),
+                );
                 write_done_payload(&db, run.facts.id, Value::Object(payload.clone()))
                     .await
                     .map_err(|error| db_error(error, "finish-write"))?;
@@ -537,6 +595,10 @@ async fn finish_inner(
         match id {
             Ok(id) => {
                 payload.insert(HANDOFF_COMMENT_KEY.to_owned(), Value::String(id));
+                payload.insert(
+                    HANDOFF_COMMENT_DIGEST_KEY.to_owned(),
+                    Value::String(text_digest(handoff)),
+                );
                 write_done_payload(&db, run.facts.id, Value::Object(payload.clone()))
                     .await
                     .map_err(|error| db_error(error, "finish-write"))?;
@@ -566,6 +628,12 @@ async fn finish_inner(
             return Ok(response);
         }
     }
+
+    // Step 6: the result, now that every step succeeded.
+    let done = merged_payload(Some(&Value::Object(payload)), &req, &isoformat(&Utc::now()));
+    write_done_payload(&db, run.facts.id, Value::Object(done))
+        .await
+        .map_err(|error| db_error(error, "finish-write"))?;
 
     Ok(finish_response(
         run.facts.id,
@@ -673,13 +741,17 @@ async fn fetch_phase_kind(pool: &PgPool, run_id: Uuid) -> Result<String, Denial>
 
 /// Whether any In Progress run on the issue stored a hand-off.
 async fn handoff_exists(pool: &PgPool, issue_id: Uuid) -> Result<bool, Denial> {
-    // raw-sql: the jsonb `?` key test has no SeaORM column operator.
+    // raw-sql: a jsonb text extraction has no SeaORM column operator. The
+    // same test as the prompt's hand-off query (`BUNDLE_HANDOFF_SQL`), so
+    // a JSON-null key counts as no hand-off in both places.
     let found: Option<Uuid> = agent_run::Entity::find()
         .select_only()
         .column(agent_run::Column::Id)
         .filter(agent_run::Column::WorkItemId.eq(issue_id))
         .filter(agent_run::Column::PhaseKind.eq(KIND_CODING_TASK))
-        .filter(Expr::cust("done_payload ? 'stage_handoff'"))
+        .filter(Expr::cust(
+            "\"agent_run\".\"done_payload\" ->> 'stage_handoff' IS NOT NULL",
+        ))
         .into_tuple()
         .one(&sea_orm_connection(pool))
         .await
@@ -767,12 +839,12 @@ mod tests {
     #[tokio::test]
     async fn unknown_state_lists_the_valid_targets() {
         let states = project_states();
-        let err = resolve_target(&states, "Shipped", StageSwitches::ALL).unwrap_err();
+        let err = resolve_target(&states, "Shipped", StageSwitches::ALL, None).unwrap_err();
         let (status, body) = body_of(err).await;
         assert_eq!(status, 400);
         assert_eq!(body["available"].as_array().unwrap().len(), 6);
         assert_eq!(
-            resolve_target(&states, "In Review", StageSwitches::ALL)
+            resolve_target(&states, "In Review", StageSwitches::ALL, None)
                 .unwrap()
                 .name,
             "In Review"
@@ -787,7 +859,7 @@ mod tests {
             test: true,
         };
         let (status, body) =
-            body_of(resolve_target(&states, "In Review", switches).unwrap_err()).await;
+            body_of(resolve_target(&states, "In Review", switches, None).unwrap_err()).await;
         assert_eq!(status, 400);
         let available: Vec<&str> = body["available"]
             .as_array()
@@ -799,7 +871,7 @@ mod tests {
         assert!(available.contains(&"In Test"));
         assert!(available.contains(&"AI Completed"));
         // In Progress is never switched off.
-        assert!(resolve_target(&states, "In Progress", switches).is_ok());
+        assert!(resolve_target(&states, "In Progress", switches, None).is_ok());
     }
 
     #[tokio::test]
@@ -883,7 +955,8 @@ mod tests {
         for (name, ticking) in [("finish_ok", true), ("finish_waiting_on_human", false)] {
             let (status, request, body) = fixture_call(name);
             let req = parse_finish_body(&request).expect("valid");
-            let target = resolve_target(&states, &req.to, StageSwitches::ALL).expect("target");
+            let target =
+                resolve_target(&states, &req.to, StageSwitches::ALL, None).expect("target");
             let expected_ticking = !req.result.stops_ticking();
             assert_eq!(expected_ticking, ticking, "{name}");
             let got = body_of(finish_response(run, &target.name, req.result, ticking)).await;
@@ -892,12 +965,13 @@ mod tests {
 
         let (status, request, body) = fixture_call("finish_unknown_state");
         let req = parse_finish_body(&request).unwrap();
-        let got = body_of(resolve_target(&states, &req.to, StageSwitches::ALL).unwrap_err()).await;
+        let got =
+            body_of(resolve_target(&states, &req.to, StageSwitches::ALL, None).unwrap_err()).await;
         assert_eq!(got, (status, body));
 
         let (status, request, body) = fixture_call("finish_disabled_stage");
         let req = parse_finish_body(&request).unwrap();
-        let got = body_of(resolve_target(&states, &req.to, review_off).unwrap_err()).await;
+        let got = body_of(resolve_target(&states, &req.to, review_off, None).unwrap_err()).await;
         assert_eq!(got, (status, body));
 
         let (status, request, body) = fixture_call("finish_bad_result");
@@ -906,7 +980,7 @@ mod tests {
 
         let (status, request, body) = fixture_call("finish_missing_handoff");
         let req = parse_finish_body(&request).unwrap();
-        let target = resolve_target(&states, &req.to, StageSwitches::ALL).unwrap();
+        let target = resolve_target(&states, &req.to, StageSwitches::ALL, None).unwrap();
         let got = body_of(
             check_handoff(
                 KIND_CODING_TASK,
@@ -925,6 +999,100 @@ mod tests {
 
     fn finish_req(body: Value) -> FinishRequest {
         parse_finish_body(&body).expect("valid")
+    }
+
+    #[test]
+    fn a_manual_run_in_a_switched_off_stage_may_stay() {
+        // §6.3: Run AI in a switched-off In Review must be able to finish
+        // `--to "In Review"` (stay, waiting on a person).
+        let states = project_states();
+        let review = &states[2];
+        let switches = StageSwitches {
+            review: false,
+            test: true,
+        };
+        let target = resolve_target(&states, "In Review", switches, Some(review.id))
+            .expect("staying is allowed");
+        assert_eq!(target.id, review.id);
+        assert!(valid_targets(&states, switches, Some(review.id)).contains(&"In Review".to_owned()));
+        // Moving into it from elsewhere is still refused.
+        assert!(resolve_target(&states, "In Review", switches, Some(states[1].id)).is_err());
+        assert!(
+            !valid_targets(&states, switches, Some(states[1].id)).contains(&"In Review".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_result_is_not_written_before_the_steps() {
+        // A refused comment or move must not leave `stop_ticking: true`
+        // behind for a later `yield --outcome progressed` to inherit.
+        let req = finish_req(json!({
+            "to": "In Progress", "result": "waiting_on_human", "comment": "?", "handoff": "h"
+        }));
+        let stored = json!({"status": "progressed", "stop_ticking": false});
+        let progress = progress_payload(Some(&stored), &req);
+        assert_eq!(progress["stop_ticking"], json!(false), "untouched");
+        assert_eq!(progress["status"], json!("progressed"), "untouched");
+        assert_eq!(progress[STAGE_HANDOFF_KEY], json!("h"));
+        let done = merged_payload(Some(&Value::Object(progress)), &req, "t");
+        assert_eq!(done["stop_ticking"], json!(true));
+        assert_eq!(done["status"], json!("waiting_on_human"));
+    }
+
+    #[test]
+    fn plan_reposts_a_comment_whose_text_changed() {
+        let states = project_states();
+        let progress = states[1].id;
+        let review = &states[2];
+        let first = finish_req(json!({
+            "to": "In Review", "result": "done", "comment": "old", "handoff": "h1"
+        }));
+        let mut stored = progress_payload(None, &first);
+        stored.insert(FINISH_COMMENT_KEY.to_owned(), json!("c1"));
+        stored.insert(
+            FINISH_COMMENT_DIGEST_KEY.to_owned(),
+            json!(text_digest("old")),
+        );
+        stored.insert(HANDOFF_COMMENT_KEY.to_owned(), json!("h-1"));
+        stored.insert(
+            HANDOFF_COMMENT_DIGEST_KEY.to_owned(),
+            json!(text_digest("h1")),
+        );
+        // Same text: nothing to post again.
+        let plan = plan_finish(
+            &first,
+            &stored,
+            review,
+            Some(progress),
+            StageSwitches::ALL,
+            true,
+        );
+        assert_eq!((plan.comment, plan.handoff_comment), (None, None));
+        // Changed text: the new text is posted, not silently dropped.
+        let second = finish_req(json!({
+            "to": "In Review", "result": "done", "comment": "new", "handoff": "h2"
+        }));
+        let plan = plan_finish(
+            &second,
+            &stored,
+            review,
+            Some(progress),
+            StageSwitches::ALL,
+            true,
+        );
+        assert_eq!(plan.comment, Some("new"));
+        assert_eq!(plan.handoff_comment, Some("h2"));
+        // A recorded id without a digest counts as posted.
+        stored.remove(FINISH_COMMENT_DIGEST_KEY);
+        let plan = plan_finish(
+            &second,
+            &stored,
+            review,
+            Some(progress),
+            StageSwitches::ALL,
+            true,
+        );
+        assert_eq!(plan.comment, None);
     }
 
     #[test]

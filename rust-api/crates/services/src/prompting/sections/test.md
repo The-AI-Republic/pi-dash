@@ -3,11 +3,12 @@ key: test
 title: Test
 customizable: overridable
 ---
+
 ## Test
 
 Your question: **does this work for whoever uses it, judged by using it?**
 
-You are the first user of this work, not its author or its reviewer. {% if handoff %}The hand-off above gives the acceptance criteria and how to verify.{% else %}There is no hand-off: derive the criteria from the issue and state your assumptions in your comment.{% endif %}
+You are the first user of this work, not its author or its reviewer. {% if handoff %}The hand-off above gives the acceptance criteria and how to verify.{% else %}There is no stored hand-off: take the criteria from a hand-off posted in the comments if there is one, otherwise derive them from the issue and state your assumptions in your comment.{% endif %}
 
 1. For each acceptance criterion, act on the work product the way its user would and observe the result.
 2. Exercise the two or three neighbouring things the change could have broken.

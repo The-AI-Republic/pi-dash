@@ -1192,10 +1192,15 @@ pub fn stages_context(
         (Some(group), Some(name)) => Some(StateRef { group, name }),
         _ => None,
     };
+    // A stage the prompt may offer: switched on and present in the project
+    // (an empty state list counts as present), matching `path`.
+    let offered = |group: &str, name: &str, enabled: bool| {
+        enabled && (project_states.is_empty() || has_state(group, name))
+    };
     json!({
         "agent_decides": stages.agent_decides(),
-        "review": switches.review,
-        "test": switches.test,
+        "review": offered("review", "In Review", switches.review),
+        "test": offered("test", "In Test", switches.test),
         "path": path,
         "current_runs_automatically": stage_runs_automatically(current.as_ref(), switches),
         "final_state": final_state,

@@ -3,6 +3,7 @@ key: lifecycle
 title: Lifecycle
 customizable: locked
 ---
+
 ## Where this task is, and how the run ends
 
 This issue is one task with a goal. Each run is a fresh session that checks the goal from where the issue stands, then moves it on, sends it back, or waits. Nothing carries over between runs except the issue itself: its comments, its state{% if run.kind == "coding-task" %}, the workpad{% endif %} and the delivered work.
@@ -14,6 +15,7 @@ Agent runs are switched off for this stage in this project. A person started thi
 {% if stages.agent_decides %}
 You choose the path. Each later stage is a separate, fresh agent run, so send the work on only when a second pass can add something:
 {% if stages.review %}
+
 - **In Review** — the work product can be wrong in a way a careful read would catch: a code change, a document someone will act on, a change to data or configuration.{% endif %}{% if stages.test %}
 - **In Test** — the work product has behaviour that can be exercised from its user's side.{% endif %}
 - **{{ stages.final_state if stages.final_state else "Stay, finish `waiting_on_human`" }}** — neither applies: a question answered, a comment posted, a status or finding reported.
@@ -33,7 +35,7 @@ End the run with one command, as your last action:
 - `waiting_on_external` — waiting on automated checks, an approval, or another issue. A later run re-checks.
 - `waiting_on_human`, `blocked` — a person must act first. No run follows until they do.
 
-Pass the current state's name to `--to` to stay. `--comment-file` is optional: when nothing changed since the last run, post nothing. If `pidash run finish` is not a known command, the runner is out of date: use `pidash comment add`, `pidash issue patch {{ issue.identifier }} --state "<state>"` and `pidash run yield --outcome <result>` in its place, and say so in your comment.
+Pass the current state's name to `--to` to stay. `--comment-file` is optional: when nothing changed since the last run, post nothing. If `pidash run finish` is not a known command, the runner is out of date: post your comment{% if run.kind == "coding-task" %} and then the hand-off as a second comment{% endif %} with `pidash comment add`, move with `pidash issue patch {{ issue.identifier }} --state "<state>"`, then `pidash run yield --outcome <result>`, adding `--stop-ticking` when the result is `waiting_on_human` or `blocked`; say in your comment that the runner needs updating.
 {% if tick %}
 Budget: {{ tick.count }}{% if tick.cap is not none %} of {{ tick.cap }}{% endif %} runs used on this issue. The budget never changes which state is true.{% if tick.spent %} **This is the last run.** Leave the task ready to hand over and tell the person in your comment that no run will follow.{% endif %}
 {% endif %}

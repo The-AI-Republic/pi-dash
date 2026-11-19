@@ -150,8 +150,15 @@ describe("ExecutionSection", () => {
     expect(onChange).not.toHaveBeenCalledWith(expect.objectContaining({ stagesMode: expect.anything() }));
   });
 
-  it("disables the Stages block while automated runs are off", () => {
+  it("keeps the Stages block usable while automated runs are off", () => {
+    // A person moving a work item into a stage still starts one run then.
     setup({ form: { ticking: false, stagesMode: "custom" } });
+    expect(screen.getByTestId("general-stages-mode-trigger")).not.toBeDisabled();
+    expect(screen.getByTestId("general-stages-toggle-trigger")).not.toBeDisabled();
+  });
+
+  it("disables the Stages block for someone who cannot edit", () => {
+    setup({ disabled: true, form: { stagesMode: "custom" } });
     expect(screen.getByTestId("general-stages-mode-trigger")).toBeDisabled();
     expect(screen.getByTestId("general-stages-toggle-trigger")).toBeDisabled();
   });

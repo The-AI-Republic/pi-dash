@@ -222,7 +222,10 @@ export function ExecutionSection({ values, errors, disabled, onChange }: Executi
         </div>
       </div>
 
-      <StagesBlock values={values} disabled={controlsDisabled} onChange={onChange} />
+      {/* Not tied to the master switch: with automated runs off, a person
+          moving a work item into a stage still starts one run there, so
+          which stages run an agent still matters. */}
+      <StagesBlock values={values} disabled={disabled} onChange={onChange} />
     </section>
   );
 }

@@ -3,11 +3,12 @@ key: review
 title: Review
 customizable: overridable
 ---
+
 ## Review
 
 Your question: **is the work product correct and complete against the goal, judged by reading it?**
 
-{% if handoff %}The hand-off above says what was produced, the acceptance criteria, and where to look first. Start there.{% else %}There is no hand-off: a person moved the issue here directly. Work from the issue and what it links to.{% endif %}
+{% if handoff %}The hand-off above says what was produced, the acceptance criteria, and where to look first. Start there.{% else %}There is no stored hand-off. Work from the issue, its comments (an In Progress run on an old runner posts its hand-off there) and what it links to.{% endif %}
 
 1. Read the work product itself, not the description of it.
 2. Look for what is wrong or missing against the acceptance criteria. Give the "review focus" items the most attention.

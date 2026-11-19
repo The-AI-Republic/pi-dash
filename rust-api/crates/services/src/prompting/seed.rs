@@ -459,20 +459,39 @@ pub const LEAN_WORKFLOW_REWRITTEN_KEYS: &[&str] = &[
 pub const LEAN_WORKFLOW_REWRITTEN_DETAIL: &str =
     "section rewritten by the lean workflow change; review this override";
 
+/// Wording only the procedure before the lean workflow change used: the
+/// separate end-of-run commands and the retired workpad blocks. An
+/// override that still carries one was written against the old
+/// procedure; one an admin has rewritten no longer does.
+pub const LEAN_WORKFLOW_RETIRED_MARKERS: &[&str] = &[
+    "pidash run yield",
+    "--stop-ticking",
+    "parent_done_payload",
+    "Progress Checkpoints",
+    "Autonomy / Escalation",
+    "Acceptance Criteria / How to Test",
+    "workpad-template",
+];
+
 /// Whether an active override of `section_key` is flagged because the
 /// lean workflow change rewrote that section (§9.5), returning the detail.
-pub fn rewritten_section_detail(section_key: &str) -> Option<&'static str> {
-    LEAN_WORKFLOW_REWRITTEN_KEYS
-        .contains(&section_key)
+/// Only an override whose body still uses the retired procedure is
+/// flagged, so the flag clears once an admin rewrites it (and `--clear`
+/// can clear it).
+pub fn rewritten_section_detail(section_key: &str, body: &str) -> Option<&'static str> {
+    let retired = LEAN_WORKFLOW_RETIRED_MARKERS
+        .iter()
+        .any(|marker| body.contains(marker));
+    (LEAN_WORKFLOW_REWRITTEN_KEYS.contains(&section_key) && retired)
         .then_some(LEAN_WORKFLOW_REWRITTEN_DETAIL)
 }
 
 /// Pure half of the revalidate loop (`revalidate_section_overrides.py:handle`):
 /// `broken` is "unknown section key, or `validate_override` raised, or the
-/// override targets a section the lean workflow change rewrote
-/// ([`rewritten_section_detail`])". A rewritten-section row counts as
-/// broken, so `--clear` never clears its flag; it stays flagged until an
-/// admin edits or removes the override.
+/// override on a section the lean workflow change rewrote still uses the
+/// retired procedure ([`rewritten_section_detail`])". Once an admin
+/// rewrites such an override it is no longer broken, and `--clear`
+/// clears its flag.
 /// Truth table mirrors the `if broken and not needs_attention /
 /// elif not broken and needs_attention and clear` branches exactly.
 pub fn decide_revalidate(broken: bool, needs_attention: bool, clear: bool) -> RevalidateAction {
