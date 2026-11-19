@@ -113,17 +113,28 @@ pub struct FinishRequest {
     pub as_agent: String,
 }
 
+/// A 400 refusal: the JSON `{"error": ..., ...}` body, rendered at the
+/// handler edge (kept small so the pure checks can return it).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Refusal(pub Value);
+
+impl IntoResponse for Refusal {
+    fn into_response(self) -> Response {
+        json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::to_string(&self.0).expect("finish body"),
+        )
+    }
+}
+
 /// A 400 with a JSON `{"error": ...}` body plus optional extra keys.
-fn bad_request(error: &str, extra: &[(&str, Value)]) -> Response {
+fn bad_request(error: &str, extra: &[(&str, Value)]) -> Refusal {
     let mut map = Map::new();
     map.insert("error".to_owned(), Value::String(error.to_owned()));
     for (key, value) in extra {
         map.insert((*key).to_owned(), value.clone());
     }
-    json_response(
-        StatusCode::BAD_REQUEST,
-        serde_json::to_string(&Value::Object(map)).expect("finish body"),
-    )
+    Refusal(Value::Object(map))
 }
 
 fn non_blank(value: Option<&Value>) -> Option<String> {
@@ -134,7 +145,7 @@ fn non_blank(value: Option<&Value>) -> Option<String> {
 }
 
 /// Parse and type-check the body (step 1, the parts that need no rows).
-pub fn parse_finish_body(data: &Value) -> Result<FinishRequest, Response> {
+pub fn parse_finish_body(data: &Value) -> Result<FinishRequest, Refusal> {
     let Some(obj) = data.as_object() else {
         return Err(bad_request("body must be a JSON object", &[]));
     };
@@ -217,7 +228,7 @@ pub fn resolve_target<'a>(
     states: &'a [StateChoice],
     to: &str,
     switches: StageSwitches,
-) -> Result<&'a StateChoice, Response> {
+) -> Result<&'a StateChoice, Refusal> {
     let names = || {
         Value::Array(
             valid_targets(states, switches)
@@ -251,7 +262,7 @@ pub fn check_handoff(
     has_handoff: bool,
     moving_to_review_or_test: bool,
     earlier_handoff_exists: bool,
-) -> Result<(), Response> {
+) -> Result<(), Refusal> {
     let coding = phase_kind == KIND_CODING_TASK;
     if has_handoff && !coding {
         return Err(bad_request(
@@ -305,6 +316,7 @@ pub fn scheduler_run_refusal() -> Response {
         "finish ends an issue run; a scheduled run reports with `pidash run yield`",
         &[],
     )
+    .into_response()
 }
 
 /// The success body.
@@ -360,7 +372,7 @@ async fn finish_inner(
     };
     let req = match parse_finish_body(&data) {
         Ok(req) => req,
-        Err(response) => return Ok(response),
+        Err(refusal) => return Ok(refusal.into_response()),
     };
     let header_run = headers
         .get(RUN_ID_HEADER)
@@ -397,7 +409,7 @@ async fn finish_inner(
     let choices = fetch_state_choices(&pre.pool, project_id).await?;
     let target = match resolve_target(&choices, &req.to, switches) {
         Ok(target) => target.clone(),
-        Err(response) => return Ok(response),
+        Err(refusal) => return Ok(refusal.into_response()),
     };
     let phase_kind = fetch_phase_kind(&pre.pool, run.facts.id).await?;
     let to_review_or_test = target.is_review_or_test();
@@ -407,13 +419,13 @@ async fn finish_inner(
         } else {
             false
         };
-    if let Err(response) = check_handoff(
+    if let Err(refusal) = check_handoff(
         &phase_kind,
         req.handoff.is_some(),
         to_review_or_test,
         earlier_handoff,
     ) {
-        return Ok(response);
+        return Ok(refusal.into_response());
     }
 
     // Step 2: the payload.
@@ -658,7 +670,8 @@ mod tests {
         ]
     }
 
-    async fn body_of(response: Response) -> (u16, Value) {
+    async fn body_of(response: impl IntoResponse) -> (u16, Value) {
+        let response = response.into_response();
         let status = response.status().as_u16();
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
