@@ -631,6 +631,16 @@ pub(crate) async fn handle_send<S: ChatSink>(
             }
         }
     };
+    // Protocol-level failures are successful Rust results too. They may end
+    // our reader before the engine's turn ends (e.g. a metadata warning).
+    // Never reuse that process: its unread reply would belong to this failed
+    // turn, not the next message. Keep the stored thread id for a clean resume.
+    if matches!(terminal, Response::ChatFailed { .. }) {
+        if let Some(bridge) = rt.bridge.take() {
+            bridge.shutdown(Duration::from_secs(5)).await.ok();
+        }
+        rt.started_sent = false;
+    }
     Ok(terminal)
 }
 
@@ -1309,6 +1319,65 @@ mod tests {
             printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"conclusion":"success","done":{"status":"ok","summary":"done"}}}'
             sleep 0.3
         "#
+    }
+
+    #[tokio::test]
+    async fn failed_turn_discards_the_bridge_before_the_next_send() {
+        // A metadata warning fails before the engine's actual reply. Keeping
+        // that process lets its unread reply terminate the next user's turn.
+        let registry = ChatRegistry::new();
+        let profile = PidashAgentChatProfile::new(None);
+        let host = ChatHost {
+            sessions: &registry,
+            approvals: &profile.approvals,
+            lane: Lane::Engine {
+                profile: &profile,
+                runner_dirs: vec![],
+            },
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        let session = registry.get_or_create(id).await;
+        {
+            let mut rt = session.rt.lock().await;
+            rt.workspace = Some(directory.path().to_path_buf());
+            rt.bridge = Some(fake_bridge(r#"
+                read _
+                printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{}}'
+                read _
+                read _
+                printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"threadId":"th_failed"}}'
+                read _
+                printf '%s\n' '{"jsonrpc":"2.0","method":"warning","params":{"message":"Model metadata for openhub_free_llm not found"}}'
+                while read _; do :; done
+            "#).await);
+        }
+        let terminal = handle_send(
+            &host,
+            SendArgs {
+                chat_session_id: id,
+                message_id: Uuid::new_v4(),
+                content: "hello".into(),
+                cwd: Some(directory.path().to_string_lossy().into_owned()),
+                model: None,
+                mode: None,
+                local_thread_id: None,
+                local_session_id: None,
+            },
+            &mut VecSink::default(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(terminal, Response::ChatFailed { .. }));
+        let rt = session.rt.lock().await;
+        assert!(
+            rt.bridge.is_none(),
+            "a failed turn must not leave unread output for the next send"
+        );
+        assert!(
+            !rt.started_sent,
+            "the replacement bridge must publish its thread id"
+        );
     }
 
     #[tokio::test]

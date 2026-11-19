@@ -421,6 +421,8 @@ export function createLocalChatTransport(deps: LocalTransportDeps): LocalChatTra
       void failWithNote(frame, creditNote(refusal.detail, deps.topUpUrl()));
     } else if (refusal?.code === MODEL_AUTH_FAILED) {
       void failWithNote(frame, SIGN_IN_AGAIN);
+    } else if (refusal?.detail?.trim()) {
+      void failWithNote(frame, refusal.detail);
     } else {
       deliver(frame);
     }
