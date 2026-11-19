@@ -18465,9 +18465,21 @@ export class WebNewDriver implements ParityDriver {
   /** GPT-editor request bodies observed since the driver started. */
   private assistantGptSeen: { prompt: string; task: string }[] = [];
 
-  /** The shared composer textarea (landing and conversation share it). */
+  /**
+   * The shared composer box (landing and conversation share it): the
+   * Tiptap chat input's contenteditable textbox, matched by its
+   * aria-placeholder since it has no native placeholder.
+   */
   private assistantComposerBox() {
-    return this.page.locator('textarea[placeholder*="Ask Pi Dash to do something"]');
+    return this.page.locator('[role="textbox"][aria-placeholder*="Ask Pi Dash to do something"]');
+  }
+
+  /**
+   * The plain-text draft of a chat input. A contenteditable has no
+   * inputValue; the input mirrors its draft string onto its frame.
+   */
+  private async assistantChatDraft(box: Locator): Promise<string> {
+    return box.evaluate((node) => node.closest("[data-chat-input]")?.getAttribute("data-draft") ?? "");
   }
 
   /** The composer's send action (icon-only, so it is labelled). */
@@ -18494,12 +18506,12 @@ export class WebNewDriver implements ParityDriver {
 
   /**
    * The dashboard card's entry composer. The new home renders a
-   * multi-line textarea composer with the Ask action inside it
+   * multi-line Tiptap chat input with the Ask action inside its box
    * (NEWPIDASH-301, DIFF-39), while the oracle home keeps its
    * single-line input.
    */
   private assistantHomeCardInput() {
-    return this.page.locator('textarea[placeholder*="Ask Pi Dash to do something"]');
+    return this.page.locator('#home-assistant-card [role="textbox"][aria-placeholder*="Ask Pi Dash to do something"]');
   }
 
   /** The dashboard card root: the card shell around the entry input. */
@@ -18575,7 +18587,9 @@ export class WebNewDriver implements ParityDriver {
   }
   async assistantLandingComposerVisible(): Promise<boolean> {
     return this.isShown(
-      this.page.locator('[data-testid="assistant-landing"] textarea[placeholder*="Ask Pi Dash to do something"]')
+      this.page.locator(
+        '[data-testid="assistant-landing"] [role="textbox"][aria-placeholder*="Ask Pi Dash to do something"]'
+      )
     );
   }
   async assistantSetupCard(): Promise<{ title: string; body: string; button: string } | null> {
@@ -18612,7 +18626,7 @@ export class WebNewDriver implements ParityDriver {
     await this.assistantComposerBox().first().fill(text);
   }
   async assistantDraftValue(): Promise<string> {
-    return this.assistantComposerBox().first().inputValue();
+    return this.assistantChatDraft(this.assistantComposerBox().first());
   }
   async assistantPressEnter(): Promise<void> {
     await this.assistantComposerBox().first().press("Enter");
@@ -18813,7 +18827,7 @@ export class WebNewDriver implements ParityDriver {
     await this.assistantHomeCardInput().first().fill(text);
   }
   async assistantCardDraftValue(): Promise<string> {
-    return this.assistantHomeCardInput().first().inputValue();
+    return this.assistantChatDraft(this.assistantHomeCardInput().first());
   }
   async assistantCardPressEnter(): Promise<void> {
     await this.assistantHomeCardInput().first().press("Enter");

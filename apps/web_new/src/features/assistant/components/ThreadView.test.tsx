@@ -25,6 +25,10 @@ import { assistantKeys } from "../api/keys.js";
 import { transcriptKey } from "../api/threadKeys.js";
 import { ThreadView, followTail, followTailWhileGrowing, isFollowingTail } from "./ThreadView.js";
 
+// The Tiptap input is covered in shared/editor/ChatInput.test.tsx; here a
+// textarea with the same contract keeps the focus on this surface's logic.
+vi.mock("../../../shared/editor/ChatInput.js", () => import("../../../testSupport/chatInputStub.js"));
+
 const stream = vi.hoisted(() => ({
   subscriptions: [] as { close: () => void; handlers: { onEvent: (event: unknown) => void } }[],
 }));

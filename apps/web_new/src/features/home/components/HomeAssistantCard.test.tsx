@@ -26,6 +26,10 @@ import { cloudAssistantKeys } from "../../cloud-assistant/index.js";
 import { sessionKeys, setSessionClient } from "../../../core/session/queries.js";
 import { cardAskOutcome, HomeAssistantCard, recentConversations } from "./HomeAssistantCard.js";
 
+// The Tiptap input is covered in shared/editor/ChatInput.test.tsx; here a
+// textarea with the same contract keeps the focus on this surface's logic.
+vi.mock("../../../shared/editor/ChatInput.js", () => import("../../../testSupport/chatInputStub.js"));
+
 const localChat = vi.hoisted(() => ({ enabled: false }));
 vi.mock("../../../core/platform/local-chat.js", () => ({ hasLocalChat: () => localChat.enabled }));
 
@@ -338,20 +342,12 @@ describe("HomeAssistantCard", () => {
     expect(screen.getByRole("textbox", { name: "Ask the assistant" })).toHaveValue("first");
   });
 
-  it("grows the composer with its content up to the max height", async () => {
+  it("caps the composer's growth at the max height", async () => {
+    // The box grows with its content up to COMPOSER_MAX_HEIGHT (200px) and
+    // then scrolls inside itself (NEWPIDASH-301); the input owns the growth.
     renderCard({ threads: [], config: CONFIGURED });
-    const input = (await screen.findByRole("textbox", { name: "Ask the assistant" })) as HTMLTextAreaElement;
-    // jsdom has no layout, so fake scrollHeight to observe the capped
-    // growth (NEWPIDASH-301): 64px content -> 64px box, 500px content ->
-    // COMPOSER_MAX_HEIGHT (200px) box.
-    let fakeHeight = 0;
-    Object.defineProperty(input, "scrollHeight", { configurable: true, get: () => fakeHeight });
-    fakeHeight = 64;
-    fireEvent.change(input, { target: { value: "line" } });
-    await waitFor(() => expect(input.style.height).toBe("64px"));
-    fakeHeight = 500;
-    fireEvent.change(input, { target: { value: "line\nline" } });
-    await waitFor(() => expect(input.style.height).toBe("200px"));
+    const input = await screen.findByRole("textbox", { name: "Ask the assistant" });
+    expect(input).toHaveAttribute("data-max-height", "200");
   });
 
   it("hides the recent-conversations section when there are none", async () => {

@@ -223,7 +223,7 @@ describe("assistant landing reads", () => {
     await expect(driver.assistantLandingGreeting()).resolves.toEqual({ headline: "Hello", caption: "" });
   });
 
-  it("reports composer visibility from the landing's textarea", async () => {
+  it("reports composer visibility from the landing's chat input", async () => {
     const isVisible = vi.fn(async () => true);
     const selectors: string[] = [];
     const page = pageOf({
@@ -235,7 +235,7 @@ describe("assistant landing reads", () => {
     const driver = new WebNewDriver(page);
 
     await expect(driver.assistantLandingComposerVisible()).resolves.toBe(true);
-    expect(selectors[0]).toContain('[data-testid="assistant-landing"] textarea');
+    expect(selectors[0]).toContain('[data-testid="assistant-landing"] [role="textbox"][aria-placeholder');
     expect(isVisible).toHaveBeenCalledTimes(1);
   });
 
@@ -320,12 +320,13 @@ describe("assistantSetupCard", () => {
 describe("assistant composer methods", () => {
   it("fills the draft box and reads it back", async () => {
     const fill = vi.fn(async () => undefined);
-    const box = locator({ fill, inputValue: async () => "hello" });
+    // The chat input is contenteditable: the draft is read off its frame.
+    const box = locator({ fill, evaluate: async () => "hello" });
     const selectors: string[] = [];
     const page = pageOf({
       locator: (selector: string) => {
         selectors.push(selector);
-        return selector.includes("textarea") ? box : locator();
+        return selector.includes("aria-placeholder") ? box : locator();
       },
     });
     const driver = new WebNewDriver(page);
@@ -334,13 +335,13 @@ describe("assistant composer methods", () => {
     await expect(driver.assistantDraftValue()).resolves.toBe("hello");
 
     expect(fill).toHaveBeenCalledWith("hello");
-    expect(selectors[0]).toBe('textarea[placeholder*="Ask Pi Dash to do something"]');
+    expect(selectors[0]).toBe('[role="textbox"][aria-placeholder*="Ask Pi Dash to do something"]');
   });
 
   it("presses the three submit keys on the draft box", async () => {
     const press = vi.fn(async () => undefined);
     const page = pageOf({
-      locator: (selector: string) => (selector.includes("textarea") ? locator({ press }) : locator()),
+      locator: (selector: string) => (selector.includes("aria-placeholder") ? locator({ press }) : locator()),
     });
     const driver = new WebNewDriver(page);
 
@@ -390,12 +391,12 @@ describe("assistant composer methods", () => {
     await expect(driver.assistantStopVisible()).resolves.toBe(false);
   });
 
-  it("reads the lock reason and the textarea disabled state", async () => {
+  it("reads the lock reason and the composer disabled state", async () => {
     const page = pageOf({
       locator: (selector: string) => {
         if (selector === '[data-testid="assistant-composer-reason"]')
           return locator({ innerText: async () => " Please set your API key. " });
-        if (selector.includes("textarea")) return locator({ isDisabled: async () => true });
+        if (selector.includes("aria-placeholder")) return locator({ isDisabled: async () => true });
         return locator();
       },
     });
@@ -664,7 +665,7 @@ describe("assistant conversation rail", () => {
 });
 
 describe("assistant dashboard card", () => {
-  // NEWPIDASH-301 (DIFF-39): the new card renders a textarea composer and
+  // NEWPIDASH-301 (DIFF-39): the new card renders a multi-line composer and
   // a sibling recents section, while the oracle home keeps a single-line
   // input with recents inside the card.
   it("reports the card visible only when its composer exists", async () => {
@@ -678,9 +679,9 @@ describe("assistant dashboard card", () => {
   it("fills and reads the card draft, and presses Enter", async () => {
     const fill = vi.fn(async () => undefined);
     const press = vi.fn(async () => undefined);
-    const input = locator({ fill, press, inputValue: async () => "draft" });
+    const input = locator({ fill, press, evaluate: async () => "draft" });
     const page = pageOf({
-      locator: (selector: string) => (selector.includes("textarea[placeholder") ? input : locator()),
+      locator: (selector: string) => (selector.includes("[aria-placeholder") ? input : locator()),
     });
     const driver = new WebNewDriver(page);
 
