@@ -112,12 +112,13 @@ export interface ProjectUpdateInput {
   dedicated_runner_lost_action?: string;
   /**
    * Typed per-project settings (NEWPIDASH-261): the nested partial
-   * the server merges into `projects.settings`. Only the
-   * `issue_run_policy` key is registered; project/workspace admins
-   * only (403 otherwise).
+   * the server merges into `projects.settings`. The registered keys are
+   * `issue_run_policy` and `agent_stages`; project/workspace admins only
+   * (403 otherwise). `agent_stages` is replaced whole on write.
    */
   settings?: {
     issue_run_policy?: "creator_and_assignees" | "project_members";
+    agent_stages?: { mode: "auto" | "custom"; review?: boolean; test?: boolean };
   };
 }
 

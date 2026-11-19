@@ -78,7 +78,7 @@ use pidash_services::app_project::ser_project::next_work_item_sequence;
 use pidash_services::orchestration::creation::{state_name_group, CreationError};
 use pidash_services::orchestration::entries::PreflightSeam;
 use pidash_services::tasks_cleanup::workspace_seed as logic;
-use pidash_types::orchestration::{is_ticking_state, StateRef};
+use pidash_types::orchestration::{phase_config_for, StateRef};
 use sea_orm::sea_query::Expr;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set};
 
@@ -1956,7 +1956,7 @@ impl SeedStore for PgSeedStore {
             group: &seeded_group,
             name: &seeded_name,
         };
-        let seed_ticking = is_ticking_state(Some(&seeded_ref));
+        let seed_ticking = phase_config_for(Some(&seeded_ref)).is_some();
         let mut tx = pidash_db::tx::Transaction::begin(&self.pool)
             .await
             .map_err(Self::db_err)?;

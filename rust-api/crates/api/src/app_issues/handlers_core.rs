@@ -3699,7 +3699,7 @@ async fn fetch_clock_policy(
     pool: &sqlx::PgPool,
     project_id: &Uuid,
 ) -> Result<ProjectClockPolicy, Denial> {
-    let row: Option<(bool, i32, i32, i32, i32)> = projects::Entity::find()
+    let row: Option<(bool, i32, i32, i32, i32, serde_json::Value)> = projects::Entity::find()
         .select_only()
         .columns([
             projects::Column::AgentTickingEnabled,
@@ -3707,6 +3707,7 @@ async fn fetch_clock_policy(
             projects::Column::AgentDefaultIntervalSeconds,
             projects::Column::AgentReviewDefaultIntervalSeconds,
             projects::Column::AgentTestDefaultIntervalSeconds,
+            projects::Column::Settings,
         ])
         .filter(projects::Column::Id.eq(*project_id))
         .filter(projects::Column::DeletedAt.is_null())
@@ -3716,7 +3717,7 @@ async fn fetch_clock_policy(
         .map_err(|_| Denial::ServerError)?;
     // A missing project row raises on Django (`ticker.issue.project`
     // re-fetches through the live-only manager) → 500, never a default.
-    let Some((ticking, max_ticks, interval, review_interval, test_interval)) = row else {
+    let Some((ticking, max_ticks, interval, review_interval, test_interval, settings)) = row else {
         return Err(Denial::ServerError);
     };
     Ok(ProjectClockPolicy {
@@ -3725,7 +3726,9 @@ async fn fetch_clock_policy(
         agent_default_interval_seconds: Some(i64::from(interval)),
         agent_review_default_interval_seconds: Some(i64::from(review_interval)),
         agent_test_default_interval_seconds: Some(i64::from(test_interval)),
-    })
+        ..Default::default()
+    }
+    .with_stages(&settings))
 }
 
 /// The issue's latest and active runs, the run count and the cumulative

@@ -7,7 +7,9 @@
 //! * `DEFAULT_CADENCE_KEY` (`:71`) → [`DEFAULT_CADENCE_KEY`].
 //! * `PhaseConfig` (`:74-114`) → [`PhaseConfig`].
 //! * `PHASES` (`:117-146`) → [`PHASES`].
-//! * `is_ticking_state` (`:149-162`) → [`is_ticking_state`].
+//! * the Python ticking check (`:149-162`) → split by question (lean agent
+//!   workflow): [`phase_config_for`] answers "has an agent prompt",
+//!   [`stage_runs_automatically`] answers "entry runs and ticks happen".
 //! * `phase_config_for` (`:165-176`) → [`phase_config_for`].
 //! * `template_name_for` (`:179-188`) → [`template_name_for`].
 //! * `cadence_fields_for` (`:191-200`) → [`cadence_fields_for`].
@@ -134,10 +136,42 @@ pub struct StateRef<'a> {
     pub name: &'a str,
 }
 
-/// Return `true` when the given state is the registered ticking state for
-/// its group (`agent_phases.py:149-162`).
-pub fn is_ticking_state(state: Option<&StateRef<'_>>) -> bool {
-    phase_config_for(state).is_some()
+/// Which optional stages run automatically in one project (the
+/// project's `agent_stages` setting, resolved). In Progress is always
+/// on and has no switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StageSwitches {
+    pub review: bool,
+    pub test: bool,
+}
+
+impl StageSwitches {
+    /// Both optional stages on — the default for every project.
+    pub const ALL: StageSwitches = StageSwitches {
+        review: true,
+        test: true,
+    };
+}
+
+impl Default for StageSwitches {
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
+/// True when entry runs and ticks happen in `state`: it is a registered
+/// phase, and that phase is In Progress or is switched on in the
+/// project. Whether a state *has* an agent prompt is a different
+/// question, answered by [`phase_config_for`] / [`template_name_for`].
+pub fn stage_runs_automatically(state: Option<&StateRef<'_>>, switches: StageSwitches) -> bool {
+    let Some(cfg) = phase_config_for(state) else {
+        return false;
+    };
+    match cfg.cadence_key {
+        "review" => switches.review,
+        "test" => switches.test,
+        _ => true,
+    }
 }
 
 /// Return the [`PhaseConfig`] for the given state's phase, or `None` when
@@ -281,9 +315,9 @@ mod tests {
             };
             let label = case["case"].as_str().unwrap();
             assert_eq!(
-                is_ticking_state(state.as_ref()),
-                case["is_ticking_state"].as_bool().unwrap(),
-                "{label}: is_ticking_state"
+                stage_runs_automatically(state.as_ref(), StageSwitches::ALL),
+                case["stage_runs_automatically"].as_bool().unwrap(),
+                "{label}: stage_runs_automatically"
             );
             assert_eq!(
                 phase_config_for(state.as_ref()).map(|cfg| serde_json::to_value(cfg).unwrap()),
@@ -307,5 +341,41 @@ mod tests {
             );
         }
         assert_eq!(owned.len(), 13, "all fixture vectors replayed");
+    }
+
+    #[test]
+    fn stage_runs_automatically_honours_switches() {
+        let progress = StateRef {
+            group: "started",
+            name: "In Progress",
+        };
+        let review = StateRef {
+            group: "review",
+            name: "In Review",
+        };
+        let test = StateRef {
+            group: "test",
+            name: "In Test",
+        };
+        let other_review = StateRef {
+            group: "review",
+            name: "Code Review",
+        };
+        let done = StateRef {
+            group: "completed",
+            name: "Done",
+        };
+        for (r, t) in [(true, true), (true, false), (false, true), (false, false)] {
+            let sw = StageSwitches { review: r, test: t };
+            assert!(stage_runs_automatically(Some(&progress), sw));
+            assert_eq!(stage_runs_automatically(Some(&review), sw), r);
+            assert_eq!(stage_runs_automatically(Some(&test), sw), t);
+            assert!(!stage_runs_automatically(Some(&other_review), sw));
+            assert!(!stage_runs_automatically(Some(&done), sw));
+            assert!(!stage_runs_automatically(None, sw));
+            // The prompt question is unaffected by the switches.
+            assert!(phase_config_for(Some(&review)).is_some());
+            assert!(phase_config_for(Some(&test)).is_some());
+        }
     }
 }

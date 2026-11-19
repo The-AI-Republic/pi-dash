@@ -97,9 +97,9 @@ use pidash_db::tasks_ticker::{
     pool_size_or_default, TickerDisarmReason, INFINITE_MAX_TICKS,
 };
 use pidash_types::orchestration::{
-    cadence_fields_for, default_outcome_for_kind, is_ticking_state, outcome_for_run,
-    template_name_for, RunOutcomeRef, StateRef, TickerDecision, TickerEvent, TickerEventKind,
-    OUTCOME_WAITING_ON_HUMAN,
+    cadence_fields_for, default_outcome_for_kind, outcome_for_run, stage_runs_automatically,
+    template_name_for, RunOutcomeRef, StageSwitches, StateRef, TickerDecision, TickerEvent,
+    TickerEventKind, OUTCOME_WAITING_ON_HUMAN,
 };
 use pidash_types::runner_runs::{
     classify_failure, policy_for, repeated_failure_limit_for, AgentRunTrigger, FailurePolicy,
@@ -209,7 +209,7 @@ pub const SAVE_CLOCK_PARAMS: &[&str] = &[
 /// The project columns the clock reads (`scheduling.py` reaches them via
 /// `issue.project`). Each is `Option` for the `getattr(..., default)` rows
 /// that somehow lack the field; `None` answers the documented default.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProjectClockPolicy {
     /// `agent_ticking_enabled` (default `true`; `_project_ticking_enabled`, `:210-212`).
     pub agent_ticking_enabled: Option<bool>,
@@ -221,6 +221,48 @@ pub struct ProjectClockPolicy {
     pub agent_review_default_interval_seconds: Option<i64>,
     /// `agent_test_default_interval_seconds` (test cadence column).
     pub agent_test_default_interval_seconds: Option<i64>,
+    /// `settings.agent_stages` resolved: does In Review run automatically?
+    /// Defaults to `true`.
+    pub review_enabled: bool,
+    /// `settings.agent_stages` resolved: does In Test run automatically?
+    /// Defaults to `true`.
+    pub test_enabled: bool,
+}
+
+impl Default for ProjectClockPolicy {
+    fn default() -> Self {
+        Self {
+            agent_ticking_enabled: None,
+            agent_default_max_ticks: None,
+            agent_default_interval_seconds: None,
+            agent_review_default_interval_seconds: None,
+            agent_test_default_interval_seconds: None,
+            review_enabled: true,
+            test_enabled: true,
+        }
+    }
+}
+
+impl ProjectClockPolicy {
+    /// Fill the two stage switches from the project's `settings` blob
+    /// (`agent_stages`). A blob that does not parse keeps both stages
+    /// enabled, so a bad write never silently turns a stage off.
+    pub fn with_stages(mut self, settings: &serde_json::Value) -> Self {
+        let stages = crate::domain::project_settings::parse_row_settings(settings)
+            .map(|p| p.settings.agent_stages)
+            .unwrap_or_default();
+        self.review_enabled = stages.review_enabled();
+        self.test_enabled = stages.test_enabled();
+        self
+    }
+
+    /// The switches [`stage_runs_automatically`] reads.
+    pub fn stage_switches(&self) -> StageSwitches {
+        StageSwitches {
+            review: self.review_enabled,
+            test: self.test_enabled,
+        }
+    }
 }
 
 /// The issue half the clock reads: its id, its current state, and its
@@ -604,7 +646,7 @@ fn untouched_with_thread(
 /// to a stage the issue has already moved past — either way the finished
 /// run must not touch the clock set for where the issue is now.
 pub fn run_ended_guard(issue: &ClockIssue<'_>, run_phase_kind: &str) -> Option<&'static str> {
-    if !is_ticking_state(issue.state.as_ref()) {
+    if !stage_runs_automatically(issue.state.as_ref(), issue.policy.stage_switches()) {
         return Some("not-in-bucket");
     }
     let current_kind = kind_for(template_name_for(issue.state.as_ref()), WORK_KIND_CODING);
@@ -951,7 +993,7 @@ pub fn on_retick(
     };
     let ticker_id = ticker.id;
     let paused = is_paused_state(issue.state.as_ref());
-    if !is_ticking_state(issue.state.as_ref()) && !paused {
+    if !stage_runs_automatically(issue.state.as_ref(), issue.policy.stage_switches()) && !paused {
         return untouched(Some(ticker_id), "not_ticking_state");
     }
     let pool = pool_size(&issue.policy);
@@ -1321,6 +1363,8 @@ mod tests {
             agent_default_interval_seconds: Some(10800),
             agent_review_default_interval_seconds: Some(3600),
             agent_test_default_interval_seconds: Some(7200),
+            review_enabled: true,
+            test_enabled: true,
         }
     }
 

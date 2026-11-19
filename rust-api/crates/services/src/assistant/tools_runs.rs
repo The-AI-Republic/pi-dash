@@ -15,7 +15,8 @@
 //!   `None` `created_at` passthrough), the `PHASES` ticking table from
 //!   `orchestration/agent_phases.py:117-147`, the exact retry messages, the
 //!   no-delegation/already-in-state payloads, and the success payload keys.
-//! * `is_ticking_state` (`agent_phases.py:149-162`) is `True` when the
+//! * `stage_runs_automatically` (the Python ticking check,
+//!   `agent_phases.py:149-162`) is `True` when the
 //!   state's group is registered in `PHASES` **and** its name equals the
 //!   registered state name — group alone is not enough.
 
@@ -50,7 +51,7 @@ pub const NO_DELEGATION_STATE_DETAIL: &str =
 pub const ALREADY_IN_STATE_ERROR: &str = "already_in_state";
 
 /// A `PHASES` entry (`agent_phases.py:107-147`): the ticking state name
-/// for one state group. Only `state_name` drives `is_ticking_state`; the
+/// for one state group. Only `state_name` drives the ticking check; the
 /// rest is recorded so the table matches Python row for row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhaseConfig {
@@ -81,12 +82,19 @@ pub const PHASES: [PhaseConfig; 3] = [
     },
 ];
 
-/// Ticking-state check (`is_ticking_state`, `agent_phases.py:149-162`).
-pub fn is_ticking_state(group: Option<&str>, name: Option<&str>) -> bool {
+/// Whether a move into `group` / `name` starts a run in a project with
+/// these stage switches: the state is a registered phase (the static
+/// [`PHASES`] table) and that phase runs automatically.
+pub fn stage_runs_automatically(
+    group: Option<&str>,
+    name: Option<&str>,
+    switches: pidash_types::orchestration::StageSwitches,
+) -> bool {
     match (group, name) {
-        (Some(group), Some(name)) => PHASES
-            .iter()
-            .any(|phase| phase.group == group && phase.state_name == name),
+        (Some(group), Some(name)) => pidash_types::orchestration::stage_runs_automatically(
+            Some(&pidash_types::orchestration::StateRef { group, name }),
+            switches,
+        ),
         _ => false,
     }
 }
@@ -210,6 +218,7 @@ pub fn dispatch_coding_run_schema() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pidash_types::orchestration::StageSwitches;
     use serde_json::Value;
 
     fn fixture() -> Value {
@@ -235,15 +244,61 @@ mod tests {
     fn ticking_table_matches_phases() {
         assert_eq!(PHASES.len(), 3);
         // Group alone is not enough: the name must equal the registered one.
-        assert!(is_ticking_state(Some("started"), Some("In Progress")));
-        assert!(is_ticking_state(Some("review"), Some("In Review")));
-        assert!(is_ticking_state(Some("test"), Some("In Test")));
-        assert!(!is_ticking_state(Some("started"), Some("In Review")));
-        assert!(!is_ticking_state(Some("backlog"), Some("In Progress")));
-        assert!(!is_ticking_state(Some("completed"), Some("Done")));
-        assert!(!is_ticking_state(None, Some("In Progress")));
-        assert!(!is_ticking_state(Some("started"), None));
-        assert!(!is_ticking_state(None, None));
+        assert!(stage_runs_automatically(
+            Some("started"),
+            Some("In Progress"),
+            StageSwitches::ALL
+        ));
+        assert!(stage_runs_automatically(
+            Some("review"),
+            Some("In Review"),
+            StageSwitches::ALL
+        ));
+        assert!(stage_runs_automatically(
+            Some("test"),
+            Some("In Test"),
+            StageSwitches::ALL
+        ));
+        assert!(!stage_runs_automatically(
+            Some("started"),
+            Some("In Review"),
+            StageSwitches::ALL
+        ));
+        assert!(!stage_runs_automatically(
+            Some("backlog"),
+            Some("In Progress"),
+            StageSwitches::ALL
+        ));
+        assert!(!stage_runs_automatically(
+            Some("completed"),
+            Some("Done"),
+            StageSwitches::ALL
+        ));
+        assert!(!stage_runs_automatically(
+            None,
+            Some("In Progress"),
+            StageSwitches::ALL
+        ));
+        assert!(!stage_runs_automatically(
+            Some("started"),
+            None,
+            StageSwitches::ALL
+        ));
+        assert!(!stage_runs_automatically(None, None, StageSwitches::ALL));
+        let review_off = StageSwitches {
+            review: false,
+            test: true,
+        };
+        assert!(!stage_runs_automatically(
+            Some("review"),
+            Some("In Review"),
+            review_off
+        ));
+        assert!(stage_runs_automatically(
+            Some("test"),
+            Some("In Test"),
+            review_off
+        ));
     }
 
     #[test]

@@ -95,8 +95,8 @@ use pidash_db::orchestration::runs::ACTIVE_STATUSES;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::orchestration::{
-    is_ticking_state, ContinuationOutcome, StateRef, TickerDecision, TickerEvent,
-    TransitionOutcome, CONTINUATION_ELIGIBLE_GROUPS,
+    stage_runs_automatically, ContinuationOutcome, StageSwitches, StateRef, TickerDecision,
+    TickerEvent, TransitionOutcome, CONTINUATION_ELIGIBLE_GROUPS,
 };
 
 use crate::prompting::composer::OverrideRow;
@@ -234,16 +234,16 @@ pub const SCHEDULER_SELECT_SQL: &str =
 /// project id.
 pub const CLOCK_POLICY_SQL: &str = "SELECT agent_ticking_enabled, agent_default_max_ticks, \
     agent_default_interval_seconds, agent_review_default_interval_seconds, \
-    agent_test_default_interval_seconds FROM projects WHERE id = $1";
+    agent_test_default_interval_seconds, settings FROM projects WHERE id = $1";
 
 /// SeaORM form of [`CLOCK_POLICY_SQL`]: the project's
 /// `(agent_ticking_enabled, agent_default_max_ticks,
 /// agent_default_interval_seconds, agent_review_default_interval_seconds,
-/// agent_test_default_interval_seconds)`, no soft-delete guard.
+/// agent_test_default_interval_seconds, settings)`, no soft-delete guard.
 pub async fn clock_policy(
     db: &impl sea_orm::ConnectionTrait,
     project_id: uuid::Uuid,
-) -> Result<Option<(bool, i32, i32, i32, i32)>, sea_orm::DbErr> {
+) -> Result<Option<(bool, i32, i32, i32, i32, serde_json::Value)>, sea_orm::DbErr> {
     use pidash_db::entity::projects;
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
     projects::Entity::find()
@@ -254,6 +254,7 @@ pub async fn clock_policy(
             projects::Column::AgentDefaultIntervalSeconds,
             projects::Column::AgentReviewDefaultIntervalSeconds,
             projects::Column::AgentTestDefaultIntervalSeconds,
+            projects::Column::Settings,
         ])
         .filter(projects::Column::Id.eq(project_id))
         .into_tuple()
@@ -555,11 +556,25 @@ pub trait PreflightSeam {
 // Pure units
 // ---------------------------------------------------------------------------
 
-/// A state transition triggers a run when `to_state` is one of the
-/// registered ticking states (`_is_delegation_trigger`,
-/// `service.py:170-177`).
-pub fn is_delegation_trigger(to_state: Option<&StateRef<'_>>) -> bool {
-    is_ticking_state(to_state)
+/// A state transition triggers a run when `to_state` is a registered
+/// phase that runs automatically in this project
+/// (`_is_delegation_trigger`, `service.py:170-177`; lean agent workflow
+/// §6.1 adds the project's stage switches).
+pub fn is_delegation_trigger(to_state: Option<&StateRef<'_>>, switches: StageSwitches) -> bool {
+    stage_runs_automatically(to_state, switches)
+}
+
+/// The project's stage switches for `issue_id` — both on for a
+/// project-less issue.
+async fn issue_stage_switches<S: EntriesSeam>(
+    seam: &mut S,
+    issue_id: Uuid,
+) -> Result<StageSwitches, EntriesError> {
+    let issue = seam.issue(issue_id).await?;
+    Ok(match issue.project_id {
+        Some(project_id) => seam.clock_policy(project_id).await?.stage_switches(),
+        None => StageSwitches::ALL,
+    })
 }
 
 /// `AgentRun.is_active` (`runner/models.py:1146-1160`): active runs occupy
@@ -733,8 +748,9 @@ pub async fn handle_issue_state_transition<S: EntriesSeam, P: PreflightSeam>(
         group: &state.group,
         name: &state.name,
     });
-    let from_ticking = is_ticking_state(from_ref.as_ref());
-    let to_ticking = is_ticking_state(to_ref.as_ref());
+    let switches = issue_stage_switches(seam, req.issue_id).await?;
+    let from_ticking = stage_runs_automatically(from_ref.as_ref(), switches);
+    let to_ticking = stage_runs_automatically(to_ref.as_ref(), switches);
     let cross_stage = match (&req.from_state, &req.to_state) {
         (Some(from), Some(to)) => from_ticking && to_ticking && from.group != to.group,
         _ => false,
@@ -771,7 +787,7 @@ pub async fn handle_issue_state_transition<S: EntriesSeam, P: PreflightSeam>(
         });
     }
 
-    if !is_delegation_trigger(to_ref.as_ref()) {
+    if !is_delegation_trigger(to_ref.as_ref(), switches) {
         return Ok(TransitionOutcome {
             created_run: None,
             reason: REASON_NOT_A_TRIGGER_STATE.to_owned(),
@@ -1057,7 +1073,8 @@ pub async fn handle_issue_comment<S: EntriesSeam>(
         group: &state.group,
         name: &state.name,
     });
-    if is_ticking_state(state_ref.as_ref()) {
+    let switches = issue_stage_switches(seam, issue.id).await?;
+    if stage_runs_automatically(state_ref.as_ref(), switches) {
         let event = TickerEvent::human_run_requested(
             true,
             Some(actor_id),
@@ -1594,6 +1611,7 @@ mod tests {
             agent_default_interval_seconds: Some(10_800),
             agent_review_default_interval_seconds: Some(10_800),
             agent_test_default_interval_seconds: Some(10_800),
+            ..Default::default()
         }
     }
 
@@ -3992,7 +4010,7 @@ mod tests {
         );
         assert_eq!(
             CLOCK_POLICY_SQL,
-            "SELECT agent_ticking_enabled, agent_default_max_ticks, agent_default_interval_seconds, agent_review_default_interval_seconds, agent_test_default_interval_seconds FROM projects WHERE id = $1"
+            "SELECT agent_ticking_enabled, agent_default_max_ticks, agent_default_interval_seconds, agent_review_default_interval_seconds, agent_test_default_interval_seconds, settings FROM projects WHERE id = $1"
         );
     }
 
@@ -4039,28 +4057,34 @@ mod tests {
             group: "started",
             name: "In Progress",
         };
-        assert!(is_delegation_trigger(Some(&ticking)));
+        assert!(is_delegation_trigger(Some(&ticking), StageSwitches::ALL));
         let review = StateRef {
             group: "review",
             name: "In Review",
         };
-        assert!(is_delegation_trigger(Some(&review)));
+        assert!(is_delegation_trigger(Some(&review), StageSwitches::ALL));
         let todo = StateRef {
             group: "unstarted",
             name: "Todo",
         };
-        assert!(!is_delegation_trigger(Some(&todo)));
+        assert!(!is_delegation_trigger(Some(&todo), StageSwitches::ALL));
         let grooming = StateRef {
             group: "started",
             name: "Grooming",
         };
-        assert!(!is_delegation_trigger(Some(&grooming)));
+        assert!(!is_delegation_trigger(Some(&grooming), StageSwitches::ALL));
         let done = StateRef {
             group: "completed",
             name: "Done",
         };
-        assert!(!is_delegation_trigger(Some(&done)));
-        assert!(!is_delegation_trigger(None));
+        assert!(!is_delegation_trigger(Some(&done), StageSwitches::ALL));
+        assert!(!is_delegation_trigger(None, StageSwitches::ALL));
+        let review_off = StageSwitches {
+            review: false,
+            test: true,
+        };
+        assert!(!is_delegation_trigger(Some(&review), review_off));
+        assert!(is_delegation_trigger(Some(&ticking), review_off));
     }
 
     #[test]

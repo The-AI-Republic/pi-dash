@@ -4050,7 +4050,7 @@ pub async fn post_comment(
     }
 }
 
-async fn comment_post_inner(
+pub(super) async fn comment_post_inner(
     state: &AppState,
     headers: &HeaderMap,
     slug: &str,

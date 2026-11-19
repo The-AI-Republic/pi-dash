@@ -1647,7 +1647,7 @@ async fn gate_v1_state_change(
     }
 }
 
-async fn patch_issue_inner(
+pub(super) async fn patch_issue_inner(
     state: &AppState,
     headers: &HeaderMap,
     slug: &str,

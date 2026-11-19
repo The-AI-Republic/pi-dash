@@ -156,6 +156,7 @@ async fn project_clock_policy(
         Option<i32>,
         Option<i32>,
         Option<i32>,
+        serde_json::Value,
     )> = projects::Entity::find_by_id(project_id)
         .select_only()
         .columns([
@@ -164,18 +165,21 @@ async fn project_clock_policy(
             projects::Column::AgentDefaultIntervalSeconds,
             projects::Column::AgentReviewDefaultIntervalSeconds,
             projects::Column::AgentTestDefaultIntervalSeconds,
+            projects::Column::Settings,
         ])
         .into_tuple()
         .one(db)
         .await?;
     Ok(match row {
-        Some((enabled, max, impl_secs, review_secs, test_secs)) => ProjectClockPolicy {
+        Some((enabled, max, impl_secs, review_secs, test_secs, settings)) => ProjectClockPolicy {
             agent_ticking_enabled: enabled,
             agent_default_max_ticks: max,
             agent_default_interval_seconds: impl_secs.map(i64::from),
             agent_review_default_interval_seconds: review_secs.map(i64::from),
             agent_test_default_interval_seconds: test_secs.map(i64::from),
-        },
+            ..Default::default()
+        }
+        .with_stages(&settings),
         None => ProjectClockPolicy::default(),
     })
 }

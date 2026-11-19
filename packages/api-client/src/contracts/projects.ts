@@ -77,8 +77,26 @@ export function issueRunPolicyOrDefault(value: string | undefined): IssueRunPoli
  * Unknown keys pass through (`looseObject`) so future keys survive a
  * read from this build, as the server preserves them.
  */
+/**
+ * Which optional agent stages run in a project (lean agent workflow).
+ * `auto` lets the agent pick the path per work item; `custom` reads the
+ * `review` / `test` toggles. In Progress always runs. A missing key reads
+ * as auto with both stages on.
+ */
+export const AGENT_STAGES_MODE_AUTO = "auto";
+export const AGENT_STAGES_MODE_CUSTOM = "custom";
+export const AgentStagesMode = z.enum([AGENT_STAGES_MODE_AUTO, AGENT_STAGES_MODE_CUSTOM]);
+export type AgentStagesMode = z.infer<typeof AgentStagesMode>;
+export const AgentStages = z.object({
+  mode: AgentStagesMode,
+  review: z.optional(z.boolean()),
+  test: z.optional(z.boolean()),
+});
+export type AgentStages = z.infer<typeof AgentStages>;
+
 export const ProjectSettings = z.looseObject({
   issue_run_policy: z.optional(IssueRunPolicy),
+  agent_stages: z.optional(AgentStages),
 });
 export type ProjectSettings = z.infer<typeof ProjectSettings>;
 

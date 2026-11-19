@@ -120,4 +120,39 @@ describe("ExecutionSection", () => {
     setup({ errors: { budget: "The run budget must be at least one" } });
     expect(screen.getByText("The run budget must be at least one")).toBeInTheDocument();
   });
+
+  it("defaults to Auto with no stage toggles and the helper text", () => {
+    setup();
+    expect(screen.getByTestId("general-stages-mode")).toHaveTextContent("Auto");
+    expect(screen.queryByTestId("general-stages-toggle-trigger")).not.toBeInTheDocument();
+    expect(screen.getByTestId("general-stages")).toHaveTextContent("A stage that is off is only a label.");
+  });
+
+  it("reports a picked mode", async () => {
+    const user = userEvent.setup();
+    const { onChange } = setup();
+    await user.click(screen.getByTestId("general-stages-mode-trigger"));
+    await user.click(screen.getByRole("option", { name: "Customize" }));
+    expect(onChange).toHaveBeenCalledWith({ stagesMode: "custom" });
+  });
+
+  it("toggles In Review and In Test under Customize, never In Progress", () => {
+    const { onChange } = setup({ form: { stagesMode: "custom", reviewStage: true, testStage: false } });
+    expect(screen.getByTestId("general-stages-enabled")).toHaveTextContent("In Progress, In Review");
+    // fireEvent drives the real click path (see the kit Menu suite).
+    fireEvent.click(screen.getByTestId("general-stages-toggle-trigger"));
+    const progress = screen.getByRole("menuitem", { name: /In Progress/ });
+    expect(progress).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(screen.getByRole("menuitem", { name: /In Review/ }));
+    expect(onChange).toHaveBeenCalledWith({ reviewStage: false });
+    fireEvent.click(screen.getByRole("menuitem", { name: /In Test/ }));
+    expect(onChange).toHaveBeenCalledWith({ testStage: true });
+    expect(onChange).not.toHaveBeenCalledWith(expect.objectContaining({ stagesMode: expect.anything() }));
+  });
+
+  it("disables the Stages block while automated runs are off", () => {
+    setup({ form: { ticking: false, stagesMode: "custom" } });
+    expect(screen.getByTestId("general-stages-mode-trigger")).toBeDisabled();
+    expect(screen.getByTestId("general-stages-toggle-trigger")).toBeDisabled();
+  });
 });

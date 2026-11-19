@@ -35,7 +35,7 @@
 //!
 //! # Seam (D-12 owns the callees)
 //!
-//! `dispatch_continuation_run`, `is_ticking_state`, `_active_run_for` and
+//! `dispatch_continuation_run`, `stage_runs_automatically`, `_active_run_for` and
 //! `_latest_prior_run` are orchestration territory (PIDASHCONV-49, which is
 //! blocked *by* this epic, so no edge) and are not re-ported here: they
 //! resolve through [`FireTickSeam`]. The stage→interval-column mapping
@@ -114,6 +114,8 @@ pub struct ProjectTickCols {
     pub interval_review: Option<i32>,
     /// `agent_test_default_interval_seconds` (In Test rhythm).
     pub interval_test: Option<i32>,
+    /// `settings.agent_stages` resolved (both on by default).
+    pub stages: pidash_types::orchestration::StageSwitches,
 }
 
 /// The ticker row as claimed under lock, plus the issue/project ids the
@@ -152,7 +154,7 @@ pub struct TickerSnapshot {
 /// no seam reads).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SeamAnswers {
-    /// `is_ticking_state(issue.state)` (`agent_ticker.py:187`).
+    /// The issue's stage runs automatically (`agent_ticker.py:187`).
     pub ticking_state: bool,
     /// `_active_run_for(issue) is not None` (`:197`).
     pub active_run: bool,
@@ -168,13 +170,18 @@ pub struct SeamAnswers {
 /// registry/mapping lookups; async methods touch the database through the
 /// implementor's own pool handle (never the claim transaction).
 pub trait FireTickSeam: Send + Sync {
-    /// `orchestration.agent_phases.is_ticking_state` (`agent_ticker.py:187`).
+    /// Whether ticks happen in `state` under the project's stage
+    /// switches (`agent_ticker.py:187`, lean agent workflow §6.1).
     ///
     /// The state row is resolved live by the caller (`read_claim` joins
     /// it, like Django's `select_related("issue__state")`): a cached
     /// boot-time map cannot see a project/state created after start
     /// (PIDASHCONV-1218).
-    fn is_ticking_state(&self, state: Option<&StateView>) -> bool;
+    fn stage_runs_automatically(
+        &self,
+        state: Option<&StateView>,
+        project: &ProjectTickCols,
+    ) -> bool;
 
     /// `ticker.effective_interval_seconds()` (`:241`): the stage→column
     /// resolution plus the project-column read with the stage default.
@@ -556,6 +563,7 @@ async fn read_claim(
                     projects::Column::AgentDefaultIntervalSeconds,
                     projects::Column::AgentReviewDefaultIntervalSeconds,
                     projects::Column::AgentTestDefaultIntervalSeconds,
+                    projects::Column::Settings,
                 ])
                 .into_model::<ProjectTickCols>()
                 .one(&conn)
@@ -595,6 +603,14 @@ impl sea_orm::FromQueryResult for ProjectTickCols {
                 .try_get::<Option<i32>>(pre, "agent_review_default_interval_seconds")?,
             interval_test: row
                 .try_get::<Option<i32>>(pre, "agent_test_default_interval_seconds")?,
+            stages: match row.try_get::<Option<serde_json::Value>>(pre, "settings") {
+                Ok(Some(settings)) => {
+                    pidash_services::orchestration::clock::ProjectClockPolicy::default()
+                        .with_stages(&settings)
+                        .stage_switches()
+                }
+                _ => pidash_types::orchestration::StageSwitches::ALL,
+            },
         })
     }
 }
@@ -809,7 +825,33 @@ pub async fn fire_tick(
             Ok(false)
         }
         PreDecision::Proceed { free_claim, cap } => {
-            if !seam.is_ticking_state(read.state.as_ref()) {
+            if !seam.stage_runs_automatically(read.state.as_ref(), &read.project) {
+                // A registered stage the project switched off while the
+                // issue sat in it (§6.4): disarm so the ticker stops
+                // firing; the issue stays where it is.
+                let switched_off = read.state.as_ref().is_some_and(|state| {
+                    pidash_types::orchestration::phase_config_for(Some(
+                        &pidash_types::orchestration::StateRef {
+                            group: &state.group,
+                            name: &state.name,
+                        },
+                    ))
+                    .is_some()
+                });
+                if switched_off {
+                    write_preclaim_disarm(
+                        &mut tx,
+                        ticker_id,
+                        TickerDisarmReason::LeftTickingState,
+                        &now,
+                    )
+                    .await?;
+                    tx.commit().await?;
+                    tracing::info!(
+                        "agent_ticker.fire_tick: skip issue={} reason=stage-switched-off",
+                        read.issue_id,
+                    );
+                }
                 return Ok(false);
             }
             if seam.has_active_run(read.issue_id).await? {
@@ -1419,7 +1461,11 @@ mod tests {
     async fn registry_owns_fire_tick_after_register() {
         struct NoSeam;
         impl FireTickSeam for NoSeam {
-            fn is_ticking_state(&self, _state: Option<&StateView>) -> bool {
+            fn stage_runs_automatically(
+                &self,
+                _state: Option<&StateView>,
+                _project: &ProjectTickCols,
+            ) -> bool {
                 true
             }
             fn tick_interval_seconds(

@@ -2048,8 +2048,8 @@ pub async fn execute_dispatch_coding_run<S: ToolStore>(
 ) -> Result<Value, ToolFailure> {
     use pidash_services::assistant::tools_runs::{
         already_in_state_result, dispatch_success_result, dispatch_summary, invalid_state_error,
-        is_ticking_state, no_delegation_state_result, non_ticking_state_error, validate_pin,
-        PHASES,
+        no_delegation_state_result, non_ticking_state_error, stage_runs_automatically,
+        validate_pin, PHASES,
     };
     // `_scoping.get_issue` → `scoped_issues` → `user_for` is the first
     // statement (`runs.py:41`, `_scoping.py:67-85`): a missing user fails
@@ -2076,7 +2076,13 @@ pub async fn execute_dispatch_coding_run<S: ToolStore>(
                 .find(|state| state.id == wanted)
                 .cloned()
                 .ok_or_else(invalid_state_error)?;
-            if !is_ticking_state(Some(&target.group), Some(&target.name)) {
+            // A stage switched off in this project starts no run, so a
+            // move there cannot dispatch one.
+            let settings = store.project_settings(deps, &issue.project_id).await?;
+            let switches = pidash_services::orchestration::clock::ProjectClockPolicy::default()
+                .with_stages(&settings)
+                .stage_switches();
+            if !stage_runs_automatically(Some(&target.group), Some(&target.name), switches) {
                 return Err(non_ticking_state_error().into());
             }
             target

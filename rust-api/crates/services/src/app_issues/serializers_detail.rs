@@ -21,7 +21,7 @@
 //!   [`effective_interval_seconds`](crate::orchestration::clock) over the
 //!   caller's [`ProjectClockPolicy`](crate::orchestration::clock).
 //! * `can_re_tick` calls the merged D-12
-//!   [`is_ticking_state`](pidash_types::orchestration) (PIDASHCONV-545) and
+//!   [`stage_runs_automatically`](pidash_types::orchestration) (PIDASHCONV-545) and
 //!   [`is_paused_state`](crate::orchestration::clock) (PIDASHCONV-580).
 //! * The blocker fields select out of the merged D-12
 //!   [`RelationsSummary`](crate::orchestration::blockers) (PIDASHCONV-561).
@@ -87,7 +87,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use pidash_db::tasks_ticker::{IssueAgentTicker, TickerDisarmReason};
-use pidash_types::orchestration::{is_ticking_state, StateRef};
+use pidash_types::orchestration::{stage_runs_automatically, StateRef};
 use pidash_types::runner_runs::{
     classify_run_error_for_reason, flat_token_fields, RunErrorDiagnostic,
 };
@@ -356,7 +356,7 @@ pub struct AgentTickerView<'a> {
 /// `ticker` is the issue's `agent_ticker` row (`None` at the call boundary
 /// renders `None`, `:1275-1281`); `policy` carries the project pool +
 /// cadence columns; `state` is the issue's current state for
-/// `can_re_tick` (`(is_ticking_state or is_paused_state) and
+/// `can_re_tick` (`(stage_runs_automatically or is_paused_state) and
 /// (cap_reached or failure_stopped)`, `:1296`, PDASHOSS01-183) and the
 /// stage interval. Pool math, predicates and interval all
 /// run through the merged D-10/D-12 ports.
@@ -374,7 +374,8 @@ pub fn agent_ticker_to_representation<'a>(
             .disarm_reason
             .parse::<TickerDisarmReason>()
             .is_ok_and(TickerDisarmReason::is_failure_stop);
-    let can_re_tick = (is_ticking_state(state) || is_paused_state(state))
+    let can_re_tick = (stage_runs_automatically(state, policy.stage_switches())
+        || is_paused_state(state))
         && (ticker.cap_reached(pool) || failure_stopped);
     AgentTickerView {
         enabled: ticker.enabled,
@@ -1292,6 +1293,7 @@ mod tests {
             agent_default_interval_seconds: Some(7200),
             agent_review_default_interval_seconds: None,
             agent_test_default_interval_seconds: None,
+            ..Default::default()
         }
     }
 
