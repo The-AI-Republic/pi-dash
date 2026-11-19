@@ -32,12 +32,24 @@ export const OPENHUB_SLUG_HINT = "The slug must match OpenHub exactly — a typo
 /** Effort values offered by Codex models (the allowed set). */
 export const RUNNER_MODEL_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
 
+/** Effort values `muse exec --reasoning-effort` accepts (the server's `MUSE_CODE_EFFORTS`). */
+export const MUSE_CODE_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
+
+/** The effort checkboxes one agent's rows offer: Muse Code has its own wider set. */
+export function effortsForAgent(agent: string): readonly string[] {
+  return agent === "muse-code" ? MUSE_CODE_EFFORTS : RUNNER_MODEL_EFFORTS;
+}
+
 /** Effort checkbox labels. */
 export const RUNNER_MODEL_EFFORT_LABELS: Record<string, string> = {
+  none: "None",
+  minimal: "Minimal",
   low: "Low",
   medium: "Medium",
   high: "High",
   xhigh: "Extra High",
+  max: "Max",
+  ultra: "Ultra",
 };
 
 /** Page heading. */
@@ -82,7 +94,7 @@ export function formErrorMessage(error: unknown): string {
       case "empty_label":
         return "The label must not be empty.";
       case "invalid_effort":
-        return "Efforts must be low, medium, high, or xhigh.";
+        return "One of the efforts is not available for this agent.";
       case "duplicate_effort":
         return "Each effort may appear once.";
       case "duplicate_model":

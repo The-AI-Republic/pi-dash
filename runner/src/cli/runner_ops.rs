@@ -27,6 +27,29 @@ use uuid::Uuid;
 /// soft warning, not a hard error.
 pub(crate) const CODEX_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh"];
 
+/// Muse Code reasoning-effort tiers, passed verbatim as `muse exec
+/// --reasoning-effort` (the set `muse exec --help` lists).
+pub(crate) const MUSE_CODE_EFFORTS: &[&str] = &[
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+];
+
+/// The reasoning-effort tiers `kind` accepts, or `None` when the agent has no
+/// effort knob. Codex and Muse Code are the only agents that take one.
+pub(crate) fn efforts_for_agent(kind: AgentKind) -> Option<&'static [&'static str]> {
+    match kind {
+        AgentKind::Codex => Some(CODEX_EFFORTS),
+        AgentKind::MuseCode => Some(MUSE_CODE_EFFORTS),
+        _ => None,
+    }
+}
+
+/// Whether `kind` needs an explicit model before an effort tier means
+/// anything. Codex sends the tier with the model on `turn/start`; Muse takes
+/// `--reasoning-effort` for whatever model it runs.
+pub(crate) fn effort_needs_model(kind: AgentKind) -> bool {
+    kind == AgentKind::Codex
+}
+
 /// Print an orange (256-color 208) warning to stderr. Used when a
 /// `--model` / `--reasoning-effort` value can't be applied to the chosen
 /// agent: we never fail the enrollment over it, just tell the operator we
@@ -118,36 +141,36 @@ pub fn agent_sections_for(
         }
     };
 
-    // Reasoning effort only applies to Codex, and only alongside an explicit
-    // model — it is meaningless on its own (see `CodexSection::effort_default`),
-    // so it is dropped when the model was absent or rejected above.
-    let effort = match (agent_kind, effort) {
+    // Reasoning effort applies to Codex and Muse Code only. Codex also needs
+    // an explicit model (see `CodexSection::effort_default`), so there it is
+    // dropped when the model was absent or rejected above.
+    let effort = match (efforts_for_agent(agent_kind), effort) {
         (_, None) => None,
-        (AgentKind::Codex, Some(e))
-            if !CODEX_EFFORTS.contains(&e.to_ascii_lowercase().as_str()) =>
-        {
+        (None, Some(_)) => {
             warn_model_fallback(&format!(
-                "reasoning effort {e:?} is not a recognized Codex tier \
-                 (expected one of {}); using the model's default effort.",
-                CODEX_EFFORTS.join(", ")
+                "--reasoning-effort only applies to the codex and muse-code agents, \
+                 not {}; ignoring it.",
+                agent_kind.display_name()
             ));
             None
         }
-        (AgentKind::Codex, Some(e)) if model.is_some() => Some(e.to_ascii_lowercase()),
-        (AgentKind::Codex, Some(_)) => {
+        (Some(tiers), Some(e)) if !tiers.contains(&e.to_ascii_lowercase().as_str()) => {
+            warn_model_fallback(&format!(
+                "reasoning effort {e:?} is not a recognized {} tier \
+                 (expected one of {}); using the model's default effort.",
+                agent_kind.display_name(),
+                tiers.join(", ")
+            ));
+            None
+        }
+        (Some(_), Some(_)) if effort_needs_model(agent_kind) && model.is_none() => {
             // Valid tier, but no applicable model to attach it to.
             warn_model_fallback(
                 "--reasoning-effort needs an applicable --model for the codex agent; ignoring it.",
             );
             None
         }
-        (_, Some(_)) => {
-            warn_model_fallback(&format!(
-                "--reasoning-effort only applies to the codex agent, not {}; ignoring it.",
-                agent_kind.display_name()
-            ));
-            None
-        }
+        (Some(_), Some(e)) => Some(e.to_ascii_lowercase()),
     };
 
     let mut codex = CodexSection::default();
@@ -165,7 +188,10 @@ pub fn agent_sections_for(
         AgentKind::CursorAgent => cursor_agent.model_default = model,
         AgentKind::OpenClaw => openclaw.model_default = model,
         AgentKind::Grok => grok.model_default = model,
-        AgentKind::MuseCode => muse_code.model_default = model,
+        AgentKind::MuseCode => {
+            muse_code.model_default = model;
+            muse_code.effort_default = effort;
+        }
         AgentKind::PidashAgent => {}
     }
     (codex, claude_code, cursor_agent, openclaw, grok, muse_code)
@@ -1088,6 +1114,35 @@ mod tests {
         let (codex, _, _, _, _, _) =
             agent_sections_for(AgentKind::Codex, Some("claude-opus-4-8"), Some("high"));
         assert_eq!(codex.model_default, None);
+        assert_eq!(codex.effort_default, None);
+    }
+
+    #[test]
+    fn muse_code_effort_is_applied() {
+        let (_, _, _, _, _, muse) =
+            agent_sections_for(AgentKind::MuseCode, Some("muse-spark"), Some("MAX"));
+        assert_eq!(muse.model_default.as_deref(), Some("muse-spark"));
+        assert_eq!(muse.effort_default.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn muse_code_effort_does_not_need_a_model() {
+        let (_, _, _, _, _, muse) = agent_sections_for(AgentKind::MuseCode, None, Some("ultra"));
+        assert_eq!(muse.model_default, None);
+        assert_eq!(muse.effort_default.as_deref(), Some("ultra"));
+    }
+
+    #[test]
+    fn muse_code_rejects_a_tier_it_does_not_have() {
+        let (_, _, _, _, _, muse) =
+            agent_sections_for(AgentKind::MuseCode, Some("muse-spark"), Some("turbo"));
+        assert_eq!(muse.effort_default, None);
+    }
+
+    #[test]
+    fn codex_rejects_a_muse_only_tier() {
+        let (codex, _, _, _, _, _) =
+            agent_sections_for(AgentKind::Codex, Some("gpt-5.5"), Some("max"));
         assert_eq!(codex.effort_default, None);
     }
 

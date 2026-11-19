@@ -1301,26 +1301,30 @@ fn apply_runner_changes(
     if let Some(effort) = &changes.reasoning_effort {
         let effort = effort.trim().to_ascii_lowercase();
         if effort.is_empty() {
-            if kind == AgentKind::Codex {
-                block.codex.effort_default = None;
+            if let Some(slot) = block.effort_slot_mut(kind) {
+                *slot = None;
             }
         } else {
-            if kind != AgentKind::Codex {
+            let Some(tiers) = crate::cli::runner_ops::efforts_for_agent(kind) else {
                 anyhow::bail!(
-                    "reasoning effort only applies to the Codex agent, not {}",
+                    "reasoning effort only applies to the Codex and Muse Code agents, not {}",
                     kind.display_name()
                 );
-            }
-            if !crate::cli::runner_ops::CODEX_EFFORTS.contains(&effort.as_str()) {
+            };
+            if !tiers.contains(&effort.as_str()) {
                 anyhow::bail!(
                     "reasoning effort {effort:?} is not one of {}",
-                    crate::cli::runner_ops::CODEX_EFFORTS.join(", ")
+                    tiers.join(", ")
                 );
             }
-            if block.codex.model_default.is_none() {
+            if crate::cli::runner_ops::effort_needs_model(kind)
+                && block.configured_model().is_none()
+            {
                 anyhow::bail!("reasoning effort needs a model; pick a Codex model first");
             }
-            block.codex.effort_default = Some(effort);
+            if let Some(slot) = block.effort_slot_mut(kind) {
+                *slot = Some(effort);
+            }
         }
     }
     Ok(())
@@ -6148,6 +6152,57 @@ mod tests {
     }
 
     #[test]
+    fn apply_changes_sets_and_clears_the_muse_code_effort() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut cfg, id) = changes_cfg(tmp.path(), AgentKind::MuseCode);
+        // Muse takes an effort without an explicit model.
+        apply_runner_changes(
+            &mut cfg,
+            id,
+            &RunnerChanges {
+                reasoning_effort: Some("Max".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(block(&cfg, id).configured_reasoning_effort(), Some("max"));
+
+        // Clearing the model keeps Muse's effort (it does not depend on one).
+        apply_runner_changes(
+            &mut cfg,
+            id,
+            &RunnerChanges {
+                model: Some(String::new()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(block(&cfg, id).configured_reasoning_effort(), Some("max"));
+
+        apply_runner_changes(
+            &mut cfg,
+            id,
+            &RunnerChanges {
+                reasoning_effort: Some(String::new()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(block(&cfg, id).configured_reasoning_effort(), None);
+
+        let err = apply_runner_changes(
+            &mut cfg,
+            id,
+            &RunnerChanges {
+                reasoning_effort: Some("turbo".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("is not one of"), "{err}");
+    }
+
+    #[test]
     fn apply_changes_switches_agent_and_applies_the_model_to_the_new_one() {
         let tmp = tempfile::tempdir().unwrap();
         let (mut cfg, id) = changes_cfg(tmp.path(), AgentKind::Codex);
@@ -6193,7 +6248,10 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(err.contains("only applies to the Codex agent"), "{err}");
+        assert!(
+            err.contains("only applies to the Codex and Muse Code agents"),
+            "{err}"
+        );
         let err = refused(
             &mut cfg,
             RunnerChanges {

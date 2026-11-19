@@ -1513,8 +1513,10 @@ pub const PIDASH_AGENT_NOT_EDITABLE_BODY: &str = r#"{"error":"pidash_agent_not_e
 /// A run is in flight or queued for the runner.
 pub const RECONFIGURE_BUSY_BODY: &str = r#"{"error":"runner_busy"}"#;
 
-/// Codex reasoning-effort tiers the daemon accepts (`runner_ops.rs`
-/// `CODEX_EFFORTS`); `""` clears back to the model default.
+/// Every reasoning-effort tier some agent accepts (Codex's and Muse Code's,
+/// see `runner_models::guards`); `""` clears back to the model default. The
+/// body need not name the agent, so the daemon re-checks the tier against
+/// the runner's agent and drops one that agent does not accept.
 pub const REASONING_EFFORTS: &[&str] = &crate::runner_models::guards::KNOWN_EFFORTS;
 
 /// The daemon-side settings a reconfigure may change. Absent means
@@ -1943,8 +1945,16 @@ mod tests {
             400
         );
         assert_eq!(
-            status_of(parse_reconfigure(&body(r#"{"reasoning_effort":"max"}"#)).unwrap_err()),
+            status_of(parse_reconfigure(&body(r#"{"reasoning_effort":"turbo"}"#)).unwrap_err()),
             400
+        );
+        // Muse Code's tiers pass; the daemon re-checks against its agent.
+        assert_eq!(
+            parse_reconfigure(&body(r#"{"agent":"muse-code","reasoning_effort":"max"}"#))
+                .unwrap()
+                .reasoning_effort
+                .as_deref(),
+            Some("max")
         );
         assert_eq!(
             status_of(parse_reconfigure(&body(r#"{"model":7}"#)).unwrap_err()),
