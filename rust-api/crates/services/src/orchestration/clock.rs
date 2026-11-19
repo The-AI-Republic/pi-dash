@@ -2859,6 +2859,98 @@ mod tests {
         assert_eq!(row.disarm_reason, "cap_hit");
     }
 
+    /// FX5 with the given optional stages switched (lean workflow §6).
+    fn policy_with_stages(review: bool, test: bool) -> ProjectClockPolicy {
+        ProjectClockPolicy {
+            review_enabled: review,
+            test_enabled: test,
+            ..fx5_policy()
+        }
+    }
+
+    #[test]
+    fn with_stages_reads_the_settings_blob() {
+        let custom = fx5_policy().with_stages(&serde_json::json!({
+            "agent_stages": {"mode": "custom", "review": false, "test": true}
+        }));
+        assert!(!custom.review_enabled);
+        assert!(custom.test_enabled);
+        // Auto ignores the stored toggles.
+        let auto = fx5_policy().with_stages(&serde_json::json!({
+            "agent_stages": {"mode": "auto", "review": false, "test": false}
+        }));
+        assert!(auto.review_enabled && auto.test_enabled);
+        // Missing key, a bad blob, or null all keep both stages on.
+        for blob in [
+            serde_json::json!({}),
+            serde_json::json!({"agent_stages": "nope"}),
+            serde_json::Value::Null,
+        ] {
+            let policy = fx5_policy().with_stages(&blob);
+            assert!(policy.review_enabled && policy.test_enabled, "{blob}");
+        }
+        assert!(ProjectClockPolicy::default().review_enabled);
+        assert!(ProjectClockPolicy::default().test_enabled);
+    }
+
+    #[test]
+    fn run_ended_in_a_switched_off_stage_is_not_in_bucket() {
+        // A manual run in a stage that is off (D6) ends without touching the
+        // clock: nothing re-runs there.
+        let off = clock_issue(Some(in_review()), policy_with_stages(false, true));
+        assert_eq!(run_ended_guard(&off, "review"), Some("not-in-bucket"));
+        let off = clock_issue(Some(in_test()), policy_with_stages(true, false));
+        assert_eq!(run_ended_guard(&off, "test"), Some("not-in-bucket"));
+        // Switched on, the same run is judged normally.
+        let on = clock_issue(Some(in_review()), policy_with_stages(true, false));
+        assert_eq!(run_ended_guard(&on, "review"), None);
+        // In Progress has no switch.
+        let progress = clock_issue(Some(in_progress()), policy_with_stages(false, false));
+        assert_eq!(run_ended_guard(&progress, "coding-task"), None);
+    }
+
+    #[test]
+    fn retick_in_a_switched_off_stage_is_refused() {
+        let stopped = || {
+            let mut row = armed_row(2);
+            row.enabled = false;
+            row.disarm_reason = "failure_needs_human".to_string();
+            Some(row)
+        };
+        let off = clock_issue(Some(in_review()), policy_with_stages(false, true));
+        let mut slot = stopped();
+        let outcome = reconcile(
+            &mut slot,
+            &off,
+            &TickerEvent::retick(true, None),
+            None,
+            false,
+            now(),
+            JITTER,
+            None,
+        )
+        .expect("retick reconciles");
+        assert_eq!(outcome.decision.reason, "not_ticking_state");
+        assert!(!outcome.decision.dispatch_now);
+        assert!(!slot.expect("row").enabled, "clock stays stopped");
+
+        // The same stop re-arms when the stage is on.
+        let on = clock_issue(Some(in_review()), policy_with_stages(true, true));
+        let mut slot = stopped();
+        let outcome = reconcile(
+            &mut slot,
+            &on,
+            &TickerEvent::retick(true, None),
+            None,
+            false,
+            now(),
+            JITTER,
+            None,
+        )
+        .expect("retick reconciles");
+        assert_eq!(outcome.decision.reason, "rearmed-after-failure");
+    }
+
     #[test]
     fn retick_rearms_a_failure_stop_without_granting() {
         for reason in ["failure_needs_human", "repeated_failure"] {

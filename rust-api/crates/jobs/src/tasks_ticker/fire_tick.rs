@@ -787,6 +787,42 @@ async fn write_rollback(
         .map_err(orm_sqlx)
 }
 
+/// The stage check before a claim (lean workflow §6.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageGate {
+    /// The issue sits in a stage that runs automatically: go on.
+    Proceed,
+    /// Not a stage at all (Done, Todo, no state): skip, leave the row.
+    Skip,
+    /// A registered stage the project switched off while the issue sat in
+    /// it: disarm so the ticker stops firing; the issue stays where it is.
+    Disarm { disarm_reason: TickerDisarmReason },
+}
+
+/// Decide the stage check from the seam's verdict (`runs_automatically`)
+/// and the issue's live state.
+pub fn stage_gate(runs_automatically: bool, state: Option<&StateView>) -> StageGate {
+    if runs_automatically {
+        return StageGate::Proceed;
+    }
+    let registered_stage = state.is_some_and(|state| {
+        pidash_types::orchestration::phase_config_for(Some(
+            &pidash_types::orchestration::StateRef {
+                group: &state.group,
+                name: &state.name,
+            },
+        ))
+        .is_some()
+    });
+    if registered_stage {
+        StageGate::Disarm {
+            disarm_reason: TickerDisarmReason::LeftTickingState,
+        }
+    } else {
+        StageGate::Skip
+    }
+}
+
 /// Per-ticker worker (`agent_ticker.py:78-345`).
 ///
 /// Returns `true` iff a continuation run was dispatched. `now` is the
@@ -825,34 +861,19 @@ pub async fn fire_tick(
             Ok(false)
         }
         PreDecision::Proceed { free_claim, cap } => {
-            if !seam.stage_runs_automatically(read.state.as_ref(), &read.project) {
-                // A registered stage the project switched off while the
-                // issue sat in it (§6.4): disarm so the ticker stops
-                // firing; the issue stays where it is.
-                let switched_off = read.state.as_ref().is_some_and(|state| {
-                    pidash_types::orchestration::phase_config_for(Some(
-                        &pidash_types::orchestration::StateRef {
-                            group: &state.group,
-                            name: &state.name,
-                        },
-                    ))
-                    .is_some()
-                });
-                if switched_off {
-                    write_preclaim_disarm(
-                        &mut tx,
-                        ticker_id,
-                        TickerDisarmReason::LeftTickingState,
-                        &now,
-                    )
-                    .await?;
+            let runs = seam.stage_runs_automatically(read.state.as_ref(), &read.project);
+            match stage_gate(runs, read.state.as_ref()) {
+                StageGate::Proceed => {}
+                StageGate::Skip => return Ok(false),
+                StageGate::Disarm { disarm_reason } => {
+                    write_preclaim_disarm(&mut tx, ticker_id, disarm_reason, &now).await?;
                     tx.commit().await?;
                     tracing::info!(
                         "agent_ticker.fire_tick: skip issue={} reason=stage-switched-off",
                         read.issue_id,
                     );
+                    return Ok(false);
                 }
-                return Ok(false);
             }
             if seam.has_active_run(read.issue_id).await? {
                 tracing::info!(
@@ -983,6 +1004,54 @@ pub fn register_fire_tick(registry: &mut Registry, pool: PgPool, seam: Arc<dyn F
 mod tests {
     use super::super::scan::fire_message;
     use super::*;
+
+    fn view(name: &str, group: &str) -> StateView {
+        StateView {
+            id: Uuid::nil(),
+            name: name.to_owned(),
+            group: group.to_owned(),
+        }
+    }
+
+    /// The live check the shim makes, for a project with these switches.
+    fn gate_for(state: Option<&StateView>, review: bool, test: bool) -> StageGate {
+        let project = ProjectTickCols {
+            stages: pidash_types::orchestration::StageSwitches { review, test },
+            ..Default::default()
+        };
+        let runs = crate::orchestration::shim_stage_runs_automatically(state, &project);
+        stage_gate(runs, state)
+    }
+
+    #[test]
+    fn stage_gate_disarms_a_stage_switched_off_under_the_issue() {
+        let disarm = StageGate::Disarm {
+            disarm_reason: TickerDisarmReason::LeftTickingState,
+        };
+        let progress = view("In Progress", "started");
+        let review = view("In Review", "review");
+        let test = view("In Test", "test");
+        // Both on: every stage proceeds.
+        for state in [&progress, &review, &test] {
+            assert_eq!(gate_for(Some(state), true, true), StageGate::Proceed);
+        }
+        // Turned off while the issue sits there: disarm, once.
+        assert_eq!(gate_for(Some(&review), false, true), disarm);
+        assert_eq!(gate_for(Some(&test), true, false), disarm);
+        // The other stage and In Progress are unaffected.
+        assert_eq!(gate_for(Some(&test), false, true), StageGate::Proceed);
+        assert_eq!(gate_for(Some(&progress), false, false), StageGate::Proceed);
+        // Not a stage: skip without touching the row, as before.
+        assert_eq!(
+            gate_for(Some(&view("Done", "completed")), true, true),
+            StageGate::Skip
+        );
+        assert_eq!(
+            gate_for(Some(&view("Code Review", "review")), false, true),
+            StageGate::Skip
+        );
+        assert_eq!(gate_for(None, true, true), StageGate::Skip);
+    }
     use crate::worker::{route_for, Route};
     use chrono::TimeZone;
     use serde_json::{json, Value};

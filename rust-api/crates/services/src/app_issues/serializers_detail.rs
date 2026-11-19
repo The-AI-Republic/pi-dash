@@ -1557,6 +1557,30 @@ mod tests {
     }
 
     #[test]
+    fn ticker_cannot_re_tick_in_a_switched_off_stage() {
+        // Lean workflow §6: Re-tick only applies where runs happen
+        // automatically; a stage switched off is a label.
+        let capped = ticker_row(10, 0, 0);
+        let review = StateRef {
+            group: "review",
+            name: "In Review",
+        };
+        let test = StateRef {
+            group: "test",
+            name: "In Test",
+        };
+        let on = policy();
+        assert!(agent_ticker_to_representation(&capped, &on, Some(&review)).can_re_tick);
+        assert!(agent_ticker_to_representation(&capped, &on, Some(&test)).can_re_tick);
+        let review_off = ProjectClockPolicy {
+            review_enabled: false,
+            ..policy()
+        };
+        assert!(!agent_ticker_to_representation(&capped, &review_off, Some(&review)).can_re_tick);
+        assert!(agent_ticker_to_representation(&capped, &review_off, Some(&test)).can_re_tick);
+    }
+
+    #[test]
     fn run_replays_bytes_with_diagnostic_and_live_state() {
         // TRACE: issue.py:1352-1371; unknown-error fallback; canonical usage
         // keys; observed id equal to the run id keeps the block.

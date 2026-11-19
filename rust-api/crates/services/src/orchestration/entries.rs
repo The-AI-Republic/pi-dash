@@ -2884,6 +2884,179 @@ mod tests {
         );
     }
 
+    // -- stage switches (lean agent workflow §6.2) -----------------------
+
+    /// Switch the fixture project's optional stages.
+    fn set_switches(seam: &mut FakeEntriesSeam, review: bool, test: bool) {
+        let policy = seam.policies.get_mut(&uid(0x20)).expect("policy");
+        policy.review_enabled = review;
+        policy.test_enabled = test;
+    }
+
+    /// An armed In Progress clock for the fixture issue.
+    fn armed_ticker(seam: &mut FakeEntriesSeam, now: DateTime<Utc>) {
+        let mut ticker = ticker_row(uid(0x01), now);
+        ticker.used = 2;
+        ticker.enabled = true;
+        ticker.next_run_at = Some(now);
+        seam.tickers.insert(uid(0x01), ticker);
+    }
+
+    #[tokio::test]
+    async fn stage_off_review_entry_creates_no_run_and_goes_dormant() {
+        let now = frozen_now();
+        let mut seam = FakeEntriesSeam::minimal();
+        set_switches(&mut seam, false, true);
+        set_issue_state(&mut seam, uid(0x32));
+        armed_ticker(&mut seam, now);
+
+        let from = seam.states[&uid(0x30)].clone();
+        let to = seam.states[&uid(0x32)].clone();
+        let mut preflight = FakePreflight::allow();
+        let outcome = handle_issue_state_transition(
+            &mut seam,
+            &mut preflight,
+            &transition_req(Some(from), Some(to), now),
+        )
+        .await
+        .expect("transition runs");
+        assert_eq!(outcome.reason, REASON_NOT_A_TRIGGER_STATE);
+        assert!(outcome.created_run.is_none());
+        assert!(seam.dispatched.is_empty());
+        // Left the bucket: the clock is kept but dormant, budget untouched.
+        let row = seam.tickers.get(&uid(0x01)).expect("ticker kept");
+        assert_eq!(row.next_run_at, None);
+        assert_eq!(row.used, 2);
+        assert!(preflight.calls.is_empty(), "no preflight for a label stage");
+    }
+
+    #[tokio::test]
+    async fn stage_off_test_entry_creates_no_run() {
+        let now = frozen_now();
+        let mut seam = FakeEntriesSeam::minimal();
+        seam.states.insert(uid(0x34), state_view("In Test", "test"));
+        set_switches(&mut seam, true, false);
+        set_issue_state(&mut seam, uid(0x34));
+        armed_ticker(&mut seam, now);
+
+        let from = seam.states[&uid(0x32)].clone();
+        let to = seam.states[&uid(0x34)].clone();
+        let mut preflight = FakePreflight::allow();
+        let outcome = handle_issue_state_transition(
+            &mut seam,
+            &mut preflight,
+            &transition_req(Some(from), Some(to), now),
+        )
+        .await
+        .expect("transition runs");
+        assert_eq!(outcome.reason, REASON_NOT_A_TRIGGER_STATE);
+        assert!(outcome.created_run.is_none());
+        assert!(seam.dispatched.is_empty());
+        assert_eq!(
+            seam.tickers.get(&uid(0x01)).expect("ticker").next_run_at,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn stage_off_label_to_label_touches_nothing() {
+        // Both optional stages off: In Review -> In Test is a move between
+        // two labels; no run, no clock row.
+        let now = frozen_now();
+        let mut seam = FakeEntriesSeam::minimal();
+        seam.states.insert(uid(0x34), state_view("In Test", "test"));
+        set_switches(&mut seam, false, false);
+        set_issue_state(&mut seam, uid(0x34));
+
+        let from = seam.states[&uid(0x32)].clone();
+        let to = seam.states[&uid(0x34)].clone();
+        let mut preflight = FakePreflight::allow();
+        let outcome = handle_issue_state_transition(
+            &mut seam,
+            &mut preflight,
+            &transition_req(Some(from), Some(to), now),
+        )
+        .await
+        .expect("transition runs");
+        assert_eq!(outcome.reason, REASON_NOT_A_TRIGGER_STATE);
+        assert!(outcome.created_run.is_none());
+        assert!(seam.tickers.is_empty());
+        assert!(seam.ticker_saves.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stage_on_review_still_creates_entry_run_when_test_is_off() {
+        let now = frozen_now();
+        let mut seam = FakeEntriesSeam::minimal();
+        set_switches(&mut seam, true, false);
+        set_issue_state(&mut seam, uid(0x32));
+        let mut seam = seam.with_bundle_state(uid(0x32));
+
+        let from = seam.states[&uid(0x30)].clone();
+        let to = seam.states[&uid(0x32)].clone();
+        let mut preflight = FakePreflight::allow();
+        let outcome = handle_issue_state_transition(
+            &mut seam,
+            &mut preflight,
+            &transition_req(Some(from), Some(to), now),
+        )
+        .await
+        .expect("transition runs");
+        let run_id = outcome.created_run.expect("review entry run");
+        assert_eq!(seam.runs[&run_id].phase_kind, "review");
+        assert_eq!(seam.dispatched, vec![run_id]);
+    }
+
+    #[tokio::test]
+    async fn stage_off_back_to_in_progress_creates_entry_run() {
+        // Leaving a label stage into In Progress (always on) is an entry.
+        let now = frozen_now();
+        let mut seam = FakeEntriesSeam::minimal();
+        set_switches(&mut seam, false, false);
+        let mut seam = seam.with_bundle();
+
+        let from = seam.states[&uid(0x32)].clone();
+        let to = seam.states[&uid(0x30)].clone();
+        let mut preflight = FakePreflight::allow();
+        let outcome = handle_issue_state_transition(
+            &mut seam,
+            &mut preflight,
+            &transition_req(Some(from), Some(to), now),
+        )
+        .await
+        .expect("transition runs");
+        let run_id = outcome.created_run.expect("coding entry run");
+        assert_eq!(seam.runs[&run_id].phase_kind, "coding-task");
+        assert!(seam.tickers.contains_key(&uid(0x01)), "clock armed");
+    }
+
+    #[tokio::test]
+    async fn stage_off_comment_and_run_dispatches_bare_stage_run() {
+        // Design §6.3 / D6: a human can still start a run in a stage that
+        // is switched off. It uses the stage's own recipe and never arms
+        // the clock.
+        let now = frozen_now();
+        let mut seam = FakeEntriesSeam::minimal();
+        set_switches(&mut seam, false, true);
+        set_issue_state(&mut seam, uid(0x32));
+        let mut seam = seam.with_bundle_state(uid(0x32));
+        let prior = uid(0x6A);
+        let mut prior_run = run_view(prior, AgentRunStatus::Completed);
+        prior_run.phase_kind = "coding-task".to_owned();
+        seam.runs.insert(prior, prior_run);
+        seam.latest.insert(uid(0x01), prior);
+
+        let outcome = handle_issue_comment(&mut seam, &comment_req(Some(uid(0x40)), now))
+            .await
+            .expect("comment runs");
+        let run_id = outcome.created_run.expect("bare run created");
+        assert_eq!(seam.runs[&run_id].phase_kind, "review");
+        assert_eq!(seam.dispatched, vec![run_id]);
+        assert!(seam.tickers.is_empty(), "no clock in a label stage");
+        assert!(seam.ticker_saves.is_empty());
+        assert_eq!(seam.rollbacks, 0);
+    }
+
     // -- comment matrix (FX-ORCH-07 M1-M10) ------------------------------
 
     fn comment_req(actor_id: Option<Uuid>, now: DateTime<Utc>) -> CommentRequest {

@@ -319,6 +319,47 @@ pub fn scheduler_run_refusal() -> Response {
     .into_response()
 }
 
+/// What a `finish` call still has to do, given the run's stored payload
+/// (steps 3–5 and the response's `ticking`). Pure, so the retry rules are
+/// unit-tested: a step whose id is already recorded is skipped, and the
+/// move is skipped when the issue already sits in the target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinishPlan<'a> {
+    /// Step 3: the comment to post, if any is still owed.
+    pub comment: Option<&'a str>,
+    /// Step 4: the hand-off to post as a comment, if still owed. Only for
+    /// a move into review or test, where humans read what the stage reads.
+    pub handoff_comment: Option<&'a str>,
+    /// Step 5: the state to move to, if the issue is not there yet.
+    pub move_to: Option<Uuid>,
+    /// Whether the clock keeps running after this run ends.
+    pub ticking: bool,
+}
+
+pub fn plan_finish<'a>(
+    req: &'a FinishRequest,
+    payload: &Map<String, Value>,
+    target: &StateChoice,
+    current_state: Option<Uuid>,
+    switches: StageSwitches,
+    project_ticking_enabled: bool,
+) -> FinishPlan<'a> {
+    FinishPlan {
+        comment: req
+            .comment
+            .as_deref()
+            .filter(|_| !payload.contains_key(FINISH_COMMENT_KEY)),
+        handoff_comment: req
+            .handoff
+            .as_deref()
+            .filter(|_| target.is_review_or_test() && !payload.contains_key(HANDOFF_COMMENT_KEY)),
+        move_to: (current_state != Some(target.id)).then_some(target.id),
+        ticking: stage_runs_automatically(Some(&target.as_ref()), switches)
+            && !req.result.stops_ticking()
+            && project_ticking_enabled,
+    }
+}
+
 /// The success body.
 pub fn finish_response(run_id: Uuid, state: &str, result: FinishResult, ticking: bool) -> Response {
     json_response(
@@ -447,11 +488,17 @@ async fn finish_inner(
     );
     let project_raw = project_id.to_string();
 
+    let plan = plan_finish(
+        &req,
+        &payload,
+        &target,
+        current_state_id,
+        switches,
+        project.policy.agent_ticking_enabled.unwrap_or(true),
+    );
+
     // Step 3: the comment.
-    if let (Some(comment), false) = (
-        req.comment.as_deref(),
-        payload.contains_key(FINISH_COMMENT_KEY),
-    ) {
+    if let Some(comment) = plan.comment {
         let id = post_agent_comment(
             state,
             &forwarded,
@@ -475,11 +522,7 @@ async fn finish_inner(
     }
 
     // Step 4: the hand-off, shown to humans where review and test read it.
-    if let (Some(handoff), true, false) = (
-        req.handoff.as_deref(),
-        to_review_or_test,
-        payload.contains_key(HANDOFF_COMMENT_KEY),
-    ) {
+    if let Some(handoff) = plan.handoff_comment {
         let id = post_agent_comment(
             state,
             &forwarded,
@@ -503,8 +546,8 @@ async fn finish_inner(
     }
 
     // Step 5: the move, as an agent state patch.
-    if current_state_id != Some(target.id) {
-        let body = serde_json::to_vec(&json!({ "state": target.id.to_string() }))
+    if let Some(target_id) = plan.move_to {
+        let body = serde_json::to_vec(&json!({ "state": target_id.to_string() }))
             .map_err(|_| Denial::ServerError)?;
         let response = match super::handlers_core::patch_issue_inner(
             state,
@@ -524,14 +567,11 @@ async fn finish_inner(
         }
     }
 
-    let ticking = stage_runs_automatically(Some(&target.as_ref()), switches)
-        && !req.result.stops_ticking()
-        && project.policy.agent_ticking_enabled.unwrap_or(true);
     Ok(finish_response(
         run.facts.id,
         &target.name,
         req.result,
-        ticking,
+        plan.ticking,
     ))
 }
 
@@ -881,6 +921,140 @@ mod tests {
 
         let (status, _request, body) = fixture_call("finish_scheduler_run");
         assert_eq!(body_of(scheduler_run_refusal()).await, (status, body));
+    }
+
+    fn finish_req(body: Value) -> FinishRequest {
+        parse_finish_body(&body).expect("valid")
+    }
+
+    #[test]
+    fn plan_first_attempt_does_every_step() {
+        let states = project_states();
+        let progress = states[1].id;
+        let review = &states[2];
+        let req = finish_req(json!({
+            "to": "In Review", "result": "done", "comment": "c", "handoff": "h"
+        }));
+        let payload = merged_payload(None, &req, "t");
+        let plan = plan_finish(
+            &req,
+            &payload,
+            review,
+            Some(progress),
+            StageSwitches::ALL,
+            true,
+        );
+        assert_eq!(
+            plan,
+            FinishPlan {
+                comment: Some("c"),
+                handoff_comment: Some("h"),
+                move_to: Some(review.id),
+                ticking: true,
+            }
+        );
+    }
+
+    #[test]
+    fn plan_retry_skips_what_already_happened() {
+        let states = project_states();
+        let progress = states[1].id;
+        let review = &states[2];
+        let req = finish_req(json!({
+            "to": "In Review", "result": "done", "comment": "c", "handoff": "h"
+        }));
+        // First attempt posted the comment, then failed: the retry posts
+        // only the hand-off and moves.
+        let mut stored = merged_payload(None, &req, "t");
+        stored.insert(FINISH_COMMENT_KEY.to_owned(), json!("c1"));
+        let payload = merged_payload(Some(&Value::Object(stored.clone())), &req, "t2");
+        let plan = plan_finish(
+            &req,
+            &payload,
+            review,
+            Some(progress),
+            StageSwitches::ALL,
+            true,
+        );
+        assert_eq!(plan.comment, None);
+        assert_eq!(plan.handoff_comment, Some("h"));
+        assert_eq!(plan.move_to, Some(review.id));
+
+        // Both comments posted, move failed: the retry only moves.
+        stored.insert(HANDOFF_COMMENT_KEY.to_owned(), json!("h1"));
+        let payload = merged_payload(Some(&Value::Object(stored.clone())), &req, "t3");
+        let plan = plan_finish(
+            &req,
+            &payload,
+            review,
+            Some(progress),
+            StageSwitches::ALL,
+            true,
+        );
+        assert_eq!((plan.comment, plan.handoff_comment), (None, None));
+        assert_eq!(plan.move_to, Some(review.id));
+
+        // Everything done: re-running after success changes nothing.
+        let plan = plan_finish(
+            &req,
+            &payload,
+            review,
+            Some(review.id),
+            StageSwitches::ALL,
+            true,
+        );
+        assert_eq!(
+            (plan.comment, plan.handoff_comment, plan.move_to),
+            (None, None, None)
+        );
+    }
+
+    #[test]
+    fn plan_posts_the_hand_off_only_for_review_or_test() {
+        let states = project_states();
+        let progress = states[1].id;
+        let completed = &states[4];
+        let req = finish_req(json!({
+            "to": "AI Completed", "result": "done", "comment": "answer", "handoff": "h"
+        }));
+        let payload = merged_payload(None, &req, "t");
+        let plan = plan_finish(
+            &req,
+            &payload,
+            completed,
+            Some(progress),
+            StageSwitches::ALL,
+            true,
+        );
+        assert_eq!(plan.comment, Some("answer"));
+        assert_eq!(plan.handoff_comment, None, "stored, not posted");
+        assert_eq!(payload[STAGE_HANDOFF_KEY], json!("h"));
+        assert_eq!(plan.move_to, Some(completed.id));
+    }
+
+    #[test]
+    fn plan_ticking_matrix() {
+        let states = project_states();
+        let progress = &states[1];
+        let review = &states[2];
+        let completed = &states[4];
+        let ticking = |to: &StateChoice, result: &str, enabled: bool| {
+            let req = finish_req(json!({"to": to.name, "result": result}));
+            let payload = merged_payload(None, &req, "t");
+            plan_finish(&req, &payload, to, None, StageSwitches::ALL, enabled).ticking
+        };
+        // Moving on to a stage that runs: its entry run follows.
+        assert!(ticking(review, "done", true));
+        // Staying with more to do, or waiting on something outside.
+        assert!(ticking(progress, "progressed", true));
+        assert!(ticking(progress, "waiting_on_external", true));
+        // A person must act: the clock stops.
+        assert!(!ticking(progress, "waiting_on_human", true));
+        assert!(!ticking(progress, "blocked", true));
+        // Left the stages: nothing ticks.
+        assert!(!ticking(completed, "done", true));
+        // The project switched automated runs off.
+        assert!(!ticking(review, "done", false));
     }
 
     #[test]

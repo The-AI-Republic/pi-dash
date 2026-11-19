@@ -2342,6 +2342,8 @@ mod tests {
         pr_fetch: PrFetch,
         pr_fetch_calls: Mutex<Vec<PrFetchCall>>,
         next_seq: Mutex<i64>,
+        /// `projects.settings` per project (lean workflow stage switches).
+        project_settings: HashMap<Uuid, Value>,
     }
 
     fn project_row(
@@ -2625,6 +2627,7 @@ mod tests {
                 pr_fetch: PrFetch::NetworkError,
                 pr_fetch_calls: Mutex::new(Vec::new()),
                 next_seq: Mutex::new(100),
+                project_settings: HashMap::new(),
             }
         }
 
@@ -2865,6 +2868,18 @@ mod tests {
             project_id: &Uuid,
         ) -> Result<Vec<StateRow>, StoreError> {
             Ok(self.states.get(project_id).cloned().unwrap_or_default())
+        }
+
+        async fn project_settings(
+            &self,
+            _deps: &AssistantDeps,
+            project_id: &Uuid,
+        ) -> Result<Value, StoreError> {
+            Ok(self
+                .project_settings
+                .get(project_id)
+                .cloned()
+                .unwrap_or_else(|| json!({})))
         }
 
         async fn project_labels(
@@ -4680,6 +4695,41 @@ mod tests {
             .await,
         );
         assert_eq!(out["new_state"], json!("In Review"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_coding_run_refuses_a_switched_off_stage() {
+        // Lean workflow §6.1: a move into a stage the project switched off
+        // starts no run, so the tool answers its non-ticking error and
+        // never transitions.
+        let mut store = FixtureStore::standard();
+        store.project_settings.insert(
+            uid(101),
+            json!({"agent_stages": {"mode": "custom", "review": false, "test": true}}),
+        );
+        let result = call(
+            &store,
+            "dispatch_coding_run",
+            json!({"issue_id": uid(301).to_string(), "target_state_id": uid(203).to_string()}),
+        )
+        .await;
+        assert_eq!(
+            retry_message(&result),
+            "That state does not start a coding run. Pick a delegated state such as 'In Progress' or 'In Review'."
+        );
+        assert!(store.transitions.lock().unwrap().is_empty());
+        assert!(store.record_writes.lock().unwrap().is_empty());
+        // In Progress has no switch: the default target still dispatches.
+        let out = ok_value(
+            call(
+                &store,
+                "dispatch_coding_run",
+                json!({"issue_id": uid(301).to_string()}),
+            )
+            .await,
+        );
+        assert_eq!(out["dispatched"], json!(true));
+        assert_eq!(out["new_state"], json!("In Progress"));
     }
 
     #[tokio::test]
