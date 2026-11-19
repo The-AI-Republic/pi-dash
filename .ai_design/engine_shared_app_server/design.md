@@ -82,8 +82,8 @@ Enforced at every layer, so an old client cannot reach the removed path.
   runner row opens its detail/overview, never `/runners/chat/:runnerId`.
 - A direct visit to the chat route for an own-agent runner shows a short
   "chat is available on the Pi Dash Agent" state instead of a composer.
-- Existing sessions on own-agent runners: hidden from the history list (see
-  O3).
+- Existing sessions on own-agent runners are deleted (O3), so the history list
+  needs no special case.
 
 ### 3.2 Cloud (Python `apps/api/pi_dash/runner/views/chat.py` and Rust `rust-api/crates/api/src/runner_runs/chat.rs`)
 
@@ -146,8 +146,10 @@ neither spawns an engine anymore.
 - **Crash:** the daemon restarts the child with backoff. Turns in progress fail
   (`chat_failed { code: "engine_restarted" }`); sessions keep their thread id
   and resume on their next warm or send (`thread/resume`).
-- **Model profile change:** see O4. MVP: wait until no turn is running, then
-  restart the child; new and resumed threads read the new config.
+- **Model profile change (O4):** wait until no turn is running, then restart
+  the child; open sessions resume their threads on the next warm or send and
+  read the new config. New turns that arrive while a restart is waiting are
+  accepted as usual; the restart waits for them too.
 
 One server per daemon. The engine uses one `CODEX_HOME` per account
 (`<daemon data>/engine/<account>/codex-home`); a daemon has one engine
@@ -238,7 +240,7 @@ routes by `threadId`:
 - The desktop IPC chat protocol and the desktop app.
 - Own-agent runners' task behaviour.
 
-## 6. Open decisions
+## 6. Decision details
 
 **O1. Default chat folder. Resolved: `<data_dir>/engine/chat`.** The home
 directory (`~`) was considered first and rejected: `resolve_engine_chat_folder`
@@ -257,20 +259,36 @@ and edit dotfiles. `<data_dir>/engine/chat`:
 Trade-off: it is a hidden location, so files a chat creates are hard for the
 user to find. Folder selection (O2) addresses that later.
 
-**O2. Folder selection.** Later: the user picks the folder per cloud chat. The
+**O2. Folder selection. Deferred.** Later: the user picks the folder per cloud chat. The
 cloud passes it in the existing `cwd` field; the daemon validates it with the
 same rule as desktop chat.
 
-**O3. Existing chat history on own-agent runners.** Hide it (recommended), keep
-it readable but closed, or delete it in a migration.
+**O3. Existing chat history on own-agent runners. Resolved: delete it.** A data
+migration deletes every `agent_chat_session` whose runner is not an engine
+runner (`provisioning != desktop_bundled`), with its messages, events,
+approvals and dedupe rows:
 
-**O4. Picking up a new model profile.** Restart when idle (MVP), or verify that
-Codex reads updated `config.toml` for new threads without a restart, which
-would avoid restarts entirely (spike S2).
+- Children are deleted explicitly before the sessions. Django's `CASCADE` is
+  enforced by the ORM, not by the database, so raw SQL must not rely on it
+  (the Rust runner delete in `rust-api/crates/services/src/runner_enroll/delete.rs`
+  deletes chat children explicitly for the same reason).
+- It ships in both migration tracks: a Django migration in
+  `apps/api/pi_dash/runner/migrations/` and its SQL port in
+  `private-pi-dash/rust-cloud/crates/cloud-migration/sql/`.
+- It runs only after the cloud refusal (§3.2) is live on every backend, so no
+  new own-agent session can be created after the delete.
+- It cannot be undone; there is no backup step.
 
-**O5. Concurrency limit.** A cap on simultaneous running turns in the shared
-server (all sessions together), with `chat_failed { code: "engine_busy" }`
-beyond it. Proposed default: 4.
+**O4. Picking up a new model profile. Resolved: restart when idle for MVP.**
+See §4.2. Spike S2 (does Codex reread `config.toml` for new threads?) stays as
+a later optimisation that would remove the restart.
+
+**O5. Concurrency limit. Resolved: at most 5 running turns.** The cap counts
+turns in progress across every session in the shared server (desktop and
+cloud together); open, idle sessions do not count. A send beyond the cap fails
+with `chat_failed { code: "engine_busy" }` and the composer shows "the Pi Dash
+Agent is busy, try again shortly". No queue in MVP. The cap is a daemon
+constant, not user configuration.
 
 ## 7. Risks
 
@@ -304,15 +322,24 @@ beyond it. Proposed default: 4.
 
 1. **Part A:** web gating, cloud refusal (Python and Rust), runner defensive
    refusal, supervisor cleanup for own-agent runners. Independent of Part B.
-2. **Spikes S1–S3.**
-3. **`EngineChatServer`** in the daemon, with desktop local chat moved onto it.
-4. **Cloud engine chat** moved onto it, the `<data_dir>/engine/chat` folder, and the
+2. **History delete (O3):** the data migration, in both tracks, after step 1
+   is deployed everywhere.
+3. **Spikes S1–S3.**
+4. **`EngineChatServer`** in the daemon, with desktop local chat moved onto it,
+   the restart-when-idle profile refresh (O4) and the 5-turn cap (O5).
+5. **Cloud engine chat** moved onto it, the `<data_dir>/engine/chat` folder, and the
    busy coupling removed for engine runners.
 
 ## 10. Acceptance
 
 - An own-agent runner shows no chat in the web app, the cloud refuses chat for
   it with `chat_not_supported`, and its runs behave as before.
+- After the migration, no chat session, message, event, approval or dedupe row
+  references an own-agent runner.
+- With 5 turns running in the shared server, a sixth send fails with
+  `engine_busy`; it succeeds once one of the 5 finishes.
+- A model profile change while a turn is running restarts the shared child
+  only after that turn ends.
 - With the engine available, the daemon has exactly one
   `pidash-agent-engine app-server` child that is not attached to a run.
 - Opening a new desktop chat starts no engine process; its first reply starts
