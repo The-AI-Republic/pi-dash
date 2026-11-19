@@ -8,6 +8,7 @@ import type { RunnerModelRow } from "@pidash/api-client";
 import {
   RUNNER_MODEL_AGENTS,
   RUNNER_MODEL_EFFORTS,
+  effortsForAgent,
   formatEfforts,
   nextSortOrder,
   rowsForAgent,
@@ -40,6 +41,12 @@ describe("agent sections", () => {
       "muse-code",
     ]);
     expect(RUNNER_MODEL_EFFORTS).toEqual(["low", "medium", "high", "xhigh"]);
+  });
+
+  it("offers Muse Code its own wider effort set", () => {
+    expect(effortsForAgent("muse-code")).toEqual(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
+    expect(effortsForAgent("codex")).toEqual(RUNNER_MODEL_EFFORTS);
+    expect(formatEfforts(row({ agent: "muse-code", reasoning_efforts: ["minimal", "max"] }))).toBe("Minimal, Max");
   });
 
   it("filters and orders one agent's rows", () => {

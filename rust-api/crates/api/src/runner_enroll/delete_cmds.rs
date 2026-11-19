@@ -1513,8 +1513,10 @@ pub const PIDASH_AGENT_NOT_EDITABLE_BODY: &str = r#"{"error":"pidash_agent_not_e
 /// A run is in flight or queued for the runner.
 pub const RECONFIGURE_BUSY_BODY: &str = r#"{"error":"runner_busy"}"#;
 
-/// Codex reasoning-effort tiers the daemon accepts (`runner_ops.rs`
-/// `CODEX_EFFORTS`); `""` clears back to the model default.
+/// Every reasoning-effort tier some agent accepts (Codex's and Muse Code's,
+/// see `runner_models::guards`); `""` clears back to the model default. The
+/// body need not name the agent, so the daemon re-checks the tier against
+/// the runner's agent and drops one that agent does not accept.
 pub const REASONING_EFFORTS: &[&str] = &crate::runner_models::guards::KNOWN_EFFORTS;
 
 /// The daemon-side settings a reconfigure may change. Absent means
@@ -1625,6 +1627,34 @@ struct ReconfigureTarget {
     name: String,
     provisioning: String,
     dev_machine_id: Option<Uuid>,
+    /// The agent the runner reports through its `agent:<kind>` capability,
+    /// in `--agent` spelling (`muse-code`); `None` for a daemon too old to
+    /// report one.
+    agent: Option<String>,
+}
+
+/// The `--agent` spelling of the runner's `agent:<kind>` capability.
+fn reported_agent(capabilities: &serde_json::Value) -> Option<String> {
+    capabilities.as_array()?.iter().find_map(|capability| {
+        let kind = capability.as_str()?.strip_prefix("agent:")?;
+        Some(kind.trim().replace('_', "-"))
+    })
+}
+
+/// Whether `effort` is a tier the agent the runner will run accepts: the
+/// body's new `agent` when it switches, else the runner's reported agent.
+/// An unknown agent (old daemon) falls back to the union; the daemon
+/// re-checks either way.
+fn effort_fits_agent(changes: &RunnerReconfigure, reported: Option<&str>) -> bool {
+    let Some(effort) = changes
+        .reasoning_effort
+        .as_deref()
+        .filter(|e| !e.is_empty())
+    else {
+        return true;
+    };
+    let agent = changes.agent.as_deref().or(reported);
+    crate::runner_models::guards::is_effort_for_agent(agent, effort)
 }
 
 async fn reconfigure_target(pool: &PgPool, runner_id: Uuid) -> Result<ReconfigureTarget, Response> {
@@ -1639,6 +1669,7 @@ async fn reconfigure_target(pool: &PgPool, runner_id: Uuid) -> Result<Reconfigur
         name: row.name,
         provisioning: row.provisioning,
         dev_machine_id: row.dev_machine_id,
+        agent: reported_agent(&row.capabilities),
     })
 }
 
@@ -1687,6 +1718,9 @@ pub async fn runner_reconfigure(
     };
     if target.provisioning == "desktop_bundled" {
         return bad_request(PIDASH_AGENT_NOT_EDITABLE_BODY);
+    }
+    if !effort_fits_agent(&changes, target.agent.as_deref()) {
+        return bad_request(INVALID_REASONING_EFFORT_BODY);
     }
     let Some(machine_id) = target.dev_machine_id else {
         return conflict(NO_DEV_MACHINE_BODY);
@@ -1918,6 +1952,34 @@ mod tests {
     }
 
     #[test]
+    fn reconfigure_effort_is_checked_against_the_runner_agent() {
+        let caps = serde_json::json!(["os:linux", "agent:muse_code"]);
+        assert_eq!(reported_agent(&caps).as_deref(), Some("muse-code"));
+        assert_eq!(reported_agent(&serde_json::json!(["os:linux"])), None);
+
+        let effort = |agent: Option<&str>, effort: &str| RunnerReconfigure {
+            agent: agent.map(str::to_string),
+            reasoning_effort: Some(effort.to_string()),
+            ..Default::default()
+        };
+        // A Codex runner refuses a Muse-only tier; a Muse runner takes it.
+        assert!(!effort_fits_agent(&effort(None, "max"), Some("codex")));
+        assert!(effort_fits_agent(&effort(None, "max"), Some("muse-code")));
+        // Switching agents checks against the new one.
+        assert!(!effort_fits_agent(
+            &effort(Some("codex"), "minimal"),
+            Some("muse-code")
+        ));
+        assert!(effort_fits_agent(
+            &effort(Some("muse-code"), "ultra"),
+            Some("codex")
+        ));
+        // Unknown agent (old daemon): the union; "" always clears.
+        assert!(effort_fits_agent(&effort(None, "max"), None));
+        assert!(effort_fits_agent(&effort(None, ""), Some("codex")));
+    }
+
+    #[test]
     fn reconfigure_treats_blank_dir_and_agent_as_unchanged() {
         let changes = parse_reconfigure(&body(r#"{"working_dir":"  ","agent":"","model":"m"}"#))
             .expect("valid");
@@ -1943,8 +2005,17 @@ mod tests {
             400
         );
         assert_eq!(
-            status_of(parse_reconfigure(&body(r#"{"reasoning_effort":"max"}"#)).unwrap_err()),
+            status_of(parse_reconfigure(&body(r#"{"reasoning_effort":"turbo"}"#)).unwrap_err()),
             400
+        );
+        // Muse Code's tiers pass the body check; the handler then checks the
+        // tier against the runner's agent (`effort_fits_agent`).
+        assert_eq!(
+            parse_reconfigure(&body(r#"{"agent":"muse-code","reasoning_effort":"max"}"#))
+                .unwrap()
+                .reasoning_effort
+                .as_deref(),
+            Some("max")
         );
         assert_eq!(
             status_of(parse_reconfigure(&body(r#"{"model":7}"#)).unwrap_err()),

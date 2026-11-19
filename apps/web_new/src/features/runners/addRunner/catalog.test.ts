@@ -164,3 +164,22 @@ describe("server catalog (NEWPIDASH-169)", () => {
     expect(preselectedId([{ ...grokRows[0]!, is_preselected: false }])).toBe(DEFAULT_MODEL_ID);
   });
 });
+
+describe("Muse Code efforts", () => {
+  it("crosses a Muse row with its effort tiers and labels them", () => {
+    const choices = choicesForAgent([
+      {
+        model: "muse-spark",
+        label: "Muse Spark",
+        reasoning_efforts: ["high", "max"],
+        sort_order: 0,
+        is_preselected: true,
+      },
+    ]);
+    expect(choices.slice(1)).toEqual([
+      { id: "muse-spark:high", label: "Muse Spark (High)", model: "muse-spark", reasoningEffort: "high" },
+      { id: "muse-spark:max", label: "Muse Spark (Max)", model: "muse-spark", reasoningEffort: "max" },
+    ]);
+    expect(modelContributionFrom(choices, "muse-spark:max")).toEqual({ model: "muse-spark", reasoningEffort: "max" });
+  });
+});

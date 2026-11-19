@@ -625,10 +625,22 @@ impl RunnerConfig {
         }
     }
 
-    /// The configured Codex reasoning effort; `None` for other agents.
+    /// The configured reasoning effort; `None` for agents without one
+    /// (only Codex and Muse Code take an effort tier).
     pub fn configured_reasoning_effort(&self) -> Option<&str> {
         match self.agent.kind {
             AgentKind::Codex => self.codex.effort_default.as_deref(),
+            AgentKind::MuseCode => self.muse_code.effort_default.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// The reasoning-effort slot of `kind`'s section; `None` for agents
+    /// without an effort knob (only Codex and Muse Code have one).
+    pub fn effort_slot_mut(&mut self, kind: AgentKind) -> Option<&mut Option<String>> {
+        match kind {
+            AgentKind::Codex => Some(&mut self.codex.effort_default),
+            AgentKind::MuseCode => Some(&mut self.muse_code.effort_default),
             _ => None,
         }
     }
@@ -1017,6 +1029,12 @@ pub struct MuseCodeSection {
     pub binary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_default: Option<String>,
+    /// `muse exec --reasoning-effort` tier (`none` / `minimal` / `low` /
+    /// `medium` / `high` / `xhigh` / `max` / `ultra`). `None` omits the flag
+    /// so Muse applies its own default. Like Codex's, only meaningful
+    /// alongside `model_default` (the web picker pairs tiers with models).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_default: Option<String>,
 }
 
 fn default_muse_binary() -> String {
@@ -1028,6 +1046,7 @@ impl Default for MuseCodeSection {
         Self {
             binary: default_muse_binary(),
             model_default: None,
+            effort_default: None,
         }
     }
 }

@@ -7,6 +7,8 @@
 // stays in code (the catalog never adds agents).
 import { isApiError, type RunnerModelRow } from "@pidash/api-client";
 
+import { EFFORT_LABELS } from "../runners/index.js";
+
 /** Agents in section order, with their display names. */
 export const RUNNER_MODEL_AGENTS: readonly { agent: string; label: string }[] = [
   { agent: "claude-code", label: "Claude Code" },
@@ -32,13 +34,16 @@ export const OPENHUB_SLUG_HINT = "The slug must match OpenHub exactly — a typo
 /** Effort values offered by Codex models (the allowed set). */
 export const RUNNER_MODEL_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
 
-/** Effort checkbox labels. */
-export const RUNNER_MODEL_EFFORT_LABELS: Record<string, string> = {
-  low: "Low",
-  medium: "Medium",
-  high: "High",
-  xhigh: "Extra High",
-};
+/** Effort values `muse exec --reasoning-effort` accepts (the server's `MUSE_CODE_EFFORTS`). */
+export const MUSE_CODE_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
+
+/** The effort checkboxes one agent's rows offer: Muse Code has its own wider set. */
+export function effortsForAgent(agent: string): readonly string[] {
+  return agent === "muse-code" ? MUSE_CODE_EFFORTS : RUNNER_MODEL_EFFORTS;
+}
+
+/** Effort checkbox labels: the add-runner picker's, so the two never drift. */
+export const RUNNER_MODEL_EFFORT_LABELS: Record<string, string> = EFFORT_LABELS;
 
 /** Page heading. */
 export const RUNNER_MODELS_HEADING = "Runner models";
@@ -82,7 +87,7 @@ export function formErrorMessage(error: unknown): string {
       case "empty_label":
         return "The label must not be empty.";
       case "invalid_effort":
-        return "Efforts must be low, medium, high, or xhigh.";
+        return "One of the efforts is not available for this agent.";
       case "duplicate_effort":
         return "Each effort may appear once.";
       case "duplicate_model":
