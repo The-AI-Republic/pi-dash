@@ -1,6 +1,6 @@
 # Lean agent workflow: configurable stages and lighter run prompts
 
-**Status:** implementation-ready (2026-11-19). Reviewed against the code at `8e8062beb`.
+**Status:** implemented in PR #3403 (2026-11-19), issues A, B and C; see §14 for deviations and the remaining ops steps. Reviewed against the code at `8e8062beb`.
 
 **Scope:** `rust-api/` (server), `runner/` (the `pidash` CLI), `apps/web_new` and `packages/api-client` (project settings). The Django server (`apps/api/`) is out of scope and gets no changes. No database migration is needed.
 
@@ -795,3 +795,27 @@ Write it to a file and pass it with `--handoff-file`:
 
 A move to In Review or In Test is refused without it. For a task that ends at {{ stages.final_state }}, your answer goes in `--comment-file` and no hand-off is needed.
 ```
+
+## 14. Implementation notes
+
+Implemented in PR #3403 as one commit per issue (A, B, C).
+
+**Deviations from the text above**
+
+- `finish` lives in `api/src/v1_work_items/handlers_finish.rs`, not `handlers_actions.rs`. It posts comments and moves the issue by calling the existing v1 comment-create and issue-patch handlers with the run's `X-Pi-Dash-Run-Id`, so their gates, attribution and transition hooks apply unchanged.
+- `finish` takes an optional `as_agent` (CLI `--as-agent`) for the comment's speaker label; it defaults to `AI Agent`.
+- The hand-off query tests `done_payload->>'stage_handoff' IS NOT NULL` instead of the jsonb `?` operator.
+- `stages.path` lists In Review or In Test only when the project has that state.
+- The auto-pause guard in `dispatch.rs` keeps the static registry check (`phase_config_for`): only In Progress auto-pauses, and it always runs automatically.
+- `phases.golden.json`'s `is_ticking_state` vector key is renamed `stage_runs_automatically`.
+- The Django mirror contract tests for prompting are removed; the section-order difference is recorded as DIFF-54 in `.ai_design/validation/differences.md`.
+
+**Measured prompt sizes** (software work type, excluding `pidash-cli`): coding-task 27.3 KB, review 7.9 KB, test 8.9 KB, against budgets of 50 / 12 / 13 KB.
+
+**Not done in code (ops)**
+
+- Cut a runner release containing `pidash run finish` (issue B step 5).
+- Raise `MIN_RUNNER_VERSION` to that release in the deploy configuration (issue C step 6).
+- Run `revalidate_section_overrides` after the deploy (§9.5).
+- Run the measurement in §10.3 on the test instance (issue C step 7).
+- NEWPIDASH-305 (#3388) has not merged. Until it does, every project renders with `final_state` null and finishes with `waiting_on_human`, per §7.
