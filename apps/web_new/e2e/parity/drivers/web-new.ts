@@ -14272,7 +14272,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async desktopRuntimeApprovalModeVisible(): Promise<boolean> {
-    return (await this.page.getByRole("group", { name: "Approval mode" }).count()) > 0;
+    return (await this.page.getByRole("combobox", { name: "Approval mode" }).count()) > 0;
   }
 
   async desktopRuntimeRuntimeBannerVisible(): Promise<boolean> {
