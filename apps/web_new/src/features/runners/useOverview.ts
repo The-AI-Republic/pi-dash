@@ -51,10 +51,7 @@ export function useRunnersOverview(workspaceSlug: string): RunnersOverviewData {
         .mutateAsync(options?.purgeLocal === undefined ? runnerId : { runnerId, purgeLocal: options.purgeLocal })
         .then(() => undefined),
     onRevoke: (runnerId) => revoke.mutateAsync(runnerId).then(() => undefined),
-    onSetPaused: (runnerId, paused) =>
-      setPaused
-        .mutateAsync({ runnerId, paused })
-        .then((row) => ({ inFlight: "in_flight_runs" in row ? row.in_flight_runs.length : 0 })),
+    onSetPaused: (runnerId, paused) => setPaused.mutateAsync({ runnerId, paused }),
     pods: pods.data,
     podsLoading: area.allowed && pods.isPending,
     podsFailed: area.allowed && pods.isError,

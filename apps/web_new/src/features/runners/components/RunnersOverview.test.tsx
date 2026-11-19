@@ -612,8 +612,8 @@ describe("RunnersOverview per-runner pause", () => {
 
   it("words the in-flight notice and skips it when nothing is held", () => {
     expect(runnerPausedInFlightText(0)).toBeNull();
-    expect(runnerPausedInFlightText(1)).toBe("1 run already on this runner will still finish.");
-    expect(runnerPausedInFlightText(3)).toBe("3 runs already on this runner will still finish.");
+    expect(runnerPausedInFlightText(1)).toBe("1 run already assigned to this runner will still run.");
+    expect(runnerPausedInFlightText(3)).toBe("3 runs already assigned to this runner will still run.");
   });
 
   it("hides the toggle without a writer", () => {
@@ -628,7 +628,10 @@ describe("RunnersOverview per-runner pause", () => {
     await userEvent.click(screen.getByRole("button", { name: "Pause" }));
     await waitFor(() => expect(onSetPaused).toHaveBeenCalledWith("r-1", true));
     await waitFor(() =>
-      expect(notifyInfo).toHaveBeenCalledWith(RUNNER_PAUSED_TITLE, "2 runs already on this runner will still finish.")
+      expect(notifyInfo).toHaveBeenCalledWith(
+        RUNNER_PAUSED_TITLE,
+        "2 runs already assigned to this runner will still run."
+      )
     );
   });
 

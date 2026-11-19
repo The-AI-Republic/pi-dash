@@ -119,13 +119,13 @@ describe("useRunnersOverview", () => {
     expect(revokeMutate).toHaveBeenCalledWith("r-2");
   });
 
-  it("counts the runs a pause leaves on the runner, and none on resume", async () => {
+  it("passes the pause toggle and its in-flight count through", async () => {
     useRunners.mockReturnValue({ data: [] });
     const { result } = renderHook(() => useRunnersOverview("acme"), { wrapper });
-    pauseMutate.mockResolvedValueOnce({ id: "r-1", in_flight_runs: [{ id: "x", status: "running" }] });
+    pauseMutate.mockResolvedValueOnce({ inFlight: 1 });
     await expect(result.current.onSetPaused("r-1", true)).resolves.toEqual({ inFlight: 1 });
     expect(pauseMutate).toHaveBeenCalledWith({ runnerId: "r-1", paused: true });
-    pauseMutate.mockResolvedValueOnce({ id: "r-1" });
+    pauseMutate.mockResolvedValueOnce({ inFlight: 0 });
     await expect(result.current.onSetPaused("r-1", false)).resolves.toEqual({ inFlight: 0 });
     expect(pauseMutate).toHaveBeenCalledWith({ runnerId: "r-1", paused: false });
   });

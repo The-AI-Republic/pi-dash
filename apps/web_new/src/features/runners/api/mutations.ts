@@ -12,9 +12,7 @@ import {
   resumeRunner,
   revokeRunner,
   updateRunner,
-  type Runner,
   type RunnerPatch,
-  type RunnerPauseResult,
 } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
@@ -71,13 +69,21 @@ export interface SetRunnerPausedInput {
 
 /**
  * Pause or resume dispatch to one runner (RUN-010). A pause answers the
- * runs the runner still holds; a resume answers the bare row.
+ * runs the runner still holds (counted as `inFlight`); a resume holds none.
  */
 export function useSetRunnerPaused(workspaceSlug: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (input: SetRunnerPausedInput): Promise<RunnerPauseResult | Runner> =>
-      input.paused ? pauseRunner(getAppClient(), input.runnerId) : resumeRunner(getAppClient(), input.runnerId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: runnersKeys.all(workspaceSlug) }),
+    mutationFn: async (input: SetRunnerPausedInput): Promise<{ inFlight: number }> => {
+      if (!input.paused) {
+        await resumeRunner(getAppClient(), input.runnerId);
+        return { inFlight: 0 };
+      }
+      const paused = await pauseRunner(getAppClient(), input.runnerId);
+      return { inFlight: paused.in_flight_runs.length };
+    },
+    // Settled, not success: a refusal (409 runner_revoked, 403) means the
+    // row is stale, so refetch it either way.
+    onSettled: () => queryClient.invalidateQueries({ queryKey: runnersKeys.all(workspaceSlug) }),
   });
 }

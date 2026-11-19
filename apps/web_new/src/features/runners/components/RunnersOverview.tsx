@@ -48,8 +48,8 @@ export const RUNNER_PAUSED_HINT =
 export function runnerPausedInFlightText(inFlight: number): string | null {
   if (inFlight <= 0) return null;
   return inFlight === 1
-    ? "1 run already on this runner will still finish."
-    : `${inFlight} runs already on this runner will still finish.`;
+    ? "1 run already assigned to this runner will still run."
+    : `${inFlight} runs already assigned to this runner will still run.`;
 }
 
 /**
@@ -197,13 +197,13 @@ export function RunnersOverview({
   const [pending, setPending] = React.useState<PendingAction | null>(null);
   const [working, setWorking] = React.useState(false);
   const [podDialog, setPodDialog] = React.useState<PodDialog>(null);
-  // Runner whose pause toggle is in flight; disables its button.
-  const [togglingPauseId, setTogglingPauseId] = React.useState<string | null>(null);
+  // Runners whose pause toggle is in flight; each disables its own button.
+  const [togglingPauseIds, setTogglingPauseIds] = React.useState<ReadonlySet<string>>(() => new Set());
 
   async function togglePause(runner: Runner): Promise<void> {
     if (onSetPaused === undefined) return;
     const pause = !runnerIsPaused(runner);
-    setTogglingPauseId(runner.id);
+    setTogglingPauseIds((ids) => new Set(ids).add(runner.id));
     try {
       const { inFlight } = await onSetPaused(runner.id, pause);
       // Pausing never interrupts work the runner already holds, so say so.
@@ -212,7 +212,11 @@ export function RunnersOverview({
     } catch {
       notifyError(RUNNER_ACTION_FAILED_TITLE, pause ? PAUSE_RUNNER_FAILED : RESUME_RUNNER_FAILED);
     } finally {
-      setTogglingPauseId(null);
+      setTogglingPauseIds((ids) => {
+        const next = new Set(ids);
+        next.delete(runner.id);
+        return next;
+      });
     }
   }
 
@@ -340,7 +344,7 @@ export function RunnersOverview({
                         <Button
                           size="small"
                           variant="secondary"
-                          disabled={togglingPauseId === runner.id}
+                          disabled={togglingPauseIds.has(runner.id)}
                           onClick={() => void togglePause(runner)}
                         >
                           {runnerIsPaused(runner) ? "Resume" : "Pause"}
