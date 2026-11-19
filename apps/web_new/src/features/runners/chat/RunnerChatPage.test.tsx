@@ -49,7 +49,12 @@ vi.mock("./historyQueries.js", () => ({
 }));
 vi.mock("../../../shared/dictation/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/dictation/index.js")>();
-  return { ...original, useDictationConfig: hooks.useDictationConfig };
+  return {
+    ...original,
+    useDictationConfig: hooks.useDictationConfig,
+    // Dictation ships hidden; switched on here so the dormant control stays covered.
+    DICTATION_UI_ENABLED: true,
+  };
 });
 
 import { makeRunner, makeSession, testClient, wrapper } from "./harness.js";

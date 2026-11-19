@@ -21,6 +21,7 @@ import {
 } from "../api/mutations.js";
 import { useAssistantLlm, useAssistantVoice } from "../api/queries.js";
 import { endpointForSave, keyForSave } from "../lib/rules.js";
+import { DICTATION_UI_ENABLED } from "../../../shared/dictation/index.js";
 import { AssistantSectionsSkeleton } from "./AssistantSectionsSkeleton.js";
 import { emptyProviderForm, providerFormFrom, ProviderForm, type ProviderFormValues } from "./ProviderForm.js";
 import { ToolServersSection } from "./ToolServersSection.js";
@@ -108,17 +109,20 @@ export function AssistantSettingsPage(): React.ReactElement {
         removing={removeLlm.isPending}
       />
 
-      <VoiceForm
-        config={voice.data}
-        values={voiceForm}
-        onChange={setVoiceForm}
-        onSave={saveVoiceConfig}
-        onTest={() => testVoice.mutate()}
-        onRemove={() => removeVoice.mutate()}
-        saving={saveVoice.isPending}
-        testing={testVoice.isPending}
-        removing={removeVoice.isPending}
-      />
+      {/* Dictation is hidden until it ships (DICTATION_UI_ENABLED). */}
+      {DICTATION_UI_ENABLED ? (
+        <VoiceForm
+          config={voice.data}
+          values={voiceForm}
+          onChange={setVoiceForm}
+          onSave={saveVoiceConfig}
+          onTest={() => testVoice.mutate()}
+          onRemove={() => removeVoice.mutate()}
+          saving={saveVoice.isPending}
+          testing={testVoice.isPending}
+          removing={removeVoice.isPending}
+        />
+      ) : null}
 
       <ToolServersSection />
     </div>

@@ -16,7 +16,7 @@ import { useQueryClient } from "@tanstack/react-query";
 
 import type { ChatSession } from "@pidash/api-client";
 
-import { useDictationConfig, dictationOffered } from "../../../shared/dictation/index.js";
+import { DICTATION_UI_ENABLED, useDictationConfig, dictationOffered } from "../../../shared/dictation/index.js";
 import { useDocumentHead } from "../../../shared/shell/index.js";
 import { useRunnersArea } from "../area.js";
 import {
@@ -405,8 +405,8 @@ export function RunnerChatPage({
     void actions.send(content, setDraft).finally(() => setInitializingHandoff(false));
   }, [actions.send, area.allowed, onInitialMessageConsumed, runnerId, surface]);
 
-  const speech = useDictationConfig(area.allowed);
-  const dictationAvailable = dictationOffered(speech.data);
+  const speech = useDictationConfig(area.allowed && DICTATION_UI_ENABLED);
+  const dictationAvailable = DICTATION_UI_ENABLED && dictationOffered(speech.data);
 
   useDocumentHead({ title: runnerChatDocumentTitle(runner.data?.name), robots: "noindex, nofollow" });
 
