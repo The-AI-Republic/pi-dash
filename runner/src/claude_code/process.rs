@@ -80,7 +80,7 @@ impl ClaudeProcess {
         if args.bypass_permissions {
             argv.extend(["--permission-mode", "bypassPermissions"]);
         }
-        if let Some(model) = args.model {
+        if let Some(model) = args.model.filter(|s| !s.is_empty()) {
             argv.extend(["--model", model]);
         }
         if let Some(effort) = args.effort.filter(|s| !s.is_empty()) {
@@ -343,19 +343,23 @@ mod argv_tests {
     #[test]
     fn passes_effort_after_the_model() {
         let argv = ClaudeProcess::argv(&args(Some("claude-opus-4-8"), Some("max")));
+        let m = argv.iter().position(|a| *a == "--model").expect("--model");
         let e = argv
             .iter()
             .position(|a| *a == "--effort")
             .expect("--effort");
+        assert_eq!(argv.get(m + 1).copied(), Some("claude-opus-4-8"));
         assert_eq!(argv.get(e + 1).copied(), Some("max"));
-        assert!(argv.contains(&"--model"), "argv: {argv:?}");
+        assert!(e > m, "--effort must follow --model: {argv:?}");
     }
 
     #[test]
     fn omits_effort_by_default() {
         let argv = ClaudeProcess::argv(&args(Some("claude-opus-4-8"), None));
         assert!(!argv.contains(&"--effort"), "argv: {argv:?}");
-        let argv = ClaudeProcess::argv(&args(None, Some("")));
+        // Empty strings (a hand-edited config) are omitted, not passed blank.
+        let argv = ClaudeProcess::argv(&args(Some(""), Some("")));
         assert!(!argv.contains(&"--effort"), "argv: {argv:?}");
+        assert!(!argv.contains(&"--model"), "argv: {argv:?}");
     }
 }

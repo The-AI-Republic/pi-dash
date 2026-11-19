@@ -386,6 +386,10 @@ pub fn set_text_value(
             } else {
                 Some(s.to_string())
             };
+            // An effort only applies alongside an explicit model.
+            if runner.codex.model_default.is_none() {
+                runner.codex.effort_default = None;
+            }
         }
         FieldId::ClaudeBinary => {
             if s.trim().is_empty() {
@@ -399,6 +403,9 @@ pub fn set_text_value(
             } else {
                 Some(s.to_string())
             };
+            if runner.claude_code.model_default.is_none() {
+                runner.claude_code.effort_default = None;
+            }
         }
         FieldId::CursorBinary => {
             if s.trim().is_empty() {
@@ -451,6 +458,9 @@ pub fn set_text_value(
             } else {
                 Some(s.to_string())
             };
+            if runner.muse_code.model_default.is_none() {
+                runner.muse_code.effort_default = None;
+            }
         }
         FieldId::AgentKind
         | FieldId::ApprovalAutoReadonly
@@ -938,6 +948,31 @@ mod tests {
             },
             runners: vec![runner],
             cli: None,
+        }
+    }
+
+    #[test]
+    fn clearing_a_model_clears_its_effort() {
+        for kind in [AgentKind::Codex, AgentKind::ClaudeCode, AgentKind::MuseCode] {
+            let mut cfg = config_with_kind(kind);
+            let field = match kind {
+                AgentKind::Codex => FieldId::CodexModelDefault,
+                AgentKind::ClaudeCode => FieldId::ClaudeModelDefault,
+                _ => FieldId::MuseCodeModelDefault,
+            };
+            set_text_value(&mut cfg, field, "some-model", 0).unwrap();
+            *cfg.runners[0].effort_slot_mut(kind).unwrap() = Some("high".into());
+
+            // Changing to another model keeps the effort...
+            set_text_value(&mut cfg, field, "other-model", 0).unwrap();
+            assert_eq!(cfg.runners[0].configured_reasoning_effort(), Some("high"));
+            // ...clearing the model drops it.
+            set_text_value(&mut cfg, field, "", 0).unwrap();
+            assert_eq!(
+                cfg.runners[0].configured_reasoning_effort(),
+                None,
+                "{kind:?}"
+            );
         }
     }
 
