@@ -145,6 +145,11 @@ function EditRunnerForm({
           setFailure(reconfigureErrorText(refusalReason(error)));
           return;
         }
+        // A rename alone still reaches the machine: an empty reconfigure
+        // pushes the cloud name to the daemon's config. Best effort; the
+        // next reconfigure carries the name again.
+        if (plan.reconfigure === null && blocker === null)
+          void reconfigureRunner(getAppClient(), runner.id, {}).catch(() => undefined);
       }
       if (plan.reconfigure !== null) {
         const client = getAppClient();
@@ -195,7 +200,8 @@ function EditRunnerForm({
           setNameError(undefined);
         }}
       />
-      {blocker === null ? null : (
+      {/* While saving, the runner restarting reads as offline; that is expected. */}
+      {blocker === null || saving ? null : (
         <p data-testid="edit-runner-blocker" className="text-meta text-(--text-muted)">
           {blocker}
         </p>
@@ -291,6 +297,22 @@ function Picker(props: {
   );
 }
 
+/**
+ * The form freezes its seed on mount; wait for the catalog so the seeded
+ * model id matches the choices the pickers will offer. Mounted only while
+ * the dialog is open, so a closed dialog never fetches.
+ */
+function EditRunnerBody(props: {
+  workspaceSlug: string;
+  runner: Runner;
+  onClose: () => void;
+  onBusyChange: (busy: boolean) => void;
+}): React.ReactElement | null {
+  const catalog = useRunnerModelCatalog(true);
+  if (catalog.isPending === true) return null;
+  return <EditRunnerForm {...props} />;
+}
+
 export function EditRunnerDialog({ workspaceSlug, runner, onClose }: EditRunnerDialogProps): React.ReactElement {
   const [busy, setBusy] = React.useState(false);
   return (
@@ -305,7 +327,7 @@ export function EditRunnerDialog({ workspaceSlug, runner, onClose }: EditRunnerD
       bodyClassName="mt-(--space-4)"
     >
       {runner === null ? null : (
-        <EditRunnerForm
+        <EditRunnerBody
           key={runner.id}
           workspaceSlug={workspaceSlug}
           runner={runner}

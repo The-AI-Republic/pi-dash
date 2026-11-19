@@ -1500,8 +1500,6 @@ pub async fn machine_command_result(
 // Runner reconfigure (edit a runner's local settings through its machine)
 // ---------------------------------------------------------------------------
 
-/// Nothing editable in the body.
-pub const NOTHING_TO_CHANGE_BODY: &str = r#"{"error":"nothing_to_change"}"#;
 /// A reconfigure field that is present but not a string.
 pub const INVALID_FIELD_BODY: &str = r#"{"error":"invalid_field"}"#;
 /// `reasoning_effort` outside [`REASONING_EFFORTS`].
@@ -1517,7 +1515,7 @@ pub const RECONFIGURE_BUSY_BODY: &str = r#"{"error":"runner_busy"}"#;
 
 /// Codex reasoning-effort tiers the daemon accepts (`runner_ops.rs`
 /// `CODEX_EFFORTS`); `""` clears back to the model default.
-pub const REASONING_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh"];
+pub const REASONING_EFFORTS: &[&str] = &crate::runner_models::guards::KNOWN_EFFORTS;
 
 /// The daemon-side settings a reconfigure may change. Absent means
 /// unchanged; `model` / `reasoning_effort` `""` means the agent default.
@@ -1586,7 +1584,8 @@ fn reconfigure_field(data: &JVal, key: &str) -> Result<Option<String>, Response>
 }
 
 /// Validate the body into a [`RunnerReconfigure`]. A blank `working_dir`
-/// or `agent` is "unchanged" (neither has a default to fall back to).
+/// or `agent` is "unchanged" (neither has a default to fall back to). An
+/// empty result only syncs the runner's name to its machine.
 pub fn parse_reconfigure(data: &JVal) -> Result<RunnerReconfigure, Response> {
     let blank_is_none = |value: Option<String>| value.filter(|v| !v.is_empty());
     let working_dir = blank_is_none(reconfigure_field(data, "working_dir")?).map(|dir| {
@@ -1615,9 +1614,9 @@ pub fn parse_reconfigure(data: &JVal) -> Result<RunnerReconfigure, Response> {
         model,
         reasoning_effort,
     };
-    if changes.is_empty() {
-        return Err(bad_request(NOTHING_TO_CHANGE_BODY));
-    }
+    // An empty body is valid: it pushes the cloud's current name to the
+    // machine (the message always carries it), so a rename made through
+    // PATCH reaches the daemon's local block.
     Ok(changes)
 }
 
@@ -1929,11 +1928,15 @@ mod tests {
 
     #[test]
     fn reconfigure_refuses_bad_bodies() {
-        assert_eq!(status_of(parse_reconfigure(&body("{}")).unwrap_err()), 400);
-        assert_eq!(
-            status_of(parse_reconfigure(&body(r#"{"project":"OTHER"}"#)).unwrap_err()),
-            400,
-            "the project is not a reconfigurable field"
+        assert!(
+            parse_reconfigure(&body("{}")).unwrap().is_empty(),
+            "an empty body only syncs the name"
+        );
+        assert!(
+            parse_reconfigure(&body(r#"{"project":"OTHER"}"#))
+                .unwrap()
+                .is_empty(),
+            "the project is not a reconfigurable field; it is ignored"
         );
         assert_eq!(
             status_of(parse_reconfigure(&body(r#"{"agent":"emacs"}"#)).unwrap_err()),

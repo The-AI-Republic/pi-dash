@@ -528,8 +528,6 @@ fn existing_engine_runner(
     }))
 }
 
-/// Kebab-case wire value → AgentKind, via the same clap ValueEnum
-/// parser `--agent` uses, so web and CLI accept identical spellings.
 /// The local changes a `reconfigure_runner` command asks for. The cloud
 /// always sends its name; it is applied only when it differs and no other
 /// runner on this machine already uses it (local names must be unique,
@@ -572,6 +570,8 @@ fn reconfigure_changes(
     }
 }
 
+/// Kebab-case wire value → AgentKind, via the same clap ValueEnum
+/// parser `--agent` uses, so web and CLI accept identical spellings.
 fn parse_agent_kind(raw: &str) -> Result<AgentKind> {
     if raw.is_empty() {
         return Ok(AgentKind::default());

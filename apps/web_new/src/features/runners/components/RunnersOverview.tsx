@@ -221,7 +221,9 @@ export function RunnersOverview({
       });
     }
   }
-  const [editing, setEditing] = React.useState<Runner | null>(null);
+
+  // Held by id so the open dialog follows live status (offline / busy).
+  const [editingId, setEditingId] = React.useState<string | null>(null);
 
   function closePodDialog(): void {
     setPodDialog(null);
@@ -354,7 +356,7 @@ export function RunnersOverview({
                         </Button>
                       ) : null}
                       {canEditRunner(runner, userId) ? (
-                        <Button size="small" variant="secondary" onClick={() => setEditing(runner)}>
+                        <Button size="small" variant="secondary" onClick={() => setEditingId(runner.id)}>
                           Edit
                         </Button>
                       ) : null}
@@ -388,7 +390,11 @@ export function RunnersOverview({
           </tbody>
         </table>
       </div>
-      <EditRunnerDialog workspaceSlug={scope.workspaceSlug} runner={editing} onClose={() => setEditing(null)} />
+      <EditRunnerDialog
+        workspaceSlug={scope.workspaceSlug}
+        runner={editingId === null ? null : (runners.find((row) => row.id === editingId) ?? null)}
+        onClose={() => setEditingId(null)}
+      />
       <CreatePodDialog
         workspaceSlug={scope.workspaceSlug}
         open={podDialog?.mode === "create"}

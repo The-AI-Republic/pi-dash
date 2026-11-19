@@ -11,20 +11,14 @@
 import type { Runner, RunnerReconfigure } from "@pidash/api-client";
 
 import { isPidashAgentRunner } from "../../../shared/lib/runnerIdentity.js";
-import {
-  AGENT_LABELS,
-  DEFAULT_MODEL_ID,
-  RUNNER_AGENTS,
-  type ModelChoice,
-  type RunnerAgent,
-} from "../addRunner/catalog.js";
+import { DEFAULT_MODEL_ID, RUNNER_AGENTS, type ModelChoice, type RunnerAgent } from "../addRunner/catalog.js";
+import { NAME_SHAPE } from "../addRunner/model.js";
 
 export const EDIT_RUNNER_TITLE = "Edit runner";
 export const EDIT_RUNNER_HINT =
   "Rename the runner or change what it runs with on its machine. Its project cannot change; add a new runner to serve another project.";
 export const EDIT_RUNNER_SUBMIT = "Save changes";
 export const EDIT_RUNNER_SAVING = "Applying on the machine…";
-export const EDIT_RUNNER_FAILED_TITLE = "Couldn't update the runner";
 export const EDIT_RUNNER_DONE_TITLE = "Runner updated";
 export const EDIT_RUNNER_TIMEOUT =
   "The machine did not confirm the change in time. Check the runner's settings in a moment; if it keeps happening, update pidash on that machine.";
@@ -34,15 +28,14 @@ export const EDIT_RUNNER_BUSY =
   "This runner has a run in progress. Wait for it to finish, or cancel it, to change the working directory, agent or model.";
 export const EDIT_RUNNER_MODEL_UNREPORTED =
   "This runner's daemon does not report its model. Update pidash on that machine to see it here.";
+export const EDIT_RUNNER_AGENT_UNREPORTED =
+  "This runner's daemon does not report its agent. Update pidash on that machine to change the working directory, agent or model.";
 export const EDIT_RUNNER_AGENT_HINT =
   "Switching agent needs that agent's CLI installed on the machine; the runner restarts with it.";
 
 /** Poll cadence and budget while the machine applies a change. */
 export const RECONFIGURE_POLL_MS = 2_000;
 export const RECONFIGURE_TIMEOUT_MS = 60_000;
-
-/** Runner names the server accepts (`runner_name_is_valid`). */
-const RUNNER_NAME_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/;
 
 /** What the form edits. `modelId` is a picker id from the agent's choices. */
 export interface RunnerEditValues {
@@ -124,7 +117,7 @@ export function validateRunnerName(raw: string): { value: string } | { error: st
   const value = raw.trim();
   if (value === "") return { error: "Name cannot be empty." };
   if (value.length > 128) return { error: "Use at most 128 characters." };
-  if (!RUNNER_NAME_PATTERN.test(value))
+  if (!NAME_SHAPE.test(value))
     return {
       error: "Letters, digits, underscore, dot and dash are allowed; it must begin with a letter, digit or underscore.",
     };
@@ -175,11 +168,13 @@ export function canEditRunner(
  * Why the machine-side fields are locked right now, or null when they can
  * change. The name stays editable either way (it lives on the server).
  */
-export function machineFieldsBlocker(runner: Pick<Runner, "status" | "dev_machine">): string | null {
+export function machineFieldsBlocker(runner: Pick<Runner, "status" | "dev_machine" | "capabilities">): string | null {
   if (runner.dev_machine === null)
     return "This runner was enrolled without a dev machine, so Pi Dash cannot reach it to change its settings.";
   if (runner.status === "offline") return EDIT_RUNNER_OFFLINE;
   if (runner.status === "busy") return EDIT_RUNNER_BUSY;
+  // Without the agent the form would seed a guess and send models for it.
+  if (runnerAgentOf(runner) === null) return EDIT_RUNNER_AGENT_UNREPORTED;
   return null;
 }
 
@@ -205,9 +200,4 @@ export function reconfigureErrorText(reason: string | undefined): string {
       // Unknown message types are dropped by daemons too old to edit runners.
       return reason;
   }
-}
-
-/** Label of an agent for the picker trigger. */
-export function agentLabel(agent: RunnerAgent): string {
-  return AGENT_LABELS[agent];
 }

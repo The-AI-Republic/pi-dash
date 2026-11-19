@@ -96,7 +96,7 @@ describe("EditRunnerDialog", () => {
     expect(screen.getByText("WEB")).toBeInTheDocument();
   });
 
-  it("renames on the server without touching the machine", async () => {
+  it("renames on the server and pushes the name to the machine without waiting", async () => {
     const { onClose } = renderDialog(runner());
     const name = screen.getByLabelText("Name");
     await userEvent.clear(name);
@@ -104,6 +104,17 @@ describe("EditRunnerDialog", () => {
     await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(onClose).toHaveBeenCalled());
     expect(updateRunner).toHaveBeenCalledWith({ runnerId: "r-1", patch: { name: "beta" } });
+    expect(reconfigureRunner).toHaveBeenCalledWith({}, "r-1", {});
+    expect(readStatus).not.toHaveBeenCalled();
+  });
+
+  it("renames on the server only while the machine is offline", async () => {
+    const { onClose } = renderDialog(runner({ status: "offline" }));
+    const name = screen.getByLabelText("Name");
+    await userEvent.clear(name);
+    await userEvent.type(name, "beta");
+    await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
     expect(reconfigureRunner).not.toHaveBeenCalled();
   });
 

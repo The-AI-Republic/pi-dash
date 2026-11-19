@@ -13,6 +13,7 @@ import {
   canEditRunner,
   choicesWithCurrent,
   machineFieldsBlocker,
+  EDIT_RUNNER_AGENT_UNREPORTED,
   modelIdFor,
   reconfigureErrorText,
   runnerAgentOf,
@@ -121,6 +122,7 @@ describe("gating", () => {
     expect(machineFieldsBlocker(runner({ status: "offline" }))).toBe(EDIT_RUNNER_OFFLINE);
     expect(machineFieldsBlocker(runner({ status: "busy" }))).toBe(EDIT_RUNNER_BUSY);
     expect(machineFieldsBlocker(runner({ dev_machine: null }))).toContain("without a dev machine");
+    expect(machineFieldsBlocker(runner({ capabilities: [] }))).toBe(EDIT_RUNNER_AGENT_UNREPORTED);
   });
 
   it("validates names like the server", () => {
