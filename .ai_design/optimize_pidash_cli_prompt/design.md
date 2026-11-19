@@ -3,7 +3,7 @@
 > Directory: `.ai_design/optimize_pidash_cli_prompt/`
 >
 > **Status:** implementation-ready (reviewed 2026-11-19). Not started.
-> Decisions on all former open questions are in §10. Work breakdown is in §11,
+> Decisions are in §10. Work breakdown (three issues, server side in Rust only) is in §11,
 > and a draft of the new core prompt section is in Appendix A.
 >
 > **Companion:** `review.md`, a line-by-line review of the current
@@ -25,8 +25,16 @@
 > fetches of data the agent already has, and make the prompt match what the
 > runner and CLI actually do.
 >
+> **Server side is Rust only.** All server changes land in `rust-api/`
+> (prompting, orchestration, envelopes, the workpad endpoint, config). The
+> Django backend (`apps/api/`) is **out of scope**: its prompting code is not
+> updated, and nothing here needs Django parity. References to `apps/api/`
+> below describe today's behaviour (they were the evidence); they are not
+> change targets.
+>
 > **Out of scope:**
 >
+> - Django (`apps/api/`), see above.
 > - The runner's use of the user's own agent config (skills, MCP connectors,
 >   settings). Agents need the user's resources for user tasks; we keep it.
 > - Routing trivial issues through fewer stages (In Progress only vs. In
@@ -67,17 +75,15 @@ sessions under `~/.claude/projects/-home-rich--local-share-pidash-test-workspace
 
 ### 2.1 The `pidash-cli` prompt section (every issue and scheduler run)
 
-`apps/api/pi_dash/prompting/recipes.py` puts `"pidash-cli"` in **every**
-runner recipe: `coding-task`, `review`, `test`, `scheduler`. (Cloud recipes in
-`CLOUD_RECIPES` do not include it.)
+`rust-api/crates/services/src/prompting/recipes.rs` puts `"pidash-cli"` in
+**every** runner recipe: `coding-task`, `review`, `test`, `scheduler`.
 
-- Source: `apps/api/pi_dash/prompting/sections/pidash-cli.md`, 37.7 KB
-  template.
-- Rust mirror: `rust-api/crates/services/src/prompting/sections/pidash-cli.md`,
-  embedded with `include_str!` and documented as "byte-identical". **It has
-  drifted** (`pidash-cli.md`, `workpad-setup.md`). The Django copy still says
-  "An empty file clears it", which the current binary refuses without
-  `--allow-empty` (R10).
+- Source: `rust-api/crates/services/src/prompting/sections/pidash-cli.md`
+  (embedded with `include_str!`), ~38 KB template.
+- The Django tree (`apps/api/pi_dash/prompting/sections/`) holds an older,
+  drifted copy (it still says "An empty file clears it"). Django is out of
+  scope, so it is not synced. R10 is resolved by scope, not by a mirror
+  check.
 
 Rendered size on PIDASHCLOU-2:
 
@@ -252,7 +258,7 @@ with the real CLI or checks the environment variables it promises.
 6. **The CLI manual is never in context twice** (skill + prompt).
 7. **The operator-command blocklist is complete and generated**, not
    hand-maintained.
-8. **Django and Rust prompt sections stay identical**, enforced in CI.
+8. **All server changes in `rust-api` only**; no Django work.
 
 Non-goal: a prompt so small the agent has to look things up on most runs.
 Each lookup is a full extra step (~50–60k tokens re-sent), so a too-small core
@@ -319,10 +325,8 @@ workspace. All scratch files move under `.pidash/` (§6.6 recipes, Appendix A).
 **Delivery to the runner.** At run creation, the server snapshots the workpad
 into `run_config` (`workpad_body`, `workpad_sha256`). The `Assign` envelope
 copies them as additive optional fields, alongside the identifiers from §6.3.
-Envelope builders:
-
-- Django: `apps/api/pi_dash/runner/services/matcher.py` `_build_assign_msg`.
-- Rust: `rust-api/crates/types/src/runner_sessions/envelopes.rs`.
+Envelope builder: `rust-api/crates/types/src/runner_sessions/envelopes.rs`
+`build_assign_msg`.
 
 Runner side: `runner/src/cloud/protocol.rs` `ServerMsg::Assign` gets the same
 fields as `#[serde(default)]` options, so old servers and old daemons stay
@@ -352,9 +356,8 @@ the SHA-256 of the workpad body instead, which needs no migration:
 "body_sha256": "<current>"}`. Absent means today's behaviour (unconditional
   write), so older CLIs keep working. On success the response adds
   `body_sha256` of the new body.
-- Implement in Django `IssueWorkpadAPIEndpoint` and Rust
-  `rust-api/crates/api/src/v1_work_items/handlers_relations.rs`
-  (`get_workpad` / `patch_workpad`), with contract tests on both backends.
+- Implement in `rust-api/crates/api/src/v1_work_items/handlers_relations.rs`
+  (`get_workpad` / `patch_workpad`), with Rust contract tests.
 
 **CLI.**
 
@@ -385,8 +388,7 @@ run `pidash workpad get --to-file` and re-apply your edit." Update
   re-fetch them. Exceptions: you have worked long enough that a human may
   have replied, you are about to make an irreversible move, or a write was
   rejected as stale." `run.rendered_at` is a new context key (UTC
-  RFC 3339, set when the prompt is built), added to both
-  `apps/api/pi_dash/prompting/context.py` and
+  RFC 3339, set when the prompt is built), added in
   `rust-api/crates/services/src/prompting/context.rs`.
 - Remove the "read these… to pick up any human replies" instruction from
   `comment list`. Keep `comment list` / `issue get` / `state list` in the
@@ -402,10 +404,10 @@ two additive optional fields to `Assign`:
 - `issue_identifier` (e.g. `PIDASHCLOU-2`), for issue runs;
 - `project_identifier` (e.g. `PIDASHCLOU`), for issue and scheduler runs.
 
-Both are filled from `run_config`, set at run creation in Django
-`orchestration/service.py` (the three `build_first_turn` call sites) and the
-Rust twin `rust-api/crates/services/src/orchestration/creation.rs`, plus the
-scheduler-run creation paths. The envelope builders are the same as §6.1.
+Both are filled from `run_config`, set at run creation in
+`rust-api/crates/services/src/orchestration/creation.rs` and the scheduler
+run path (`rust-api/crates/services/src/scheduler/`). The envelope builder is
+the same as §6.1.
 The agent name comes from runner config: `AgentKind::display_name()`
 (`runner/src/config/schema.rs`) plus the effective model (`Assign`'s
 `expected_codex_model`, else the runner's `model_default`, else omitted).
@@ -578,7 +580,7 @@ cheap when loaded, and the agent is told it's unnecessary.
 Runner-side test that:
 
 1. renders each recipe kind (`coding-task`, `review`, `test`, `scheduler`)
-   from fixtures shared with the API prompt tests;
+   from fixtures exported by the Rust composer tests;
 2. extracts every `pidash …` command line and parses it with the real clap
    `Command` (`try_get_matches_from`), substituting placeholders;
 3. asserts every `PIDASH_*` variable the prompt promises is set by
@@ -586,8 +588,10 @@ Runner-side test that:
 4. asserts the never-run sentence and the generated classification (§6.5)
    agree.
 
-Plus a CI diff of the Django and Rust `sections/*.md` trees (R10), failing
-on any difference.
+Fixtures come from the Rust composer
+(`rust-api/crates/services/src/prompting/`), regenerated by a test there that
+fails when they are out of date. There is no Django/Rust mirror check;
+Django is out of scope.
 
 ### 6.10 Per-run values in one block (R8)
 
@@ -610,26 +614,22 @@ on any difference.
 Ordered so each step is independently shippable and the cheap, high-value
 fixes go first.
 
-| #   | Change                                                                                                                                                                                             | Where                 | Effort | Notes                                          |
-| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- | ------ | ---------------------------------------------- |
-| 1   | Sync Django ⇄ Rust sections; CI diff (§6.9)                                                                                                                                                        | api, rust-api         | S      | prerequisite for every prompt edit             |
-| 2   | `Assign` gains `issue_identifier` / `project_identifier`; runner exports `PIDASH_ISSUE_IDENTIFIER` / `PIDASH_PROJECT` / `PIDASH_AGENT_NAME`; `state list --project`; `comment add` defaults (§6.3) | api, rust-api, runner | S–M    | implements NEWPIDASH-317                       |
-| 3   | Operator classification, refusal inside runs, agent-facing `--help` (§6.5)                                                                                                                         | runner                | S      |                                                |
-| 4   | Workpad snapshot in `Assign`; `.pidash/workpad.md`; `body_sha256` precondition; keep-by-default; `get --to-file` (§6.1)                                                                            | api, rust-api, runner | M      | after step 2 (same envelope plumbing)          |
-| 5   | `pidash docs` (§6.6)                                                                                                                                                                               | runner                | M      | content migrated from the prompt               |
-| 6   | Prompt-vs-CLI contract test (§6.9)                                                                                                                                                                 | runner                | M      | lands before the prompt change so it guards it |
-| 7   | Prompt rewrite: "This run" block, freshness note, truthful env, core section, index, one-owner cleanup (§6.2, 6.4, 6.6, 6.7, 6.10)                                                                 | api + rust-api        | M      | gated on runner version (below)                |
-| 8   | Thin skill + new installer release (§6.8)                                                                                                                                                          | skill, overlay        | S      |                                                |
-| 9   | Evaluate cacheable static channel per bridge (§6.10 follow-up)                                                                                                                                     | runner bridges        | M–L    | separate decision                              |
+| #   | Change                                                                                                                                                                                             | Where                  | Issue |
+| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- | ----- |
+| 1   | Runner context + workpad file: `Assign` identifiers and workpad snapshot, env exports, CLI defaults (`state list --project`, `comment add`), `body_sha256` guard, `.pidash/workpad.md` (§6.1, 6.3) | rust-api, runner       | A     |
+| 2   | Agent-facing CLI: operator classification and refusal, agent-only `--help`, `pidash docs`, thin skill (§6.5, 6.6, 6.8)                                                                             | runner, skill          | B     |
+| 3   | Prompt v2 behind `PROMPT_PIDASH_CLI_V2` + prompt-vs-CLI contract test + measurement (§6.2, 6.4, 6.6, 6.7, 6.9, 6.10, Appendix A)                                                                   | rust-api, runner tests | C     |
 
-**Gating step 7.** The composer can't gate on the runner's version: the
-prompt is rendered at run creation (`orchestration/service.py`
-`build_first_turn` call sites; Rust `orchestration/creation.rs`), before the
-pod matcher picks a runner. Gate it instead with:
+A and B can proceed in parallel. C lands after both, and the flag flips only
+after the runner release that contains A and B.
+
+**Gating step 3.** The composer can't gate on the runner's version: the
+prompt is rendered at run creation
+(`rust-api/crates/services/src/orchestration/creation.rs`), before the pod
+matcher picks a runner. Gate it instead with:
 
 1. **A config flag.** Add `PROMPT_PIDASH_CLI_V2` (default `False`) to the
-   central config registry (`apps/api/pi_dash/config/registry.py` and its
-   Rust counterpart). With the flag off, the composer renders today's
+   Rust config registry (`rust-api/crates/db/src/config/registry.rs`). With the flag off, the composer renders today's
    `pidash-cli` section with the R3/R10 corrections. With it on, it renders
    the v2 core (Appendix A).
 
@@ -638,7 +638,7 @@ pod matcher picks a runner. Gate it instead with:
    `{% if %}`. That keeps both versions testable and lets workspace overrides
    of `pidash-cli` keep working until they opt in.
 
-2. **A runner release** containing steps 2–5, then a `MIN_RUNNER_VERSION`
+2. **A runner release** containing issues A and B, then a `MIN_RUNNER_VERSION`
    bump to it. That setting is advisory today: old runners show a red
    banner.
 3. **Flip the flag** once the operator's runners are upgraded. For the
@@ -710,48 +710,86 @@ and `muse_code` runners:
 
 - **D1. Comment attribution:** CLI defaults only (§6.3). Server-side
   inference from `X-Pi-Dash-Run-Id` is deferred. It changes the comment API
-  contract on both backends and is not needed once the CLI defaults ship.
+  contract and is not needed once the CLI defaults ship.
   Revisit if §8 still shows unattributed agent comments.
 - **D2. Workpad stale guard:** the endpoint has no precondition today, and
   its `updated_at` is the issue row's, which the agent's own edits change. Use
   `body_sha256` / `if_body_sha256` (§6.1). This is an additive API change in
-  Django and Rust, with no migration.
+  `rust-api`, with no migration.
 - **D3. Gating:** the composer has no runner at render time. Gate on a config
   flag (`PROMPT_PIDASH_CLI_V2`) flipped after a `MIN_RUNNER_VERSION` bump,
   with in-prompt fallbacks for old runners (§7).
 - **D4. Skill sources:** the OSS `skill/pidash/` is the single source. The
   private overlay's `plugins/{claude,codex}/pidash/skills/pidash/` become thin
   copies generated from it, or are deleted. That change lives in the private
-  repo and is tracked separately (§11, I-8 follow-up).
+  repo and is tracked separately (a follow-up filed from issue B).
 - **D5. `PIDASH_AGENT_NAME` format:** `<display name> (<model>)`, e.g.
   `Claude Code (claude-opus-4-8)`, or just `<display name>` when the model is
   unknown. The display name comes from `AgentKind::display_name()`.
 - **D6. Scratch files:** all agent scratch files live under `.pidash/`, which
   is git-excluded, not in the repo root (§6.1).
+- **D8. Server scope is Rust only.** Django (`apps/api/`) gets no changes,
+  including no prompt-section sync.
 - **D7. Workpad stays inlined in review/test prompts** as well as written to
   file. The agent must read it before deciding anything; reading the file
   instead would cost a step.
 
 ---
 
-## 11. Implementation plan (one issue each)
+## 11. Implementation plan (three issues)
 
-Tracking issue: NEWPIDASH-318. Every item that touches the API does so in
-**both** Django (`apps/api`) and Rust (`rust-api`), with contract tests on both.
+Tracking issue: NEWPIDASH-318. Server work is in `rust-api` only.
 
-| ID  | Issue                                                                                                                                                                                            | Main files                                                                                                                                                                                                             | Depends on                     |
-| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
-| I-1 | Sync Django/Rust prompt sections + CI mirror check (§6.9)                                                                                                                                        | `apps/api/pi_dash/prompting/sections/`, `rust-api/crates/services/src/prompting/sections/`, CI                                                                                                                         | –                              |
-| I-2 | `Assign` identifiers + runner env exports + `state list --project` + `comment add` defaults (§6.3). Implements NEWPIDASH-317                                                                     | `matcher.py` `_build_assign_msg`; `envelopes.rs`; `orchestration/service.py` / `creation.rs` (`run_config`); `runner/src/cloud/protocol.rs`; `daemon/supervisor.rs`; `util/shell.rs`; `cli/state.rs`; `cli/comment.rs` | –                              |
-| I-3 | Operator classification, in-run refusal, agent-facing help (§6.5)                                                                                                                                | `runner/src/cli/mod.rs`                                                                                                                                                                                                | –                              |
-| I-4 | Workpad snapshot + `.pidash/workpad.md` + `body_sha256` precondition + CLI keep/`--to-file` (§6.1)                                                                                               | `IssueWorkpadAPIEndpoint` + serializer; `v1_work_items/handlers_relations.rs`; envelope builders; `runner/src/cli/workpad.rs`; supervisor                                                                              | I-2 (shares envelope plumbing) |
-| I-5 | `pidash docs` (§6.6)                                                                                                                                                                             | `runner/docs/cli-reference.md`, `runner/src/cli/docs.rs`                                                                                                                                                               | –                              |
-| I-6 | Prompt-vs-CLI contract test (§6.9)                                                                                                                                                               | runner tests + API fixture export                                                                                                                                                                                      | I-1                            |
-| I-7 | Prompt v2: `pidash-cli-core` section, `PROMPT_PIDASH_CLI_V2` flag, freshness note + `run.rendered_at`, truthful env, one-owner cleanup, "This run" block (§6.2, 6.4, 6.6, 6.7, 6.10, Appendix A) | `prompting/sections/*`, `recipes.py`/`recipes.rs`, `context.py`/`context.rs`, config registry                                                                                                                          | I-1…I-6                        |
-| I-8 | Thin OSS skill + installer release (§6.8); follow-up issue in the private overlay for plugin copies (D4)                                                                                         | `skill/pidash/`, `skill/install.mjs`                                                                                                                                                                                   | I-5                            |
-| I-9 | Evaluate a cacheable static prompt channel per agent bridge (§6.10 follow-up). Investigation; produces a short design note                                                                       | `runner/src/bridges/*`                                                                                                                                                                                                 | I-7                            |
+### Issue A: runner context and the workpad file (§6.1, §6.3)
 
-Rollout order is §7. I-1, I-2, I-3 and I-5 can proceed in parallel.
+Implements NEWPIDASH-317.
+
+- `rust-api`:
+  - At run creation (`services/src/orchestration/creation.rs`, scheduler run
+    path), put `issue_identifier`, `project_identifier`, `workpad_body` and
+    `workpad_sha256` into `run_config`.
+  - Copy them into the `assign` envelope
+    (`types/src/runner_sessions/envelopes.rs` `build_assign_msg`).
+  - Workpad endpoint (`api/src/v1_work_items/handlers_relations.rs`): add
+    `body_sha256` to GET/PATCH responses, and accept an optional
+    `if_body_sha256` that returns 412 on mismatch.
+- `runner`:
+  - Add the four fields to `ServerMsg::Assign` as `#[serde(default)]`.
+  - In `Supervisor::handle_assign`, write `.pidash/workpad.md` and
+    `.pidash/workpad.sha256` and ensure the git exclude.
+  - Extend `RunEnv` / `apply_run_env` with `PIDASH_ISSUE_IDENTIFIER`,
+    `PIDASH_PROJECT` and `PIDASH_AGENT_NAME`.
+  - CLI: `state list --project` plus env defaults; `comment add` speaker
+    defaults; `workpad update` default path, hash precondition, keep by
+    default; `workpad get --to-file`.
+
+### Issue B: agent-facing CLI (§6.5, §6.6, §6.8)
+
+- `runner/src/cli/mod.rs`: classify every subcommand as agent or operator,
+  refuse operator commands inside runs (`PIDASH_ALLOW_OPERATOR=1` bypass),
+  hide them from `--help` inside runs, fix the header.
+- `pidash docs [<topic>]` from `runner/docs/cli-reference.md`
+  (`include_str!`), with the content moved out of `pidash-cli.md`.
+- Thin `skill/pidash/` (≤ 2 KB, no references directory), a new installer
+  release, and a follow-up issue for the private overlay's plugin copies (D4).
+
+### Issue C: prompt v2, contract test, rollout (§6.2, 6.4, 6.6, 6.7, 6.9, 6.10, §7, Appendix A)
+
+- `rust-api/crates/services/src/prompting/`:
+  - new `sections/pidash-cli-core.md` (Appendix A);
+  - `PROMPT_PIDASH_CLI_V2` in `db/src/config/registry.rs`, with `recipes.rs`
+    choosing between the core and full sections;
+  - `run.rendered_at` in `context.rs`;
+  - "This run" block and one-owner cleanup of the shared sections;
+  - flag-off corrections to `pidash-cli.md` (scheduler `state list`, env
+    section, "Not for you").
+- Runner-side prompt-vs-CLI contract test over Rust-rendered fixtures (§6.9),
+  and over `pidash docs` output.
+- Rollout and measurement (§7, §8) on the test runner, with numbers posted on
+  the issue.
+- Follow-up investigation, after measurement: deliver static guidance through
+  a cross-run cacheable channel per agent bridge (§6.10). This produces a
+  short note; implementation is only filed if it's worth it.
 
 ---
 
@@ -761,7 +799,7 @@ Target ≤ 6 KB rendered. Jinja is limited to the "This run" values. Outcome
 and clock semantics are owned by `ending-run`; state choice by the cycle
 sections.
 
-`````markdown
+````markdown
 ## Pi Dash CLI (`pidash`)
 
 `pidash` is your only channel to Pi Dash. It is already authenticated **as
@@ -838,4 +876,4 @@ refused inside a run; if one seems necessary, the run is blocked (see
 - All writes are real and immediate; there is no undo. Check intent against
   your workpad plan before mutating.
 - When pasting `pidash` JSON into the workpad, fence it in ` ``` `.
-`````
+````
