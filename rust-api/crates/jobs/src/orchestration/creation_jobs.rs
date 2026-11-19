@@ -58,7 +58,7 @@ use pidash_db::orm_tx::{self, TxConn};
 use pidash_db::runner_runs::agent_run as run_bag;
 use pidash_db::tx::Transaction;
 use pidash_services::orchestration::creation::{
-    finalize_failure_reason, state_name_group, user_id_for_run,
+    finalize_failure_reason, load_stage_inputs, state_name_group, user_id_for_run,
     AdmissionError as ServiceAdmissionError, CreationError, CreationSeam, DedicatedPinArgs,
     ExecutionError, ExecutionFields as ServiceExecutionFields, ExecutionRequest,
     FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, NewSystemComment, PinOutcome,
@@ -1908,6 +1908,12 @@ async fn load_render_bundle(
         .transpose()
         .map_err(|_| CreationError::MissingRow("bad user id".to_owned()))?;
     let override_rows = bundle_overrides(tx, issue.workspace_id, user_id).await?;
+    let stages = {
+        let conn = TxConn::new(tx.inner());
+        load_stage_inputs(&conn, project_id, issue_id, run_id)
+            .await
+            .map_err(sea_db)?
+    };
     Ok(RenderBundle {
         issue,
         project,
@@ -1938,6 +1944,7 @@ async fn load_render_bundle(
         has_parent_run,
         ticker_parent_payload,
         override_rows,
+        stages,
     })
 }
 

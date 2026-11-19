@@ -86,6 +86,7 @@ fn issue_sample(kind: &str, populated: bool) -> serde_json::Value {
                     {"name": "In Progress", "group": "started", "description": "Active"},
                     {"name": "In Review", "group": "review", "description": "Awaiting human review"},
                     {"name": "In Test", "group": "test", "description": "Testing / QA"},
+                    {"name": "AI Completed", "group": "completed", "description": "Finished by the agent"},
                     {"name": "Done", "group": "completed", "description": "Finished"},
                 ],
             },
@@ -186,7 +187,17 @@ fn issue_sample(kind: &str, populated: bool) -> serde_json::Value {
             },
             "comments_section": "### Comment 1 — Human: Sample at 2026-01-01\n\nHello.",
             "parent_done_payload": "{\n  \"pr_url\": \"https://example.com/pr/1\"\n}",
-            "workpad_body": "### Phase\n- investigating",
+            "workpad_body": "### Path to done\n- **Goal**: sample",
+            "stages": {
+                "agent_decides": true,
+                "review": true,
+                "test": true,
+                "path": ["In Progress", "In Review", "In Test", "AI Completed"],
+                "current_runs_automatically": true,
+                "final_state": "AI Completed",
+            },
+            "handoff": "### Hand-off\n**Produced:** https://example.com/pr/1\n**Acceptance criteria:**\n- The sample works.\n**How to verify:** run the sample.\n**Review focus:** the sample.\n**Next stage:** In Review — a code change.",
+            "stage_history": "- 2026-01-01 In Progress: done — opened the sample PR",
         })
     } else {
         // Minimal: every key present, all optionals empty/`None`
@@ -246,6 +257,16 @@ fn issue_sample(kind: &str, populated: bool) -> serde_json::Value {
             "comments_section": "(no comments on this issue yet)",
             "parent_done_payload": "(no parent run done payload available)",
             "workpad_body": "",
+            "stages": {
+                "agent_decides": false,
+                "review": false,
+                "test": false,
+                "path": [],
+                "current_runs_automatically": false,
+                "final_state": null,
+            },
+            "handoff": "",
+            "stage_history": "",
         })
     }
 }

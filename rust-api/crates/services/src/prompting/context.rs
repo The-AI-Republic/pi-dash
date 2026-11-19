@@ -130,6 +130,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde_json::{json, Value};
 
 use super::{composer, recipes, work_types};
+use crate::domain::project_settings::AgentStages;
 
 /// Upper bound on inlined children / related items per group
 /// (`context.py:72-77`).
@@ -978,8 +979,18 @@ pub struct IssueContextInput {
     /// `None` = no ticker row.
     pub tick: Option<Value>,
     pub comments_section: String,
+    /// Kept in the context for workspace overrides that reference it; no
+    /// built-in section renders it since the lean workflow change.
     pub parent_done_payload: String,
     pub workpad_body: String,
+    /// The project's `settings.agent_stages`, resolved (missing key =
+    /// Auto). Feeds the `stages` context value ([`stages_context`]).
+    pub agent_stages: AgentStages,
+    /// `done_payload.stage_handoff` of the latest `coding-task` run on the
+    /// issue that stored one; empty when none.
+    pub handoff: String,
+    /// The pre-rendered run history ([`stage_history`]); empty when none.
+    pub stage_history: String,
 }
 
 /// `{key, title}` of the issue's effective work type (`context.py`
@@ -1090,6 +1101,14 @@ pub fn build_context(input: &IssueContextInput) -> Value {
         "comments_section": input.comments_section,
         "parent_done_payload": input.parent_done_payload,
         "workpad_body": input.workpad_body,
+        "stages": stages_context(
+            &input.agent_stages,
+            &input.project_states,
+            input.state_name.as_deref(),
+            input.state_group.as_deref(),
+        ),
+        "handoff": input.handoff,
+        "stage_history": input.stage_history,
     });
     for (key, value) in [
         ("extra_toolsets", json!(input.extra_toolsets_enabled)),
@@ -1112,6 +1131,137 @@ pub fn build_context(input: &IssueContextInput) -> Value {
         }
     }
     context
+}
+
+/// Name of the terminal state an agent's path ends at (NEWPIDASH-305): the
+/// project state with exactly this name in the `completed` group.
+pub const FINAL_STATE_NAME: &str = "AI Completed";
+
+/// The `stages` context value (lean workflow design §9.3):
+/// `{agent_decides, review, test, path, current_runs_automatically,
+/// final_state}`.
+///
+/// * `review` / `test` — whether the stage runs an agent in this project.
+/// * `path` — the enabled stages in phase order, then the final state,
+///   using the project's own state names. In Progress is always on; an
+///   enabled review/test stage is listed only when the project has the
+///   matching state (an empty state list is treated as "unknown", so the
+///   stage is listed).
+/// * `final_state` — [`FINAL_STATE_NAME`] when the project has it, else
+///   null (the prompt then tells the agent to stay and wait on a person).
+/// * `current_runs_automatically` —
+///   [`stage_runs_automatically`](pidash_types::orchestration::stage_runs_automatically)
+///   for the issue's current state: false for a manual run in a disabled
+///   stage (or outside the registered stages).
+pub fn stages_context(
+    stages: &AgentStages,
+    project_states: &[ProjectStateView],
+    state_name: Option<&str>,
+    state_group: Option<&str>,
+) -> Value {
+    use pidash_types::orchestration::{stage_runs_automatically, StageSwitches, StateRef, PHASES};
+    let switches = StageSwitches {
+        review: stages.review_enabled(),
+        test: stages.test_enabled(),
+    };
+    let has_state = |group: &str, name: &str| {
+        project_states
+            .iter()
+            .any(|state| state.group == group && state.name == name)
+    };
+    let mut path: Vec<Value> = Vec::new();
+    for (group, phase) in PHASES {
+        let enabled = match phase.cadence_key {
+            "review" => switches.review,
+            "test" => switches.test,
+            _ => true,
+        };
+        let present = project_states.is_empty() || has_state(group, phase.state_name);
+        let always = phase.cadence_key != "review" && phase.cadence_key != "test";
+        if enabled && (always || present) {
+            path.push(Value::String(phase.state_name.to_owned()));
+        }
+    }
+    let final_state = if has_state("completed", FINAL_STATE_NAME) {
+        path.push(Value::String(FINAL_STATE_NAME.to_owned()));
+        Value::String(FINAL_STATE_NAME.to_owned())
+    } else {
+        Value::Null
+    };
+    let current = match (state_group, state_name) {
+        (Some(group), Some(name)) => Some(StateRef { group, name }),
+        _ => None,
+    };
+    json!({
+        "agent_decides": stages.agent_decides(),
+        "review": switches.review,
+        "test": switches.test,
+        "path": path,
+        "current_runs_automatically": stage_runs_automatically(current.as_ref(), switches),
+        "final_state": final_state,
+    })
+}
+
+/// Most runs listed in `stage_history` (design §8.3).
+pub const STAGE_HISTORY_LIMIT: usize = 10;
+
+/// A run note longer than this is cut in `stage_history` (notes are
+/// stored up to 2000 characters; the history is a summary).
+pub const STAGE_HISTORY_NOTE_MAX_CHARS: usize = 200;
+
+/// One earlier run on the issue, as the stage-history query returns it
+/// (`BUNDLE_STAGE_HISTORY_SQL`, newest first).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageHistoryRow {
+    /// `agent_run.phase_kind` (`coding-task`, `review`, `test`, …).
+    pub phase_kind: String,
+    /// `done_payload->>'status'`: the result the run reported, if any.
+    pub result: Option<String>,
+    /// `done_payload->>'note'`.
+    pub note: Option<String>,
+    /// `created_at` as `YYYY-MM-DD`.
+    pub date: String,
+}
+
+/// The stage a run's `phase_kind` belongs to, by its registered state
+/// name; other kinds pass through.
+fn stage_label(phase_kind: &str) -> &str {
+    match phase_kind {
+        recipes::KIND_CODING_TASK => "In Progress",
+        recipes::KIND_REVIEW => "In Review",
+        recipes::KIND_TEST => "In Test",
+        other => other,
+    }
+}
+
+/// Render `stage_history` (design §8.3): one line per run, the last
+/// [`STAGE_HISTORY_LIMIT`] runs oldest first — date, stage, result, note.
+/// `rows` come newest first (the query order); empty input renders "".
+pub fn stage_history(rows: &[StageHistoryRow]) -> String {
+    let mut lines: Vec<String> = rows
+        .iter()
+        .take(STAGE_HISTORY_LIMIT)
+        .map(|row| {
+            let result = row
+                .result
+                .as_deref()
+                .filter(|result| !result.is_empty())
+                .unwrap_or("no result reported");
+            let mut line = format!("- {} {}: {result}", row.date, stage_label(&row.phase_kind));
+            if let Some(note) = row.note.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+                let note = note.replace('\n', " ");
+                let cut: String = note.chars().take(STAGE_HISTORY_NOTE_MAX_CHARS).collect();
+                line.push_str(" — ");
+                line.push_str(&cut);
+                if note.chars().count() > STAGE_HISTORY_NOTE_MAX_CHARS {
+                    line.push('…');
+                }
+            }
+            line
+        })
+        .collect();
+    lines.reverse();
+    lines.join("\n")
 }
 
 /// `tool_plan` section default: `(getattr(run, "tool_plan", {}) or
@@ -1723,6 +1873,9 @@ mod tests {
             comments_section: NO_COMMENTS_TEXT.to_owned(),
             parent_done_payload: NO_PARENT_PAYLOAD_TEXT.to_owned(),
             workpad_body: String::new(),
+            agent_stages: AgentStages::default(),
+            handoff: String::new(),
+            stage_history: String::new(),
         }
     }
 

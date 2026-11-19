@@ -1702,6 +1702,7 @@ mod tests {
             has_parent_run: false,
             ticker_parent_payload: None,
             override_rows: Vec::new(),
+            stages: Default::default(),
         }
     }
 

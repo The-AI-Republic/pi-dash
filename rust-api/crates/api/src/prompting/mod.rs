@@ -129,6 +129,7 @@ use pidash_db::entity::{
     issue_labels, issues, labels, projects, prompt_section_override, scheduler_bindings,
     schedulers, states, users, workspaces,
 };
+use pidash_services::orchestration::creation;
 use pidash_services::prompting::{composer, context, recipes, registry, validation, work_types};
 
 /// `views.py:59`: numeric `WorkspaceMember.role` for the admin role.
@@ -2176,6 +2177,14 @@ async fn load_issue_context(
 
     let (parent, lineage) = parent_and_lineage(pool, &ancestors).await?;
 
+    // `_FakeRun` (`views.py:65-72`): a fresh id, so the stage history
+    // excludes nothing.
+    let preview_run_id = uuid::Uuid::new_v4();
+    let stages =
+        creation::load_stage_inputs(&orm(pool), issue.project_id, issue.id, preview_run_id)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+
     let input = context::IssueContextInput {
         issue_id: issue.id.to_string(),
         project_identifier: project.identifier.clone(),
@@ -2205,7 +2214,7 @@ async fn load_issue_context(
         relations,
         // `_FakeRun` (`views.py:65-72`): a fresh id with no trigger,
         // `local_runner` executor, and an empty tool plan.
-        run_id: uuid::Uuid::new_v4().to_string(),
+        run_id: preview_run_id.to_string(),
         run_template_name: template_name_for(state.as_ref()),
         attempt: context::compute_attempt(prior_runs),
         trigger: None,
@@ -2219,6 +2228,9 @@ async fn load_issue_context(
         comments_section: context::comments_section(&comments),
         parent_done_payload,
         workpad_body: issue.workpad.clone().unwrap_or_default(),
+        agent_stages: stages.agent_stages,
+        handoff: stages.handoff.unwrap_or_default(),
+        stage_history: context::stage_history(&stages.stage_history),
     };
     let mut context_value = context::build_context(&input);
     // Honor the requested kind even if it differs from the issue's

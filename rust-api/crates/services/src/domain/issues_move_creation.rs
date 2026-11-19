@@ -1244,6 +1244,10 @@ async fn twin_load_render_bundle(
         .transpose()
         .map_err(|_| CreationError::MissingRow("bad user id".to_owned()))?;
     let override_rows = twin_bundle_overrides(conn, issue.workspace_id, user_id).await?;
+    let stages =
+        crate::orchestration::creation::load_stage_inputs(conn, project_id, issue_id, run_id)
+            .await
+            .map_err(twin_db)?;
     Ok(RenderBundle {
         issue,
         project,
@@ -1269,6 +1273,7 @@ async fn twin_load_render_bundle(
         has_parent_run,
         ticker_parent_payload,
         override_rows,
+        stages,
     })
 }
 

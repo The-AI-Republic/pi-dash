@@ -213,6 +213,12 @@ pub fn plan_revalidate(rows: &[ActiveOverride], clear: bool) -> RevalidatePlan {
                 // (`revalidate_section_overrides.py`, PDASHOSS01-234).
                 broken = true;
                 detail = issue;
+            } else if let Some(rewritten) = seed::rewritten_section_detail(&row.section_key) {
+                // The lean workflow change rewrote this section; an override
+                // written against the old procedure needs an admin's review
+                // (design §9.5).
+                broken = true;
+                detail = rewritten.to_owned();
             }
         }
         let action = seed::decide_revalidate(broken, row.needs_attention, clear);
@@ -338,7 +344,11 @@ mod tests {
         let sections = registry::all_sections();
         let section = sections
             .iter()
-            .find(|s| !s.is_locked() && !validation::kinds_for_section(s.key).is_empty())
+            .find(|s| {
+                !s.is_locked()
+                    && !validation::kinds_for_section(s.key).is_empty()
+                    && seed::rewritten_section_detail(s.key).is_none()
+            })
             .expect("registry carries a usable section");
         section.key.to_owned()
     }
@@ -357,7 +367,9 @@ mod tests {
     /// Unknown keys flag without rendering (`:40-41`); the literal
     /// A renderable core-section override that still carries git/PR
     /// wording is flagged with the neutrality detail; a work-type
-    /// section override with the same body is kept (PDASHOSS01-234).
+    /// section override with the same body is not a neutrality problem
+    /// (PDASHOSS01-234) — it is flagged only because the lean workflow
+    /// change rewrote that section (design §9.5).
     #[test]
     fn non_neutral_core_override_flags_with_neutrality_detail() {
         let body = "Commit and push the branch, then open a PR.";
@@ -367,7 +379,7 @@ mod tests {
             &[active_override("implementation", body), work_type_row],
             false,
         );
-        assert_eq!(plan.flagged, 1);
+        assert_eq!(plan.flagged, 2);
         assert_eq!(plan.steps[0].action, seed::RevalidateAction::Flag);
         let line = plan.steps[0].line.as_deref().expect("flagged line");
         assert!(
@@ -378,8 +390,42 @@ mod tests {
             ),
             "{line}"
         );
-        assert_eq!(plan.steps[1].action, seed::RevalidateAction::Keep);
-        assert_eq!(plan.steps[1].line, None);
+        assert_eq!(plan.steps[1].action, seed::RevalidateAction::Flag);
+        assert!(plan.steps[1]
+            .line
+            .as_deref()
+            .expect("flagged line")
+            .ends_with(seed::LEAN_WORKFLOW_REWRITTEN_DETAIL));
+    }
+
+    /// Overrides on sections the lean workflow change rewrote are flagged
+    /// with the review detail, and `--clear` never clears that flag; an
+    /// override on a new section key is kept (design §9.5).
+    #[test]
+    fn rewritten_section_overrides_flag_for_review() {
+        for key in seed::LEAN_WORKFLOW_REWRITTEN_KEYS {
+            let plan = plan_revalidate(&[active_override(key, "Plain text with no Jinja.")], false);
+            assert_eq!(plan.steps[0].action, seed::RevalidateAction::Flag, "{key}");
+            assert_eq!(
+                plan.steps[0].line.as_deref(),
+                Some(
+                    format!(
+                        "flagged 00000000-0000-0000-0000-000000000002/{key} (user=None): \
+                         section rewritten by the lean workflow change; review this override"
+                    )
+                    .as_str()
+                ),
+            );
+            let mut flagged = active_override(key, "Plain text with no Jinja.");
+            flagged.needs_attention = true;
+            let plan = plan_revalidate(&[flagged], true);
+            assert_eq!(plan.steps[0].action, seed::RevalidateAction::Keep, "{key}");
+        }
+        let plan = plan_revalidate(
+            &[active_override("review", "Plain text with no Jinja.")],
+            false,
+        );
+        assert_eq!(plan.steps[0].action, seed::RevalidateAction::Keep);
     }
 
     /// `None` user matches Python's f-string of `None`.

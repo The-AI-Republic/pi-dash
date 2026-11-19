@@ -433,8 +433,46 @@ pub enum RevalidateAction {
     Keep,
 }
 
+/// Section keys whose built-in body the lean agent workflow change
+/// rewrote (design `.ai_design/lean_agent_workflow/design.md` §9.5). An
+/// active override on one of these still wins over the new default, but
+/// it was written against the old procedure (it may name `pidash run
+/// yield` or workpad blocks that no longer exist), so the revalidate scan
+/// flags it for review. Deleted keys (`review-cycle`, `test-cycle`,
+/// `workpad-setup`, …) need no entry: they are unknown keys and are
+/// flagged with [`UNKNOWN_SECTION_DETAIL`].
+pub const LEAN_WORKFLOW_REWRITTEN_KEYS: &[&str] = &[
+    "analyze-and-scope",
+    "autonomy",
+    "default-posture",
+    "implementation",
+    "general.execute",
+    "general.review",
+    "general.test",
+    "software.execute",
+    "software.review",
+    "software.test",
+];
+
+/// Detail recorded for an override on a [`LEAN_WORKFLOW_REWRITTEN_KEYS`]
+/// section.
+pub const LEAN_WORKFLOW_REWRITTEN_DETAIL: &str =
+    "section rewritten by the lean workflow change; review this override";
+
+/// Whether an active override of `section_key` is flagged because the
+/// lean workflow change rewrote that section (§9.5), returning the detail.
+pub fn rewritten_section_detail(section_key: &str) -> Option<&'static str> {
+    LEAN_WORKFLOW_REWRITTEN_KEYS
+        .contains(&section_key)
+        .then_some(LEAN_WORKFLOW_REWRITTEN_DETAIL)
+}
+
 /// Pure half of the revalidate loop (`revalidate_section_overrides.py:handle`):
-/// `broken` is "unknown section key, or `validate_override` raised".
+/// `broken` is "unknown section key, or `validate_override` raised, or the
+/// override targets a section the lean workflow change rewrote
+/// ([`rewritten_section_detail`])". A rewritten-section row counts as
+/// broken, so `--clear` never clears its flag; it stays flagged until an
+/// admin edits or removes the override.
 /// Truth table mirrors the `if broken and not needs_attention /
 /// elif not broken and needs_attention and clear` branches exactly.
 pub fn decide_revalidate(broken: bool, needs_attention: bool, clear: bool) -> RevalidateAction {
