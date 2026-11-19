@@ -348,8 +348,7 @@ pub struct AttachBody {
     /// form shows what the daemon runs with. Older clouds ignore it.
     pub model: String,
     /// The configured reasoning effort (Codex / Claude Code / Muse Code);
-    /// `""` is the
-    /// agent's default.
+    /// `""` is the agent's default.
     pub reasoning_effort: String,
 }
 

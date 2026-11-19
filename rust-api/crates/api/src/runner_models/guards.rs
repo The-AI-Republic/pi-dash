@@ -63,19 +63,21 @@ pub const MUSE_CODE_EFFORTS: [&str; 8] = [
 /// sets. Used where the agent is not known (the agent-agnostic patch and
 /// the reconfigure body before the runner's agent is loaded). Muse's set is
 /// a superset of Codex's and Claude Code's, so it is the union;
-/// `known_efforts_is_the_union`
-/// pins that.
+/// `known_efforts_is_the_union` pins that.
 pub const KNOWN_EFFORTS: [&str; 8] = MUSE_CODE_EFFORTS;
 
-/// The effort tiers valid for `agent`'s catalog rows. Claude Code and Muse
-/// Code have their own sets; every other runner agent keeps the Codex tiers.
-/// `None` (agent unknown) is the union.
+/// The effort tiers valid for `agent`, matching the runner's
+/// `efforts_for_agent`: Codex, Claude Code and Muse Code each have their own
+/// set, and every other runner agent (Cursor, OpenClaw, Grok) takes none.
+/// `None` (agent unknown) is the union. `openhub` is the union too so its
+/// rows fail with the clearer `efforts_not_allowed`, checked afterwards.
 pub fn efforts_for_agent(agent: Option<&str>) -> &'static [&'static str] {
     match agent {
-        None => &KNOWN_EFFORTS,
-        Some("muse-code") => &MUSE_CODE_EFFORTS,
+        None | Some(OPENHUB_AGENT) => &KNOWN_EFFORTS,
+        Some("codex") => &CODEX_EFFORTS,
         Some("claude-code") => &CLAUDE_CODE_EFFORTS,
-        Some(_) => &CODEX_EFFORTS,
+        Some("muse-code") => &MUSE_CODE_EFFORTS,
+        Some(_) => &[],
     }
 }
 
@@ -478,6 +480,22 @@ mod tests {
             &json!({"reasoning_efforts": ["none"]})
         )
         .is_ok());
+    }
+
+    #[test]
+    fn agents_without_an_effort_setting_take_none() {
+        for agent in ["cursor-agent", "open-claw", "grok"] {
+            assert_eq!(
+                validate_create(&json!({
+                    "agent": agent, "model": "m", "label": "M",
+                    "reasoning_efforts": ["high"],
+                }))
+                .err(),
+                Some("invalid_effort"),
+                "{agent}"
+            );
+            assert!(validate_create(&json!({"agent": agent, "model": "m", "label": "M"})).is_ok());
+        }
     }
 
     #[test]

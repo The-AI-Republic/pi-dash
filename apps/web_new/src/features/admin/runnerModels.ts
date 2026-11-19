@@ -40,11 +40,22 @@ export const MUSE_CODE_EFFORTS = ["none", "minimal", "low", "medium", "high", "x
 /** Effort values `claude --effort` accepts (the server's `CLAUDE_CODE_EFFORTS`). */
 export const CLAUDE_CODE_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 
-/** The effort checkboxes one agent's rows offer: Claude Code and Muse Code have their own sets. */
+/**
+ * The effort checkboxes one agent's rows offer (the server's
+ * `efforts_for_agent`). Codex, Claude Code and Muse Code each have their own
+ * set; Cursor, OpenClaw and Grok take no effort, so they get none.
+ */
 export function effortsForAgent(agent: string): readonly string[] {
-  if (agent === "muse-code") return MUSE_CODE_EFFORTS;
-  if (agent === "claude-code") return CLAUDE_CODE_EFFORTS;
-  return RUNNER_MODEL_EFFORTS;
+  switch (agent) {
+    case "codex":
+      return RUNNER_MODEL_EFFORTS;
+    case "claude-code":
+      return CLAUDE_CODE_EFFORTS;
+    case "muse-code":
+      return MUSE_CODE_EFFORTS;
+    default:
+      return [];
+  }
 }
 
 /** Effort checkbox labels: the add-runner picker's, so the two never drift. */

@@ -47,6 +47,7 @@ describe("agent sections", () => {
     expect(effortsForAgent("muse-code")).toEqual(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
     expect(effortsForAgent("codex")).toEqual(RUNNER_MODEL_EFFORTS);
     expect(effortsForAgent("claude-code")).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    for (const agent of ["cursor-agent", "open-claw", "grok", "openhub"]) expect(effortsForAgent(agent)).toEqual([]);
     expect(formatEfforts(row({ agent: "muse-code", reasoning_efforts: ["minimal", "max"] }))).toBe("Minimal, Max");
   });
 

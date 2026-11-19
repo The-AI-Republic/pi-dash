@@ -1633,12 +1633,19 @@ struct ReconfigureTarget {
     agent: Option<String>,
 }
 
-/// The `--agent` spelling of the runner's `agent:<kind>` capability.
+/// The `--agent` spelling of the runner's `agent:<kind>` capability. The
+/// column is an array of strings or, on older rows, an object keyed by
+/// capability (the same two shapes `machine_identity` reads).
 fn reported_agent(capabilities: &serde_json::Value) -> Option<String> {
-    capabilities.as_array()?.iter().find_map(|capability| {
-        let kind = capability.as_str()?.strip_prefix("agent:")?;
-        Some(kind.trim().replace('_', "-"))
-    })
+    let kind = match capabilities {
+        serde_json::Value::Array(caps) => caps
+            .iter()
+            .find_map(|cap| cap.as_str()?.strip_prefix("agent:")),
+        serde_json::Value::Object(map) => map.keys().find_map(|key| key.strip_prefix("agent:")),
+        _ => None,
+    }?;
+    let kind = kind.trim();
+    (!kind.is_empty()).then(|| kind.replace('_', "-"))
 }
 
 /// Whether `effort` is a tier the agent the runner will run accepts: the
@@ -1956,6 +1963,10 @@ mod tests {
         let caps = serde_json::json!(["os:linux", "agent:muse_code"]);
         assert_eq!(reported_agent(&caps).as_deref(), Some("muse-code"));
         assert_eq!(reported_agent(&serde_json::json!(["os:linux"])), None);
+        assert_eq!(
+            reported_agent(&serde_json::json!({"os:linux": true, "agent:codex": true})).as_deref(),
+            Some("codex")
+        );
 
         let effort = |agent: Option<&str>, effort: &str| RunnerReconfigure {
             agent: agent.map(str::to_string),
@@ -1974,6 +1985,8 @@ mod tests {
             &effort(Some("muse-code"), "ultra"),
             Some("codex")
         ));
+        // Agents without an effort setting take none.
+        assert!(!effort_fits_agent(&effort(None, "high"), Some("grok")));
         // Claude Code takes `max` but not Muse's `ultra`.
         assert!(effort_fits_agent(&effort(None, "max"), Some("claude-code")));
         assert!(!effort_fits_agent(
