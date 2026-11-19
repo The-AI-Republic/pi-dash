@@ -1293,9 +1293,11 @@ fn apply_runner_changes(
         if let Some(slot) = block.model_slot_mut(kind) {
             *slot = value;
         }
-        // Effort is only meaningful alongside an explicit Codex model.
-        if kind == AgentKind::Codex && block.codex.model_default.is_none() {
-            block.codex.effort_default = None;
+        // Effort is only meaningful alongside an explicit model.
+        if block.configured_model().is_none()
+            && let Some(slot) = block.effort_slot_mut(kind)
+        {
+            *slot = None;
         }
     }
     if let Some(effort) = &changes.reasoning_effort {
@@ -1317,10 +1319,11 @@ fn apply_runner_changes(
                     tiers.join(", ")
                 );
             }
-            if crate::cli::runner_ops::effort_needs_model(kind)
-                && block.configured_model().is_none()
-            {
-                anyhow::bail!("reasoning effort needs a model; pick a Codex model first");
+            if block.configured_model().is_none() {
+                anyhow::bail!(
+                    "reasoning effort needs a model; pick a {} model first",
+                    kind.display_name()
+                );
             }
             if let Some(slot) = block.effort_slot_mut(kind) {
                 *slot = Some(effort);
@@ -6155,11 +6158,23 @@ mod tests {
     fn apply_changes_sets_and_clears_the_muse_code_effort() {
         let tmp = tempfile::tempdir().unwrap();
         let (mut cfg, id) = changes_cfg(tmp.path(), AgentKind::MuseCode);
-        // Muse takes an effort without an explicit model.
+        // Like Codex, an effort needs a model.
+        let err = apply_runner_changes(
+            &mut cfg,
+            id,
+            &RunnerChanges {
+                reasoning_effort: Some("max".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("needs a model"), "{err}");
+
         apply_runner_changes(
             &mut cfg,
             id,
             &RunnerChanges {
+                model: Some("muse-spark".into()),
                 reasoning_effort: Some("Max".into()),
                 ..Default::default()
             },
@@ -6167,7 +6182,27 @@ mod tests {
         .unwrap();
         assert_eq!(block(&cfg, id).configured_reasoning_effort(), Some("max"));
 
-        // Clearing the model keeps Muse's effort (it does not depend on one).
+        apply_runner_changes(
+            &mut cfg,
+            id,
+            &RunnerChanges {
+                reasoning_effort: Some(String::new()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(block(&cfg, id).configured_reasoning_effort(), None);
+
+        // Back to the agent default drops the effort with it.
+        apply_runner_changes(
+            &mut cfg,
+            id,
+            &RunnerChanges {
+                reasoning_effort: Some("ultra".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         apply_runner_changes(
             &mut cfg,
             id,
@@ -6177,7 +6212,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(block(&cfg, id).configured_reasoning_effort(), Some("max"));
+        assert_eq!(block(&cfg, id).configured_reasoning_effort(), None);
 
         apply_runner_changes(
             &mut cfg,

@@ -55,8 +55,9 @@ pub struct Args {
     #[arg(long)]
     pub model: Option<String>,
 
-    /// Codex reasoning-effort tier (``low`` / ``medium`` / ``high`` /
-    /// ``xhigh``). Only applies when ``--agent codex``.
+    /// Reasoning-effort tier, used together with ``--model``. Applies to
+    /// ``--agent codex`` (``low`` … ``xhigh``) and ``--agent muse-code``
+    /// (``none`` … ``ultra``).
     #[arg(long)]
     pub reasoning_effort: Option<String>,
 

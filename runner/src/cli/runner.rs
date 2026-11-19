@@ -192,8 +192,10 @@ pub struct AddArgs {
     #[arg(long)]
     pub model: Option<String>,
 
-    /// Codex reasoning-effort tier (`low` / `medium` / `high` / `xhigh`).
-    /// Only applies when `--agent codex`; ignored for other agents.
+    /// Reasoning-effort tier, used together with `--model`. Codex takes
+    /// `low` / `medium` / `high` / `xhigh`; Muse Code takes `none` /
+    /// `minimal` / `low` / `medium` / `high` / `xhigh` / `max` / `ultra`.
+    /// Ignored for other agents.
     #[arg(long)]
     pub reasoning_effort: Option<String>,
 
@@ -457,7 +459,9 @@ pub async fn add(args: AddArgs, paths: &Paths) -> Result<RunnerConfig> {
 async fn add_engine(args: &AddArgs, paths: &Paths) -> Result<RunnerConfig> {
     use crate::ipc::protocol::{Request, Response};
     if args.name.is_some() {
-        eprintln!("note: --name is ignored for the Pi Dash Agent; Pi Dash names Pi Dash Agent runners");
+        eprintln!(
+            "note: --name is ignored for the Pi Dash Agent; Pi Dash names Pi Dash Agent runners"
+        );
     }
     if args.model.is_some() || args.reasoning_effort.is_some() {
         eprintln!(
@@ -777,7 +781,8 @@ pub async fn remove(args: RemoveArgs, paths: &Paths) -> Result<()> {
     // The server row of a local-only or offline removal stays live; record
     // it before the block goes so the engine reconcile loop doesn't re-add
     // the runner (it would otherwise see a live engine row with no block).
-    if !matches!(mode, RemoveMode::Cascade) && cfg.runners[idx].agent.kind == AgentKind::PidashAgent {
+    if !matches!(mode, RemoveMode::Cascade) && cfg.runners[idx].agent.kind == AgentKind::PidashAgent
+    {
         crate::pidash_agent::tombstones::add(
             paths,
             runner_id,

@@ -1031,8 +1031,8 @@ pub struct MuseCodeSection {
     pub model_default: Option<String>,
     /// `muse exec --reasoning-effort` tier (`none` / `minimal` / `low` /
     /// `medium` / `high` / `xhigh` / `max` / `ultra`). `None` omits the flag
-    /// so Muse applies its own default. Unlike Codex it does not need a
-    /// `model_default`: Muse takes the tier for whatever model it runs.
+    /// so Muse applies its own default. Like Codex's, only meaningful
+    /// alongside `model_default` (the web picker pairs tiers with models).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort_default: Option<String>,
 }

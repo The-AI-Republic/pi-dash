@@ -7,6 +7,8 @@
 // stays in code (the catalog never adds agents).
 import { isApiError, type RunnerModelRow } from "@pidash/api-client";
 
+import { EFFORT_LABELS } from "../runners/index.js";
+
 /** Agents in section order, with their display names. */
 export const RUNNER_MODEL_AGENTS: readonly { agent: string; label: string }[] = [
   { agent: "claude-code", label: "Claude Code" },
@@ -40,17 +42,8 @@ export function effortsForAgent(agent: string): readonly string[] {
   return agent === "muse-code" ? MUSE_CODE_EFFORTS : RUNNER_MODEL_EFFORTS;
 }
 
-/** Effort checkbox labels. */
-export const RUNNER_MODEL_EFFORT_LABELS: Record<string, string> = {
-  none: "None",
-  minimal: "Minimal",
-  low: "Low",
-  medium: "Medium",
-  high: "High",
-  xhigh: "Extra High",
-  max: "Max",
-  ultra: "Ultra",
-};
+/** Effort checkbox labels: the add-runner picker's, so the two never drift. */
+export const RUNNER_MODEL_EFFORT_LABELS: Record<string, string> = EFFORT_LABELS;
 
 /** Page heading. */
 export const RUNNER_MODELS_HEADING = "Runner models";

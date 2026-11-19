@@ -43,13 +43,6 @@ pub(crate) fn efforts_for_agent(kind: AgentKind) -> Option<&'static [&'static st
     }
 }
 
-/// Whether `kind` needs an explicit model before an effort tier means
-/// anything. Codex sends the tier with the model on `turn/start`; Muse takes
-/// `--reasoning-effort` for whatever model it runs.
-pub(crate) fn effort_needs_model(kind: AgentKind) -> bool {
-    kind == AgentKind::Codex
-}
-
 /// Print an orange (256-color 208) warning to stderr. Used when a
 /// `--model` / `--reasoning-effort` value can't be applied to the chosen
 /// agent: we never fail the enrollment over it, just tell the operator we
@@ -141,8 +134,9 @@ pub fn agent_sections_for(
         }
     };
 
-    // Reasoning effort applies to Codex and Muse Code only. Codex also needs
-    // an explicit model (see `CodexSection::effort_default`), so there it is
+    // Reasoning effort applies to Codex and Muse Code only, and only alongside
+    // an explicit model: the web picker pairs every tier with a model, so an
+    // effort on the agent default could not be shown or kept there. It is
     // dropped when the model was absent or rejected above.
     let effort = match (efforts_for_agent(agent_kind), effort) {
         (_, None) => None,
@@ -163,11 +157,12 @@ pub fn agent_sections_for(
             ));
             None
         }
-        (Some(_), Some(_)) if effort_needs_model(agent_kind) && model.is_none() => {
+        (Some(_), Some(_)) if model.is_none() => {
             // Valid tier, but no applicable model to attach it to.
-            warn_model_fallback(
-                "--reasoning-effort needs an applicable --model for the codex agent; ignoring it.",
-            );
+            warn_model_fallback(&format!(
+                "--reasoning-effort needs an applicable --model for the {} agent; ignoring it.",
+                agent_kind.display_name()
+            ));
             None
         }
         (Some(_), Some(e)) => Some(e.to_ascii_lowercase()),
@@ -1126,10 +1121,10 @@ mod tests {
     }
 
     #[test]
-    fn muse_code_effort_does_not_need_a_model() {
+    fn muse_code_effort_dropped_without_a_model() {
         let (_, _, _, _, _, muse) = agent_sections_for(AgentKind::MuseCode, None, Some("ultra"));
         assert_eq!(muse.model_default, None);
-        assert_eq!(muse.effort_default.as_deref(), Some("ultra"));
+        assert_eq!(muse.effort_default, None);
     }
 
     #[test]

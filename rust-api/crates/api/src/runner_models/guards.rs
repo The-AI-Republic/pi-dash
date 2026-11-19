@@ -57,7 +57,9 @@ pub const MUSE_CODE_EFFORTS: [&str; 8] = [
 
 /// Every effort tier some runner agent accepts: the union of the per-agent
 /// sets. Used where the agent is not known (the agent-agnostic patch and
-/// the reconfigure body, whose daemon re-checks against its agent).
+/// the reconfigure body before the runner's agent is loaded). Muse's set is
+/// a superset of Codex's, so it is the union; `known_efforts_is_the_union`
+/// pins that.
 pub const KNOWN_EFFORTS: [&str; 8] = MUSE_CODE_EFFORTS;
 
 /// The effort tiers valid for `agent`'s catalog rows. Muse Code has its own
@@ -83,10 +85,6 @@ pub fn is_known_catalog_agent(agent: &str) -> bool {
 /// True when the value is the OpenHub catalog group (assistant models).
 pub fn is_openhub(agent: &str) -> bool {
     agent == OPENHUB_AGENT
-}
-
-pub fn is_known_effort(effort: &str) -> bool {
-    KNOWN_EFFORTS.contains(&effort)
 }
 
 /// True when `effort` is a tier `agent` accepts (see [`efforts_for_agent`]).
@@ -442,6 +440,16 @@ mod tests {
         );
         // Agent-agnostic validate_patch does not enforce openhub rule.
         assert!(validate_patch(&json!({"reasoning_efforts": ["high"]})).is_ok());
+    }
+
+    #[test]
+    fn known_efforts_is_the_union() {
+        for tier in CODEX_EFFORTS.iter().chain(MUSE_CODE_EFFORTS.iter()) {
+            assert!(
+                KNOWN_EFFORTS.contains(tier),
+                "{tier} missing from KNOWN_EFFORTS"
+            );
+        }
     }
 
     #[test]
