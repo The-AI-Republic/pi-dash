@@ -14,6 +14,7 @@ import { Mic, Send, Square } from "lucide-react";
 import * as React from "react";
 
 import { CrossAppLink } from "../../../shared/coexistence/index.js";
+import { ChatInput } from "../../../shared/editor/ChatInput.js";
 import type { ComposerDictation } from "../lib/dictation.js";
 import {
   API_KEY_REMINDER,
@@ -62,6 +63,9 @@ export interface ComposerProps {
   /** Model picker rendered in the bottom bar next to send; absent elsewhere. */
   modelPicker?: React.ReactNode;
 }
+
+/** Caps the draft box's growth; beyond this the draft scrolls inside it. */
+const COMPOSER_MAX_HEIGHT = 240;
 
 export function Composer({
   workspaceSlug,
@@ -151,111 +155,119 @@ export function Composer({
           {dictationHintText(hint)}
         </p>
       )}
-      <div className="flex items-end gap-(--space-2)">
-        <textarea
-          aria-label={ASSISTANT_COMPOSER_LABEL}
+      {/* One box holds the draft and its controls: the editor on top, the
+          model picker bottom-left, dictation and send/stop bottom-right. */}
+      <div
+        data-testid="assistant-composer-box"
+        className={cn(
+          "flex flex-col gap-(--space-2) rounded-(--radius-dialog) border border-(--border) bg-(--surface)",
+          "px-(--space-4) pt-(--space-4) pb-(--space-3) transition-colors focus-within:border-(--accent)"
+        )}
+      >
+        {/* Only an unmodified Enter submits: Shift+Enter breaks the line
+            and a chord never fires a send (AGT-049 intended). A running
+            turn is not a client-side gate; the send still posts and the
+            server's `turn_active` reply lands inline. */}
+        <ChatInput
+          label={ASSISTANT_COMPOSER_LABEL}
           placeholder={placeholder}
           value={draft}
-          rows={3}
           disabled={boxLocked}
-          onChange={(event) => onDraftChange(event.target.value)}
-          onKeyDown={(event) => {
-            // Only an unmodified Enter submits: Shift+Enter keeps the newline
-            // the browser inserts natively, and every other modifier is left
-            // to the browser so a chord never fires a send (AGT-049 intended).
-            // A running turn is not a client-side gate; the send still posts
-            // and the server's `turn_active` reply lands inline.
-            if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) {
-              event.preventDefault();
-              if (canSend) onSubmit(draft.trim());
-            }
+          onChange={onDraftChange}
+          onSubmit={() => {
+            if (canSend) onSubmit(draft.trim());
           }}
-          className="text-body min-h-20 flex-1 resize-none rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-4) py-(--space-3) text-(--text) placeholder:text-(--text-muted) focus:border-(--accent) focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
+          maxHeight={COMPOSER_MAX_HEIGHT}
+          className="min-h-12 px-(--space-2)"
         />
-        {modelPicker}
-        {dictation !== undefined && micShown ? (
-          hasSpeechKey || micDisabled ? (
-            <Button
-              variant={recording ? "danger" : "ghost"}
-              size="small"
-              data-testid="assistant-mic"
-              aria-label={micLabel}
-              aria-pressed={recording}
-              title={micLabel}
-              disabled={micDisabled}
-              loading={transcribing}
-              // Push-to-talk: hold (pointer or Space/Enter) to record,
-              // release to transcribe. onClick stays off so a keyboard
-              // press maps to the same hold gesture as the pointer.
-              onPointerDown={(event) => {
-                event.preventDefault();
-                dictation.handle.reset();
-                void dictation.handle.start();
-              }}
-              onPointerUp={() => dictation.handle.stop()}
-              onPointerLeave={() => {
-                if (dictation.handle.status === "recording") dictation.handle.stop();
-              }}
-              onPointerCancel={() => dictation.handle.cancel()}
-              onKeyDown={(event) => {
-                if ((event.key !== " " && event.key !== "Enter") || event.repeat) return;
-                event.preventDefault();
-                dictation.handle.reset();
-                void dictation.handle.start();
-              }}
-              onKeyUp={(event) => {
-                if (event.key !== " " && event.key !== "Enter") return;
-                event.preventDefault();
-                dictation.handle.stop();
-              }}
-              className="tabular-nums"
-            >
-              {recording ? (
-                <span className="flex items-center gap-(--space-1)">
-                  <Mic size={16} strokeWidth={1.5} aria-hidden="true" />
-                  {formatDictationElapsed(dictation.handle.elapsedSeconds)}
-                </span>
+        <div className="flex items-center gap-(--space-2)">
+          {modelPicker}
+          <div className="ml-auto flex items-center gap-(--space-2)">
+            {dictation !== undefined && micShown ? (
+              hasSpeechKey || micDisabled ? (
+                <Button
+                  variant={recording ? "danger" : "ghost"}
+                  size="small"
+                  data-testid="assistant-mic"
+                  aria-label={micLabel}
+                  aria-pressed={recording}
+                  title={micLabel}
+                  disabled={micDisabled}
+                  loading={transcribing}
+                  // Push-to-talk: hold (pointer or Space/Enter) to record,
+                  // release to transcribe. onClick stays off so a keyboard
+                  // press maps to the same hold gesture as the pointer.
+                  onPointerDown={(event) => {
+                    event.preventDefault();
+                    dictation.handle.reset();
+                    void dictation.handle.start();
+                  }}
+                  onPointerUp={() => dictation.handle.stop()}
+                  onPointerLeave={() => {
+                    if (dictation.handle.status === "recording") dictation.handle.stop();
+                  }}
+                  onPointerCancel={() => dictation.handle.cancel()}
+                  onKeyDown={(event) => {
+                    if ((event.key !== " " && event.key !== "Enter") || event.repeat) return;
+                    event.preventDefault();
+                    dictation.handle.reset();
+                    void dictation.handle.start();
+                  }}
+                  onKeyUp={(event) => {
+                    if (event.key !== " " && event.key !== "Enter") return;
+                    event.preventDefault();
+                    dictation.handle.stop();
+                  }}
+                  className="tabular-nums"
+                >
+                  {recording ? (
+                    <span className="flex items-center gap-(--space-1)">
+                      <Mic size={16} strokeWidth={1.5} aria-hidden="true" />
+                      {formatDictationElapsed(dictation.handle.elapsedSeconds)}
+                    </span>
+                  ) : (
+                    <Mic size={16} strokeWidth={1.5} aria-hidden="true" />
+                  )}
+                </Button>
               ) : (
-                <Mic size={16} strokeWidth={1.5} aria-hidden="true" />
-              )}
-            </Button>
-          ) : (
-            // No speech key: the press routes to dictation settings
-            // instead of recording (AGT-051).
-            <CrossAppLink
-              to={settingsHref}
-              hash={VOICE_DICTATION_HASH}
-              data-testid="assistant-mic"
-              aria-label={micLabel}
-              title={micLabel}
-              className="text-meta inline-flex h-6 cursor-pointer items-center justify-center gap-(--space-2) rounded-(--radius-control) bg-transparent px-(--space-3) font-medium whitespace-nowrap text-(--text) transition-colors duration-(--motion-duration) hover:bg-(--subtle) focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--focus-ring-color)"
-            >
-              <Mic size={16} strokeWidth={1.5} aria-hidden="true" />
-            </CrossAppLink>
-          )
-        ) : null}
-        {running ? (
-          <Button
-            variant="secondary"
-            aria-label={ASSISTANT_STOP_LABEL}
-            onClick={(event) => {
-              event.preventDefault();
-              onStop?.();
-            }}
-          >
-            <Square aria-hidden="true" size={16} />
-          </Button>
-        ) : (
-          <Button
-            type="submit"
-            variant="primary"
-            disabled={!canSend}
-            loading={starting || posting}
-            aria-label={ASSISTANT_SEND_LABEL}
-          >
-            <Send aria-hidden="true" size={16} />
-          </Button>
-        )}
+                // No speech key: the press routes to dictation settings
+                // instead of recording (AGT-051).
+                <CrossAppLink
+                  to={settingsHref}
+                  hash={VOICE_DICTATION_HASH}
+                  data-testid="assistant-mic"
+                  aria-label={micLabel}
+                  title={micLabel}
+                  className="text-meta inline-flex h-6 cursor-pointer items-center justify-center gap-(--space-2) rounded-(--radius-control) bg-transparent px-(--space-3) font-medium whitespace-nowrap text-(--text) transition-colors duration-(--motion-duration) hover:bg-(--subtle) focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--focus-ring-color)"
+                >
+                  <Mic size={16} strokeWidth={1.5} aria-hidden="true" />
+                </CrossAppLink>
+              )
+            ) : null}
+            {running ? (
+              <Button
+                variant="secondary"
+                aria-label={ASSISTANT_STOP_LABEL}
+                onClick={(event) => {
+                  event.preventDefault();
+                  onStop?.();
+                }}
+              >
+                <Square aria-hidden="true" size={16} />
+              </Button>
+            ) : (
+              <Button
+                type="submit"
+                variant="primary"
+                disabled={!canSend}
+                loading={starting || posting}
+                aria-label={ASSISTANT_SEND_LABEL}
+              >
+                <Send aria-hidden="true" size={16} />
+              </Button>
+            )}
+          </div>
+        </div>
       </div>
     </form>
   );

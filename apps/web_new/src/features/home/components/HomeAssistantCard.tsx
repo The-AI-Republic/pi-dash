@@ -22,6 +22,7 @@ import type { AssistantThread } from "@pidash/api-client";
 import { hasLocalChat } from "../../../core/platform/local-chat.js";
 import { usePermissions } from "../../../core/session/index.js";
 import { CrossAppLink } from "../../../shared/coexistence/index.js";
+import { ChatInput } from "../../../shared/editor/ChatInput.js";
 import { notifyError } from "../../../shared/shell/index.js";
 import { useAssistantConfig, useAssistantThreads } from "../api/queries.js";
 import {
@@ -76,17 +77,7 @@ export function HomeAssistantCard({ workspaceSlug }: HomeAssistantCardProps): Re
   const start = useStartConversation();
   const navigate = useNavigate();
   const [draft, setDraft] = React.useState("");
-  const composerRef = React.useRef<HTMLTextAreaElement | null>(null);
   const localStartRef = React.useRef(false);
-
-  // The composer grows with its content up to COMPOSER_MAX_HEIGHT, then
-  // scrolls inside the box (ChatGPT/Claude style).
-  React.useEffect(() => {
-    const el = composerRef.current;
-    if (el === null) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, COMPOSER_MAX_HEIGHT)}px`;
-  }, [draft]);
 
   if (!canView) return null;
   if ((!localChat && threads.data === undefined) || config.data === undefined) return null;
@@ -156,43 +147,36 @@ export function HomeAssistantCard({ workspaceSlug }: HomeAssistantCardProps): Re
             </CrossAppLink>
           </div>
         )}
-        <div data-testid="assistant-card-entry" className="relative">
-          <textarea
-            ref={composerRef}
-            aria-label="Ask the assistant"
+        <div
+          data-testid="assistant-card-entry"
+          className={cn(
+            "flex flex-col gap-(--space-2) rounded-(--radius-dialog) border border-(--border) bg-(--surface)",
+            "px-(--space-4) pt-(--space-4) pb-(--space-3) transition-colors focus-within:border-(--accent)"
+          )}
+        >
+          {/* Unmodified Enter asks; Shift+Enter breaks the line; a chord
+              (Control/Command/Alt) never asks (AGT-049). */}
+          <ChatInput
+            label="Ask the assistant"
             placeholder="Ask Pi Dash to do something…"
             value={draft}
-            rows={1}
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={(event) => {
-              // Unmodified Enter submits; Shift+Enter breaks the line; a
-              // chord (Control/Command/Alt) never asks (AGT-049).
-              if (event.key !== "Enter") return;
-              if (event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) return;
-              event.preventDefault();
-              if (event.ctrlKey || event.metaKey || event.altKey) return;
-              ask();
-            }}
-            className={cn(
-              "text-body block w-full resize-none rounded-(--radius-dialog) border border-(--border) bg-(--surface)",
-              "max-h-50 min-h-24 overflow-y-auto px-(--space-6) pt-(--space-5) pr-(--space-24) pb-(--space-16)",
-              "text-(--text) placeholder:text-(--text-muted) focus:border-(--accent) focus:outline-none"
-            )}
+            onChange={setDraft}
+            onSubmit={ask}
+            maxHeight={COMPOSER_MAX_HEIGHT}
+            className="min-h-12 px-(--space-2)"
           />
-          <OpenHubModelPicker
-            workspaceSlug={workspaceSlug}
-            config={config.data}
-            className="absolute bottom-(--space-4) left-(--space-4)"
-          />
-          <Button
-            variant="primary"
-            onClick={ask}
-            disabled={draft.trim() === "" || start.isPending}
-            loading={start.isPending}
-            className="absolute right-(--space-4) bottom-(--space-4)"
-          >
-            Ask
-          </Button>
+          <div className="flex items-center justify-between gap-(--space-2)">
+            <OpenHubModelPicker workspaceSlug={workspaceSlug} config={config.data} />
+            <Button
+              variant="primary"
+              onClick={ask}
+              disabled={draft.trim() === "" || start.isPending}
+              loading={start.isPending}
+              className="ml-auto"
+            >
+              Ask
+            </Button>
+          </div>
         </div>
         <div className="flex flex-wrap gap-(--space-2)">
           {ASSISTANT_CARD_SUGGESTIONS.map((suggestion) => (

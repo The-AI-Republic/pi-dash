@@ -162,6 +162,8 @@ export function ThreadView({
           configured={configured}
           dictation={dictation}
           modelPicker={<OpenHubModelPicker workspaceSlug={workspaceSlug} config={config} />}
+          // The composer is its own bordered box; a divider above it would double the line.
+          bordered={false}
         />
       </div>
     </div>
