@@ -426,6 +426,31 @@ pub enum MachineMsg {
     CreateRunner(CreateRunnerCmd),
     /// Reserved for config distribution; ack + ignore for now.
     ConfigPush {},
+    /// Cloud-driven edit of one runner's local settings (the web runner
+    /// edit form). Answered on the command-result endpoint like
+    /// [`MachineMsg::CreateRunner`].
+    ReconfigureRunner(ReconfigureRunnerCmd),
+}
+
+/// Payload of [`MachineMsg::ReconfigureRunner`]. `name` is the cloud's
+/// current name (so a rename made in the web follows to the local block);
+/// every other field is present only when it changes. `model` /
+/// `reasoning_effort` `""` mean the agent's own default.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReconfigureRunnerCmd {
+    #[serde(default)]
+    pub request_id: String,
+    pub runner_id: Uuid,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub working_dir: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 /// Payload of [`MachineMsg::CreateRunner`]. Mirrors the fields the web

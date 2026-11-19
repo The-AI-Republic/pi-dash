@@ -343,6 +343,12 @@ pub struct AttachBody {
     /// `"muse_code"`) — the same spelling the diagnostics matcher expects. A
     /// cloud that predates this field simply ignores it.
     pub agent_kind: AgentKind,
+    /// The default model configured for the agent; `""` is the agent's
+    /// own default. The cloud keeps it on the runner row so the web edit
+    /// form shows what the daemon runs with. Older clouds ignore it.
+    pub model: String,
+    /// The configured Codex reasoning effort; `""` is the model default.
+    pub reasoning_effort: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -3033,6 +3039,8 @@ mod tests {
             working_dir: "/tmp/wd".into(),
             agent_versions: std::collections::HashMap::new(),
             agent_kind: AgentKind::default(),
+            model: String::new(),
+            reasoning_effort: String::new(),
         }
     }
 
@@ -3072,7 +3080,9 @@ mod tests {
         // The poll path is the single ingestion site for the
         // per-active-run snapshot; session-open stays a thin
         // identity/resume body. `agent_kind` is identity, not observability —
-        // which agent this runner drives, persisted once on session-open.
+        // which agent this runner drives, persisted once on session-open;
+        // `model` / `reasoning_effort` are its configured settings, shown
+        // by the web runner edit form.
         let body = sample_attach_body();
         let v = serde_json::to_value(&body).unwrap();
         let keys: std::collections::BTreeSet<_> = v.as_object().unwrap().keys().cloned().collect();
@@ -3087,6 +3097,8 @@ mod tests {
             "working_dir",
             "agent_versions",
             "agent_kind",
+            "model",
+            "reasoning_effort",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -3429,6 +3441,8 @@ mod reconnect_loop_tests {
                 working_dir: "/tmp/wd".into(),
                 agent_versions: HashMap::new(),
                 agent_kind: AgentKind::default(),
+                model: String::new(),
+                reasoning_effort: String::new(),
             },
         )
         .with_state(state.clone())

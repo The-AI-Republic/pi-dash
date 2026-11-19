@@ -79,6 +79,7 @@ pub async fn set_working_dir(args: SetWorkingDirArgs, paths: &Paths) -> Result<(
                 runner: args.runner.clone(),
                 changes: RunnerChanges {
                     working_dir: Some(path.clone()),
+                    ..Default::default()
                 },
             }),
         )

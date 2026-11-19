@@ -26,6 +26,13 @@ export type RunnerPodDispatch = (typeof RUNNER_POD_DISPATCHES)[number];
 /** Environment facts the runner reports when it opens a session. */
 export const RunnerDevMetadata = z.object({
   working_dir: z.optional(z.string()),
+  /**
+   * The agent's configured default model; absent when the agent uses its
+   * own default, and on daemons that predate reporting it.
+   */
+  model: z.optional(z.string()),
+  /** The configured Codex reasoning effort; absent for the model default. */
+  reasoning_effort: z.optional(z.string()),
 });
 export type RunnerDevMetadata = z.infer<typeof RunnerDevMetadata>;
 
@@ -210,6 +217,60 @@ export async function resumeRunner(client: ApiClient, runnerId: string): Promise
   const path = `/api/runners/${runnerId}/resume/`;
   const envelope = await client.sendJson<unknown>("POST", path, {});
   return client.parse(Runner, envelope.data, `POST ${path}`);
+}
+
+/**
+ * Settings of a runner that live on its machine. Absent fields are left
+ * as they are; `model` / `reasoning_effort` `""` fall back to the agent's
+ * default. The project is never changeable: add a new runner instead.
+ */
+export interface RunnerReconfigure {
+  working_dir?: string;
+  agent?: string;
+  model?: string;
+  reasoning_effort?: string;
+}
+
+export const RunnerReconfigureAccepted = z.object({ request_id: uuid() });
+export type RunnerReconfigureAccepted = z.infer<typeof RunnerReconfigureAccepted>;
+
+/**
+ * Send a settings change to the runner's machine. The daemon applies it
+ * and restarts only that runner; poll {@link getRunnerReconfigureStatus}
+ * for the outcome. Refused with 409 `machine_offline`, `runner_busy`,
+ * `runner_revoked` or `no_dev_machine`, and 400 for the Pi Dash Agent.
+ */
+export async function reconfigureRunner(
+  client: ApiClient,
+  runnerId: string,
+  changes: RunnerReconfigure
+): Promise<RunnerReconfigureAccepted> {
+  const path = `/api/runners/${runnerId}/reconfigure/`;
+  const envelope = await client.sendJson<unknown>("POST", path, { json: { ...changes } });
+  return client.parse(RunnerReconfigureAccepted, envelope.data, `POST ${path}`);
+}
+
+export const RUNNER_RECONFIGURE_STATUSES = ["pending", "ok", "error"] as const;
+
+/** The daemon's answer to a reconfigure; unknown ids answer 404. */
+export const RunnerReconfigureStatus = z.object({
+  request_id: uuid(),
+  status: z.enum(RUNNER_RECONFIGURE_STATUSES),
+  runner_id: z.optional(z.string()),
+  runner_name: z.optional(z.string()),
+  error: z.optional(z.string()),
+});
+export type RunnerReconfigureStatus = z.infer<typeof RunnerReconfigureStatus>;
+
+/** Read one reconfigure request until it leaves `pending`. */
+export async function getRunnerReconfigureStatus(
+  client: ApiClient,
+  runnerId: string,
+  requestId: string
+): Promise<RunnerReconfigureStatus> {
+  const path = `/api/runners/${runnerId}/reconfigure/${requestId}/`;
+  const body = await client.getJson<unknown>(path);
+  return client.parse(RunnerReconfigureStatus, body, `GET ${path}`);
 }
 
 /**

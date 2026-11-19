@@ -354,7 +354,16 @@ import {
   revokeDevMachine,
   rotateDevMachine,
 } from "./contracts/dev-machines.js";
-import { deleteRunner, getRunner, listRunners, pauseRunner, resumeRunner, revokeRunner } from "./contracts/runners.js";
+import {
+  deleteRunner,
+  getRunner,
+  getRunnerReconfigureStatus,
+  listRunners,
+  pauseRunner,
+  reconfigureRunner,
+  resumeRunner,
+  revokeRunner,
+} from "./contracts/runners.js";
 import { cancelRun, commentAndRun, createRun, getRun, listRuns, reTickIssue, runAi } from "./contracts/runs.js";
 import { decideApproval, listApprovals } from "./contracts/approvals.js";
 import { bulkSubscribeIssues, bulkUpdateIssues } from "./contracts/issue-bulk.js";
@@ -4474,6 +4483,27 @@ describe("runners contracts", () => {
     expect(resumed.paused_at).toBeNull();
     const call = transport.calls.find((c) => c.url.endsWith(`/api/runners/${UUID}/resume/`));
     expect(call?.init.method).toBe("POST");
+  });
+
+  it("sends only the changed settings to reconfigure", async () => {
+    const REQ = "33333333-3333-4333-8333-333333333333";
+    const transport = mutating({ request_id: REQ }, 202);
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const accepted = await reconfigureRunner(client, UUID, { model: "gpt-5.5", reasoning_effort: "high" });
+    expect(accepted.request_id).toBe(REQ);
+    const call = transport.calls.find((c) => c.url.endsWith(`/api/runners/${UUID}/reconfigure/`));
+    expect(call?.init.method).toBe("POST");
+    expect(JSON.parse(String(call?.init.body))).toEqual({ model: "gpt-5.5", reasoning_effort: "high" });
+  });
+
+  it("reads the reconfigure status", async () => {
+    const REQ = "33333333-3333-4333-8333-333333333333";
+    const transport = mutating({ request_id: REQ, status: "error", error: "runner is busy" });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const status = await getRunnerReconfigureStatus(client, UUID, REQ);
+    expect(status.status).toBe("error");
+    expect(status.error).toBe("runner is busy");
+    expect(transport.calls.some((c) => c.url.endsWith(`/api/runners/${UUID}/reconfigure/${REQ}/`))).toBe(true);
   });
 
   it("deletes with the purge default", async () => {

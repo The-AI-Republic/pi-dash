@@ -1320,14 +1320,19 @@ export {
   RunnerList,
   RunnerLiveState,
   RunnerPauseResult,
+  RunnerReconfigureAccepted,
+  RunnerReconfigureStatus,
   RUNNER_POD_DISPATCHES,
+  RUNNER_RECONFIGURE_STATUSES,
   RUNNER_PROVISIONINGS,
   RUNNER_STATUSES,
   deleteRunner,
   getRunner,
+  getRunnerReconfigureStatus,
   listRunners,
   pauseRunner,
   resumeRunner,
+  reconfigureRunner,
   revokeRunner,
   updateRunner,
 } from "./contracts/runners.js";
@@ -1336,6 +1341,7 @@ export type {
   RunnerPatch,
   RunnerPodDispatch,
   RunnerProvisioning,
+  RunnerReconfigure,
   RunnerStatus,
 } from "./contracts/runners.js";
 export {
