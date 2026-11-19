@@ -1309,7 +1309,7 @@ fn apply_runner_changes(
         } else {
             let Some(tiers) = crate::cli::runner_ops::efforts_for_agent(kind) else {
                 anyhow::bail!(
-                    "reasoning effort only applies to the Codex and Muse Code agents, not {}",
+                    "reasoning effort only applies to the Codex, Claude Code and Muse Code agents, not {}",
                     kind.display_name()
                 );
             };
@@ -6262,6 +6262,51 @@ mod tests {
     }
 
     #[test]
+    fn apply_changes_sets_the_claude_code_effort_and_refuses_it_elsewhere() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut cfg, id) = changes_cfg(tmp.path(), AgentKind::ClaudeCode);
+        apply_runner_changes(
+            &mut cfg,
+            id,
+            &RunnerChanges {
+                model: Some("claude-opus-4-8".into()),
+                reasoning_effort: Some("MAX".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(block(&cfg, id).configured_reasoning_effort(), Some("max"));
+        // Claude Code has no `minimal` level.
+        let err = apply_runner_changes(
+            &mut cfg,
+            id,
+            &RunnerChanges {
+                reasoning_effort: Some("minimal".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("is not one of"), "{err}");
+
+        let (mut cfg, id) = changes_cfg(tmp.path(), AgentKind::Grok);
+        let err = apply_runner_changes(
+            &mut cfg,
+            id,
+            &RunnerChanges {
+                model: Some("grok-4.3".into()),
+                reasoning_effort: Some("high".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("only applies to the Codex, Claude Code and Muse Code agents"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn apply_changes_refuses_mismatched_and_engine_settings() {
         let tmp = tempfile::tempdir().unwrap();
         let (mut cfg, id) = changes_cfg(tmp.path(), AgentKind::ClaudeCode);
@@ -6283,10 +6328,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert!(
-            err.contains("only applies to the Codex and Muse Code agents"),
-            "{err}"
-        );
+        // Claude Code takes an effort, but only alongside a model.
+        assert!(err.contains("needs a model"), "{err}");
         let err = refused(
             &mut cfg,
             RunnerChanges {

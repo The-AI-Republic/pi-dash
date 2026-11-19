@@ -433,8 +433,12 @@ impl AgentBridge {
                 let b = crate::codex::bridge::Bridge::spawn_with_env_and_resume(
                     &runner.codex.binary,
                     cwd,
-                    selected_model(model_override, runner.codex.model_default.clone()),
-                    runner.codex.effort_default.clone(),
+                    selected_model(model_override.clone(), runner.codex.model_default.clone()),
+                    selected_effort(
+                        model_override.as_deref(),
+                        runner.codex.model_default.as_deref(),
+                        runner.codex.effort_default.clone(),
+                    ),
                     engine_settings,
                     &agent_env_for_config(runner),
                     resume_session_id,
@@ -467,7 +471,15 @@ impl AgentBridge {
                 let b = crate::claude_code::bridge::Bridge::spawn_with_resume(
                     &runner.claude_code.binary,
                     cwd,
-                    selected_model(model_override, runner.claude_code.model_default.clone()),
+                    selected_model(
+                        model_override.clone(),
+                        runner.claude_code.model_default.clone(),
+                    ),
+                    selected_effort(
+                        model_override.as_deref(),
+                        runner.claude_code.model_default.as_deref(),
+                        runner.claude_code.effort_default.clone(),
+                    ),
                     resume_session_id,
                 )
                 .await?;
@@ -507,8 +519,15 @@ impl AgentBridge {
                 let b = crate::muse_code::bridge::Bridge::spawn_with_resume(
                     &runner.muse_code.binary,
                     cwd,
-                    selected_model(model_override, runner.muse_code.model_default.clone()),
-                    runner.muse_code.effort_default.clone(),
+                    selected_model(
+                        model_override.clone(),
+                        runner.muse_code.model_default.clone(),
+                    ),
+                    selected_effort(
+                        model_override.as_deref(),
+                        runner.muse_code.model_default.as_deref(),
+                        runner.muse_code.effort_default.clone(),
+                    ),
                     resume_session_id,
                 )
                 .await?;
@@ -659,10 +678,26 @@ fn selected_model(
     model_override.or(configured_default)
 }
 
+/// The configured effort, unless a per-run override swaps in a different
+/// model: the effort was chosen (and validated) for the configured model, so
+/// it is dropped rather than paired with a model that may not take it. The
+/// overriding run then gets the agent's default effort.
+fn selected_effort(
+    model_override: Option<&str>,
+    configured_model: Option<&str>,
+    configured_effort: Option<String>,
+) -> Option<String> {
+    match model_override {
+        Some(model) if Some(model) != configured_model => None,
+        _ => configured_effort,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        STDERR_LINE_CAP_BYTES, StderrBuffer, sanitize_stderr_line, selected_model, strip_ansi_codes,
+        STDERR_LINE_CAP_BYTES, StderrBuffer, sanitize_stderr_line, selected_effort, selected_model,
+        strip_ansi_codes,
     };
 
     #[test]
@@ -869,6 +904,18 @@ mod tests {
             selected_model(None, Some("claude-default".into())),
             Some("claude-default".into())
         );
+    }
+
+    #[test]
+    fn selected_effort_is_dropped_when_an_override_changes_the_model() {
+        let effort = || Some("max".to_string());
+        assert_eq!(selected_effort(None, Some("opus"), effort()), effort());
+        assert_eq!(
+            selected_effort(Some("opus"), Some("opus"), effort()),
+            effort()
+        );
+        assert_eq!(selected_effort(Some("haiku"), Some("opus"), effort()), None);
+        assert_eq!(selected_effort(Some("haiku"), None, effort()), None);
     }
 
     #[test]

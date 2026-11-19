@@ -191,6 +191,8 @@ export function reconfigureErrorText(reason: string | undefined): string {
       return "This runner was enrolled without a dev machine, so Pi Dash cannot reach it to change its settings.";
     case "pidash_agent_not_editable":
       return "The Pi Dash Agent's settings come from Pi Dash.";
+    case "invalid_reasoning_effort":
+      return "That reasoning effort is not available for this runner's agent.";
     case "delivery_failed":
       return "Pi Dash could not deliver the change to the machine. Try again.";
     case undefined:

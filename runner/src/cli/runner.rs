@@ -193,7 +193,8 @@ pub struct AddArgs {
     pub model: Option<String>,
 
     /// Reasoning-effort tier, used together with `--model`. Codex takes
-    /// `low` / `medium` / `high` / `xhigh`; Muse Code takes `none` /
+    /// `low` / `medium` / `high` / `xhigh`; Claude Code takes `low` /
+    /// `medium` / `high` / `xhigh` / `max`; Muse Code takes `none` /
     /// `minimal` / `low` / `medium` / `high` / `xhigh` / `max` / `ultra`.
     /// Ignored for other agents.
     #[arg(long)]

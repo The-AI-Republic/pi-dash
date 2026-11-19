@@ -135,6 +135,9 @@ describe("gating", () => {
   it("explains refusals and passes the daemon's own reason through", () => {
     expect(reconfigureErrorText("machine_offline")).toBe(EDIT_RUNNER_OFFLINE);
     expect(reconfigureErrorText("runner_busy")).toBe(EDIT_RUNNER_BUSY);
+    expect(reconfigureErrorText("invalid_reasoning_effort")).toBe(
+      "That reasoning effort is not available for this runner's agent."
+    );
     expect(reconfigureErrorText("the Codex CLI (codex) was not found on this machine; install it first")).toContain(
       "not found"
     );

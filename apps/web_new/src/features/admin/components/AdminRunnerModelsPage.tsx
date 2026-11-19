@@ -100,7 +100,11 @@ function ModelDialog({
 }): React.ReactElement {
   const [model, setModel] = React.useState(initial.model);
   const [label, setLabel] = React.useState(initial.label);
-  const [efforts, setEfforts] = React.useState(isOpenhub ? [] : initial.efforts);
+  // Keep only tiers this agent offers, so a stale stored tier is not re-sent
+  // (and refused) by an edit that never shows it.
+  const [efforts, setEfforts] = React.useState(
+    isOpenhub ? [] : initial.efforts.filter((effort) => effortOptions.includes(effort))
+  );
   const [preselected, setPreselected] = React.useState(initial.is_preselected);
 
   function toggleEffort(effort: string, checked: boolean): void {
@@ -137,7 +141,7 @@ function ModelDialog({
           onChange={(event) => setLabel(event.target.value)}
           placeholder={isOpenhub ? "OpenHub free model" : "GPT-5.5"}
         />
-        {isOpenhub ? null : (
+        {isOpenhub || effortOptions.length === 0 ? null : (
           <fieldset className="flex flex-col gap-(--space-2)">
             <legend className="text-body font-medium text-(--text)">Reasoning efforts</legend>
             {effortOptions.map((effort) => (

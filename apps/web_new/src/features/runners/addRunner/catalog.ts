@@ -32,7 +32,7 @@ export interface ModelChoice {
   label: string;
   /** Value for `--model`; the sentinel omits it. */
   model?: string;
-  /** Value for `--reasoning-effort` (Codex and Muse Code). */
+  /** Value for `--reasoning-effort` (Codex, Claude Code and Muse Code). */
   reasoningEffort?: string;
 }
 
