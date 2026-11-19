@@ -29,6 +29,19 @@ import { AssistantLanding } from "./AssistantLanding.js";
 // textarea with the same contract keeps the focus on this surface's logic.
 vi.mock("../../../shared/editor/ChatInput.js", () => import("../../../testSupport/chatInputStub.js"));
 
+// Dictation ships hidden (DICTATION_UI_ENABLED); these suites switch it on
+// so the dormant UI stays covered, and pin the hidden default separately.
+const dictationUi = vi.hoisted(() => ({ enabled: true }));
+vi.mock("../../../shared/dictation/index.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../../shared/dictation/index.js")>();
+  return {
+    ...original,
+    get DICTATION_UI_ENABLED() {
+      return dictationUi.enabled;
+    },
+  };
+});
+
 const notified = vi.hoisted(() => ({ error: vi.fn() }));
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../shared/shell/index.js")>();

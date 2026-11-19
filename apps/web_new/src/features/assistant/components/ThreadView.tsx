@@ -18,7 +18,7 @@ import { useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
 import { markdownHtml } from "../../../shared/markdown/index.js";
-import { appendDictation } from "../../../shared/dictation/index.js";
+import { appendDictation, DICTATION_UI_ENABLED } from "../../../shared/dictation/index.js";
 import { useComposerDictation } from "../hooks/useComposerDictation.js";
 import { useAssistantChat } from "../hooks/useAssistantChat.js";
 import { EMPTY_CONVERSATION_HINT, HANDOFF_FAILED_TITLE, TOOL_LINK_FALLBACK } from "../lib/copy.js";
@@ -160,7 +160,7 @@ export function ThreadView({
           running={chat.running}
           onStop={chat.stop}
           configured={configured}
-          dictation={dictation}
+          dictation={DICTATION_UI_ENABLED ? dictation : undefined}
           modelPicker={<OpenHubModelPicker workspaceSlug={workspaceSlug} config={config} />}
           // The composer is its own bordered box; a divider above it would double the line.
           bordered={false}
