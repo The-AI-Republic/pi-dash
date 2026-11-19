@@ -68,7 +68,7 @@ chat pays process startup plus `initialize`.
 | D1  | Cloud runner chat is offered only for engine runners (`Runner.provisioning = desktop_bundled`, `Runner.is_engine`).                           | decided |
 | D2  | The daemon runs one always-on engine app-server as a child process and serves all Pi Dash Agent chat (desktop and cloud) from it.             | decided |
 | D3  | AgentRun is unchanged for every runner type: one agent process per run, `PIDASH_RUN_ID`, per-run containment.                                 | decided |
-| D4  | Cloud engine chat no longer runs in the runner's project folder. MVP: a default folder, the daemon user's home directory (`~`).               | decided |
+| D4  | Cloud engine chat no longer runs in the runner's project folder. MVP: a default folder, `<data_dir>/engine/chat` (see O1).                    | decided |
 | D5  | Choosing the folder for a cloud chat is a later feature. The session already has a `cwd` field; the cloud ignores it today (`normalize_cwd`). | decided |
 | D6  | Cloud chat keeps reaching the daemon through the engine runner's existing long-poll and `chat_*` messages. No new transport.                  | decided |
 
@@ -204,16 +204,27 @@ routes by `threadId`:
   unchanged.
 - The engine runner's supervisor hands them to the daemon's `EngineChatServer`
   instead of running its own chat runtime.
-- **Folder (D4):** the daemon user's home directory. `resolve_chat_workspace`
-  stops using `workspace.working_dir` for engine chat. The session's `cwd`
+- **Folder (D4):** `<data_dir>/engine/chat`, created by the daemon (private,
+  like the rest of `data_dir`). `resolve_chat_workspace` stops using
+  `workspace.working_dir` for engine chat and resolves this folder through the
+  same `resolve_engine_chat_folder` rule desktop chat uses. The session's `cwd`
   stays empty in MVP (D5).
+  - `data_dir` is the daemon's per-machine data folder (`util/paths.rs`):
+    `~/.local/share/pidash` on Linux,
+    `~/Library/Application Support/so.pidash.pidash` on macOS,
+    `%APPDATA%\pidash\pidash\data` on Windows, or the `PIDASH_DATA_DIR` /
+    `--data-dir` override (desktop and CI installs).
+  - `engine/` already holds `engine/<account>/codex-home` and the default
+    engine task root `engine/workdirs` (`pidash_agent/workdir.rs`);
+    `engine/chat` is their sibling.
 - **No more busy coupling:** the chat no longer shares the runner's project
   folder, so for engine runners:
   - chat is accepted while that runner has a run in progress (no
     `runner_busy` for chat);
   - a task assignment is no longer rejected while a chat turn is active.
 
-  This depends on O1 being settled, because `~` contains the task folders.
+  This is safe because `engine/chat` is outside every task folder, so a chat
+  cannot edit a running task's files (O1).
 
 - Several cloud chats on one engine runner can be open at once; each is its own
   thread. The cloud's per-session `chat_turn_active` rule stays.
@@ -229,21 +240,22 @@ routes by `threadId`:
 
 ## 6. Open decisions
 
-**O1. Writes from a chat in `~`.** `resolve_engine_chat_folder` refuses a folder
-_inside_ a task folder, but `~` _contains_ every task folder. With Codex's
-default `workspace-write` sandbox the thread's `cwd` is writable, so a chat in
-`~` could edit a task worktree while a run is active, and edit dotfiles.
-Options:
+**O1. Default chat folder. Resolved: `<data_dir>/engine/chat`.** The home
+directory (`~`) was considered first and rejected: `resolve_engine_chat_folder`
+refuses a folder _inside_ a task folder, but `~` _contains_ every task folder,
+and Codex's default `workspace-write` sandbox makes the thread's `cwd`
+writable, so a chat in `~` could edit a task worktree while a run is active,
+and edit dotfiles. `<data_dir>/engine/chat`:
 
-- (a) Keep `~`, start cloud chat threads with a read-only sandbox and
-  `on-request` approvals, so every write is approved by the user.
-- (b) Default to a dedicated folder instead, e.g. `~/pidash-chat`, created by
-  the daemon. The existing folder rule then applies unchanged.
-- (c) Keep `~` with `workspace-write` and accept the risk for MVP.
+- is outside every task folder, so the existing folder rule accepts it
+  unchanged;
+- keeps `workspace-write` safe: only `engine/chat` is writable, not task
+  folders, dotfiles or the engine's `codex-home`;
+- follows the data-dir override, so isolated desktop and CI installs each get
+  their own.
 
-Recommendation: (a) for MVP. It keeps `~` as asked and keeps the dropped
-`runner_busy` rule safe; (b) is the fallback if approvals on every write are
-too noisy.
+Trade-off: it is a hidden location, so files a chat creates are hard for the
+user to find. Folder selection (O2) addresses that later.
 
 **O2. Folder selection.** Later: the user picks the folder per cloud chat. The
 cloud passes it in the existing `cwd` field; the daemon validates it with the
@@ -294,7 +306,7 @@ beyond it. Proposed default: 4.
    refusal, supervisor cleanup for own-agent runners. Independent of Part B.
 2. **Spikes S1–S3.**
 3. **`EngineChatServer`** in the daemon, with desktop local chat moved onto it.
-4. **Cloud engine chat** moved onto it, the `~` folder with O1's guard, and the
+4. **Cloud engine chat** moved onto it, the `<data_dir>/engine/chat` folder, and the
    busy coupling removed for engine runners.
 
 ## 10. Acceptance
@@ -305,7 +317,8 @@ beyond it. Proposed default: 4.
   `pidash-agent-engine app-server` child that is not attached to a run.
 - Opening a new desktop chat starts no engine process; its first reply starts
   measurably sooner than today (S4).
-- A cloud chat with an engine runner runs in `~`, is accepted while that runner
+- A cloud chat with an engine runner runs in `<data_dir>/engine/chat`, cannot
+  write outside it, is accepted while that runner
   has a run in progress, and does not block the runner's next task.
 - Killing the shared child fails only the turns in progress; reopened sessions
   continue their conversation.
