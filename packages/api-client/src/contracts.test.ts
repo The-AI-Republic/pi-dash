@@ -354,7 +354,7 @@ import {
   revokeDevMachine,
   rotateDevMachine,
 } from "./contracts/dev-machines.js";
-import { deleteRunner, getRunner, listRunners, revokeRunner } from "./contracts/runners.js";
+import { deleteRunner, getRunner, listRunners, pauseRunner, resumeRunner, revokeRunner } from "./contracts/runners.js";
 import { cancelRun, commentAndRun, createRun, getRun, listRuns, reTickIssue, runAi } from "./contracts/runs.js";
 import { decideApproval, listApprovals } from "./contracts/approvals.js";
 import { bulkSubscribeIssues, bulkUpdateIssues } from "./contracts/issue-bulk.js";
@@ -4449,6 +4449,31 @@ describe("runners contracts", () => {
     const revokeCall = transport.calls.find((call) => call.url.endsWith(`/api/runners/${UUID}/revoke/`));
     expect(revokeCall?.init.method).toBe("POST");
     expect(revokeCall?.init.body).toBeUndefined();
+  });
+
+  it("pauses without a body and parses the in-flight runs", async () => {
+    const RUN = "22222222-2222-4222-8222-222222222222";
+    const transport = mutating({
+      ...runner,
+      paused_at: "2026-10-17T04:00:00.000Z",
+      in_flight_runs: [{ id: RUN, status: "running" }],
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const paused = await pauseRunner(client, UUID);
+    expect(paused.paused_at).toBe("2026-10-17T04:00:00.000Z");
+    expect(paused.in_flight_runs).toEqual([{ id: RUN, status: "running" }]);
+    const call = transport.calls.find((c) => c.url.endsWith(`/api/runners/${UUID}/pause/`));
+    expect(call?.init.method).toBe("POST");
+    expect(call?.init.body).toBeUndefined();
+  });
+
+  it("resumes without a body and parses the cleared row", async () => {
+    const transport = mutating({ ...runner, paused_at: null });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const resumed = await resumeRunner(client, UUID);
+    expect(resumed.paused_at).toBeNull();
+    const call = transport.calls.find((c) => c.url.endsWith(`/api/runners/${UUID}/resume/`));
+    expect(call?.init.method).toBe("POST");
   });
 
   it("deletes with the purge default", async () => {

@@ -1316,14 +1316,18 @@ export type {
 export {
   Runner,
   RunnerDevMetadata,
+  RunnerInFlightRun,
   RunnerList,
   RunnerLiveState,
+  RunnerPauseResult,
   RUNNER_POD_DISPATCHES,
   RUNNER_PROVISIONINGS,
   RUNNER_STATUSES,
   deleteRunner,
   getRunner,
   listRunners,
+  pauseRunner,
+  resumeRunner,
   revokeRunner,
   updateRunner,
 } from "./contracts/runners.js";
