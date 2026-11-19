@@ -266,12 +266,8 @@
         "estimate_point": null,
         "type": null,
         "assigned_pod": null,
-        "assignees": [
-          "79c81d76-5a93-4d3d-894d-5935576834b6"
-        ],
-        "labels": [
-          "c833c492-fa3d-49f5-85a4-0ef810642731"
-        ],
+        "assignees": ["79c81d76-5a93-4d3d-894d-5935576834b6"],
+        "labels": ["c833c492-fa3d-49f5-85a4-0ef810642731"],
         "relations_summary": {
           "blocked_by": [],
           "blocking": [
@@ -770,14 +766,10 @@
       "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a7509d00-345f-47fb-bee3-6bcf7d3339e2/relations/",
       "status": 200,
       "body": {
-        "blocking": [
-          "25ace52e-c64d-4043-a700-911b1e42bffc"
-        ],
+        "blocking": ["25ace52e-c64d-4043-a700-911b1e42bffc"],
         "blocked_by": [],
         "duplicate": [],
-        "relates_to": [
-          "2143bf91-62b6-45b6-8fe0-702122483419"
-        ],
+        "relates_to": ["2143bf91-62b6-45b6-8fe0-702122483419"],
         "start_after": [],
         "start_before": [],
         "finish_after": [],
@@ -1021,9 +1013,7 @@
       },
       "status": 400,
       "body": {
-        "state": [
-          "Invalid pk \"00000000-0000-0000-0000-000000000000\" - object does not exist."
-        ]
+        "state": ["Invalid pk \"00000000-0000-0000-0000-000000000000\" - object does not exist."]
       }
     },
     "detail_404": {
@@ -1042,12 +1032,8 @@
       },
       "status": 400,
       "body": {
-        "name": [
-          "This field is required."
-        ],
-        "priority": [
-          "\"bogus\" is not a valid choice."
-        ]
+        "name": ["This field is required."],
+        "priority": ["\"bogus\" is not a valid choice."]
       }
     },
     "by_identifier_dup_sequence": {
@@ -1111,9 +1097,7 @@
       },
       "status": 400,
       "body": {
-        "url": [
-          "Invalid URL format."
-        ]
+        "url": ["Invalid URL format."]
       }
     },
     "comment_create": {
@@ -1187,9 +1171,7 @@
       "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/relations/",
       "request": {
         "relation_type": "blocked_by",
-        "issues": [
-          "25ace52e-c64d-4043-a700-911b1e42bffc"
-        ]
+        "issues": ["25ace52e-c64d-4043-a700-911b1e42bffc"]
       },
       "status": 201,
       "body": [
@@ -1213,15 +1195,11 @@
       "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/relations/",
       "request": {
         "relation_type": "nope",
-        "issues": [
-          "25ace52e-c64d-4043-a700-911b1e42bffc"
-        ]
+        "issues": ["25ace52e-c64d-4043-a700-911b1e42bffc"]
       },
       "status": 400,
       "body": {
-        "relation_type": [
-          "\"nope\" is not a valid choice."
-        ]
+        "relation_type": ["\"nope\" is not a valid choice."]
       }
     },
     "relate": {
@@ -1229,17 +1207,13 @@
       "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/relations/relate/",
       "request": {
         "relation_type": "relates_to",
-        "issues": [
-          "CT00003-1"
-        ]
+        "issues": ["CT00003-1"]
       },
       "status": 200,
       "body": {
         "issue": "CT00003-10",
         "relation_type": "relates_to",
-        "created": [
-          "CT00003-1"
-        ],
+        "created": ["CT00003-1"],
         "unchanged": [],
         "conflicts": [],
         "relations": {
@@ -1277,16 +1251,12 @@
       "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/relations/relate/",
       "request": {
         "relation_type": "relates_to",
-        "issues": [
-          "ZZZ-999"
-        ]
+        "issues": ["ZZZ-999"]
       },
       "status": 404,
       "body": {
         "error": "work items not found or not accessible: ZZZ-999",
-        "unresolved": [
-          "ZZZ-999"
-        ]
+        "unresolved": ["ZZZ-999"]
       }
     },
     "unrelate": {
@@ -1294,18 +1264,14 @@
       "url": "/api/v1/workspaces/ws-conv659-2/projects/d715be3d-234f-46ef-89a3-97f0c7c04b7e/work-items/a9b6c9f9-2817-4967-a501-1e26caf4abea/relations/unrelate/",
       "request": {
         "relation_type": "relates_to",
-        "issues": [
-          "25ace52e-c64d-4043-a700-911b1e42bffc"
-        ]
+        "issues": ["25ace52e-c64d-4043-a700-911b1e42bffc"]
       },
       "status": 200,
       "body": {
         "issue": "CT00003-10",
         "relation_type": "relates_to",
         "removed": [],
-        "not_related": [
-          "CT00003-2"
-        ],
+        "not_related": ["CT00003-2"],
         "relations": {
           "blocked_by": [
             {
@@ -1560,13 +1526,7 @@
       "status": 400,
       "body": {
         "error": "outcome is required",
-        "allowed": [
-          "blocked",
-          "done",
-          "progressed",
-          "waiting_on_external",
-          "waiting_on_human"
-        ]
+        "allowed": ["blocked", "done", "progressed", "waiting_on_external", "waiting_on_human"]
       }
     },
     "yield_header_mismatch": {
@@ -1652,9 +1612,7 @@
       },
       "status": 400,
       "body": {
-        "non_field_errors": [
-          "Send the body as description_markdown or description_html, not both."
-        ]
+        "non_field_errors": ["Send the body as description_markdown or description_html, not both."]
       },
       "note": "Lives in labels_pages file too; duplicated here because the call was recorded alongside move setup."
     },
@@ -1666,12 +1624,7 @@
         "type": "application/pdf",
         "size": 200
       },
-      "response_keys": [
-        "asset_id",
-        "asset_url",
-        "attachment",
-        "upload_data"
-      ],
+      "response_keys": ["asset_id", "asset_url", "attachment", "upload_data"],
       "upload_data": {
         "url": "http://127.0.0.1:18359/conv659",
         "fields": {
@@ -1739,6 +1692,110 @@
       "status": 405,
       "body": {
         "detail": "Method \"PUT\" not allowed."
+      }
+    },
+    "finish_ok": {
+      "_note": "Rust-only route (lean agent workflow §8.1); no Django twin. Recorded from the Rust implementation.",
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/agent-runs/640d8cdf-08fb-4772-82d3-2c693d0e105f/finish/",
+      "request": {
+        "to": "In Review",
+        "result": "done",
+        "comment": "Done.",
+        "handoff": "### Hand-off",
+        "note": "implemented"
+      },
+      "status": 200,
+      "body": {
+        "run": "640d8cdf-08fb-4772-82d3-2c693d0e105f",
+        "state": "In Review",
+        "result": "done",
+        "ticking": true
+      }
+    },
+    "finish_waiting_on_human": {
+      "_note": "Rust-only route (lean agent workflow §8.1); no Django twin. Recorded from the Rust implementation.",
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/agent-runs/640d8cdf-08fb-4772-82d3-2c693d0e105f/finish/",
+      "request": {
+        "to": "In Progress",
+        "result": "waiting_on_human",
+        "comment": "Which API version?"
+      },
+      "status": 200,
+      "body": {
+        "run": "640d8cdf-08fb-4772-82d3-2c693d0e105f",
+        "state": "In Progress",
+        "result": "waiting_on_human",
+        "ticking": false
+      }
+    },
+    "finish_unknown_state": {
+      "_note": "Rust-only route (lean agent workflow §8.1); no Django twin. Recorded from the Rust implementation.",
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/agent-runs/640d8cdf-08fb-4772-82d3-2c693d0e105f/finish/",
+      "request": {
+        "to": "Shipped",
+        "result": "done"
+      },
+      "status": 400,
+      "body": {
+        "error": "unknown state \"Shipped\"",
+        "available": ["Backlog", "Todo", "In Progress", "In Review", "In Test", "AI Completed", "Done", "Cancelled"]
+      }
+    },
+    "finish_disabled_stage": {
+      "_note": "Rust-only route (lean agent workflow §8.1); no Django twin. Recorded from the Rust implementation. Project agent_stages = custom, review off.",
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/agent-runs/640d8cdf-08fb-4772-82d3-2c693d0e105f/finish/",
+      "request": {
+        "to": "In Review",
+        "result": "done"
+      },
+      "status": 400,
+      "body": {
+        "error": "\"In Review\" does not run an agent in this project; move the issue to a state that does, or finish in the current one",
+        "available": ["Backlog", "Todo", "In Progress", "In Test", "AI Completed", "Done", "Cancelled"]
+      }
+    },
+    "finish_bad_result": {
+      "_note": "Rust-only route (lean agent workflow §8.1); no Django twin. Recorded from the Rust implementation.",
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/agent-runs/640d8cdf-08fb-4772-82d3-2c693d0e105f/finish/",
+      "request": {
+        "to": "In Review",
+        "result": "approved"
+      },
+      "status": 400,
+      "body": {
+        "error": "result is required",
+        "allowed": ["done", "progressed", "waiting_on_external", "waiting_on_human", "blocked"]
+      }
+    },
+    "finish_missing_handoff": {
+      "_note": "Rust-only route (lean agent workflow §8.1); no Django twin. Recorded from the Rust implementation. An In Progress run moving to review with no hand-off stored.",
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/agent-runs/640d8cdf-08fb-4772-82d3-2c693d0e105f/finish/",
+      "request": {
+        "to": "In Review",
+        "result": "done"
+      },
+      "status": 400,
+      "body": {
+        "error": "a move to review or test needs a hand-off: write it to a file and pass --handoff-file"
+      }
+    },
+    "finish_scheduler_run": {
+      "_note": "Rust-only route (lean agent workflow §8.1); no Django twin. Recorded from the Rust implementation.",
+      "method": "POST",
+      "url": "/api/v1/workspaces/ws-conv659-2/agent-runs/640d8cdf-08fb-4772-82d3-2c693d0e105f/finish/",
+      "request": {
+        "to": "Done",
+        "result": "done"
+      },
+      "status": 400,
+      "body": {
+        "error": "finish ends an issue run; a scheduled run reports with `pidash run yield`"
       }
     }
   },
