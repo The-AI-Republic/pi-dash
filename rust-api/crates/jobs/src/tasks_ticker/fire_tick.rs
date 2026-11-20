@@ -605,9 +605,7 @@ impl sea_orm::FromQueryResult for ProjectTickCols {
                 .try_get::<Option<i32>>(pre, "agent_test_default_interval_seconds")?,
             stages: match row.try_get::<Option<serde_json::Value>>(pre, "settings") {
                 Ok(Some(settings)) => {
-                    pidash_services::orchestration::clock::ProjectClockPolicy::default()
-                        .with_stages(&settings)
-                        .stage_switches()
+                    pidash_services::domain::project_settings::stage_switches_of(&settings)
                 }
                 _ => pidash_types::orchestration::StageSwitches::ALL,
             },

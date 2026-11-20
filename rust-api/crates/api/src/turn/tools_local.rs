@@ -2048,8 +2048,8 @@ pub async fn execute_dispatch_coding_run<S: ToolStore>(
 ) -> Result<Value, ToolFailure> {
     use pidash_services::assistant::tools_runs::{
         already_in_state_result, dispatch_success_result, dispatch_summary, invalid_state_error,
-        no_delegation_state_result, non_ticking_state_error, stage_runs_automatically,
-        validate_pin, PHASES,
+        no_delegation_state_result, non_ticking_state_error, stage_off_error,
+        stage_runs_automatically, validate_pin, PHASES,
     };
     // `_scoping.get_issue` → `scoped_issues` → `user_for` is the first
     // statement (`runs.py:41`, `_scoping.py:67-85`): a missing user fails
@@ -2079,10 +2079,18 @@ pub async fn execute_dispatch_coding_run<S: ToolStore>(
             // A stage switched off in this project starts no run, so a
             // move there cannot dispatch one.
             let settings = store.project_settings(deps, &issue.project_id).await?;
-            let switches = pidash_services::orchestration::clock::ProjectClockPolicy::default()
-                .with_stages(&settings)
-                .stage_switches();
+            let switches = pidash_services::domain::project_settings::stage_switches_of(&settings);
             if !stage_runs_automatically(Some(&target.group), Some(&target.name), switches) {
+                // A registered stage that is merely switched off gets its own
+                // message; anything else is not a delegated state at all.
+                let registered = stage_runs_automatically(
+                    Some(&target.group),
+                    Some(&target.name),
+                    pidash_types::orchestration::StageSwitches::ALL,
+                );
+                if registered {
+                    return Err(stage_off_error(&target.name).into());
+                }
                 return Err(non_ticking_state_error().into());
             }
             target
@@ -4715,7 +4723,7 @@ mod tests {
         .await;
         assert_eq!(
             retry_message(&result),
-            "That state does not start a coding run. Pick a delegated state such as 'In Progress' or 'In Review'."
+            "Agent runs are switched off for 'In Review' in this project, so moving there starts no run. Pick 'In Progress' or another state that runs an agent."
         );
         assert!(store.transitions.lock().unwrap().is_empty());
         assert!(store.record_writes.lock().unwrap().is_empty());

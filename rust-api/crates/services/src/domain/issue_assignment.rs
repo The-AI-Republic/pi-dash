@@ -3054,9 +3054,9 @@ async fn is_ticking_issue(
             .into_tuple()
             .one(db)
             .await?;
-    let switches = crate::orchestration::clock::ProjectClockPolicy::default()
-        .with_stages(&settings.unwrap_or(serde_json::Value::Null))
-        .stage_switches();
+    let switches = crate::domain::project_settings::stage_switches_of(
+        &settings.unwrap_or(serde_json::Value::Null),
+    );
     Ok(pidash_types::orchestration::stage_runs_automatically(
         Some(&pidash_types::orchestration::StateRef {
             group: state.group.as_str(),

@@ -182,6 +182,14 @@ pub fn non_ticking_state_error() -> ToolScopeError {
     ToolScopeError::Permission(NON_TICKING_STATE_MESSAGE.to_string())
 }
 
+/// The retry error for a target stage the project switched off: it never
+/// suggests the refused stage (lean workflow §6.1).
+pub fn stage_off_error(state_name: &str) -> ToolScopeError {
+    ToolScopeError::Permission(format!(
+        "Agent runs are switched off for '{state_name}' in this project, so moving there starts no run. Pick 'In Progress' or another state that runs an agent."
+    ))
+}
+
 /// Activity summary for a dispatched run (`runs.py:85-90`).
 pub fn dispatch_summary(project_identifier: &str, sequence_id: i64, target_name: &str) -> String {
     format!("Started a coding run on {project_identifier}-{sequence_id} (moved to '{target_name}')")

@@ -8,13 +8,15 @@
 //! 1. validates the target state (by exact name; never a move into a
 //!    stage the project switched off, though staying put is always
 //!    allowed), the result, and the hand-off rules;
-//! 2. stores the hand-off as `stage_handoff` in `agent_run.done_payload`;
-//! 3. posts the comment, attributed to the run;
-//! 4. posts the hand-off as a comment when the issue goes to review/test;
-//! 5. moves the issue through the v1 patch path with the run as mover, so
+//! 2. keeps the hand-off as pending in `agent_run.done_payload`;
+//! 3. moves the issue through the v1 patch path with the run as mover, so
 //!    the transition (and an enabled stage's entry run) fires as for any
-//!    agent move;
-//! 6. merges the outcome into `done_payload` — the same keys `yield`
+//!    agent move — first, so a refused move leaves nothing that claims it
+//!    happened;
+//! 4. stores the hand-off as `stage_handoff`;
+//! 5. posts the comment, attributed to the run;
+//! 6. posts the hand-off as a comment when the issue goes to review/test;
+//! 7. merges the outcome into `done_payload` — the same keys `yield`
 //!    writes, with `stop_ticking` *derived* from the result. Written last,
 //!    so a step refused on the way leaves no stop signal behind.
 //!
@@ -40,7 +42,8 @@ use pidash_compat::response::json_response;
 use pidash_db::entity::{agent_run, issues, states};
 use pidash_db::pool::sea_orm_connection;
 use pidash_types::orchestration::{
-    phase_config_for, stage_runs_automatically, StageSwitches, StateRef, KIND_CODING_TASK,
+    agent_move_refusal, phase_config_for, stage_runs_automatically, AgentMoveRefusal,
+    StageSwitches, StateRef, KIND_CODING_TASK,
 };
 
 use crate::state::AppState;
@@ -59,6 +62,10 @@ pub const DEFAULT_AGENT_LABEL: &str = "AI Agent";
 /// `done_payload` key holding the In Progress hand-off. Not `handoff`:
 /// that word already names the project-move handoff in orchestration.
 pub const STAGE_HANDOFF_KEY: &str = "stage_handoff";
+/// `done_payload` key holding a hand-off whose move has not happened yet.
+/// Nothing reads it: it only becomes [`STAGE_HANDOFF_KEY`] once the issue
+/// moved (or stays), so a refused move leaves no hand-off that counts.
+pub const PENDING_HANDOFF_KEY: &str = "pending_stage_handoff";
 /// `done_payload` key recording the posted finish comment (retry guard).
 pub const FINISH_COMMENT_KEY: &str = "finish_comment_id";
 /// `done_payload` key recording the posted hand-off comment (retry guard).
@@ -197,6 +204,7 @@ pub fn parse_finish_body(data: &Value) -> Result<FinishRequest, Refusal> {
         }
     }
     let handoff = non_blank(obj.get("handoff"));
+    let comment = non_blank(obj.get("comment"));
     if let Some(text) = handoff.as_deref() {
         if text.chars().count() > HANDOFF_MAX_CHARS {
             return Err(bad_request(
@@ -205,10 +213,19 @@ pub fn parse_finish_body(data: &Value) -> Result<FinishRequest, Refusal> {
             ));
         }
     }
+    if result.stops_ticking() && comment.is_none() {
+        return Err(bad_request(
+            &format!(
+                "a {} run must say what the person must do: pass --comment-file",
+                result.as_wire()
+            ),
+            &[],
+        ));
+    }
     Ok(FinishRequest {
         to: to.trim().to_owned(),
         result,
-        comment: non_blank(obj.get("comment")),
+        comment,
         handoff,
         note: obj
             .get("note")
@@ -238,17 +255,12 @@ impl StateChoice {
 
     /// A registered phase the project switched off (§6.5).
     pub fn is_disabled_stage(&self, switches: StageSwitches) -> bool {
-        phase_config_for(Some(&self.as_ref())).is_some()
-            && !stage_runs_automatically(Some(&self.as_ref()), switches)
+        agent_move_refusal(&self.as_ref(), switches) == Some(AgentMoveRefusal::StageOff)
     }
 
-    /// A closed state only a person may move an issue into: Cancelled, or a
-    /// completed state other than "AI Completed" (Done is a person's
-    /// confirmation of AI Completed, §7).
+    /// A closed state only a person may move an issue into (§7).
     pub fn is_human_only(&self) -> bool {
-        self.group == "cancelled"
-            || (self.group == "completed"
-                && self.name != pidash_services::prompting::context::FINAL_STATE_NAME)
+        agent_move_refusal(&self.as_ref(), StageSwitches::ALL) == Some(AgentMoveRefusal::HumanOnly)
     }
 
     /// The review or test phase (a move there needs a hand-off).
@@ -373,37 +385,6 @@ pub fn result_delta(req: &FinishRequest, yielded_at: &str) -> Map<String, Value>
         Value::Bool(req.result.stops_ticking()),
     );
     delta
-}
-
-/// Merge the finish keys into the run's stored payload (the last write).
-pub fn merged_payload(
-    stored: Option<&Value>,
-    req: &FinishRequest,
-    yielded_at: &str,
-) -> Map<String, Value> {
-    let mut payload = match stored {
-        Some(Value::Object(map)) => map.clone(),
-        _ => Map::new(),
-    };
-    payload.insert(
-        "status".to_owned(),
-        Value::String(req.result.as_wire().to_owned()),
-    );
-    payload.insert(
-        "yielded_at".to_owned(),
-        Value::String(yielded_at.to_owned()),
-    );
-    if let Some(note) = req.note.as_ref() {
-        payload.insert("note".to_owned(), Value::String(note.clone()));
-    }
-    payload.insert(
-        "stop_ticking".to_owned(),
-        Value::Bool(req.result.stops_ticking()),
-    );
-    if let Some(handoff) = req.handoff.as_ref() {
-        payload.insert(STAGE_HANDOFF_KEY.to_owned(), Value::String(handoff.clone()));
-    }
-    payload
 }
 
 /// The refusal for a run without an issue: scheduled runs keep `yield`.
@@ -608,15 +589,16 @@ async fn finish_inner(
         return Ok(refusal.into_response());
     }
 
-    // Step 2: the hand-off (the result is written last, step 6). Every
-    // write merges only its own keys into the stored payload, so a
-    // concurrent `yield` write is never overwritten from a stale snapshot.
+    // Step 2: keep the hand-off as pending (the result is written last,
+    // step 7). Every write merges only its own keys into the stored
+    // payload, so a concurrent `yield` write is never overwritten from a
+    // stale snapshot.
     let mut payload = progress_payload(run.done_payload.as_ref(), &req);
     if let Some(handoff) = req.handoff.as_ref() {
         merge_done_payload(
             &pre.pool,
             run.facts.id,
-            &json!({ STAGE_HANDOFF_KEY: handoff }),
+            &json!({ PENDING_HANDOFF_KEY: handoff }),
         )
         .await?;
     }
@@ -644,7 +626,41 @@ async fn finish_inner(
         clock,
     );
 
-    // Step 3: the comment.
+    // Step 3: the move, as an agent state patch, before anything that says
+    // the issue moved. A refused move leaves no comment and no hand-off
+    // behind (only the pending copy, which nothing reads).
+    if let Some(target_id) = plan.move_to {
+        let body = serde_json::to_vec(&json!({ "state": target_id.to_string() }))
+            .map_err(|_| Denial::ServerError)?;
+        let response = match super::handlers_core::patch_issue_inner(
+            state,
+            &forwarded,
+            slug,
+            &project_raw,
+            &issue_id,
+            &body,
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(denial) => denial.into_response(),
+        };
+        if !response.status().is_success() {
+            return Ok(response);
+        }
+    }
+
+    // Step 4: the hand-off counts only now that the issue moved (or stays).
+    if let Some(handoff) = req.handoff.as_ref() {
+        merge_done_payload(
+            &pre.pool,
+            run.facts.id,
+            &json!({ STAGE_HANDOFF_KEY: handoff }),
+        )
+        .await?;
+    }
+
+    // Step 5: the comment.
     if let Some(comment) = plan.comment {
         // A comment this run already posted with the same body (an earlier
         // attempt whose id write failed) is reused, not posted twice.
@@ -677,7 +693,7 @@ async fn finish_inner(
         }
     }
 
-    // Step 4: the hand-off, shown to humans where review and test read it.
+    // Step 6: the hand-off, shown to humans where review and test read it.
     if let Some(handoff) = plan.handoff_comment {
         // A comment this run already posted with the same body (an earlier
         // attempt whose id write failed) is reused, not posted twice.
@@ -710,29 +726,7 @@ async fn finish_inner(
         }
     }
 
-    // Step 5: the move, as an agent state patch.
-    if let Some(target_id) = plan.move_to {
-        let body = serde_json::to_vec(&json!({ "state": target_id.to_string() }))
-            .map_err(|_| Denial::ServerError)?;
-        let response = match super::handlers_core::patch_issue_inner(
-            state,
-            &forwarded,
-            slug,
-            &project_raw,
-            &issue_id,
-            &body,
-        )
-        .await
-        {
-            Ok(response) => response,
-            Err(denial) => denial.into_response(),
-        };
-        if !response.status().is_success() {
-            return Ok(response);
-        }
-    }
-
-    // Step 6: the result, now that every step succeeded.
+    // Step 7: the result, now that every step succeeded.
     merge_done_payload(
         &pre.pool,
         run.facts.id,
@@ -1082,24 +1076,37 @@ mod tests {
     }
 
     #[test]
-    fn payload_merge_keeps_retry_guards_and_derives_stop_ticking() {
+    fn progress_keeps_stored_keys_and_the_result_delta_derives_stop_ticking() {
+        // What the handler reads before the steps, and the keys its last
+        // write merges in (`result_delta`, merged with `||`).
         let stored = json!({"status": "progressed", "finish_comment_id": "c1", "other": 1});
         let req = parse_finish_body(&json!({
-            "to": "In Review", "result": "waiting_on_human", "handoff": "### Hand-off", "note": "n"
+            "to": "In Review", "result": "waiting_on_human", "comment": "?",
+            "handoff": "### Hand-off", "note": "n"
         }))
         .unwrap();
-        let payload = merged_payload(Some(&stored), &req, "2026-11-19T00:00:00Z");
-        assert_eq!(payload["status"], json!("waiting_on_human"));
-        assert_eq!(payload["stop_ticking"], json!(true));
-        assert_eq!(payload[STAGE_HANDOFF_KEY], json!("### Hand-off"));
-        assert_eq!(payload[FINISH_COMMENT_KEY], json!("c1"));
-        assert_eq!(payload["other"], json!(1));
-        assert_eq!(payload["note"], json!("n"));
+        let progress = progress_payload(Some(&stored), &req);
+        assert_eq!(progress[FINISH_COMMENT_KEY], json!("c1"));
+        assert_eq!(progress["other"], json!(1));
+        assert_eq!(
+            progress["status"],
+            json!("progressed"),
+            "result not yet written"
+        );
+        let delta = result_delta(&req, "2026-11-19T00:00:00Z");
+        assert_eq!(delta["status"], json!("waiting_on_human"));
+        assert_eq!(delta["stop_ticking"], json!(true));
+        assert_eq!(delta["note"], json!("n"));
+        assert_eq!(delta["yielded_at"], json!("2026-11-19T00:00:00Z"));
+        assert!(
+            !delta.contains_key(STAGE_HANDOFF_KEY),
+            "stored by its own step"
+        );
 
         let done = parse_finish_body(&json!({"to": "AI Completed", "result": "done"})).unwrap();
-        let payload = merged_payload(None, &done, "t");
-        assert_eq!(payload["stop_ticking"], json!(false));
-        assert!(!payload.contains_key(STAGE_HANDOFF_KEY));
+        let delta = result_delta(&done, "t");
+        assert_eq!(delta["stop_ticking"], json!(false));
+        assert!(!delta.contains_key("note"));
     }
 
     static F18_11: &str =
@@ -1223,7 +1230,7 @@ mod tests {
         assert_eq!(progress["stop_ticking"], json!(false), "untouched");
         assert_eq!(progress["status"], json!("progressed"), "untouched");
         assert_eq!(progress[STAGE_HANDOFF_KEY], json!("h"));
-        let done = merged_payload(Some(&Value::Object(progress)), &req, "t");
+        let done = result_delta(&req, "t");
         assert_eq!(done["stop_ticking"], json!(true));
         assert_eq!(done["status"], json!("waiting_on_human"));
     }
@@ -1295,7 +1302,7 @@ mod tests {
         let req = finish_req(json!({
             "to": "In Review", "result": "done", "comment": "c", "handoff": "h"
         }));
-        let payload = merged_payload(None, &req, "t");
+        let payload = progress_payload(None, &req);
         let plan = plan_finish(
             &req,
             &payload,
@@ -1326,9 +1333,9 @@ mod tests {
         }));
         // First attempt posted the comment, then failed: the retry posts
         // only the hand-off and moves.
-        let mut stored = merged_payload(None, &req, "t");
+        let mut stored = progress_payload(None, &req);
         stored.insert(FINISH_COMMENT_KEY.to_owned(), json!("c1"));
-        let payload = merged_payload(Some(&Value::Object(stored.clone())), &req, "t2");
+        let payload = progress_payload(Some(&Value::Object(stored.clone())), &req);
         let plan = plan_finish(
             &req,
             &payload,
@@ -1344,7 +1351,7 @@ mod tests {
 
         // Both comments posted, move failed: the retry only moves.
         stored.insert(HANDOFF_COMMENT_KEY.to_owned(), json!("h1"));
-        let payload = merged_payload(Some(&Value::Object(stored.clone())), &req, "t3");
+        let payload = progress_payload(Some(&Value::Object(stored.clone())), &req);
         let plan = plan_finish(
             &req,
             &payload,
@@ -1381,7 +1388,7 @@ mod tests {
         let req = finish_req(json!({
             "to": "AI Completed", "result": "done", "comment": "answer", "handoff": "h"
         }));
-        let payload = merged_payload(None, &req, "t");
+        let payload = progress_payload(None, &req);
         let plan = plan_finish(
             &req,
             &payload,
@@ -1441,7 +1448,9 @@ mod tests {
         let states = project_states();
         let progress = states[1].id;
         let review = &states[2];
-        let req = finish_req(json!({"to": "In Review", "result": "blocked", "handoff": "h"}));
+        let req = finish_req(
+            json!({"to": "In Review", "result": "blocked", "comment": "c", "handoff": "h"}),
+        );
         let payload = progress_payload(None, &req);
         let plan = plan_finish(
             &req,
@@ -1453,6 +1462,29 @@ mod tests {
             None,
         );
         assert!(plan.ticking);
+    }
+
+    #[tokio::test]
+    async fn waiting_on_a_person_needs_a_comment() {
+        for result in ["waiting_on_human", "blocked"] {
+            let (status, body) = body_of(
+                parse_finish_body(&json!({"to": "In Progress", "result": result})).unwrap_err(),
+            )
+            .await;
+            assert_eq!(status, 400, "{result}");
+            assert!(
+                body["error"].as_str().unwrap().contains("--comment-file"),
+                "{result}"
+            );
+            assert!(parse_finish_body(
+                &json!({"to": "In Progress", "result": result, "comment": "Which API?"})
+            )
+            .is_ok());
+        }
+        // The other results may finish quietly.
+        for result in ["done", "progressed", "waiting_on_external"] {
+            assert!(parse_finish_body(&json!({"to": "In Progress", "result": result})).is_ok());
+        }
     }
 
     #[tokio::test]

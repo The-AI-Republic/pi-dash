@@ -1135,7 +1135,7 @@ pub fn build_context(input: &IssueContextInput) -> Value {
 
 /// Name of the terminal state an agent's path ends at (NEWPIDASH-305): the
 /// project state with exactly this name in the `completed` group.
-pub const FINAL_STATE_NAME: &str = "AI Completed";
+pub const FINAL_STATE_NAME: &str = pidash_types::orchestration::AI_COMPLETED_STATE_NAME;
 
 /// The `stages` context value (lean workflow design §9.3):
 /// `{agent_decides, review, test, path, current_runs_automatically,

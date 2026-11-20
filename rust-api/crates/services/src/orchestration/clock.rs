@@ -250,9 +250,9 @@ impl ProjectClockPolicy {
     pub fn with_stages(mut self, settings: &serde_json::Value) -> Self {
         // Read the one key on its own: a bad value under any other key
         // (a legacy `issue_run_policy`, say) must not turn stages back on.
-        let stages = crate::domain::project_settings::agent_stages_of(settings);
-        self.review_enabled = stages.review_enabled();
-        self.test_enabled = stages.test_enabled();
+        let switches = crate::domain::project_settings::stage_switches_of(settings);
+        self.review_enabled = switches.review;
+        self.test_enabled = switches.test;
         self
     }
 

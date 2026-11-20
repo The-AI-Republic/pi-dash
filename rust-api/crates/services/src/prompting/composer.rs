@@ -1095,6 +1095,13 @@ mod tests {
                     "{kind}/{work_type}: yield only in the fallback"
                 );
                 if kind != recipes::KIND_CODING_TASK {
+                    // Review and test have no workpad: not even a mention, or
+                    // an agent may guess a write over In Progress's notes.
+                    let mentions: Vec<&str> = body
+                        .lines()
+                        .filter(|line| line.to_lowercase().contains("workpad"))
+                        .collect();
+                    assert!(mentions.is_empty(), "{kind}/{work_type}: {mentions:?}");
                     assert!(!body.contains("pidash workpad"), "{kind}/{work_type}");
                     assert!(!body.contains("workpad_body"), "{kind}/{work_type}");
                 }

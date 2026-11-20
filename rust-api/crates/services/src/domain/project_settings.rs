@@ -167,6 +167,17 @@ pub fn agent_stages_of(settings: &Value) -> AgentStages {
         .unwrap_or_default()
 }
 
+/// The stage switches a stored settings blob resolves to (both on for a
+/// missing row, a missing key or a malformed value) — the one conversion
+/// every reader uses.
+pub fn stage_switches_of(settings: &Value) -> pidash_types::orchestration::StageSwitches {
+    let stages = agent_stages_of(settings);
+    pidash_types::orchestration::StageSwitches {
+        review: stages.review_enabled(),
+        test: stages.test_enabled(),
+    }
+}
+
 /// The typed settings: the single definition of each key, its type
 /// and its default. Stored as one JSON object; missing keys read as
 /// their `#[serde(default)]` value.

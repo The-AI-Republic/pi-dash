@@ -159,6 +159,37 @@ impl Default for StageSwitches {
     }
 }
 
+/// The state an agent finishes a task in (NEWPIDASH-305). Done is a
+/// person's confirmation of it.
+pub const AI_COMPLETED_STATE_NAME: &str = "AI Completed";
+
+/// Why an issue run may not move its own issue into a state (lean agent
+/// workflow §6.5, §7). A person moving an issue is never refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentMoveRefusal {
+    /// Cancelled, or a completed state other than "AI Completed".
+    HumanOnly,
+    /// A registered stage the project switched off: entering it starts no
+    /// run, so the issue would sit there with nothing to tell anyone why.
+    StageOff,
+}
+
+/// Whether an issue run may move its issue into `state`; `None` allows it.
+pub fn agent_move_refusal(
+    state: &StateRef<'_>,
+    switches: StageSwitches,
+) -> Option<AgentMoveRefusal> {
+    if state.group == "cancelled"
+        || (state.group == "completed" && state.name != AI_COMPLETED_STATE_NAME)
+    {
+        return Some(AgentMoveRefusal::HumanOnly);
+    }
+    if phase_config_for(Some(state)).is_some() && !stage_runs_automatically(Some(state), switches) {
+        return Some(AgentMoveRefusal::StageOff);
+    }
+    None
+}
+
 /// True when entry runs and ticks happen in `state`: it is a registered
 /// phase, and that phase is In Progress or is switched on in the
 /// project. Whether a state *has* an agent prompt is a different
@@ -377,5 +408,40 @@ mod tests {
             assert!(phase_config_for(Some(&review)).is_some());
             assert!(phase_config_for(Some(&test)).is_some());
         }
+    }
+
+    #[test]
+    fn agent_move_refusal_rules() {
+        let on = StageSwitches::ALL;
+        let review_off = StageSwitches {
+            review: false,
+            test: true,
+        };
+        let st = |group, name| StateRef { group, name };
+        assert_eq!(
+            agent_move_refusal(&st("completed", "Done"), on),
+            Some(AgentMoveRefusal::HumanOnly)
+        );
+        assert_eq!(
+            agent_move_refusal(&st("cancelled", "Cancelled"), on),
+            Some(AgentMoveRefusal::HumanOnly)
+        );
+        assert_eq!(
+            agent_move_refusal(&st("completed", "AI Completed"), on),
+            None
+        );
+        assert_eq!(
+            agent_move_refusal(&st("review", "In Review"), review_off),
+            Some(AgentMoveRefusal::StageOff)
+        );
+        assert_eq!(agent_move_refusal(&st("review", "In Review"), on), None);
+        assert_eq!(
+            agent_move_refusal(&st("started", "In Progress"), review_off),
+            None
+        );
+        assert_eq!(
+            agent_move_refusal(&st("unstarted", "Todo"), review_off),
+            None
+        );
     }
 }

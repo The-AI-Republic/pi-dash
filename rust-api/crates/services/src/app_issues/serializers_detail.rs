@@ -381,7 +381,9 @@ pub fn agent_ticker_to_representation<'a>(
     // tick there is skipped (lean workflow §6.4): show no next-tick time.
     let stage_off = pidash_types::orchestration::phase_config_for(state).is_some() && !ticking;
     AgentTickerView {
-        enabled: ticker.enabled,
+        // A switched-off stage keeps the row armed but never runs there:
+        // report the clock as not running, so the UI shows no armed clock.
+        enabled: ticker.enabled && !stage_off,
         user_disabled: ticker.user_disabled,
         used: ticker.used,
         tick_count: ticker.used,
@@ -1602,7 +1604,11 @@ mod tests {
         };
         let off = agent_ticker_to_representation(&row, &review_off, Some(&review));
         assert_eq!(off.next_run_at, None);
-        assert!(off.enabled, "the ticker itself stays armed");
+        assert!(
+            !off.enabled,
+            "reported as not running while the stage is off"
+        );
+        assert!(row.enabled, "the row itself stays armed");
         // Not a stage at all: unchanged behaviour.
         let done = StateRef {
             group: "completed",

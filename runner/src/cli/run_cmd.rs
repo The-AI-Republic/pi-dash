@@ -257,7 +257,27 @@ pub fn finish_summary(resp: &Value) -> String {
 }
 
 /// `POST workspaces/{slug}/agent-runs/{run_id}/finish/`.
+/// `waiting_on_human` and `blocked` stop the clock until a person acts, so
+/// the run must say what that person has to do.
+pub fn check_comment_for_result(args: &FinishArgs) -> Result<(), CliError> {
+    let stops = matches!(
+        args.result,
+        FinishResult::WaitingOnHuman | FinishResult::Blocked
+    );
+    if stops && args.comment_file.is_none() {
+        return Err(CliError::new(
+            EXIT_INVALID,
+            format!(
+                "--result {} needs --comment-file saying what the person must do",
+                args.result.as_wire()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn cmd_finish(client: &ApiClient, args: FinishArgs) -> Result<(), CliError> {
+    check_comment_for_result(&args)?;
     let run_id = resolve_run_id(args.run_id.as_deref(), client.env.run_id.as_deref())?;
     let comment = args
         .comment_file
@@ -422,6 +442,26 @@ mod tests {
         assert_eq!(err.exit_code, EXIT_INVALID);
         assert!(err.to_string().contains("is empty"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_stop_result_needs_a_comment_file() {
+        for result in ["waiting_on_human", "blocked"] {
+            let args = finish_args(&["--to", "In Progress", "--result", result]);
+            let err = check_comment_for_result(&args).unwrap_err();
+            assert_eq!(err.exit_code, EXIT_INVALID, "{result}");
+            let args = finish_args(&[
+                "--to",
+                "In Progress",
+                "--result",
+                result,
+                "--comment-file",
+                "q.md",
+            ]);
+            assert!(check_comment_for_result(&args).is_ok(), "{result}");
+        }
+        let args = finish_args(&["--to", "In Progress", "--result", "progressed"]);
+        assert!(check_comment_for_result(&args).is_ok());
     }
 
     #[test]
