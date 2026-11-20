@@ -4540,17 +4540,25 @@ pub async fn collection_list(
     // (`div_ceil` is unstable on this toolchain; the manual form matches
     // `math.ceil` for non-negative inputs.)
     let total_pages = (total + page.limit - 1) / page.limit;
-    let next_cursor = format!("{}:{}:0", page.limit, page.page + 1);
-    let prev_cursor = format!("{}:{}:1", page.limit, page.page - 1);
+    // Cursor arithmetic runs in `i128` and renders decimally: a crafted
+    // `cursor` can carry `i64::MAX`, and Django's unbounded ints keep
+    // counting (`next` becomes `...808:0`). The DB offset itself stays
+    // saturated in `i64` (`list_page`). (`total_pages` needs no guard:
+    // `total` is a real row count, `limit` is within `1..=1000`.)
+    let next_page = i128::from(page.page) + 1;
+    let prev_page = i128::from(page.page) - 1;
+    let next_cursor = format!("{}:{}:0", page.limit, next_page);
+    let prev_cursor = format!("{}:{}:1", page.limit, prev_page);
     // `next.has_results` is `page_results.count() > limit` over the
     // over-fetched window — exactly `total > offset + limit`.
+    let next_page_results = i128::from(total) > i128::from(page.offset) + i128::from(page.limit);
     let body = pidash_services::app_issues::envelope(
         None,
         None,
         total,
         &next_cursor,
         &prev_cursor,
-        total > page.offset + page.limit,
+        next_page_results,
         page.page > 0,
         raw_rows.len(),
         total_pages,
