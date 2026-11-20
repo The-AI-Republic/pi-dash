@@ -1122,9 +1122,12 @@ impl EngineChatServer {
         // A warm races cancel/close the way the per-session lane does: a
         // hung engine must not hold the session lock for the whole startup
         // budget.
-        // A cancel that landed before this waiter parked leaves no notify
-        // to observe; the drive loop re-checks too, so a warm that wins
-        // this check still cancels on its first turn iteration.
+        // A cancel only targets the in-flight turn. The session lock is
+        // free, so no turn runs and any flag value present is stale from a
+        // turn that already ended: clear it so one cancel cannot poison
+        // every later warm/send on this session. A cancel that lands from
+        // here on still cancels via the waiter below.
+        session.cancelled.store(false, Ordering::SeqCst);
         let pre_cancelled = session.cancelled.load(Ordering::SeqCst);
         let cancel = session.cancel.notified();
         tokio::pin!(cancel);
@@ -1360,21 +1363,33 @@ impl EngineChatServer {
             mode: spec.mode,
             resume_id: spec.resume_id.clone(),
         };
+        // As in `warm`, a stale cancel flag from an ended turn is cleared
+        // first: only a cancel of this turn may cancel it.
+        session.cancelled.store(false, Ordering::SeqCst);
+        let pre_cancelled = session.cancelled.load(Ordering::SeqCst);
         let cancel = session.cancel.notified();
         tokio::pin!(cancel);
-        let thread_id = tokio::select! {
-            biased;
-            _ = cancel.as_mut() => {
-                return TurnTerminal::Completed {
-                    turn_id: None,
-                    assistant_message: None,
-                    status: "cancelled".into(),
-                };
+        let thread_id = if pre_cancelled {
+            return TurnTerminal::Completed {
+                turn_id: None,
+                assistant_message: None,
+                status: "cancelled".into(),
+            };
+        } else {
+            tokio::select! {
+                biased;
+                _ = cancel.as_mut() => {
+                    return TurnTerminal::Completed {
+                        turn_id: None,
+                        assistant_message: None,
+                        status: "cancelled".into(),
+                    };
+                }
+                r = self.warm_locked(&mut data, &warm) => match r {
+                    Ok((thread_id, _)) => thread_id,
+                    Err(e) => return self.send_failed(e).await,
+                },
             }
-            r = self.warm_locked(&mut data, &warm) => match r {
-                Ok((thread_id, _)) => thread_id,
-                Err(e) => return self.send_failed(e).await,
-            },
         };
 
         if !data.started_reported {
@@ -1529,6 +1544,16 @@ impl EngineChatServer {
             .expect("chat server state poisoned")
             .up;
         if !up {
+            // No stop was recorded (e.g. the daemon booted signed-out before
+            // any manager hook fired): report the engine's actual state
+            // rather than a restart that never happened.
+            let availability = (self.inner.availability)();
+            if !availability.can_run {
+                return TurnTerminal::Failed {
+                    code: availability.code,
+                    detail: Some(format!("{e:#}")),
+                };
+            }
             return TurnTerminal::Failed {
                 code: ENGINE_RESTARTED.into(),
                 detail: Some(format!("{e:#}")),
@@ -2431,6 +2456,79 @@ done
             assert!(Instant::now() < deadline, "no interrupt in log:\n{log}");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    #[tokio::test]
+    async fn send_again_after_cancel_runs_a_new_turn() {
+        // A cancel ends its own turn only: the next send on the same
+        // session resumes the thread and completes. (A sticky flag that is
+        // never cleared bricks the session — every later send returns
+        // "cancelled" without running.)
+        let probe = Probe::new(vec![&release_gated_script()]);
+        let id = Uuid::new_v4();
+        let mut sink = RecSink::default();
+        let send = tokio::time::timeout(
+            Duration::from_secs(15),
+            probe.server.send(id, probe.send_spec("slow"), &mut sink),
+        );
+        tokio::pin!(send);
+        loop {
+            tokio::select! {
+                biased;
+                r = &mut send => panic!("send ended before cancel: {r:?}"),
+                _ = tokio::time::sleep(Duration::from_millis(20)) => {
+                    if probe.running_count() == 1 {
+                        probe.server.cancel(id);
+                        break;
+                    }
+                }
+            }
+        }
+        let terminal = send.await.expect("send timed out");
+        assert!(
+            matches!(
+                terminal,
+                TurnTerminal::Completed { ref status, .. } if status == "cancelled"
+            ),
+            "{terminal:?}"
+        );
+        // Let the cancelled turn's trailing completion drain while nobody
+        // subscribes, so it cannot land on the next turn. The fake logs
+        // each line it reads: once it reads the interrupt, its completion
+        // for the cancelled turn is already emitted and dropped.
+        std::fs::write(probe.dir.join("release"), "go").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if probe.log().contains("\"method\":\"turn/interrupt\"") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no interrupt in log:\n{}",
+                probe.log()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // The next send on the same session runs a new turn to completion
+        // on the resumed thread.
+        let mut sink2 = RecSink::default();
+        let terminal = run_send(&probe.server, id, probe.send_spec("again"), &mut sink2).await;
+        let (status, text) = terminal_of(terminal);
+        assert_eq!(status, "completed", "log:\n{}", probe.log());
+        assert!(
+            text.as_ref().is_some_and(|t| t.contains("late-done")),
+            "{text:?}"
+        );
+        assert!(
+            sink2.started.is_empty(),
+            "resumed threads do not re-emit started"
+        );
+        let log = probe.log();
+        assert_eq!(
+            log.matches("\"method\":\"thread/start\"").count(),
+            1,
+            "the second send must resume, not start:\n{log}"
+        );
     }
 
     #[tokio::test]

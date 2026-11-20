@@ -1120,9 +1120,47 @@ done
         }
     }
 
+    /// A fake `pidash-agent-engine app-server` that parks one turn on a
+    /// user approval: it emits a notification-style
+    /// `item/commandExecution/requestApproval`, waits for the
+    /// `approval/response` answer, then completes the turn.
+    const APPROVAL_ENGINE: &str = r#"#!/bin/sh
+rid() { printf '%s' "$1" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p'; }
+tidp() { printf '%s' "$1" | sed -n 's/.*"threadId":"\([^"]*\)".*/\1/p'; }
+read -r line
+id=$(rid "$line")
+printf '{"jsonrpc":"2.0","id":%s,"result":{"capabilities":{}}}\n' "$id"
+read -r line
+while read -r line; do
+  case "$line" in
+    *'"method":"thread/start"'*)
+      id=$(rid "$line")
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"threadId":"th-appr-1"}}\n' "$id";;
+    *'"method":"turn/start"'*)
+      id=$(rid "$line"); t=$(tidp "$line")
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"turn":{"id":"turn-appr-1"}}}\n' "$id" "$t"
+      printf '{"jsonrpc":"2.0","method":"item/commandExecution/requestApproval","params":{"threadId":"%s","approval_id":"appr-1","command":"touch /tmp/engine-chat-approval-probe","reason":"test"}}\n' "$t"
+      read -r ans; echo "$ans" >> "$CODEX_HOME/approval-answers"
+      printf '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"%s","turn":{"id":"turn-appr-1","status":"completed"},"done":{"text":"approved and done"}}}\n' "$t";;
+    *'"method":"turn/interrupt"'*)
+      id=$(rid "$line")
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id";;
+    *'"method":"thread/unsubscribe"'*)
+      id=$(rid "$line")
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"status":"unsubscribed"}}\n' "$id";;
+  esac
+done
+"#;
+
     /// A daemon hosting `runners` (offline), whose engine profile launches
     /// [`FAKE_ENGINE`]. Nothing outside the temp dir is touched.
     async fn chat_daemon(runners: &[&str]) -> ChatDaemon {
+        chat_daemon_with_engine(runners, FAKE_ENGINE).await
+    }
+
+    /// A daemon hosting `runners` (offline), whose engine profile launches
+    /// `engine_script` instead of [`FAKE_ENGINE`].
+    async fn chat_daemon_with_engine(runners: &[&str], engine_script: &str) -> ChatDaemon {
         use std::os::unix::fs::PermissionsExt as _;
         let tmp = tempfile::tempdir().unwrap();
         let paths = crate::util::paths::Paths {
@@ -1152,7 +1190,7 @@ done
             .collect();
         let engine = tmp.path().join("engine/0.153.4/pidash-agent-engine");
         std::fs::create_dir_all(engine.parent().unwrap()).unwrap();
-        std::fs::write(&engine, FAKE_ENGINE).unwrap();
+        std::fs::write(&engine, engine_script).unwrap();
         std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).unwrap();
         let codex_home = tmp.path().join("engine-home");
         std::fs::create_dir_all(&codex_home).unwrap();
@@ -1301,6 +1339,100 @@ done
             Some(Response::Error(e)) => assert!(e.message.contains("no runner named"), "{e:?}"),
             other => panic!("expected an error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn engine_chat_inline_approval_decide_completes_the_turn() {
+        // Desktop local chat approvals run through the shared server: the
+        // turn parks, the daemon streams `ChatApprovalRequest`, and a
+        // `ChatDecide` on a second connection unblocks it to completion.
+        // (The approval policy reads the session's stored folder mid-turn;
+        // doing that lookup while the driver holds the session lock
+        // self-deadlocks the turn, so the handler reads it up front.)
+        let d = chat_daemon_with_engine(&[], APPROVAL_ENGINE).await;
+        let folder = chat_folder(&d);
+        let session = Uuid::new_v4();
+        let mut client = crate::ipc::client::Client::connect(d.paths.ipc_socket_path())
+            .await
+            .unwrap();
+        let first = client
+            .call(Request::ChatSend {
+                chat_session_id: session,
+                message_id: Uuid::new_v4(),
+                content: "do it".into(),
+                runner: None,
+                cwd: Some(folder.display().to_string()),
+                model: None,
+                mode: Some(crate::cloud::protocol::ApprovalMode::Ask),
+                local_thread_id: None,
+                local_session_id: None,
+            })
+            .await
+            .unwrap();
+        let mut frames = vec![first];
+        let approval_id = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                match client.read_next().await.unwrap() {
+                    Some(Response::ChatApprovalRequest {
+                        local_approval_id, ..
+                    }) => break local_approval_id,
+                    Some(f) => frames.push(f),
+                    None => panic!("connection closed before the approval request: {frames:?}"),
+                }
+            }
+        })
+        .await
+        .expect("the turn must park on an approval");
+        // Answer from a second connection, as the desktop does.
+        let mut decider = crate::ipc::client::Client::connect(d.paths.ipc_socket_path())
+            .await
+            .unwrap();
+        let decided = decider
+            .call(Request::ChatDecide {
+                chat_session_id: session,
+                local_approval_id: approval_id.clone(),
+                decision: crate::cloud::protocol::ApprovalDecision::Accept,
+                runner: None,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(decided, Response::Ack), "{decided:?}");
+        let terminal = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                match client.read_next().await.unwrap() {
+                    Some(f @ Response::ChatMessageCompleted { .. }) => break f,
+                    Some(f @ Response::ChatFailed { .. }) => break f,
+                    Some(f) => frames.push(f),
+                    None => panic!("connection closed before the terminal frame: {frames:?}"),
+                }
+            }
+        })
+        .await
+        .expect("the approved turn must end");
+        match &terminal {
+            Response::ChatMessageCompleted {
+                status,
+                assistant_message,
+                ..
+            } => {
+                assert_eq!(
+                    status, "completed",
+                    "frames: {frames:?} terminal: {terminal:?}"
+                );
+                assert_eq!(
+                    assistant_message.as_deref(),
+                    Some("approved and done"),
+                    "frames: {frames:?} terminal: {terminal:?}"
+                );
+            }
+            other => panic!("expected completion, got {other:?}; frames: {frames:?}"),
+        }
+        // The accept decision reached the engine as an approval answer.
+        let answers = std::fs::read_to_string(d.codex_home.join("approval-answers")).unwrap();
+        assert!(
+            answers.contains("appr-1") && answers.contains("accept"),
+            "engine never got the approval answer: {answers}"
+        );
     }
 
     #[tokio::test]

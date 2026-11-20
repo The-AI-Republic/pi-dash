@@ -235,8 +235,10 @@ mod tests {
         assert!(resolve_engine_chat_folder(Some(link.to_str().unwrap()), &dirs).is_err());
     }
 
-    #[test]
-    fn the_profile_is_the_engine_with_no_project() {
+    // The profile owns the shared server, whose background task needs a
+    // runtime at construction.
+    #[tokio::test]
+    async fn the_profile_is_the_engine_with_no_project() {
         let p = PidashAgentChatProfile::new(
             None,
             Arc::new(|| ChatAvailability {

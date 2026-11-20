@@ -776,6 +776,14 @@ pub(crate) async fn handle_engine_send<S: ChatSink>(
     let cancel = ctx.profile.server().session_cancel(chat_session_id).await;
     let mut events = SharedSink::for_send(ctx, chat_session_id, message_id, mode, cancel, sink);
     events.workspace = workspace.clone();
+    // Read the stored folder before the turn starts: the driver holds the
+    // session lock for the whole turn, so the approval policy cannot look
+    // it up mid-turn.
+    events.stored_workspace = ctx
+        .profile
+        .server()
+        .session_workspace(chat_session_id)
+        .await;
     let spec = SendSpec {
         workspace,
         mode,
@@ -849,9 +857,14 @@ struct SharedSink<'a, 's, S: ChatSink> {
     mode: ApprovalMode,
     cancel: Arc<Notify>,
     /// The folder this request resolved to. The approval policy evaluates
-    /// against the session's stored folder (see `session_workspace`); this
+    /// against the session's stored folder (see `stored_workspace`); this
     /// is the fallback for a session that never warmed.
     workspace: PathBuf,
+    /// The session's stored folder, read before the turn started. The turn
+    /// driver holds the session lock for the whole turn, so the policy
+    /// cannot look this up mid-turn (that re-lock self-deadlocks); the
+    /// handler reads it up front instead.
+    stored_workspace: Option<PathBuf>,
     sink: &'s mut S,
 }
 
@@ -870,6 +883,7 @@ impl<'a, 's, S: ChatSink> SharedSink<'a, 's, S> {
             mode,
             cancel,
             workspace: PathBuf::from("/"),
+            stored_workspace: None,
             sink,
         }
     }
@@ -889,6 +903,7 @@ impl<'a, 's, S: ChatSink> SharedSink<'a, 's, S> {
             mode,
             cancel,
             workspace: PathBuf::from("/"),
+            stored_workspace: None,
             sink,
         }
     }
@@ -966,13 +981,7 @@ async fn resolve_shared_approval<S: ChatSink>(
 ) -> ApprovalOutcome {
     // The policy evaluates against the session's stored folder (the folder
     // the thread runs in), falling back to this request's folder.
-    let stored = sink
-        .ctx
-        .profile
-        .server()
-        .session_workspace(sink.chat_session_id)
-        .await;
-    let workspace = stored.as_deref().unwrap_or(&sink.workspace);
+    let workspace = sink.stored_workspace.as_deref().unwrap_or(&sink.workspace);
     let policy = Policy::new(
         &sink.ctx.profile.config().approval_policy,
         workspace,
