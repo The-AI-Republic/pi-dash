@@ -1153,13 +1153,21 @@ pub const FINAL_STATE_NAME: &str = pidash_types::orchestration::AI_COMPLETED_STA
 ///   [`stage_runs_automatically`](pidash_types::orchestration::stage_runs_automatically)
 ///   for the issue's current state: false for a manual run in a disabled
 ///   stage (or outside the registered stages).
+/// * `current_stage_switched_off` — true only when the current state is
+///   a registered stage the project switched off (NEWPIDASH-338 item 2).
+///   `current_runs_automatically` is also false for Todo, Backlog,
+///   Paused and custom states, which are not switched-off stages, so
+///   the prompt keys its "switched off" paragraph on this value
+///   instead.
 pub fn stages_context(
     stages: &AgentStages,
     project_states: &[ProjectStateView],
     state_name: Option<&str>,
     state_group: Option<&str>,
 ) -> Value {
-    use pidash_types::orchestration::{stage_runs_automatically, StageSwitches, StateRef, PHASES};
+    use pidash_types::orchestration::{
+        phase_config_for, stage_runs_automatically, StageSwitches, StateRef, PHASES,
+    };
     let switches = StageSwitches {
         review: stages.review_enabled(),
         test: stages.test_enabled(),
@@ -1192,6 +1200,14 @@ pub fn stages_context(
         (Some(group), Some(name)) => Some(StateRef { group, name }),
         _ => None,
     };
+    // A registered stage the project switched off — and only that — is
+    // what "switched off" means. Non-stage states (Todo, Backlog,
+    // Paused, custom) never count, even though no run starts in them
+    // automatically either (NEWPIDASH-338 item 2).
+    let current_stage_switched_off = current
+        .as_ref()
+        .is_some_and(|state| phase_config_for(Some(state)).is_some())
+        && !stage_runs_automatically(current.as_ref(), switches);
     // A stage the prompt may offer: switched on and present in the project
     // (an empty state list counts as present), matching `path`.
     let offered = |group: &str, name: &str, enabled: bool| {
@@ -1203,6 +1219,7 @@ pub fn stages_context(
         "test": offered("test", "In Test", switches.test),
         "path": path,
         "current_runs_automatically": stage_runs_automatically(current.as_ref(), switches),
+        "current_stage_switched_off": current_stage_switched_off,
         "final_state": final_state,
     })
 }

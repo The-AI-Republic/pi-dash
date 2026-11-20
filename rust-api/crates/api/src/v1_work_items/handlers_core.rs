@@ -84,7 +84,9 @@ use crate::issue_transition::AppTransitionHook;
 use crate::state::AppState;
 
 use super::issue_reads;
-use super::perms::{decide, gate_for, resolve_moved_by_run, RunFacts, V1WorkItemsRoute};
+use super::perms::{
+    decide, gate_for, is_own_issue_run, resolve_moved_by_run, RunFacts, V1WorkItemsRoute,
+};
 pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
@@ -1588,10 +1590,13 @@ pub fn agent_move_message(
     state_name: &str,
     refusal: pidash_types::orchestration::AgentMoveRefusal,
 ) -> String {
-    use pidash_types::orchestration::{AgentMoveRefusal, AI_COMPLETED_STATE_NAME};
+    use pidash_types::orchestration::AgentMoveRefusal;
     match refusal {
+        // NEWPIDASH-338 item 4: never name "AI Completed" — the project
+        // may not have that state, and the agent would burn retries
+        // re-sending the named state. Staying is always allowed.
         AgentMoveRefusal::HumanOnly => format!(
-            "\"{state_name}\" is for a person to set; an agent finishes in \"{AI_COMPLETED_STATE_NAME}\" or stays where it is"
+            "\"{state_name}\" is for a person to set; stay where it is and finish with `waiting_on_human`"
         ),
         AgentMoveRefusal::StageOff => format!(
             "\"{state_name}\" does not run an agent in this project; move the issue to a state that does, or stay where it is"
@@ -1855,10 +1860,18 @@ pub(super) async fn patch_issue_inner(
     // Lean agent workflow §6.5 / §7: an issue run moving its own issue may
     // not close it (Done, Cancelled) or park it in a stage the project
     // switched off. Shared by `finish` and the `issue patch` fallback.
-    let own_issue_run = agent_context
-        && run_by_id
-            .as_ref()
-            .is_some_and(|run| run.work_item_id == Some(*pk));
+    // The gate applies whenever the move is attributed to a run
+    // (`moved_by_run` is set), however that was derived (NEWPIDASH-338
+    // item 3): an explicit header proves it through the header run's own
+    // row, while the headerless inference only ever resolves the caller's
+    // active run on this issue. The work-type lock above stays
+    // header-only on purpose (PDASHOSS01-234).
+    let own_issue_run = is_own_issue_run(
+        moved_by_run,
+        run_by_id.as_ref().and_then(|run| run.work_item_id),
+        header_run_id_present,
+        *pk,
+    );
     if own_issue_run {
         if let Some(message) = gate_agent_state_change(
             &pre.pool,
@@ -2215,5 +2228,24 @@ mod signal_tests {
         };
         let outcome = fire_state_transition(&mut seam, &mut preflight, &request).await;
         assert!(outcome.is_err());
+    }
+}
+
+#[cfg(test)]
+mod agent_move_message_tests {
+    use super::*;
+
+    #[test]
+    fn human_only_refusal_names_no_missing_state() {
+        // NEWPIDASH-338 item 4: the project may have no "AI Completed"
+        // state, so the refusal tells the agent to stay and finish with
+        // `waiting_on_human` instead of naming one.
+        use pidash_types::orchestration::AgentMoveRefusal;
+        let message = agent_move_message("Done", AgentMoveRefusal::HumanOnly);
+        assert!(message.contains("stay where it is"), "{message}");
+        assert!(message.contains("waiting_on_human"), "{message}");
+        assert!(!message.contains("AI Completed"), "{message}");
+        let message = agent_move_message("In Review", AgentMoveRefusal::StageOff);
+        assert!(message.contains("does not run an agent"), "{message}");
     }
 }

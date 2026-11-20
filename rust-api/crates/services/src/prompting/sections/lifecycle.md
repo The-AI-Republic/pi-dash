@@ -9,7 +9,7 @@ customizable: locked
 This issue is one task with a goal. Each run is a fresh session that checks the goal from where the issue stands, then moves it on, sends it back, or waits. Nothing carries over between runs except the issue itself: its comments, its state{% if run.kind == "coding-task" %}, the workpad{% endif %} and the delivered work.
 
 Path in this project: {{ stages.path | join(" → ") }}. You are in **{{ issue.state }}**.
-{% if not stages.current_runs_automatically %}
+{% if stages.current_stage_switched_off %}
 Agent runs are switched off for this stage in this project. A person started this run by hand, and no run will follow it here. Do not wait: finish with a verdict and move the issue, or say exactly what a person must do.
 {% endif %}
 {% if stages.agent_decides %}

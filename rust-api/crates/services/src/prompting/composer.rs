@@ -1320,6 +1320,82 @@ mod tests {
         }
     }
 
+    /// NEWPIDASH-338 item 2: a run in a non-stage state is not told
+    /// agent runs are "switched off" for the stage. That paragraph is
+    /// only for a registered stage the project switched off; Todo,
+    /// Backlog, Paused and custom states get no such sentence.
+    #[test]
+    fn non_stage_states_are_not_called_switched_off() {
+        use crate::prompting::context::{stages_context, ProjectStateView};
+        let state = |name: &str, group: &str| ProjectStateView {
+            name: name.to_owned(),
+            group: group.to_owned(),
+            description: None,
+        };
+        let states = vec![
+            state("Todo", "unstarted"),
+            state("In Progress", "started"),
+            state("In Review", "review"),
+            state("In Test", "test"),
+            state("AI Completed", "completed"),
+        ];
+        let custom = |review: bool, test: bool| AgentStages {
+            mode: AgentStagesMode::Custom,
+            review,
+            test,
+        };
+        // (state, group, stages, runs_automatically, switched_off)
+        let cases = vec![
+            ("Todo", "unstarted", AgentStages::default(), false, false),
+            ("Backlog", "backlog", AgentStages::default(), false, false),
+            ("Paused", "backlog", AgentStages::default(), false, false),
+            ("Triage X", "triage", AgentStages::default(), false, false),
+            ("Done", "completed", AgentStages::default(), false, false),
+            ("In Review", "review", custom(false, true), false, true),
+            ("In Test", "test", custom(true, false), false, true),
+            ("In Review", "review", AgentStages::default(), true, false),
+            ("In Progress", "started", custom(false, false), true, false),
+        ];
+        for (name, group, stages, runs, off) in cases {
+            let ctx = stages_context(&stages, &states, Some(name), Some(group));
+            assert_eq!(ctx["current_runs_automatically"], Value::Bool(runs));
+            assert_eq!(
+                ctx["current_stage_switched_off"],
+                Value::Bool(off),
+                "{name}"
+            );
+        }
+        // The Done-when case: a coding-task prompt rendered for an issue
+        // in Todo contains no "switched off".
+        let lifecycle = &registry::get_section("lifecycle")
+            .expect("lifecycle")
+            .default_body;
+        let mut ctx = stage_context(recipes::KIND_CODING_TASK, &AgentStages::default(), true);
+        ctx["issue"]["state"] = Value::from("Todo");
+        ctx["issue"]["state_group"] = Value::from("unstarted");
+        let views: Vec<ProjectStateView> = ctx["issue"]["project_states"]
+            .as_array()
+            .expect("states")
+            .iter()
+            .map(|s| ProjectStateView {
+                name: s["name"].as_str().expect("name").to_owned(),
+                group: s["group"].as_str().expect("group").to_owned(),
+                description: None,
+            })
+            .collect();
+        ctx["stages"] = stages_context(
+            &AgentStages::default(),
+            &views,
+            Some("Todo"),
+            Some("unstarted"),
+        );
+        let section = renderer::render(lifecycle, &ctx).expect("lifecycle renders");
+        assert!(
+            !section.contains("switched off"),
+            "Todo prompt names no switched-off stage"
+        );
+    }
+
     /// NEWPIDASH-305 fallback: with no "AI Completed" state the path ends
     /// at the last enabled stage and the run is told to wait on a person.
     #[test]
