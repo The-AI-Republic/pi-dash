@@ -99,16 +99,23 @@ export function IssueTitleField({ value, disabled, pipeline, onSave }: IssueTitl
   );
 
   if (disabled) {
-    return <h1 className="text-h2 break-words text-(--text)">{value}</h1>;
+    // wrap-anywhere (not break-words): long unbroken tokens must shrink
+    // the flex/grid item below their max-content width so they wrap
+    // instead of clipping in peek and narrow full-page views.
+    return <h1 className="text-h2 min-w-0 wrap-anywhere text-(--text)">{value}</h1>;
   }
 
   return (
-    <div className="flex flex-col gap-(--space-2)">
-      <div className="relative">
+    <div className="flex min-w-0 flex-col gap-(--space-2)">
+      <div className="relative min-w-0">
         <textarea
           aria-label={TITLE_LABEL}
           aria-invalid={text.length === 0 ? true : undefined}
-          className="text-h2 block w-full resize-none overflow-hidden rounded-(--radius-control) bg-transparent text-(--text) outline-none placeholder:text-(--text-muted) focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:ring-offset-1"
+          className={`text-h2 block w-full min-w-0 resize-none overflow-hidden rounded-(--radius-control) bg-transparent wrap-anywhere whitespace-pre-wrap text-(--text) outline-none placeholder:text-(--text-muted) focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:ring-offset-1${
+            // Reserve the counter's strip while it is visible so the
+            // overlay sits in padding, never over the wrapped text.
+            focused ? " pb-(--space-12)" : ""
+          }`}
           style={{ fieldSizing: "content" }}
           value={text}
           maxLength={TITLE_MAX_LENGTH}

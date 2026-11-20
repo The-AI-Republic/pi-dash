@@ -185,6 +185,38 @@ describe("IssueTitleField", () => {
     expect(onSave).not.toHaveBeenCalled();
   });
 
+  it("wraps long titles in read mode, including unbroken tokens", () => {
+    const longTitle = `${"word ".repeat(50).trim()} ${"x".repeat(255).slice(0, 60)}`;
+    renderField({ value: longTitle, disabled: true });
+    const heading = screen.getByRole("heading", { name: longTitle });
+    expect(heading.className).toContain("wrap-anywhere");
+    expect(heading.className).toContain("min-w-0");
+  });
+
+  it("wraps the edit field and grows it instead of scrolling sideways", () => {
+    renderField({ value: "a".repeat(TITLE_MAX_LENGTH) });
+    const box = field();
+    expect(box.tagName).toBe("TEXTAREA");
+    expect(box.className).toContain("wrap-anywhere");
+    expect(box.className).toContain("whitespace-pre-wrap");
+    expect(box.className).toContain("overflow-hidden");
+    expect(box.className).toContain("resize-none");
+    // Growth comes from `field-sizing: content` in the component (jsdom
+    // drops that property, so it is source-reviewed, not asserted here);
+    // rows=1 plus no scrollbars means height can only come from wrapping.
+    expect(box.getAttribute("rows")).toBe("1");
+  });
+
+  it("pads the edit field while the counter overlay is visible", () => {
+    renderField({ value: "Fix login" });
+    const box = field();
+    expect(box.className).not.toContain("pb-(--space-12)");
+    fireEvent.focus(box);
+    expect(box.className).toContain("pb-(--space-12)");
+    fireEvent.blur(box);
+    expect(box.className).not.toContain("pb-(--space-12)");
+  });
+
   it("shows a live counter while focused and the required note when empty", () => {
     renderField();
     expect(screen.queryByText(`9/${TITLE_MAX_LENGTH}`)).not.toBeInTheDocument();
