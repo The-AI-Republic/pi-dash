@@ -157,9 +157,10 @@ pub async fn pod_has_runner_for_issue_principal(
 }
 
 /// The PO-3 engine gate (§8): does this engine's owner serve the
-/// run? The owner starts it (triggerer admitted only in
-/// `project_members` mode, NEWPIDASH-261), or the run is automatic
-/// on one of the owner's issues, or the machine opted into
+/// run? The owner starts it and either the run policy admits the
+/// triggerer (`project_members` mode, NEWPIDASH-261) or the run sits
+/// on one of the owner's own issues (NEWPIDASH-362), or the run is
+/// automatic on one of the owner's issues, or the machine opted into
 /// teammates' runs.
 #[allow(clippy::too_many_arguments)]
 fn engine_counts(
@@ -170,7 +171,9 @@ fn engine_counts(
     team_runs: bool,
     triggerer_admitted: bool,
 ) -> bool {
-    (triggerer_admitted && Some(owner_id) == creator_id) || (!human && in_issue_people) || team_runs
+    (Some(owner_id) == creator_id && (triggerer_admitted || in_issue_people))
+        || (!human && in_issue_people)
+        || team_runs
 }
 
 /// The single live [`PodRunnerMatcher`]: SeaORM over the caller's
@@ -280,8 +283,8 @@ mod tests {
             );
         }
         // NEWPIDASH-261 default mode: the engine owner's own click
-        // stops counting (triggerer not admitted); the automatic
-        // and team arms are unchanged.
+        // on a stranger issue stops counting (triggerer not
+        // admitted); the automatic and team arms are unchanged.
         assert!(!engine_counts(
             owner,
             Some(owner),
@@ -290,6 +293,11 @@ mod tests {
             false,
             false
         ));
+        // NEWPIDASH-362: the owner's own click on their own issue
+        // counts again in default mode; a teammate's click on that
+        // issue still does not.
+        assert!(engine_counts(owner, Some(owner), true, true, false, false));
+        assert!(!engine_counts(owner, Some(mate), true, true, false, false));
         assert!(engine_counts(owner, Some(mate), false, true, false, false));
         assert!(engine_counts(owner, Some(owner), true, false, true, false));
         // Own-agent candidates count for every principal; the
