@@ -247,8 +247,18 @@ The prompt for such a run says so (§9.3), because staying and waiting has no me
 
 ### 6.4 Changing the setting on a live project
 
-- **A stage is turned off while issues sit in it.** Nothing is swept. A run already in flight finishes normally. The next tick for each issue reaches the pre-fire guard in `fire_tick.rs`, which now fails; the guard disarms the ticker with the existing left-bucket disarm so it does not fire again. The issue stays where it is.
-- **A stage is turned on while issues sit in it.** No run starts by itself. A human starts one with Run AI or Re-tick, or the next state move does. This avoids a burst of runs from one settings change.
+Saving the setting never starts, stops or reschedules anything by itself. The ticker of an issue sitting in the stage stays armed through the change, and the pre-fire guard decides at each tick.
+
+- **A stage is turned off while issues sit in it.** Nothing is swept. A run already in flight finishes normally. When the next tick for such an issue comes due, the pre-fire guard in `fire_tick.rs` finds the stage off and **skips** the tick: it creates no run, spends no budget (`tick_count` unchanged), leaves the ticker enabled with no disarm reason, and sets `next_fire_at` one normal interval ahead, exactly as a fired tick would. The issue stays where it is.
+- **A stage is turned back on.** Nothing happens at save time. The next tick that comes due fires as usual, so the issue resumes on its existing schedule. Example: next tick due in 2 hours, stage turned off, turned on 1 hour later, the tick fires 1 hour after that. If the stage stayed off for 5 hours, the ticks at hours 2 and 4 were skipped and the next fires at hour 6. No run fires immediately, so one settings change cannot cause a burst of runs.
+- **An issue moved into the stage while it was off** has no armed ticker (§6.2) and stays idle after the stage is turned on, until a person moves it or presses Run AI.
+- **Leaving the stage** still disarms the ticker through `left_bucket`, whether the stage is on or off.
+
+Consequences for the implementation:
+
+- The guard does not disarm on a disabled stage, so no `left_ticking_state` stop is created by a switch-off, and the "stage switched back on" branch in `on_retick` and `can_re_tick` (`stage_stopped`) is removed. Re-tick returns to its earlier behaviour, including `budget_not_exhausted` for an issue in Paused.
+- The issue detail hides the next-tick time while the issue's stage is off; it reads the same `stage_runs_automatically` answer.
+- A skipped tick is a cheap read per parked issue per interval; that cost is accepted.
 
 ### 6.5 Guarding agent moves
 
@@ -524,7 +534,7 @@ Run with `cargo test -p <crate>` from `rust-api/`, `cargo test` from `runner/`, 
 - **Policy** (`phases.rs`): `stage_runs_automatically` for In Progress, In Review, In Test, a same-group state with another name, and a non-phase state, under all four switch combinations.
 - **Transitions** (`entries.rs`): entering a disabled stage from In Progress creates no run and applies `left_bucket`; entering an enabled stage behaves as today.
 - **Manual runs**: Run AI and Comment & Run in a disabled stage create one run whose `phase_kind` is the stage's, and the clock is dormant after it ends.
-- **Live change** (`fire_tick.rs`): a tick on an issue sitting in a stage that was turned off does not fire and disarms the ticker.
+- **Live change** (`fire_tick.rs`): a tick on an issue sitting in a stage that was turned off is skipped: no run, `tick_count` unchanged, ticker still enabled, `next_fire_at` moved one interval ahead. After the stage is turned on, the next due tick fires. Re-tick on an issue in Paused with budget left answers `budget_not_exhausted`.
 - **Finish endpoint** (`handlers_actions.rs`): each result's `stop_ticking`; unknown state; disabled-stage target; hand-off on a non-coding run; missing hand-off on a move to review; retry after a simulated failure posts no duplicate comment; scheduler run refused.
 - **Finish CLI** (`runner/src/cli/run_cmd.rs`): argument parsing, file reading, request body, missing run id error.
 - **Prompt** (`composer.rs`): for each of the five settings in §7, the composed review, test and coding prompts name exactly the enabled stages; a disabled stage's name does not appear in the lifecycle section; the manual-run branch renders when `current_runs_automatically` is false; size budgets hold.
@@ -588,7 +598,7 @@ Three issues. A and B are independent of each other. C needs both and NEWPIDASH-
 2. `StageSwitches` and `stage_runs_automatically` in `types/src/orchestration/phases.rs` (§6.1).
 3. Two fields on `ProjectClockPolicy`, manual `Default`, `with_stages`, `stage_switches`; fill them at every construction site (§5.2).
 4. Move every `is_ticking_state` caller per the table in §6.1; remove `is_ticking_state`.
-5. Pre-fire guard disarms on a disabled stage (§6.4).
+5. Pre-fire guard skips and reschedules the tick on a disabled stage, without disarming (§6.4).
 6. Contract schema and the Stages control (§5.3).
 7. Tests: settings, policy, transitions, manual runs, live change, UI (§10.1); fixture fields (§10.2).
 
@@ -597,7 +607,7 @@ Three issues. A and B are independent of each other. C needs both and NEWPIDASH-
 - A project with no `agent_stages` key behaves exactly as before this change.
 - With Customize and In Review off: moving an issue to In Review creates no run and leaves the ticker dormant; Run AI there creates one `review` run; no tick follows it.
 - With Customize and In Test off, the same holds for In Test.
-- Turning a stage off with an issue sitting in it stops its ticks; turning it on starts nothing.
+- Turning a stage off with an issue sitting in it skips its ticks without disarming the ticker or spending budget; turning it back on starts nothing at save time, and the next due tick fires on the existing schedule.
 - `grep -rn "is_ticking_state" rust-api/crates` returns nothing.
 - The project settings page shows and saves the control; In Progress cannot be turned off.
 - `cargo test` passes for `types`, `services`, `api` and `jobs`; `pnpm --filter web_new test` and `pnpm check:types` pass.
@@ -809,7 +819,7 @@ Implemented in PR #3403 as one commit per issue (A, B, C).
 - The retry guard stores a SHA-256 of each posted comment; a retry with different text posts the new text. Before posting, `finish` also looks for a live comment this run already posted with the same body, so a failed id write cannot cause a double post. Each payload write merges only its own keys (`done_payload || delta`).
 - `finish` refuses Done and Cancelled (any completed state other than "AI Completed"); the issue's current state is still always allowed. An explicitly empty `comment` or `handoff` is refused (400), and the CLI refuses an empty `--comment-file` or `--handoff-file`.
 - The response's `ticking` reports what follows the run: a move into a stage that runs starts its entry run whatever the result (the run-ended check ignores a stop from a stage the issue left), unless a person switched the clock off or the budget is spent; staying needs a result that keeps the clock and a ticker that can fire.
-- A stage switched off and back on leaves its issues with a `left_ticking_state` stop; Re-tick re-arms that stop (without granting budget) once the stage runs again, and the issue detail offers Re-tick for it (§6.4).
+- _Superseded by the revised §6.4 (skip instead of disarm); to be removed from the code:_ a stage switched off and back on leaves its issues with a `left_ticking_state` stop; Re-tick re-arms that stop (without granting budget) once the stage runs again, and the issue detail offers Re-tick for it.
 - The stage switches are read from the `agent_stages` key alone (`agent_stages_of`), so a bad value under another settings key never turns stages back on.
 - Leaving any registered stage for one that does not run sends `left_bucket`, so a ticker armed before its stage was switched off is disarmed when the issue moves on. Leaving In Progress for a switched-off stage still records the resume parent. The stage switches are read only when a move or Comment & Run involves a stage.
 - The old-runner fallback adds `--stop-ticking` to `yield` for `waiting_on_human` and `blocked`, and an In Progress run posts its hand-off as a comment. Review and test, with no stored hand-off, look for one in the comments.
