@@ -62,6 +62,7 @@ function pageOf(overrides: Partial<Record<string, unknown>> = {}): Page {
     goBack: vi.fn(async () => null),
     waitForLoadState: vi.fn(async () => undefined),
     url: () => "https://app.test/acme/assistant/t1",
+    keyboard: { press: vi.fn(async () => undefined) },
     getByRole: vi.fn(() => locator()),
     getByText: vi.fn(() => locator()),
     locator: vi.fn(() => locator()),
@@ -182,15 +183,66 @@ describe("history surface reads", () => {
   // NEWPIDASH-337: the history surface is the Chat History header button
   // plus the dialog it opens — no persistent rail. The button carries the
   // surface label, the header link the New-chat entry, and the dialog the
-  // link-only thread rows.
-  function historyPage(layout: StubLocator, dialog: StubLocator): Page {
-    return pageOf({
-      locator: (selector: string) => {
-        if (selector === '[data-testid="assistant-layout"]') return layout;
-        if (selector === '[data-testid="assistant-history-dialog"]') return dialog;
-        return locator({ count: async () => 0 });
-      },
+  // link-only thread rows. Open/closed checks key on the dialog root
+  // (role=dialog, always sized while open), never on the content div,
+  // which collapses to zero size when it holds nothing.
+  interface HistoryPair {
+    dialog: StubLocator;
+    root: StubLocator;
+    presses: string[];
+    opens: number;
+    button: (text: string | null) => StubLocator;
+    page: (layout: StubLocator) => Page;
+  }
+
+  function historyPair(startOpen: boolean): HistoryPair {
+    const state = { open: startOpen };
+    const presses: string[] = [];
+    let opens = 0;
+    const dialog = locator({
+      waitFor: async () => undefined,
+      locator: (inner: string) =>
+        inner === "nav a" ? locator({ count: async () => 2, nth: () => historyLinkRow() }) : locator(),
     });
+    const root = locator({
+      isVisible: async () => state.open,
+      waitFor: async () => undefined,
+    });
+    return {
+      dialog,
+      root,
+      presses,
+      get opens() {
+        return opens;
+      },
+      button: (text: string | null) =>
+        locator({
+          textContent: async () => text,
+          click: async () => {
+            opens += 1;
+            state.open = true;
+          },
+        }),
+      page: (layout: StubLocator) =>
+        pageOf({
+          keyboard: {
+            press: async (key: string) => {
+              presses.push(key);
+              if (key === "Escape") state.open = false;
+            },
+          },
+          getByRole: (role: string, options?: unknown) => {
+            const name = (options as { name?: string } | undefined)?.name;
+            if (role === "dialog" && name === "Chat History") return root;
+            return locator({ count: async () => 0 });
+          },
+          locator: (selector: string) => {
+            if (selector === '[data-testid="assistant-layout"]') return layout;
+            if (selector === '[data-testid="assistant-history-dialog"]') return dialog;
+            return locator({ count: async () => 0 });
+          },
+        }),
+    };
   }
 
   function layoutWith(button: StubLocator | null, newChat: StubLocator | null): StubLocator {
@@ -208,76 +260,90 @@ describe("history surface reads", () => {
     });
   }
 
-  function historyButton(text: string | null): StubLocator {
-    return locator({ textContent: async () => text, click: async () => undefined });
-  }
-
   function historyLinkRow(): StubLocator {
     return locator({ evaluate: async (fn) => fn({ tagName: "A" } as unknown as Element) });
   }
 
-  function openDialog(): StubLocator {
-    return locator({
-      isVisible: async () => false,
-      waitFor: async () => undefined,
-      locator: (inner: string) =>
-        inner === "nav a" ? locator({ count: async () => 2, nth: () => historyLinkRow() }) : locator(),
-    });
-  }
-
-  it("reads the Chat History button label", async () => {
-    const page = historyPage(layoutWith(historyButton(" Chat History "), null), locator({ count: async () => 0 }));
+  it("reads the Chat History button label without touching the dialog", async () => {
+    const pair = historyPair(false);
+    const page = pair.page(layoutWith(pair.button(" Chat History "), null));
     await expect(new WebNewDriver(page).assistantSidebarHeader()).resolves.toBe("Chat History");
+    expect(pair.presses).toEqual([]);
+    expect(pair.opens).toBe(0);
   });
 
   it("reads null when the button is missing, blank or unreadable", async () => {
-    const missing = historyPage(layoutWith(null, null), locator({ count: async () => 0 }));
-    await expect(new WebNewDriver(missing).assistantSidebarHeader()).resolves.toBeNull();
-    const blank = historyPage(layoutWith(historyButton("  "), null), locator({ count: async () => 0 }));
-    await expect(new WebNewDriver(blank).assistantSidebarHeader()).resolves.toBeNull();
-    const unreadable = historyPage(layoutWith(historyButton(null), null), locator({ count: async () => 0 }));
-    await expect(new WebNewDriver(unreadable).assistantSidebarHeader()).resolves.toBeNull();
+    const missing = historyPair(false);
+    await expect(new WebNewDriver(missing.page(layoutWith(null, null))).assistantSidebarHeader()).resolves.toBeNull();
+    for (const text of ["  ", null]) {
+      const pair = historyPair(false);
+      const page = pair.page(layoutWith(pair.button(text), null));
+      await expect(new WebNewDriver(page).assistantSidebarHeader()).resolves.toBeNull();
+      expect(pair.presses).toEqual([]);
+      expect(pair.opens).toBe(0);
+    }
   });
 
   it("reports the header New-chat entry and the dialog thread rows by tag", async () => {
+    const pair = historyPair(false);
     const newChat = locator({ evaluate: async (fn) => fn({ tagName: "A" } as unknown as Element) });
-    const dialog = openDialog();
-    const page = historyPage(layoutWith(historyButton("Chat History"), newChat), dialog);
+    const page = pair.page(layoutWith(pair.button("Chat History"), newChat));
     await expect(new WebNewDriver(page).assistantSidebarRowKinds()).resolves.toEqual({
       newChat: "a",
       rows: ["a", "a"],
     });
+    expect(pair.presses).toEqual([]);
+    expect(pair.opens).toBe(1);
   });
 
   it("reports an empty surface when the layout is absent", async () => {
-    const page = historyPage(locator({ count: async () => 0 }), locator({ count: async () => 0 }));
+    const pair = historyPair(false);
+    const page = pair.page(locator({ count: async () => 0 }));
     await expect(new WebNewDriver(page).assistantSidebarRowKinds()).resolves.toEqual({
       newChat: null,
       rows: [],
     });
+    expect(pair.presses).toEqual([]);
+    expect(pair.opens).toBe(0);
   });
 
   it("reports no rows without opening the dialog where the button is absent", async () => {
+    const pair = historyPair(false);
     const newChat = locator({ evaluate: async (fn) => fn({ tagName: "A" } as unknown as Element) });
-    const dialog = locator({
-      locator: () => {
-        throw new Error("dialog must not open without the history button");
-      },
-    });
-    const page = historyPage(layoutWith(null, newChat), dialog);
+    const page = pair.page(layoutWith(null, newChat));
     await expect(new WebNewDriver(page).assistantSidebarRowKinds()).resolves.toEqual({
       newChat: "a",
       rows: [],
     });
+    expect(pair.presses).toEqual([]);
+    expect(pair.opens).toBe(0);
+  });
+
+  it("closes an open dialog before reading the Chat History label", async () => {
+    const pair = historyPair(true);
+    const page = pair.page(layoutWith(pair.button(" Chat History "), null));
+    await expect(new WebNewDriver(page).assistantSidebarHeader()).resolves.toBe("Chat History");
+    expect(pair.presses).toEqual(["Escape"]);
+  });
+
+  it("closes, reads the header link, reopens and reads rows when the dialog starts open", async () => {
+    const pair = historyPair(true);
+    const newChat = locator({ evaluate: async (fn) => fn({ tagName: "A" } as unknown as Element) });
+    const page = pair.page(layoutWith(pair.button("Chat History"), newChat));
+    await expect(new WebNewDriver(page).assistantSidebarRowKinds()).resolves.toEqual({
+      newChat: "a",
+      rows: ["a", "a"],
+    });
+    expect(pair.presses).toEqual(["Escape"]);
+    expect(pair.opens).toBe(1);
   });
 
   it("reads dialog button labels, or nothing when the dialog is closed", async () => {
-    const open = historyPage(
-      layoutWith(historyButton("Chat History"), null),
-      locator({ locator: () => locator({ allInnerTexts: async () => [] }) })
-    );
+    const openPair = historyPair(true);
+    const open = openPair.page(layoutWith(openPair.button("Chat History"), null));
     await expect(new WebNewDriver(open).assistantSidebarButtons()).resolves.toEqual([]);
-    const closed = historyPage(layoutWith(historyButton("Chat History"), null), locator({ count: async () => 0 }));
+    const closedPair = historyPair(false);
+    const closed = closedPair.page(layoutWith(closedPair.button("Chat History"), null));
     await expect(new WebNewDriver(closed).assistantSidebarButtons()).resolves.toEqual([]);
   });
 });

@@ -10,7 +10,10 @@
 // unresolved, so neither rows nor the placeholder appear — the exclusion
 // AGT-041 pins. The dialog has no buttons of its own: picking a
 // conversation navigates to it and closes the dialog, while Escape and the
-// backdrop also close it, and the dialog traps focus while open.
+// backdrop also close it, and the dialog traps focus while open. Opening
+// moves focus to the first row once the read settles (the list itself when
+// empty), because the rows mount after the read and the opener would
+// otherwise keep focus.
 
 import { Link, useRouterState } from "@tanstack/react-router";
 import * as React from "react";
@@ -38,10 +41,35 @@ export function ConversationHistoryDialog({
   const rows = visibleConversations(threads.data);
   const empty = threads.isSuccess && rows.length === 0;
 
+  // The rows mount after the thread read settles — and the portal mounts
+  // the list asynchronously on open — so the dialog takes over focusing
+  // entirely through the list's own attach: once the read settles, move
+  // focus inside when it is still outside (the opener keeps it otherwise,
+  // and the first Tab would escape to the page header). The effect-free
+  // callback refires on every attach, including the settle flip that
+  // arrives after the portal mount. The nav is the fallback when there is
+  // no row to land on; it is programmatically focusable but never a tab
+  // stop.
+  const focusWhenReady = React.useCallback(
+    (node: HTMLElement | null) => {
+      if (!node || !open || (!threads.isSuccess && !threads.isError)) return;
+      const active = document.activeElement;
+      if (active && node.contains(active)) return;
+      const first = node.querySelector("a");
+      (first ?? node).focus();
+    },
+    [open, threads.isSuccess, threads.isError]
+  );
+
   return (
-    <Dialog title={CHAT_HISTORY_TITLE} open={open} onOpenChange={onOpenChange} closeButton={false}>
+    <Dialog title={CHAT_HISTORY_TITLE} open={open} onOpenChange={onOpenChange} closeButton={false} initialFocus={false}>
       <div data-testid="assistant-history-dialog" className="flex min-h-0 flex-col">
-        <nav aria-label={CHAT_HISTORY_TITLE} className="flex min-h-0 flex-1 flex-col gap-(--space-1) overflow-y-auto">
+        <nav
+          ref={focusWhenReady}
+          tabIndex={-1}
+          aria-label={CHAT_HISTORY_TITLE}
+          className="flex min-h-0 flex-1 flex-col gap-(--space-1) overflow-y-auto"
+        >
           {rows.map((thread) => (
             <Link
               key={thread.id}

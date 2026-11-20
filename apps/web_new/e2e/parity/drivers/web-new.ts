@@ -18510,28 +18510,39 @@ export class WebNewDriver implements ParityDriver {
     return this.page.locator('[data-testid="assistant-history-dialog"]').first();
   }
 
+  /**
+   * The dialog root, named by the dialog title. The content div above can
+   * collapse to zero size when it holds nothing (a refused guest read
+   * renders neither rows nor the placeholder), so open/closed checks key
+   * on the root, which is always sized while open and detached while
+   * closed.
+   */
+  private assistantHistoryDialogRoot() {
+    return this.page.getByRole("dialog", { name: "Chat History", exact: true }).first();
+  }
+
   /** Open the history dialog unless it is already open. */
   private async assistantEnsureHistoryOpen(): Promise<void> {
     if (
-      await this.assistantHistoryDialog()
+      await this.assistantHistoryDialogRoot()
         .isVisible()
         .catch(() => false)
     )
       return;
     await this.assistantHistoryButton().click();
-    await this.assistantHistoryDialog().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await this.assistantHistoryDialogRoot().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
 
   /** Close the history dialog when a read left it open (it blocks the page). */
   private async assistantEnsureHistoryClosed(): Promise<void> {
     if (
-      !(await this.assistantHistoryDialog()
+      !(await this.assistantHistoryDialogRoot()
         .isVisible()
         .catch(() => false))
     )
       return;
     await this.page.keyboard.press("Escape");
-    await this.assistantHistoryDialog().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+    await this.assistantHistoryDialogRoot().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
 
   /**
@@ -18868,7 +18879,7 @@ export class WebNewDriver implements ParityDriver {
     await this.assistantHistoryDialog().locator("nav a").nth(index).click();
     // Picking a row navigates and closes the dialog; wait for the close so
     // the next read sees the thread, not the backdrop.
-    await this.assistantHistoryDialog().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+    await this.assistantHistoryDialogRoot().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
   async assistantCardVisible(): Promise<boolean> {
     return (await this.assistantHomeCardInput().count()) > 0;
@@ -19286,13 +19297,20 @@ export class WebNewDriver implements ParityDriver {
     if ((await layout.count()) === 0) return [];
     await scan(layout);
     const dialog = this.assistantHistoryDialog();
-    if (await dialog.isVisible().catch(() => false)) await scan(dialog);
+    if (
+      await this.assistantHistoryDialogRoot()
+        .isVisible()
+        .catch(() => false)
+    )
+      await scan(dialog);
     return hits;
   }
   async assistantSidebarHeader(): Promise<string | null> {
     // The history surface's label: the header button that opens it. Null
     // where the button is absent (the desktop local chat has no server
-    // history).
+    // history). An open history dialog hides the header behind aria-hidden
+    // while the modal is open, so a read that left it open closes first.
+    await this.assistantEnsureHistoryClosed();
     const button = this.assistantHistoryButton();
     if ((await button.count()) === 0) return null;
     // textContent: innerText would apply CSS text transforms.
@@ -19302,6 +19320,10 @@ export class WebNewDriver implements ParityDriver {
   async assistantSidebarRowKinds(): Promise<{ newChat: string | null; rows: string[] }> {
     // New chat lives in the page header; thread rows live in the history
     // dialog. Both stay links, never buttons, on the new app as on the old.
+    // An open history dialog hides the header behind aria-hidden while the
+    // modal is open, so the header link is read with the dialog closed and
+    // the rows with it open.
+    await this.assistantEnsureHistoryClosed();
     const layout = this.page.locator('[data-testid="assistant-layout"]').first();
     if ((await layout.count()) === 0) return { newChat: null, rows: [] };
     const newChatLink = layout.getByRole("link", { name: "New chat" }).first();

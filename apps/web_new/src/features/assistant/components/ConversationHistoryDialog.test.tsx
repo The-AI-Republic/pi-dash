@@ -27,10 +27,19 @@ import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { assistantKeys } from "../api/keys.js";
 import { ConversationHistoryDialog } from "./ConversationHistoryDialog.js";
 
-function makeThread(id: string, overrides: Partial<AssistantThread> = {}): AssistantThread {
+function makeThreadId(tag: string): string {
+  // The fetch path validates ids as UUIDs; the cache path does not.
+  const suffix = tag
+    .replaceAll(/[^0-9a-f]/gi, "1")
+    .padEnd(12, "0")
+    .slice(0, 12);
+  return `11111111-1111-4111-8111-${suffix}`;
+}
+
+function makeThread(tag: string, overrides: Partial<AssistantThread> = {}): AssistantThread {
   return {
-    id,
-    title: `Thread ${id}`,
+    id: makeThreadId(tag),
+    title: `Thread ${tag}`,
     is_archived: false,
     has_active_turn: false,
     created_at: "2026-10-01T00:00:00Z",
@@ -39,15 +48,27 @@ function makeThread(id: string, overrides: Partial<AssistantThread> = {}): Assis
   };
 }
 
-function renderDialog(options: { threads?: AssistantThread[]; fail?: boolean; initialPath?: string }): void {
-  createAppClient("https://api.test", (async (url: string) => ({
-    status: options.fail === true ? 403 : 200,
-    url,
-    headers: { get: () => "application/json" },
-    text: async () => JSON.stringify(options.fail === true ? { error: "role_not_allowed" } : (options.threads ?? [])),
-  })) as never);
+function renderDialog(options: {
+  threads?: AssistantThread[];
+  fail?: boolean;
+  failRef?: { current: boolean };
+  hang?: boolean;
+  preset?: boolean;
+  initialPath?: string;
+}): QueryClient {
+  const shouldFail = () => (options.failRef ? options.failRef.current : options.fail === true);
+  createAppClient("https://api.test", ((url: string) => {
+    if (options.hang === true) return new Promise(() => {}) as never;
+    return (async () => ({
+      status: shouldFail() ? 403 : 200,
+      url,
+      headers: { get: () => "application/json" },
+      text: async () => JSON.stringify(shouldFail() ? { error: "role_not_allowed" } : (options.threads ?? [])),
+    }))() as never;
+  }) as never);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  if (options.threads !== undefined) queryClient.setQueryData(assistantKeys.threads("acme"), options.threads);
+  if (options.threads !== undefined && options.preset !== false)
+    queryClient.setQueryData(assistantKeys.threads("acme"), options.threads);
   const rootRoute = createRootRouteWithContext<{ queryClient: QueryClient }>()();
   const wsRoute = createRoute({
     getParentRoute: () => rootRoute,
@@ -92,6 +113,7 @@ function renderDialog(options: { threads?: AssistantThread[]; fail?: boolean; in
       <RouterProvider router={router} />
     </QueryClientProvider>
   );
+  return queryClient;
 }
 
 async function openDialog(): Promise<void> {
@@ -118,13 +140,16 @@ describe("ConversationHistoryDialog", () => {
         makeThread("gone", { is_archived: true }),
         makeThread("a", { title: "" }),
       ],
-      initialPath: "/acme/assistant/b",
+      initialPath: `/acme/assistant/${makeThreadId("b")}`,
     });
     await openDialog();
     const dialog = screen.getByRole("dialog", { name: "Chat History" });
-    expect(within(dialog).getByRole("link", { name: "Beta" })).toHaveAttribute("href", "/acme/assistant/b");
+    expect(within(dialog).getByRole("link", { name: "Beta" })).toHaveAttribute(
+      "href",
+      `/acme/assistant/${makeThreadId("b")}`
+    );
     const untitled = within(dialog).getByRole("link", { name: "Untitled conversation" });
-    expect(untitled).toHaveAttribute("href", "/acme/assistant/a");
+    expect(untitled).toHaveAttribute("href", `/acme/assistant/${makeThreadId("a")}`);
     expect(within(dialog).queryByRole("link", { name: "Thread gone" })).not.toBeInTheDocument();
     expect(within(dialog).getByRole("link", { name: "Beta" })).toHaveAttribute("aria-current", "page");
     expect(untitled).not.toHaveAttribute("aria-current");
@@ -177,5 +202,48 @@ describe("ConversationHistoryDialog", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(within(dialog).queryByText("No conversations yet.")).not.toBeInTheDocument();
     expect(within(dialog).getByRole("navigation").querySelectorAll("a")).toHaveLength(0);
+  });
+
+  it("moves focus to the first row once the read settles", async () => {
+    renderDialog({
+      threads: [makeThread("b", { title: "Beta" }), makeThread("a", { title: "Alpha" })],
+      initialPath: "/acme/assistant",
+    });
+    await openDialog();
+    const dialog = screen.getByRole("dialog", { name: "Chat History" });
+    const links = within(dialog).getAllByRole("link");
+    await waitFor(() => expect(document.activeElement).toBe(links[0]));
+  });
+
+  it("falls back to the list itself when there is no row to land on", async () => {
+    renderDialog({ threads: [] });
+    await openDialog();
+    const dialog = screen.getByRole("dialog", { name: "Chat History" });
+    await waitFor(() => expect(document.activeElement).toBe(within(dialog).getByRole("navigation")));
+  });
+
+  it("leaves focus on the opener while the read is pending", async () => {
+    renderDialog({ hang: true });
+    await openDialog();
+    expect(document.activeElement).toHaveTextContent("Chat History");
+    expect(document.activeElement?.tagName).toBe("BUTTON");
+  });
+
+  it("keeps focus put when the read recovers while the dialog is open", async () => {
+    const failRef = { current: true };
+    const queryClient = renderDialog({
+      threads: [makeThread("b", { title: "Beta" }), makeThread("a", { title: "Alpha" })],
+      failRef,
+      preset: false,
+      initialPath: "/acme/assistant",
+    });
+    await openDialog();
+    const dialog = screen.getByRole("dialog", { name: "Chat History" });
+    const nav = within(dialog).getByRole("navigation");
+    await waitFor(() => expect(document.activeElement).toBe(nav));
+    failRef.current = false;
+    await queryClient.invalidateQueries({ queryKey: assistantKeys.threads("acme") });
+    await waitFor(() => expect(within(dialog).getByRole("link", { name: "Beta" })).toBeInTheDocument());
+    expect(document.activeElement).toBe(nav);
   });
 });
