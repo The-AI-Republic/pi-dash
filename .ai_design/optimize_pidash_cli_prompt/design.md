@@ -2,13 +2,16 @@
 
 > Directory: `.ai_design/optimize_pidash_cli_prompt/`
 >
-> **Status:** implementation-ready (reviewed 2026-11-19). Not started.
-> Decisions are in §10. Work breakdown (three issues, server side in Rust only) is in §11,
-> and a draft of the new core prompt section is in Appendix A.
+> **Status:** implementation-ready. Not started. Revised 2026-11-20 after the
+> lean agent workflow change merged (PR #3403); §0 lists what that changed
+> here. Decisions are in §10. Work breakdown (three issues, server side in
+> Rust only) is in §11, and a draft of the new core prompt section is in
+> Appendix A.
 >
 > **Companion:** `review.md`, a line-by-line review of the current
 > `pidash-cli` section with the evidence behind each change here (findings
-> R1–R10).
+> R1–R10). It was written before the lean agent workflow change and is kept
+> as evidence; line numbers in it refer to the section as it was then.
 >
 > **Scope:** how an issue/scheduler agent run learns to use the `pidash` CLI
 > and gets the issue data it works from. Covers:
@@ -37,8 +40,39 @@
 > - Django (`apps/api/`), see above.
 > - The runner's use of the user's own agent config (skills, MCP connectors,
 >   settings). Agents need the user's resources for user tasks; we keep it.
-> - Routing trivial issues through fewer stages (In Progress only vs. In
->   Progress → In Review → In Test). That is a separate design.
+> - Which stages an issue goes through, the end-of-run command
+>   (`pidash run finish`) and the review/test hand-off. Those shipped with the
+>   lean agent workflow design (`.ai_design/lean_agent_workflow/design.md`);
+>   this design builds on them and does not change them.
+
+---
+
+## 0. What the lean agent workflow change means for this design
+
+The lean agent workflow change (PR #3403, merged 2026-11-20) rewrote the
+issue-run prompts around this design's target. It did not touch the
+`pidash-cli` section beyond swapping the end-of-run command. The effects on
+this design:
+
+| Area                | Before                                                                     | Now                                                                                                                                                                                      |
+| ------------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Priority            | The CLI section was 36–50% of an issue-run prompt                          | It is about 55% of an In Progress prompt and about 80% of a review or test prompt (§2.1). It is now the largest single cost per step                                                     |
+| Rollout             | New prompt behind `PROMPT_PIDASH_CLI_V2`, as a second section key          | No flag and no second key. `pidash-cli` is rewritten in place, as the lean change did for its sections (§7). The section is `locked`, so no workspace override can hold the old text     |
+| Ending a run        | `comment add`, `issue patch --state`, `run yield`, owned by `ending-run`   | One command, `pidash run finish`, owned by the `lifecycle` section. `run yield` remains for scheduler runs and as the old-runner fallback (§6.6, §6.7)                                   |
+| Workpad             | Used by every stage; inlined in review and test                            | In Progress only. Review and test read the hand-off, which is inlined. The workpad file and its envelope fields apply to `coding-task` runs only (§6.1); former decision D7 is withdrawn |
+| Sections named here | `ending-run`, `task-lifecycle`, `workpad-setup`, `workpad-context`, cycles | Those are gone. The owners are now `lifecycle`, `workpad`, `run-framing`, `review`, `test` (§6.7)                                                                                        |
+| Duplication (R7)    | Core commands restated in up to nine sections                              | Mostly fixed by the lean change. What is left is listed in §2.6                                                                                                                          |
+| Agent name          | `--as-agent` asked for on `comment add`                                    | Also asked for on `run finish`; the default from `PIDASH_AGENT_NAME` covers both (§6.3)                                                                                                  |
+| Freshness           | "Don't re-fetch" everywhere                                                | `run-framing` tells timer-started runs to check for newer comments, which is correct. §6.2 makes that check cheap instead of removing it                                                 |
+| Rare procedures     | Only CLI reference text moves to `pidash docs`                             | The lean design left its rarely used procedures inline because `pidash docs` did not exist. Issue C may move them (§6.6)                                                                 |
+
+Open follow-ups from the lean change that touch the same files: NEWPIDASH-338
+(the stored hand-off is lost at run completion; four other `finish` and
+prompt bugs) and NEWPIDASH-339 (simplifying `finish`). Do NEWPIDASH-338
+before issue C, because both edit `lifecycle.md`.
+
+Sections 1 and 2 keep the original evidence from PIDASHCLOU-2. Where the
+lean change altered a fact, the text says so.
 
 ---
 
@@ -64,6 +98,12 @@ being re-sent. This design attacks two of those three factors:
 | ---------------------- | ---------------------------------------------------------------------- | ----------------------------------- |
 | Fixed context per step | the 34 KB `pidash-cli` section, ~60% of which a typical run never uses | ~200k tokens removable              |
 | Steps per run          | re-fetching inlined data, failed bare commands, manual bookkeeping     | ~7 of 26 steps ≈ 420k tokens (~25%) |
+
+These numbers predate the lean agent workflow change. That change removes
+whole runs for simple issues (PIDASHCLOU-2 would now be one In Progress run,
+not three) and cut the non-CLI part of each prompt, which leaves the CLI
+section as most of what is re-sent on every step (§2.1). It has not been
+measured end to end yet; §8 measures both changes together.
 
 Sources: run transcripts under
 `~/.local/share/pidash-test/runners/7a9bed71-…/history/runs/` and Claude Code
@@ -92,6 +132,18 @@ Rendered size on PIDASHCLOU-2:
 | Implement | 96.5 KB      | 34.4 KB                  | 36%   |
 | Review    | 68.3 KB      | 34.5 KB                  | 50%   |
 | Test      | 76.2 KB      | 34.5 KB                  | 45%   |
+
+After the lean agent workflow change, the rest of the prompt is much
+smaller, and the CLI section is unchanged in size (37.7 KB template):
+
+| Stage     | Prompt without the CLI section (measured, PR #3403) | CLI section (rendered, as above) | CLI share (approx.) |
+| --------- | --------------------------------------------------- | -------------------------------- | ------------------- |
+| Implement | 27.3 KB                                             | ~34 KB                           | ~55%                |
+| Review    | 7.9 KB                                              | ~34 KB                           | ~80%                |
+| Test      | 8.9 KB                                              | ~34 KB                           | ~80%                |
+
+The first column was measured on a sample issue with the software work
+type; a real issue adds its description and comments.
 
 Roughly 8–10k tokens, re-sent on every step. Breakdown (R5):
 
@@ -133,6 +185,20 @@ it, so it fetches anyway. Redundant or failed calls on PIDASHCLOU-2:
 
 That's about 7 of 26 calls, ~420k tokens.
 
+**Since the lean change.** `workpad-context.md` and `test-cycle.md` are gone,
+and review and test no longer use the workpad. What remains:
+
+- the `workpad` section (In Progress only) still says "A successful update
+  deletes the file, so before each later edit re-fetch with
+  `pidash workpad get | jq -r .body > <path>`", and the CLI section's recipe
+  says the same;
+- `comment list` in the CLI section still says to read comments "to pick up
+  any human replies since your last run";
+- `run-framing` tells a timer-started run to run `pidash comment list` for
+  anything newer than the prompt. That one is justified, because the prompt
+  is built when the run is created and the run may start later; but it
+  returns the whole thread again.
+
 ### 2.3 The environment contract is wrong (R2)
 
 `pidash-cli.md:10-20` says the CLI reads `PIDASH_API_URL`,
@@ -170,17 +236,30 @@ them is attributed to the human owner, and scheduler run tracing
 (`apps/api/pi_dash/api/views/scheduler.py:151-171`, keyed on
 `speaker_agent_run_id`) silently misses it.
 
+Since the lean change, `pidash run finish` posts the closing comment with
+the run id attached by the server, so that comment is always attributed to
+the run. The agent's name is still manual: `lifecycle.md` ends the command
+with `--as-agent "<your name>"`, and the server falls back to the label
+"AI Agent" when it is omitted.
+
 ### 2.6 Core commands are re-specified across sections (R7)
 
-| Command / rule          | Sections that restate it besides `pidash-cli`                                                                                           |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `run yield` outcomes    | ending-run (fullest), blocking, analyze-and-scope, relationships, task-lifecycle, implementation                                        |
-| `--stop-ticking`        | ending-run, blocking, analyze-and-scope, review-cycle, session-framing, test-cycle, task-lifecycle                                      |
-| `workpad update`        | blocking, default-posture, workpad-setup, ending-run, guardrails, workpad-template, implementation, workpad-context, `software/execute` |
-| `issue patch`           | blocking, analyze-and-scope, autonomy, ending-run, implementation, task-lifecycle, `software/execute`                                   |
-| `issue relate` / `wait` | blocking, analyze-and-scope, relationships, session-framing, ending-run, workpad-template, task-lifecycle                               |
-| Stage-ending flow       | `pidash-cli.md:164-193` recipes, the cycle section's Step 3, ending-run (three copies)                                                  |
-| Retry rule              | `pidash-cli.md:32` and `:216`                                                                                                           |
+Before the lean change, `run yield` outcomes, `--stop-ticking`,
+`workpad update`, `issue patch` and the stage-ending flow were each restated
+in five to nine sections (the table is in `review.md`, R7). The lean change
+removed most of that. What is restated today, besides `pidash-cli` itself:
+
+| Command / rule                       | Also specified in                                                                    |
+| ------------------------------------ | ------------------------------------------------------------------------------------ |
+| `run finish` syntax and result names | `lifecycle` (the owner) and the CLI section's "Ending the run" entry and two recipes |
+| Blocking flow                        | `blocking`, and the CLI section's "Block on a person" recipe                         |
+| Workpad edit round-trip              | `workpad` (the owner) and the CLI section's workpad entry and recipe                 |
+| `issue patch --state`                | `lifecycle` (old-runner fallback), `analyze-and-scope`, `software/execute`           |
+| `comment list`                       | `run-framing`, `analyze-and-scope`, `relationships`, `workpad`                       |
+| Retry rule                           | the CLI section's output contract and its conventions list                           |
+
+So the remaining duplication is mostly between the CLI section and the
+section that owns each flow.
 
 ### 2.7 "Not for you" list is stale (R6)
 
@@ -191,6 +270,8 @@ It misses:
   service when a test ran it on 2026-11-16;
 - `update`, `engine`, `reconnect`, `login`, `auth`, `config`;
 - `ai`, which calls the cloud AI assistant on the user's BYOK key.
+
+The lean change did not touch this list; it is still as described.
 
 ### 2.8 The `pidash` skill in the agent's home directory loads on top of the prompt
 
@@ -293,22 +374,42 @@ CLI defaults from env                   │  - command index (1 line each) │
                                         └────────────────────────────────┘
 ```
 
----
-
-## 5. Expected effect (PIDASHCLOU-2 as the yardstick)
-
-| Change                                                      | Mechanism                                         | Estimated saving                            |
-| ----------------------------------------------------------- | ------------------------------------------------- | ------------------------------------------- |
-| §6.1–6.3 run-start materialisation, freshness, env defaults | ~7 fewer calls of ~60k each                       | ~420k tokens (~25%)                         |
-| §6.6 core section + `pidash docs`                           | ~7–8k fewer tokens on each of ~19 remaining calls | ~150k tokens (~9%)                          |
-| §6.8 thin skill                                             | no second manual on Codex/muse runs               | up to ~8k tokens per step on those runs     |
-| §6.10 per-run block                                         | enables a cacheable static prefix                 | cost, not token count (evaluate separately) |
-| **Total, first two rows**                                   |                                                   | **~1.66M → ~1.1M tokens (~−35%)**           |
-
-Stage routing (the separate design) multiplies on top: every step it keeps is
-also cheaper.
+The workpad file is written for In Progress (`coding-task`) runs only. The
+end-of-run command, its results and the choice of next state stay in the
+`lifecycle` section; the core only points at it.
 
 ---
+
+## 5. Expected effect
+
+Estimates; §8 replaces them with measurements. The per-step figures assume
+about 4 characters per token.
+
+| Change                                               | Mechanism                                                                             | Estimated saving                                              |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| §6.6 core section + `pidash docs`                    | the CLI section goes from ~34 KB to ≤ 6 KB on every step                              | ~7k tokens per step, on every issue and scheduler run         |
+| §6.1–6.3 workpad file, cheap freshness, env defaults | no workpad re-fetch before each edit, no failed bare commands, no full-thread re-read | 1–3 fewer steps per In Progress run; fewer on review and test |
+| §6.8 thin skill                                      | no second manual on Codex/muse runs                                                   | up to ~8k tokens per step on those runs                       |
+| §6.10 per-run block                                  | enables a cacheable static prefix                                                     | cost, not token count (evaluate separately)                   |
+
+What that means per prompt, using the sizes in §2.1:
+
+| Stage     | Prompt today (approx.) | With a ≤ 6 KB core | Reduction |
+| --------- | ---------------------- | ------------------ | --------- |
+| Implement | ~61 KB                 | ~33 KB             | ~45%      |
+| Review    | ~42 KB                 | ~14 KB             | ~65%      |
+| Test      | ~43 KB                 | ~15 KB             | ~65%      |
+
+The agent's own system prompt and tool definitions (about 13k tokens on
+Claude Code) are re-sent too and are outside this design, so the saving per
+step in total context is smaller than these percentages: roughly 7k of
+about 28k tokens on an implement step, and 7k of about 23k on a review or
+test step.
+
+On PIDASHCLOU-2 the earlier estimate was 1.66M → ~1.1M tokens from this
+design alone. With the lean change that issue is one run, not three, so the
+absolute saving from this design on it is smaller, and the saving on issues
+that do go through review and test is proportionally larger.
 
 ## 6. Changes
 
@@ -321,6 +422,12 @@ committed by accident. The current prompt's root-level scratch files
 (`./.pidash-workpad.md`, `.pidash-review.md`, `.pidash-comment.md`, …) can be
 committed by a careless `git add -A`, and were found left over in a test
 workspace. All scratch files move under `.pidash/` (§6.6 recipes, Appendix A).
+
+**Which runs.** Only In Progress (`coding-task`) runs have a workpad since
+the lean change: review and test read the hand-off, which the prompt
+inlines, and write nothing to the workpad. The snapshot, the file and the
+prompt text below apply to `coding-task` runs only. For every other kind
+the envelope fields are omitted and the runner writes no workpad file.
 
 **Delivery to the runner.** At run creation, the server snapshots the workpad
 into `run_config` (`workpad_body`, `workpad_sha256`). The `Assign` envelope
@@ -375,21 +482,48 @@ the SHA-256 of the workpad body instead, which needs no migration:
   instead of the body, so a refresh doesn't put the whole body into the
   agent's context.
 
-**Prompt** (Appendix A): "Your workpad is in `.pidash/workpad.md` (also shown
-below). Edit it, then run `pidash workpad update`. If the file is missing, run
+**Prompt.** The `workpad` section owns the workpad round-trip (§6.7). Its
+last paragraph, which today tells the agent to re-fetch before every edit,
+becomes: "Your workpad is in `.pidash/workpad.md` (also shown above). Edit
+it, then run `pidash workpad update`; there is no append, so the file is
+always the full body. If the file is missing, run
 `pidash workpad get --to-file` first. If an update is rejected as changed,
-run `pidash workpad get --to-file` and re-apply your edit." Update
-`workpad-setup.md`, `workpad-context.md` and `test-cycle.md:41` to match.
+run `pidash workpad get --to-file` and re-apply your edit. Update the
+workpad after each meaningful step." The CLI core carries one line that
+names the two commands and points at "Workpad" (Appendix A). `workpad` is an
+`overridable` section; see §9 for existing overrides.
 
-### 6.2 Say what is fresh, and stop instructing re-reads (R1)
+The same directory holds the files for the closing command: the prompt's
+examples use `.pidash/comment.md` and `.pidash/handoff.md` for
+`pidash run finish --comment-file … --handoff-file …`.
 
-- Add to the inlined-context block: "The issue, comments, states and workpad
-  below were read when this run started (`{{ run.rendered_at }}`). Don't
-  re-fetch them. Exceptions: you have worked long enough that a human may
-  have replied, you are about to make an irreversible move, or a write was
-  rejected as stale." `run.rendered_at` is a new context key (UTC
-  RFC 3339, set when the prompt is built), added in
-  `rust-api/crates/services/src/prompting/context.rs`.
+### 6.2 Say what is fresh, and make the one needed re-read cheap (R1)
+
+The prompt is built when the run is created, and a run can start later
+(queued behind another run, or waiting for a runner). So "never re-fetch"
+would be wrong, and `run-framing` already tells a timer-started run to look
+for newer comments. The change is to make that check small and to stop
+every other re-read.
+
+- New context key `run.rendered_at` (UTC RFC 3339, set when the prompt is
+  built), added in `rust-api/crates/services/src/prompting/context.rs`.
+- New CLI flag `pidash comment list <issue> --since <RFC 3339>`: prints only
+  comments created after that time, in the same JSON shape. Filter in the
+  CLI after the fetch if the list endpoint has no such filter; the point is
+  what reaches the agent's context, not the request size. With nothing new
+  it prints an empty list.
+- `run-framing` (the owner of this instruction) changes its timer-run
+  sentence from "run `pidash comment list {{ issue.identifier }}` for
+  anything newer" to
+  "run `pidash comment list --since {{ run.rendered_at }}` for anything
+  newer". On an old runner the flag is unknown; the fallback is the plain
+  `comment list` (Appendix A).
+- The CLI core says once: "The issue, comments, states{% if coding-task %}
+  and workpad{% endif %}{% if review or test %} and hand-off{% endif %}
+  in this prompt were read at `{{ run.rendered_at }}`. Don't fetch them
+  again, except: `comment list --since` when "How this run works" tells you
+  to or you have worked long enough that a person may have replied; and
+  after a write is rejected as stale."
 - Remove the "read these… to pick up any human replies" instruction from
   `comment list`. Keep `comment list` / `issue get` / `state list` in the
   command index for genuine refreshes.
@@ -437,14 +571,21 @@ CLI:
   `--agent-run-id` from `PIDASH_RUN_ID` when they are set and the flags are
   absent (`runner/src/cli/comment.rs` `add_speaker_metadata`). Explicit flags
   win. Server-side inference from `X-Pi-Dash-Run-Id` is deferred (§10, D1).
+- `run finish` defaults `--as-agent` from `PIDASH_AGENT_NAME` the same way
+  (`runner/src/cli/run_cmd.rs` `FinishArgs`). Today the lifecycle prompt
+  asks the agent to type its own name, and the server labels the comment
+  "AI Agent" when it doesn't.
+- `comment list` gains `--since` (§6.2).
 
 Prompt: core commands are shown in their short form
-(`pidash comment add <id> --body-file <path> [--fold]`), and the explicit
-`--as-agent` / `--agent-run-id` instructions are removed. The new prompt
-ships behind a flag (§7). On a runner older than this change, a bare
-`comment add` still succeeds but is attributed to the owner. That's
-acceptable during rollout and is why the flag flips only after the
-`MIN_RUNNER_VERSION` bump.
+(`pidash comment add <id> --body-file <path> [--fold]`), the explicit
+`--as-agent` / `--agent-run-id` instructions are removed from the CLI
+section, and `--as-agent "<your name>"` is removed from the `run finish`
+line in `lifecycle.md`. On a runner older than this change, a bare
+`comment add` still succeeds but is attributed to the owner, and a
+`run finish` comment is labelled "AI Agent". That's acceptable for the few
+runners that lag, and is why the prompt change ships only after the runner
+release and the `MIN_RUNNER_VERSION` bump (§7).
 
 ### 6.4 Truthful environment and credential section (R2)
 
@@ -475,40 +616,64 @@ prompt; the agent never needs them.
   is blocked." Refusal is enforced by the CLI, so the prompt doesn't need to
   enumerate them. `issue re-tick` stays named (it is a human decision, refused
   server-side).
+- Since the lean change the server also refuses an issue run that moves its
+  own issue to Done, Cancelled or a stage the project switched off, whether
+  through `run finish` or `issue patch --state`. `lifecycle` states the rule;
+  the CLI reference (`pidash docs issue`) repeats it next to
+  `issue patch --state` so an agent that reaches for that command sees it.
 
 ### 6.6 Core section + `pidash docs` (R5)
 
-Rewrite `sections/pidash-cli.md` to contain only:
+Rewrite `sections/pidash-cli.md` **in place** (same key; it is a `locked`
+section, so no workspace override exists) to contain only:
 
 1. The environment/credential note (§6.4) and the output contract (one
    paragraph; the retry rule lives here only).
-2. **Core commands, exact usage:** `workpad update`, `comment add`,
-   `issue patch --state`, `run yield` (syntax + one line each; outcome and
-   clock semantics are owned by `ending-run`, §6.7), plus `issue get`,
-   `comment list`, `workpad get` as explicit refresh commands.
-3. **Command index**, one line per remaining group, e.g.
+2. The freshness note (§6.2).
+3. **Core commands, exact usage:**
+   - issue runs: `comment add` (a question or note during the run), the
+     workpad line for `coding-task` runs (§6.1), `issue get` and
+     `comment list [--since]` as refresh commands, and one line for
+     `run finish` that gives no syntax and points at "Lifecycle", which
+     owns it (§6.7);
+   - scheduler runs: `issue create` for filing a finding, `comment add`, and
+     `run yield` (optional, last call). A scheduled run has no stages and
+     does not use `run finish`.
+4. **Command index**, one line per remaining group, e.g.
 
    ```
    Other commands (run `pidash docs <topic>` or `pidash <cmd> --help` before first use):
-     issue      create, list, search, relate/unrelate/wait, relations, run-ai, --pod/--runner
+     issue      create, patch (title, labels, state of another issue), list, search,
+                relate/unrelate/wait, relations, run-ai, --pod/--runner
      page       project wiki pages: list, get, create, update, archive
      label      list, create, update, delete
      scheduler  view/update project schedulers
      project    runners
+     context    the context.md files that list this machine's projects
    ```
 
-4. The blocklist sentence (§6.5).
-5. **Conventions:** no undo, token secrecy, fenced JSON in the workpad.
+5. The blocklist sentence (§6.5).
+6. **Conventions:** no undo, token secrecy, fenced JSON.
 
-Scheduler runs get the scheduler commands as their core instead of workpad /
-`run yield` ticking semantics (the template already branches on `run.kind`).
-Issue runs see schedulers only as one index line.
+`issue patch --state` leaves the core for issue runs: a run moves its own
+issue with `run finish`, and moving another issue is rare. It stays in the
+index and in `lifecycle`'s old-runner fallback.
+
+Scheduler runs get the scheduler commands as their core (the template
+already branches on `run.kind`). Issue runs see schedulers only as one
+index line.
 
 Removed from the prompt entirely:
 
-- the `issue search` backwards-compat note (enforce a minimum runner version
-  instead, §7);
-- the stage-ending recipes (§6.7).
+- the `issue search` backwards-compat note (the runner release this depends
+  on is newer than `search`, §7);
+- the "Ending the run" entry and the three end-of-run recipes (finish a
+  task, finish a review or test pass, block on a person): `lifecycle` and
+  `blocking` own those (§6.7);
+- the workpad recipe (replaced by §6.1);
+- the "Working context files (`context.md`)" block (~1.3 KB), which explains
+  cross-project lookups that few runs need. It becomes the `context` topic
+  of `pidash docs`, with one index line.
 
 Add `pidash docs [<topic>]` to the runner CLI:
 
@@ -516,42 +681,68 @@ Add `pidash docs [<topic>]` to the runner CLI:
   embedded with `include_str!`) holding everything removed from the prompt:
   full flag descriptions, output fields (`relations_summary`,
   `has_open_blockers`, `dispatch_wait`, …), pods/runners policy,
-  page/label/scheduler details, the remaining recipes.
+  page/label/scheduler details, the `context.md` files, the remaining
+  recipes.
 - `pidash docs` lists topics; `pidash docs <topic>` prints one (`issue`,
   `comment`, `workpad`, `page`, `label`, `state`, `scheduler`, `pods`, `run`,
-  `recipes`). Plain markdown on stdout, so `pidash docs | grep …` works.
+  `context`, `recipes`). Plain markdown on stdout, so `pidash docs | grep …`
+  works.
+- The `run` topic documents `run finish` in full (flags, results, what the
+  server refuses, that a repeated call changes nothing) and `run yield` for
+  scheduler runs.
 - Static content only. Anything run-specific stays in the prompt.
+
+**Rare procedures from other sections (optional, in issue C).** The lean
+design kept two rarely used procedures inline because `pidash docs` did not
+exist: the split-into-sub-issues procedure in `analyze-and-scope` and the
+comment examples in `software/execute`. Once `pidash docs` ships, each may
+move to a `recipes` sub-topic with a one-line pointer left behind. Move one
+only if the section's rule stays in the prompt and only the worked
+procedure moves, and check §8's lookup metric afterwards. This is a
+follow-on saving, not a requirement of this design.
 
 Why not a markdown file next to the binary: same content, but adds an install
 path the agent must be told and a way to drift. Why not only `--help`: help
 text is the wrong place for recipes and field semantics. `--help` stays the
 place for flags (and gains `--as-agent`-style details in `long_about`).
 
-Add a rendered-size budget test per recipe kind (core section ≤ 6 KB), so it
-doesn't creep back.
+**Size tests.** The lean change added a rendered-size test per recipe kind
+that excludes the CLI section (budgets 50 / 12 / 13 KB). Add:
+
+- the rendered CLI section ≤ 6 KB for each kind;
+- the whole rendered prompt on the sample issue ≤ 56 / 18 / 19 KB for
+  `coding-task` / `review` / `test`.
 
 ### 6.7 One owner per fact (R7)
 
-| Fact                                         | Owner                              | Everyone else                               |
-| -------------------------------------------- | ---------------------------------- | ------------------------------------------- |
-| Command syntax and one-line semantics        | `pidash-cli` core                  | refer to it by name                         |
-| `run yield` outcomes, `--stop-ticking` rules | `ending-run`                       | say _when_ to yield, not what outcomes mean |
-| Which state to move to at the end of a stage | the stage's cycle section (Step 3) | –                                           |
-| Workpad edit round-trip                      | `pidash-cli` core (§6.1 form)      | refer to it                                 |
-| Retry rule                                   | output contract in `pidash-cli`    | –                                           |
+The lean change set the owners for the run's flow. This design removes the
+second copies that the CLI section still holds, and takes ownership of
+command syntax for everything else.
+
+| Fact                                                          | Owner                            | Everyone else                                            |
+| ------------------------------------------------------------- | -------------------------------- | -------------------------------------------------------- |
+| `run finish`: syntax, result meanings, which state to move to | `lifecycle`                      | the CLI core names the command and points at "Lifecycle" |
+| Asking a person, blocking                                     | `blocking`                       | refer to it                                              |
+| Workpad content and edit round-trip                           | `workpad` (In Progress only)     | the CLI core names the two commands                      |
+| When to look for newer comments                               | `run-framing`                    | the CLI core's freshness note refers to it               |
+| Syntax and one-line semantics of every other command          | `pidash-cli` core, `pidash docs` | refer to the command by name                             |
+| Retry rule                                                    | output contract in `pidash-cli`  | –                                                        |
 
 Concretely:
 
-- delete the stage-ending recipes from `pidash-cli.md:164-193` and the
-  duplicate retry rule (`:216`);
-- trim restated flags and outcome meanings in `blocking.md`,
-  `task-lifecycle.md`, `analyze-and-scope.md`, `session-framing.md`,
-  `workpad-setup.md`, `workpad-context.md`, `default-posture.md`,
-  `guardrails.md`.
+- delete from `pidash-cli.md` the "Ending the run" entry, the three
+  end-of-run recipes, the workpad recipe and the duplicate retry rule in the
+  conventions list;
+- in `analyze-and-scope`, `relationships`, `workpad` and `software/execute`,
+  keep the instruction to use a command but drop restated flags, since the
+  core or `pidash docs` has them;
+- once the runner release with `run finish` is the minimum (§7), delete the
+  old-runner fallback sentence from `lifecycle.md` (about 400 characters on
+  every issue run). That removes the last `run yield`, `--stop-ticking` and
+  `issue patch --state` text from issue-run prompts.
 
-Keep one sentence of emphasis where a past failure justifies it (e.g. "never
-`--stop-ticking` while an external wait remains"), but no second copy of the
-specification.
+Keep one sentence of emphasis where a past failure justifies it, but no
+second copy of a specification.
 
 ### 6.8 Thin skill, kept out of Pi Dash runs
 
@@ -580,13 +771,24 @@ cheap when loaded, and the agent is told it's unnecessary.
 Runner-side test that:
 
 1. renders each recipe kind (`coding-task`, `review`, `test`, `scheduler`)
-   from fixtures exported by the Rust composer tests;
+   from fixtures exported by the Rust composer tests, with stage settings
+   that cover Auto and a switched-off stage;
 2. extracts every `pidash …` command line and parses it with the real clap
    `Command` (`try_get_matches_from`), substituting placeholders;
 3. asserts every `PIDASH_*` variable the prompt promises is set by
    `apply_run_env` for that run kind;
 4. asserts the never-run sentence and the generated classification (§6.5)
-   agree.
+   agree;
+5. asserts every quoted section reference (`see "…"`) matches a heading
+   that is rendered for that kind. Today eight references say "Lifecycle",
+   while the heading in that section's body is "Where this task is, and how
+   the run ends". "Lifecycle" is the section's title in its front matter,
+   which the composer keeps as metadata; confirm it is not rendered, then
+   fix the references or the heading;
+6. covers the whole prompt, not only the CLI section: the `run finish` line
+   in `lifecycle`, `--handoff-file` appearing only for `coding-task`, the
+   `comment list --since` line in `run-framing`, and every command in
+   `blocking`, `workpad` and the work-type slots.
 
 Fixtures come from the Rust composer
 (`rust-api/crates/services/src/prompting/`), regenerated by a test there that
@@ -599,6 +801,11 @@ Django is out of scope.
   block: issue identifier, run id, stage, agent name, rendered-at time.
 - Static sections refer to "this issue" / "this run" instead of templating
   ids inline. §6.3 already removes most `{{ run.id }}` uses.
+- The lean change added per-run values to `lifecycle` (the project's path,
+  the current state, the run budget) and `run-framing` (what started the
+  run). Those are short and belong where they are; for the caching
+  follow-up they would need to move into the "This run" block too, which is
+  part of that evaluation, not of this design.
 - This makes the static sections identical across runs of the same kind,
   which (a) simplifies testing and (b) enables a follow-up: delivering static
   guidance through a cacheable channel (e.g. Claude Code
@@ -614,68 +821,75 @@ Django is out of scope.
 Ordered so each step is independently shippable and the cheap, high-value
 fixes go first.
 
-| #   | Change                                                                                                                                                                                             | Where                  | Issue |
-| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- | ----- |
-| 1   | Runner context + workpad file: `Assign` identifiers and workpad snapshot, env exports, CLI defaults (`state list --project`, `comment add`), `body_sha256` guard, `.pidash/workpad.md` (§6.1, 6.3) | rust-api, runner       | A     |
-| 2   | Agent-facing CLI: operator classification and refusal, agent-only `--help`, `pidash docs`, thin skill (§6.5, 6.6, 6.8)                                                                             | runner, skill          | B     |
-| 3   | Prompt v2 behind `PROMPT_PIDASH_CLI_V2` + prompt-vs-CLI contract test + measurement (§6.2, 6.4, 6.6, 6.7, 6.9, 6.10, Appendix A)                                                                   | rust-api, runner tests | C     |
+| #   | Change                                                                                                                                                                                                                                  | Where                  | Issue |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- | ----- |
+| 1   | Runner context + workpad file: `Assign` identifiers and workpad snapshot, env exports, CLI defaults (`state list --project`, `comment add`, `run finish`), `comment list --since`, `body_sha256` guard, `.pidash/workpad.md` (§6.1–6.3) | rust-api, runner       | A     |
+| 2   | Agent-facing CLI: operator classification and refusal, agent-only `--help`, `pidash docs`, thin skill (§6.5, 6.6, 6.8)                                                                                                                  | runner, skill          | B     |
+| 3   | Prompt rewrite + prompt-vs-CLI contract test + measurement (§6.2, 6.4, 6.6, 6.7, 6.9, 6.10, Appendix A)                                                                                                                                 | rust-api, runner tests | C     |
 
-A and B can proceed in parallel. C lands after both, and the flag flips only
-after the runner release that contains A and B.
+A and B can proceed in parallel. C lands after both.
 
-**Gating step 3.** The composer can't gate on the runner's version: the
-prompt is rendered at run creation
+**No flag.** The earlier revision put the new prompt behind
+`PROMPT_PIDASH_CLI_V2`, as a second section key chosen in `recipe_for()`.
+That is withdrawn, for the reason the lean change gave: one prompt, replaced
+outright, with the old one gone. `pidash-cli` is `locked`, so there is no
+workspace override to protect either.
+
+The composer still can't gate on the runner's version: the prompt is
+rendered at run creation
 (`rust-api/crates/services/src/orchestration/creation.rs`), before the pod
-matcher picks a runner. Gate it instead with:
+matcher picks a runner. So the order of releases does the gating:
 
-1. **A config flag.** Add `PROMPT_PIDASH_CLI_V2` (default `False`) to the
-   Rust config registry (`rust-api/crates/db/src/config/registry.rs`). With the flag off, the composer renders today's
-   `pidash-cli` section with the R3/R10 corrections. With it on, it renders
-   the v2 core (Appendix A).
-
-   Implement v2 as a new section key (`pidash-cli-core`) and choose between
-   the keys in `recipe_for()`, rather than one template full of
-   `{% if %}`. That keeps both versions testable and lets workspace overrides
-   of `pidash-cli` keep working until they opt in.
-
-2. **A runner release** containing issues A and B, then a `MIN_RUNNER_VERSION`
-   bump to it. That setting is advisory today: old runners show a red
-   banner.
-3. **Flip the flag** once the operator's runners are upgraded. For the
-   hosted cloud, flip after the bump has been out for one release cycle.
-   Self-hosters flip it themselves; the release notes say so.
-4. **Fallbacks in the prompt** for an old runner that still receives v2
-   (Appendix A):
-   - workpad file missing → `pidash workpad get --to-file`;
+1. **Server side of issue A** deploys first. Its changes are additive
+   (optional envelope fields, an optional request field on the workpad
+   endpoint), so old runners are unaffected.
+2. **A runner release** containing issues A and B, which also carries
+   `pidash run finish` from the lean change if no earlier release did.
+3. **`MIN_RUNNER_VERSION` is raised** to that release. That setting is
+   advisory: old runners show a red banner and keep working.
+4. **Issue C merges and deploys** once the operator's runners are upgraded.
+   For the hosted cloud, wait one release cycle after the bump. Self-hosters
+   who deploy the server before upgrading runners get the fallbacks below;
+   the release notes say to upgrade runners first.
+5. **Fallbacks in the prompt** for an old runner (Appendix A), each one
+   short:
+   - workpad file missing → `pidash workpad get --to-file`, and if that flag
+     is unknown, `pidash workpad get | jq -r .body > .pidash/workpad.md`;
    - `pidash docs` unknown → `pidash <cmd> --help`;
+   - `comment list --since` unknown → `pidash comment list`;
    - bare commands failing for lack of `PIDASH_ISSUE_IDENTIFIER` → pass
      `{{ issue.identifier }}`.
 
    Each costs one extra step on old runners only, never a dead end.
 
-The `issue search` backwards-compat note is dropped from v2. Runners new
-enough for v2 all have `search`.
+6. **One release cycle later**, remove the fallbacks and the `run finish`
+   fallback in `lifecycle.md` (§6.7).
 
----
+Rolling back is a revert of issue C's commit; nothing in A or B depends on
+the prompt.
 
 ## 8. Measurement
 
-Before/after on the test runner, same issue shapes (a PIDASHCLOU-2-style
-answer-only issue and one small real code issue), for `claude_code`, `codex`
-and `muse_code` runners:
+Three points on the test runner, so the two designs can be told apart: the
+PIDASHCLOU-2 baseline (1.66M tokens, before either change), after the lean
+agent workflow change (its §10.3 measurement, still to be run), and after
+this one. Same issue shapes each time: a PIDASHCLOU-2-style answer-only
+issue and one small real code issue that goes through review, for
+`claude_code`, `codex` and `muse_code` runners:
 
 - first-call context tokens; rendered prompt size per kind (compiled-prompt
   preview endpoint);
 - steps per run and total tokens per run, per issue;
-- **redundant fetches per run**: `workpad get` / `comment list` /
-  `issue get` / `state list` calls with no intervening reason. Target ~0 on
-  the answer-only issue;
+- **redundant fetches per run**: `workpad get` / `issue get` /
+  `state list` calls, and `comment list` without `--since`, with no
+  intervening reason. Target ~0 on the answer-only issue;
 - failed `pidash` calls per run. Target 0 on both issues;
 - `pidash docs` / `--help` lookups per run (the core is too small if this
   exceeds ~0.5 per run on typical issues);
 - skill loads per run (target: no `references/` reads; `SKILL.md` loads are
   cheap);
-- comments with missing `speaker_agent_run_id` from agent runs. Target 0.
+- comments with missing `speaker_agent_run_id` from agent runs, and closing
+  comments labelled "AI Agent" instead of the agent's name. Target 0.
 
 ---
 
@@ -694,12 +908,20 @@ and `muse_code` runners:
 - **Refusing operator commands breaks a legitimate workflow** run from a
   shell that inherited `PIDASH_RUN_ID`. Mitigation: the
   `PIDASH_ALLOW_OPERATOR=1` escape hatch, and a clear error message.
-- **Overridden sections.** Workspaces can override sections
-  (user → workspace → default). Overrides of `pidash-cli` keep the old full
-  text and may contradict the new runner behaviour (e.g. the workpad
-  re-fetch recipe still works, it's just wasteful). Note it in the release
-  notes; consider flagging overrides older than the new default in the
-  customisation UI.
+- **Overridden sections.** `pidash-cli`, `lifecycle` and `run-framing` are
+  `locked`, so they have no overrides. `workpad` is `overridable`, and its
+  round-trip paragraph changes (§6.1). An existing override keeps the old
+  re-fetch recipe, which still works on a new runner but wastes a step. Add
+  the old recipe's text (`pidash workpad get | jq`) to the retired markers
+  that `revalidate_section_overrides` looks for, so such overrides are
+  flagged for review, and run it after deploying issue C.
+- **No flag to flip back.** A bad prompt change is reverted by reverting the
+  commit and redeploying, which is slower than a flag. Mitigation: the
+  contract test (§6.9), the size tests, and measuring on the test server
+  before the production deploy.
+- **Both designs' follow-ups edit the same files.** NEWPIDASH-338 and
+  NEWPIDASH-339 touch `lifecycle.md` and the `finish` path. Land
+  NEWPIDASH-338 before issue C.
 - **The skill is still loaded by Codex/muse.** Made cheap, not prevented. If
   §8 shows the instruction doesn't stop loads, consider a per-agent mechanism
   to skip that one skill in runs (touches user config; deferred).
@@ -716,9 +938,12 @@ and `muse_code` runners:
   its `updated_at` is the issue row's, which the agent's own edits change. Use
   `body_sha256` / `if_body_sha256` (§6.1). This is an additive API change in
   `rust-api`, with no migration.
-- **D3. Gating:** the composer has no runner at render time. Gate on a config
-  flag (`PROMPT_PIDASH_CLI_V2`) flipped after a `MIN_RUNNER_VERSION` bump,
-  with in-prompt fallbacks for old runners (§7).
+- **D3. Gating (revised 2026-11-20):** no flag and no second section key.
+  `pidash-cli` is rewritten in place and ships after the runner release and
+  the `MIN_RUNNER_VERSION` bump, with in-prompt fallbacks for old runners
+  (§7). The composer has no runner at render time, so release order is the
+  gate. This follows the lean agent workflow decision to replace prompts
+  outright.
 - **D4. Skill sources:** the OSS `skill/pidash/` is the single source. The
   private overlay's `plugins/{claude,codex}/pidash/skills/pidash/` become thin
   copies generated from it, or are deleted. That change lives in the private
@@ -730,24 +955,38 @@ and `muse_code` runners:
   is git-excluded, not in the repo root (§6.1).
 - **D8. Server scope is Rust only.** Django (`apps/api/`) gets no changes,
   including no prompt-section sync.
-- **D7. Workpad stays inlined in review/test prompts** as well as written to
-  file. The agent must read it before deciding anything; reading the file
-  instead would cost a step.
+- **D7 (withdrawn 2026-11-20).** It said the workpad stays inlined in review
+  and test prompts. Since the lean change those runs do not use the workpad;
+  they get the hand-off inline. The workpad is inlined, and written to file,
+  for In Progress runs only.
+- **D9. End of run:** this design does not specify it. `pidash run finish`
+  and the `lifecycle` section own it; the CLI core only names the command.
+  `run yield` is documented for scheduler runs.
+- **D10. Newer comments:** timer-started runs keep checking for comments
+  newer than the prompt, through `comment list --since {{ run.rendered_at }}`
+  (§6.2), so the check costs a few lines, not the whole thread.
+- **D11. `pidash docs` may take rare procedures from other sections**
+  (§6.6), decided per procedure in issue C and checked against the lookup
+  metric.
 
 ---
 
 ## 11. Implementation plan (three issues)
 
-Tracking issue: NEWPIDASH-318. Server work is in `rust-api` only.
+Tracking issue: NEWPIDASH-318. Issues: A = NEWPIDASH-320, B = NEWPIDASH-321,
+C = NEWPIDASH-325. Server work is in `rust-api` only. Their descriptions
+predate this revision; where they differ, this document is the
+specification.
 
-### Issue A: runner context and the workpad file (§6.1, §6.3)
+### Issue A: runner context and the workpad file (§6.1, §6.2, §6.3)
 
 Implements NEWPIDASH-317.
 
 - `rust-api`:
   - At run creation (`services/src/orchestration/creation.rs`, scheduler run
-    path), put `issue_identifier`, `project_identifier`, `workpad_body` and
-    `workpad_sha256` into `run_config`.
+    path), put `issue_identifier` and `project_identifier` into `run_config`
+    for every run, and `workpad_body` and `workpad_sha256` for `coding-task`
+    runs only.
   - Copy them into the `assign` envelope
     (`types/src/runner_sessions/envelopes.rs` `build_assign_msg`).
   - Workpad endpoint (`api/src/v1_work_items/handlers_relations.rs`): add
@@ -755,13 +994,25 @@ Implements NEWPIDASH-317.
     `if_body_sha256` that returns 412 on mismatch.
 - `runner`:
   - Add the four fields to `ServerMsg::Assign` as `#[serde(default)]`.
-  - In `Supervisor::handle_assign`, write `.pidash/workpad.md` and
-    `.pidash/workpad.sha256` and ensure the git exclude.
+  - In `Supervisor::handle_assign`, when the workpad fields are present,
+    write `.pidash/workpad.md` and `.pidash/workpad.sha256`; always ensure
+    the git exclude.
   - Extend `RunEnv` / `apply_run_env` with `PIDASH_ISSUE_IDENTIFIER`,
     `PIDASH_PROJECT` and `PIDASH_AGENT_NAME`.
-  - CLI: `state list --project` plus env defaults; `comment add` speaker
-    defaults; `workpad update` default path, hash precondition, keep by
-    default; `workpad get --to-file`.
+  - CLI:
+    - `state list --project` plus env defaults;
+    - `comment add` and `run finish` default `--as-agent` from
+      `PIDASH_AGENT_NAME`;
+    - `comment list --since <RFC 3339>`;
+    - `workpad update` default path, hash precondition, keep by default;
+    - `workpad get --to-file`.
+
+Done when: on the test runner, a bare `pidash workpad get`,
+`pidash workpad update` and `pidash state list` succeed inside a
+`coding-task` run; a review run has no `.pidash/workpad.md`; a
+`run finish` comment posted with no `--as-agent` carries the agent's name;
+`comment list --since` with a time after the last comment prints an empty
+list; an update against a changed workpad returns 412.
 
 ### Issue B: agent-facing CLI (§6.5, §6.6, §6.8)
 
@@ -769,35 +1020,60 @@ Implements NEWPIDASH-317.
   refuse operator commands inside runs (`PIDASH_ALLOW_OPERATOR=1` bypass),
   hide them from `--help` inside runs, fix the header.
 - `pidash docs [<topic>]` from `runner/docs/cli-reference.md`
-  (`include_str!`), with the content moved out of `pidash-cli.md`.
+  (`include_str!`), with the content moved out of `pidash-cli.md`, including
+  the `run` topic (`run finish` in full, `run yield` for scheduler runs) and
+  the `context` topic.
 - Thin `skill/pidash/` (≤ 2 KB, no references directory), a new installer
   release, and a follow-up issue for the private overlay's plugin copies (D4).
 
-### Issue C: prompt v2, contract test, rollout (§6.2, 6.4, 6.6, 6.7, 6.9, 6.10, §7, Appendix A)
+Done when: inside a run, `pidash runner add` exits non-zero with the
+refusal and `pidash --help` lists no operator command; `pidash docs` lists
+the topics and each prints; a unit test fails on an unclassified
+subcommand; the installed skill is ≤ 2 KB.
+
+### Issue C: prompt rewrite, contract test, rollout (§6.2, 6.4, 6.6, 6.7, 6.9, 6.10, §7, Appendix A)
+
+Blocked by A, B and NEWPIDASH-338.
 
 - `rust-api/crates/services/src/prompting/`:
-  - new `sections/pidash-cli-core.md` (Appendix A);
-  - `PROMPT_PIDASH_CLI_V2` in `db/src/config/registry.rs`, with `recipes.rs`
-    choosing between the core and full sections;
+  - rewrite `sections/pidash-cli.md` in place from Appendix A (no flag, no
+    new key);
   - `run.rendered_at` in `context.rs`;
-  - "This run" block and one-owner cleanup of the shared sections;
-  - flag-off corrections to `pidash-cli.md` (scheduler `state list`, env
-    section, "Not for you").
+  - `run-framing.md`: `comment list --since {{ run.rendered_at }}`;
+  - `workpad.md`: the `.pidash/workpad.md` round-trip (§6.1);
+  - `lifecycle.md`: drop `--as-agent "<your name>"` from the `run finish`
+    line; use `.pidash/` paths in examples;
+  - "This run" block and the remaining one-owner cleanup (§6.7);
+  - size tests (§6.6); regenerate `rust-api/fixtures/prompting/`;
+  - add the old workpad recipe to the retired markers in
+    `revalidate_section_overrides` (§9).
 - Runner-side prompt-vs-CLI contract test over Rust-rendered fixtures (§6.9),
   and over `pidash docs` output.
+- Optional: move the split procedure and the comment examples to
+  `pidash docs recipes` (§6.6).
 - Rollout and measurement (§7, §8) on the test runner, with numbers posted on
   the issue.
+- One release cycle after the production deploy: remove the old-runner
+  fallbacks, including the `run finish` fallback in `lifecycle.md`.
 - Follow-up investigation, after measurement: deliver static guidance through
   a cross-run cacheable channel per agent bridge (§6.10). This produces a
   short note; implementation is only filed if it's worth it.
 
----
+Done when: the contract test runs in CI and fails on a prompt command the
+CLI cannot parse (shown once with a temporary bad fixture); the size tests
+pass; `PROMPT_PIDASH_CLI_V2` and `pidash-cli-core` appear nowhere in the
+code; on the test runner, for the two issue shapes in §8, there are zero
+failed `pidash` calls, about zero redundant fetches, and the per-step
+context is down by the amounts in §5 within 20%; the numbers are posted on
+the issue.
 
-## Appendix A — Draft `pidash-cli-core` section (v2)
+## Appendix A — Draft `pidash-cli` section
 
-Target ≤ 6 KB rendered. Jinja is limited to the "This run" values. Outcome
-and clock semantics are owned by `ending-run`; state choice by the cycle
-sections.
+This replaces `sections/pidash-cli.md` in place. Target ≤ 6 KB rendered for
+every kind. The end-of-run command, its results and the choice of state are
+owned by `lifecycle` (rendered heading "Where this task is, and how the run
+ends"); the workpad by `workpad`; blocking by `blocking`. Section references
+use the headings the agent actually sees.
 
 ````markdown
 ## Pi Dash CLI (`pidash`)
@@ -819,48 +1095,53 @@ transient failures, and never retry the same command more than twice.
 
 ### What you already have
 
-The issue, comments, available states{% if run.kind != "scheduler" %} and
-your workpad{% endif %} shown in this prompt were read at
-`{{ run.rendered_at }}`. Don't re-fetch them. Re-read only if you have worked
-long enough that a human may have replied, before an irreversible move, or
-after a write is rejected as stale.
+{% if run.kind == "scheduler" %}The project and its states shown in this
+prompt were read at `{{ run.rendered_at }}`.{% else %}The issue, its
+comments, the available states{% if run.kind == "coding-task" %} and your
+workpad{% else %} and the hand-off{% endif %} shown in this prompt were read
+at `{{ run.rendered_at }}`. Don't fetch them again. Two exceptions: check
+for newer comments with `pidash comment list --since {{ run.rendered_at }}`
+when "How this run works" tells you to, or when you have worked long enough
+that a person may have replied; and re-read after a write is rejected as
+stale. (If `--since` is not a known flag, use `pidash comment list`.){% endif %}
 
 ### Core commands
 
-{% if run.kind != "scheduler" %}
+{% if run.kind != "scheduler" %}- `pidash comment add --body-file .pidash/<name>.md [--fold]`: post a
+comment during the run, as this agent run. Your closing comment goes
+through `pidash run finish`, not this. Use `--fold` only for low-value
+status notes.
+{% if run.kind == "coding-task" %}- `pidash workpad update` / `pidash workpad get --to-file`: write and
+re-read `.pidash/workpad.md`. See "Workpad".
+{% endif %}- `pidash issue get` / `pidash comment list [--since <time>]`: refresh only
+(see above).
 
-- **Workpad**: your workpad is in `.pidash/workpad.md`. Edit it, then
-  `pidash workpad update`. Always write the full body; there is no append.
-  If the file is missing, or an update is rejected because the workpad
-  changed, run `pidash workpad get --to-file` and re-apply your edit.
-  {% endif %}
-- `pidash comment add <issue> --body-file .pidash/<name>.md [--fold]`: post a
-  comment as this agent run. Keep scratch files under `.pidash/`. Use
-  `--fold` only for low-value status notes.
-- `pidash issue patch <issue> --state "<state name>"`: move an issue. Pick
-  the name from "Available states".
-- `pidash issue get <issue>` / `pidash comment list <issue>`: refresh only
-  (see above).
-  {% if run.kind != "scheduler" %}- `pidash run yield --outcome <progressed|waiting_on_human|waiting_on_external|done|blocked> [--stop-ticking] [--note "<one line>"]`:
-  your **last** `pidash` call. See "Ending the run" for what each outcome
-  means and when to stop the clock.
+- `pidash run finish …`: ends the run; your **last** `pidash` call. The
+  syntax, the results and the state to pass are in "Where this task is, and
+  how the run ends".
   {% else %}- `pidash issue create --project {{ project.identifier }} --title "<summary>" --description-file .pidash/finding.md`:
   file a finding.
-- `pidash run yield --outcome <…> [--note "<one line>"]`: optional; if sent,
-  your last `pidash` call.
+- `pidash comment add <issue> --body-file .pidash/<name>.md [--fold]`: post a
+  comment as this agent run.
+- `pidash run yield --outcome <progressed|waiting_on_human|waiting_on_external|done|blocked> [--note "<one line>"]`:
+  optional; if sent, your last `pidash` call. See "Ending the scheduled run".
   {% endif %}
+  Keep every scratch file under `.pidash/`; it is never committed.
 
 ### Other commands
 
-Run `pidash docs <topic>` (or `pidash <command> --help`) before first use:
+Run `pidash docs <topic>` (or `pidash <command> --help`) before first use.
+If `pidash docs` is not a known command, use `--help`.
 
-- `issue`: create, list/filter, search history, relate/unrelate/wait,
-  relations, pods and dedicated runners, run-ai
+- `issue`: create, patch (title, description, labels, another issue's
+  state), list/filter, search history, relate/unrelate/wait, relations, pods
+  and dedicated runners, run-ai
 - `page`: project wiki pages (read before re-deriving a convention)
 - `label`: list, create, update, delete; attach via `issue patch --add-label`
 - `state`: list workflow states (already shown below)
 - `scheduler`: view or change scheduled automation (admin; only when asked)
 - `project`: list runners
+- `context`: the `context.md` files that list the projects on this machine
 
 You don't need to load a `pidash` / `pi-dash` skill: this section and
 `pidash docs` are the reference. Commands that manage the runner itself are
@@ -874,6 +1155,29 @@ refused inside a run; if one seems necessary, the run is blocked (see
 ### Conventions
 
 - All writes are real and immediate; there is no undo. Check intent against
-  your workpad plan before mutating.
-- When pasting `pidash` JSON into the workpad, fence it in ` ``` `.
+  {% if run.kind == "coding-task" %}your workpad plan{% else %}the issue and
+  its comments{% endif %} before mutating.
+- When pasting `pidash` JSON into a comment{% if run.kind == "coding-task" %}
+  or the workpad{% endif %}, fence it in ` ``` `.
 ````
+
+Changes to other sections that go with it (issue C):
+
+- `lifecycle.md`, the closing command:
+
+  ```
+  pidash run finish --to "<state>" --result <result> --comment-file .pidash/comment.md{% if run.kind == "coding-task" %} [--handoff-file .pidash/handoff.md]{% endif %}
+  ```
+
+  (`--as-agent` removed; the old-runner fallback sentence stays until §7
+  step 6.)
+
+- `run-framing.md`, the timer-run sentence: "…the comments above were
+  captured when the run was created, so run
+  `pidash comment list --since {{ run.rendered_at }}` for anything newer and
+  address a new human comment first."
+- `workpad.md`, the last paragraph: the text in §6.1.
+- Every reference to "Lifecycle" in `pidash-cli.md`, `default-posture.md`
+  and `implementation.md` becomes the rendered heading, or the heading in
+  `lifecycle.md` is renamed to "Lifecycle"; pick one and let the contract
+  test hold it (§6.9).
