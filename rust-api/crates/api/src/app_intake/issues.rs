@@ -1567,7 +1567,28 @@ pub async fn validate_issue_fields(
         }
     }
     if let Some(value) = input.get("sequence_id") {
-        out.sequence_id = validate_integer(errors, "sequence_id", value, false);
+        // Model `IntegerField`: DRF adds `Min/MaxValueValidator(±2^31)`
+        // on top of the integer parse, so out-of-int4 input 400s with
+        // the bound message instead of passing through to the write
+        // (where `as i32` used to wrap it — NEWPIDASH-311).
+        match validate_integer(errors, "sequence_id", value, false) {
+            Some(sequence) if sequence > i32::MAX as i64 => {
+                push_error(
+                    errors,
+                    "sequence_id",
+                    "Ensure this value is less than or equal to 2147483647.".to_owned(),
+                );
+            }
+            Some(sequence) if sequence < i32::MIN as i64 => {
+                push_error(
+                    errors,
+                    "sequence_id",
+                    "Ensure this value is greater than or equal to -2147483648.".to_owned(),
+                );
+            }
+            Some(sequence) => out.sequence_id = Some(sequence),
+            None => {}
+        }
     }
     // `""` clears like null on every scalar pk arm below: DRF coerces
     // it to `None` before validation, and each key here is
@@ -2359,7 +2380,10 @@ pub async fn apply_issue_update(
         .unwrap_or_else(|| issue.external_id.clone());
     fields.sequence_id = validated
         .sequence_id
-        .map(|sequence| sequence as i32)
+        // Validated to int4 above, so the checked conversion cannot
+        // fail; the fallback keeps a corrupt value out even if a new
+        // caller widens the range (NEWPIDASH-311).
+        .map(|sequence| i32::try_from(sequence).unwrap_or(issue.sequence_id))
         .unwrap_or(issue.sequence_id);
     fields.state_id = validated.state_id.unwrap_or(issue.state_id);
     fields.parent_id = validated.parent_id.unwrap_or(issue.parent_id);
@@ -5956,7 +5980,10 @@ async fn validate_issue_create(
             None
         }
     };
-    let sequence_id = match opt_int_field(issue_data, "sequence_id") {
+    // Model `IntegerField` bounds (±2^31): Django answers the bound
+    // message for out-of-int4 integers, not the generic one
+    // (NEWPIDASH-311); `opt_bounded_int_field` recovers that case.
+    let sequence_id = match opt_bounded_int_field(issue_data, "sequence_id") {
         Ok(value) => value,
         Err(message) => {
             field_errors.insert("sequence_id".to_owned(), serde_json::json!([message]));
@@ -6687,6 +6714,47 @@ fn opt_int_field(
             Err(_) => Err("A valid integer is required.".to_owned()),
         },
         Some(_) => Err("A valid integer is required.".to_owned()),
+    }
+}
+
+/// Optional model `IntegerField`: [`opt_int_field`] plus the ±2^31
+/// bound messages Django's `Min/MaxValueValidator` produce. Values
+/// [`opt_int_field`] accepts pass through untouched; only a rejection
+/// whose raw value is an integer outside int4 is remapped to the bound
+/// message (NEWPIDASH-311).
+fn opt_bounded_int_field(
+    issue_data: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<Option<i32>, String> {
+    const MAX_MESSAGE: &str = "Ensure this value is less than or equal to 2147483647.";
+    const MIN_MESSAGE: &str = "Ensure this value is greater than or equal to -2147483648.";
+    match opt_int_field(issue_data, key) {
+        Ok(value) => Ok(value),
+        Err(message) => {
+            // Wide re-parse (same coercion as `validate_integer`):
+            // only a genuine out-of-int4 integer earns the bound
+            // message; everything else keeps the generic one.
+            let wide = match issue_data.get(key) {
+                Some(serde_json::Value::Number(number)) => number
+                    .as_i64()
+                    .or_else(|| number.as_u64().and_then(|uint| i64::try_from(uint).ok()))
+                    .or_else(|| {
+                        number.as_f64().and_then(|float| {
+                            (float.fract() == 0.0
+                                && float >= i64::MIN as f64
+                                && float <= i64::MAX as f64)
+                                .then_some(float as i64)
+                        })
+                    }),
+                Some(serde_json::Value::String(text)) => text.trim().parse::<i64>().ok(),
+                _ => None,
+            };
+            match wide {
+                Some(int) if int > i32::MAX as i64 => Err(MAX_MESSAGE.to_owned()),
+                Some(int) if int < i32::MIN as i64 => Err(MIN_MESSAGE.to_owned()),
+                _ => Err(message),
+            }
+        }
     }
 }
 
@@ -7608,5 +7676,50 @@ mod tests {
             1,
             "fragment narrows the page to one row"
         );
+    }
+
+    /// `opt_bounded_int_field` (NEWPIDASH-311): in-int4 values pass
+    /// through; out-of-int4 integers answer Django's bound messages;
+    /// anything else keeps the generic message.
+    #[test]
+    fn bounded_int_field_answers_django_bound_messages() {
+        use serde_json::Map;
+        fn data(value: serde_json::Value) -> Map<String, serde_json::Value> {
+            let mut map = Map::new();
+            map.insert("sequence_id".to_owned(), value);
+            map
+        }
+        assert_eq!(
+            opt_bounded_int_field(&data(json!(7)), "sequence_id"),
+            Ok(Some(7))
+        );
+        assert_eq!(
+            opt_bounded_int_field(&data(json!(2147483647)), "sequence_id"),
+            Ok(Some(2147483647))
+        );
+        assert_eq!(
+            opt_bounded_int_field(&data(json!(-2147483648)), "sequence_id"),
+            Ok(Some(-2147483648))
+        );
+        assert_eq!(
+            opt_bounded_int_field(&data(json!("42")), "sequence_id"),
+            Ok(Some(42))
+        );
+        assert_eq!(
+            opt_bounded_int_field(&data(json!(4294967297i64)), "sequence_id"),
+            Err("Ensure this value is less than or equal to 2147483647.".to_owned())
+        );
+        assert_eq!(
+            opt_bounded_int_field(&data(json!(-2147483649i64)), "sequence_id"),
+            Err("Ensure this value is greater than or equal to -2147483648.".to_owned())
+        );
+        assert_eq!(
+            opt_bounded_int_field(&data(json!("nope")), "sequence_id"),
+            Err("A valid integer is required.".to_owned())
+        );
+        assert_eq!(opt_bounded_int_field(&Map::new(), "sequence_id"), Ok(None));
+        let mut nulls = Map::new();
+        nulls.insert("sequence_id".to_owned(), serde_json::Value::Null);
+        assert_eq!(opt_bounded_int_field(&nulls, "sequence_id"), Ok(None));
     }
 }
