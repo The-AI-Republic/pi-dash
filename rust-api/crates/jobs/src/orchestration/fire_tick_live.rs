@@ -33,8 +33,8 @@ use pidash_services::runner_sessions::live_drains::{drain_pod_by_id, DrainError}
 
 use super::creation_jobs::StoreDeps;
 use super::fire_tick_seam::{
-    dispatch_continuation_run, emit_logs, shim_is_ticking_state, shim_tick_interval_seconds,
-    DispatchJobsError, StateView,
+    dispatch_continuation_run, emit_logs, shim_stage_runs_automatically,
+    shim_tick_interval_seconds, DispatchJobsError, StateView,
 };
 use super::live_inputs::{
     creator_universe, fetch_presence, gate_fn, gate_verdicts, profile_fn, JobsMatcher,
@@ -75,8 +75,12 @@ impl LiveFireTickSeam {
 }
 
 impl FireTickSeam for LiveFireTickSeam {
-    fn is_ticking_state(&self, state: Option<&StateView>) -> bool {
-        shim_is_ticking_state(state)
+    fn stage_runs_automatically(
+        &self,
+        state: Option<&StateView>,
+        project: &ProjectTickCols,
+    ) -> bool {
+        shim_stage_runs_automatically(state, project)
     }
 
     fn tick_interval_seconds(&self, state: Option<&StateView>, project: &ProjectTickCols) -> i64 {
@@ -240,17 +244,18 @@ mod tests {
         let review = state(2, "In Review", "review");
         let done = state(3, "Done", "completed");
         let unknown = state(9, "Renamed", "started");
-        assert!(seam.is_ticking_state(Some(&started)));
-        assert!(seam.is_ticking_state(Some(&review)));
-        assert!(!seam.is_ticking_state(Some(&done)));
-        assert!(!seam.is_ticking_state(Some(&unknown)));
-        assert!(!seam.is_ticking_state(None));
+        assert!(seam.stage_runs_automatically(Some(&started), &ProjectTickCols::default()));
+        assert!(seam.stage_runs_automatically(Some(&review), &ProjectTickCols::default()));
+        assert!(!seam.stage_runs_automatically(Some(&done), &ProjectTickCols::default()));
+        assert!(!seam.stage_runs_automatically(Some(&unknown), &ProjectTickCols::default()));
+        assert!(!seam.stage_runs_automatically(None, &ProjectTickCols::default()));
         let project = ProjectTickCols {
             pool: Some(10),
             ticking_enabled: Some(true),
             interval_default: Some(10800),
             interval_review: Some(7200),
             interval_test: Some(3600),
+            ..Default::default()
         };
         assert_eq!(seam.tick_interval_seconds(Some(&started), &project), 10800);
         assert_eq!(seam.tick_interval_seconds(Some(&review), &project), 7200);

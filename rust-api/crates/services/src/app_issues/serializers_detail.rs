@@ -21,7 +21,7 @@
 //!   [`effective_interval_seconds`](crate::orchestration::clock) over the
 //!   caller's [`ProjectClockPolicy`](crate::orchestration::clock).
 //! * `can_re_tick` calls the merged D-12
-//!   [`is_ticking_state`](pidash_types::orchestration) (PIDASHCONV-545) and
+//!   [`stage_runs_automatically`](pidash_types::orchestration) (PIDASHCONV-545) and
 //!   [`is_paused_state`](crate::orchestration::clock) (PIDASHCONV-580).
 //! * The blocker fields select out of the merged D-12
 //!   [`RelationsSummary`](crate::orchestration::blockers) (PIDASHCONV-561).
@@ -87,7 +87,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use pidash_db::tasks_ticker::{IssueAgentTicker, TickerDisarmReason};
-use pidash_types::orchestration::{is_ticking_state, StateRef};
+use pidash_types::orchestration::{stage_runs_automatically, StateRef};
 use pidash_types::runner_runs::{
     classify_run_error_for_reason, flat_token_fields, RunErrorDiagnostic,
 };
@@ -356,7 +356,7 @@ pub struct AgentTickerView<'a> {
 /// `ticker` is the issue's `agent_ticker` row (`None` at the call boundary
 /// renders `None`, `:1275-1281`); `policy` carries the project pool +
 /// cadence columns; `state` is the issue's current state for
-/// `can_re_tick` (`(is_ticking_state or is_paused_state) and
+/// `can_re_tick` (`(stage_runs_automatically or is_paused_state) and
 /// (cap_reached or failure_stopped)`, `:1296`, PDASHOSS01-183) and the
 /// stage interval. Pool math, predicates and interval all
 /// run through the merged D-10/D-12 ports.
@@ -374,10 +374,16 @@ pub fn agent_ticker_to_representation<'a>(
             .disarm_reason
             .parse::<TickerDisarmReason>()
             .is_ok_and(TickerDisarmReason::is_failure_stop);
-    let can_re_tick = (is_ticking_state(state) || is_paused_state(state))
-        && (ticker.cap_reached(pool) || failure_stopped);
+    let ticking = stage_runs_automatically(state, policy.stage_switches());
+    let can_re_tick =
+        (ticking || is_paused_state(state)) && (ticker.cap_reached(pool) || failure_stopped);
+    // A stage the project switched off keeps its ticker armed, but every
+    // tick there is skipped (lean workflow §6.4): show no next-tick time.
+    let stage_off = pidash_types::orchestration::phase_config_for(state).is_some() && !ticking;
     AgentTickerView {
-        enabled: ticker.enabled,
+        // A switched-off stage keeps the row armed but never runs there:
+        // report the clock as not running, so the UI shows no armed clock.
+        enabled: ticker.enabled && !stage_off,
         user_disabled: ticker.user_disabled,
         used: ticker.used,
         tick_count: ticker.used,
@@ -386,7 +392,10 @@ pub fn agent_ticker_to_representation<'a>(
         max_ticks: ticker.effective_max_ticks(pool),
         remaining: ticker.remaining(pool),
         interval_seconds: effective_interval_seconds(state, policy),
-        next_run_at: ticker.next_run_at.map(serialize_iso_datetime),
+        next_run_at: ticker
+            .next_run_at
+            .filter(|_| !stage_off)
+            .map(serialize_iso_datetime),
         last_tick_at: ticker.last_tick_at.map(serialize_iso_datetime),
         disarm_reason: ticker.disarm_reason.as_str(),
         pending_entry: ticker.pending_entry,
@@ -1292,6 +1301,7 @@ mod tests {
             agent_default_interval_seconds: Some(7200),
             agent_review_default_interval_seconds: None,
             agent_test_default_interval_seconds: None,
+            ..Default::default()
         }
     }
 
@@ -1552,6 +1562,63 @@ mod tests {
         assert!(!agent_ticker_to_representation(&capped, &policy, Some(&other)).can_re_tick);
         assert!(!agent_ticker_to_representation(&capped, &policy, None).can_re_tick);
         assert!(!agent_ticker_to_representation(&open, &policy, Some(&ticking)).can_re_tick);
+    }
+
+    #[test]
+    fn ticker_cannot_re_tick_in_a_switched_off_stage() {
+        // Lean workflow §6: Re-tick only applies where runs happen
+        // automatically; a stage switched off is a label.
+        let capped = ticker_row(10, 0, 0);
+        let review = StateRef {
+            group: "review",
+            name: "In Review",
+        };
+        let test = StateRef {
+            group: "test",
+            name: "In Test",
+        };
+        let on = policy();
+        assert!(agent_ticker_to_representation(&capped, &on, Some(&review)).can_re_tick);
+        assert!(agent_ticker_to_representation(&capped, &on, Some(&test)).can_re_tick);
+        let review_off = ProjectClockPolicy {
+            review_enabled: false,
+            ..policy()
+        };
+        assert!(!agent_ticker_to_representation(&capped, &review_off, Some(&review)).can_re_tick);
+        assert!(agent_ticker_to_representation(&capped, &review_off, Some(&test)).can_re_tick);
+    }
+
+    #[test]
+    fn ticker_hides_the_next_tick_in_a_switched_off_stage() {
+        let row = ticker_row(3, 0, 0);
+        assert!(row.next_run_at.is_some());
+        let review = StateRef {
+            group: "review",
+            name: "In Review",
+        };
+        let on = agent_ticker_to_representation(&row, &policy(), Some(&review));
+        assert!(on.next_run_at.is_some());
+        let review_off = ProjectClockPolicy {
+            review_enabled: false,
+            ..policy()
+        };
+        let off = agent_ticker_to_representation(&row, &review_off, Some(&review));
+        assert_eq!(off.next_run_at, None);
+        assert!(
+            !off.enabled,
+            "reported as not running while the stage is off"
+        );
+        assert!(row.enabled, "the row itself stays armed");
+        // Not a stage at all: unchanged behaviour.
+        let done = StateRef {
+            group: "completed",
+            name: "Done",
+        };
+        assert!(
+            agent_ticker_to_representation(&row, &review_off, Some(&done))
+                .next_run_at
+                .is_some()
+        );
     }
 
     #[test]

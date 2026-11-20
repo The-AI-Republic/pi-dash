@@ -63,11 +63,17 @@ pub const OFFLINE_REJECT_RUNNER: &[&str] = &[
 ];
 
 /// Live machine-scoped message types (`machine_outbox.py:49-54`).
-pub const VALID_TYPES_MACHINE: &[&str] = &["config_push", "create_runner", "ping", "welcome"];
+pub const VALID_TYPES_MACHINE: &[&str] = &[
+    "config_push",
+    "create_runner",
+    "ping",
+    "reconfigure_runner",
+    "welcome",
+];
 
 /// Machine-scoped types that raise `MachineOfflineError` instead of
 /// queueing offline (`machine_outbox.py:62-65`).
-pub const OFFLINE_REJECT_MACHINE: &[&str] = &["config_push", "create_runner"];
+pub const OFFLINE_REJECT_MACHINE: &[&str] = &["config_push", "create_runner", "reconfigure_runner"];
 
 /// Whether `msg_type` is enqueueable on the per-runner outbox.
 pub fn is_valid_runner_type(msg_type: &str) -> bool {

@@ -34,7 +34,7 @@ use pidash_auth::permissions::runner::{
 };
 use pidash_db::entity::{
     agent_run, dev_machine, issue_activities, issue_assignees, issue_comments, issues, pod,
-    projects, runner, users,
+    project_members, projects, runner, users,
 };
 use pidash_types::runner_runs::{AgentRunStatus, AgentRunTrigger, HUMAN_TRIGGERS};
 
@@ -1688,7 +1688,31 @@ pub async fn dedicated_refusal_body(
     }))
 }
 
+/// Whether `user` may use `pod_once` on `issue` under `policy`.
+/// Pure kernel behind [`pod_once_auth_code`]: mirrors
+/// [`crate::domain::project_settings::can_run_issue_pure`] so the
+/// dedicated-runner one-shot path follows the same `issue_run_policy`
+/// (NEWPIDASH-261 D1). In `creator_and_assignees` only the creator or
+/// a current assignee passes; in `project_members` any active Member
+/// or Admin passes (guests and non-members never do).
+pub fn pod_once_allowed_pure(
+    policy: crate::domain::project_settings::IssueRunPolicy,
+    is_creator: bool,
+    is_assignee: bool,
+    member_role: Option<i32>,
+) -> bool {
+    crate::domain::project_settings::can_run_issue_pure(
+        policy,
+        is_creator,
+        is_assignee,
+        member_role,
+    )
+}
+
 /// The `pod_once` authorization refusal for `user` on `issue` (§23.3).
+/// Follows the project's `issue_run_policy` (NEWPIDASH-261 D1): in
+/// `project_members` mode a non-creator Member/Admin is allowed even
+/// when neither creator nor assignee, matching every other run trigger.
 pub async fn pod_once_auth_code(
     db: &impl ConnectionTrait,
     issue: &issues::Model,
@@ -1700,14 +1724,30 @@ pub async fn pod_once_auth_code(
     let Some(user_id) = user_id else {
         return Ok(Some("pod_once_not_allowed"));
     };
-    if issue.created_by_id == Some(user_id) {
-        return Ok(None);
+    let policy = crate::domain::project_settings::policy_for_project(db, issue.project_id).await?;
+    let is_creator = issue.created_by_id == Some(user_id);
+    let is_assignee = if is_creator {
+        false
+    } else {
+        issue_people(db, issue.id).await?.contains(&user_id)
+    };
+    let member_role = if policy == crate::domain::project_settings::IssueRunPolicy::ProjectMembers {
+        project_members::Entity::find()
+            .filter(project_members::Column::ProjectId.eq(issue.project_id))
+            .filter(project_members::Column::MemberId.eq(user_id))
+            .filter(project_members::Column::IsActive.eq(true))
+            .filter(project_members::Column::DeletedAt.is_null())
+            .one(db)
+            .await?
+            .map(|row| i32::from(row.role))
+    } else {
+        None
+    };
+    if pod_once_allowed_pure(policy, is_creator, is_assignee, member_role) {
+        Ok(None)
+    } else {
+        Ok(Some("pod_once_not_allowed"))
     }
-    let people = issue_people(db, issue.id).await?;
-    if people.contains(&user_id) {
-        return Ok(None);
-    }
-    Ok(Some("pod_once_not_allowed"))
 }
 
 // ---------------------------------------------------------------------------
@@ -2992,8 +3032,8 @@ async fn post_fall_back_comment(
     Ok(())
 }
 
-/// Ticking-state check for the bounce arms (`is_ticking_state`,
-/// `agent_phases.py:149-162`).
+/// Ticking-state check for the bounce arms: the issue sits in a stage
+/// that runs automatically under its project's stage switches.
 async fn is_ticking_issue(
     db: &impl ConnectionTrait,
     issue: &issues::Model,
@@ -3007,9 +3047,22 @@ async fn is_ticking_issue(
     else {
         return Ok(false);
     };
-    Ok(crate::assistant::tools_runs::is_ticking_state(
-        Some(state.group.as_str()),
-        Some(state.name.as_str()),
+    let settings: Option<serde_json::Value> =
+        pidash_db::entity::projects::Entity::find_by_id(issue.project_id)
+            .select_only()
+            .column(pidash_db::entity::projects::Column::Settings)
+            .into_tuple()
+            .one(db)
+            .await?;
+    let switches = crate::domain::project_settings::stage_switches_of(
+        &settings.unwrap_or(serde_json::Value::Null),
+    );
+    Ok(pidash_types::orchestration::stage_runs_automatically(
+        Some(&pidash_types::orchestration::StateRef {
+            group: state.group.as_str(),
+            name: state.name.as_str(),
+        }),
+        switches,
     ))
 }
 
@@ -3522,5 +3575,63 @@ mod tests {
         // The by-id sibling is a thin fetch+delegate over this shape;
         // its JSON fields are covered by the SDK surface test and the
         // live DB wrapper exercised by dedicated_refusal_comment_html.
+    }
+
+    #[test]
+    fn pod_once_pure_follows_issue_run_policy() {
+        use crate::domain::project_settings::IssueRunPolicy;
+        use pidash_auth::permissions::{
+            ROLE_ADMIN as ADMIN, ROLE_GUEST as GUEST, ROLE_MEMBER as MEMBER,
+        };
+        // Default: creator/assignee only (old three-owner rule).
+        assert!(pod_once_allowed_pure(
+            IssueRunPolicy::CreatorAndAssignees,
+            true,
+            false,
+            None
+        ));
+        assert!(pod_once_allowed_pure(
+            IssueRunPolicy::CreatorAndAssignees,
+            false,
+            true,
+            None
+        ));
+        assert!(!pod_once_allowed_pure(
+            IssueRunPolicy::CreatorAndAssignees,
+            false,
+            false,
+            Some(MEMBER)
+        ));
+        assert!(!pod_once_allowed_pure(
+            IssueRunPolicy::CreatorAndAssignees,
+            false,
+            false,
+            Some(ADMIN)
+        ));
+        // project_members: any Member/Admin passes (D1).
+        assert!(pod_once_allowed_pure(
+            IssueRunPolicy::ProjectMembers,
+            false,
+            false,
+            Some(MEMBER)
+        ));
+        assert!(pod_once_allowed_pure(
+            IssueRunPolicy::ProjectMembers,
+            false,
+            false,
+            Some(ADMIN)
+        ));
+        assert!(!pod_once_allowed_pure(
+            IssueRunPolicy::ProjectMembers,
+            false,
+            false,
+            Some(GUEST)
+        ));
+        assert!(!pod_once_allowed_pure(
+            IssueRunPolicy::ProjectMembers,
+            false,
+            false,
+            None
+        ));
     }
 }

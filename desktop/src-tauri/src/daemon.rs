@@ -751,6 +751,7 @@ pub async fn daemon_engine_runner_rebind(runner: String) -> Result<PathBuf, Stri
 pub(crate) async fn set_runner_working_dir(runner: String, folder: PathBuf) -> Result<(), String> {
     let changes = RunnerChanges {
         working_dir: Some(folder),
+        ..Default::default()
     };
     match call(Request::RunnerReconfigure { runner, changes }, CALL_TIMEOUT).await? {
         Response::Ack => Ok(()),

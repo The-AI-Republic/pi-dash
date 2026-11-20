@@ -33,11 +33,13 @@
     "config_push",
     "create_runner",
     "ping",
+    "reconfigure_runner",
     "welcome"
   ],
   "offline_reject_machine": [
     "config_push",
-    "create_runner"
+    "create_runner",
+    "reconfigure_runner"
   ],
   "serialize": {
     "explicit_mid": {

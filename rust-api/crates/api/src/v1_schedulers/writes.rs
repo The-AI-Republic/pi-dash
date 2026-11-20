@@ -2031,10 +2031,17 @@ mod tests {
 
     #[test]
     fn builtin_is_a_catalog_slug() {
-        assert!(is_builtin_slug("security-audit"));
-        assert!(is_builtin_slug("fable-security-audit"));
+        // Catalog is empty after NEWPIDASH-256: no prod slug is builtin.
+        // The mechanism is pinned by asserting the old slugs are now
+        // ordinary and that membership still gates via BUILTINS.
+        assert!(!is_builtin_slug("security-audit"));
+        assert!(!is_builtin_slug("fable-security-audit"));
         assert!(!is_builtin_slug("contract-test-scheduler"));
         assert!(!is_builtin_slug("Security-Audit"));
+        // `is_builtin_slug` reads the same BUILTINS constant as the
+        // seeder, so a future entry added back will become builtin
+        // without code change.
+        assert_eq!(pidash_services::scheduler::builtins::BUILTINS.len(), 0);
     }
 
     #[test]

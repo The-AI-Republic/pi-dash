@@ -228,6 +228,10 @@ fn project_row(id: Uuid, p: &NewProject<'_>) -> projects::ActiveModel {
         // writable project serializers may override it on create.
         dedicated_runner_lost_action: Set(p.dedicated_runner_lost_action.to_owned()),
         default_work_type: Set(p.default_work_type.to_owned()),
+        // New projects start with the all-defaults bag (the DB default
+        // would fill `{}` too; named explicitly like every other
+        // column — NEWPIDASH-278).
+        settings: Set(Value::Object(Default::default())),
     }
 }
 
@@ -926,6 +930,8 @@ fn seed_project_row(id: Uuid, p: &SeedProject<'_>) -> projects::ActiveModel {
         // `Project.save()` fills a blank one from the repo binding; the
         // seed's repo_url is empty, so `general`.
         default_work_type: Set("general".to_owned()),
+        // All-defaults bag (NEWPIDASH-278).
+        settings: Set(Value::Object(Default::default())),
     }
 }
 
@@ -1014,6 +1020,8 @@ fn demo_project_row(id: Uuid, p: &DemoProject<'_>) -> projects::ActiveModel {
         // `Project.save()` fills a blank one from the repo binding; the
         // dummy project has no repo_url, so `general`.
         default_work_type: Set("general".to_owned()),
+        // All-defaults bag (NEWPIDASH-278).
+        settings: Set(Value::Object(Default::default())),
         ..Default::default()
     }
 }
@@ -2750,13 +2758,14 @@ mod tests {
             "\"members_can_edit_states\"",
             "\"agent_test_default_interval_seconds\"",
             "\"dedicated_runner_lost_action\"",
+            "\"settings\"",
         ] {
             assert!(insert.contains(column), "{column} named in {insert}");
         }
         assert_eq!(
             insert.matches(", ").count(),
-            2 * 47,
-            "48 columns, 48 values"
+            2 * 48,
+            "49 columns, 49 values"
         );
     }
 
@@ -3186,10 +3195,11 @@ mod tests {
              guest_view_all_features, archive_in, close_in, logo_props, is_default, timezone, \
              repo_url, base_branch, agent_default_interval_seconds, agent_default_max_ticks, \
              agent_review_default_interval_seconds, agent_test_default_interval_seconds, \
-             agent_ticking_enabled, default_agent_executor, members_can_edit_states) \
+             agent_ticking_enabled, default_agent_executor, members_can_edit_states, \
+             dedicated_runner_lost_action, default_work_type, settings) \
              VALUES ($1, $2, $2, 'Bind', '', 2, $3, 'BIND', false, false, false, true, false, \
              false, false, false, 30, 30, '{}', false, 'UTC', $4, $5, 60, 10, 60, 60, true, \
-             'local_runner', true)",
+             'local_runner', true, 'fail_to_backlog', 'general', '{}')",
         )
         .bind(id)
         .bind(t0)
@@ -3297,7 +3307,9 @@ mod tests {
         agent_review_default_interval_seconds INTEGER NOT NULL,
         agent_test_default_interval_seconds INTEGER NOT NULL,
         agent_ticking_enabled BOOLEAN NOT NULL, default_agent_executor TEXT NOT NULL,
-        members_can_edit_states BOOLEAN NOT NULL)";
+        members_can_edit_states BOOLEAN NOT NULL,
+        dedicated_runner_lost_action TEXT NOT NULL, default_work_type TEXT NOT NULL,
+        settings JSONB NOT NULL)";
 
     const WORKSPACES_DDL: &str = "CREATE TEMPORARY TABLE workspaces (
         id UUID PRIMARY KEY, slug TEXT NOT NULL)";

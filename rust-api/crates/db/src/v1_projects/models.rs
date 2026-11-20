@@ -140,6 +140,7 @@ pub mod project {
         "agent_ticking_enabled",
         "default_agent_executor",
         "default_work_type",
+        "settings",
     ];
 
     /// Partial unique index names (`Meta.constraints`, `:233-249`).
@@ -272,6 +273,8 @@ pub mod project {
         pub agent_ticking_enabled: bool,
         pub default_agent_executor: String,
         pub default_work_type: String,
+        /// `projects.settings` (NEWPIDASH-278): the typed settings bag.
+        pub settings: serde_json::Value,
     }
 
     /// Default member role for project membership contexts.
@@ -1148,6 +1151,7 @@ mod tests {
                 "agent_ticking_enabled",
                 "default_agent_executor",
                 "default_work_type",
+                "settings",
             ]
         );
         assert_eq!(project::TABLE, "projects");
@@ -1640,6 +1644,7 @@ mod tests {
             agent_ticking_enabled: true,
             default_agent_executor: "local_runner".to_string(),
             default_work_type: "general".to_string(),
+            settings: serde_json::json!({}),
         };
         let value = serde_json::to_value(&project_row).unwrap();
         assert_eq!(value["identifier"], serde_json::json!("ENG"));

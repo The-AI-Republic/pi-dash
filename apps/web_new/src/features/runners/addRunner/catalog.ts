@@ -32,7 +32,7 @@ export interface ModelChoice {
   label: string;
   /** Value for `--model`; the sentinel omits it. */
   model?: string;
-  /** Value for `--reasoning-effort` (Codex only). */
+  /** Value for `--reasoning-effort` (Codex, Claude Code and Muse Code). */
   reasoningEffort?: string;
 }
 
@@ -145,10 +145,14 @@ export function modelContribution(agent: RunnerAgent, id: string): { model?: str
 
 /** Effort display labels (the `:<effort>` id suffixes stay machine values). */
 export const EFFORT_LABELS: Record<string, string> = {
+  none: "None",
+  minimal: "Minimal",
   low: "Low",
   medium: "Medium",
   high: "High",
   xhigh: "Extra High",
+  max: "Max",
+  ultra: "Ultra",
 };
 
 /** One catalog row as the add-runner form reads it. */

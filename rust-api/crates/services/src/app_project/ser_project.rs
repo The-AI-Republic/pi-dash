@@ -1001,6 +1001,7 @@ pub const PROJECT_KEY_ORDER: &[&str] = &[
     "agent_ticking_enabled",
     "default_agent_executor",
     "default_work_type",
+    "settings",
     "created_by",
     "updated_by",
     "workspace",
@@ -1064,6 +1065,7 @@ pub const PROJECT_LIST_KEY_ORDER: &[&str] = &[
     "agent_ticking_enabled",
     "default_agent_executor",
     "default_work_type",
+    "settings",
     "created_by",
     "updated_by",
     "workspace",
@@ -1139,6 +1141,7 @@ pub const PROJECT_DETAIL_KEY_ORDER: &[&str] = &[
     "agent_ticking_enabled",
     "default_agent_executor",
     "default_work_type",
+    "settings",
     "created_by",
     "updated_by",
     "workspace",
@@ -1278,6 +1281,10 @@ pub struct ProjectRead {
     pub default_agent_executor: String,
     /// `CharField(max_length=32, blank=True)` (PDASHOSS01-234).
     pub default_work_type: String,
+    /// Typed settings bag (NEWPIDASH-278): `projects.settings` with
+    /// defaults filled in (`__all__` renders it after
+    /// `default_work_type`).
+    pub settings: Value,
     /// Audit FK (`PrimaryKeyRelatedField`).
     pub created_by: Option<String>,
     /// Audit FK (`PrimaryKeyRelatedField`).
@@ -1411,6 +1418,10 @@ pub struct ProjectListRead {
     pub default_agent_executor: String,
     /// `CharField(max_length=32, blank=True)` (PDASHOSS01-234).
     pub default_work_type: String,
+    /// Typed settings bag (NEWPIDASH-278): `projects.settings` with
+    /// defaults filled in (`__all__` renders it after
+    /// `default_work_type`).
+    pub settings: Value,
     /// Audit FK.
     pub created_by: Option<String>,
     /// Audit FK.
@@ -1560,6 +1571,10 @@ pub struct ProjectDetailRead {
     pub default_agent_executor: String,
     /// `CharField(max_length=32, blank=True)` (PDASHOSS01-234).
     pub default_work_type: String,
+    /// Typed settings bag (NEWPIDASH-278): `projects.settings` with
+    /// defaults filled in (`__all__` renders it after
+    /// `default_work_type`).
+    pub settings: Value,
     /// Audit FK.
     pub created_by: Option<String>,
     /// Audit FK.
@@ -2571,7 +2586,7 @@ mod tests {
     #[test]
     fn key_order_consts_match_fixture() {
         let fx = fixture();
-        assert_eq!(PROJECT_KEY_ORDER.len(), 51);
+        assert_eq!(PROJECT_KEY_ORDER.len(), 52);
         assert_eq!(
             PROJECT_KEY_ORDER,
             str_list(
@@ -2582,7 +2597,7 @@ mod tests {
             )
             .as_slice()
         );
-        assert_eq!(PROJECT_LIST_KEY_ORDER.len(), 57);
+        assert_eq!(PROJECT_LIST_KEY_ORDER.len(), 58);
         assert_eq!(
             PROJECT_LIST_KEY_ORDER,
             str_list(
@@ -2597,7 +2612,7 @@ mod tests {
             PROJECT_LITE_FIELDS,
             str_list(fx.get("lite").expect("lite").get("key_order").expect("ko")).as_slice()
         );
-        assert_eq!(PROJECT_DETAIL_KEY_ORDER.len(), 53);
+        assert_eq!(PROJECT_DETAIL_KEY_ORDER.len(), 54);
         assert_eq!(
             PROJECT_DETAIL_KEY_ORDER,
             str_list(

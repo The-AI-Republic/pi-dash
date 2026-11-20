@@ -209,9 +209,12 @@ class TestWorkspaceSchedulerList:
         assert response.status_code == http_status.HTTP_200_OK
         flags = {row["slug"]: row["is_builtin"] for row in response.data["results"]}
         # ``source`` reads ``builtin`` for both (PDASHOSS01-290); is_builtin
-        # tells them apart.
+        # tells them apart. NEWPIDASH-256: catalog empty — the former
+        # `security-audit` row is no longer seeded, so only the contract
+        # row exists and it reads as non-builtin.
         assert flags["contract-test-scheduler"] is False
-        assert flags["security-audit"] is True
+        assert "security-audit" not in flags
+        assert all(v is False for v in flags.values())
 
 
 @pytest.mark.contract
@@ -1017,21 +1020,38 @@ class TestWorkspaceSchedulerDefinitionUpdate:
         assert custom_scheduler.prompt == "Scan the project for stalled issues."
 
     @pytest.mark.django_db
-    def test_builtin_rejected(self, api_key_client, workspace):
-        builtin = Scheduler.objects.get(workspace=workspace, slug="security-audit")
-        assert builtin.source == SchedulerSource.BUILTIN
-        seeded = builtin.prompt
+    def test_builtin_rejected(self, api_key_client, workspace, create_user):
+        # NEWPIDASH-256: catalog empty — the former `security-audit`
+        # slug is no longer builtin. A row with that slug is now an
+        # ordinary editable definition.
+        from crum import impersonate as _imp
 
-        response = api_key_client.patch(
+        with _imp(create_user):
+            builtin = Scheduler.objects.create(
+                workspace=workspace,
+                slug="security-audit",
+                name="Former Builtin",
+                prompt="seeded prompt",
+            )
+        assert builtin.source == SchedulerSource.BUILTIN
+        # `source` still defaults to builtin, but `is_builtin` is false
+        # (slug not in empty catalog).
+        assert builtin.pk is not None
+
+        response = api_key_client.get(_ws_url(workspace.slug))
+        assert response.status_code == http_status.HTTP_200_OK
+        flags = {r["slug"]: r["is_builtin"] for r in response.data["results"]}
+        assert flags["security-audit"] is False
+
+        patched = api_key_client.patch(
             _definition_url(workspace.slug, builtin.id),
             {"prompt": "Do something else entirely."},
             format="json",
         )
-
-        assert response.status_code == http_status.HTTP_409_CONFLICT
-        assert response.data["code"] == "builtin_scheduler"
+        assert patched.status_code == http_status.HTTP_200_OK
+        assert patched.data["prompt"] == "Do something else entirely."
         builtin.refresh_from_db()
-        assert builtin.prompt == seeded
+        assert builtin.prompt == "Do something else entirely."
 
     @pytest.mark.django_db
     @pytest.mark.parametrize(
@@ -1272,6 +1292,8 @@ class TestWorkspaceSchedulerCreate:
 
     @pytest.mark.django_db
     def test_builtin_slug_is_reserved(self, api_key_client, workspace):
+        # NEWPIDASH-256: no reserved slugs — `security-audit` is now an
+        # ordinary handle. It can be created, but not duplicated.
         Scheduler.objects.filter(workspace=workspace, slug="security-audit").delete()
 
         response = api_key_client.post(
@@ -1279,11 +1301,19 @@ class TestWorkspaceSchedulerCreate:
             {**NEW_SCHEDULER, "slug": "security-audit"},
             format="json",
         )
+        # First creation succeeds (no existing row after delete).
+        assert response.status_code == http_status.HTTP_201_CREATED
+        assert response.data["slug"] == "security-audit"
+        assert response.data["source"] == "builtin"
+        assert response.data["is_builtin"] is False
 
-        assert response.status_code == http_status.HTTP_400_BAD_REQUEST
-        assert response.data == {
-            "slug": ["This slug is reserved for a built-in scheduler."]
-        }
+        dup = api_key_client.post(
+            _ws_url(workspace.slug),
+            {**NEW_SCHEDULER, "slug": "security-audit", "name": "Clash"},
+            format="json",
+        )
+        assert dup.status_code == http_status.HTTP_400_BAD_REQUEST
+        assert dup.data == {"slug": ["This slug is already in use in this workspace."]}
 
     @pytest.mark.django_db
     @pytest.mark.parametrize(
@@ -1421,14 +1451,22 @@ class TestWorkspaceSchedulerDelete:
         assert project_list.data["results"] == []
 
     @pytest.mark.django_db
-    def test_builtin_rejected(self, api_key_client, workspace):
-        builtin = Scheduler.objects.get(workspace=workspace, slug="security-audit")
+    def test_builtin_rejected(self, api_key_client, workspace, create_user):
+        # NEWPIDASH-256: former builtin is ordinary — delete succeeds.
+        from crum import impersonate as _imp
 
+        with _imp(create_user):
+            builtin = Scheduler.objects.create(
+                workspace=workspace,
+                slug="security-audit",
+                name="Former Builtin",
+                prompt="seeded prompt",
+            )
         response = api_key_client.delete(_definition_url(workspace.slug, builtin.id))
 
-        assert response.status_code == http_status.HTTP_409_CONFLICT
-        assert response.data["code"] == "builtin_scheduler"
-        assert Scheduler.objects.filter(pk=builtin.pk).exists()
+        assert response.status_code == http_status.HTTP_204_NO_CONTENT
+        assert not Scheduler.objects.filter(pk=builtin.pk).exists()
+        assert Scheduler.all_objects.get(pk=builtin.pk).deleted_at is not None
 
     @pytest.mark.django_db
     def test_stale_token_is_precondition_failed(
@@ -1519,8 +1557,19 @@ class TestProjectSchedulerInstall:
 
     @pytest.mark.django_db
     def test_admin_installs_builtin_by_slug(
-        self, api_key_client, workspace, sched_project
+        self, api_key_client, workspace, sched_project, create_user
     ):
+        # NEWPIDASH-256: no seeded builtin — create a user scheduler
+        # with the former builtin slug (now ordinary) and install it.
+        from crum import impersonate as _imp
+
+        with _imp(create_user):
+            Scheduler.objects.create(
+                workspace=workspace,
+                slug="security-audit",
+                name="Former Builtin",
+                prompt="seeded prompt",
+            )
         response = api_key_client.post(
             _list_url(workspace.slug, sched_project.id),
             _install_body("security-audit", tzid="America/New_York", enabled=False),
@@ -1788,8 +1837,19 @@ class TestProjectSchedulerUninstall:
 
     @pytest.mark.django_db
     def test_builtin_can_be_uninstalled(
-        self, api_key_client, workspace, sched_project
+        self, api_key_client, workspace, sched_project, create_user
     ):
+        # NEWPIDASH-256: former builtin is ordinary — create it, install,
+        # then uninstall.
+        from crum import impersonate as _imp
+
+        with _imp(create_user):
+            Scheduler.objects.create(
+                workspace=workspace,
+                slug="security-audit",
+                name="Former Builtin",
+                prompt="seeded prompt",
+            )
         installed = api_key_client.post(
             _list_url(workspace.slug, sched_project.id),
             _install_body("security-audit"),

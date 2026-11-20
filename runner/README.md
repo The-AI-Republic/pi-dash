@@ -322,7 +322,13 @@ After a bare `pidash-installer.sh` / `.ps1` install, run it yourself. The MSI
 installs the engine itself. `pidash engine path` prints the engine the daemon
 would use.
 
-The daemon resolves the engine once at start and keeps that path.
+The daemon looks for the engine at start. If it is missing, it checks again
+every second and on status/chat requests, so an engine installed later by the
+desktop or another installer becomes usable without a daemon restart. This
+discovery does not require a cargo-dist install receipt. Once found, the
+daemon keeps that path for its lifetime. Availability checks still validate
+the file: removing it reports `engine_not_installed`, and restoring it clears
+that reason without a restart or a switch to a different engine version.
 `pidash update` installs the new release's engine version directory beside the
 old one before replacing `pidash`, so runs in flight keep their binary. It
 skips the download when the new release pins an engine version already

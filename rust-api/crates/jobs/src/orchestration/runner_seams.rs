@@ -616,6 +616,7 @@ pub async fn disarm_on_terminal_signal_deferred(
                 Option<i32>,
                 Option<i32>,
                 Option<i32>,
+                serde_json::Value,
             )> = projects::Entity::find_by_id(project_id)
                 .select_only()
                 .columns([
@@ -624,20 +625,23 @@ pub async fn disarm_on_terminal_signal_deferred(
                     projects::Column::AgentDefaultIntervalSeconds,
                     projects::Column::AgentReviewDefaultIntervalSeconds,
                     projects::Column::AgentTestDefaultIntervalSeconds,
+                    projects::Column::Settings,
                 ])
                 .into_tuple()
                 .one(&conn)
                 .await
                 .map_err(into_sqlx)?;
             match row {
-                Some((enabled, max, impl_secs, review_secs, test_secs)) => {
+                Some((enabled, max, impl_secs, review_secs, test_secs, settings)) => {
                     pidash_services::orchestration::clock::ProjectClockPolicy {
                         agent_ticking_enabled: enabled,
                         agent_default_max_ticks: max,
                         agent_default_interval_seconds: impl_secs.map(i64::from),
                         agent_review_default_interval_seconds: review_secs.map(i64::from),
                         agent_test_default_interval_seconds: test_secs.map(i64::from),
+                        ..Default::default()
                     }
+                    .with_stages(&settings)
                 }
                 None => Default::default(),
             }

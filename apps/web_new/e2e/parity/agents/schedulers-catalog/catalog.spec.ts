@@ -6,9 +6,11 @@
 // update; members and guests can view but not mutate; an emptied catalog
 // shows a guidance row; the tab title carries the workspace name.
 // Row: AGT-001.
-// Note: only the Built-in origin mark is provable — nothing in the API
-// creates manifest-source definitions (the serializer leaves `source`
-// read-only and no loader sets it), so no manifest row can be provisioned.
+// Note (NEWPIDASH-256): origin is `is_builtin` (slug-in-catalog), not
+// `source`. User-created definitions read "Custom"; only a catalog
+// slug (none in prod after the empty catalog) would read "Built-in".
+// The old "Built-in for every row" expectation pinned the bug fixed
+// by this issue.
 import { test, expect } from "../../fixtures";
 import {
   ensureProject,
@@ -76,7 +78,9 @@ test(
         const match = server.find((candidate) => candidate.slug === row.handle);
         expect(match).toBeDefined();
         expect(row.name).toBe(match?.name ?? "");
-        expect(row.origin).toBe("Built-in");
+        // NEWPIDASH-256: user-created rows are Custom; the empty catalog
+        // means no Built-in rows exist.
+        expect(row.origin).toBe("Custom");
         expect(row.installs).toContain(String(match?.active_binding_count ?? -1));
         expect(row.status).toBe((match?.is_enabled ?? false) ? "Enabled" : "Disabled");
         expect(row.updated.length).toBeGreaterThan(0);

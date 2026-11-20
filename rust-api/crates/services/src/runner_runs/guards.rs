@@ -378,6 +378,46 @@ pub fn runner_visible_scheduler_exists(owner_id: Uuid, run_alias: &str) -> Simpl
     Expr::exists(sub)
 }
 
+/// Whether a run's triggerer qualifies as an eligible runner owner
+/// under the issue's project policy (NEWPIDASH-261): scheduler runs
+/// (no work item) always qualify; issue runs qualify only in
+/// `project_members` mode (a missing `issue_run_policy` key reads as
+/// the default `creator_and_assignees`, i.e. excluded). Join aliases
+/// `U0` / `U1` (issues / projects) do not collide with the
+/// `U0` / `U2` aliases in [`runner_visible_issue_exists`] because
+/// each EXISTS subquery scopes its own aliases.
+fn issue_triggerer_admitted(run_alias: &str) -> Condition {
+    let sub = Query::select()
+        .expr_as(
+            SimpleExpr::Value(sea_query::Value::Int(Some(1))),
+            Alias::new("a"),
+        )
+        .from_as(Alias::new("issues"), Alias::new("U0"))
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("projects"),
+            Alias::new("U1"),
+            Expr::col((Alias::new("U0"), "project_id")).eq(Expr::col((Alias::new("U1"), "id"))),
+        )
+        .and_where(Expr::col((Alias::new("U0"), "deleted_at")).is_null())
+        .and_where(Expr::col((Alias::new("U1"), "deleted_at")).is_null())
+        .and_where(
+            Expr::col((Alias::new("U0"), "id"))
+                .eq(Expr::col((Alias::new(run_alias), "work_item_id"))),
+        )
+        .and_where(Expr::cust_with_values(
+            "\"U1\".\"settings\" ->> 'issue_run_policy' = $1",
+            [sea_query::Value::String(Some(Box::new(
+                "project_members".to_owned(),
+            )))],
+        ))
+        .limit(1u64)
+        .to_owned();
+    Condition::any()
+        .add(Expr::col((Alias::new(run_alias), "work_item_id")).is_null())
+        .add(Expr::exists(sub))
+}
+
 /// `filter_runs_usable_by_runner` (`permissions.py:83-146`): the `OR`
 /// over the usability arms for the runner owner's id (a
 /// [`sea_query::Condition`], embedded with `.and_where_condition`).
@@ -385,6 +425,9 @@ pub fn runner_visible_scheduler_exists(owner_id: Uuid, run_alias: &str) -> Simpl
 /// Private runners consume work created by their owner, billed to their
 /// owner, involving their owner (issue created by, or assigned through a
 /// live `IssueAssignee` row), or scheduler work authored by their owner.
+/// The created-by / owner arms are triggerer arms: for issue-bound runs
+/// they apply only in `project_members` mode (NEWPIDASH-261); scheduler
+/// runs (no work item) keep the current rule.
 ///
 /// Pi Dash Agent runners without `engine_team_runs` use the narrower
 /// PO-3 rule (#2903): owner-created runs, plus *automatic* runs
@@ -409,6 +452,7 @@ pub fn runs_usable_by_runner_predicate(
     }
     let issue = runner_visible_issue_exists(owner_id, run_alias);
     let sched = runner_visible_scheduler_exists(owner_id, run_alias);
+    let triggerer = issue_triggerer_admitted(run_alias);
     if is_pidash_agent && !team_runs {
         let triggers: Vec<SimpleExpr> = pidash_types::runner_runs::enums::HUMAN_TRIGGERS
             .iter()
@@ -416,7 +460,11 @@ pub fn runs_usable_by_runner_predicate(
             .collect();
         return Some(
             Condition::any()
-                .add(Expr::col((Alias::new(run_alias), "created_by_id")).eq(owner_id))
+                .add(
+                    Condition::all()
+                        .add(Expr::col((Alias::new(run_alias), "created_by_id")).eq(owner_id))
+                        .add(triggerer.clone()),
+                )
                 .add(
                     Condition::all()
                         .add(Expr::col((Alias::new(run_alias), "trigger")).is_not_in(triggers))
@@ -426,8 +474,16 @@ pub fn runs_usable_by_runner_predicate(
     }
     Some(
         Condition::any()
-            .add(Expr::col((Alias::new(run_alias), "created_by_id")).eq(owner_id))
-            .add(Expr::col((Alias::new(run_alias), "owner_id")).eq(owner_id))
+            .add(
+                Condition::all()
+                    .add(Expr::col((Alias::new(run_alias), "created_by_id")).eq(owner_id))
+                    .add(triggerer.clone()),
+            )
+            .add(
+                Condition::all()
+                    .add(Expr::col((Alias::new(run_alias), "owner_id")).eq(owner_id))
+                    .add(triggerer),
+            )
             .add(issue)
             .add(sched),
     )
@@ -905,6 +961,13 @@ mod tests {
         }
         assert!(ours.contains("U2"));
         assert!(ours.contains("\"deleted_at\" IS NULL"));
+        // NEWPIDASH-261: the triggerer arms follow the project
+        // `issue_run_policy` (scheduler runs qualify unconditionally).
+        assert!(ours.contains("'issue_run_policy'"), "policy gate present");
+        assert!(
+            ours.contains("\"work_item_id\" IS NULL"),
+            "scheduler arm present"
+        );
         // Engine branch (PO-3): owner arm dropped, trigger gate added.
         let engine = Query::select()
             .from(Alias::new("agent_run"))

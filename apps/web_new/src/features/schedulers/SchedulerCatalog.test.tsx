@@ -38,6 +38,7 @@ function row(overrides: Partial<Scheduler> = {}): Scheduler {
     prompt: "Review the week",
     color: "#5e6ad2",
     source: "builtin",
+    is_builtin: false,
     is_enabled: true,
     active_binding_count: 2,
     created_at: "2026-10-01T00:00:00Z",
@@ -68,20 +69,21 @@ afterEach(() => resetAppClient());
 
 describe("SchedulerCatalog", () => {
   it("formats source and timestamps, including invalid timestamps", () => {
-    expect(schedulerSourceLabel("builtin")).toBe("Built in");
-    expect(schedulerSourceLabel("manifest")).toBe("Manifest");
+    expect(schedulerSourceLabel(true)).toBe("Built in");
+    expect(schedulerSourceLabel(false)).toBe("Custom");
     expect(formatSchedulerUpdatedAt("bad")).toBe("Unknown");
     expect(formatSchedulerUpdatedAt("2026-10-02T12:30:00Z")).not.toBe("Unknown");
   });
 
   it("lists definition metadata and admin controls", async () => {
     setup(ROLE_ADMIN, [
-      row(),
+      row({ is_builtin: true }),
       row({
         id: "s2",
         name: "Imported",
         slug: "imported",
         source: "manifest",
+        is_builtin: false,
         is_enabled: false,
         active_binding_count: 0,
       }),
@@ -90,7 +92,7 @@ describe("SchedulerCatalog", () => {
     expect(within(table).getByText("Weekly report")).toBeInTheDocument();
     expect(within(table).getByText("weekly-report")).toBeInTheDocument();
     expect(within(table).getByText("Built in")).toBeInTheDocument();
-    expect(within(table).getByText("Manifest")).toBeInTheDocument();
+    expect(within(table).getByText("Custom")).toBeInTheDocument();
     expect(within(table).getByText("Enabled")).toBeInTheDocument();
     expect(within(table).getByText("Disabled")).toBeInTheDocument();
     expect(within(table).getAllByTestId("scheduler-row")).toHaveLength(2);

@@ -229,6 +229,9 @@ export interface ActivityRow {
 export function activityRows(events: readonly Pick<ChatEvent, "seq" | "kind" | "payload">[]): ActivityRow[] {
   const labelled: { row: ActivityRow; key: string }[] = [];
   for (const event of events) {
+    // Activity describes the current turn; an old failure must not keep
+    // claiming that a later response is failing.
+    if (event.kind === "message_started" || event.kind === "turn_started") labelled.length = 0;
     const activity = frameActivity(event);
     if (activity !== null) labelled.push({ row: { seq: event.seq, label: activity.label }, key: activity.key });
   }

@@ -378,6 +378,16 @@ pub trait ToolStore {
         project_id: &Uuid,
     ) -> Result<Vec<StateRow>, StoreError>;
 
+    /// The project's `settings` blob, for the stage switches the
+    /// dispatch tool honours. Defaults to `{}` (all defaults).
+    async fn project_settings(
+        &self,
+        _deps: &AssistantDeps,
+        _project_id: &Uuid,
+    ) -> Result<serde_json::Value, StoreError> {
+        Ok(serde_json::Value::Object(serde_json::Map::new()))
+    }
+
     /// `Label.objects.filter(project_id, workspace__slug)` in name
     /// order (`projects.list_labels :41-43`).
     async fn project_labels(
@@ -1384,6 +1394,23 @@ impl ToolStore for PgToolStore {
                 actor_email: row.actor_email,
             })
             .collect())
+    }
+
+    async fn project_settings(
+        &self,
+        _deps: &AssistantDeps,
+        project_id: &Uuid,
+    ) -> Result<serde_json::Value, StoreError> {
+        let db = pidash_db::pool::sea_orm_connection(&self.pool);
+        let settings: Option<serde_json::Value> =
+            pidash_db::entity::projects::Entity::find_by_id(*project_id)
+                .select_only()
+                .column(pidash_db::entity::projects::Column::Settings)
+                .into_tuple()
+                .one(&db)
+                .await
+                .map_err(orm_err)?;
+        Ok(settings.unwrap_or(serde_json::Value::Null))
     }
 
     async fn project_states(

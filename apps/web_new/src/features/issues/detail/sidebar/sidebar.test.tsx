@@ -576,6 +576,7 @@ function CachedSidebar({
       issue={issue.data}
       project={project}
       editable={editable}
+      canRun
     />
   );
 }
@@ -665,6 +666,7 @@ describe("SidebarProperties", () => {
         issue={issueFixture()}
         project={projectFixture()}
         editable
+        canRun
       />,
       queryClient
     );
@@ -716,6 +718,7 @@ describe("SidebarProperties", () => {
           issue={issueFixture()}
           project={projectFixture()}
           editable
+          canRun
         />,
         queryClient
       );
@@ -735,6 +738,7 @@ describe("SidebarProperties", () => {
         issue={issueFixture()}
         project={projectFixture()}
         editable
+        canRun
       />,
       queryClient
     );
@@ -752,6 +756,7 @@ describe("SidebarProperties", () => {
         issue={issueFixture({ created_by: null, assignee_ids: [] })}
         project={projectFixture()}
         editable
+        canRun
       />,
       queryClient
     );
@@ -768,6 +773,7 @@ describe("SidebarProperties", () => {
         issue={issueFixture({ created_by: null })}
         project={projectFixture()}
         editable
+        canRun
       />,
       queryClient
     );
@@ -784,6 +790,7 @@ describe("SidebarProperties", () => {
         issue={issueFixture({ created_by: BOT })}
         project={projectFixture()}
         editable
+        canRun
       />,
       queryClient
     );
@@ -800,6 +807,7 @@ describe("SidebarProperties", () => {
         issue={issueFixture({ created_by: AGENT_BOT })}
         project={projectFixture()}
         editable
+        canRun
       />,
       queryClient
     );
@@ -816,6 +824,7 @@ describe("SidebarProperties", () => {
         issue={issueFixture({ created_by: ADA })}
         project={projectFixture()}
         editable
+        canRun
       />,
       queryClient
     );
@@ -840,6 +849,7 @@ describe("SidebarProperties", () => {
           agent_executor_options: [{ kind: "local_runner", available: true, reason_code: "" }],
         })}
         editable
+        canRun
       />,
       queryClient
     );
@@ -857,6 +867,7 @@ describe("SidebarProperties", () => {
           issue={issueFixture(state.issue)}
           project={projectFixture()}
           editable={state.editable}
+          canRun
         />,
         queryClient
       );
@@ -877,6 +888,7 @@ describe("SidebarProperties", () => {
         issue={issueFixture({ is_synced: true })}
         project={projectFixture()}
         editable
+        canRun
       />,
       queryClient
     );
@@ -894,6 +906,7 @@ describe("SidebarProperties", () => {
         issue={issueFixture({ assignee_ids: [ADA] })}
         project={projectFixture()}
         editable={false}
+        canRun
       />,
       queryClient
     );
@@ -914,6 +927,7 @@ describe("SidebarProperties", () => {
         issue={issueFixture({ assigned_pod_id: POD_A, assigned_runner_id: RUNNER_GPU })}
         project={projectFixture()}
         editable
+        canRun
       />,
       queryClient
     );
@@ -968,6 +982,7 @@ describe("SidebarProperties", () => {
         })}
         project={projectFixture()}
         editable
+        canRun
       />,
       queryClient
     );
@@ -983,6 +998,7 @@ describe("SidebarProperties", () => {
         issue={issueFixture()}
         project={projectFixture()}
         editable
+        canRun
       />,
       queryClient
     );
@@ -1009,6 +1025,7 @@ describe("SidebarProperties", () => {
         issue={issueFixture()}
         project={projectFixture()}
         editable
+        canRun
       />,
       first.queryClient
     );
@@ -1023,6 +1040,7 @@ describe("SidebarProperties", () => {
         issue={issueFixture()}
         project={projectFixture()}
         editable
+        canRun
       />,
       second.queryClient
     );
@@ -1038,6 +1056,7 @@ describe("SidebarProperties", () => {
         issue={issueFixture()}
         project={projectFixture()}
         editable
+        canRun
       />,
       queryClient
     );
@@ -1057,6 +1076,7 @@ describe("SidebarProperties", () => {
         issue={issueFixture({ assignee_ids: [ADA] })}
         project={projectFixture()}
         editable
+        canRun
       />,
       queryClient
     );
@@ -1075,6 +1095,7 @@ describe("SidebarProperties", () => {
         issue={issueFixture({ assignee_ids: [] })}
         project={projectFixture()}
         editable
+        canRun
       />,
       queryClient
     );
@@ -1094,6 +1115,7 @@ describe("SidebarProperties", () => {
         issue={issueFixture()}
         project={projectFixture()}
         editable
+        canRun
       />,
       queryClient
     );
@@ -1114,6 +1136,7 @@ describe("SidebarProperties", () => {
         issue={issueFixture({ agent_executor: "managed_runner" })}
         project={project}
         editable
+        canRun
       />,
       queryClient
     );
@@ -1131,6 +1154,7 @@ describe("SidebarProperties", () => {
         issue={issueFixture()}
         project={projectFixture()}
         editable
+        canRun
       />,
       queryClient
     );
@@ -1147,6 +1171,7 @@ describe("SidebarProperties", () => {
         issue={issueFixture({ state_id: null, assignee_ids: [], assigned_pod_id: null })}
         project={projectFixture()}
         editable
+        canRun
       />,
       queryClient
     );
@@ -1168,6 +1193,7 @@ describe("SidebarProperties", () => {
         issue={issueFixture()}
         project={projectFixture()}
         editable
+        canRun
       />,
       queryClient
     );
@@ -1185,6 +1211,7 @@ describe("SidebarProperties", () => {
         issue={issueFixture()}
         project={projectFixture()}
         editable
+        canRun
       />,
       queryClient
     );
@@ -1211,6 +1238,7 @@ describe("SidebarProperties", () => {
         issue={issueFixture()}
         project={projectFixture()}
         editable
+        canRun
       />,
       queryClient
     );
@@ -1258,6 +1286,7 @@ describe("IssuePropertiesSidebar", () => {
         projectId={PROJECT}
         issue={issueFixture()}
         editable
+        canRun
         client={gated}
       />,
       queryClient
@@ -1278,6 +1307,7 @@ describe("IssuePropertiesSidebar", () => {
         projectId={PROJECT}
         issue={issueFixture()}
         editable
+        canRun
         client={client}
       />,
       queryClient
@@ -1294,6 +1324,7 @@ describe("IssuePropertiesSidebar", () => {
         projectId={PROJECT}
         issue={issueFixture()}
         editable
+        canRun
         client={client}
       />,
       queryClient
@@ -1322,6 +1353,7 @@ describe("IssuePropertiesSidebar", () => {
         projectId={PROJECT}
         issue={issueFixture()}
         editable
+        canRun
         client={client}
       />,
       queryClient

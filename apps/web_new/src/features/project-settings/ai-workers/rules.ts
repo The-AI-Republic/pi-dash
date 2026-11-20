@@ -66,3 +66,70 @@ export function lostRunnerRuleDescription(value: LostRunnerRule): string {
 export function buildLostRunnerRulePayload(value: LostRunnerRule): ProjectUpdateInput {
   return { dedicated_runner_lost_action: value };
 }
+
+/** Who may move an issue's state or run it (NEWPIDASH-261). */
+export type IssueRunPolicyValue = "creator_and_assignees" | "project_members";
+
+/** The policy a project without the setting behaves by (default mode). */
+export const DEFAULT_ISSUE_RUN_POLICY: IssueRunPolicyValue = "creator_and_assignees";
+
+/** The two policies in display order. */
+export const ISSUE_RUN_POLICY_ORDER: readonly IssueRunPolicyValue[] = ["creator_and_assignees", "project_members"];
+
+export interface IssueRunPolicyOption {
+  label: string;
+  description: string;
+}
+
+export const ISSUE_RUN_POLICY_OPTIONS: Record<IssueRunPolicyValue, IssueRunPolicyOption> = {
+  creator_and_assignees: {
+    label: "Issue creator and assignees",
+    description:
+      "Only the issue's creator and its current assignees may move its state or start, cancel or release an agent run. Each person still uses only their own runners.",
+  },
+  project_members: {
+    label: "All project members",
+    description:
+      "Any project member (Member or Admin) may move an issue's state or start, cancel or release an agent run. Guests still cannot.",
+  },
+};
+
+/**
+ * The form value for the stored setting. Anything but the known
+ * `project_members` value reads as the default, so older rows and
+ * unknown values never strand the form.
+ */
+export function issueRunPolicyFrom(stored: string | undefined): IssueRunPolicyValue {
+  return stored === "project_members" ? "project_members" : "creator_and_assignees";
+}
+
+/** Trigger label for a policy value. */
+export function issueRunPolicyLabel(value: IssueRunPolicyValue): string {
+  return ISSUE_RUN_POLICY_OPTIONS[value].label;
+}
+
+/** Explainer for a policy value. */
+export function issueRunPolicyDescription(value: IssueRunPolicyValue): string {
+  return ISSUE_RUN_POLICY_OPTIONS[value].description;
+}
+
+/**
+ * The form save: only the fields the admin changed are written, so a
+ * lost-runner-only edit never re-sends the run policy (and vice
+ * versa). A no-change submit sends an empty partial.
+ */
+export function buildAiWorkersPayload(
+  storedLost: string | undefined,
+  lost: LostRunnerRule,
+  storedPolicy: string | undefined,
+  policy: IssueRunPolicyValue
+): ProjectUpdateInput {
+  const payload: ProjectUpdateInput = {};
+  if (lostRunnerRuleFrom(storedLost) !== lost) {
+    payload.dedicated_runner_lost_action = lost;
+  }
+  if (issueRunPolicyFrom(storedPolicy) !== policy) {
+    payload.settings = { issue_run_policy: policy };
+  }
+  return payload;
+}

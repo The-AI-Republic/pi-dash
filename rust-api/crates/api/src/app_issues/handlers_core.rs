@@ -3699,7 +3699,7 @@ async fn fetch_clock_policy(
     pool: &sqlx::PgPool,
     project_id: &Uuid,
 ) -> Result<ProjectClockPolicy, Denial> {
-    let row: Option<(bool, i32, i32, i32, i32)> = projects::Entity::find()
+    let row: Option<(bool, i32, i32, i32, i32, serde_json::Value)> = projects::Entity::find()
         .select_only()
         .columns([
             projects::Column::AgentTickingEnabled,
@@ -3707,6 +3707,7 @@ async fn fetch_clock_policy(
             projects::Column::AgentDefaultIntervalSeconds,
             projects::Column::AgentReviewDefaultIntervalSeconds,
             projects::Column::AgentTestDefaultIntervalSeconds,
+            projects::Column::Settings,
         ])
         .filter(projects::Column::Id.eq(*project_id))
         .filter(projects::Column::DeletedAt.is_null())
@@ -3716,7 +3717,7 @@ async fn fetch_clock_policy(
         .map_err(|_| Denial::ServerError)?;
     // A missing project row raises on Django (`ticker.issue.project`
     // re-fetches through the live-only manager) → 500, never a default.
-    let Some((ticking, max_ticks, interval, review_interval, test_interval)) = row else {
+    let Some((ticking, max_ticks, interval, review_interval, test_interval, settings)) = row else {
         return Err(Denial::ServerError);
     };
     Ok(ProjectClockPolicy {
@@ -3725,7 +3726,9 @@ async fn fetch_clock_policy(
         agent_default_interval_seconds: Some(i64::from(interval)),
         agent_review_default_interval_seconds: Some(i64::from(review_interval)),
         agent_test_default_interval_seconds: Some(i64::from(test_interval)),
-    })
+        ..Default::default()
+    }
+    .with_stages(&settings))
 }
 
 /// The issue's latest and active runs, the run count and the cumulative
@@ -3970,6 +3973,46 @@ fn v_state(validated: &BTreeMap<&'static str, Validated>) -> (bool, Option<Uuid>
         Some(Validated::State(id, group)) => (touched, Some(*id), Some(group.clone())),
         Some(Validated::Uuid(id)) => (touched, Some(*id), None),
         _ => (touched, None, None),
+    }
+}
+
+/// NEWPIDASH-261: refuse a human state move the caller may not make
+/// under the project's `issue_run_policy`, before any write (so a
+/// state move that would also dispatch is refused as a whole). Runs
+/// after validation, so an invalid body still 400s first. A request
+/// that does not touch the state (or re-states the current one) is
+/// not gated; other edits keep today's rules.
+async fn gate_web_state_change(
+    pool: &sqlx::PgPool,
+    actor: Uuid,
+    issue_id: Uuid,
+    project_id: Uuid,
+    current_state: Option<Uuid>,
+    touched: bool,
+    requested: Option<Uuid>,
+) -> Result<(), Denial> {
+    if !touched || requested == current_state {
+        return Ok(());
+    }
+    let orm = orm(pool);
+    let issue = issues::Entity::find_by_id(issue_id)
+        .one(&orm)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)?;
+    let project = projects::Entity::find_by_id(project_id)
+        .one(&orm)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)?;
+    let allowed =
+        pidash_services::domain::project_settings::can_run_issue(&orm, actor, &issue, &project)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+    if allowed {
+        Ok(())
+    } else {
+        Err(Denial::NotIssueRunner)
     }
 }
 
@@ -4801,6 +4844,19 @@ async fn partial_update_inner(
     let prev = crate::issue_transition::capture_prior_state_pool(&pool, Some(pk))
         .await
         .map_err(|_| Denial::ServerError)?;
+    // NEWPIDASH-261: a human state move is gated by the project's
+    // `issue_run_policy` (PATCH only; the epic twin shares this inner).
+    let (state_touched, requested_state, _) = v_state(&validated);
+    gate_web_state_change(
+        &pool,
+        user_id,
+        pk,
+        tenant.project_id,
+        looked_up.save.state_id,
+        state_touched,
+        requested_state,
+    )
+    .await?;
     let mut row = looked_up.save;
     apply_validated_to_existing(&mut row, &validated, &filtered)?;
     if row.state_id.is_none() {
@@ -4983,6 +5039,19 @@ pub async fn put_update_issue(
     let prev = crate::issue_transition::capture_prior_state_pool(&pool, Some(pk))
         .await
         .map_err(|_| Denial::ServerError)?;
+    // NEWPIDASH-261: same human state gate as PATCH (PUT is the same
+    // "every way a person changes state" covered by the issue).
+    let (state_touched, requested_state, _) = v_state(&validated);
+    gate_web_state_change(
+        &pool,
+        user_id,
+        pk,
+        project_id,
+        looked_up.state_id,
+        state_touched,
+        requested_state,
+    )
+    .await?;
     let mut row = looked_up;
     apply_validated_to_existing(&mut row, &validated, &filtered)?;
     if row.state_id.is_none() {

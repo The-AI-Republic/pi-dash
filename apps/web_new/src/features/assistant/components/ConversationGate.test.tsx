@@ -23,6 +23,10 @@ import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { assistantKeys } from "../api/keys.js";
 import { ConversationGate } from "./ConversationGate.js";
 
+// The Tiptap input is covered in shared/editor/ChatInput.test.tsx; here a
+// textarea with the same contract keeps the focus on this surface's logic.
+vi.mock("../../../shared/editor/ChatInput.js", () => import("../../../testSupport/chatInputStub.js"));
+
 const notified = vi.hoisted(() => ({ error: vi.fn() }));
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../shared/shell/index.js")>();

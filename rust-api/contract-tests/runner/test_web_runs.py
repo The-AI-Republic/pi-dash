@@ -383,9 +383,17 @@ def _ticking_issue(seeder, daemon_world):
         daemon_world["workspace"]["id"], daemon_world["project"]["id"],
         name="In Progress", group="started",
     )
-    return seeder.create_issue(
+    issue = seeder.create_issue(
         daemon_world["workspace"]["id"], daemon_world["project"]["id"], state["id"]
     )
+    # NEWPIDASH-261: direct/run_ai on a work item now requires
+    # creator/assignee in default mode; the helper's issues have no
+    # creator/assignee, so pin the world owner as creator.
+    seeder.db.execute(
+        "UPDATE issues SET created_by_id = %s WHERE id = %s",
+        (daemon_world["owner"]["id"], issue["id"]),
+    )
+    return issue
 
 
 def test_web_runs_create_direct_freeform_201(user_client, seeder, daemon_world):

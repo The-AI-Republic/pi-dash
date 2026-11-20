@@ -168,12 +168,12 @@ pub const PAUSED_STATE_NAME: &str = "Paused";
 
 /// DEPRECATED (`scheduling.py:54`): retained only for backward
 /// compatibility with external importers.
-#[deprecated(note = "use phases::is_ticking_state / phases::phase_config_for")]
+#[deprecated(note = "use phases::phase_config_for / phases::stage_runs_automatically")]
 pub const SCHEDULING_DELEGATION_STATE_NAME: &str = "In Progress";
 
 /// DEPRECATED (`service.py:64`): retained only for backward compatibility
 /// with external importers.
-#[deprecated(note = "use phases::is_ticking_state / phases::phase_config_for")]
+#[deprecated(note = "use phases::phase_config_for / phases::stage_runs_automatically")]
 pub const SERVICE_DELEGATION_STATE_NAME: &str = "In Progress";
 
 /// What `handle_issue_state_transition` decided to do (`service.py:67-72`).

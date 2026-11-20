@@ -6,6 +6,9 @@
 // later slices mount their screens through `RunnersAreaShell`, build their
 // child links with `runnersPath`, and read data through the api hooks.
 
+// Display labels for reasoning-effort tiers (shared with the admin model catalog).
+export { EFFORT_LABELS } from "./addRunner/catalog.js";
+
 // In-app command-line setup (DESK-021): detect, install, self-approved login.
 export {
   CLI_SETUP_BUSY,

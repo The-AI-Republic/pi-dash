@@ -64,7 +64,7 @@ use pidash_services::runner_enroll::validation::{
     ValidationError,
 };
 use pidash_types::orchestration::{
-    is_ticking_state, StateRef, TickerEvent, TRIGGER_COMMENT_AND_RUN, TRIGGER_RUN_AI,
+    stage_runs_automatically, StateRef, TickerEvent, TRIGGER_COMMENT_AND_RUN, TRIGGER_RUN_AI,
 };
 use pidash_types::runner_runs::AgentRunStatus;
 
@@ -1283,6 +1283,45 @@ pub async fn post_direct(
         Ok(scope) => scope,
         Err(response) => return response,
     };
+    // NEWPIDASH-261: a direct run bound to a work item is gated by the
+    // project's `issue_run_policy` before the pin/insert; scheduler
+    // runs (no work item) keep the current rule.
+    if let Some(work_item_id) = ctx.work_item_id {
+        let orm_pool = sea_orm_connection(pool);
+        let issue_entity = match orm::issues::Entity::find_by_id(work_item_id)
+            .one(&orm_pool)
+            .await
+        {
+            Ok(Some(entity)) => entity,
+            Ok(None) => return server_error(),
+            Err(_) => return server_error(),
+        };
+        let project_entity = match orm::projects::Entity::find_by_id(issue_entity.project_id)
+            .one(&orm_pool)
+            .await
+        {
+            Ok(Some(entity)) => entity,
+            Ok(None) => return server_error(),
+            Err(_) => return server_error(),
+        };
+        let allowed = match pidash_services::domain::project_settings::can_run_issue(
+            &orm_pool,
+            actor_id,
+            &issue_entity,
+            &project_entity,
+        )
+        .await
+        {
+            Ok(allowed) => allowed,
+            Err(_) => return server_error(),
+        };
+        if !allowed {
+            return json_response(
+                StatusCode::FORBIDDEN,
+                pidash_services::domain::project_settings::not_issue_runner_body(),
+            );
+        }
+    }
     // The pin (design §9.1) + the H-11 refusal (§11) + `pod_once`
     // (§23.3), all before the insert exactly as Django's direct tail
     // (`runs.py:258-284`): the H-11 refusal is checked before reconcile
@@ -1554,6 +1593,45 @@ async fn post_issue_dispatch(
         Ok(None) => return server_error(),
         Err(_) => return server_error(),
     };
+    // NEWPIDASH-261: gate the human trigger (Run AI / Comment & Run)
+    // by the project's `issue_run_policy` before any transaction, so
+    // neither the run nor the comment-and-run comment is written.
+    {
+        let orm_pool = sea_orm_connection(pool);
+        let issue_entity = match orm::issues::Entity::find_by_id(work_item_id)
+            .one(&orm_pool)
+            .await
+        {
+            Ok(Some(entity)) => entity,
+            Ok(None) => return server_error(),
+            Err(_) => return server_error(),
+        };
+        let project_entity = match orm::projects::Entity::find_by_id(project_id)
+            .one(&orm_pool)
+            .await
+        {
+            Ok(Some(entity)) => entity,
+            Ok(None) => return server_error(),
+            Err(_) => return server_error(),
+        };
+        let allowed = match pidash_services::domain::project_settings::can_run_issue(
+            &orm_pool,
+            actor_id,
+            &issue_entity,
+            &project_entity,
+        )
+        .await
+        {
+            Ok(allowed) => allowed,
+            Err(_) => return server_error(),
+        };
+        if !allowed {
+            return json_response(
+                StatusCode::FORBIDDEN,
+                pidash_services::domain::project_settings::not_issue_runner_body(),
+            );
+        }
+    }
     let state_ref = match (
         issue_row.state_group.as_deref(),
         issue_row.state_name.as_deref(),
@@ -1561,10 +1639,11 @@ async fn post_issue_dispatch(
         (Some(group), Some(name)) => Some(StateRef { group, name }),
         _ => None,
     };
-    // `_human_run_clock` only runs while the issue ticks
-    // (`agent_phases.is_ticking_state`, `runs.py:404`); otherwise the
-    // clock is untouched and the dispatch runs bare.
-    let ticking = is_ticking_state(state_ref.as_ref());
+    // `_human_run_clock` only runs while the issue ticks (`runs.py:404`)
+    // — a stage that runs automatically in this project; otherwise
+    // (including a stage switched off) the clock is untouched and the
+    // dispatch runs bare.
+    let ticking = stage_runs_automatically(state_ref.as_ref(), project_row.policy.stage_switches());
     let now = now_micros();
     let jitter = draw_jitter(&issue_row, &project_row.policy);
     let (deps, matcher) = match dispatch_deps(

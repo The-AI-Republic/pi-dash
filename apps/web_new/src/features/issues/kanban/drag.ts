@@ -209,6 +209,8 @@ export interface BoardDropGate {
   openCycleIds: ReadonlySet<string>;
   /** Edition workflow rule reason; OSS never supplies one. */
   workflowBlockedReason?: string | undefined;
+  /** Run-policy reason for this card (NEWPIDASH-261); undefined when allowed. */
+  runBlockedReason?: string | undefined;
 }
 
 /** Refused drops share one notice title; the reason rides the body. */
@@ -240,6 +242,9 @@ export function boardDropRefusal(gate: BoardDropGate): { overlay: string | null;
     !gate.openCycleIds.has(gate.destColumnKey)
   ) {
     return { overlay: "Cannot move to a completed cycle", toast: "Cannot move to a completed cycle." };
+  }
+  if (gate.runBlockedReason !== undefined) {
+    return { overlay: gate.runBlockedReason, toast: gate.runBlockedReason };
   }
   if (gate.workflowBlockedReason !== undefined) {
     return { overlay: gate.workflowBlockedReason, toast: gate.workflowBlockedReason };

@@ -744,6 +744,42 @@ impl RunnerSpawnCtx {
             .into_iter()
             .find(|i| i.name == name)
             .ok_or_else(|| anyhow::anyhow!("no running runner named {name:?}"))?;
+        self.reconfigure_instance_locked(inst, changes).await
+    }
+
+    /// [`Self::reconfigure_runner`] for the runner with id `runner_id`
+    /// (the cloud's `reconfigure_runner` machine command addresses runners
+    /// by id, since a rename changes the name).
+    pub(crate) async fn reconfigure_runner_by_id(
+        &self,
+        runner_id: uuid::Uuid,
+        changes: RunnerChanges,
+    ) -> Result<RunnerConfig> {
+        if changes.is_empty() {
+            anyhow::bail!("nothing to change");
+        }
+        if let Some(dir) = &changes.working_dir
+            && !dir.is_absolute()
+        {
+            anyhow::bail!(
+                "working dir must be an absolute path, got {}",
+                dir.display()
+            );
+        }
+        let _activation = self.activation_lock.lock().await;
+        let inst = self
+            .instance_by_id(runner_id)
+            .ok_or_else(|| anyhow::anyhow!("runner {runner_id} is not running on this machine"))?;
+        self.reconfigure_instance_locked(inst, changes).await
+    }
+
+    /// The body of a reconfigure, under the activation lock.
+    async fn reconfigure_instance_locked(
+        &self,
+        inst: RunnerInstance,
+        changes: RunnerChanges,
+    ) -> Result<RunnerConfig> {
+        let name = inst.name.clone();
         ensure_idle(&inst)?;
         let runner_id = inst.runner_id;
 
@@ -754,6 +790,23 @@ impl RunnerSpawnCtx {
         preview
             .validate()
             .map_err(|e| anyhow::anyhow!("invalid change: {e}"))?;
+        // A switched agent must be installed here, or the runner would
+        // come back up unable to run anything.
+        if changes.agent.is_some()
+            && let Some(block) = preview.runners.iter().find(|r| r.runner_id == runner_id)
+        {
+            let binary = agent_binary_for(block).to_string();
+            let env = crate::agent::agent_env_for_config(block);
+            if crate::util::shell::binary_version(&binary, &env)
+                .await
+                .is_none()
+            {
+                anyhow::bail!(
+                    "the {} CLI ({binary}) was not found on this machine; install it first",
+                    block.agent.kind.display_name()
+                );
+            }
+        }
 
         self.stop_runner_locked(runner_id).await;
         if let Some(dir) = &changes.working_dir
@@ -1203,6 +1256,79 @@ fn apply_runner_changes(
         .ok_or_else(|| anyhow::anyhow!("runner {runner_id} is not in config.toml"))?;
     if let Some(dir) = &changes.working_dir {
         block.workspace.working_dir = dir.clone();
+    }
+    if let Some(name) = &changes.name {
+        let name = name.trim();
+        if name.is_empty() {
+            anyhow::bail!("runner name cannot be empty");
+        }
+        block.name = name.to_string();
+    }
+    if let Some(agent) = &changes.agent {
+        let kind = <AgentKind as clap::ValueEnum>::from_str(agent.trim(), false)
+            .map_err(|_| anyhow::anyhow!("unknown agent kind {agent:?}"))?;
+        if kind == AgentKind::PidashAgent || block.agent.kind == AgentKind::PidashAgent {
+            anyhow::bail!("the Pi Dash Agent cannot be switched to or from another agent");
+        }
+        block.agent.kind = kind;
+    }
+    let kind = block.agent.kind;
+    if kind == AgentKind::PidashAgent
+        && (changes.model.is_some() || changes.reasoning_effort.is_some())
+    {
+        anyhow::bail!("the Pi Dash Agent's model comes from Pi Dash");
+    }
+    if let Some(model) = &changes.model {
+        let model = model.trim();
+        let value = if model.is_empty() {
+            None
+        } else if crate::cli::runner_ops::model_applies_to_agent(kind, model) {
+            Some(model.to_string())
+        } else {
+            anyhow::bail!(
+                "model {model:?} does not apply to the {} agent",
+                kind.display_name()
+            );
+        };
+        if let Some(slot) = block.model_slot_mut(kind) {
+            *slot = value;
+        }
+        // Effort is only meaningful alongside an explicit model.
+        if block.configured_model().is_none()
+            && let Some(slot) = block.effort_slot_mut(kind)
+        {
+            *slot = None;
+        }
+    }
+    if let Some(effort) = &changes.reasoning_effort {
+        let effort = effort.trim().to_ascii_lowercase();
+        if effort.is_empty() {
+            if let Some(slot) = block.effort_slot_mut(kind) {
+                *slot = None;
+            }
+        } else {
+            let Some(tiers) = crate::cli::runner_ops::efforts_for_agent(kind) else {
+                anyhow::bail!(
+                    "reasoning effort only applies to the Codex, Claude Code and Muse Code agents, not {}",
+                    kind.display_name()
+                );
+            };
+            if !tiers.contains(&effort.as_str()) {
+                anyhow::bail!(
+                    "reasoning effort {effort:?} is not one of {}",
+                    tiers.join(", ")
+                );
+            }
+            if block.configured_model().is_none() {
+                anyhow::bail!(
+                    "reasoning effort needs a model; pick a {} model first",
+                    kind.display_name()
+                );
+            }
+            if let Some(slot) = block.effort_slot_mut(kind) {
+                *slot = Some(effort);
+            }
+        }
     }
     Ok(())
 }
@@ -2076,6 +2202,16 @@ fn attach_body_for_instance(
             .unwrap_or_default(),
         agent_versions,
         agent_kind: inst.config.agent.kind,
+        model: inst
+            .config
+            .configured_model()
+            .unwrap_or_default()
+            .to_string(),
+        reasoning_effort: inst
+            .config
+            .configured_reasoning_effort()
+            .unwrap_or_default()
+            .to_string(),
     }
 }
 
@@ -5948,6 +6084,7 @@ mod tests {
                 "main",
                 RunnerChanges {
                     working_dir: Some(new_dir.clone()),
+                    ..Default::default()
                 },
             )
             .await
@@ -5969,6 +6106,307 @@ mod tests {
         assert!(loop_running(&ctx, other.runner_id));
     }
 
+    fn changes_cfg(tmp: &std::path::Path, kind: AgentKind) -> (Config, uuid::Uuid) {
+        let paths = paths_for(tmp);
+        paths.ensure().unwrap();
+        let mut main = runner_config("main", "WEB", tmp.join("wd-main"));
+        main.agent.kind = kind;
+        let id = main.runner_id;
+        write_runners(
+            &paths,
+            vec![main, runner_config("other", "API", tmp.join("wd-other"))],
+        );
+        (crate::config::file::load_config(&paths).unwrap(), id)
+    }
+
+    fn block(cfg: &Config, id: uuid::Uuid) -> &RunnerConfig {
+        cfg.runners.iter().find(|r| r.runner_id == id).unwrap()
+    }
+
+    #[test]
+    fn apply_changes_sets_and_clears_the_codex_model_and_effort() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut cfg, id) = changes_cfg(tmp.path(), AgentKind::Codex);
+        apply_runner_changes(
+            &mut cfg,
+            id,
+            &RunnerChanges {
+                model: Some("gpt-5.5".into()),
+                reasoning_effort: Some("HIGH".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(block(&cfg, id).configured_model(), Some("gpt-5.5"));
+        assert_eq!(block(&cfg, id).configured_reasoning_effort(), Some("high"));
+
+        // Back to the agent default drops the effort with it.
+        apply_runner_changes(
+            &mut cfg,
+            id,
+            &RunnerChanges {
+                model: Some(String::new()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(block(&cfg, id).configured_model(), None);
+        assert_eq!(block(&cfg, id).configured_reasoning_effort(), None);
+    }
+
+    #[test]
+    fn apply_changes_sets_and_clears_the_muse_code_effort() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut cfg, id) = changes_cfg(tmp.path(), AgentKind::MuseCode);
+        // Like Codex, an effort needs a model.
+        let err = apply_runner_changes(
+            &mut cfg,
+            id,
+            &RunnerChanges {
+                reasoning_effort: Some("max".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("needs a model"), "{err}");
+
+        apply_runner_changes(
+            &mut cfg,
+            id,
+            &RunnerChanges {
+                model: Some("muse-spark".into()),
+                reasoning_effort: Some("Max".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(block(&cfg, id).configured_reasoning_effort(), Some("max"));
+
+        apply_runner_changes(
+            &mut cfg,
+            id,
+            &RunnerChanges {
+                reasoning_effort: Some(String::new()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(block(&cfg, id).configured_reasoning_effort(), None);
+
+        // Back to the agent default drops the effort with it.
+        apply_runner_changes(
+            &mut cfg,
+            id,
+            &RunnerChanges {
+                reasoning_effort: Some("ultra".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        apply_runner_changes(
+            &mut cfg,
+            id,
+            &RunnerChanges {
+                model: Some(String::new()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(block(&cfg, id).configured_reasoning_effort(), None);
+
+        apply_runner_changes(
+            &mut cfg,
+            id,
+            &RunnerChanges {
+                reasoning_effort: Some(String::new()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(block(&cfg, id).configured_reasoning_effort(), None);
+
+        let err = apply_runner_changes(
+            &mut cfg,
+            id,
+            &RunnerChanges {
+                reasoning_effort: Some("turbo".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("is not one of"), "{err}");
+    }
+
+    #[test]
+    fn apply_changes_switches_agent_and_applies_the_model_to_the_new_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut cfg, id) = changes_cfg(tmp.path(), AgentKind::Codex);
+        apply_runner_changes(
+            &mut cfg,
+            id,
+            &RunnerChanges {
+                agent: Some("claude-code".into()),
+                model: Some("claude-opus-5-5".into()),
+                name: Some("renamed".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let b = block(&cfg, id);
+        assert_eq!(b.agent.kind, AgentKind::ClaudeCode);
+        assert_eq!(
+            b.claude_code.model_default.as_deref(),
+            Some("claude-opus-5-5")
+        );
+        assert_eq!(b.name, "renamed");
+    }
+
+    #[test]
+    fn apply_changes_sets_the_claude_code_effort_and_refuses_it_elsewhere() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut cfg, id) = changes_cfg(tmp.path(), AgentKind::ClaudeCode);
+        apply_runner_changes(
+            &mut cfg,
+            id,
+            &RunnerChanges {
+                model: Some("claude-opus-4-8".into()),
+                reasoning_effort: Some("MAX".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(block(&cfg, id).configured_reasoning_effort(), Some("max"));
+        // Claude Code has no `minimal` level.
+        let err = apply_runner_changes(
+            &mut cfg,
+            id,
+            &RunnerChanges {
+                reasoning_effort: Some("minimal".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("is not one of"), "{err}");
+
+        let (mut cfg, id) = changes_cfg(tmp.path(), AgentKind::Grok);
+        let err = apply_runner_changes(
+            &mut cfg,
+            id,
+            &RunnerChanges {
+                model: Some("grok-4.3".into()),
+                reasoning_effort: Some("high".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("only applies to the Codex, Claude Code and Muse Code agents"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn apply_changes_refuses_mismatched_and_engine_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut cfg, id) = changes_cfg(tmp.path(), AgentKind::ClaudeCode);
+        let refused = |cfg: &mut Config, changes: RunnerChanges| {
+            format!("{:#}", apply_runner_changes(cfg, id, &changes).unwrap_err())
+        };
+        let err = refused(
+            &mut cfg,
+            RunnerChanges {
+                model: Some("gpt-5.5".into()),
+                ..Default::default()
+            },
+        );
+        assert!(err.contains("does not apply"), "{err}");
+        let err = refused(
+            &mut cfg,
+            RunnerChanges {
+                reasoning_effort: Some("high".into()),
+                ..Default::default()
+            },
+        );
+        // Claude Code takes an effort, but only alongside a model.
+        assert!(err.contains("needs a model"), "{err}");
+        let err = refused(
+            &mut cfg,
+            RunnerChanges {
+                agent: Some("engine".into()),
+                ..Default::default()
+            },
+        );
+        assert!(err.contains("Pi Dash Agent"), "{err}");
+        let err = refused(
+            &mut cfg,
+            RunnerChanges {
+                agent: Some("emacs".into()),
+                ..Default::default()
+            },
+        );
+        assert!(err.contains("unknown agent kind"), "{err}");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut engine, engine_id) = changes_cfg(tmp.path(), AgentKind::PidashAgent);
+        let err = format!(
+            "{:#}",
+            apply_runner_changes(
+                &mut engine,
+                engine_id,
+                &RunnerChanges {
+                    model: Some("m".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err()
+        );
+        assert!(err.contains("comes from Pi Dash"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn reconfigure_by_id_renames_and_changes_the_model_in_process() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_for(tmp.path());
+        paths.ensure().unwrap();
+        let mut main = runner_config("main", "WEB", tmp.path().join("wd-main"));
+        main.agent.kind = AgentKind::Codex;
+        write_runners(&paths, vec![main.clone()]);
+        let ctx = running_ctx(&paths, std::slice::from_ref(&main)).await;
+
+        let block = ctx
+            .reconfigure_runner_by_id(
+                main.runner_id,
+                RunnerChanges {
+                    name: Some("main-renamed".into()),
+                    model: Some("gpt-5.5".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(block.name, "main-renamed");
+        assert_eq!(block.configured_model(), Some("gpt-5.5"));
+        let running = ctx.instance_by_id(main.runner_id).unwrap();
+        assert_eq!(running.name, "main-renamed");
+        assert_eq!(running.config.configured_model(), Some("gpt-5.5"));
+        assert!(loop_running(&ctx, main.runner_id));
+        let on_disk = crate::config::file::load_config(&paths).unwrap();
+        assert_eq!(on_disk.runners[0].name, "main-renamed");
+
+        let err = ctx
+            .reconfigure_runner_by_id(
+                uuid::Uuid::new_v4(),
+                RunnerChanges {
+                    model: Some("gpt-5.5".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("not running on this machine"));
+    }
+
     #[tokio::test]
     async fn reconfigure_is_refused_mid_run_and_for_a_colliding_dir() {
         let tmp = tempfile::tempdir().unwrap();
@@ -5986,6 +6424,7 @@ mod tests {
                 "main",
                 RunnerChanges {
                     working_dir: Some(tmp.path().join("wd-other").join("nested")),
+                    ..Default::default()
                 },
             )
             .await
@@ -6012,6 +6451,7 @@ mod tests {
                 "main",
                 RunnerChanges {
                     working_dir: Some(tmp.path().join("elsewhere")),
+                    ..Default::default()
                 },
             )
             .await

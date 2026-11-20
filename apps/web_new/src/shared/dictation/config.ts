@@ -12,6 +12,14 @@ import { getSttConfig, type ApiClient } from "@pidash/api-client";
 
 import { getAppClient } from "../../core/api/client.js";
 
+/**
+ * Product switch for every dictation surface: the composer microphones,
+ * their setup hints, and the voice section in assistant settings. Dictation
+ * is not ready to ship, so the UI stays hidden until this flips back on;
+ * the capture and config code underneath is kept intact.
+ */
+export const DICTATION_UI_ENABLED = false;
+
 /** Cache key for the signed-in account's speech configuration. */
 export const sttConfigKeys = {
   all: () => ["assistant", "stt-config"] as const,

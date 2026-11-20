@@ -13,9 +13,11 @@
 //!   (PIDASHCONV-1041 drives the dispatch tails through
 //!   [`super::dispatch`]); only the parser arms proxy (malformed JSON,
 //!   JSON non-objects).
-//! * `AgentReTickEndpoint.post` (`:517-560`) → [`retick`]: the missing /
-//!   malformed-UUID / not-found arms are owned; the `re_tick_ticker` tail
-//!   (D-12) proxies.
+//! * `AgentReTickEndpoint.post` (`:517-560`) → [`retick`]: fully owned.
+//!   The `re_tick_ticker` tail runs through the shared v1 core
+//!   ([`crate::v1_work_items::handlers_actions::retick_issue`]); the body
+//!   parses through [`super::read_request_data`] (only a non-JSON
+//!   content type proxies).
 //! * `AgentRunDetailEndpoint.get` (`:565-585`) → [`run_detail`], with
 //!   `?include_events=1`.
 //! * `AgentRunCancelEndpoint.post` (`:590-682`) → [`cancel_run`]: the
@@ -110,6 +112,47 @@ pub const SCHEDULER_BINDING_MALFORMED_BODY: &str =
 /// Issue lookup / membership miss on the three issue-bound creates
 /// (`runs.py:367/369/439/441/505/507`).
 pub const ISSUE_NOT_FOUND_BODY: &str = r#"{"error":"issue not found"}"#;
+/// NEWPIDASH-261: gate run control (cancel / release-pin) on a
+/// work-item run by the project's `issue_run_policy`. Scheduler runs
+/// (no work item) are never gated. Returns `Err(response)` with the
+/// already-rendered 403/500 response.
+async fn gate_run_control(
+    pool: &PgPool,
+    actor_id: Uuid,
+    work_item_id: Option<Uuid>,
+) -> Result<(), Response> {
+    let Some(work_item_id) = work_item_id else {
+        return Ok(());
+    };
+    let orm_pool = sea_orm_connection(pool);
+    let issue_entity = orm::issues::Entity::find_by_id(work_item_id)
+        .one(&orm_pool)
+        .await
+        .map_err(|_| server_error())?
+        .ok_or_else(server_error)?;
+    let project_entity = orm::projects::Entity::find_by_id(issue_entity.project_id)
+        .one(&orm_pool)
+        .await
+        .map_err(|_| server_error())?
+        .ok_or_else(server_error)?;
+    let allowed = pidash_services::domain::project_settings::can_run_issue(
+        &orm_pool,
+        actor_id,
+        &issue_entity,
+        &project_entity,
+    )
+    .await
+    .map_err(|_| server_error())?;
+    if allowed {
+        Ok(())
+    } else {
+        Err(json_response(
+            StatusCode::FORBIDDEN,
+            pidash_services::domain::project_settings::not_issue_runner_body(),
+        ))
+    }
+}
+
 /// Cancel on a terminal run (`runs.py:572-576`).
 pub const RUN_ALREADY_TERMINAL_BODY: &str =
     r#"{"error":"run already terminal","code":"run_already_terminal"}"#;
@@ -1672,8 +1715,8 @@ async fn create_run_inner(
 // `POST /api/runners/re-tick/` — budget grant (`runs.py:482-523`)
 // ---------------------------------------------------------------------------
 
-/// Re-tick: missing / malformed-UUID / not-found arms are owned; the
-/// `re_tick_ticker` tail (D-12) proxies.
+/// Re-tick: fully owned (only a non-JSON content type proxies); the
+/// `re_tick_ticker` tail runs natively.
 pub async fn retick(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
@@ -1690,6 +1733,7 @@ async fn retick_inner(
     extension: Option<Extension<SessionHandle>>,
     req: Request,
 ) -> Response {
+    use crate::v1_work_items::handlers_actions::{fetch_issue_by_id, retick_issue};
     let actor = match request_actor(&state, extension).await {
         Ok(Some(actor)) => actor,
         Ok(None) => return unauthorized(),
@@ -1699,17 +1743,16 @@ async fn retick_inner(
         Ok(pool) => pool,
         Err(response) => return response,
     };
-    let (parts, body) = req.into_parts();
-    let bytes = match collect_body(body).await {
-        Ok(bytes) => bytes,
+    // DRF `request.data`: an empty body is `{}` (the 400 below), bad JSON
+    // is the parser's 400. Proxying these answered 502 on the all-Rust
+    // stack, which has no Django upstream.
+    let parsed = match super::read_request_data(&state, req).await {
+        Ok(parsed) => parsed,
         Err(response) => return response,
     };
-    let parsed: Value = match serde_json::from_slice(&bytes) {
-        Ok(parsed) => parsed,
-        Err(_) => return proxy_with_body(state, parts, bytes).await,
-    };
+    // A non-dict body is the source's `AttributeError` on `.get` (500).
     if !parsed.is_object() {
-        return proxy_with_body(state, parts, bytes).await;
+        return server_error();
     }
     let work_item_id = match classify_retick_work_item(&parsed) {
         WorkItemRef::Missing => {
@@ -1723,21 +1766,31 @@ async fn retick_inner(
         }
         WorkItemRef::Id(id) => id,
     };
-    let row = match issue_lookup(pool, work_item_id).await {
-        Ok(row) => row,
-        Err(response) => return response,
+    // `Issue.all_objects.filter(pk=...).first()`: one read serves both the
+    // membership check and the `re_tick_ticker` tail.
+    let issue = match fetch_issue_by_id(pool, &work_item_id).await {
+        Ok(Some(issue)) => issue,
+        Ok(None) => {
+            return json_response(StatusCode::NOT_FOUND, ISSUE_NOT_FOUND_BODY.to_owned());
+        }
+        Err(_) => return server_error(),
     };
-    let Some((_, workspace_id)) = row else {
-        return json_response(StatusCode::NOT_FOUND, ISSUE_NOT_FOUND_BODY.to_owned());
-    };
-    let role = match workspace_role(pool, workspace_id, actor.id).await {
+    let role = match workspace_role(pool, issue.workspace_id, actor.id).await {
         Ok(role) => role,
         Err(response) => return response,
     };
     if !is_workspace_member(role) {
         return json_response(StatusCode::NOT_FOUND, ISSUE_NOT_FOUND_BODY.to_owned());
     }
-    proxy_with_body(state, parts, bytes).await
+    // `scheduling.re_tick_ticker` tail, natively: the all-Rust stack has no
+    // Django upstream, so proxying it answered 502 to every valid re-tick.
+    match retick_issue(&state, pool, actor.id, &issue).await {
+        Ok((status, body)) => json_response(status, body),
+        Err(_) => {
+            tracing::warn!(issue_id = %issue.id, "web re-tick failed");
+            server_error()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1790,8 +1843,29 @@ async fn cancel_run_inner(
         Ok(facts) => facts,
         Err(response) => return response,
     };
-    if !guards::can_cancel_run(&facts) {
+    // NEWPIDASH-261: cancel on a work-item run follows the project's
+    // `issue_run_policy` (a removed assignee loses the right at once).
+    // Gated before can_cancel_run so non-runners get 403 not_issue_runner
+    // (acceptance) rather than the generic 404 visibility hide. For
+    // work-item runs the gate is the permission (project_members admits
+    // any Member, whom can_cancel_run would still 404); for scheduler
+    // runs (no work item) can_cancel_run still applies.
+    let is_work_item_run = guarded.run.work_item_id.is_some();
+    if let Err(response) = gate_run_control(pool, actor.id, guarded.run.work_item_id).await {
+        return response;
+    }
+    if !is_work_item_run && !guards::can_cancel_run(&facts) {
         return not_found();
+    }
+    // For work-item runs the gate is the permission: creator/assignee
+    // in default, any Member/Admin in project_members. The old
+    // can_cancel_run would 404 a project_members Member who is not
+    // creator/assignee/owner, so it is skipped here.
+    if is_work_item_run && !guards::can_cancel_run(&facts) {
+        // Still need workspace membership (gate already ensures it for
+        // project_members; for default the gate ensures creator/assignee
+        // which implies membership in practice). Allow.
+        tracing::debug!("cancel allowed via gate despite can_cancel_run false");
     }
     let (parts, body) = req.into_parts();
     let bytes = match collect_body(body).await {
@@ -2021,7 +2095,14 @@ async fn release_pin_inner(
         Ok(facts) => facts,
         Err(response) => return response,
     };
-    if !guards::can_cancel_run(&facts) {
+    // NEWPIDASH-261: release-pin on a work-item run follows the
+    // project's `issue_run_policy` (before can_cancel_run for 403).
+    // For work-item runs the gate is the permission (see cancel).
+    let is_work_item_run = guarded.run.work_item_id.is_some();
+    if let Err(response) = gate_run_control(pool, actor.id, guarded.run.work_item_id).await {
+        return response;
+    }
+    if !is_work_item_run && !guards::can_cancel_run(&facts) {
         return not_found();
     }
     if guarded.run.executor_kind == AgentExecutorKind::RetiredCloudRun {
