@@ -44,6 +44,7 @@ import { useAppInstanceBootstrap } from "../../instance/index.js";
 import { useCreateWorkItem } from "../api/create.js";
 import { executionTargetFieldError } from "../api/executionTarget.js";
 import { createStateRefusal, creationStateGate, stateOptionGate } from "../edition/workflow.js";
+import { useProjectWorkItemTypes } from "../edition/IssueTypePicker.js";
 import { DiscardDraftDialog } from "../create/DiscardDraftDialog.js";
 import {
   DRAFT_SAVE_FAILED_INLINE_TITLE,
@@ -556,6 +557,11 @@ export function WorkItemCreateDialog({
   const openedType = React.useRef<string | null>(null);
   const adoptedType = React.useRef<string | null>(null);
   const baselineTypeId = React.useRef<string | null>(null);
+  // A create preselects the project's default type (NEWPIDASH-361): the
+  // first flag marks a pick the user made this visit (which a project
+  // switch keeps), the second the project already defaulted.
+  const typeTouched = React.useRef(false);
+  const typeDefaultedFor = React.useRef<string | null>(null);
   // The stored description already folded into the form; the detail read
   // may answer more than once (a refetch), and only the first fold needs
   // to rebuild the editor.
@@ -575,6 +581,10 @@ export function WorkItemCreateDialog({
   const submitting = React.useRef(false);
   const draftTargetId = editDraftId(edit, draftId);
   const issueType = getIssueTypeExtension();
+  // The type picker lives in the property chip row as its last button
+  // (NEWPIDASH-361); the template and extra-property slots keep their
+  // section above the title.
+  const TypePicker = issueType?.typePicker ?? null;
   const [typeId, setTypeId] = React.useState<string | null>(null);
   const [propertyValues, setPropertyValues] = React.useState<Record<string, unknown>>({});
 
@@ -650,6 +660,8 @@ export function WorkItemCreateDialog({
     openedType.current = null;
     adoptedType.current = null;
     baselineTypeId.current = null;
+    typeTouched.current = false;
+    typeDefaultedFor.current = null;
     setPropertyValues({});
     setEditorGeneration((current) => current + 1);
     setFocusRequest((current) => current + 1);
@@ -794,6 +806,20 @@ export function WorkItemCreateDialog({
     if (seededExecution === null) return;
     setForm((current) => withDefaultExecution(current, seededExecution));
   }, [seededExecution, form.execution]);
+  // A create preselects the project's default issue type (NEWPIDASH-361):
+  // the first loaded list carrying a default fills an untouched pick, a
+  // project switch re-defaults, and a user's pick always wins. The read
+  // shares the picker's query key, so it adds no second request.
+  const typeReads = creating && projectId !== "" && issueType !== null;
+  const projectTypes = useProjectWorkItemTypes(workspaceSlug, projectId, typeReads);
+  React.useEffect(() => {
+    if (!creating || issueType === null || projectId === "") return;
+    if (typeTouched.current || typeDefaultedFor.current === projectId) return;
+    if (projectTypes.data === undefined) return;
+    typeDefaultedFor.current = projectId;
+    const fallback = projectTypes.data.find((row) => row.isDefault)?.id ?? null;
+    if (fallback !== null) setTypeId(fallback);
+  }, [creating, issueType, projectId, projectTypes.data]);
   const busy =
     create.isPending ||
     writeEdit.isPending ||
@@ -815,6 +841,25 @@ export function WorkItemCreateDialog({
   function updateBranch(branch: string): void {
     setGitError(gitBranchError(branch));
     patch({ gitWorkBranch: branch });
+  }
+
+  /** A type pick the user made: marks the visit touched so the project
+   * default never overwrites it (NEWPIDASH-361). */
+  function handleTypeChange(next: string | null): void {
+    typeTouched.current = true;
+    setTypeId(next);
+  }
+
+  /** Fill the form from a template's prefill (ISS-129); a carried type
+   * counts as the user's pick for the default preselect. */
+  function applyTemplate(prefill: TemplatePrefill): void {
+    setForm((current) => applyTemplatePrefill(current, prefill));
+    if (prefill.typeId !== undefined) {
+      typeTouched.current = true;
+      setTypeId(prefill.typeId);
+    }
+    if (prefill.propertyValues !== undefined) setPropertyValues(prefill.propertyValues);
+    setEditorGeneration((current) => current + 1);
   }
 
   function pickProject(nextProjectId: string): void {
@@ -1254,7 +1299,9 @@ export function WorkItemCreateDialog({
         open={open}
         onOpenChange={handleOpenChange}
         ignoreEscapeKey={busy}
-        className="max-w-2xl"
+        // NEWPIDASH-361: twice the old width (max-w-2xl is 42rem) and
+        // half again as tall, both capped at the viewport on small screens.
+        className="min-h-[min(44rem,calc(100dvh-2rem))] max-w-[min(84rem,calc(100vw-2rem))]"
         actions={
           <>
             <TabStop index={MODAL_TAB_ORDER.discard} label="Discard">
@@ -1315,11 +1362,15 @@ export function WorkItemCreateDialog({
               {editing || drafting ? null : <DuplicatePanel matches={duplicates.matches} />}
             </FieldSlot>
           </div>
-          {/* The type slots need a stored row to seed from and an endpoint
-              that keeps the pick: drafts have neither (no type column),
-              so the picker shows for issue creates and issue edits only
-              (ISS-129). */}
-          {issueType === null || drafting || edit?.kind === "draft" ? null : (
+          {/* The template and extra-property slots need a stored row to
+              seed from and an endpoint that keeps the pick: drafts have
+              neither (no type column), so they show for issue creates
+              and issue edits only (ISS-129). The type picker itself
+              sits in the property chip row below (NEWPIDASH-361). */}
+          {issueType === null ||
+          drafting ||
+          edit?.kind === "draft" ||
+          (issueType.templatePicker === undefined && issueType.additionalProperties === undefined) ? null : (
             <IssueTypeSlots
               extension={issueType}
               workspaceSlug={workspaceSlug}
@@ -1327,14 +1378,9 @@ export function WorkItemCreateDialog({
               disabled={busy}
               typeId={typeId}
               propertyValues={propertyValues}
-              onTypeChange={setTypeId}
+              onTypeChange={handleTypeChange}
               onPropertyValuesChange={setPropertyValues}
-              onTemplateApply={(prefill) => {
-                setForm((current) => applyTemplatePrefill(current, prefill));
-                if (prefill.typeId !== undefined) setTypeId(prefill.typeId);
-                if (prefill.propertyValues !== undefined) setPropertyValues(prefill.propertyValues);
-                setEditorGeneration((current) => current + 1);
-              }}
+              onTemplateApply={applyTemplate}
             />
           )}
           <Input
@@ -1523,6 +1569,23 @@ export function WorkItemCreateDialog({
                 disabled={busy || lockedParent}
               />
             </TabStop>
+            {/* The issue type rides the property row as its last button
+                (NEWPIDASH-361): drafts have no type column, so the chip
+                shows for issue creates and issue edits only (ISS-129). */}
+            {TypePicker === null || drafting || edit?.kind === "draft" ? null : (
+              <div role="group" aria-label="Issue type" className="flex items-center">
+                <TypePicker
+                  workspaceSlug={workspaceSlug}
+                  projectId={projectId}
+                  disabled={busy}
+                  typeId={typeId}
+                  propertyValues={propertyValues}
+                  onTypeChange={handleTypeChange}
+                  onPropertyValuesChange={setPropertyValues}
+                  onTemplateApply={applyTemplate}
+                />
+              </div>
+            )}
           </div>
           <div className="flex flex-col gap-(--space-2)">
             <Button
@@ -1589,21 +1652,16 @@ function applyTemplatePrefill(form: CreateFormState, prefill: TemplatePrefill): 
   };
 }
 
-/** The cloud trio (ISS-129): type, template and extra properties. */
+/** The cloud template and extra-property slots (ISS-129): the type
+ * picker left this section for the property chip row (NEWPIDASH-361). */
 function IssueTypeSlots({
   extension,
   ...props
 }: IssueTypeExtensionProps & { extension: IssueTypeExtension }): React.ReactElement {
-  const TypePicker = extension.typePicker;
   const TemplatePicker = extension.templatePicker;
   const AdditionalProperties = extension.additionalProperties;
   return (
     <div className="flex flex-col gap-(--space-4)">
-      {TypePicker === undefined ? null : (
-        <FieldSlot label="Issue type">
-          <TypePicker {...props} />
-        </FieldSlot>
-      )}
       {TemplatePicker === undefined ? null : (
         <FieldSlot label="Template">
           <TemplatePicker {...props} />
