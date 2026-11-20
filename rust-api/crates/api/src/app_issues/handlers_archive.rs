@@ -39,8 +39,11 @@
 //!   `target_date`, `start_date` or `created_by` always 500d (archive
 //!   passes no `queryset` to `issue_group_values`, so `None.values_list`
 //!   raises); the port no longer 500s and buckets over the archived set.
-//! * Bulk-archive enqueues for the issues *before* the first bad one,
-//!   then answers 400 (partial side effects on failure).
+//! * (fixed by NEWPIDASH-352, DIFF-59) Bulk-archive used to enqueue
+//!   for the issues *before* the first bad one, then answer 400
+//!   (partial side effects on failure); the port now validates every
+//!   row's state group first and enqueues only after the archive
+//!   UPDATE, so a 400 enqueues nothing.
 //! * Re-archiving answers 404 (`issue_objects` excludes archived rows).
 //! * Archiving a NULL-state issue 500s (`None.group`); unarchiving one
 //!   assigns the default state instead.
@@ -1302,9 +1305,11 @@ fn archive_denial(error: domain::DomainError) -> Denial {
 // ---------------------------------------------------------------------------
 
 /// `POST .../bulk-archive-issues/`: the entity gate, the id parse, then
-/// per issue (model `-created_at` order) the literal gate plus the
-/// enqueue — a bad issue answers 400 *after* the earlier enqueues fired
-/// — and one `archived_at`-only `bulk_update`.
+/// the literal gate over every issue (model `-created_at` order) — a
+/// bad issue answers 400 before anything is written or enqueued — then
+/// one `archived_at`-only `bulk_update`, then one enqueue per issue
+/// (DIFF-59: the old system enqueues per issue *before* the gate, so a
+/// 400 leaves false "archived" history for the valid prefix).
 pub async fn bulk_archive(
     State(state): State<AppState>,
     Path((slug, project_raw)): Path<(String, String)>,
@@ -1358,7 +1363,11 @@ pub async fn bulk_archive(
     let today = chrono::Utc::now().date_naive();
     let origin = activity_origin(&state)?;
     let rows = fetch_bulk_issues(&context.pool, &slug, &context.gate.project_id, &ids).await?;
-    let enqueue_hook: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&context.pool));
+    // DIFF-59 (old bug fix): validate every row's state group *before*
+    // any side effect. The old system enqueues the activity per row and
+    // only then hits the 400 on the first open-state row, leaving false
+    // "archived" history for the valid prefix with nothing archived
+    // (PB-0302). The 400 body below stays byte-identical.
     for row in &rows {
         // `select_related("state")` caches `None` for a NULL *or* dangling
         // id alike, so a missing group is `AttributeError` (500) either
@@ -1371,6 +1380,17 @@ pub async fn bulk_archive(
             );
             return Ok(status_response(StatusCode::BAD_REQUEST, &body));
         }
+    }
+    // `bulk_update(["archived_at"])`: one UPDATE, no `save()`.
+    let hit: Vec<uuid::Uuid> = rows.iter().map(|row| row.id).collect();
+    domain_issues::bulk_archive_update(&context.pool, &hit, today)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    // Enqueue only after the archive UPDATE has been written: a 400
+    // above returns before any task exists. `current_instance` renders
+    // from the pre-update in-memory rows, exactly as before.
+    let enqueue_hook: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&context.pool));
+    for row in &rows {
         let current_instance = current_instance_json(&context.pool, row).await?;
         domain_issues::bulk_archive_activity(
             &enqueue_hook,
@@ -1385,11 +1405,6 @@ pub async fn bulk_archive(
         )
         .await;
     }
-    // `bulk_update(["archived_at"])`: one UPDATE, no `save()`.
-    let hit: Vec<uuid::Uuid> = rows.iter().map(|row| row.id).collect();
-    domain_issues::bulk_archive_update(&context.pool, &hit, today)
-        .await
-        .map_err(|_| Denial::ServerError)?;
     Ok(json_response(format!("{{\"archived_at\":\"{today}\"}}")))
 }
 
