@@ -354,6 +354,11 @@ pub struct BridgeCursor {
     pub seq: u64,
     /// `run.output.delta` text not yet emitted as an `assistant/message`.
     output: String,
+    /// Latest `run.usage` record, summed into the canonical usage shape (kept
+    /// for the completion `done_payload`). `None` until the first `run.usage`
+    /// arrives — muse 1.3.0 emits none, and its `done_payload` reports
+    /// `usage: null`.
+    usage: Option<serde_json::Value>,
 }
 
 impl BridgeCursor {
@@ -365,6 +370,7 @@ impl BridgeCursor {
             terminal: false,
             seq: 0,
             output: String::new(),
+            usage: None,
         }
     }
 
@@ -446,6 +452,16 @@ impl BridgeCursor {
                 out.push(self.passthrough(rec));
                 out
             }
+            // Token usage arrives once, just before `run.terminal.completed`
+            // (muse 1.4.x; 1.3.0 emits no usage). Keep the latest record for
+            // the completion `done_payload`, and still forward it so run
+            // history shows the verbatim record.
+            "run.usage" => {
+                self.usage = summarize_run_usage(&rec.payload);
+                let mut out = self.flush_output();
+                out.push(self.passthrough(rec));
+                out
+            }
             _ => {
                 let mut out = self.flush_output();
                 out.push(self.passthrough(rec));
@@ -513,6 +529,9 @@ impl BridgeCursor {
                     "conclusion": terminal,
                     "result": text,
                     "reason": reason,
+                    // `None` serializes to `null`, which the server's
+                    // `normalize_usage` treats as unreported (muse < 1.4).
+                    "usage": self.usage.clone().unwrap_or(serde_json::Value::Null),
                     "ended_at": Utc::now().to_rfc3339(),
                 }),
             }
@@ -527,6 +546,39 @@ impl BridgeCursor {
             }
         }
     }
+}
+
+/// Sum a `run.usage` payload's per-model counters into the canonical usage
+/// shape (`pi_dash/runner/services/usage.py`): `input`, `output`,
+/// `total` (`input` + `output`), `cache_read` (from `cached_tokens`) and
+/// `reasoning` (from `reasoning_tokens`), with the reported payload kept
+/// verbatim under `raw`.
+///
+/// Returns `None` when `models` is missing or empty, so the completion
+/// `done_payload` reports `usage: null` exactly like a muse that never sent
+/// usage. `cached_tokens` is assumed to be a subset of `input_tokens` and
+/// `reasoning_tokens` a subset of `output_tokens` (OpenAI convention).
+fn summarize_run_usage(payload: &serde_json::Value) -> Option<serde_json::Value> {
+    let models = payload.get("models")?.as_array()?;
+    if models.is_empty() {
+        return None;
+    }
+    let counter = |key: &str| -> u64 {
+        models
+            .iter()
+            .map(|m| m.get(key).and_then(|v| v.as_u64()).unwrap_or(0))
+            .fold(0u64, u64::saturating_add)
+    };
+    let input = counter("input_tokens");
+    let output = counter("output_tokens");
+    Some(serde_json::json!({
+        "input": input,
+        "output": output,
+        "total": input.saturating_add(output),
+        "cache_read": counter("cached_tokens"),
+        "reasoning": counter("reasoning_tokens"),
+        "raw": payload.clone(),
+    }))
 }
 
 /// Best-effort mapping from a non-`completed` `run.terminal.*` kind to our
@@ -665,6 +717,7 @@ mod tests {
 
     const META_COMPLETED: &str =
         include_str!("../../tests/fixtures/muse_code/meta_completed_run.jsonl");
+    const META_USAGE: &str = include_str!("../../tests/fixtures/muse_code/meta_usage_run.jsonl");
     const ECHO_COMPLETED: &str =
         include_str!("../../tests/fixtures/muse_code/echo_completed_run.jsonl");
     const META_FAILED: &str =
@@ -771,6 +824,121 @@ mod tests {
             [BridgeEvent::Completed { .. }]
         ));
         assert!(c.translate(done).is_empty());
+    }
+
+    #[test]
+    fn completed_run_with_usage_reports_canonical_usage() {
+        // muse 1.4.x emits `run.usage` just before `run.terminal.completed`.
+        // The completion payload must carry the summed canonical counters so
+        // the server can store them on `AgentRun.usage`.
+        let (_, out) = replay(META_USAGE);
+        let methods = methods(&out);
+        assert!(methods.contains(&"muse/run.usage"), "{methods:?}");
+        let BridgeEvent::Completed { done_payload, .. } = out.last().unwrap() else {
+            panic!("expected Completed last, got {:?}", out.last());
+        };
+        let usage = &done_payload["usage"];
+        assert_eq!(usage["input"], 32590, "{usage}");
+        assert_eq!(usage["output"], 16, "{usage}");
+        assert_eq!(usage["total"], 32606, "{usage}");
+        assert_eq!(usage["cache_read"], 0, "{usage}");
+        assert_eq!(usage["reasoning"], 6, "{usage}");
+        assert_eq!(
+            usage["raw"]["models"][0]["model"], "muse-spark-1.3-contributor",
+            "{usage}"
+        );
+    }
+
+    #[test]
+    fn legacy_completed_run_reports_null_usage() {
+        // muse 1.3.0 emits no `run.usage`: the completion payload reports
+        // `usage: null`, which the server treats as unreported.
+        let (_, out) = replay(META_COMPLETED);
+        let BridgeEvent::Completed { done_payload, .. } = out.last().unwrap() else {
+            panic!("expected Completed last, got {:?}", out.last());
+        };
+        assert!(done_payload["usage"].is_null(), "{done_payload}");
+    }
+
+    /// Feed raw JSONL lines through a cursor and return the events.
+    fn feed(lines: &[&str]) -> Vec<BridgeEvent> {
+        let mut c = cursor();
+        let mut out = Vec::new();
+        for line in lines {
+            let ev = serde_json::from_str::<StreamEvent>(line).expect("line parses");
+            out.extend(c.translate(ev));
+        }
+        out
+    }
+
+    const USAGE_TMPL: &str =
+        r#"{"record_type":"status","payload_type":"run.usage","payload":PAYLOAD}"#;
+    const TERMINAL: &str = r#"{"record_type":"event","payload_type":"run.terminal.completed","payload":{"kind":"run_terminal","terminal":"completed","text":"done"}}"#;
+
+    fn completed_usage(payload: &str) -> serde_json::Value {
+        let out = feed(&[&USAGE_TMPL.replace("PAYLOAD", payload), TERMINAL]);
+        match out.last().unwrap() {
+            BridgeEvent::Completed { done_payload, .. } => done_payload["usage"].clone(),
+            other => panic!("expected Completed last, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_usage_sums_across_models() {
+        let usage = completed_usage(
+            r#"{"kind":"run_usage","calls":2,"models":[
+                {"model":"a","input_tokens":100,"output_tokens":20,"cached_tokens":10,"reasoning_tokens":5},
+                {"model":"b","input_tokens":50,"output_tokens":30,"cached_tokens":0,"reasoning_tokens":7}
+            ]}"#,
+        );
+        assert_eq!(usage["input"], 150, "{usage}");
+        assert_eq!(usage["output"], 50, "{usage}");
+        assert_eq!(usage["total"], 200, "{usage}");
+        assert_eq!(usage["cache_read"], 10, "{usage}");
+        assert_eq!(usage["reasoning"], 12, "{usage}");
+        assert_eq!(usage["raw"]["calls"], 2, "{usage}");
+    }
+
+    #[test]
+    fn run_usage_without_models_reports_null_usage() {
+        for payload in [
+            r#"{"kind":"run_usage","calls":0,"models":[]}"#,
+            r#"{"kind":"run_usage","calls":1}"#,
+        ] {
+            assert!(completed_usage(payload).is_null(), "payload: {payload}");
+        }
+    }
+
+    #[test]
+    fn latest_run_usage_wins() {
+        let out = feed(&[
+            &USAGE_TMPL.replace(
+                "PAYLOAD",
+                r#"{"kind":"run_usage","calls":1,"models":[{"model":"a","input_tokens":10,"output_tokens":2,"cached_tokens":0,"reasoning_tokens":0}]}"#,
+            ),
+            &USAGE_TMPL.replace(
+                "PAYLOAD",
+                r#"{"kind":"run_usage","calls":1,"models":[{"model":"a","input_tokens":70,"output_tokens":8,"cached_tokens":0,"reasoning_tokens":1}]}"#,
+            ),
+            TERMINAL,
+        ]);
+        // Both records are forwarded verbatim for run history.
+        assert_eq!(
+            out.iter()
+                .filter_map(|e| match e {
+                    BridgeEvent::Raw { method, .. } if method == "muse/run.usage" => Some(()),
+                    _ => None,
+                })
+                .count(),
+            2
+        );
+        match out.last().unwrap() {
+            BridgeEvent::Completed { done_payload, .. } => {
+                assert_eq!(done_payload["usage"]["input"], 70);
+                assert_eq!(done_payload["usage"]["reasoning"], 1);
+            }
+            other => panic!("expected Completed last, got {other:?}"),
+        }
     }
 
     #[test]
