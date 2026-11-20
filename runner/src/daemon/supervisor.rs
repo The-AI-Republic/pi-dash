@@ -2421,6 +2421,23 @@ fn materialise_workpad_snapshot(
     Ok(())
 }
 
+/// Remove a stale workpad snapshot from `<working_dir>/.pidash/`
+/// (NEWPIDASH-320 review): review/test/scheduler assigns carry no
+/// snapshot, and the runner reuses one `working_dir` across runs, so a
+/// previous coding-task run's `workpad.md` + `workpad.sha256` must not
+/// leak into a run that owns no workpad. Best-effort like the write
+/// path — missing files are fine, other errors warn.
+fn discard_stale_workpad_snapshot(working_dir: &std::path::Path) {
+    for name in ["workpad.md", "workpad.sha256"] {
+        let path = working_dir.join(".pidash").join(name);
+        if let Err(err) = std::fs::remove_file(&path)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(path = %path.display(), error = %err, "stale workpad snapshot delete failed; continuing without the file");
+        }
+    }
+}
+
 struct CurrentChat {
     chat_session_id: uuid::Uuid,
     tx: mpsc::Sender<ChatCommand>,
@@ -4776,14 +4793,18 @@ impl AssignWorker {
         // Workpad snapshot (NEWPIDASH-320 §6.1): for `coding-task` runs the
         // server attached `workpad_body` + `workpad_sha256` to the assign.
         // Materialise them as files before the agent launches so the prompt
-        // never needs a re-fetch; review/test/scheduler assigns carry
-        // neither field and write nothing. A stale or missing file is
-        // never fatal — the CLI falls back to `workpad get --to-file`.
+        // never needs a re-fetch. Review/test/scheduler assigns carry
+        // neither field: drop a previous run's files (the runner reuses one
+        // `working_dir` across runs) so they can't leak into this run. A
+        // stale or missing file is never fatal — the CLI falls back to
+        // `workpad get --to-file`.
         if let Some(body) = context.workpad_body.as_deref() {
             let sha = context.workpad_sha256.as_deref().unwrap_or("");
             if let Err(err) = materialise_workpad_snapshot(&workspace_path, body, sha) {
                 tracing::warn!(%run_id, error = %err, "workpad snapshot write failed; continuing without the file");
             }
+        } else {
+            discard_stale_workpad_snapshot(&workspace_path);
         }
         // The `.pidash/` scratch dir must never be committed, whatever the
         // run carries (reuses the CLI context helper).
@@ -5912,6 +5933,19 @@ mod tests {
             std::fs::read_to_string(dir.path().join(".pidash/workpad.md")).expect("body"),
             ""
         );
+    }
+
+    /// NEWPIDASH-320 review: non-coding-task assigns carry no snapshot, so
+    /// a previous run's files must be removed — and missing files are fine.
+    #[test]
+    fn stale_workpad_snapshot_is_discarded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        materialise_workpad_snapshot(dir.path(), "stale", "deadbeef").expect("snapshot");
+        discard_stale_workpad_snapshot(dir.path());
+        assert!(!dir.path().join(".pidash/workpad.md").exists());
+        assert!(!dir.path().join(".pidash/workpad.sha256").exists());
+        // Idempotent: nothing there is not an error.
+        discard_stale_workpad_snapshot(dir.path());
     }
 
     #[tokio::test]
