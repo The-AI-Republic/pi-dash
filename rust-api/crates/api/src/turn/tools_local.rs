@@ -2078,8 +2078,7 @@ pub async fn execute_dispatch_coding_run<S: ToolStore>(
                 .ok_or_else(invalid_state_error)?;
             // A stage switched off in this project starts no run, so a
             // move there cannot dispatch one.
-            let settings = store.project_settings(deps, &issue.project_id).await?;
-            let switches = pidash_services::domain::project_settings::stage_switches_of(&settings);
+            let switches = store.project_settings(deps, &issue.project_id).await?;
             if !stage_runs_automatically(Some(&target.group), Some(&target.name), switches) {
                 // A registered stage that is merely switched off gets its own
                 // message; anything else is not a delegated state at all.
@@ -2265,6 +2264,7 @@ mod tests {
     use super::super::tools_local_store::*;
     use super::*;
     use chrono::DateTime;
+    use pidash_types::orchestration::StageSwitches;
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -2350,8 +2350,8 @@ mod tests {
         pr_fetch: PrFetch,
         pr_fetch_calls: Mutex<Vec<PrFetchCall>>,
         next_seq: Mutex<i64>,
-        /// `projects.settings` per project (lean workflow stage switches).
-        project_settings: HashMap<Uuid, Value>,
+        /// Stage switches per project (lean workflow stage switches).
+        project_settings: HashMap<Uuid, StageSwitches>,
     }
 
     fn project_row(
@@ -2882,12 +2882,12 @@ mod tests {
             &self,
             _deps: &AssistantDeps,
             project_id: &Uuid,
-        ) -> Result<Value, StoreError> {
+        ) -> Result<StageSwitches, StoreError> {
             Ok(self
                 .project_settings
                 .get(project_id)
-                .cloned()
-                .unwrap_or_else(|| json!({})))
+                .copied()
+                .unwrap_or(StageSwitches::ALL))
         }
 
         async fn project_labels(
@@ -4713,7 +4713,10 @@ mod tests {
         let mut store = FixtureStore::standard();
         store.project_settings.insert(
             uid(101),
-            json!({"agent_stages": {"mode": "custom", "review": false, "test": true}}),
+            StageSwitches {
+                review: false,
+                test: true,
+            },
         );
         let result = call(
             &store,

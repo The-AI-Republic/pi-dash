@@ -1806,21 +1806,6 @@ fn decode_ticker(row: &Map<String, Value>) -> Result<Option<IssueAgentTicker>, D
     }))
 }
 
-/// The project's `settings` blob (`{}` when the row or id is missing).
-async fn fetch_project_settings(pool: &sqlx::PgPool, project_id: &str) -> Result<Value, Denial> {
-    let Ok(project_id) = uuid::Uuid::parse_str(project_id) else {
-        return Ok(Value::Object(Map::new()));
-    };
-    let settings: Option<Value> = pidash_db::entity::projects::Entity::find_by_id(project_id)
-        .select_only()
-        .column(pidash_db::entity::projects::Column::Settings)
-        .into_tuple()
-        .one(&pidash_db::pool::sea_orm_connection(pool))
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    Ok(settings.unwrap_or_else(|| Value::Object(Map::new())))
-}
-
 /// `IssueDetailSerializer(issue)` (`:1488`): the 38-key full body —
 /// `is_intake` INCLUDED on this path (unlike retrieve).
 async fn render_full(
@@ -1858,11 +1843,12 @@ async fn render_full(
         ..Default::default()
     };
     // The stage switches (`settings.agent_stages`) gate `can_re_tick`;
-    // only read when there is a ticker to render.
-    let policy = match (ticker_row.is_some(), get_str(row, "i_project_id")) {
-        (true, Some(project_id)) => {
-            policy.with_stages(&fetch_project_settings(pool, project_id).await?)
-        }
+    // only read when there is a ticker to render. The detail already
+    // joins the project row, so the blob comes off it (`p_settings`,
+    // selected in `identifier_full_select`) — no second query
+    // (NEWPIDASH-338 item 8). A missing key reads as all defaults.
+    let policy = match (ticker_row.is_some(), row.get("p_settings")) {
+        (true, Some(settings)) => policy.with_stages(settings),
         _ => policy,
     };
     let state_owned;

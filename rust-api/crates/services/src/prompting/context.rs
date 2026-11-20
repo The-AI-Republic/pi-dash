@@ -545,11 +545,26 @@ pub struct CommentView {
 /// (`context.py:297-329`): `### Comment N — <author> at <timestamp>`
 /// plus body, blank-line separated. Empty-after-strip bodies are skipped
 /// without consuming a number.
-pub fn comments_section(comments: &[CommentView]) -> String {
+///
+/// When the stored hand-off is inlined above the section (review/test
+/// prompts), the hand-off comment itself is dropped from the section so
+/// the text renders once (NEWPIDASH-338 item 9): a comment whose stripped
+/// body equals the stripped hand-off — the same strip pipeline the write
+/// path stores (`strip_comment_html` over `to_safe_html`) — is skipped
+/// without consuming a number. An empty hand-off disables the filter.
+pub fn comments_section(comments: &[CommentView], handoff: &str) -> String {
+    let handoff_stripped = if python_strip(handoff).is_empty() {
+        String::new()
+    } else {
+        strip_handoff(handoff)
+    };
     let mut parts = Vec::new();
     for comment in comments {
         let body = python_strip(&comment.body);
         if body.is_empty() {
+            continue;
+        }
+        if !handoff_stripped.is_empty() && body == handoff_stripped {
             continue;
         }
         let author = comment_author_label(
@@ -571,6 +586,18 @@ pub fn comments_section(comments: &[CommentView]) -> String {
         return NO_COMMENTS_TEXT.to_owned();
     }
     parts.join("\n\n")
+}
+
+/// The hand-off markdown as its posted comment reads in the section: the
+/// same strip pipeline the write path stores (`strip_comment_html` over
+/// `to_safe_html`), so an unchanged hand-off comment matches exactly.
+pub(crate) fn strip_handoff(handoff: &str) -> String {
+    let html = crate::assistant::markdown::to_safe_html(Some(handoff));
+    if html.is_empty() {
+        String::new()
+    } else {
+        pidash_db::app_pages::strip::ml_strip_tags(&html)
+    }
 }
 
 /// Render an interval for prose (`context.py:332-338`): whole hours stay
@@ -2192,7 +2219,7 @@ mod tests {
 
     #[test]
     fn comments_section_numbers_visible_only() {
-        assert_eq!(comments_section(&[]), NO_COMMENTS_TEXT.to_owned());
+        assert_eq!(comments_section(&[], ""), NO_COMMENTS_TEXT.to_owned());
         let comments = vec![
             CommentView {
                 body: "   ".to_owned(),
@@ -2211,10 +2238,44 @@ mod tests {
                 run_id: Some("run-9".to_owned()),
             },
         ];
-        let section = comments_section(&comments);
+        let section = comments_section(&comments, "");
         // The blank body is skipped without consuming a number.
         assert!(section.starts_with("### Comment 1 — Human: a@b.c at "));
         assert!(section.contains("\nAgent run: run-9\n\nhello"));
+    }
+
+    #[test]
+    fn comments_section_drops_the_inlined_hand_off_comment() {
+        // NEWPIDASH-338 item 9: the stored hand-off is inlined above the
+        // section, so its posted comment renders once. The match runs
+        // through the write path's strip pipeline, so an unchanged
+        // hand-off comment matches exactly.
+        let handoff = "### Hand-off\n\n**Produced:** the sample.";
+        let stripped = strip_handoff(handoff);
+        assert!(!stripped.is_empty());
+        let comment = |body: &str| CommentView {
+            body: body.to_owned(),
+            speaker_type: "agent".to_owned(),
+            speaker_label: Some("AI Agent".to_owned()),
+            actor: None,
+            created_at_iso: Some("2026-01-01T00:00:00+00:00".to_owned()),
+            run_id: Some("run-1".to_owned()),
+        };
+        let section = comments_section(
+            &[comment(&stripped), comment("unrelated findings")],
+            handoff,
+        );
+        // The hand-off comment is skipped without consuming a number;
+        // the other comment keeps number 1.
+        assert!(section.starts_with("### Comment 1 — "));
+        assert!(section.contains("unrelated findings"));
+        assert!(!section.contains("Comment 2"), "{section}");
+        // No hand-off: nothing is filtered.
+        let section = comments_section(&[comment(&stripped)], "");
+        assert!(section.contains("### Comment 1 — "));
+        // A hand-off that matches no comment changes nothing.
+        let section = comments_section(&[comment("other work")], handoff);
+        assert!(section.contains("other work"));
     }
 
     // -- scheduler ---------------------------------------------------------
