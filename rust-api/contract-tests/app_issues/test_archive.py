@@ -7,6 +7,8 @@ throwaways so the seed is untouched.
 
 import json
 
+from _harness.diffs import expect, is_rust
+
 ARCHIVE_DETAIL_KEYS = {
     "id", "name", "state_id", "sort_order", "completed_at",
     "estimate_point", "priority", "complexity_score", "start_date",
@@ -292,3 +294,137 @@ def test_archived_grouped_rows_match_ungrouped_shape(clients, seed):
     assert srow["sort_order"] == flat["sort_order"]
     assert srow["created_at"] == flat["created_at"]
     assert srow["updated_at"] == flat["updated_at"]
+
+
+def test_archived_grouped_created_by_buckets_and_totals(clients, seed):
+    # NEWPIDASH-350 (DIFF-58, old bug fix, PB-0300/PB-0301): the old
+    # archived list 500s on group_by/sub_group_by=created_by (archive
+    # passes no queryset to issue_group_values, so None.values_list
+    # raises) and counts every group with archived_at__isnull=True. The
+    # new list buckets over the archived set like the live list and
+    # counts archived rows.
+    admin, member, guest = (
+        clients["admin"], clients["member"], clients["guest"])
+    ws, pid, done = seed["ws_slug"], seed["project"], seed["state_done"]
+    admin_id, member_id = seed["admin"], seed["member"]
+    made = member.post(
+        f"{_base(ws, pid)}/issues/", json={"name": "DIFF-58 member issue"})
+    assert made.status_code == 201, made.text
+    mid = made.json()["id"]
+    try:
+        assert member.patch(
+            f"{_base(ws, pid)}/issues/{mid}/",
+            json={"state_id": done}).status_code == 204
+        assert member.post(
+            f"{_base(ws, pid)}/issues/{mid}/archive/").status_code == 200
+        assert admin.post(
+            f"{_base(ws, pid)}/issues/{seed['issue3']}/archive/"
+        ).status_code == 200
+        # I5 + I3 (admin-created) and M1 (member-created) are archived.
+        resp = admin.get(
+            f"{_base(ws, pid)}/archived-issues/",
+            params={"group_by": "created_by", "per_page": 1},
+        )
+        assert resp.status_code == expect("DIFF-58", django=500, rust=200)
+        if is_rust():
+            buckets = resp.json()["results"]
+            assert set(buckets) == {admin_id, member_id}, buckets.keys()
+            assert buckets[admin_id]["total_results"] == 2
+            assert buckets[member_id]["total_results"] == 1
+            assert len(buckets[admin_id]["results"]) == 1
+            assert sum(
+                cell["total_results"] for cell in buckets.values()) == 3
+            assert resp.json()["total_count"] == 3
+        gresp = guest.get(
+            f"{_base(ws, pid)}/archived-issues/",
+            params={"group_by": "created_by"},
+        )
+        assert gresp.status_code == expect("DIFF-58", django=500, rust=200)
+        sub = admin.get(
+            f"{_base(ws, pid)}/archived-issues/",
+            params={"group_by": "priority", "sub_group_by": "created_by"},
+        )
+        assert sub.status_code == expect("DIFF-58", django=500, rust=200)
+        if is_rust():
+            total = sum(
+                cell["total_results"]
+                for group in sub.json()["results"].values()
+                for cell in group["results"].values()
+            )
+            assert total == 3, sub.json()["results"].keys()
+    finally:
+        admin.request(
+            "DELETE", f"{_base(ws, pid)}/issues/{seed['issue3']}/archive/")
+        admin.request("DELETE", f"{_base(ws, pid)}/issues/{mid}/archive/")
+        admin.delete(f"{_base(ws, pid)}/issues/{mid}/")
+
+
+def test_archived_grouped_target_date_and_start_date(clients, seed):
+    # NEWPIDASH-350 (DIFF-58, old bug fix, PB-0301): group_by of
+    # target_date/start_date 500s on the old archived list for the same
+    # missing-queryset reason as created_by. The new list buckets over
+    # the archived set.
+    admin = clients["admin"]
+    ws, pid, done = seed["ws_slug"], seed["project"], seed["state_done"]
+    made = admin.post(
+        f"{_base(ws, pid)}/issues/", json={"name": "DIFF-58 dated issue"})
+    assert made.status_code == 201, made.text
+    aid = made.json()["id"]
+    try:
+        assert admin.patch(
+            f"{_base(ws, pid)}/issues/{aid}/",
+            json={"state_id": done,
+                  "target_date": "2026-11-17",
+                  "start_date": "2026-11-10"}).status_code == 204
+        assert admin.post(
+            f"{_base(ws, pid)}/issues/{aid}/archive/").status_code == 200
+        # I5 (undated) and A1 (dated) are archived.
+        resp = admin.get(
+            f"{_base(ws, pid)}/archived-issues/",
+            params={"group_by": "target_date", "per_page": 1},
+        )
+        assert resp.status_code == expect("DIFF-58", django=500, rust=200)
+        if is_rust():
+            buckets = resp.json()["results"]
+            assert buckets["2026-11-17"]["total_results"] == 1
+            assert buckets["None"]["total_results"] == 1
+            assert len(buckets["None"]["results"]) == 1
+        sresp = admin.get(
+            f"{_base(ws, pid)}/archived-issues/",
+            params={"group_by": "start_date"},
+        )
+        assert sresp.status_code == expect("DIFF-58", django=500, rust=200)
+        if is_rust():
+            sbuckets = sresp.json()["results"]
+            assert sbuckets["2026-11-10"]["total_results"] == 1
+            assert sbuckets["None"]["total_results"] == 1
+    finally:
+        admin.request("DELETE", f"{_base(ws, pid)}/issues/{aid}/archive/")
+        admin.delete(f"{_base(ws, pid)}/issues/{aid}/")
+
+
+def test_archived_grouped_state_totals_count_archived_rows(clients, seed):
+    # NEWPIDASH-350 (DIFF-58, old bug fix, PB-0300): the old archived
+    # list counts each group with archived_at__isnull=True, so the Done
+    # bucket of two archived Done issues reads total_results 1 (and the
+    # second page is never offered). The new list counts archived rows.
+    admin = clients["admin"]
+    ws, pid, done = seed["ws_slug"], seed["project"], seed["state_done"]
+    assert admin.post(
+        f"{_base(ws, pid)}/issues/{seed['issue3']}/archive/"
+    ).status_code == 200
+    try:
+        # I3 + I5 are archived, both in the Done state.
+        resp = admin.get(
+            f"{_base(ws, pid)}/archived-issues/",
+            params={"group_by": "state_id", "per_page": 1},
+        )
+        assert resp.status_code == 200, resp.text
+        bucket = resp.json()["results"][done]
+        assert len(bucket["results"]) == 1
+        assert bucket["total_results"] == expect("DIFF-58", django=1, rust=2)
+        if is_rust():
+            assert resp.json()["total_count"] == 2
+    finally:
+        admin.request(
+            "DELETE", f"{_base(ws, pid)}/issues/{seed['issue3']}/archive/")
