@@ -430,7 +430,10 @@ fn issue_triggerer_admitted(run_alias: &str) -> Condition {
 /// runs (no work item) keep the current rule.
 ///
 /// Pi Dash Agent runners without `engine_team_runs` use the narrower
-/// PO-3 rule (#2903): owner-created runs, plus *automatic* runs
+/// PO-3 rule (#2903): runs the owner created that are either admitted
+/// by the issue's run policy (`issue_triggerer_admitted`, NEWPIDASH-261)
+/// or sit on the owner's own issue (created by or assigned to the
+/// owner, NEWPIDASH-362), plus *automatic* runs
 /// (`trigger NOT IN HUMAN_TRIGGERS`) on owner issues or from
 /// owner-authored bindings — the `owner_id` arm is dropped.
 ///
@@ -463,7 +466,7 @@ pub fn runs_usable_by_runner_predicate(
                 .add(
                     Condition::all()
                         .add(Expr::col((Alias::new(run_alias), "created_by_id")).eq(owner_id))
-                        .add(triggerer.clone()),
+                        .add(Condition::any().add(triggerer.clone()).add(issue.clone())),
                 )
                 .add(
                     Condition::all()
@@ -987,6 +990,16 @@ mod tests {
         ] {
             assert!(engine.contains(trigger), "human trigger listed: {trigger}");
         }
+        // NEWPIDASH-362: the owner-created arm also admits the owner's
+        // own issue, so `FROM "issues" AS "U0"` appears three times
+        // (policy gate + owner arm + automatic arm); the policy gate
+        // still guards the triggerer-only case.
+        assert!(engine.contains("'issue_run_policy'"), "policy gate present");
+        assert_eq!(
+            engine.matches("FROM \"issues\" AS \"U0\"").count(),
+            3,
+            "policy gate + owner arm + automatic arm each read issues U0"
+        );
         // team_runs on restores the ordinary rule.
         let team = Query::select()
             .from(Alias::new("agent_run"))
