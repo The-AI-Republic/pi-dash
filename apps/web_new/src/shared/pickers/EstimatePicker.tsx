@@ -16,7 +16,7 @@ import * as React from "react";
 import { selectActiveEstimate } from "@pidash/api-client";
 
 import { NO_ESTIMATE_ID, selectEstimateOptions, selectEstimateValueLabel, type EstimateOption } from "./estimates.js";
-import { PropertyChip } from "./PropertyChip.js";
+import { describeChip, PropertyChip } from "./PropertyChip.js";
 import { usePickerEstimates } from "./reference.js";
 
 export interface EstimatePickerProps {
@@ -113,7 +113,7 @@ export function EstimatePicker({
           icon={<EstimateGlyph />}
           text={text}
           placeholder={!filled}
-          {...(filled ? { title: text } : {})}
+          tooltip={describeChip(label, filled ? text : null, "The expected effort for this work item.")}
           {...(tabIndex === undefined ? {} : { tabIndex })}
         />
       );

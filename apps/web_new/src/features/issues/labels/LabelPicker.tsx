@@ -13,7 +13,7 @@ import { Button, Input, Popover, cn } from "@pidash/kit";
 import { Check, ChevronDown, Tags } from "lucide-react";
 import * as React from "react";
 
-import { PropertyChip } from "../../../shared/pickers/PropertyChip.js";
+import { describeChip, PropertyChip } from "../../../shared/pickers/PropertyChip.js";
 import { ROLE_ADMIN } from "../../../core/session/permissions.js";
 import { useProjectRoles, useWorkspaceMembership } from "../../auth/index.js";
 import { isProjectAdmin } from "../../projects/index.js";
@@ -162,7 +162,7 @@ export function LabelPicker({
       icon={<Tags size={16} strokeWidth={1.5} className="text-(--text-muted)" aria-hidden="true" />}
       text={chipText}
       placeholder={!filled}
-      {...(filled ? { title: chipText } : {})}
+      tooltip={describeChip(label, filled ? chipText : null, "Tags that group and filter this work item.")}
       disabled={disabled}
       tabIndex={-1}
       data-testid="label-picker-trigger"

@@ -46,6 +46,15 @@ export { ArchivesTabSlot } from "./components/ArchivesTabSlot.js";
 export type { ArchivesTabSlotProps } from "./components/ArchivesTabSlot.js";
 export { ArchivesTabStrip } from "./components/ArchivesTabStrip.js";
 export type { ArchivesTabStripProps } from "./components/ArchivesTabStrip.js";
+export {
+  ARCHIVED_CYCLE_NO_ASSIGNEE_TITLE,
+  ARCHIVED_CYCLE_NO_LABEL_TITLE,
+  archivedCycleProgress,
+  selectArchivedCycleAssigneeRows,
+  selectArchivedCycleChart,
+  selectArchivedCycleLabelRows,
+  selectArchivedCycleStateRows,
+} from "./lib/archivedCycleAnalytics.js";
 export { resolveArchivedCyclesBody } from "./lib/archivedCyclesBody.js";
 export type { ArchivedCyclesBodyInput, ArchivedCyclesBodyState } from "./lib/archivedCyclesBody.js";
 export { ARCHIVES_BACK_BREAKPOINT_PX, useArchivesBackVisible } from "./lib/narrow.js";

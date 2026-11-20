@@ -3181,6 +3181,106 @@ describe("WorkItemCreateDialog type seam (ISS-129)", () => {
   });
 });
 
+describe("WorkItemCreateDialog modal refresh (NEWPIDASH-361)", () => {
+  afterEach(() => {
+    resetIssueTypeExtension();
+  });
+
+  function StubTypePicker(props: IssueTypeExtensionProps): React.ReactElement {
+    return (
+      <div>
+        <span data-testid="stub-type-id">{props.typeId ?? "none"}</span>
+        <button type="button" onClick={() => props.onTypeChange(TYPE_ONE)}>
+          Pick one
+        </button>
+      </div>
+    );
+  }
+
+  function setupWithTypes(): { sent: unknown[] } {
+    registerEditionIssuesProviders({
+      workItemTypes: async () => [
+        { id: TYPE_ONE, name: "Bug" },
+        { id: TYPE_TWO, name: "Task", isDefault: true },
+      ],
+    });
+    registerIssueTypeExtension({ typePicker: StubTypePicker });
+    return setup();
+  }
+
+  it("renders the modal twice as wide and half again as tall, capped at the viewport", () => {
+    setup();
+    const dialog = screen.getByRole("dialog", { name: "Create new work item" });
+    expect(dialog).toHaveClass("max-w-[min(84rem,calc(100vw-2rem))]");
+    expect(dialog).toHaveClass("min-h-[min(44rem,calc(100dvh-2rem))]");
+    // The kit default must not compete: two max-widths resolve to the
+    // default in the Tailwind cascade, which is what kept this modal narrow.
+    expect(dialog).not.toHaveClass("max-w-md");
+  });
+
+  it("renders the issue type as the last property chip", () => {
+    registerIssueTypeExtension({ typePicker: StubTypePicker });
+    setup();
+    const row = screen.getByTestId("property-chips");
+    expect(row.lastElementChild).toHaveAttribute("aria-label", "Issue type");
+    expect(screen.getByTestId("stub-type-id")).toBeInTheDocument();
+  });
+
+  it("preselects the project default type and carries it in the payload", async () => {
+    const user = userEvent.setup();
+    const h = setupWithTypes();
+    await waitFor(() => expect(screen.getByTestId("stub-type-id")).toHaveTextContent(TYPE_TWO));
+    await user.type(titleField(), "Default typed");
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toMatchObject({ type: TYPE_TWO });
+  });
+
+  it("keeps a user pick instead of re-applying the project default", async () => {
+    const user = userEvent.setup();
+    setupWithTypes();
+    await waitFor(() => expect(screen.getByTestId("stub-type-id")).toHaveTextContent(TYPE_TWO));
+    await user.click(screen.getByRole("button", { name: "Pick one" }));
+    await waitFor(() => expect(screen.getByTestId("stub-type-id")).toHaveTextContent(TYPE_ONE));
+  });
+
+  it("re-defaults the type after a project switch instead of keeping the stale pick", async () => {
+    const user = userEvent.setup();
+    const TYPE_BEACON = "b23e4567-e89b-12d3-a456-426614174010";
+    registerEditionIssuesProviders({
+      workItemTypes: async (input: { workspaceSlug: string; projectId: string }) =>
+        input.projectId === PROJECT_BEACON
+          ? [{ id: TYPE_BEACON, name: "Beacon type", isDefault: true }]
+          : [
+              { id: TYPE_ONE, name: "Bug" },
+              { id: TYPE_TWO, name: "Task", isDefault: true },
+            ],
+    });
+    registerIssueTypeExtension({ typePicker: StubTypePicker });
+    const h = setup();
+    await waitFor(() => expect(screen.getByTestId("stub-type-id")).toHaveTextContent(TYPE_TWO));
+    await user.click(screen.getByRole("button", { name: "Pick one" }));
+    await waitFor(() => expect(screen.getByTestId("stub-type-id")).toHaveTextContent(TYPE_ONE));
+    await user.click(screen.getByRole("button", { name: "Atlas" }));
+    await user.click(await screen.findByRole("option", { name: "Beacon" }));
+    await waitFor(() => expect(screen.getByTestId("stub-type-id")).toHaveTextContent(TYPE_BEACON));
+    await user.type(titleField(), "Moved");
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toMatchObject({ type: TYPE_BEACON });
+  });
+
+  it("shows Field: Value tooltips on the property buttons", async () => {
+    setup();
+    const chip = await screen.findByRole("button", { name: "State: Todo" });
+    fireEvent.focus(chip);
+    fireEvent.mouseEnter(chip);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "State: Todo — The workflow stage this work item is in."
+    );
+  });
+});
+
 describe("WorkItemCreateDialog publish (ISS-130)", () => {
   it("links images uploaded for a draft to the issue it becomes", async () => {
     const user = userEvent.setup();

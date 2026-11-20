@@ -13,7 +13,7 @@
 import { Button, Combobox, IconButton, type ButtonVariant, type ComboboxOption } from "@pidash/kit";
 import * as React from "react";
 
-import { PropertyChip } from "./PropertyChip.js";
+import { describeChip, PropertyChip } from "./PropertyChip.js";
 import { usePickerStates } from "./reference.js";
 import { selectStateOptions, STATE_GROUP_ICONS, type StateOption } from "./states.js";
 
@@ -131,7 +131,7 @@ export function StatePicker({
           icon={shown === undefined ? undefined : <StateGlyph option={shown} />}
           text={text}
           placeholder={!filled}
-          {...(filled ? { title: text } : {})}
+          tooltip={describeChip(label, filled ? text : null, "The workflow stage this work item is in.")}
           {...(tabIndex === undefined ? {} : { tabIndex })}
         />
       );
