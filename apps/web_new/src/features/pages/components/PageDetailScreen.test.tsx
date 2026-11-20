@@ -143,6 +143,7 @@ interface Harness {
   convertBodies: unknown[];
   pages: PageRow[];
   childrenByParent: Record<string, PageRow[]>;
+  childrenStatus: number;
   pagesStatus: number;
   pagesCalls: number;
   pagesHold: Promise<void> | null;
@@ -194,6 +195,7 @@ beforeEach(() => {
     convertBodies: [],
     pages: [],
     childrenByParent: {},
+    childrenStatus: 200,
     pagesStatus: 200,
     pagesCalls: 0,
     pagesHold: null,
@@ -414,7 +416,7 @@ beforeEach(() => {
       harness.pagesCalls += 1;
       if (harness.pagesHold !== null) await harness.pagesHold;
       const parent = new URL(requested).searchParams.get("parent");
-      if (parent !== null) return jsonResponse(url, harness.pagesStatus, harness.childrenByParent[parent] ?? []);
+      if (parent !== null) return jsonResponse(url, harness.childrenStatus, harness.childrenByParent[parent] ?? []);
       return jsonResponse(url, harness.pagesStatus, harness.pages);
     }
     if (url.endsWith("/api/workspaces/acme/members/")) {
@@ -1322,6 +1324,27 @@ describe("PageDetailScreen deep links", () => {
     renderScreen({ paneTab: "info" });
     expect((await screen.findAllByRole("status", { name: "Loading versions" })).length).toBe(3);
   });
+
+  it("replaces the timeline skeleton when the history read fails", async () => {
+    harness.versionsStatus = 500;
+    renderScreen({ paneTab: "info" });
+    expect(await screen.findByText("Current version")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("status", { name: "Loading versions" })).not.toBeInTheDocument());
+    expect(screen.getByTestId("page-versions-error")).toHaveTextContent("Version history could not be loaded.");
+  });
+
+  it("refetches the history from the timeline error retry", async () => {
+    harness.versionsStatus = 500;
+    renderScreen({ paneTab: "info" });
+    await screen.findByText("Version history could not be loaded.");
+    const before = harness.versionsCalls;
+    harness.versionsStatus = 200;
+    harness.versions = [SNAPSHOT_ROW];
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(harness.versionsCalls).toBeGreaterThan(before));
+    expect(await screen.findByRole("link", { name: /Oct 20, 2026/ })).toBeInTheDocument();
+    expect(screen.queryByTestId("page-versions-error")).not.toBeInTheDocument();
+  });
 });
 
 describe("PageDetailScreen display preferences (PAGE-072)", () => {
@@ -1556,6 +1579,21 @@ describe("PageDetailScreen header actions (PAGE-055-060)", () => {
       expect(router.navigate).toHaveBeenCalledWith({
         href: `/acme/projects/${PROJECT}/pages?type=archived`,
       })
+    );
+  });
+
+  it("keeps the delete dialog confirmable when the child count read fails", async () => {
+    harness.page = record({ archived_at: "2026-10-20" });
+    harness.childrenStatus = 500;
+    renderScreen();
+    expect(await screen.findByTestId("page-archived-marker")).toBeInTheDocument();
+    await openOptions();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
+    const dialog = await screen.findByRole("dialog", { name: "Delete page" });
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "Delete" })).toBeEnabled());
+    expect(within(dialog).queryByTestId("page-delete-rehomed-loading")).not.toBeInTheDocument();
+    expect(within(dialog).getByTestId("page-delete-rehomed-error")).toHaveTextContent(
+      "The sub-page count could not be loaded."
     );
   });
 
