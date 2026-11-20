@@ -43,6 +43,7 @@
 pub mod agent;
 pub mod api;
 pub mod auto_install;
+pub mod chat_server;
 pub mod cleanup;
 pub mod codex_config;
 pub mod free_quota;
