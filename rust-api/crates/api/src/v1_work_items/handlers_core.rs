@@ -215,10 +215,14 @@ impl From<operations::Error> for Denial {
     }
 }
 
-/// Wrap an operation outcome in the v1 response. A re-pointed QUEUED run
-/// drains its pod on commit (design §13.2), exactly Django's
-/// `transaction.on_commit(_drain)`.
-async fn op_response(state: &AppState, outcome: operations::Outcome) -> Result<Response, Denial> {
+/// Drain a re-pointed QUEUED run's pod on commit (design §13.2), exactly
+/// Django's `transaction.on_commit(_drain)`. Shared by [`op_response`]
+/// and the `finish` endpoint, which applies the issue-update operation
+/// directly (NEWPIDASH-338 item 7) and so drains without rendering.
+pub(super) async fn drain_outcome_pod(
+    state: &AppState,
+    outcome: &operations::Outcome,
+) -> Result<(), Denial> {
     if let Some(pod_id) = outcome.drain_pod {
         let pool = pool_of(state).map_err(|_| Denial::ServerError)?;
         if crate::runner_enroll::teardown::drain_pod_by_id(&pool, state, pod_id)
@@ -228,6 +232,14 @@ async fn op_response(state: &AppState, outcome: operations::Outcome) -> Result<R
             return Err(Denial::ServerError);
         }
     }
+    Ok(())
+}
+
+/// Wrap an operation outcome in the v1 response. A re-pointed QUEUED run
+/// drains its pod on commit (design §13.2), exactly Django's
+/// `transaction.on_commit(_drain)`.
+async fn op_response(state: &AppState, outcome: operations::Outcome) -> Result<Response, Denial> {
+    drain_outcome_pod(state, &outcome).await?;
     let status = StatusCode::from_u16(outcome.status).map_err(|_| Denial::ServerError)?;
     Ok(json_response(status, outcome.body))
 }
@@ -253,7 +265,7 @@ fn db_error<E: std::fmt::Display>(error: E, site: &str) -> Denial {
 /// `timezone.now()` truncated to microseconds: Python datetimes carry no
 /// nanos, and `timestamptz` stores micros — an untruncated `Utc::now()`
 /// would render nanos in the response while the DB row reads back micros.
-fn now_utc() -> DateTime<Utc> {
+pub(super) fn now_utc() -> DateTime<Utc> {
     trunc_micros(Utc::now())
 }
 
@@ -637,7 +649,7 @@ async fn identifier_membership(
 /// `ProjectEntityPermission` (see [`gate_for`]); the by-identifier routes
 /// additionally set the `project_identifier` arm.
 #[allow(clippy::too_many_arguments)]
-async fn require_gate(
+pub(super) async fn require_gate(
     pool: &PgPool,
     workspace_id: &uuid::Uuid,
     workspace_slug: &str,
@@ -706,7 +718,7 @@ async fn render_decoded(
 }
 
 /// Fetch one row for the write paths via the public read service.
-async fn fetch_issue_for_write(
+pub(super) async fn fetch_issue_for_write(
     pool: &PgPool,
     slug: &str,
     project_id: &Uuid,
@@ -727,7 +739,7 @@ async fn fetch_issue_for_write(
 
 /// Render a write response / `current_instance` image via the public
 /// read service.
-async fn render_write_response(
+pub(super) async fn render_write_response(
     pool: &PgPool,
     decoded: &DecodedIssue,
     tz: &Tz,
@@ -745,7 +757,10 @@ async fn render_write_response(
 }
 
 /// Fetch the project row for the write paths via the public read service.
-async fn fetch_project_for_write(pool: &PgPool, project_id: &Uuid) -> Result<WriteProject, Denial> {
+pub(super) async fn fetch_project_for_write(
+    pool: &PgPool,
+    project_id: &Uuid,
+) -> Result<WriteProject, Denial> {
     read::fetch_project_for_write(pool, project_id)
         .await
         .map_err(|error| match error {
@@ -1436,7 +1451,7 @@ async fn issue_detail_inner(
 /// `model_activity` origin: `APP_BASE_URL`, else `WEB_URL`, else the
 /// `ImproperlyConfigured` 500 (raised after every write lands, so the row
 /// persists and only the response is the 500).
-fn app_origin(urls: &pidash_db::config::UrlSettings) -> Result<String, Denial> {
+pub(super) fn app_origin(urls: &pidash_db::config::UrlSettings) -> Result<String, Denial> {
     if let Some(url) = urls.app_base_url.as_deref().filter(|s| !s.is_empty()) {
         return Ok(url.to_owned());
     }
@@ -1448,7 +1463,7 @@ fn app_origin(urls: &pidash_db::config::UrlSettings) -> Result<String, Denial> {
 
 /// The domain-write context for a v1 work-item request: the API actor
 /// (with their stored time zone name) plus the gated tenant scope.
-fn domain_write_ctx(pre: &Preamble, project_id: &Uuid) -> WriteCtx {
+pub(super) fn domain_write_ctx(pre: &Preamble, project_id: &Uuid) -> WriteCtx {
     WriteCtx::new(WriteActor {
         user_id: pre.actor.id,
         timezone: pre.actor.timezone.clone(),
@@ -1640,16 +1655,10 @@ async fn gate_agent_state_change(
     let Some((group, name)) = target else {
         return Ok(None);
     };
-    let settings: Option<Value> = pidash_db::entity::projects::Entity::find_by_id(project_id)
-        .select_only()
-        .column(pidash_db::entity::projects::Column::Settings)
-        .into_tuple()
-        .one(&orm)
-        .await
-        .map_err(|error| db_error(error, "agent-move-settings"))?;
-    let switches = pidash_services::domain::project_settings::stage_switches_of(
-        &settings.unwrap_or(Value::Null),
-    );
+    let switches =
+        pidash_services::domain::project_settings::stage_switches_for_project(&orm, project_id)
+            .await
+            .map_err(|error| db_error(error, "agent-move-settings"))?;
     let state = pidash_types::orchestration::StateRef {
         group: &group,
         name: &name,

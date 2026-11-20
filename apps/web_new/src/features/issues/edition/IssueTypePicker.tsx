@@ -7,11 +7,13 @@
 // parity scope (owner decision 2026-10-30, NEWFRONT-1038) and stay
 // absent in every edition. Options come from the project type list, so
 // a project without types offers "No type" only.
-import { Button, Combobox, type ComboboxOption } from "@pidash/kit";
+import { Combobox, type ComboboxOption } from "@pidash/kit";
+import { Tags } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import * as React from "react";
 
 import type { IssueTypeExtensionProps } from "../create/issueTypeSeam.js";
+import { describeChip, PropertyChip } from "../../../shared/pickers/PropertyChip.js";
 import { editionOptionsKey } from "./EditionFilterSections.js";
 import { getEditionIssuesProviders } from "./providers.js";
 
@@ -19,12 +21,12 @@ const NO_TYPE_ID = "";
 const NO_TYPE_LABEL = "No type";
 
 /** Project types for pickers outside the filter builder (registration-gated). */
-export function useProjectWorkItemTypes(workspaceSlug: string, projectId: string) {
+export function useProjectWorkItemTypes(workspaceSlug: string, projectId: string, enabled = true) {
   const provider = getEditionIssuesProviders().workItemTypes;
   return useQuery({
     queryKey: editionOptionsKey(workspaceSlug, projectId, "types"),
     queryFn: () => provider!({ workspaceSlug, projectId }),
-    enabled: provider !== undefined,
+    enabled: provider !== undefined && enabled,
   });
 }
 
@@ -48,12 +50,18 @@ export function IssueTypePicker({
     [types.data]
   );
   const current = options.find((option) => option.id === (typeId ?? NO_TYPE_ID)) ?? options[0]!;
+  const picked = typeId !== null;
   return (
     <Combobox
       trigger={
-        <Button variant="secondary" disabled={disabled}>
-          <span className="truncate">{current.label}</span>
-        </Button>
+        <PropertyChip
+          label={picked ? `Issue type: ${current.label}` : "Issue type"}
+          icon={<Tags size={16} strokeWidth={1.5} className="text-(--text-muted)" aria-hidden="true" />}
+          text={current.label}
+          placeholder={!picked}
+          tooltip={describeChip("Issue type", current.label, "The kind of work this item represents.")}
+          disabled={disabled}
+        />
       }
       options={options}
       value={typeId ?? NO_TYPE_ID}

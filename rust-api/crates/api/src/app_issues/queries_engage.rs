@@ -793,6 +793,15 @@ pub fn identifier_full_select(
         .expr_as(is_subscribed(slug, project_id, user_id), a("is_subscribed"))
         .expr_as(is_intake_exists(slug, project_id), a("is_intake"));
     select_fields(&mut stmt, "projects", &PROJECT_FIELDS, FULL_PROJECT_PREFIX);
+    // NEWPIDASH-338 item 8: the detail already joins the project row, so
+    // `render_full` reads the stage switches off it instead of selecting
+    // `projects.settings` a second time. `Settings` is not in
+    // `PROJECT_FIELDS` (that list feeds other selects too), so it is added
+    // here only, with the same `p_` prefix.
+    stmt.expr_as(
+        col("projects", projects::Column::Settings),
+        Alias::new(format!("{FULL_PROJECT_PREFIX}settings")),
+    );
     select_fields(
         &mut stmt,
         "workspaces",

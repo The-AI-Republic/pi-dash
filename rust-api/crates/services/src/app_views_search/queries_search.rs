@@ -775,7 +775,7 @@ pub fn global_pages(scope: &GlobalScope<'_>, query: Option<&str>) -> SelectState
                 None,
                 Box::new(sea_query::SubQueryStatement::SelectStatement(subquery)),
             )
-            .eq(Expr::val(pid)),
+            .eq(uuid_val(pid)),
         );
     }
     stmt.order_by(("pages", "created_at"), Order::Desc);
@@ -1804,6 +1804,10 @@ mod tests {
         // Narrow rides the ProjectPage subquery (which carries its own limit).
         assert!(sql.contains("project_pages"), "{sql}");
         assert!(sql.contains("limit"), "{sql}");
+        // NEWPIDASH-349: the narrow compares the uuid subquery against a
+        // uuid bind — a text bind 500d (`uuid = text`) every
+        // project-scoped search that includes pages.
+        assert!(sql.contains(") = cast($"), "{sql}");
         let plain = sql_of(global_pages(&global_scope(None), None));
         assert!(!plain.contains("limit"), "{plain}");
     }

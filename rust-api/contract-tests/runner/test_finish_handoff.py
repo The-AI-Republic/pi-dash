@@ -137,6 +137,36 @@ def test_finish_handoff_survives_completion(
     row = seeder.db.fetchone("SELECT state_id FROM issues WHERE id = %s", (issue_id,))
     assert str(row["state_id"]) == handoff_world["states"]["review"], row
 
+    # A retry of the same finish dedupes through the comment operation's
+    # external id (NEWPIDASH-338 item 6): still 200, still exactly the two
+    # comments, no duplicates. The retry runs before the COMPLETED frame:
+    # once the run ends it is no longer active and `finish` refuses.
+    with _v1(settings, daemon_world) as retry_client:
+        retry = retry_client.post(
+            f"/api/v1/workspaces/{slug}/agent-runs/{run_id}/finish/",
+            json={
+                "to": "In Review",
+                "result": "done",
+                "comment": COMMENT,
+                "handoff": HANDOFF,
+            },
+            headers={"X-Pi-Dash-Run-Id": run_id},
+        )
+    assert retry.status_code == 200, retry.text[:500]
+    assert retry.json()["state"] == "In Review", retry.text[:500]
+    bodies = seeder.db.fetchall(
+        "SELECT comment_stripped FROM issue_comments WHERE issue_id = %s",
+        (issue_id,),
+    )
+    assert len(bodies) == 2, [row["comment_stripped"] for row in bodies]
+
+    rows = seeder.db.fetchall(
+        "SELECT external_source, external_id FROM issue_comments WHERE issue_id = %s",
+        (issue_id,),
+    )
+    assert {row["external_source"] for row in rows} == {"run-finish"}, rows
+    assert len({row["external_id"] for row in rows}) == 2, rows
+
     machine_client.post(f"{DAEMON}/runs/{run_id}/accept/", json={})
     resp = machine_client.post(
         f"{DAEMON}/runs/{run_id}/complete/",
@@ -150,8 +180,8 @@ def test_finish_handoff_survives_completion(
         "SELECT done_payload FROM agent_run WHERE id = %s", (run_id,)
     )["done_payload"]
     assert payload["stage_handoff"] == HANDOFF, payload
-    assert payload.get("finish_comment_id"), payload
-    assert payload.get("handoff_comment_id"), payload
+    assert "finish_comment_id" not in payload, payload
+    assert "handoff_comment_id" not in payload, payload
 
     # What `load_stage_inputs` runs for the review run (BUNDLE_HANDOFF_SQL).
     found = seeder.db.fetchone(
@@ -162,3 +192,4 @@ def test_finish_handoff_survives_completion(
         (issue_id,),
     )["handoff"]
     assert found == HANDOFF, found
+

@@ -301,11 +301,14 @@ async fn list_inner(
     }
     let cursor = crate::paginator::Cursor::from_string(&cursor_text).map_err(page_denial)?;
     let page = cursor.offset;
-    let offset = page.saturating_mul(per_page);
-    if offset < 0 {
+    // `page` rides `i128` (NEWPIDASH-345); the DB `OFFSET` stays `i64`:
+    // a huge positive page saturates to an empty page past the end.
+    let offset_i128 = page.saturating_mul(per_page as i128);
+    if offset_i128 < 0 {
         // `BadPaginationError("Pagination offset cannot be negative")`.
         return Err(Denial::BadDetail("Error in parsing".to_owned()));
     }
+    let offset = offset_i128.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
     let order_by =
         crate::app_issues::query_last(query, "order_by").unwrap_or(DEFAULT_ORDER.to_owned());
     let order = resolve_export_order(&order_by)?;

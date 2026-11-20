@@ -10,7 +10,9 @@ index (expression: to_tsvector('english', name + description_stripped)).
 The EXPLAIN test below pins the plan; the behavioral tests pin the results.
 """
 
+import json
 import os
+import uuid
 from datetime import datetime, timezone
 
 from .conftest import session_headers
@@ -136,6 +138,75 @@ def test_global_search_project_scoped(api, seed, tenant_a, project_a, auth_a):
     )
     assert r.status_code == 200, r.text
     assert r.json()["results"]["issue"] == []
+
+
+def _seed_linked_page(seed, ws_id, project_id, owner_id, name):
+    """A ``pages`` row + its ``project_pages`` link (column set mirrors
+    ``Seeder.create_page`` / ``link_page_project``). Tracked so
+    ``Seed.cleanup`` removes the bridge before the page."""
+    page_id = str(uuid.uuid4())
+    with seed.conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO pages
+               (id, name, description_json, description_binary, description_html,
+                owned_by_id, access, workspace_id, color, parent_id, archived_at,
+                is_locked, view_props, logo_props, is_global, sort_order,
+                created_by_id, created_at, updated_at)
+               VALUES (%s,%s,CAST(%s AS jsonb),%s,%s,%s,%s,%s,'',%s,
+                       NULL,%s,'{"full_width": false}','{}',false,65535,%s,now(),now())""",
+            (
+                page_id, name, json.dumps({}), None, "<p></p>",
+                owner_id, 0, ws_id, None, False, owner_id,
+            ),
+        )
+    seed.track("pages", "id", page_id)
+    bridge_id = str(uuid.uuid4())
+    with seed.conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO project_pages
+               (id, workspace_id, project_id, page_id, created_by_id, updated_by_id,
+                deleted_at, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s,NULL,now(),now())""",
+            (bridge_id, ws_id, str(project_id), page_id, owner_id, owner_id),
+        )
+    seed.track("project_pages", "id", bridge_id)
+    return page_id
+
+
+def test_global_search_project_scoped_page(api, seed, tenant_a, project_a, auth_a):
+    """workspace_search=false + project_id narrows pages to that project.
+
+    NEWPIDASH-349: the Rust page arm bound the narrowing project id as
+    text against a uuid subquery (``operator does not exist: uuid =
+    text``), 500ing every project-scoped search that includes pages.
+    """
+    ws_id = tenant_a["workspace"]["id"]
+    owner_id = tenant_a["user"]["id"]
+    page_id = _seed_linked_page(
+        seed, ws_id, project_a, owner_id, "Probe page scoped narrow",
+    )
+    other_project = seed.project(ws_id)
+    seed.project_member(
+        other_project, ws_id, owner_id, role=20
+    )
+    _seed_linked_page(
+        seed, ws_id, other_project, owner_id, "Probe page other project",
+    )
+    for params in (
+        {"search": "Probe page scoped"},
+        {"search": "Probe page scoped", "entities": "page"},
+    ):
+        r = api.get(
+            _search_url(tenant_a), headers=auth_a,
+            params={
+                **params, "workspace_search": "false",
+                "project_id": str(project_a),
+            },
+        )
+        assert r.status_code == 200, r.text
+        rows = r.json()["results"]["page"]
+        assert [row["id"] for row in rows] == [page_id]
+        assert rows[0]["project_ids"] == [str(project_a)]
 
 
 def test_project_search_shape(api, seed, tenant_a, project_a, auth_a):

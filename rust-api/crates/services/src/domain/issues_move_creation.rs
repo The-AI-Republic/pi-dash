@@ -27,6 +27,7 @@ use uuid::Uuid;
 use pidash_db::agent_runs::status::AgentRunStatus as DbAgentRunStatus;
 use pidash_db::tx::Transaction as DbTransaction;
 use pidash_types::agent_runs::AgentExecutorKind;
+use pidash_types::orchestration::StateRef;
 
 use crate::run_creation::execution::{
     execution_fields as resolve_execution_fields, ActorScope, DeferredAdmissionError,
@@ -34,11 +35,11 @@ use crate::run_creation::execution::{
 };
 
 use crate::orchestration::creation::{
-    finalize_error_details_patch, orm, user_id_for_run, AdmissionError as ServiceAdmissionError,
-    CreationError, CreationSeam, DedicatedPinArgs, ExecutionError,
-    ExecutionFields as ServiceExecutionFields, ExecutionRequest, FinalizeAgentRunSeam, IssueView,
-    LockedIssue, NewAgentRun, NewSystemComment, PinOutcome, PodView, ProjectView, RenderBundle,
-    RunView, RunnerView, StateView, TickerBudget,
+    finalize_error_details_patch, orm, template_kind_for_state, user_id_for_run,
+    AdmissionError as ServiceAdmissionError, CreationError, CreationSeam, DedicatedPinArgs,
+    ExecutionError, ExecutionFields as ServiceExecutionFields, ExecutionRequest,
+    FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, NewSystemComment, PinOutcome,
+    PodView, ProjectView, RenderBundle, RunView, RunnerView, StateView, TickerBudget,
 };
 use crate::prompting::{composer, context};
 
@@ -1244,8 +1245,12 @@ async fn twin_load_render_bundle(
         .transpose()
         .map_err(|_| CreationError::MissingRow("bad user id".to_owned()))?;
     let override_rows = twin_bundle_overrides(conn, issue.workspace_id, user_id).await?;
+    let kind = template_kind_for_state(state.as_ref().map(|s| StateRef {
+        group: &s.group,
+        name: &s.name,
+    }));
     let stages =
-        crate::orchestration::creation::load_stage_inputs(conn, project_id, issue_id, run_id)
+        crate::orchestration::creation::load_stage_inputs(conn, project_id, issue_id, run_id, kind)
             .await
             .map_err(twin_db)?;
     Ok(RenderBundle {

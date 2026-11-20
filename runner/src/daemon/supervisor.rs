@@ -231,11 +231,30 @@ impl Supervisor {
                     tracing::warn!("run receipts storage unavailable: {e}");
                 })
                 .ok();
+        // The engine profile's chats run on the shared app-server
+        // (NEWPIDASH-333): readiness follows the engine manager through a
+        // weak handle, so the profile never keeps the manager alive.
+        let engine_weak = std::sync::Arc::downgrade(&engine);
+        let chat_availability: crate::pidash_agent::chat_server::AvailabilitySource =
+            std::sync::Arc::new(move || {
+                engine_weak
+                    .upgrade()
+                    .map(|engine| engine.chat_availability())
+                    .unwrap_or(crate::pidash_agent::chat_server::ChatAvailability {
+                        can_run: false,
+                        code: crate::pidash_agent::chat_server::ENGINE_START_FAILED.to_string(),
+                    })
+            });
+        let local_chat = Arc::new(crate::ipc::pidash_agent_chat::PidashAgentChatProfile::new(
+            config.daemon.dev_machine_id,
+            chat_availability,
+        ));
+        // Lifecycle hooks: sign-out/pause stops the shared child, a model
+        // profile change restarts it once idle.
+        engine.set_chat_lifecycle(local_chat.server_lifecycle());
         let spawn_ctx = RunnerSpawnCtx {
             engine: engine.clone(),
-            local_chat: Arc::new(crate::ipc::pidash_agent_chat::PidashAgentChatProfile::new(
-                config.daemon.dev_machine_id,
-            )),
+            local_chat,
             transport: transport.clone(),
             tokens: tokens.clone(),
             paths: paths.clone(),
@@ -451,6 +470,9 @@ impl Supervisor {
         }
 
         spawn_ctx.abort_all_tasks();
+        // Stop the shared chat server: running turns fail with
+        // `daemon_stopping` and the child is reaped with the daemon.
+        spawn_ctx.local_chat.server().shutdown().await;
         if let Some(h) = machine_handle {
             h.abort();
         }
@@ -5827,16 +5849,30 @@ mod tests {
         daemon: DaemonConfig,
         insts: &[&RunnerInstance],
     ) -> RunnerSpawnCtx {
+        let engine = crate::pidash_agent::manager::PidashAgentManager::new(
+            transport.as_ref().map(|t| t.cloud_url()),
+            paths.clone(),
+            tokens.clone(),
+            None,
+        );
+        // Test contexts read readiness from their manager, as production
+        // does; tests that need the engine override the profile afterwards.
+        let engine_weak = std::sync::Arc::downgrade(&engine);
+        let local_chat = Arc::new(crate::ipc::pidash_agent_chat::PidashAgentChatProfile::new(
+            daemon.dev_machine_id,
+            std::sync::Arc::new(move || {
+                engine_weak
+                    .upgrade()
+                    .map(|engine| engine.chat_availability())
+                    .unwrap_or(crate::pidash_agent::chat_server::ChatAvailability {
+                        can_run: false,
+                        code: "offline".to_string(),
+                    })
+            }),
+        ));
         RunnerSpawnCtx {
-            engine: crate::pidash_agent::manager::PidashAgentManager::new(
-                transport.as_ref().map(|t| t.cloud_url()),
-                paths.clone(),
-                tokens.clone(),
-                None,
-            ),
-            local_chat: Arc::new(crate::ipc::pidash_agent_chat::PidashAgentChatProfile::new(
-                daemon.dev_machine_id,
-            )),
+            engine,
+            local_chat,
             transport,
 
             tokens,
