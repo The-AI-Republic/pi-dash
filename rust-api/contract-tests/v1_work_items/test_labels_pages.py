@@ -366,3 +366,49 @@ def test_page_create_with_parent(api, world, seeder, db):
     assert hits, "page create must convert through the live server"
     assert hits[0]["path"] == "/live/convert-document/"
     assert hits[0]["json"]["variant"] == "document"
+
+
+def test_page_list_extreme_page_cursor(seeder, settings):
+    """NEWPIDASH-345 ("Bug:"): `cursor=1:MAX:0` must not drop the connection.
+
+    Django's ints are unbounded: the request answers 200 with the empty
+    page past the end (`next_cursor` keeps counting to `MAX+1`). The
+    shared Rust kernel used to compute `page + 1` in `i64` and panicked
+    in debug builds (the client saw the connection dropped).
+
+    Seeds SQL-only (no issue POST) so the test exercises exactly the
+    list path.
+    """
+    owner = seeder.create_user()
+    workspace = seeder.create_workspace(owner["id"])
+    seeder.create_workspace_member(workspace["id"], owner["id"], role=20)
+    project = seeder.create_project(workspace["id"])
+    seeder.create_project_member(workspace["id"], project["id"], owner["id"], role=20)
+    token = seeder.create_api_token(owner["id"], workspace["id"])
+    page = seeder.create_page(workspace["id"], owner["id"], name="Wiki home")
+    seeder.link_page_to_project(page["id"], project["id"], workspace["id"])
+    url = (
+        f"/api/v1/workspaces/{workspace['slug']}"
+        f"/projects/{project['id']}/pages/"
+    )
+    max_i64 = 2**63 - 1
+    with httpx.Client(
+        base_url=settings.base_url,
+        timeout=30,
+        headers={"X-Api-Key": token["token"]},
+    ) as client:
+        response = client.get(
+            url, params={"per_page": 1, "cursor": f"1:{max_i64}:0"}
+        )
+    assert response.status_code == 200, response.text[:500]
+    body = response.json()
+    assert set(body) == ENVELOPE_KEYS
+    assert body["results"] == []
+    assert body["count"] == 0
+    assert body["total_count"] == 1
+    assert body["next_page_results"] is False
+    assert body["prev_page_results"] is True
+    # Django keeps counting past i64::MAX; the Rust kernel renders the
+    # same unbounded step (i128) instead of panicking or wrapping.
+    assert body["next_cursor"] == f"1:{max_i64 + 1}:0"
+    assert body["prev_cursor"] == f"1:{max_i64 - 1}:1"
