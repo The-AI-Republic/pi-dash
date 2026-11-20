@@ -64,7 +64,7 @@ use pidash_services::runner_enroll::validation::{
     ValidationError,
 };
 use pidash_types::orchestration::{
-    is_ticking_state, StateRef, TickerEvent, TRIGGER_COMMENT_AND_RUN, TRIGGER_RUN_AI,
+    stage_runs_automatically, StateRef, TickerEvent, TRIGGER_COMMENT_AND_RUN, TRIGGER_RUN_AI,
 };
 use pidash_types::runner_runs::AgentRunStatus;
 
@@ -1639,10 +1639,11 @@ async fn post_issue_dispatch(
         (Some(group), Some(name)) => Some(StateRef { group, name }),
         _ => None,
     };
-    // `_human_run_clock` only runs while the issue ticks
-    // (`agent_phases.is_ticking_state`, `runs.py:404`); otherwise the
-    // clock is untouched and the dispatch runs bare.
-    let ticking = is_ticking_state(state_ref.as_ref());
+    // `_human_run_clock` only runs while the issue ticks (`runs.py:404`)
+    // — a stage that runs automatically in this project; otherwise
+    // (including a stage switched off) the clock is untouched and the
+    // dispatch runs bare.
+    let ticking = stage_runs_automatically(state_ref.as_ref(), project_row.policy.stage_switches());
     let now = now_micros();
     let jitter = draw_jitter(&issue_row, &project_row.policy);
     let (deps, matcher) = match dispatch_deps(

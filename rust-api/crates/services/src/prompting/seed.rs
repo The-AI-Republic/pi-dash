@@ -433,8 +433,87 @@ pub enum RevalidateAction {
     Keep,
 }
 
+/// Section keys whose built-in body the lean agent workflow change
+/// rewrote (design `.ai_design/lean_agent_workflow/design.md` §9.5). An
+/// active override on one of these still wins over the new default, but
+/// it was written against the old procedure (it may name `pidash run
+/// yield` or workpad blocks that no longer exist), so the revalidate scan
+/// flags it for review. Deleted keys (`review-cycle`, `test-cycle`,
+/// `workpad-setup`, …) need no entry: they are unknown keys and are
+/// flagged with [`UNKNOWN_SECTION_DETAIL`].
+pub const LEAN_WORKFLOW_REWRITTEN_KEYS: &[&str] = &[
+    "analyze-and-scope",
+    "autonomy",
+    "default-posture",
+    "implementation",
+    "general.execute",
+    "general.review",
+    "general.test",
+    "software.execute",
+    "software.review",
+    "software.test",
+];
+
+/// Detail recorded for an override on a [`LEAN_WORKFLOW_REWRITTEN_KEYS`]
+/// section.
+pub const LEAN_WORKFLOW_REWRITTEN_DETAIL: &str =
+    "section rewritten by the lean workflow change; review this override";
+
+/// Wording only the procedure before the lean workflow change used: the
+/// separate end-of-run commands and the retired workpad blocks. An
+/// override that still carries one was written against the old
+/// procedure; one an admin has rewritten no longer does.
+pub const LEAN_WORKFLOW_RETIRED_MARKERS: &[&str] = &[
+    "pidash run yield",
+    "--stop-ticking",
+    "parent_done_payload",
+    "Progress Checkpoints",
+    "Autonomy / Escalation",
+    "Acceptance Criteria / How to Test",
+    "workpad-template",
+];
+
+/// Whether an active override of `section_key` is flagged because the
+/// lean workflow change rewrote that section (§9.5), returning the detail.
+/// An override is flagged while its body still uses the retired procedure,
+/// or drops a step only that section carries (the `implementation`
+/// hand-off), so the flag clears once an admin brings it up to date (and
+/// `--clear` can clear it).
+pub fn rewritten_section_detail(section_key: &str, body: &str) -> Option<&'static str> {
+    if !LEAN_WORKFLOW_REWRITTEN_KEYS.contains(&section_key) {
+        return None;
+    }
+    let retired = LEAN_WORKFLOW_RETIRED_MARKERS
+        .iter()
+        .any(|marker| body.contains(marker));
+    (retired || lacks_required_procedure(section_key, body))
+        .then_some(LEAN_WORKFLOW_REWRITTEN_DETAIL)
+}
+
+/// Sections that carry a step of the new procedure no other section
+/// repeats: an override that replaces one must keep that step. The
+/// `implementation` section is where an In Progress run is told to write
+/// the hand-off; without it, `finish --to "In Review"` is refused.
+pub const LEAN_WORKFLOW_REQUIRED_STEPS: &[(&str, &[&str])] = &[(
+    "implementation",
+    &["hand-off", "handoff", "Hand-off", "Handoff"],
+)];
+
+/// Whether an override of `section_key` drops a step of the new procedure
+/// that only that section carries ([`LEAN_WORKFLOW_REQUIRED_STEPS`]).
+fn lacks_required_procedure(section_key: &str, body: &str) -> bool {
+    LEAN_WORKFLOW_REQUIRED_STEPS
+        .iter()
+        .find(|(key, _)| *key == section_key)
+        .is_some_and(|(_, any_of)| !any_of.iter().any(|word| body.contains(word)))
+}
+
 /// Pure half of the revalidate loop (`revalidate_section_overrides.py:handle`):
-/// `broken` is "unknown section key, or `validate_override` raised".
+/// `broken` is "unknown section key, or `validate_override` raised, or the
+/// override on a section the lean workflow change rewrote still uses the
+/// retired procedure ([`rewritten_section_detail`])". Once an admin
+/// rewrites such an override it is no longer broken, and `--clear`
+/// clears its flag.
 /// Truth table mirrors the `if broken and not needs_attention /
 /// elif not broken and needs_attention and clear` branches exactly.
 pub fn decide_revalidate(broken: bool, needs_attention: bool, clear: bool) -> RevalidateAction {

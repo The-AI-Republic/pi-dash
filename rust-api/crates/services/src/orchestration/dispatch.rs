@@ -76,10 +76,10 @@ use pidash_db::tasks_ticker::models::issue_agent_ticker::{
 };
 use pidash_db::tasks_ticker::{pool_size_or_default, TickerDisarmReason};
 use pidash_types::orchestration::{
-    auto_pauses_on_cap, is_ticking_state, ticking_state_names_by_group, MACHINE_TRIGGERS,
-    RUN_AI_ACTIVE_RUN_EXISTS, RUN_AI_NO_ELIGIBLE_RUNNER, RUN_AI_NO_ELIGIBLE_RUNNER_IN_POD,
-    RUN_AI_NO_POD, TRIGGER_RUN_AI, WAIT_CAP_REACHED, WAIT_GRANTED, WAIT_INFINITE_POOL,
-    WAIT_NO_TICKER, WAIT_REARMABLE_DISARMS,
+    auto_pauses_on_cap, phase_config_for, stage_runs_automatically, ticking_state_names_by_group,
+    StageSwitches, MACHINE_TRIGGERS, RUN_AI_ACTIVE_RUN_EXISTS, RUN_AI_NO_ELIGIBLE_RUNNER,
+    RUN_AI_NO_ELIGIBLE_RUNNER_IN_POD, RUN_AI_NO_POD, TRIGGER_RUN_AI, WAIT_CAP_REACHED,
+    WAIT_GRANTED, WAIT_INFINITE_POOL, WAIT_NO_TICKER, WAIT_REARMABLE_DISARMS,
 };
 use pidash_types::orchestration::{StateRef, TickerEvent};
 
@@ -193,7 +193,7 @@ pub const PROJECT_DEFAULT_STATE_SQL: &str = "SELECT default_state_id FROM projec
 /// The project columns the dispatch drivers read for clock policy
 /// (`issue.project` follows in `reconcile` / `wait_ticker`). `$1` is the
 /// project id.
-pub const PROJECT_CLOCK_POLICY_SQL: &str = "SELECT agent_ticking_enabled, agent_default_max_ticks, agent_default_interval_seconds, agent_review_default_interval_seconds, agent_test_default_interval_seconds FROM projects WHERE id = $1";
+pub const PROJECT_CLOCK_POLICY_SQL: &str = "SELECT agent_ticking_enabled, agent_default_max_ticks, agent_default_interval_seconds, agent_review_default_interval_seconds, agent_test_default_interval_seconds, settings FROM projects WHERE id = $1";
 
 /// Wait activity row (`_record_wait_activity`, `:839-852`): full column
 /// list with the Django-side defaults. `$1` now, `$2` now, `$3` id, `$4`
@@ -365,13 +365,14 @@ pub fn wait_rearms(
     pool: i32,
     ticking_enabled: bool,
     state: Option<&StateRef<'_>>,
+    switches: StageSwitches,
 ) -> bool {
     !ticker.enabled
         && WAIT_REARMABLE_DISARMS.contains(&ticker.disarm_reason.as_str())
         && !ticker.cap_reached(pool)
         && !ticker.user_disabled
         && ticking_enabled
-        && is_ticking_state(state)
+        && stage_runs_automatically(state, switches)
 }
 
 /// One cloud/managed creator candidate (`:921-927` head): dedup by id
@@ -445,7 +446,9 @@ pub fn pause_guard_verdict(probe: &PauseProbe<'_>) -> Option<PauseStop> {
     let Some(state) = probe.state else {
         return Some(PauseStop::NoState);
     };
-    if !is_ticking_state(Some(&state)) {
+    // Only In Progress auto-pauses, and In Progress always runs
+    // automatically, so the static registry answers this guard.
+    if phase_config_for(Some(&state)).is_none() {
         return Some(PauseStop::NotTicking);
     }
     if !auto_pauses_on_cap(Some(&state)) {
@@ -1108,10 +1111,13 @@ pub async fn bounce_issue_no_eligible_runner<S: DispatchSeam>(
                 .await
                 .map_err(DispatchError::Store)?;
             let safe = fallback.as_ref().is_some_and(|state| {
-                !is_ticking_state(Some(&StateRef {
-                    group: state.group.as_str(),
-                    name: state.name.as_str(),
-                }))
+                !stage_runs_automatically(
+                    Some(&StateRef {
+                        group: state.group.as_str(),
+                        name: state.name.as_str(),
+                    }),
+                    policy.stage_switches(),
+                )
             });
             if safe {
                 target = fallback;
@@ -1150,10 +1156,13 @@ pub async fn bounce_issue_no_eligible_runner<S: DispatchSeam>(
     // this bounce endlessly. Silent when no ticker row exists
     // (`disarm_ticker` returns `None` without logging).
     let still_ticking = current_state.as_ref().is_some_and(|state| {
-        is_ticking_state(Some(&StateRef {
-            group: state.group.as_str(),
-            name: state.name.as_str(),
-        }))
+        stage_runs_automatically(
+            Some(&StateRef {
+                group: state.group.as_str(),
+                name: state.name.as_str(),
+            }),
+            policy.stage_switches(),
+        )
     });
     if still_ticking {
         let mut ticker = seam.lock_ticker_for_issue(issue_id).await?;
@@ -1820,6 +1829,7 @@ pub async fn wait_ticker<S: DispatchSeam>(
         pool,
         clock::project_ticking_enabled(&policy),
         state_ref.as_ref(),
+        policy.stage_switches(),
     );
     if rearmed {
         row.enabled = true;
@@ -2176,6 +2186,7 @@ mod tests {
             agent_default_interval_seconds: Some(10800),
             agent_review_default_interval_seconds: Some(10800),
             agent_test_default_interval_seconds: Some(10800),
+            ..Default::default()
         }
     }
 

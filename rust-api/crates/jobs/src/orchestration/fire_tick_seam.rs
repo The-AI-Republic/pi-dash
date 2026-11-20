@@ -77,7 +77,7 @@ use pidash_services::orchestration::dispatch::{
 use pidash_services::orchestration::entries::clock_policy;
 use pidash_services::run_creation::{ExecutionFieldsError, LlmProfile};
 use pidash_types::orchestration::{
-    cadence_fields_for, is_ticking_state, StateRef, PAUSED_STATE_NAME,
+    cadence_fields_for, stage_runs_automatically, StateRef, PAUSED_STATE_NAME,
 };
 
 use super::creation_jobs::{LiveCreationStore, StoreDeps};
@@ -427,7 +427,8 @@ where
                 .await
                 .map_err(|error| db(into_sqlx(error)))?
         };
-        let Some((ticking_enabled, max_ticks, interval, interval_review, interval_test)) = row
+        let Some((ticking_enabled, max_ticks, interval, interval_review, interval_test, settings)) =
+            row
         else {
             return Err(db(sqlx::Error::RowNotFound));
         };
@@ -437,7 +438,9 @@ where
             agent_default_interval_seconds: Some(i64::from(interval)),
             agent_review_default_interval_seconds: Some(i64::from(interval_review)),
             agent_test_default_interval_seconds: Some(i64::from(interval_test)),
-        })
+            ..Default::default()
+        }
+        .with_stages(&settings))
     }
 
     async fn update_issue_state(
@@ -1122,13 +1125,14 @@ pub fn shim_tick_interval_seconds(state: Option<&StateView>, project: &ProjectTi
     pidash_db::tasks_ticker::resolve_project_interval(value.map(i64::from))
 }
 
-/// Ticking-state verdict shared by the shim.
-pub fn shim_is_ticking_state(state: Option<&StateView>) -> bool {
+/// Ticking-state verdict shared by the shim: the state is a registered
+/// phase that runs automatically under the project's stage switches.
+pub fn shim_stage_runs_automatically(state: Option<&StateView>, project: &ProjectTickCols) -> bool {
     let state_ref = state.map(|s| StateRef {
         group: s.group.as_str(),
         name: s.name.as_str(),
     });
-    is_ticking_state(state_ref.as_ref())
+    stage_runs_automatically(state_ref.as_ref(), project.stages)
 }
 
 impl<H, P> FireTickSeam for FireTickShim<H, P>
@@ -1136,8 +1140,12 @@ where
     H: Fn(Uuid) -> bool + Clone + Send + Sync + 'static,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync + 'static,
 {
-    fn is_ticking_state(&self, state: Option<&StateView>) -> bool {
-        shim_is_ticking_state(state)
+    fn stage_runs_automatically(
+        &self,
+        state: Option<&StateView>,
+        project: &ProjectTickCols,
+    ) -> bool {
+        shim_stage_runs_automatically(state, project)
     }
 
     fn tick_interval_seconds(&self, state: Option<&StateView>, project: &ProjectTickCols) -> i64 {
@@ -1244,26 +1252,51 @@ mod tests {
             name: "In Progress".to_owned(),
             group: "started".to_owned(),
         };
-        assert!(shim_is_ticking_state(Some(&started)));
+        assert!(shim_stage_runs_automatically(
+            Some(&started),
+            &ProjectTickCols::default()
+        ));
         let review = StateView {
             id: Uuid::nil(),
             name: "In Review".to_owned(),
             group: "review".to_owned(),
         };
-        assert!(shim_is_ticking_state(Some(&review)));
+        assert!(shim_stage_runs_automatically(
+            Some(&review),
+            &ProjectTickCols::default()
+        ));
         let done = StateView {
             id: Uuid::nil(),
             name: "Done".to_owned(),
             group: "completed".to_owned(),
         };
-        assert!(!shim_is_ticking_state(Some(&done)));
+        assert!(!shim_stage_runs_automatically(
+            Some(&done),
+            &ProjectTickCols::default()
+        ));
         let paused = StateView {
             id: Uuid::nil(),
             name: "Paused".to_owned(),
             group: "backlog".to_owned(),
         };
-        assert!(!shim_is_ticking_state(Some(&paused)));
-        assert!(!shim_is_ticking_state(None));
+        assert!(!shim_stage_runs_automatically(
+            Some(&paused),
+            &ProjectTickCols::default()
+        ));
+        assert!(!shim_stage_runs_automatically(
+            None,
+            &ProjectTickCols::default()
+        ));
+        // A stage switched off in the project does not tick.
+        let review_off = ProjectTickCols {
+            stages: pidash_types::orchestration::StageSwitches {
+                review: false,
+                test: true,
+            },
+            ..Default::default()
+        };
+        assert!(!shim_stage_runs_automatically(Some(&review), &review_off));
+        assert!(shim_stage_runs_automatically(Some(&started), &review_off));
     }
 
     #[test]
@@ -1408,6 +1441,7 @@ mod tests {
             interval_default: Some(10800),
             interval_review: Some(7200),
             interval_test: Some(3600),
+            ..Default::default()
         };
         let started = StateView {
             id: Uuid::nil(),
@@ -1434,6 +1468,7 @@ mod tests {
             interval_default: None,
             interval_review: None,
             interval_test: None,
+            ..Default::default()
         };
         assert_eq!(
             shim_tick_interval_seconds(Some(&started), &empty),
@@ -3165,15 +3200,16 @@ mod tests {
             name: "In Review".to_owned(),
             group: "review".to_owned(),
         };
-        assert!(shim.is_ticking_state(Some(&in_progress)));
-        assert!(!shim.is_ticking_state(Some(&done)));
-        assert!(!shim.is_ticking_state(None));
+        assert!(shim.stage_runs_automatically(Some(&in_progress), &Default::default()));
+        assert!(!shim.stage_runs_automatically(Some(&done), &Default::default()));
+        assert!(!shim.stage_runs_automatically(None, &Default::default()));
         let project = crate::tasks_ticker::fire_tick::ProjectTickCols {
             pool: Some(10),
             ticking_enabled: Some(true),
             interval_default: Some(10800),
             interval_review: Some(7200),
             interval_test: Some(3600),
+            ..Default::default()
         };
         assert_eq!(shim.tick_interval_seconds(Some(&in_review), &project), 7200);
         assert!(!shim.has_active_run(graph.issue).await.expect("active"));

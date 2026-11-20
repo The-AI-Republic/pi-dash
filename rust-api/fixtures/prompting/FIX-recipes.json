@@ -73,10 +73,10 @@
         "work_kind_coding": "coding"
       },
       "local_recipe_lengths": {
-        "coding-task": 17,
-        "review": 11,
-        "scheduler": 6,
-        "test": 11
+        "coding-task": 13,
+        "review": 8,
+        "test": 8,
+        "scheduler": 6
       },
       "local_recipes": {
         "coding-task": [
@@ -85,39 +85,46 @@
             "slot": "context"
           },
           "relationships",
-          "session-framing",
+          "run-framing",
           "pidash-cli",
-          "task-lifecycle",
+          "lifecycle",
           "default-posture",
           "autonomy",
-          "state-routing",
           "analyze-and-scope",
-          "workpad-setup",
+          "workpad",
           {
             "slot": "execute"
           },
           "implementation",
-          "blocking",
-          "guardrails",
-          "workpad-template",
-          "ending-run"
+          "blocking"
         ],
         "review": [
           "review-intro",
           {
             "slot": "context"
           },
-          "session-framing",
+          "run-framing",
           "pidash-cli",
-          "task-lifecycle",
-          "workpad-context",
-          "review-cycle",
+          "lifecycle",
+          "review",
           {
             "slot": "review"
           },
-          "blocking",
-          "guardrails",
-          "ending-run"
+          "blocking"
+        ],
+        "test": [
+          "test-intro",
+          {
+            "slot": "context"
+          },
+          "run-framing",
+          "pidash-cli",
+          "lifecycle",
+          "test",
+          {
+            "slot": "test"
+          },
+          "blocking"
         ],
         "scheduler": [
           "scheduler-intro",
@@ -126,23 +133,6 @@
           "scheduler-task",
           "guardrails",
           "scheduler-ending"
-        ],
-        "test": [
-          "test-intro",
-          {
-            "slot": "context"
-          },
-          "session-framing",
-          "pidash-cli",
-          "task-lifecycle",
-          "workpad-context",
-          "test-cycle",
-          {
-            "slot": "test"
-          },
-          "blocking",
-          "guardrails",
-          "ending-run"
         ]
       },
       "managed_is_alias_of_local": true,
@@ -162,66 +152,52 @@
             "general": [
               "intro",
               "relationships",
-              "session-framing",
+              "run-framing",
               "pidash-cli",
-              "task-lifecycle",
+              "lifecycle",
               "default-posture",
               "autonomy",
-              "state-routing",
               "analyze-and-scope",
-              "workpad-setup",
+              "workpad",
               "general.execute",
               "implementation",
-              "blocking",
-              "guardrails",
-              "workpad-template",
-              "ending-run"
+              "blocking"
             ],
             "software": [
               "intro",
               "software.context",
               "relationships",
-              "session-framing",
+              "run-framing",
               "pidash-cli",
-              "task-lifecycle",
+              "lifecycle",
               "default-posture",
               "autonomy",
-              "state-routing",
               "analyze-and-scope",
-              "workpad-setup",
+              "workpad",
               "software.execute",
               "implementation",
-              "blocking",
-              "guardrails",
-              "workpad-template",
-              "ending-run"
+              "blocking"
             ]
           },
           "review": {
             "general": [
               "review-intro",
-              "session-framing",
+              "run-framing",
               "pidash-cli",
-              "task-lifecycle",
-              "workpad-context",
-              "review-cycle",
+              "lifecycle",
+              "review",
               "general.review",
-              "blocking",
-              "guardrails",
-              "ending-run"
+              "blocking"
             ],
             "software": [
               "review-intro",
               "software.context",
-              "session-framing",
+              "run-framing",
               "pidash-cli",
-              "task-lifecycle",
-              "workpad-context",
-              "review-cycle",
+              "lifecycle",
+              "review",
               "software.review",
-              "blocking",
-              "guardrails",
-              "ending-run"
+              "blocking"
             ]
           },
           "scheduler": {
@@ -245,28 +221,22 @@
           "test": {
             "general": [
               "test-intro",
-              "session-framing",
+              "run-framing",
               "pidash-cli",
-              "task-lifecycle",
-              "workpad-context",
-              "test-cycle",
+              "lifecycle",
+              "test",
               "general.test",
-              "blocking",
-              "guardrails",
-              "ending-run"
+              "blocking"
             ],
             "software": [
               "test-intro",
               "software.context",
-              "session-framing",
+              "run-framing",
               "pidash-cli",
-              "task-lifecycle",
-              "workpad-context",
-              "test-cycle",
+              "lifecycle",
+              "test",
               "software.test",
-              "blocking",
-              "guardrails",
-              "ending-run"
+              "blocking"
             ]
           }
         },
@@ -305,9 +275,10 @@
     }
   },
   "fixture_id": "FIX-recipes",
-  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world). PIDASHCONV-1058 re-sync: content-derived fields regenerated from origin/main@3267ceb9 via /tmp/fx1058_gen.py (registry.py + recipes.py loaded by path; stdlib-only, no Django). PDASHOSS01-234 re-sync: content-derived fields + work types regenerated from the work-type branch @28421e56e via fx234_gen.py (registry.py + recipes.py + work_types.py imported without Django).",
+  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world). PIDASHCONV-1058 re-sync: content-derived fields regenerated from origin/main@3267ceb9 via /tmp/fx1058_gen.py (registry.py + recipes.py loaded by path; stdlib-only, no Django). PDASHOSS01-234 re-sync: content-derived fields + work types regenerated from the work-type branch @28421e56e via fx234_gen.py (registry.py + recipes.py + work_types.py imported without Django). LEAN-WORKFLOW-C (design .ai_design/lean_agent_workflow/design.md, D13/\u00a710.2): re-based on the Rust implementation; these entries NO LONGER MIRROR Django. Content-derived fields regenerated from the Rust section files and recipes.rs.",
   "notes": [
-    "MANAGED_RECIPES is dict(RECIPES) (equal copy, not alias); recipe_for('direct') raises RecipeNotFound (cloud kinds unreachable here); recipe errors read 'no recipe for kind %r' / 'no Cloud Agent recipe for kind %r'."
+    "MANAGED_RECIPES is dict(RECIPES) (equal copy, not alias); recipe_for('direct') raises RecipeNotFound (cloud kinds unreachable here); recipe errors read 'no recipe for kind %r' / 'no Cloud Agent recipe for kind %r'.",
+    "LEAN-WORKFLOW-C (design .ai_design/lean_agent_workflow/design.md, D13/\u00a710.2): re-based on the Rust implementation; these entries NO LONGER MIRROR Django. Content-derived fields regenerated from the Rust section files and recipes.rs."
   ],
   "ported_from": "28421e56e",
   "trace": [

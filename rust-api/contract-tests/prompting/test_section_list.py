@@ -4,6 +4,8 @@ Route (apps/api/pi_dash/prompting/urls.py):
   GET /api/workspaces/<slug>/prompt-sections?kind=&scope=
 """
 
+from _harness.diffs import expect
+
 SECTION_KEYS = {
     "key", "title", "customizable", "body", "default_body", "source",
     "version", "needs_attention", "editable_at_workspace",
@@ -12,13 +14,24 @@ SECTION_KEYS = {
 
 # coding-task recipe order, pinned from prompting/recipes.py, with the
 # work-type slots filled for the default work type (`software`,
-# PDASHOSS01-234).
-CODING_TASK_ORDER = (
+# PDASHOSS01-234). DIFF-54: the lean agent workflow change replaced the
+# Rust issue-run recipes (design .ai_design/lean_agent_workflow/design.md
+# §9.2), so each backend pins its own order.
+DJANGO_CODING_TASK_ORDER = (
     "intro", "software.context", "relationships", "session-framing",
     "pidash-cli", "task-lifecycle", "default-posture", "autonomy",
     "state-routing", "analyze-and-scope", "workpad-setup",
     "software.execute", "implementation", "blocking", "guardrails",
     "workpad-template", "ending-run",
+)
+RUST_CODING_TASK_ORDER = (
+    "intro", "software.context", "relationships", "run-framing",
+    "pidash-cli", "lifecycle", "default-posture", "autonomy",
+    "analyze-and-scope", "workpad", "software.execute", "implementation",
+    "blocking",
+)
+CODING_TASK_ORDER = expect(
+    "DIFF-54", django=DJANGO_CODING_TASK_ORDER, rust=RUST_CODING_TASK_ORDER
 )
 
 

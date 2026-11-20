@@ -82,10 +82,16 @@ pub struct SettingsKey {
 }
 
 /// Every known settings key, in wire order.
-pub const KNOWN_KEYS: &[SettingsKey] = &[SettingsKey {
-    name: "issue_run_policy",
-    role: SettingsRole::ProjectAdmin,
-}];
+pub const KNOWN_KEYS: &[SettingsKey] = &[
+    SettingsKey {
+        name: "issue_run_policy",
+        role: SettingsRole::ProjectAdmin,
+    },
+    SettingsKey {
+        name: "agent_stages",
+        role: SettingsRole::ProjectAdmin,
+    },
+];
 
 /// Who may a human move an issue's state or start/cancel/release an
 /// agent run on it (NEWPIDASH-261). Stored as the `issue_run_policy`
@@ -100,6 +106,78 @@ pub enum IssueRunPolicy {
     ProjectMembers,
 }
 
+/// How the optional agent stages (In Review, In Test) are chosen
+/// (lean agent workflow, design §5.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStagesMode {
+    /// Both stages are available; the agent picks the path per issue.
+    #[default]
+    Auto,
+    /// The project toggles In Review and In Test itself.
+    Custom,
+}
+
+/// Which stages run an agent automatically. Stored as the
+/// `agent_stages` key; a missing key reads as Auto with both stages on.
+/// `review` / `test` are only read in [`AgentStagesMode::Custom`], but
+/// are kept in Auto so the toggles reappear as the user left them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentStages {
+    pub mode: AgentStagesMode,
+    pub review: bool,
+    pub test: bool,
+}
+
+impl Default for AgentStages {
+    fn default() -> Self {
+        Self {
+            mode: AgentStagesMode::Auto,
+            review: true,
+            test: true,
+        }
+    }
+}
+
+impl AgentStages {
+    /// Whether the review stage runs an agent automatically.
+    pub fn review_enabled(&self) -> bool {
+        self.mode == AgentStagesMode::Auto || self.review
+    }
+
+    /// Whether the test stage runs an agent automatically.
+    pub fn test_enabled(&self) -> bool {
+        self.mode == AgentStagesMode::Auto || self.test
+    }
+
+    /// Whether the agent chooses the path per issue (Auto).
+    pub fn agent_decides(&self) -> bool {
+        self.mode == AgentStagesMode::Auto
+    }
+}
+
+/// The `agent_stages` value of a stored settings blob, read on its own:
+/// a bad value under any other key does not turn stages back on, and a
+/// missing or malformed `agent_stages` reads as the default (Auto).
+pub fn agent_stages_of(settings: &Value) -> AgentStages {
+    settings
+        .get("agent_stages")
+        .and_then(|value| serde_json::from_value::<AgentStages>(value.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// The stage switches a stored settings blob resolves to (both on for a
+/// missing row, a missing key or a malformed value) — the one conversion
+/// every reader uses.
+pub fn stage_switches_of(settings: &Value) -> pidash_types::orchestration::StageSwitches {
+    let stages = agent_stages_of(settings);
+    pidash_types::orchestration::StageSwitches {
+        review: stages.review_enabled(),
+        test: stages.test_enabled(),
+    }
+}
+
 /// The typed settings: the single definition of each key, its type
 /// and its default. Stored as one JSON object; missing keys read as
 /// their `#[serde(default)]` value.
@@ -110,6 +188,9 @@ pub struct ProjectSettings {
     /// `creator_and_assignees`, so `{}` (every existing project) is
     /// the strict default mode.
     pub issue_run_policy: IssueRunPolicy,
+    /// Which optional stages run an agent (lean agent workflow).
+    /// Missing reads as Auto with both stages on.
+    pub agent_stages: AgentStages,
 }
 
 /// The validated read of one stored blob: the typed settings plus
@@ -241,10 +322,40 @@ fn check_key_value(key: &str, value: &Value) -> Result<(), SettingsError> {
                 detail: "must be \"creator_and_assignees\" or \"project_members\"".to_owned(),
             }),
         },
+        "agent_stages" => check_agent_stages(value),
         _ => Err(SettingsError::UnknownKey {
             key: key.to_owned(),
         }),
     }
+}
+
+/// Type-check an `agent_stages` value: an object with a required
+/// `mode` (`"auto"` | `"custom"`) and optional boolean `review` /
+/// `test`; any other key is invalid.
+fn check_agent_stages(value: &Value) -> Result<(), SettingsError> {
+    let invalid = |detail: &str| SettingsError::InvalidValue {
+        key: "agent_stages".to_owned(),
+        detail: detail.to_owned(),
+    };
+    let Value::Object(object) = value else {
+        return Err(invalid("must be an object"));
+    };
+    match object.get("mode") {
+        Some(Value::String(m)) if matches!(m.as_str(), "auto" | "custom") => {}
+        _ => return Err(invalid("mode must be \"auto\" or \"custom\"")),
+    }
+    for (k, v) in object {
+        match k.as_str() {
+            "mode" => {}
+            "review" | "test" => {
+                if !v.is_boolean() {
+                    return Err(invalid(&format!("{k} must be a boolean")));
+                }
+            }
+            other => return Err(invalid(&format!("unknown field {other}"))),
+        }
+    }
+    Ok(())
 }
 
 /// Parse one stored blob (the `projects.settings` column for one
@@ -526,8 +637,86 @@ mod tests {
         assert!(parsed.extra.is_empty());
         assert_eq!(
             render(&parsed.settings),
-            json!({"issue_run_policy": "creator_and_assignees"})
+            json!({
+                "issue_run_policy": "creator_and_assignees",
+                "agent_stages": {"mode": "auto", "review": true, "test": true}
+            })
         );
+    }
+
+    #[test]
+    fn agent_stages_default_is_auto_with_both_stages() {
+        let parsed = parse_stored(&empty_bag()).expect("empty bag parses");
+        let stages = parsed.settings.agent_stages;
+        assert_eq!(stages.mode, AgentStagesMode::Auto);
+        assert!(stages.review_enabled());
+        assert!(stages.test_enabled());
+        assert!(stages.agent_decides());
+    }
+
+    #[test]
+    fn agent_stages_reads_stored_shapes() {
+        let stored = obj(&[(
+            "agent_stages",
+            json!({"mode": "custom", "review": false, "test": true}),
+        )]);
+        let stages = parse_stored(&stored).unwrap().settings.agent_stages;
+        assert!(!stages.agent_decides());
+        assert!(!stages.review_enabled());
+        assert!(stages.test_enabled());
+
+        // Missing toggles default to on.
+        let stored = obj(&[("agent_stages", json!({"mode": "custom"}))]);
+        let stages = parse_stored(&stored).unwrap().settings.agent_stages;
+        assert!(stages.review_enabled() && stages.test_enabled());
+
+        // Auto ignores stored toggles.
+        let stored = obj(&[(
+            "agent_stages",
+            json!({"mode": "auto", "review": false, "test": false}),
+        )]);
+        let stages = parse_stored(&stored).unwrap().settings.agent_stages;
+        assert!(stages.review_enabled() && stages.test_enabled());
+        assert!(!stages.review && !stages.test);
+    }
+
+    #[test]
+    fn agent_stages_validation() {
+        for ok in [
+            json!({"mode": "auto"}),
+            json!({"mode": "custom", "review": false}),
+            json!({"mode": "custom", "review": true, "test": false}),
+        ] {
+            assert!(
+                validate_update(&obj(&[("agent_stages", ok.clone())])).is_ok(),
+                "{ok}"
+            );
+        }
+        for bad in [
+            json!("auto"),
+            json!({}),
+            json!({"mode": "manual"}),
+            json!({"mode": "custom", "review": "yes"}),
+            json!({"mode": "custom", "progress": false}),
+        ] {
+            assert!(
+                matches!(
+                    validate_update(&obj(&[("agent_stages", bad.clone())])),
+                    Err(SettingsError::InvalidValue { .. })
+                ),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_stages_requires_project_admin() {
+        let fragment = obj(&[("agent_stages", json!({"mode": "auto"}))]);
+        assert!(matches!(
+            authorize_and_validate(&fragment, ROLE_MEMBER, ROLE_MEMBER),
+            Err(SettingsError::Forbidden { .. })
+        ));
+        assert!(authorize_and_validate(&fragment, ROLE_ADMIN, ROLE_MEMBER).is_ok());
     }
 
     #[test]
@@ -541,7 +730,10 @@ mod tests {
         assert!(parsed.extra.is_empty());
         assert_eq!(
             render(&parsed.settings),
-            json!({"issue_run_policy": "project_members"})
+            json!({
+                "issue_run_policy": "project_members",
+                "agent_stages": {"mode": "auto", "review": true, "test": true}
+            })
         );
     }
 

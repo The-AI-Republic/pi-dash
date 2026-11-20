@@ -234,7 +234,7 @@ fn json_string(value: &str) -> String {
 
 /// Map a database/driver failure to the generic 500 while logging the site
 /// and error for operators (no secrets: messages never include tokens).
-fn db_error<E: std::fmt::Display>(error: E, site: &str) -> Denial {
+pub(super) fn db_error<E: std::fmt::Display>(error: E, site: &str) -> Denial {
     tracing::warn!(%error, site, "v1_work_items actions database failure");
     Denial::ServerError
 }
@@ -480,7 +480,7 @@ async fn load_timezone_name(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Optio
 /// `KeyError` branch (`api/views/base.py:160-164`). An EMPTY zone 500s:
 /// `ZoneInfo('')` raises `ValueError` (not `KeyError`), which falls
 /// through to the generic 500 (`api/views/base.py:166-171`).
-fn activate_timezone(timezone: Option<&str>) -> Result<Tz, Denial> {
+pub(super) fn activate_timezone(timezone: Option<&str>) -> Result<Tz, Denial> {
     match timezone {
         None => Ok(chrono_tz::UTC),
         Some("") => Err(Denial::ServerError),
@@ -742,7 +742,7 @@ pub struct YieldRun {
     pub scheduler_binding_id: Option<Uuid>,
 }
 
-async fn fetch_yield_run(
+pub(super) async fn fetch_yield_run(
     pool: &PgPool,
     slug: &str,
     run_id: &Uuid,
@@ -760,7 +760,7 @@ async fn fetch_yield_run(
 
 /// `is_workspace_member` (`core/permissions.py:28-34`): any active
 /// membership row. `deleted_at IS NULL` is the manager scope.
-async fn is_workspace_member(
+pub(super) async fn is_workspace_member(
     pool: &PgPool,
     user_id: &Uuid,
     workspace_id: &Uuid,
@@ -796,6 +796,7 @@ struct ProjectLookup {
     agent_default_interval_seconds: Option<i32>,
     agent_review_default_interval_seconds: Option<i32>,
     agent_test_default_interval_seconds: Option<i32>,
+    settings: serde_json::Value,
     default_agent_executor: String,
     project_lead_id: Option<Uuid>,
     default_assignee_id: Option<Uuid>,
@@ -810,6 +811,7 @@ pub async fn fetch_project(pool: &PgPool, project_id: &Uuid) -> Result<Option<Pr
             projects::Column::AgentDefaultIntervalSeconds,
             projects::Column::AgentReviewDefaultIntervalSeconds,
             projects::Column::AgentTestDefaultIntervalSeconds,
+            projects::Column::Settings,
             projects::Column::DefaultAgentExecutor,
             projects::Column::ProjectLeadId,
             projects::Column::DefaultAssigneeId,
@@ -833,7 +835,9 @@ pub async fn fetch_project(pool: &PgPool, project_id: &Uuid) -> Result<Option<Pr
             agent_test_default_interval_seconds: row
                 .agent_test_default_interval_seconds
                 .map(i64::from),
-        };
+            ..Default::default()
+        }
+        .with_stages(&row.settings);
         ProjectRow {
             policy,
             default_agent_executor: row.default_agent_executor,
@@ -1176,7 +1180,7 @@ pub fn draw_jitter(
 /// microseconds only when nonzero (the `app_integrations` precedent).
 /// Python datetimes carry only micros, so sub-microsecond nanos truncate
 /// first (PIDASHCONV-867); `AutoSi` would otherwise emit 9 digits.
-fn isoformat(dt: &DateTime<Utc>) -> String {
+pub(super) fn isoformat(dt: &DateTime<Utc>) -> String {
     let truncated =
         DateTime::from_timestamp_micros(dt.timestamp_micros()).expect("micros in range");
     truncated.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false)
@@ -1892,7 +1896,7 @@ async fn run_ai_inner(
 /// `run.done_payload = payload; run.save(update_fields=["done_payload"])`
 /// (`:1300-1308`): one column, no other stamp. `agent_run` is not a
 /// design §4 table, so the entity write runs here.
-async fn write_done_payload<C: ConnectionTrait>(
+pub(super) async fn write_done_payload<C: ConnectionTrait>(
     db: &C,
     run_id: Uuid,
     payload: Value,

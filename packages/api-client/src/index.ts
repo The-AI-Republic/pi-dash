@@ -136,7 +136,11 @@ export type {
 export { Project, ProjectList, listProjects } from "./contracts/projects.js";
 export { ProjectLite } from "./contracts/project-lite.js";
 export {
+  AGENT_STAGES_MODE_AUTO,
+  AGENT_STAGES_MODE_CUSTOM,
   AgentExecutorOption,
+  AgentStages,
+  AgentStagesMode,
   DEDICATED_RUNNER_LOST_FAIL_TO_BACKLOG,
   DEDICATED_RUNNER_LOST_FALL_BACK,
   ISSUE_RUN_POLICY_CREATOR_AND_ASSIGNEES,

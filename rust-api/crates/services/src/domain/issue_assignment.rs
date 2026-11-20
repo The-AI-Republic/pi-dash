@@ -3032,8 +3032,8 @@ async fn post_fall_back_comment(
     Ok(())
 }
 
-/// Ticking-state check for the bounce arms (`is_ticking_state`,
-/// `agent_phases.py:149-162`).
+/// Ticking-state check for the bounce arms: the issue sits in a stage
+/// that runs automatically under its project's stage switches.
 async fn is_ticking_issue(
     db: &impl ConnectionTrait,
     issue: &issues::Model,
@@ -3047,9 +3047,22 @@ async fn is_ticking_issue(
     else {
         return Ok(false);
     };
-    Ok(crate::assistant::tools_runs::is_ticking_state(
-        Some(state.group.as_str()),
-        Some(state.name.as_str()),
+    let settings: Option<serde_json::Value> =
+        pidash_db::entity::projects::Entity::find_by_id(issue.project_id)
+            .select_only()
+            .column(pidash_db::entity::projects::Column::Settings)
+            .into_tuple()
+            .one(db)
+            .await?;
+    let switches = crate::domain::project_settings::stage_switches_of(
+        &settings.unwrap_or(serde_json::Value::Null),
+    );
+    Ok(pidash_types::orchestration::stage_runs_automatically(
+        Some(&pidash_types::orchestration::StateRef {
+            group: state.group.as_str(),
+            name: state.name.as_str(),
+        }),
+        switches,
     ))
 }
 

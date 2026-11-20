@@ -1580,6 +1580,81 @@ async fn fetch_newest_runs_on_issue(
     .map_err(|error| db_error(error, "fetch-runs"))
 }
 
+/// The refusal message for an issue run's move into `requested`, or
+/// `None` when the move is allowed ([`agent_move_refusal`]).
+///
+/// [`agent_move_refusal`]: pidash_types::orchestration::agent_move_refusal
+pub fn agent_move_message(
+    state_name: &str,
+    refusal: pidash_types::orchestration::AgentMoveRefusal,
+) -> String {
+    use pidash_types::orchestration::{AgentMoveRefusal, AI_COMPLETED_STATE_NAME};
+    match refusal {
+        AgentMoveRefusal::HumanOnly => format!(
+            "\"{state_name}\" is for a person to set; an agent finishes in \"{AI_COMPLETED_STATE_NAME}\" or stays where it is"
+        ),
+        AgentMoveRefusal::StageOff => format!(
+            "\"{state_name}\" does not run an agent in this project; move the issue to a state that does, or stay where it is"
+        ),
+    }
+}
+
+/// [`agent_move_message`] for a state-changing body, reading the target
+/// state and the project's stage switches.
+async fn gate_agent_state_change(
+    pool: &PgPool,
+    project_id: Uuid,
+    current_state: Option<Uuid>,
+    body: &Value,
+    from_form: bool,
+) -> Result<Option<String>, Denial> {
+    let requested = match body.get("state") {
+        Some(Value::String(text)) if !(from_form && text.is_empty()) => {
+            match text.parse::<Uuid>() {
+                Ok(id) => id,
+                Err(_) => return Ok(None),
+            }
+        }
+        _ => return Ok(None),
+    };
+    if Some(requested) == current_state {
+        return Ok(None);
+    }
+    use sea_orm::QuerySelect as _;
+    let orm = pidash_db::pool::sea_orm_connection(pool);
+    let target: Option<(String, String)> = pidash_db::entity::states::Entity::find_by_id(requested)
+        .select_only()
+        .columns([
+            pidash_db::entity::states::Column::Group,
+            pidash_db::entity::states::Column::Name,
+        ])
+        .into_tuple()
+        .one(&orm)
+        .await
+        .map_err(|error| db_error(error, "agent-move-state"))?;
+    let Some((group, name)) = target else {
+        return Ok(None);
+    };
+    let settings: Option<Value> = pidash_db::entity::projects::Entity::find_by_id(project_id)
+        .select_only()
+        .column(pidash_db::entity::projects::Column::Settings)
+        .into_tuple()
+        .one(&orm)
+        .await
+        .map_err(|error| db_error(error, "agent-move-settings"))?;
+    let switches = pidash_services::domain::project_settings::stage_switches_of(
+        &settings.unwrap_or(Value::Null),
+    );
+    let state = pidash_types::orchestration::StateRef {
+        group: &group,
+        name: &name,
+    };
+    Ok(
+        pidash_types::orchestration::agent_move_refusal(&state, switches)
+            .map(|refusal| agent_move_message(&name, refusal)),
+    )
+}
+
 /// NEWPIDASH-261: the v1 state-change gate. Returns `Some(body)` when
 /// the body attempts a state move the actor may not make under the
 /// project's `issue_run_policy` (the caller answers 403 with the
@@ -1647,7 +1722,7 @@ async fn gate_v1_state_change(
     }
 }
 
-async fn patch_issue_inner(
+pub(super) async fn patch_issue_inner(
     state: &AppState,
     headers: &HeaderMap,
     slug: &str,
@@ -1776,6 +1851,26 @@ async fn patch_issue_inner(
     .await?
     {
         return Err(Denial::ForbiddenBody(body));
+    }
+    // Lean agent workflow §6.5 / §7: an issue run moving its own issue may
+    // not close it (Done, Cancelled) or park it in a stage the project
+    // switched off. Shared by `finish` and the `issue patch` fallback.
+    let own_issue_run = agent_context
+        && run_by_id
+            .as_ref()
+            .is_some_and(|run| run.work_item_id == Some(*pk));
+    if own_issue_run {
+        if let Some(message) = gate_agent_state_change(
+            &pre.pool,
+            project_id,
+            current_state,
+            &parsed_body.value,
+            parsed_body.from_form,
+        )
+        .await?
+        {
+            return Err(Denial::BadError(message));
+        }
     }
     let orm = state.orm().ok_or(Denial::ServerError)?;
     let ctx = domain_write_ctx(&pre, &project_id);

@@ -3,28 +3,23 @@ key: review-intro
 title: Review context
 customizable: locked
 ---
-
-You are reviewing the work product of a previous implementation pass on
-Pi Dash issue `{{ issue.identifier }}`. "Review" can mean different things
-depending on what was produced.
-
-This issue belongs to the Project: {{ project.name }} ({{ project.identifier }})
+You are reviewing the work product of an earlier run on Pi Dash issue `{{ issue.identifier }}`, in project {{ project.name }} ({{ project.identifier }}).
 {% if project.description %}
 {{ project.description }}
 
-Project-level instructions in the description apply to this review pass as well as to implementation.
+Project-level instructions in the description apply to this review as well.
 {% endif %}
 Issue: {{ issue.title }}
-Issue Description: {{ issue.description }}
 
-Recent activity (chronological — humans and the agent's own prior runs):
+Issue description:
+{{ issue.description if issue.description else "No description provided." }}
+{% if handoff %}
+Hand-off from the In Progress run (what was produced, the acceptance criteria, how to verify, where to look first):
+
+{{ handoff }}
+{% endif %}{% if stage_history %}
+Runs so far on this issue (oldest first):
+{{ stage_history }}
+{% endif %}
+Comments to date (chronological — people and earlier runs; a later human comment overrides the hand-off):
 {{ comments_section }}
-
-Latest implementation run output (read this carefully — it is your
-authoritative record of what was produced):
-{{ parent_done_payload }}
-
-If there is no prior run output above and no workpad, a human moved the
-issue straight into this stage: the work product is what the issue links
-to — an attached deliverable, a document, the description — and you create
-the workpad's `### Path to done` block yourself (see "Workpad").

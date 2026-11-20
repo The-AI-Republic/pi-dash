@@ -428,13 +428,14 @@ fn lock_ticker_select(
 /// agent_test_default_interval_seconds FROM projects WHERE id = $1`,
 /// `dispatch.rs:183`). `Option` decode keeps the `getattr`-default rows
 /// the old `map_policy` read; the cadence columns widen `i32 → i64` there.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, sea_orm::FromQueryResult)]
+#[derive(Debug, Clone, PartialEq, Eq, sea_orm::FromQueryResult)]
 struct ClockPolicyRow {
     agent_ticking_enabled: Option<bool>,
     agent_default_max_ticks: Option<i32>,
     agent_default_interval_seconds: Option<i32>,
     agent_review_default_interval_seconds: Option<i32>,
     agent_test_default_interval_seconds: Option<i32>,
+    settings: serde_json::Value,
 }
 
 impl From<ClockPolicyRow> for ProjectClockPolicy {
@@ -449,7 +450,9 @@ impl From<ClockPolicyRow> for ProjectClockPolicy {
             agent_test_default_interval_seconds: row
                 .agent_test_default_interval_seconds
                 .map(i64::from),
+            ..Default::default()
         }
+        .with_stages(&row.settings)
     }
 }
 
@@ -464,6 +467,7 @@ fn clock_policy_select(project_id: Uuid) -> sea_orm::Select<pidash_db::entity::p
             projects::Column::AgentDefaultIntervalSeconds,
             projects::Column::AgentReviewDefaultIntervalSeconds,
             projects::Column::AgentTestDefaultIntervalSeconds,
+            projects::Column::Settings,
         ])
 }
 
@@ -1088,8 +1092,11 @@ mod ticker_orch_orm_tests {
             agent_default_interval_seconds: Some(10800),
             agent_review_default_interval_seconds: Some(3600),
             agent_test_default_interval_seconds: Some(7200),
+            settings: serde_json::json!({"agent_stages": {"mode": "custom", "review": false}}),
         };
         let policy: ProjectClockPolicy = row.into();
+        assert!(!policy.review_enabled);
+        assert!(policy.test_enabled);
         assert_eq!(policy.agent_ticking_enabled, Some(true));
         assert_eq!(policy.agent_default_max_ticks, Some(-1));
         assert_eq!(policy.agent_default_interval_seconds, Some(10800));

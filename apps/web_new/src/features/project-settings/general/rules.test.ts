@@ -47,6 +47,8 @@ import {
   selectCadence,
   shapeBudget,
   shapeIdentifier,
+  stagesChanged,
+  stagesFrom,
   uploadedEmblem,
   validateGeneralFields,
   type GeneralFormValues,
@@ -263,6 +265,60 @@ describe("budgetOnSave", () => {
     expect(budgetOnSave(values({ budget: "12" }))).toBe(12);
     expect(budgetOnSave(values({ budget: "" }))).toBe(DEFAULT_MAX_TICKS);
     expect(budgetOnSave(values({ budget: "0" }))).toBe(1);
+  });
+});
+
+describe("stages", () => {
+  it("reads a missing key as Auto with both stages on", () => {
+    expect(stagesFrom(undefined)).toEqual({ stagesMode: "auto", reviewStage: true, testStage: true });
+    expect(stagesFrom({})).toEqual({ stagesMode: "auto", reviewStage: true, testStage: true });
+    expect(generalFormFrom(STORED)).toMatchObject({ stagesMode: "auto", reviewStage: true, testStage: true });
+  });
+
+  it("reads each stored shape onto the form", () => {
+    expect(stagesFrom({ agent_stages: { mode: "custom", review: false, test: true } })).toEqual({
+      stagesMode: "custom",
+      reviewStage: false,
+      testStage: true,
+    });
+    expect(stagesFrom({ agent_stages: { mode: "custom" } })).toEqual({
+      stagesMode: "custom",
+      reviewStage: true,
+      testStage: true,
+    });
+    // Auto keeps the stored toggles so they reappear under Customize.
+    expect(stagesFrom({ agent_stages: { mode: "auto", review: false, test: false } })).toEqual({
+      stagesMode: "auto",
+      reviewStage: false,
+      testStage: false,
+    });
+  });
+
+  it("detects a change against the stored setting", () => {
+    expect(stagesChanged(values(), STORED)).toBe(false);
+    expect(stagesChanged(values({ stagesMode: "custom" }), STORED)).toBe(true);
+    expect(stagesChanged(values({ testStage: false }), STORED)).toBe(true);
+  });
+
+  it("writes the whole key only when the stage setting changed", () => {
+    expect(buildGeneralPayload({ values: values(), cadenceDirty: false }).settings).toBeUndefined();
+    expect(
+      buildGeneralPayload({ values: values({ stagesMode: "auto" }), cadenceDirty: false, stagesDirty: true }).settings
+    ).toEqual({ agent_stages: { mode: "auto", review: true, test: true } });
+    expect(
+      buildGeneralPayload({
+        values: values({ stagesMode: "custom", reviewStage: false, testStage: true }),
+        cadenceDirty: false,
+        stagesDirty: true,
+      }).settings
+    ).toEqual({ agent_stages: { mode: "custom", review: false, test: true } });
+    expect(
+      buildGeneralPayload({
+        values: values({ stagesMode: "custom", reviewStage: false, testStage: false }),
+        cadenceDirty: false,
+        stagesDirty: true,
+      }).settings
+    ).toEqual({ agent_stages: { mode: "custom", review: false, test: false } });
   });
 });
 

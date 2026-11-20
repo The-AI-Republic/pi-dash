@@ -208,6 +208,14 @@ pub fn routes() -> Router<AppState> {
             "/api/v1/workspaces/{slug}/agent-runs/{run_id}/yield/",
             owned_action(axum::routing::post(post_yield)),
         )
+        // Lean agent workflow §8.1 — agent-run finish (post): the one
+        // closing command of an issue run.
+        .route(
+            "/api/v1/workspaces/{slug}/agent-runs/{run_id}/finish/",
+            owned_action(axum::routing::post(
+                super::handlers_finish::post_finish,
+            )),
+        )
         // Activities (IssueActivityListAPIEndpoint `views/issue.py:2124-2175`).
         .route(
             "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/activities/",

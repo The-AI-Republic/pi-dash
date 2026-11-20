@@ -286,7 +286,8 @@ where
                 .await
                 .map_err(db_err)?
         };
-        let Some((ticking_enabled, max_ticks, interval, interval_review, interval_test)) = row
+        let Some((ticking_enabled, max_ticks, interval, interval_review, interval_test, settings)) =
+            row
         else {
             return Err(CreationError::MissingRow(format!(
                 "no clock policy {project_id}"
@@ -298,7 +299,9 @@ where
             agent_default_interval_seconds: Some(i64::from(interval)),
             agent_review_default_interval_seconds: Some(i64::from(interval_review)),
             agent_test_default_interval_seconds: Some(i64::from(interval_test)),
-        })
+            ..Default::default()
+        }
+        .with_stages(&settings))
     }
 
     async fn binding(&mut self, binding_id: Uuid) -> Result<BindingView, CreationError> {

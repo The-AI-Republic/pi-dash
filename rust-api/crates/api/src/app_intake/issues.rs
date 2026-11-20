@@ -3054,12 +3054,13 @@ async fn fetch_ticker_owned(
         .column(proj_entity::Column::AgentReviewDefaultIntervalSeconds)
         .column(proj_entity::Column::AgentTestDefaultIntervalSeconds)
         .column(proj_entity::Column::AgentTickingEnabled)
-        .into_tuple::<(i32, i32, i32, i32, bool)>()
+        .column(proj_entity::Column::Settings)
+        .into_tuple::<(i32, i32, i32, i32, bool, serde_json::Value)>()
         .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-    let (pool_size, impl_interval, review_interval, test_interval, ticking_enabled) =
-        policy_row.unwrap_or((10, 10800, 10800, 10800, true));
+    let (pool_size, impl_interval, review_interval, test_interval, ticking_enabled, settings) =
+        policy_row.unwrap_or((10, 10800, 10800, 10800, true, serde_json::Value::Null));
     let state: Option<(String, String)> = match issue.state_id {
         None => None,
         Some(state_id) => {
@@ -3107,7 +3108,9 @@ async fn fetch_ticker_owned(
             agent_default_interval_seconds: Some(i64::from(impl_interval)),
             agent_review_default_interval_seconds: Some(i64::from(review_interval)),
             agent_test_default_interval_seconds: Some(i64::from(test_interval)),
-        },
+            ..Default::default()
+        }
+        .with_stages(&settings),
         state_group,
         state_name,
     }))
