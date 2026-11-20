@@ -3698,13 +3698,20 @@ export interface ParityDriver {
   assistantIsScrolledToBottom(): Promise<boolean>;
   /** Follow a tool-activity deep link. */
   assistantClickToolLink(activityIndex: number, linkIndex: number): Promise<void>;
-  /** Sidebar threads top to bottom with hrefs and the active mark. */
+  /**
+   * History threads top to bottom with hrefs and the active mark: the
+   * oracle's persistent rail reads directly, while the new app opens the
+   * Chat History dialog first (NEWPIDASH-337).
+   */
   assistantSidebarThreads(): Promise<AssistantSidebarThread[]>;
-  /** Whether the sidebar shows the no-conversations placeholder. */
+  /**
+   * Whether the history surface shows the no-conversations placeholder:
+   * the oracle rail or the new app's Chat History dialog.
+   */
   assistantSidebarEmptyVisible(): Promise<boolean>;
-  /** Click the sidebar's New chat entry. */
+  /** Click the New chat entry (the oracle rail or the new app page header). */
   assistantClickNewChat(): Promise<void>;
-  /** Click a sidebar thread by index. */
+  /** Click a history thread by index (oracle rail row or new app dialog row). */
   assistantClickSidebarThread(index: number): Promise<void>;
   /** Whether the dashboard assistant card renders. */
   assistantCardVisible(): Promise<boolean>;
@@ -3797,13 +3804,24 @@ export interface ParityDriver {
     transcribe: number;
     remove: number;
   }>;
-  /** Visible texts of buttons inside the assistant sidebar (negative proofs). */
+  /**
+   * Visible texts of buttons inside the assistant history surface
+   * (negative proofs): the oracle rail or the new app's Chat History
+   * dialog, which is links-only.
+   */
   assistantSidebarButtons(): Promise<string[]>;
   /** Rename/archive/delete-ish controls in the assistant layout (negative proofs). */
   assistantThreadManagementControls(): Promise<string[]>;
-  /** Header text of the assistant sidebar. */
+  /**
+   * Label of the assistant history surface: the oracle rail's brand header
+   * or the new app's Chat History button (NEWPIDASH-337).
+   */
   assistantSidebarHeader(): Promise<string | null>;
-  /** Row element kinds of the sidebar New-chat entry + thread rows. */
+  /**
+   * Row element kinds of the New-chat entry + thread rows: the oracle rail
+   * reads its own links, while the new app reads the header link plus the
+   * Chat History dialog rows (NEWPIDASH-337).
+   */
   assistantSidebarRowKinds(): Promise<{ newChat: string | null; rows: string[] }>;
   /** Links and buttons inside skipped-server notices (negative proofs). */
   assistantSkippedNoticeActions(): Promise<{ kind: string; text: string; href: string | null }[]>;

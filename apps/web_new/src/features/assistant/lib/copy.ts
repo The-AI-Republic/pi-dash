@@ -82,14 +82,15 @@ export const API_KEY_REQUIRED_TITLE = "API key required";
 export const UNTITLED_CONVERSATION = "Untitled conversation";
 /** Empty-state line inside a conversation with no messages yet. */
 export const EMPTY_CONVERSATION_HINT = ASSISTANT_CAPTION;
-/** Empty state for the conversation rail (members only; not shown on a refusal). */
+/** Empty state for the conversation history (members only; not shown on a refusal). */
 export const NO_CONVERSATIONS = "No conversations yet.";
-/** Heading above the conversation rail. */
-export const CONVERSATION_RAIL_TITLE = "Conversations";
-/** New-conversation rail action. */
+/** New-conversation action in the assistant page header. */
 export const NEW_CONVERSATION_LABEL = "New chat";
-/** Brand line at the top of the conversation rail, matched exactly by the AGT-061 scenario. */
-export const CONVERSATION_RAIL_BRAND = "Pi Dash AI";
+/**
+ * History button label in the assistant page header, and the title of the
+ * history dialog it opens (parity/specs/agents.md §11, AGT-044/AGT-061).
+ */
+export const CHAT_HISTORY_TITLE = "Chat History";
 /** Fallback label for a tool-activity link the server sent without one. */
 export const TOOL_LINK_FALLBACK = "View";
 /**
