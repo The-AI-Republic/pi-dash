@@ -346,7 +346,7 @@ pub async fn newest_run_facts_on_issue<C: ConnectionTrait>(
 }
 
 /// A yield run row: [`RunFactsRow`] plus the run's workspace,
-/// `done_payload` and scheduler binding.
+/// `done_payload`, scheduler binding and phase kind.
 #[derive(Debug, Clone, PartialEq, FromQueryResult)]
 pub struct YieldRunRow {
     pub id: Uuid,
@@ -360,6 +360,8 @@ pub struct YieldRunRow {
     pub done_payload: Option<serde_json::Value>,
     /// Set on scheduler runs (PDASHOSS01-276).
     pub scheduler_binding_id: Option<Uuid>,
+    /// `AgentRun.phase_kind`, stamped at creation (`NOT NULL`).
+    pub phase_kind: String,
 }
 
 impl YieldRunRow {
@@ -391,6 +393,9 @@ pub async fn yield_run_by_id<C: ConnectionTrait>(
             agent_run::Column::WorkspaceId,
             agent_run::Column::DonePayload,
             agent_run::Column::SchedulerBindingId,
+            // NEWPIDASH-338 item 7: `finish` reads the run row once; the
+            // phase kind rides along instead of a second select.
+            agent_run::Column::PhaseKind,
         ])
         .join(
             JoinType::InnerJoin,

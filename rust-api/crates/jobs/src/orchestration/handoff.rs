@@ -38,7 +38,9 @@ use pidash_db::orm_tx::TxConn;
 use pidash_db::runner_runs::agent_run::merge_error_details;
 use pidash_db::tx::Transaction as DbTransaction;
 use pidash_services::extensions::AssistantModelSeam;
-use pidash_services::orchestration::creation::{self as creation_kernel, user_id_for_run};
+use pidash_services::orchestration::creation::{
+    self as creation_kernel, template_kind_for_state, user_id_for_run,
+};
 use pidash_services::orchestration::creation::{
     finalize_error_details_patch, finalize_failure_reason, AdmissionError as ServiceAdmissionError,
     CreationError, CreationSeam, DedicatedPinArgs, ExecutionError,
@@ -54,6 +56,7 @@ use pidash_services::runner_runs::finalization as finalize_kernel;
 use pidash_services::runner_runs::LifecycleEffect;
 use pidash_services::runner_sessions::live_drains::drain_pod_by_id;
 use pidash_types::agent_runs::AgentExecutorKind;
+use pidash_types::orchestration::StateRef;
 
 use crate::run_dispatch::{
     dispatch_after_commit as collect_dispatch, dispatch_agent_run,
@@ -1880,9 +1883,13 @@ async fn twin_load_render_bundle(
         .transpose()
         .map_err(|_| CreationError::MissingRow("bad user id".to_owned()))?;
     let override_rows = twin_bundle_overrides(tx, issue.workspace_id, user_id).await?;
+    let kind = template_kind_for_state(state.as_ref().map(|s| StateRef {
+        group: &s.group,
+        name: &s.name,
+    }));
     let stages = {
         let conn = TxConn::new(tx.inner());
-        creation_kernel::load_stage_inputs(&conn, project_id, issue_id, run_id)
+        creation_kernel::load_stage_inputs(&conn, project_id, issue_id, run_id, kind)
             .await
             .map_err(twin_db)?
     };

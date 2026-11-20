@@ -9,10 +9,10 @@
 //!    stage the project switched off, though staying put is always
 //!    allowed), the result, and the hand-off rules;
 //! 2. keeps the hand-off as pending in `agent_run.done_payload`;
-//! 3. moves the issue through the v1 patch path with the run as mover, so
-//!    the transition (and an enabled stage's entry run) fires as for any
-//!    agent move — first, so a refused move leaves nothing that claims it
-//!    happened;
+//! 3. moves the issue through the issue-update operation with the run as
+//!    mover, so the transition (and an enabled stage's entry run) fires
+//!    as for any agent move — first, so a refused move leaves nothing
+//!    that claims it happened;
 //! 4. stores the hand-off as `stage_handoff`;
 //! 5. posts the comment, attributed to the run;
 //! 6. posts the hand-off as a comment when the issue goes to review/test;
@@ -21,17 +21,20 @@
 //!    so a step refused on the way leaves no stop signal behind.
 //!
 //! The steps are not one transaction (the comment and issue operations
-//! own theirs). They are ordered so a retry is safe: a comment is skipped
-//! once its id is recorded with the same text (a changed text is posted
-//! again), and the move is a no-op when the issue already sits in the
-//! target state.
+//! own theirs). They are ordered so a retry is safe: each comment carries
+//! a run-finish external id, so a retry that already posted hits the
+//! comment operation's own dedupe (`409`) and continues instead of posting
+//! twice (a changed text carries a new digest, so it is posted again),
+//! and the move is a no-op when the issue already sits in the target state.
 //!
 //! Scheduler runs (no issue) are refused; they keep using `yield`.
 
+use std::sync::Arc;
+
 use axum::extract::{Path, Request, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use sea_orm::sea_query::Expr;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
 use serde_json::{json, Map, Value};
@@ -41,18 +44,29 @@ use uuid::Uuid;
 use pidash_compat::response::json_response;
 use pidash_db::entity::{agent_run, issues, states};
 use pidash_db::pool::sea_orm_connection;
+use pidash_services::domain::activity::TaskEnqueueHook;
+use pidash_services::domain::transition::IssueTransitionHook;
+use pidash_services::domain::{WriteActor, WriteCtx, WriteScope};
+use pidash_services::operations;
 use pidash_types::orchestration::{
     agent_move_refusal, phase_config_for, stage_runs_automatically, AgentMoveRefusal,
-    StageSwitches, StateRef, KIND_CODING_TASK,
+    StageSwitches, StateRef, KIND_CODING_TASK, OUTCOME_BLOCKED, OUTCOME_DONE, OUTCOME_PROGRESSED,
+    OUTCOME_WAITING_ON_EXTERNAL, OUTCOME_WAITING_ON_HUMAN,
 };
 
+use crate::domain_hooks::AppTaskEnqueueHook;
+use crate::issue_transition::AppTransitionHook;
 use crate::state::AppState;
 
 use super::handlers_actions::{
     activate_timezone, db_error, fetch_project, fetch_yield_run, is_workspace_member, isoformat,
     preamble, truncate_note, Denial, HEADER_MISMATCH_BODY,
 };
-use super::perms::{run_belongs_to, RUN_ID_HEADER};
+use super::handlers_core::{
+    app_origin, drain_outcome_pod, fetch_issue_for_write, fetch_project_for_write, now_utc,
+    render_write_response, require_gate,
+};
+use super::perms::{run_belongs_to, V1WorkItemsRoute, RUN_ID_HEADER};
 
 /// The hand-off cap, in characters (§8.2).
 pub const HANDOFF_MAX_CHARS: usize = 20_000;
@@ -66,33 +80,22 @@ pub const STAGE_HANDOFF_KEY: &str = "stage_handoff";
 /// Nothing reads it: it only becomes [`STAGE_HANDOFF_KEY`] once the issue
 /// moved (or stays), so a refused move leaves no hand-off that counts.
 pub const PENDING_HANDOFF_KEY: &str = "pending_stage_handoff";
-/// `done_payload` key recording the posted finish comment (retry guard).
-pub const FINISH_COMMENT_KEY: &str = "finish_comment_id";
-/// `done_payload` key recording the posted hand-off comment (retry guard).
-pub const HANDOFF_COMMENT_KEY: &str = "handoff_comment_id";
-/// `done_payload` key holding the SHA-256 of the posted finish comment, so
-/// a retry with different text posts the new text instead of dropping it.
-pub const FINISH_COMMENT_DIGEST_KEY: &str = "finish_comment_sha256";
-/// `done_payload` key holding the SHA-256 of the posted hand-off comment.
-pub const HANDOFF_COMMENT_DIGEST_KEY: &str = "handoff_comment_sha256";
+/// The comment operation's dedupe source for `finish` posts (NEWPIDASH-338
+/// item 6): retries carry the same external id, so a retry that already
+/// posted hits the `409` instead of posting twice.
+pub const RUN_FINISH_SOURCE: &str = "run-finish";
 
-/// Hex SHA-256 of a comment body (the retry guard's text check).
+/// Hex SHA-256 of a comment body: the retry guard's text check, carried in
+/// the external id (same text retries dedupe; changed text posts again).
 pub fn text_digest(text: &str) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(text.as_bytes()))
 }
 
-/// Whether `text` still has to be posted: no comment recorded yet, or the
-/// recorded one carried different text. A recorded id without a digest
-/// counts as posted.
-fn comment_owed(payload: &Map<String, Value>, id_key: &str, digest_key: &str, text: &str) -> bool {
-    if !payload.contains_key(id_key) {
-        return true;
-    }
-    match payload.get(digest_key).and_then(Value::as_str) {
-        Some(stored) => stored != text_digest(text),
-        None => false,
-    }
+/// The comment operation's dedupe id for one `finish` post: the run, the
+/// slot (`comment` or `handoff`), and the text digest.
+pub fn finish_external_id(run_id: Uuid, slot: &str, text: &str) -> String {
+    format!("{run_id}:{slot}:{}", text_digest(text))
 }
 
 /// The five results a run may finish with.
@@ -114,13 +117,17 @@ impl FinishResult {
         FinishResult::Blocked,
     ];
 
+    /// The wire names, derived from the one vocabulary in
+    /// `pidash_types::orchestration` (NEWPIDASH-338 item 10): the api list
+    /// can no longer drift from the types crate. Order of [`FinishResult::ALL`]
+    /// is untouched (the F18-11 golden pins the `allowed` order).
     pub fn as_wire(self) -> &'static str {
         match self {
-            FinishResult::Done => "done",
-            FinishResult::Progressed => "progressed",
-            FinishResult::WaitingOnExternal => "waiting_on_external",
-            FinishResult::WaitingOnHuman => "waiting_on_human",
-            FinishResult::Blocked => "blocked",
+            FinishResult::Done => OUTCOME_DONE,
+            FinishResult::Progressed => OUTCOME_PROGRESSED,
+            FinishResult::WaitingOnExternal => OUTCOME_WAITING_ON_EXTERNAL,
+            FinishResult::WaitingOnHuman => OUTCOME_WAITING_ON_HUMAN,
+            FinishResult::Blocked => OUTCOME_BLOCKED,
         }
     }
 
@@ -376,21 +383,6 @@ pub fn check_handoff(
     Ok(())
 }
 
-/// The payload written before the steps that can fail: the stored payload
-/// plus the hand-off, but not the result. `status` and `stop_ticking` are
-/// written only once every step succeeded, so a refused comment or move
-/// never leaves a stop signal behind for a later `yield` to inherit.
-pub fn progress_payload(stored: Option<&Value>, req: &FinishRequest) -> Map<String, Value> {
-    let mut payload = match stored {
-        Some(Value::Object(map)) => map.clone(),
-        _ => Map::new(),
-    };
-    if let Some(handoff) = req.handoff.as_ref() {
-        payload.insert(STAGE_HANDOFF_KEY.to_owned(), Value::String(handoff.clone()));
-    }
-    payload
-}
-
 /// The keys the last write merges in: the result, its time, the note, and
 /// the derived `stop_ticking`.
 pub fn result_delta(req: &FinishRequest, yielded_at: &str) -> Map<String, Value> {
@@ -422,18 +414,20 @@ pub fn scheduler_run_refusal() -> Response {
     .into_response()
 }
 
-/// What a `finish` call still has to do, given the run's stored payload
-/// (steps 3–5 and the response's `ticking`). Pure, so the retry rules are
-/// unit-tested: a step whose id is already recorded is skipped, and the
-/// move is skipped when the issue already sits in the target.
+/// What a `finish` call still has to do (steps 3–5 and the response's
+/// `ticking`). Pure, so the step rules are unit-tested: the comments post
+/// whenever the request carries them (retries dedupe through the
+/// comment operation's external id, not through this plan), and the move
+/// is skipped when the issue already sits in the target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinishPlan<'a> {
-    /// Step 3: the comment to post, if any is still owed.
+    /// Step 5: the comment to post, if the request carries one.
     pub comment: Option<&'a str>,
-    /// Step 4: the hand-off to post as a comment, if still owed. Only for
-    /// a move into review or test, where humans read what the stage reads.
+    /// Step 6: the hand-off to post as a comment, if the request carries
+    /// one. Only for a move into review or test, where humans read what
+    /// the stage reads.
     pub handoff_comment: Option<&'a str>,
-    /// Step 5: the state to move to, if the issue is not there yet.
+    /// Step 3: the state to move to, if the issue is not there yet.
     pub move_to: Option<Uuid>,
     /// Whether the clock keeps running after this run ends.
     pub ticking: bool,
@@ -471,10 +465,8 @@ pub fn clock_runs_after(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn plan_finish<'a>(
     req: &'a FinishRequest,
-    payload: &Map<String, Value>,
     target: &StateChoice,
     current_state: Option<Uuid>,
     switches: StageSwitches,
@@ -483,18 +475,11 @@ pub fn plan_finish<'a>(
 ) -> FinishPlan<'a> {
     let moved = current_state != Some(target.id);
     FinishPlan {
-        comment: req.comment.as_deref().filter(|text| {
-            comment_owed(payload, FINISH_COMMENT_KEY, FINISH_COMMENT_DIGEST_KEY, text)
-        }),
-        handoff_comment: req.handoff.as_deref().filter(|text| {
-            target.is_review_or_test()
-                && comment_owed(
-                    payload,
-                    HANDOFF_COMMENT_KEY,
-                    HANDOFF_COMMENT_DIGEST_KEY,
-                    text,
-                )
-        }),
+        comment: req.comment.as_deref(),
+        handoff_comment: req
+            .handoff
+            .as_deref()
+            .filter(|_| target.is_review_or_test()),
         move_to: moved.then_some(target.id),
         ticking: clock_runs_after(
             moved,
@@ -550,7 +535,7 @@ async fn finish_inner(
     raw_body: &[u8],
 ) -> Result<Response, Denial> {
     let pre = preamble(state, headers, slug).await?;
-    activate_timezone(pre.actor.timezone.as_deref())?;
+    let tz = activate_timezone(pre.actor.timezone.as_deref())?;
     let data: Value = if raw_body.is_empty() {
         Value::Object(Map::new())
     } else {
@@ -598,7 +583,8 @@ async fn finish_inner(
         Ok(target) => target.clone(),
         Err(refusal) => return Ok(refusal.into_response()),
     };
-    let phase_kind = fetch_phase_kind(&pre.pool, run.facts.id).await?;
+    // The run row is already loaded: no second select for its phase kind.
+    let phase_kind = run.phase_kind.clone();
     let to_review_or_test = target.is_review_or_test();
     let earlier_handoff =
         if phase_kind == KIND_CODING_TASK && to_review_or_test && req.handoff.is_none() {
@@ -619,7 +605,6 @@ async fn finish_inner(
     // step 7). Every write merges only its own keys into the stored
     // payload, so a concurrent `yield` write is never overwritten from a
     // stale snapshot.
-    let mut payload = progress_payload(run.done_payload.as_ref(), &req);
     if let Some(handoff) = req.handoff.as_ref() {
         merge_done_payload(
             &pre.pool,
@@ -629,29 +614,9 @@ async fn finish_inner(
         .await?;
     }
 
-    let mut forwarded = headers.clone();
-    forwarded.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
-    // NEWPIDASH-338 (unlisted composition defect): the inner handlers
-    // re-negotiate the body from headers, and a missing `content-length`
-    // reads as an empty body (`content_length_is_empty`). Dropping the
-    // incoming length here — without setting the new one — silently
-    // turned every inner call into a no-op: the move never persisted and
-    // the comments posted empty. Each inner call below stamps the length
-    // of the body it actually sends (`forward_json`).
-    forwarded.remove(header::CONTENT_LENGTH);
-    forwarded.insert(
-        RUN_ID_HEADER,
-        HeaderValue::from_str(&run.facts.id.to_string()).map_err(|_| Denial::ServerError)?,
-    );
-    let project_raw = project_id.to_string();
-
     let clock = fetch_clock_view(&pre.pool, issue_id, &project.policy).await?;
     let plan = plan_finish(
         &req,
-        &payload,
         &target,
         current_state_id,
         switches,
@@ -659,28 +624,148 @@ async fn finish_inner(
         clock,
     );
 
-    // Step 3: the move, as an agent state patch, before anything that says
-    // the issue moved. A refused move leaves no comment and no hand-off
-    // behind (only the pending copy, which nothing reads).
-    if let Some(target_id) = plan.move_to {
-        let body = serde_json::to_vec(&json!({ "state": target_id.to_string() }))
-            .map_err(|_| Denial::ServerError)?;
-        let headers = forward_json(&forwarded, body.len());
-        let response = match super::handlers_core::patch_issue_inner(
-            state,
-            &headers,
+    // The gates the composed handler inners used to run, kept now that
+    // `finish` calls the operations directly (NEWPIDASH-338 item 7). The
+    // move is gated exactly like the issue-patch path (its gate plus the
+    // archived check); each posted comment like the comment-create path.
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
+    // The core helpers answer the core `Denial`: render it directly, as
+    // the handler inners did, instead of converting into this module's.
+    if plan.move_to.is_some() {
+        if let Err(denial) = require_gate(
+            &pre.pool,
+            &workspace_id,
             slug,
-            &project_raw,
-            &issue_id,
-            &body,
+            &pre.actor.id,
+            Some(&project_id),
+            None,
+            V1WorkItemsRoute::IssueDetail,
+            "PATCH",
         )
         .await
         {
-            Ok(response) => response,
-            Err(denial) => denial.into_response(),
+            return Ok(denial.into_response());
+        }
+        refuse_if_archived(&pre.pool, project_id).await?;
+    }
+    if plan.comment.is_some() || plan.handoff_comment.is_some() {
+        if let Err(denial) = require_gate(
+            &pre.pool,
+            &workspace_id,
+            slug,
+            &pre.actor.id,
+            Some(&project_id),
+            None,
+            V1WorkItemsRoute::CommentList,
+            "POST",
+        )
+        .await
+        {
+            return Ok(denial.into_response());
+        }
+        // The comment endpoint's own gate carries the archived check, so
+        // a stay that only posts still refuses on an archived project,
+        // exactly like the composed `comment_post_inner` did.
+        refuse_if_archived(&pre.pool, project_id).await?;
+    }
+
+    // One shared operation context for the move and both comments: the
+    // same actor, scope and hooks the handler inners built per call.
+    let orm = state.orm().ok_or(Denial::ServerError)?;
+    let ctx = WriteCtx::new(WriteActor {
+        user_id: pre.actor.id,
+        timezone: pre.actor.timezone.clone(),
+    })
+    .with_scope(WriteScope {
+        workspace_id: pre.workspace_id,
+        project_id: Some(project_id),
+    });
+    let transition: Arc<dyn IssueTransitionHook> =
+        Arc::new(AppTransitionHook::new(state, &pre.pool));
+    let enqueue: Arc<dyn TaskEnqueueHook> = Arc::new(AppTaskEnqueueHook::new(&pre.pool));
+    let deps = operations::Deps {
+        pool: pre.pool.clone(),
+        orm: orm.clone(),
+        transition,
+        enqueue,
+    };
+    let web_base = pidash_services::v1_work_items::shape_issue::web_base_url(
+        state.settings().urls.web_url.as_deref(),
+        state.settings().urls.app_base_url.as_deref(),
+    );
+    let origin = app_origin(&state.settings().urls).ok();
+    // The `created_at` override resolver: `finish` never sends one, so the
+    // comment is stamped now, exactly like the endpoint's absent-override
+    // arm.
+    let now = now_utc();
+    let rendered_now = crate::serializer::render_datetime_in(&now, &tz);
+    let resolve_created_at =
+        move |_: Option<&Value>| -> Result<(DateTime<Utc>, String), operations::Error> {
+            Ok((now, rendered_now.clone()))
         };
-        if !response.status().is_success() {
-            return Ok(response);
+
+    // Step 3: the move, through the issue-update operation with the run as
+    // mover, before anything that says the issue moved. A refused move
+    // leaves no comment and no hand-off behind (only the pending copy,
+    // which nothing reads).
+    //
+    // Attribution and gates preserved from the patch path: `moved_by_run`
+    // is this run (the inner path inferred the same id from the forwarded
+    // run header); the work-type lock cannot fire (`finish` never sends
+    // `work_type`); the `issue_run_policy` gate skips agent self-actions
+    // exactly as before (`moved_by_run` set); and `resolve_target` above
+    // enforces the same rule as the agent-move gate on the same switches.
+    if let Some(target_id) = plan.move_to {
+        let current =
+            match fetch_issue_for_write(&pre.pool, slug, &project_id, &issue_id, &tz).await {
+                Ok(current) => current,
+                Err(denial) => return Ok(denial.into_response()),
+            };
+        let write_project = match fetch_project_for_write(&pre.pool, &project_id).await {
+            Ok(project) => project,
+            Err(denial) => return Ok(denial.into_response()),
+        };
+        let current_rendered =
+            match render_write_response(&pre.pool, &current, &tz, web_base.as_deref()).await {
+                Ok(rendered) => rendered,
+                Err(denial) => return Ok(denial.into_response()),
+            };
+        let current_text =
+            pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&current_rendered);
+        let move_body = json!({ "state": target_id.to_string() });
+        let write = operations::issues::IssueWrite {
+            slug,
+            project_id,
+            workspace_id,
+            project: write_project,
+            body: &move_body,
+            from_form: false,
+            origin: origin.clone(),
+            web_base: web_base.clone(),
+        };
+        let update_target = operations::issues::UpdateTarget {
+            current: &current,
+            current_instance: current_text,
+            moved_by_run: Some(run.facts.id),
+        };
+        let outcome = match operations::issues::update(
+            &deps,
+            &ctx,
+            issue_id,
+            &write,
+            &update_target,
+            operations::issues::UpdateOptions {
+                emit_activity: true,
+                pod_once: pidash_services::orchestration::creation::pod_once_requested(&move_body),
+            },
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => return Ok(op_failure(error)),
+        };
+        if let Err(denial) = drain_outcome_pod(state, &outcome).await {
+            return Ok(denial.into_response());
         }
     }
 
@@ -696,67 +781,45 @@ async fn finish_inner(
 
     // Step 5: the comment.
     if let Some(comment) = plan.comment {
-        // A comment this run already posted with the same body (an earlier
-        // attempt whose id write failed) is reused, not posted twice.
-        let existing = find_run_comment(&pre.pool, issue_id, run.facts.id, comment).await?;
-        let id = match existing {
-            Some(id) => Ok(id),
-            None => {
-                post_agent_comment(
-                    state,
-                    &forwarded,
-                    slug,
-                    &project_raw,
-                    issue_id,
-                    comment,
-                    &req.as_agent,
-                    run.facts.id,
-                )
-                .await?
-            }
-        };
-        match id {
-            Ok(id) => {
-                let delta = json!({ FINISH_COMMENT_KEY: id, FINISH_COMMENT_DIGEST_KEY: text_digest(comment) });
-                merge_done_payload(&pre.pool, run.facts.id, &delta).await?;
-                if let Value::Object(delta) = delta {
-                    payload.extend(delta);
-                }
-            }
-            Err(response) => return Ok(response),
+        if let Some(response) = post_finish_comment(
+            &deps,
+            &ctx,
+            &resolve_created_at,
+            slug,
+            project_id,
+            issue_id,
+            origin.clone(),
+            web_base.clone(),
+            comment,
+            &req.as_agent,
+            run.facts.id,
+            "comment",
+        )
+        .await
+        {
+            return Ok(response);
         }
     }
 
     // Step 6: the hand-off, shown to humans where review and test read it.
     if let Some(handoff) = plan.handoff_comment {
-        // A comment this run already posted with the same body (an earlier
-        // attempt whose id write failed) is reused, not posted twice.
-        let existing = find_run_comment(&pre.pool, issue_id, run.facts.id, handoff).await?;
-        let id = match existing {
-            Some(id) => Ok(id),
-            None => {
-                post_agent_comment(
-                    state,
-                    &forwarded,
-                    slug,
-                    &project_raw,
-                    issue_id,
-                    handoff,
-                    &req.as_agent,
-                    run.facts.id,
-                )
-                .await?
-            }
-        };
-        match id {
-            Ok(id) => {
-                let delta = json!({ HANDOFF_COMMENT_KEY: id, HANDOFF_COMMENT_DIGEST_KEY: text_digest(handoff) });
-                merge_done_payload(&pre.pool, run.facts.id, &delta).await?;
-                if let Value::Object(delta) = delta {
-                    payload.extend(delta);
-                }
-            }
-            Err(response) => return Ok(response),
+        if let Some(response) = post_finish_comment(
+            &deps,
+            &ctx,
+            &resolve_created_at,
+            slug,
+            project_id,
+            issue_id,
+            origin.clone(),
+            web_base.clone(),
+            handoff,
+            &req.as_agent,
+            run.facts.id,
+            "handoff",
+        )
+        .await
+        {
+            return Ok(response);
         }
     }
 
@@ -776,63 +839,89 @@ async fn finish_inner(
     ))
 }
 
-/// The headers for one forwarded inner call: the shared base plus the
-/// `content-length` of the body it actually sends. Without the length
-/// the inner handler's body negotiation reads an empty body and the call
-/// silently no-ops (NEWPIDASH-338 unlisted composition defect).
-fn forward_json(base: &HeaderMap, body_len: usize) -> HeaderMap {
-    let mut headers = base.clone();
-    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(body_len));
-    headers
+/// The archived-project refusal the composed handler inners ran: the
+/// patch path checked it after its gate and the comment endpoint's own
+/// gate carries it. Each `finish` branch checks it after its gate, so a
+/// move and a comment-only stay are each refused on an archived project,
+/// exactly as before.
+async fn refuse_if_archived(pool: &PgPool, project_id: Uuid) -> Result<(), Denial> {
+    if let Some(info) = crate::project_archived::archived_by_id(pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
+    Ok(())
 }
 
-/// Post one agent comment through the v1 comment-create path. `Ok(Ok(id))`
-/// on success; `Ok(Err(response))` passes a refusal through unchanged.
+/// Map an operation failure onto the exact status and body the v1
+/// endpoint would have answered (the operation's own mapping): the move
+/// and the comments no longer pass through their handler inners, but a
+/// refused step still answers byte-identically.
+fn op_failure(error: operations::Error) -> Response {
+    let (status, body) = error.status_and_body();
+    let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    json_response(status, pidash_compat::response::escape_u2028(&body))
+}
+
+/// Post one `finish` comment through the comment-create operation (steps
+/// 5 and 6 share this helper). The body carries the run-finish external
+/// id, so a retry that already posted hits the operation's own dedupe
+/// (`409 Conflict`) and continues instead of posting twice; any other
+/// failure answers with the operation's own status and body, exactly as
+/// the comment endpoint would. Returns the refusal response when the
+/// post failed, `None` on success.
 #[allow(clippy::too_many_arguments)]
-async fn post_agent_comment(
-    state: &AppState,
-    headers: &HeaderMap,
+async fn post_finish_comment(
+    deps: &operations::Deps,
+    ctx: &WriteCtx,
+    resolve_created_at: &operations::comments::CreatedAtResolver,
     slug: &str,
-    project_raw: &str,
+    project_id: Uuid,
     issue_id: Uuid,
+    origin: Option<String>,
+    web_base: Option<String>,
     markdown: &str,
     as_agent: &str,
     run_id: Uuid,
-) -> Result<Result<String, Response>, Denial> {
-    let body = serde_json::to_vec(&json!({
+    slot: &str,
+) -> Option<Response> {
+    let body = json!({
         "comment_html": pidash_services::assistant::markdown::to_safe_html(Some(markdown)),
         "speaker_type": "agent",
         "speaker_label": as_agent,
         "speaker_agent_run_id": run_id.to_string(),
-    }))
-    .map_err(|_| Denial::ServerError)?;
-    let headers = forward_json(headers, body.len());
-    let response = match super::handlers_social::comment_post_inner(
-        state,
-        &headers,
+        "external_source": RUN_FINISH_SOURCE,
+        "external_id": finish_external_id(run_id, slot, markdown),
+    });
+    let write = operations::comments::CommentWrite {
         slug,
-        project_raw,
-        &issue_id,
-        &body,
+        project_id,
+        issue_id,
+        body: &body,
+        from_form: false,
+        origin,
+        web_base,
+    };
+    match operations::comments::create(
+        deps,
+        ctx,
+        &write,
+        resolve_created_at,
+        operations::comments::CommentCreateOptions {
+            emit_activity: true,
+            emit_model_activity: true,
+        },
     )
     .await
     {
-        Ok(response) => response,
-        Err(denial) => denial.into_response(),
-    };
-    if !response.status().is_success() {
-        return Ok(Err(response));
+        Ok(_) => None,
+        // Already posted by an earlier attempt: the retry dedupe hit.
+        Err(operations::Error::Conflict(_)) => None,
+        Err(error) => Some(op_failure(error)),
     }
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let value: Value = serde_json::from_slice(&bytes).map_err(|_| Denial::ServerError)?;
-    let id = value
-        .get("id")
-        .and_then(Value::as_str)
-        .ok_or(Denial::ServerError)?
-        .to_owned();
-    Ok(Ok(id))
 }
 
 /// Merge `delta`'s keys into `agent_run.done_payload` in one statement
@@ -853,30 +942,6 @@ async fn merge_done_payload(pool: &PgPool, run_id: Uuid, delta: &Value) -> Resul
         .await
         .map(|_| ())
         .map_err(|error| db_error(error, "finish-write"))
-}
-
-/// The id of a live comment this run already posted on the issue with
-/// exactly this body, if any.
-async fn find_run_comment(
-    pool: &PgPool,
-    issue_id: Uuid,
-    run_id: Uuid,
-    markdown: &str,
-) -> Result<Option<String>, Denial> {
-    use pidash_db::entity::issue_comments;
-    let html = pidash_services::assistant::markdown::to_safe_html(Some(markdown));
-    let found: Option<Uuid> = issue_comments::Entity::find()
-        .select_only()
-        .column(issue_comments::Column::Id)
-        .filter(issue_comments::Column::IssueId.eq(issue_id))
-        .filter(issue_comments::Column::SpeakerAgentRunId.eq(run_id))
-        .filter(issue_comments::Column::CommentHtml.eq(html))
-        .filter(issue_comments::Column::DeletedAt.is_null())
-        .into_tuple()
-        .one(&sea_orm_connection(pool))
-        .await
-        .map_err(|error| db_error(error, "finish-find-comment"))?;
-    Ok(found.map(|id| id.to_string()))
 }
 
 /// The issue's clock for the response's `ticking`: `None` without a
@@ -934,17 +999,6 @@ async fn fetch_state_choices(pool: &PgPool, project_id: Uuid) -> Result<Vec<Stat
         .into_iter()
         .map(|(id, name, group)| StateChoice { id, name, group })
         .collect())
-}
-
-async fn fetch_phase_kind(pool: &PgPool, run_id: Uuid) -> Result<String, Denial> {
-    let kind: Option<String> = agent_run::Entity::find_by_id(run_id)
-        .select_only()
-        .column(agent_run::Column::PhaseKind)
-        .into_tuple()
-        .one(&sea_orm_connection(pool))
-        .await
-        .map_err(|error| db_error(error, "finish-phase-kind"))?;
-    Ok(kind.unwrap_or_default())
 }
 
 /// Whether an In Progress run stored a hand-off that still describes the
@@ -1016,6 +1070,23 @@ mod tests {
             .await
             .expect("body");
         (status, serde_json::from_slice(&bytes).expect("json"))
+    }
+
+    #[test]
+    fn finish_result_names_come_from_the_types_crate() {
+        // NEWPIDASH-338 item 10: the wire names are the OUTCOME_* consts,
+        // not literals that can drift.
+        assert_eq!(FinishResult::Done.as_wire(), OUTCOME_DONE);
+        assert_eq!(FinishResult::Progressed.as_wire(), OUTCOME_PROGRESSED);
+        assert_eq!(
+            FinishResult::WaitingOnExternal.as_wire(),
+            OUTCOME_WAITING_ON_EXTERNAL
+        );
+        assert_eq!(
+            FinishResult::WaitingOnHuman.as_wire(),
+            OUTCOME_WAITING_ON_HUMAN
+        );
+        assert_eq!(FinishResult::Blocked.as_wire(), OUTCOME_BLOCKED);
     }
 
     #[test]
@@ -1121,23 +1192,37 @@ mod tests {
     }
 
     #[test]
-    fn progress_keeps_stored_keys_and_the_result_delta_derives_stop_ticking() {
-        // What the handler reads before the steps, and the keys its last
-        // write merges in (`result_delta`, merged with `||`).
-        let stored = json!({"status": "progressed", "finish_comment_id": "c1", "other": 1});
+    fn finish_external_ids_carry_run_slot_and_digest() {
+        // NEWPIDASH-338 item 6: retries dedupe through the comment
+        // operation's external id. Same text retries the same id (the
+        // `409` continues); changed text carries a new digest (posted
+        // again); the two slots never collide.
+        let run = Uuid::new_v4();
+        let comment = finish_external_id(run, "comment", "same text");
+        assert_eq!(comment, finish_external_id(run, "comment", "same text"));
+        assert_ne!(comment, finish_external_id(run, "comment", "changed text"));
+        assert_ne!(
+            comment,
+            finish_external_id(run, "handoff", "same text"),
+            "slots differ even for identical texts"
+        );
+        assert_ne!(
+            comment,
+            finish_external_id(Uuid::new_v4(), "comment", "same text"),
+            "runs differ"
+        );
+        assert!(comment.starts_with(&format!("{run}:comment:")));
+    }
+
+    #[test]
+    fn result_delta_derives_stop_ticking() {
+        // The last write merges in (`result_delta`, merged with `||`):
+        // the result, its time, the note, and the derived stop signal.
         let req = parse_finish_body(&json!({
             "to": "In Review", "result": "waiting_on_human", "comment": "?",
             "handoff": "### Hand-off", "note": "n"
         }))
         .unwrap();
-        let progress = progress_payload(Some(&stored), &req);
-        assert_eq!(progress[FINISH_COMMENT_KEY], json!("c1"));
-        assert_eq!(progress["other"], json!(1));
-        assert_eq!(
-            progress["status"],
-            json!("progressed"),
-            "result not yet written"
-        );
         let delta = result_delta(&req, "2026-11-19T00:00:00Z");
         assert_eq!(delta["status"], json!("waiting_on_human"));
         assert_eq!(delta["stop_ticking"], json!(true));
@@ -1266,77 +1351,68 @@ mod tests {
     #[test]
     fn the_result_is_not_written_before_the_steps() {
         // A refused comment or move must not leave `stop_ticking: true`
-        // behind for a later `yield --outcome progressed` to inherit.
+        // behind for a later `yield --outcome progressed` to inherit:
+        // step 7 writes the result only after every step succeeded.
         let req = finish_req(json!({
             "to": "In Progress", "result": "waiting_on_human", "comment": "?", "handoff": "h"
         }));
-        let stored = json!({"status": "progressed", "stop_ticking": false});
-        let progress = progress_payload(Some(&stored), &req);
-        assert_eq!(progress["stop_ticking"], json!(false), "untouched");
-        assert_eq!(progress["status"], json!("progressed"), "untouched");
-        assert_eq!(progress[STAGE_HANDOFF_KEY], json!("h"));
-        let done = result_delta(&req, "t");
-        assert_eq!(done["stop_ticking"], json!(true));
-        assert_eq!(done["status"], json!("waiting_on_human"));
+        let delta = result_delta(&req, "t");
+        assert_eq!(delta["stop_ticking"], json!(true));
+        assert_eq!(delta["status"], json!("waiting_on_human"));
+        assert!(
+            !delta.contains_key(STAGE_HANDOFF_KEY),
+            "the hand-off is stored by its own step"
+        );
     }
 
     #[test]
-    fn plan_reposts_a_comment_whose_text_changed() {
+    fn plan_posts_whatever_the_request_carries() {
+        // NEWPIDASH-338 item 6: the plan no longer tracks posted ids —
+        // retries dedupe through the comment operation's external id.
+        // Same request, same plan; a retry posts the same external ids
+        // and the `409` continues.
         let states = project_states();
         let progress = states[1].id;
         let review = &states[2];
         let first = finish_req(json!({
             "to": "In Review", "result": "done", "comment": "old", "handoff": "h1"
         }));
-        let mut stored = progress_payload(None, &first);
-        stored.insert(FINISH_COMMENT_KEY.to_owned(), json!("c1"));
-        stored.insert(
-            FINISH_COMMENT_DIGEST_KEY.to_owned(),
-            json!(text_digest("old")),
-        );
-        stored.insert(HANDOFF_COMMENT_KEY.to_owned(), json!("h-1"));
-        stored.insert(
-            HANDOFF_COMMENT_DIGEST_KEY.to_owned(),
-            json!(text_digest("h1")),
-        );
-        // Same text: nothing to post again.
         let plan = plan_finish(
             &first,
-            &stored,
             review,
             Some(progress),
             StageSwitches::ALL,
             true,
             Some(true),
         );
-        assert_eq!((plan.comment, plan.handoff_comment), (None, None));
-        // Changed text: the new text is posted, not silently dropped.
-        let second = finish_req(json!({
-            "to": "In Review", "result": "done", "comment": "new", "handoff": "h2"
-        }));
+        assert_eq!(plan.comment, Some("old"));
+        assert_eq!(plan.handoff_comment, Some("h1"));
+        // A retry of the same request plans the same posts.
         let plan = plan_finish(
-            &second,
-            &stored,
+            &first,
             review,
             Some(progress),
             StageSwitches::ALL,
             true,
             Some(true),
         );
-        assert_eq!(plan.comment, Some("new"));
-        assert_eq!(plan.handoff_comment, Some("h2"));
-        // A recorded id without a digest counts as posted.
-        stored.remove(FINISH_COMMENT_DIGEST_KEY);
+        assert_eq!(
+            (plan.comment, plan.handoff_comment),
+            (Some("old"), Some("h1"))
+        );
+        // The stay case: already in the target, only the comments post.
         let plan = plan_finish(
-            &second,
-            &stored,
+            &first,
             review,
-            Some(progress),
+            Some(review.id),
             StageSwitches::ALL,
             true,
             Some(true),
         );
-        assert_eq!(plan.comment, None);
+        assert_eq!(
+            (plan.comment, plan.handoff_comment, plan.move_to),
+            (Some("old"), Some("h1"), None)
+        );
     }
 
     #[test]
@@ -1347,10 +1423,8 @@ mod tests {
         let req = finish_req(json!({
             "to": "In Review", "result": "done", "comment": "c", "handoff": "h"
         }));
-        let payload = progress_payload(None, &req);
         let plan = plan_finish(
             &req,
-            &payload,
             review,
             Some(progress),
             StageSwitches::ALL,
@@ -1369,63 +1443,6 @@ mod tests {
     }
 
     #[test]
-    fn plan_retry_skips_what_already_happened() {
-        let states = project_states();
-        let progress = states[1].id;
-        let review = &states[2];
-        let req = finish_req(json!({
-            "to": "In Review", "result": "done", "comment": "c", "handoff": "h"
-        }));
-        // First attempt posted the comment, then failed: the retry posts
-        // only the hand-off and moves.
-        let mut stored = progress_payload(None, &req);
-        stored.insert(FINISH_COMMENT_KEY.to_owned(), json!("c1"));
-        let payload = progress_payload(Some(&Value::Object(stored.clone())), &req);
-        let plan = plan_finish(
-            &req,
-            &payload,
-            review,
-            Some(progress),
-            StageSwitches::ALL,
-            true,
-            Some(true),
-        );
-        assert_eq!(plan.comment, None);
-        assert_eq!(plan.handoff_comment, Some("h"));
-        assert_eq!(plan.move_to, Some(review.id));
-
-        // Both comments posted, move failed: the retry only moves.
-        stored.insert(HANDOFF_COMMENT_KEY.to_owned(), json!("h1"));
-        let payload = progress_payload(Some(&Value::Object(stored.clone())), &req);
-        let plan = plan_finish(
-            &req,
-            &payload,
-            review,
-            Some(progress),
-            StageSwitches::ALL,
-            true,
-            Some(true),
-        );
-        assert_eq!((plan.comment, plan.handoff_comment), (None, None));
-        assert_eq!(plan.move_to, Some(review.id));
-
-        // Everything done: re-running after success changes nothing.
-        let plan = plan_finish(
-            &req,
-            &payload,
-            review,
-            Some(review.id),
-            StageSwitches::ALL,
-            true,
-            Some(true),
-        );
-        assert_eq!(
-            (plan.comment, plan.handoff_comment, plan.move_to),
-            (None, None, None)
-        );
-    }
-
-    #[test]
     fn plan_posts_the_hand_off_only_for_review_or_test() {
         let states = project_states();
         let progress = states[1].id;
@@ -1433,10 +1450,8 @@ mod tests {
         let req = finish_req(json!({
             "to": "AI Completed", "result": "done", "comment": "answer", "handoff": "h"
         }));
-        let payload = progress_payload(None, &req);
         let plan = plan_finish(
             &req,
-            &payload,
             completed,
             Some(progress),
             StageSwitches::ALL,
@@ -1445,7 +1460,6 @@ mod tests {
         );
         assert_eq!(plan.comment, Some("answer"));
         assert_eq!(plan.handoff_comment, None, "stored, not posted");
-        assert_eq!(payload[STAGE_HANDOFF_KEY], json!("h"));
         assert_eq!(plan.move_to, Some(completed.id));
     }
 
@@ -1496,16 +1510,7 @@ mod tests {
         let req = finish_req(
             json!({"to": "In Review", "result": "blocked", "comment": "c", "handoff": "h"}),
         );
-        let payload = progress_payload(None, &req);
-        let plan = plan_finish(
-            &req,
-            &payload,
-            review,
-            Some(progress),
-            StageSwitches::ALL,
-            true,
-            None,
-        );
+        let plan = plan_finish(&req, review, Some(progress), StageSwitches::ALL, true, None);
         assert!(plan.ticking);
     }
 
