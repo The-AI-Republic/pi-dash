@@ -2,7 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { INTAKE_STATUS } from "@pidash/api-client";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// Pinned so the fixed-clock local-day assertion reads the same day on
+// any machine running the suite. The remaining cases use explicit day
+// strings and are timezone-independent.
+process.env.TZ = "America/Los_Angeles";
 
 import {
   appliedFilterCount,
@@ -183,9 +188,15 @@ describe("intake filter selection (INT-009/010)", () => {
     expect(filters.labels).toEqual(["l-1", "l-2"]);
   });
 
-  it("defaults the token day to the UTC today", () => {
-    const selection = { ...defaultSelectionForTab("open"), createdAt: { kind: "preset", preset: "today" } } as const;
-    const today = new Date().toISOString().slice(0, 10);
-    expect(selectionToListFilters("open", selection).createdAt).toBe(`${today};after,${today};before`);
+  it("defaults the token day to the viewer's local today", () => {
+    vi.useFakeTimers();
+    try {
+      // 01:00 UTC is still the previous day in Los Angeles.
+      vi.setSystemTime(new Date("2026-11-18T01:00:00Z"));
+      const selection = { ...defaultSelectionForTab("open"), createdAt: { kind: "preset", preset: "today" } } as const;
+      expect(selectionToListFilters("open", selection).createdAt).toBe("2026-11-17;after,2026-11-17;before");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

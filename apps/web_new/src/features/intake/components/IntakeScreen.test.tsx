@@ -26,6 +26,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 }));
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { todayLocalIsoDay } from "../lib/dates.js";
 import type { IntakeSearch, IntakeSearchWriteOptions } from "../lib/search.js";
 import { IntakeScreen } from "./IntakeScreen.js";
 
@@ -917,7 +918,7 @@ describe("IntakeScreen dates (INT-010)", () => {
     openFilters();
     const section = screen.getByTestId("intake-filter-createdAt");
     fireEvent.click(within(section).getByRole("radio", { name: "Today" }));
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayLocalIsoDay();
     await waitFor(() => expect(lastListParams().get("created_at")).toBe(`${today};after,${today};before`));
   });
 
@@ -930,7 +931,7 @@ describe("IntakeScreen dates (INT-010)", () => {
     const section = screen.getByTestId("intake-filter-updatedAt");
     fireEvent.click(within(section).getByRole("radio", { name: "Custom" }));
     fireEvent.click(screen.getByRole("button", { name: "Apply" }));
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayLocalIsoDay();
     const [year, month, day] = today.split("-").map(Number) as [number, number, number];
     const nextMonth = new Date(Date.UTC(year, month, day)).toISOString().slice(0, 10);
     await waitFor(() => expect(lastListParams().get("updated_at")).toBe(`${today};after,${nextMonth};before`));

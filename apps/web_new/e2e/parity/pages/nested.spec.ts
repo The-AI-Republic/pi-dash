@@ -670,6 +670,10 @@ test(
       await driver.pagesNestedDeleteConfirm();
       await driver.pagesNestedWaitToast("Page deleted successfully.");
 
+      // The deleted row leaves the Archived tab at once: the delete write
+      // re-reads the forest, so no reload is needed (NEWPIDASH-347).
+      await expect.poll(() => driver.pagesNestedRowTitles(), { timeout: 30_000 }).not.toContain(parentName);
+
       // The child survives, detached to the top level and otherwise intact.
       const child = await serverPageRecord(seed.workspaceSlug, projectId, childId, session);
       expect(child.parentId).toBeNull();

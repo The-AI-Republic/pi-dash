@@ -4443,7 +4443,9 @@ pub async fn collection_list(
     // `Project.objects.get(pk=...)` (`:182`) is subsumed by the gate's
     // tenant lookup (same 404 when the row is gone).
     let today = Utc::now().with_timezone(&gate.timezone).date_naive();
-    let compiled = match compile_filter(&query, today) {
+    // Day filters truncate in the actor's zone (Django `TimezoneMixin` +
+    // `TruncDate`), not UTC — NEWPIDASH-310, mirroring NEWPIDASH-211.
+    let compiled = match compile_filter(&query, today, &gate.timezone) {
         Ok(compiled) => compiled,
         Err(response) => return response,
     };
@@ -4538,17 +4540,25 @@ pub async fn collection_list(
     // (`div_ceil` is unstable on this toolchain; the manual form matches
     // `math.ceil` for non-negative inputs.)
     let total_pages = (total + page.limit - 1) / page.limit;
-    let next_cursor = format!("{}:{}:0", page.limit, page.page + 1);
-    let prev_cursor = format!("{}:{}:1", page.limit, page.page - 1);
+    // Cursor arithmetic runs in `i128` and renders decimally: a crafted
+    // `cursor` can carry `i64::MAX`, and Django's unbounded ints keep
+    // counting (`next` becomes `...808:0`). The DB offset itself stays
+    // saturated in `i64` (`list_page`). (`total_pages` needs no guard:
+    // `total` is a real row count, `limit` is within `1..=1000`.)
+    let next_page = i128::from(page.page) + 1;
+    let prev_page = i128::from(page.page) - 1;
+    let next_cursor = format!("{}:{}:0", page.limit, next_page);
+    let prev_cursor = format!("{}:{}:1", page.limit, prev_page);
     // `next.has_results` is `page_results.count() > limit` over the
     // over-fetched window — exactly `total > offset + limit`.
+    let next_page_results = i128::from(total) > i128::from(page.offset) + i128::from(page.limit);
     let body = pidash_services::app_issues::envelope(
         None,
         None,
         total,
         &next_cursor,
         &prev_cursor,
-        total > page.offset + page.limit,
+        next_page_results,
         page.page > 0,
         raw_rows.len(),
         total_pages,
@@ -4704,7 +4714,11 @@ fn through_join(kind: JoinType, table: &'static str) -> FilterJoin {
 /// joins are INNER; an `__isnull` lookup on a relation forces that
 /// relation's join LEFT.
 #[allow(clippy::result_large_err)]
-fn compile_filter(query: &QueryMap, today: chrono::NaiveDate) -> Result<CompiledFilter, Response> {
+fn compile_filter(
+    query: &QueryMap,
+    today: chrono::NaiveDate,
+    timezone: &chrono_tz::Tz,
+) -> Result<CompiledFilter, Response> {
     let mut params = std::collections::HashMap::new();
     for key in ISSUE_FILTER_KEYS {
         if let Some(last) = query_last(query, key) {
@@ -4773,7 +4787,7 @@ fn compile_filter(query: &QueryMap, today: chrono::NaiveDate) -> Result<Compiled
     let mut next = 3usize;
     let mut parts = Vec::new();
     for (name, value) in predicates {
-        match compile_predicate(name, value, &mut binds, &mut next)? {
+        match compile_predicate(name, value, &mut binds, &mut next, timezone)? {
             Some(sql) => parts.push(sql),
             None => return Err(Denial::ServerError.into_response()),
         }
@@ -4798,6 +4812,7 @@ fn compile_predicate(
     value: &FilterValue,
     binds: &mut Vec<OwnedBind>,
     next: &mut usize,
+    timezone: &chrono_tz::Tz,
 ) -> Result<Option<String>, Response> {
     // `__isnull` flags.
     if let Some(path) = name.strip_suffix("__isnull") {
@@ -4882,10 +4897,10 @@ fn compile_predicate(
             }
             Ok(Some(format!("{column} IN ({})", holders.join(","))))
         }
-        FilterValue::Text(text) => compile_text_predicate(name, text, binds, next),
+        FilterValue::Text(text) => compile_text_predicate(name, text, binds, next, timezone),
         FilterValue::Flag(_) => Err(Denial::ServerError.into_response()),
         FilterValue::Day(day) => {
-            let (column, operator) = match day_comparison(name) {
+            let (column, operator) = match day_comparison(name, binds, next, timezone) {
                 Some(pair) => pair,
                 None => return Ok(None),
             };
@@ -4959,15 +4974,38 @@ fn strings_in_column(name: &str) -> Option<&'static str> {
     })
 }
 
+/// A `__date` term truncated in `timezone`: `("issues".<column> AT TIME
+/// ZONE $N)::date` with the zone bound as a parameter (it comes from a
+/// parsed `Tz`, so it is a valid IANA name either way). Django's
+/// `__date` lookup is `TruncDate`, whose `get_tzname()` returns the
+/// `TimezoneMixin`-activated actor zone.
+fn zoned_date_column(
+    binds: &mut Vec<OwnedBind>,
+    next: &mut usize,
+    column: &str,
+    timezone: &chrono_tz::Tz,
+) -> String {
+    let holder = placeholder(next);
+    binds.push(OwnedBind::Text(timezone.name().to_owned()));
+    format!("(\"issues\".\"{column}\" AT TIME ZONE {holder})::date")
+}
+
 /// `(column, operator)` for `Day` predicates (`__gte` / `__lte`).
-fn day_comparison(name: &str) -> Option<(&'static str, &'static str)> {
+/// The `__date` terms truncate in `timezone`; `start_date` /
+/// `target_date` are plain date columns and need no truncation.
+fn day_comparison(
+    name: &str,
+    binds: &mut Vec<OwnedBind>,
+    next: &mut usize,
+    timezone: &chrono_tz::Tz,
+) -> Option<(String, &'static str)> {
     let (term, operator) = name.rsplit_once("__")?;
     let column = match term {
-        "issue__created_at__date" => "\"issues\".\"created_at\"::date",
-        "issue__updated_at__date" => "\"issues\".\"updated_at\"::date",
-        "issue__completed_at__date" => "\"issues\".\"completed_at\"::date",
-        "issue__start_date" => "\"issues\".\"start_date\"",
-        "issue__target_date" => "\"issues\".\"target_date\"",
+        "issue__created_at__date" => zoned_date_column(binds, next, "created_at", timezone),
+        "issue__updated_at__date" => zoned_date_column(binds, next, "updated_at", timezone),
+        "issue__completed_at__date" => zoned_date_column(binds, next, "completed_at", timezone),
+        "issue__start_date" => "\"issues\".\"start_date\"".to_owned(),
+        "issue__target_date" => "\"issues\".\"target_date\"".to_owned(),
         _ => return None,
     };
     let operator = match operator {
@@ -4980,13 +5018,15 @@ fn day_comparison(name: &str) -> Option<(&'static str, &'static str)> {
 
 /// Text predicates: `name__icontains`, explicit date bounds
 /// (`__gte`/`__lte` on a `__date` term or plain date term), and the
-/// single-value `__contains` form.
+/// single-value `__contains` form. The `__date` terms truncate in
+/// `timezone` (Django `TruncDate` under the activated actor zone).
 #[allow(clippy::result_large_err)]
 fn compile_text_predicate(
     name: &str,
     text: &str,
     binds: &mut Vec<OwnedBind>,
     next: &mut usize,
+    timezone: &chrono_tz::Tz,
 ) -> Result<Option<String>, Response> {
     if name == "issue__name__icontains" {
         // Django `icontains`: LIKE with `\`, `%`, `_` escaped.
@@ -5008,11 +5048,11 @@ fn compile_text_predicate(
         _ => return Ok(None),
     };
     let column = match term {
-        "issue__created_at__date" => "\"issues\".\"created_at\"::date",
-        "issue__updated_at__date" => "\"issues\".\"updated_at\"::date",
-        "issue__completed_at__date" => "\"issues\".\"completed_at\"::date",
-        "issue__start_date" => "\"issues\".\"start_date\"",
-        "issue__target_date" => "\"issues\".\"target_date\"",
+        "issue__created_at__date" => zoned_date_column(binds, next, "created_at", timezone),
+        "issue__updated_at__date" => zoned_date_column(binds, next, "updated_at", timezone),
+        "issue__completed_at__date" => zoned_date_column(binds, next, "completed_at", timezone),
+        "issue__start_date" => "\"issues\".\"start_date\"".to_owned(),
+        "issue__target_date" => "\"issues\".\"target_date\"".to_owned(),
         _ => return Ok(None),
     };
     if operator == "=" {
@@ -7268,22 +7308,42 @@ mod tests {
 
     #[test]
     fn updated_at_predicates_hit_the_issue_updated_column() {
+        // NEWPIDASH-310: `__date` terms truncate in the actor's zone
+        // (Django `TruncDate`), binding the IANA name as `$N`.
+        let zone = chrono_tz::Tz::Pacific__Kiritimati;
         let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 12).expect("day");
-        let (mut binds, mut next) = (Vec::new(), 1);
+        let (mut binds, mut next) = (Vec::new(), 3usize);
         let sql = compile_predicate(
             "issue__updated_at__date__gte",
             &FilterValue::Day(day),
             &mut binds,
             &mut next,
+            &zone,
         )
         .expect("compiles")
         .expect("known key");
-        assert_eq!(sql, "\"issues\".\"updated_at\"::date >= $1::date");
+        assert_eq!(
+            sql,
+            "(\"issues\".\"updated_at\" AT TIME ZONE $3)::date >= $4::date"
+        );
+        assert!(matches!(
+            binds.as_slice(),
+            [OwnedBind::Text(tz), OwnedBind::Date(_)] if tz == "Pacific/Kiritimati"
+        ));
         let text = FilterValue::Text("2026-01-12".to_owned());
-        let sql = compile_predicate("issue__updated_at__date__lte", &text, &mut binds, &mut next)
-            .expect("compiles")
-            .expect("known key");
-        assert!(sql.starts_with("\"issues\".\"updated_at\"::date"), "{sql}");
+        let sql = compile_predicate(
+            "issue__updated_at__date__lte",
+            &text,
+            &mut binds,
+            &mut next,
+            &zone,
+        )
+        .expect("compiles")
+        .expect("known key");
+        assert!(
+            sql.starts_with("(\"issues\".\"updated_at\" AT TIME ZONE $5)::date"),
+            "{sql}"
+        );
     }
 
     #[test]
