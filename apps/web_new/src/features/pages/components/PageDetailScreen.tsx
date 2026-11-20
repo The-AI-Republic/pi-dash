@@ -301,10 +301,17 @@ export function PageDetailScreen({
   // The options menu drives the same shared writes as the list row menu
   // (PAGE-057/059/060): duplication, visibility, shelve/restore and delete.
   // The lock control and the star own their hooks inside the header.
-  const headerTarget = { workspaceSlug, projectId, page: { id: pageId, name: page?.name ?? "" } };
+  // The header carries the open page's parenthood so a restore under a
+  // still-shelved parent reports the detach to the top level (PAGE-088);
+  // the trail pool already holds every row the notice must consult.
+  const headerTarget = {
+    workspaceSlug,
+    projectId,
+    page: { id: pageId, name: page?.name ?? "", parent: page?.parent ?? null, parent_id: page?.parent_id },
+  };
   const duplicate = useDuplicatePage(workspaceSlug, projectId);
   const visibility = usePageVisibilityWrite(headerTarget);
-  const archive = usePageArchiveWrite(headerTarget);
+  const archive = usePageArchiveWrite(headerTarget, { rows: trailPool });
   const deletion = usePageDeleteWrite(headerTarget);
   const [deleteOpen, setDeleteOpen] = React.useState(false);
   // A shelved page never reports its subtree size through the row, so the

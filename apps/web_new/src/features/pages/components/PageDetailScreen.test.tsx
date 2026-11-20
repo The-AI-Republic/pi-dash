@@ -1500,6 +1500,24 @@ describe("PageDetailScreen header actions (PAGE-055-060)", () => {
     expect(notifySuccess).toHaveBeenCalledWith("Page restored successfully.");
   });
 
+  it("restores under a shelved parent with the top-level notice (NEWPIDASH-347)", async () => {
+    const parentId = "623e4567-e89b-12d3-a456-426614174011";
+    harness.page = record({ archived_at: "2026-10-20", parent: parentId, parent_id: parentId });
+    const parentRow = makePageRow({ id: parentId, name: "Shelved parent", archived_at: "2026-10-20" });
+    harness.pages = [parentRow];
+    harness.childrenByParent = {
+      [parentId]: [
+        makePageRow({ id: harness.pageId, name: "Launch notes", archived_at: "2026-10-20", parent: parentId }),
+      ],
+    };
+    renderScreen();
+    expect(await screen.findByTestId("page-archived-marker")).toBeInTheDocument();
+    await openOptions();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Restore" }));
+    await waitFor(() => expect(harness.pageWrites.some((write) => write.method === "RESTORE")).toBe(true));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Page restored to the top level."));
+  });
+
   it("switches visibility both ways from the menu", async () => {
     renderScreen();
     await screen.findByRole("textbox", { name: "Page title" });
