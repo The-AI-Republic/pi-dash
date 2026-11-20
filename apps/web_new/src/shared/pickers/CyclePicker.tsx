@@ -11,7 +11,7 @@ import { Button, Combobox, IconButton, type ButtonVariant, type ComboboxOption }
 import { Repeat } from "lucide-react";
 import * as React from "react";
 
-import { PropertyChip } from "./PropertyChip.js";
+import { describeChip, PropertyChip } from "./PropertyChip.js";
 import { selectCycleOptions, type CycleOption } from "./cycles.js";
 import { usePickerCycles } from "./reference.js";
 
@@ -113,7 +113,7 @@ export function CyclePicker({
           icon={<CycleGlyph />}
           text={text}
           placeholder={!filled}
-          {...(filled ? { title: text } : {})}
+          tooltip={describeChip(label, filled ? text : null, "The time-boxed iteration this work item belongs to.")}
           {...(triggerId === undefined ? {} : { id: triggerId })}
           {...(tabIndex === undefined ? {} : { tabIndex })}
         />

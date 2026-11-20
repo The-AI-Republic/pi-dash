@@ -12,7 +12,7 @@ import { IconButton, Popover, cn } from "@pidash/kit";
 import { CalendarDays, ChevronLeft, ChevronRight, X } from "lucide-react";
 import * as React from "react";
 
-import { PropertyChip } from "../../../shared/pickers/PropertyChip.js";
+import { describeChip, PropertyChip } from "../../../shared/pickers/PropertyChip.js";
 import {
   CAPTION_YEAR_MAX,
   CAPTION_YEAR_MIN,
@@ -206,6 +206,10 @@ export function DatePicker({
   const showClear = clearable && value !== null && !disabled;
   const filled = value !== null;
   const chipText = filled ? formatDay(value) : placeholder;
+  // The chip names its own field: only the two modal labels exist, so
+  // the sentence follows the label (NEWPIDASH-361).
+  const sentence =
+    label === "Due date" ? "When this work item is expected to be done." : "When work on this item begins.";
   const defaultTrigger = chip ? (
     <PropertyChip
       label={filled ? `${label}: ${chipText}` : label}
@@ -213,7 +217,7 @@ export function DatePicker({
       text={chipText}
       placeholder={!filled}
       {...(filled && overdue ? { textClassName: "text-(--danger)" } : {})}
-      {...(filled ? { title: chipText } : {})}
+      tooltip={describeChip(label, filled ? chipText : null, sentence)}
       disabled={disabled}
       data-testid={`${testId}-trigger`}
     />
