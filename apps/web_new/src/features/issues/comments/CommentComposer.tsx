@@ -49,7 +49,13 @@ export interface CommentComposerProps {
    * Comment & Run (ISS-193): post the draft, then dispatch a continuation
    * run. Absent on surfaces without runs; disabled until dispatch can act.
    */
-  commentAndRun?: { submit: (input: ComposerPost) => Promise<unknown>; disabled: boolean } | undefined;
+  commentAndRun?:
+    | {
+        submit: (input: ComposerPost) => Promise<unknown>;
+        disabled: boolean;
+        disabledReason?: string | undefined;
+      }
+    | undefined;
 }
 
 export function CommentComposer({
@@ -226,6 +232,7 @@ export function CommentComposer({
             loading={sending}
             disabled={commentAndRun.disabled || empty || busy}
             onClick={() => void post(commentAndRun.submit)}
+            {...(commentAndRun.disabledReason === undefined ? {} : { title: commentAndRun.disabledReason })}
           >
             <span className="flex items-center gap-(--space-1)">
               <MessageSquarePlus size={14} strokeWidth={1.5} aria-hidden="true" />

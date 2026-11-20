@@ -49,12 +49,17 @@ vi.mock("./historyQueries.js", () => ({
 }));
 vi.mock("../../../shared/dictation/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/dictation/index.js")>();
-  return { ...original, useDictationConfig: hooks.useDictationConfig };
+  return {
+    ...original,
+    useDictationConfig: hooks.useDictationConfig,
+    // Dictation ships hidden; switched on here so the dormant control stays covered.
+    DICTATION_UI_ENABLED: true,
+  };
 });
 
 import { makeRunner, makeSession, testClient, wrapper } from "./harness.js";
 import { RUNNER_CHAT_PAGE_TITLE, RunnerChatPage, runnerChatDocumentTitle } from "./RunnerChatPage.js";
-import { APPROVAL_MODE_COPY, approvalModeKey } from "./approvalCopy.js";
+import { approvalModeKey } from "./approvalCopy.js";
 import { getChatTransport, setChatTransport, type ChatTransport } from "./transport.js";
 import { chatKeys } from "./keys.js";
 
@@ -585,7 +590,7 @@ describe("RunnerChatPage messaging (RUN-027/029/030/031)", () => {
     };
     renderPage();
     expect(screen.queryByRole("alertdialog")).toBeNull();
-    expect(screen.queryByRole("group", { name: "Approval mode" })).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Approval mode" })).toBeNull();
   });
 
   it("refreshes history and transcript from the stream's own refresh signal", () => {
@@ -636,7 +641,9 @@ describe("RunnerChatPage desktop approvals (RUN-034/035)", () => {
   it("shows the mode control and the parked request", () => {
     stream.approval = approval;
     renderPage();
-    expect(screen.getByRole("group", { name: "Approval mode" })).toBeInTheDocument();
+    // The mode is a dropdown in the composer box's toolbar, not the header.
+    const box = screen.getByTestId("runner-chat-composer-box");
+    expect(within(box).getByRole("combobox", { name: "Approval mode" })).toBeInTheDocument();
     const prompt = screen.getByRole("alertdialog", { name: "Approval requested" });
     expect(prompt).toHaveTextContent("npm test");
     expect(prompt).toHaveTextContent("checks the build");
@@ -718,7 +725,7 @@ describe("RunnerChatPage desktop approvals (RUN-034/035)", () => {
   it("persists the chosen mode and hands it to the session and the runner", async () => {
     const transport = getChatTransport();
     renderPage();
-    await userEvent.click(screen.getByRole("button", { name: APPROVAL_MODE_COPY.ask.label }));
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Approval mode" }), "ask");
     expect(globalThis.localStorage.getItem(approvalModeKey("r-1"))).toBe("ask");
     expect(transport.setApprovalMode).toHaveBeenCalledWith("open", "ask");
     expect(transport.setRunnerApprovalMode).toHaveBeenCalledWith("r-1", "ask");
@@ -727,14 +734,7 @@ describe("RunnerChatPage desktop approvals (RUN-034/035)", () => {
   it("loads the stored mode for the contact on screen", () => {
     globalThis.localStorage.setItem(approvalModeKey("r-1"), "workspace");
     renderPage();
-    expect(screen.getByRole("button", { name: APPROVAL_MODE_COPY.workspace.label })).toHaveAttribute(
-      "aria-pressed",
-      "true"
-    );
-    expect(screen.getByRole("button", { name: APPROVAL_MODE_COPY.full_access.label })).toHaveAttribute(
-      "aria-pressed",
-      "false"
-    );
+    expect(screen.getByRole("combobox", { name: "Approval mode" })).toHaveValue("workspace");
   });
 
   it("hands the stored mode to the session the page warms", () => {
@@ -749,23 +749,20 @@ describe("RunnerChatPage desktop approvals (RUN-034/035)", () => {
   it("keeps a server runner on the cloud path and hides the approval controls", () => {
     setChatTransport(localTransport((runnerId) => runnerId === "pidash-builtin"));
     renderPage();
-    expect(screen.queryByRole("group", { name: "Approval mode" })).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Approval mode" })).toBeNull();
     expect(screen.queryByRole("alertdialog")).toBeNull();
   });
 
   it("falls back to full access for an unrecognized stored value", () => {
     globalThis.localStorage.setItem(approvalModeKey("r-1"), "yolo");
     renderPage();
-    expect(screen.getByRole("button", { name: APPROVAL_MODE_COPY.full_access.label })).toHaveAttribute(
-      "aria-pressed",
-      "true"
-    );
+    expect(screen.getByRole("combobox", { name: "Approval mode" })).toHaveValue("full_access");
   });
 
   it("still remembers the choice when no conversation is open yet", async () => {
     hooks.useChatSessions.mockReturnValue({ data: [], isPending: false, refetch: refetchSessions });
     render(<RunnerChatPage workspaceSlug="acme" runnerId="r-1" requestedSessionId={null} onSelectSession={vi.fn()} />);
-    await userEvent.click(screen.getByRole("button", { name: APPROVAL_MODE_COPY.ask.label }));
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Approval mode" }), "ask");
     // No session to name, so only the runner-level value is handed over.
     expect(getChatTransport().setApprovalMode).not.toHaveBeenCalledWith("", "ask");
     expect(getChatTransport().setRunnerApprovalMode).toHaveBeenCalledWith("r-1", "ask");
@@ -775,7 +772,7 @@ describe("RunnerChatPage desktop approvals (RUN-034/035)", () => {
   it("keeps the mode control usable while a send is in flight", async () => {
     actions.sending = true;
     renderPage();
-    expect(screen.getByRole("button", { name: APPROVAL_MODE_COPY.ask.label })).toBeEnabled();
+    expect(screen.getByRole("combobox", { name: "Approval mode" })).toBeEnabled();
   });
 
   it("falls back to full access when storage refuses the read", () => {
@@ -784,10 +781,7 @@ describe("RunnerChatPage desktop approvals (RUN-034/035)", () => {
     });
     try {
       renderPage();
-      expect(screen.getByRole("button", { name: APPROVAL_MODE_COPY.full_access.label })).toHaveAttribute(
-        "aria-pressed",
-        "true"
-      );
+      expect(screen.getByRole("combobox", { name: "Approval mode" })).toHaveValue("full_access");
     } finally {
       getItem.mockRestore();
     }
@@ -821,11 +815,8 @@ describe("RunnerChatPage desktop approvals (RUN-034/035)", () => {
     });
     try {
       renderPage();
-      await userEvent.click(screen.getByRole("button", { name: APPROVAL_MODE_COPY.ask.label }));
-      expect(screen.getByRole("button", { name: APPROVAL_MODE_COPY.ask.label })).toHaveAttribute(
-        "aria-pressed",
-        "true"
-      );
+      await userEvent.selectOptions(screen.getByRole("combobox", { name: "Approval mode" }), "ask");
+      expect(screen.getByRole("combobox", { name: "Approval mode" })).toHaveValue("ask");
       expect(getChatTransport().setApprovalMode).toHaveBeenCalledWith("open", "ask");
     } finally {
       setItem.mockRestore();

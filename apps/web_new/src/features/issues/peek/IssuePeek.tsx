@@ -17,7 +17,8 @@ import { ArrowUpRight } from "lucide-react";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
-import { useWorkspace } from "../../../core/session/index.js";
+import { useMe, useWorkspace } from "../../../core/session/index.js";
+import { canRunIssue } from "../runPolicy.js";
 import { useNarrowViewport } from "../../../shared/shell/narrowViewport.js";
 import { canEditInProject } from "../../../shared/shell/contextual/index.js";
 import { projectDetailsQueryOptions } from "../../projects/index.js";
@@ -192,6 +193,7 @@ export function IssuePeek({
   const titleUpdate = useUpdateIssue({ workspaceSlug, projectId, issueId, failureTitle: TITLE_SAVE_FAILED_TITLE });
   const attachmentsRef = React.useRef<AttachmentsWidgetHandle>(null);
   const narrow = useNarrowViewport();
+  const me = useMe();
   useRefocusOrigin();
 
   const refreshDetail = React.useCallback(
@@ -412,7 +414,19 @@ export function IssuePeek({
   const sidebar = (
     <>
       <AgentStatusPanel workspaceSlug={workspaceSlug} issue={issue} refresh={refreshDetail} />
-      <IssuePropertiesSidebar workspaceSlug={workspaceSlug} projectId={projectId} issue={issue} editable={editable} />
+      <IssuePropertiesSidebar
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        issue={issue}
+        editable={editable}
+        canRun={canRunIssue({
+          policy: project?.settings?.issue_run_policy,
+          viewerId: me.data?.id ?? null,
+          creatorId: issue.created_by,
+          assigneeIds: issue.assignee_ids,
+          memberRole: project?.member_role ?? null,
+        })}
+      />
     </>
   );
 

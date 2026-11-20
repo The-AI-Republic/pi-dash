@@ -16,7 +16,7 @@ Before you test anything, bring the {{ repo.code_review_term }} branch up to dat
 - Conflicts: resolve them so the base's newer structure wins and the PR's change is re-applied on top. Run this repo's own gates, then push the merge commit.
 - Too large to resolve with confidence — the base rewrote the code the PR changes: do not test stale code. Abort the merge, leave the branch untouched, comment on the issue with what changed on the base and what needs redoing, and move the issue back to **In Progress** so the change can be rebuilt on the current base.
 - Record in the workpad the base SHA you were checked against (`git rev-parse origin/<base>`, or the short SHA after the sync), so a later run can tell whether the verdict is still current. For a stacked PR, note in the workpad whether the parent PR has merged.
-- If a prior test verdict exists and the base has moved since that verdict, redo the test on the synced branch — a verdict on an old base does not carry over. A merge into the base after the test ran means syncing and re-checking first. If this pass merges the PR (agent-close, "accepting the deliverable"), re-check mergeability first.
+- If a prior test verdict exists and the base has moved since that verdict, redo the test on the synced branch — a verdict on an old base does not carry over. A merge into the base after the test ran means syncing and re-checking first.
 
 Gates and CI runs are **corroborating evidence, never the verdict**. A green pipeline only re-checks what someone already wrote a check for — it cannot tell you the new behavior is right (its tests are part of the change being doubted) or that the button is actually visible. A test pass that ends with "CI is green" and no first-hand observation is incomplete.
 
@@ -36,4 +36,4 @@ Acting on findings, within the limits of the chosen kind (step 7 of the test cyc
 - **OPS / INFRA**: apply a trivial config fix; otherwise report.
 - **DESIGN**: edit the doc for a trivial gap; otherwise report.
 
-For software, "accepting the deliverable" on an agent-close pass means merging the {{ repo.code_review_term }}; "waiting on an external process" means waiting on CI checks or a merge.
+For software, "waiting on an external process" means waiting on CI checks or a merge.

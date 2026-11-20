@@ -16,7 +16,7 @@ import { useQueryClient } from "@tanstack/react-query";
 
 import type { ChatSession } from "@pidash/api-client";
 
-import { useDictationConfig, dictationOffered } from "../../../shared/dictation/index.js";
+import { DICTATION_UI_ENABLED, useDictationConfig, dictationOffered } from "../../../shared/dictation/index.js";
 import { useDocumentHead } from "../../../shared/shell/index.js";
 import { useRunnersArea } from "../area.js";
 import {
@@ -405,8 +405,8 @@ export function RunnerChatPage({
     void actions.send(content, setDraft).finally(() => setInitializingHandoff(false));
   }, [actions.send, area.allowed, onInitialMessageConsumed, runnerId, surface]);
 
-  const speech = useDictationConfig(area.allowed);
-  const dictationAvailable = dictationOffered(speech.data);
+  const speech = useDictationConfig(area.allowed && DICTATION_UI_ENABLED);
+  const dictationAvailable = DICTATION_UI_ENABLED && dictationOffered(speech.data);
 
   useDocumentHead({ title: runnerChatDocumentTitle(runner.data?.name), robots: "noindex, nofollow" });
 
@@ -420,17 +420,7 @@ export function RunnerChatPage({
         {...(localHistory ? { onRename: startRename, onDelete: startDelete, onClear: startClear } : {})}
       />
       <div className="flex min-w-0 flex-1 flex-col px-(--space-4) pb-(--space-4)">
-        <ChatHeader
-          summary={summary}
-          {...(session === null ? {} : { onClose: () => void actions.close() })}
-          {...(approvalsSupported
-            ? {
-                // The mode applies to the next thread, so a send in flight
-                // does not lock it.
-                actions: <ChatApprovalMode value={approvalMode} onChange={chooseMode} />,
-              }
-            : {})}
-        />
+        <ChatHeader summary={summary} {...(session === null ? {} : { onClose: () => void actions.close() })} />
         <ChatTranscript
           messages={stream.messages}
           loading={messages.isPending && session !== null}
@@ -489,6 +479,9 @@ export function RunnerChatPage({
           }}
           sending={actions.sending}
           dictationAvailable={dictationAvailable}
+          // The approval mode sits in the composer's toolbar. It applies to
+          // the next thread, so a send in flight does not lock it.
+          toolbar={approvalsSupported ? <ChatApprovalMode value={approvalMode} onChange={chooseMode} /> : undefined}
         />
       </div>
       {localHistory && renameTarget !== null ? (

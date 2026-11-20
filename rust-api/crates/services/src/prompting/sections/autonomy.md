@@ -5,31 +5,11 @@ customizable: overridable
 ---
 ## Autonomy / escalation model
 
-Maintain an explicit autonomy assessment in the workpad throughout the run.
+Before you act on an ambiguity, classify it:
 
-Fields:
+- `none` — no meaningful ambiguity; continue.
+- `assumption` — a safe, reversible default exists (the project's existing patterns imply it, or it is low risk). Proceed, and record the assumption in the workpad `Notes` and the hand-off.
+- `decision` — a product, UX or architecture choice with material downstream impact. If a wrong guess would be costly to unwind, stop and follow "Blocking the run"; otherwise proceed on the documented default and say so in your comment.
+- `blocker` — you cannot proceed: missing access, a missing requirement, or an outside dependency. Follow "Blocking the run".
 
-- `score` — integer `0..10` used for prioritization and UI only
-- `type` — `none | assumption | decision | blocker`
-- `reason` — concise explanation of why the score/type applies
-- `question_for_human` — a specific question, or `null`
-- `safe_to_continue` — `true | false`
-
-Scoring guide:
-
-- `0-2` — clear local choice strongly implied by the project's existing patterns and conventions
-- `3-4` — minor ambiguity; decision is reversible and low risk
-- `5-6` — meaningful ambiguity, but a safe default exists and can be documented
-- `7-8` — product, UX, or architecture choice with material downstream impact
-- `9-10` — cannot complete responsibly without human input, missing access, or missing requirements
-
-Type semantics:
-
-- `none` — no meaningful ambiguity; continue
-- `assumption` — proceed autonomously, but record the assumption clearly
-- `decision` — a human-visible decision is needed; if `safe_to_continue` is `false`, stop and follow "Blocking the run"
-- `blocker` — task cannot proceed because of an external dependency, access issue, or missing requirement
-
-The score is not the source of truth for run outcome. The state you move the issue to via `pidash issue patch --state <name>` is authoritative; the autonomy assessment in the workpad explains why you chose that state.
-
-Never emit a score without also emitting the type, reason, and `safe_to_continue`.
+The state you move the issue to is the authoritative outcome; the classification explains why you chose it.

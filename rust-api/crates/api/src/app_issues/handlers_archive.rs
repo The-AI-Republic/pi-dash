@@ -860,7 +860,7 @@ async fn fetch_clock_policy(
     )
     .await
     .map_err(|_| Denial::ServerError)?;
-    let Some((enabled, max_ticks, interval, review_interval, test_interval)) = row else {
+    let Some((enabled, max_ticks, interval, review_interval, test_interval, settings)) = row else {
         return Err(Denial::ServerError);
     };
     Ok(ProjectClockPolicy {
@@ -869,7 +869,9 @@ async fn fetch_clock_policy(
         agent_default_interval_seconds: Some(i64::from(interval)),
         agent_review_default_interval_seconds: Some(i64::from(review_interval)),
         agent_test_default_interval_seconds: Some(i64::from(test_interval)),
-    })
+        ..Default::default()
+    }
+    .with_stages(&settings))
 }
 
 /// One state row through `_base_manager` (no soft-delete guard).

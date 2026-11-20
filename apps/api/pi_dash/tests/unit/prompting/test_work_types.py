@@ -330,8 +330,11 @@ def test_software_review_syncs_pr_branch_with_base():
     assert text.index(
         "Sync the PR branch with its base"
     ) < text.index("Software work products come in these review kinds")
-    # Mergeability re-check on agent-close.
-    assert "re-check mergeability" in text
+    # NEWPIDASH-305: there is no agent-close merge step any more (a pass
+    # moves the issue to AI Completed; only a human closes), so no
+    # mergeability re-check can exist.
+    assert "re-check mergeability" not in text
+    assert "agent-close" not in text
 
 
 @pytest.mark.unit
@@ -356,7 +359,9 @@ def test_software_test_syncs_pr_branch_with_base():
     ):
         assert phrase in text, f"missing {phrase!r}"
     assert text.index("Sync the PR branch with its base") < text.index("Gates and CI runs are")
-    assert "re-check mergeability" in text
+    # NEWPIDASH-305: no agent-close merge step any more (see above).
+    assert "re-check mergeability" not in text
+    assert "agent-close" not in text
     # Base moved after the test ran: sync and re-check first.
     assert "A merge into the base after the test ran means syncing and re-checking first" in text
 

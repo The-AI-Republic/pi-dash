@@ -610,6 +610,57 @@ pub struct RunnerConfig {
     pub approval_policy: ApprovalPolicySection,
 }
 
+impl RunnerConfig {
+    /// The default model configured for this runner's agent, if any. The
+    /// Pi Dash Agent's model comes from Pi Dash, so it has none here.
+    pub fn configured_model(&self) -> Option<&str> {
+        match self.agent.kind {
+            AgentKind::Codex => self.codex.model_default.as_deref(),
+            AgentKind::ClaudeCode => self.claude_code.model_default.as_deref(),
+            AgentKind::CursorAgent => self.cursor_agent.model_default.as_deref(),
+            AgentKind::OpenClaw => self.openclaw.model_default.as_deref(),
+            AgentKind::Grok => self.grok.model_default.as_deref(),
+            AgentKind::MuseCode => self.muse_code.model_default.as_deref(),
+            AgentKind::PidashAgent => None,
+        }
+    }
+
+    /// The configured reasoning effort; `None` for agents without one
+    /// (only Codex, Claude Code and Muse Code take an effort tier).
+    pub fn configured_reasoning_effort(&self) -> Option<&str> {
+        match self.agent.kind {
+            AgentKind::Codex => self.codex.effort_default.as_deref(),
+            AgentKind::ClaudeCode => self.claude_code.effort_default.as_deref(),
+            AgentKind::MuseCode => self.muse_code.effort_default.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// The reasoning-effort slot of `kind`'s section; `None` for agents
+    /// without an effort knob (only Codex, Claude Code and Muse Code have one).
+    pub fn effort_slot_mut(&mut self, kind: AgentKind) -> Option<&mut Option<String>> {
+        match kind {
+            AgentKind::Codex => Some(&mut self.codex.effort_default),
+            AgentKind::ClaudeCode => Some(&mut self.claude_code.effort_default),
+            AgentKind::MuseCode => Some(&mut self.muse_code.effort_default),
+            _ => None,
+        }
+    }
+
+    /// The model slot of `kind`'s section (the Pi Dash Agent has none).
+    pub fn model_slot_mut(&mut self, kind: AgentKind) -> Option<&mut Option<String>> {
+        match kind {
+            AgentKind::Codex => Some(&mut self.codex.model_default),
+            AgentKind::ClaudeCode => Some(&mut self.claude_code.model_default),
+            AgentKind::CursorAgent => Some(&mut self.cursor_agent.model_default),
+            AgentKind::OpenClaw => Some(&mut self.openclaw.model_default),
+            AgentKind::Grok => Some(&mut self.grok.model_default),
+            AgentKind::MuseCode => Some(&mut self.muse_code.model_default),
+            AgentKind::PidashAgent => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceSection {
     pub working_dir: PathBuf,
@@ -884,6 +935,12 @@ pub struct ClaudeCodeSection {
     pub binary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_default: Option<String>,
+    /// `claude --effort` level (`low` / `medium` / `high` / `xhigh` /
+    /// `max`). `None` omits the flag so Claude Code applies its own default.
+    /// Only meaningful alongside `model_default` (the web picker pairs
+    /// levels with models).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_default: Option<String>,
 }
 
 fn default_claude_binary() -> String {
@@ -895,6 +952,7 @@ impl Default for ClaudeCodeSection {
         Self {
             binary: default_claude_binary(),
             model_default: None,
+            effort_default: None,
         }
     }
 }
@@ -980,6 +1038,12 @@ pub struct MuseCodeSection {
     pub binary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_default: Option<String>,
+    /// `muse exec --reasoning-effort` tier (`none` / `minimal` / `low` /
+    /// `medium` / `high` / `xhigh` / `max` / `ultra`). `None` omits the flag
+    /// so Muse applies its own default. Like Codex's, only meaningful
+    /// alongside `model_default` (the web picker pairs tiers with models).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_default: Option<String>,
 }
 
 fn default_muse_binary() -> String {
@@ -991,6 +1055,7 @@ impl Default for MuseCodeSection {
         Self {
             binary: default_muse_binary(),
             model_default: None,
+            effort_default: None,
         }
     }
 }

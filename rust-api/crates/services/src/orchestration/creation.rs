@@ -102,6 +102,7 @@ use pidash_types::agent_runs::AgentExecutorKind;
 pub use pidash_types::orchestration::PROJECT_MOVE_HANDOFF_CONFIG_KEY;
 use pidash_types::orchestration::{ContinuationOutcome, PhaseConfig, StateRef, TransitionOutcome};
 
+use crate::domain::project_settings::AgentStages;
 use crate::prompting::{composer, context, recipes, work_types};
 use crate::run_creation::UserFlags;
 
@@ -563,6 +564,89 @@ pub const BUNDLE_OVERRIDES_SQL: &str = "SELECT section_key, body, version, user_
 /// The workspace slug + name (`context.py:567-570`). `$1` is the
 /// workspace id.
 pub const BUNDLE_WORKSPACE_SQL: &str = "SELECT slug, name FROM workspaces WHERE id = $1";
+
+/// The hand-off review and test read (lean workflow design §8.2): the
+/// `stage_handoff` of the most recent `coding-task` run on the issue that
+/// stored one. Read directly rather than through the parent-payload pick,
+/// which follows the run's parent and can miss the latest In Progress run
+/// after a hand-back. `IS NOT NULL` stands in for the design's `?` key
+/// test (it also skips a stored JSON null) so no raw `?` reaches a
+/// placeholder-rewriting driver. `$1` is the issue id.
+pub const BUNDLE_HANDOFF_SQL: &str = "SELECT done_payload->>'stage_handoff' AS handoff \
+    FROM agent_run WHERE work_item_id = $1 AND phase_kind = 'coding-task' \
+    AND done_payload->>'stage_handoff' IS NOT NULL ORDER BY created_at DESC LIMIT 1";
+
+/// The issue's last runs for `stage_history` (lean workflow design §8.3),
+/// newest first; the context renders them oldest first. `$1` is the issue
+/// id, `$2` the new run id (excluded).
+pub const BUNDLE_STAGE_HISTORY_SQL: &str = "SELECT phase_kind, \
+    done_payload->>'status' AS result, done_payload->>'note' AS note, created_at \
+    FROM agent_run WHERE work_item_id = $1 AND id != $2 ORDER BY created_at DESC LIMIT 10";
+
+/// The project's Rust-owned settings bag, for `agent_stages` (lean
+/// workflow design §5.1). `$1` is the project id.
+pub const BUNDLE_PROJECT_SETTINGS_SQL: &str = "SELECT settings FROM projects WHERE id = $1";
+
+/// The lean-workflow prompt inputs the creation bundle carries on top of
+/// the Django-era ones: the project's stage setting, the latest hand-off
+/// and the run history. Loaded by [`load_stage_inputs`].
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct StageInputs {
+    pub agent_stages: AgentStages,
+    pub handoff: Option<String>,
+    pub stage_history: Vec<context::StageHistoryRow>,
+}
+
+/// Run [`BUNDLE_PROJECT_SETTINGS_SQL`], [`BUNDLE_HANDOFF_SQL`] and
+/// [`BUNDLE_STAGE_HISTORY_SQL`] (through their [`orm`] builders) on any
+/// connection — every render-bundle store (jobs creation + handoff, the
+/// services move twin, the api preview) shares this one loader. A settings
+/// bag that fails to parse reads as the default (Auto), like
+/// `ProjectClockPolicy::with_stages`.
+pub async fn load_stage_inputs(
+    conn: &impl sea_orm::ConnectionTrait,
+    project_id: Uuid,
+    issue_id: Uuid,
+    run_id: Uuid,
+) -> Result<StageInputs, sea_orm::DbErr> {
+    use sea_orm::DbBackend;
+    let backend = DbBackend::Postgres;
+    let agent_stages = match conn
+        .query_one(backend.build(&orm::bundle_project_settings_select(project_id)))
+        .await?
+    {
+        Some(row) => {
+            let settings: Value = row.try_get("", "settings")?;
+            crate::domain::project_settings::agent_stages_of(&settings)
+        }
+        None => AgentStages::default(),
+    };
+    let handoff = match conn
+        .query_one(backend.build(&orm::bundle_handoff_select(issue_id)))
+        .await?
+    {
+        Some(row) => row.try_get::<Option<String>>("", "handoff")?,
+        None => None,
+    };
+    let rows = conn
+        .query_all(backend.build(&orm::bundle_stage_history_select(issue_id, run_id)))
+        .await?;
+    let mut stage_history = Vec::with_capacity(rows.len());
+    for row in rows {
+        let created_at: DateTime<chrono::FixedOffset> = row.try_get("", "created_at")?;
+        stage_history.push(context::StageHistoryRow {
+            phase_kind: row.try_get("", "phase_kind")?,
+            result: row.try_get("", "result")?,
+            note: row.try_get("", "note")?,
+            date: created_at.format("%Y-%m-%d").to_string(),
+        });
+    }
+    Ok(StageInputs {
+        agent_stages,
+        handoff,
+        stage_history,
+    })
+}
 
 /// The INSERT as executed: [`RUN_INSERT_SQL`] plus `RETURNING` the
 /// [`RUN_VIEW_COLUMNS`] projection, like `objects.create`.
@@ -1353,6 +1437,51 @@ pub mod orm {
             .to_owned()
     }
 
+    /// `"agent_run"."done_payload" ->> '<key>'`: one `done_payload` key as
+    /// text (NULL when absent or JSON null).
+    pub fn done_payload_text(key: &str) -> sea_orm::sea_query::SimpleExpr {
+        use sea_orm::sea_query::extension::postgres::PgExpr;
+        Expr::col((run::Entity, run::Column::DonePayload)).cast_json_field(key)
+    }
+
+    /// [`super::BUNDLE_HANDOFF_SQL`]: output name `handoff`.
+    pub fn bundle_handoff_select(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .expr_as(done_payload_text("stage_handoff"), alias("handoff"))
+            .from(run::Entity)
+            .and_where(run_col(run::Column::WorkItemId).eq(issue_id))
+            .and_where(run_col(run::Column::PhaseKind).eq(super::recipes::KIND_CODING_TASK))
+            .and_where(Expr::expr(done_payload_text("stage_handoff")).is_not_null())
+            .order_by((run::Entity, run::Column::CreatedAt), Order::Desc)
+            .limit(1)
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_STAGE_HISTORY_SQL`]: output names `phase_kind`,
+    /// `result`, `note`, `created_at`.
+    pub fn bundle_stage_history_select(issue_id: Uuid, run_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column((run::Entity, run::Column::PhaseKind))
+            .expr_as(done_payload_text("status"), alias("result"))
+            .expr_as(done_payload_text("note"), alias("note"))
+            .column((run::Entity, run::Column::CreatedAt))
+            .from(run::Entity)
+            .and_where(run_col(run::Column::WorkItemId).eq(issue_id))
+            .and_where(run_col(run::Column::Id).ne(run_id))
+            .order_by((run::Entity, run::Column::CreatedAt), Order::Desc)
+            .limit(10)
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_PROJECT_SETTINGS_SQL`].
+    pub fn bundle_project_settings_select(project_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column(projects::Column::Settings)
+            .from(projects::Entity)
+            .and_where(Expr::col(projects::Column::Id).eq(project_id))
+            .to_owned()
+    }
+
     /// [`super::BUNDLE_WORKSPACE_SQL`].
     pub fn bundle_workspace_select(workspace_id: Uuid) -> SelectStatement {
         Query::select()
@@ -1802,6 +1931,9 @@ pub struct RenderBundle {
     /// The ticker-stashed resume parent `done_payload` (may be absent).
     pub ticker_parent_payload: Option<Value>,
     pub override_rows: Vec<composer::OverrideRow>,
+    /// The project's stage setting, the latest hand-off and the run
+    /// history ([`load_stage_inputs`]).
+    pub stages: StageInputs,
 }
 
 /// The run half of a render call.
@@ -2208,6 +2340,9 @@ pub fn render_first_turn(
             bundle.ticker_parent_payload.as_ref(),
         ),
         workpad_body: issue.workpad.clone().unwrap_or_default(),
+        agent_stages: bundle.stages.agent_stages,
+        handoff: bundle.stages.handoff.clone().unwrap_or_default(),
+        stage_history: context::stage_history(&bundle.stages.stage_history),
     };
     let context_value = context::build_context(&input);
     // Override keys are workspace/user UUID strings (`load_index`),
@@ -3164,9 +3299,39 @@ pub async fn resolve_pod_for_issue<C: CreationSeam>(
     Ok(resolve_pod_select(None, default.as_ref()))
 }
 
+/// Section count of the lean-workflow `coding-task` recipe for `software`
+/// (§9.2): 11 core sections plus the `software.context` and
+/// `software.execute` slots. Diverges from the Django-captured FX6
+/// manifests on purpose (D13).
+#[cfg(test)]
+const LEAN_CODING_SECTIONS: usize = 13;
+/// The lean `review` recipe for `software`: 6 core sections plus the
+/// `software.context` and `software.review` slots.
+#[cfg(test)]
+const LEAN_REVIEW_SECTIONS: usize = 8;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stage_queries_read_done_payload_keys_with_the_builder() {
+        use sea_orm::sea_query::PostgresQueryBuilder;
+        let issue = Uuid::nil();
+        let handoff = orm::bundle_handoff_select(issue).to_string(PostgresQueryBuilder);
+        assert_eq!(
+            handoff,
+            "SELECT \"agent_run\".\"done_payload\" ->> 'stage_handoff' AS \"handoff\" \
+             FROM \"agent_run\" WHERE \"agent_run\".\"work_item_id\" = '00000000-0000-0000-0000-000000000000' \
+             AND \"agent_run\".\"phase_kind\" = 'coding-task' \
+             AND (\"agent_run\".\"done_payload\" ->> 'stage_handoff') IS NOT NULL \
+             ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1"
+        );
+        let history =
+            orm::bundle_stage_history_select(issue, issue).to_string(PostgresQueryBuilder);
+        assert!(history.contains("\"agent_run\".\"done_payload\" ->> 'status' AS \"result\""));
+        assert!(history.contains("\"agent_run\".\"done_payload\" ->> 'note' AS \"note\""));
+    }
     use serde_json::json;
 
     static CREATE_DISPATCH: &str = include_str!(
@@ -3535,6 +3700,7 @@ mod tests {
             has_parent_run: false,
             ticker_parent_payload: None,
             override_rows: Vec::new(),
+            stages: Default::default(),
         }
     }
 
@@ -4365,10 +4531,7 @@ mod tests {
             assert!(turn.text.contains(marker), "missing {marker}");
         }
         let manifest = turn.manifest.as_array().expect("bare list");
-        assert_eq!(
-            manifest.len(),
-            after["prompt_manifest"].as_array().unwrap().len()
-        );
+        assert_eq!(manifest.len(), LEAN_CODING_SECTIONS);
         assert_eq!(
             manifest[0]["section_key"],
             after["prompt_manifest"][0]["section_key"]
@@ -4399,9 +4562,10 @@ mod tests {
         .expect("renders");
         assert!(turn.text.contains("You are reviewing"));
         assert!(turn.text.contains("FX6-1"));
+        let _ = after;
         assert_eq!(
             turn.manifest.as_array().expect("bare list").len(),
-            after["prompt_manifest"].as_array().unwrap().len()
+            LEAN_REVIEW_SECTIONS
         );
     }
 
@@ -4458,10 +4622,7 @@ mod tests {
         );
         let (prompt, manifest) = seam.saved_prompts.borrow()[&created].clone();
         assert!(prompt.contains("FX6-1"));
-        assert_eq!(
-            manifest.as_array().unwrap().len(),
-            case["after"]["prompt_manifest"].as_array().unwrap().len()
-        );
+        assert_eq!(manifest.as_array().unwrap().len(), LEAN_CODING_SECTIONS);
         // Owner stays NULL: the INSERT hardcodes it.
         assert!(RUN_INSERT_SQL.contains("owner_id"));
     }
@@ -4530,9 +4691,7 @@ mod tests {
         assert_eq!(inserted[0].phase_kind, "review");
         let created = outcome.created_run.unwrap();
         let manifest = &seam.saved_prompts.borrow()[&created].1;
-        // The review recipe for `software`: 9 core sections plus the
-        // `software.context` and `software.review` slots.
-        assert_eq!(manifest.as_array().unwrap().len(), 11);
+        assert_eq!(manifest.as_array().unwrap().len(), LEAN_REVIEW_SECTIONS);
     }
 
     #[tokio::test]

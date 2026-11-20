@@ -17,7 +17,10 @@ export const SCHEDULER_SOURCES = ["builtin", "manifest"] as const;
 /**
  * One reusable scheduler definition: a URL handle plus the base prompt
  * every install fires with. `active_binding_count` is the live install
- * count; `description` is blank unless set.
+ * count; `description` is blank unless set. `is_builtin` is the
+ * slug-in-catalog marker (NEWPIDASH-256): `source` defaults to `builtin`
+ * for user-created rows too, so the badge must read `is_builtin`, not
+ * `source`.
  */
 export const Scheduler = z.object({
   id: uuid(),
@@ -28,6 +31,7 @@ export const Scheduler = z.object({
   prompt: z.string(),
   color: z.string(),
   source: z.enum(SCHEDULER_SOURCES),
+  is_builtin: z.boolean(),
   is_enabled: z.boolean(),
   active_binding_count: z.number(),
   created_at: dateTime(),

@@ -1252,11 +1252,11 @@ async fn group_values(
 // Totals (grouped `__get_total_queryset`s, paginator.py:297-303,505-527)
 // ---------------------------------------------------------------------------
 
-/// Per-group totals over the filtered set with the intake/archived/draft
-/// `count_filter` (`views/issue.py:170-177,196-203`,
-/// [`count_filter_sql`](list_q::count_filter_sql)): one `(group, count)`
-/// row per group value, raw counts (the `1-if-zero` rule lives in the
-/// kernel [`total_dict`](paginator::total_dict)).
+/// Per-group totals over the filtered set with the archived/draft totals
+/// predicate (`views/issue.py:170-177,196-203` minus the intake leg;
+/// [`count_filter_sql`](list_q::count_filter_sql), DIFF-52): one
+/// `(group, count)` row per group value, raw counts (the `1-if-zero` rule
+/// lives in the kernel [`total_dict`](paginator::total_dict)).
 async fn group_total_pairs(
     pool: &sqlx::PgPool,
     group_expr: &str,

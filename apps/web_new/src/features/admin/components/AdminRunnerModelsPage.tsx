@@ -33,13 +33,13 @@ import {
   OPENHUB_NOTE,
   OPENHUB_SLUG_HINT,
   RUNNER_MODEL_AGENTS,
-  RUNNER_MODEL_EFFORTS,
   RUNNER_MODEL_EFFORT_LABELS,
   RUNNER_MODELS_DELETE_NOTE,
   RUNNER_MODELS_DESCRIPTION,
   RUNNER_MODELS_EMPTY_TEXT,
   RUNNER_MODELS_HEADERS,
   RUNNER_MODELS_HEADING,
+  effortsForAgent,
   formatEfforts,
   formErrorMessage,
   nextSortOrder,
@@ -82,6 +82,7 @@ function effortCheckboxId(effort: string): string {
 function ModelDialog({
   title,
   isOpenhub,
+  efforts: effortOptions,
   initial,
   pending,
   error,
@@ -90,6 +91,7 @@ function ModelDialog({
 }: {
   title: string;
   isOpenhub: boolean;
+  efforts: readonly string[];
   initial: FormValues;
   pending: boolean;
   error: string | null;
@@ -98,7 +100,11 @@ function ModelDialog({
 }): React.ReactElement {
   const [model, setModel] = React.useState(initial.model);
   const [label, setLabel] = React.useState(initial.label);
-  const [efforts, setEfforts] = React.useState(isOpenhub ? [] : initial.efforts);
+  // Keep only tiers this agent offers, so a stale stored tier is not re-sent
+  // (and refused) by an edit that never shows it.
+  const [efforts, setEfforts] = React.useState(
+    isOpenhub ? [] : initial.efforts.filter((effort) => effortOptions.includes(effort))
+  );
   const [preselected, setPreselected] = React.useState(initial.is_preselected);
 
   function toggleEffort(effort: string, checked: boolean): void {
@@ -135,10 +141,10 @@ function ModelDialog({
           onChange={(event) => setLabel(event.target.value)}
           placeholder={isOpenhub ? "OpenHub free model" : "GPT-5.5"}
         />
-        {isOpenhub ? null : (
+        {isOpenhub || effortOptions.length === 0 ? null : (
           <fieldset className="flex flex-col gap-(--space-2)">
             <legend className="text-body font-medium text-(--text)">Reasoning efforts</legend>
-            {RUNNER_MODEL_EFFORTS.map((effort) => (
+            {effortOptions.map((effort) => (
               <label
                 key={effort}
                 htmlFor={effortCheckboxId(effort)}
@@ -526,6 +532,7 @@ export function AdminRunnerModelsPage(): React.ReactElement {
         <ModelDialog
           title={dialog.kind === "add" ? "Add model" : "Edit model"}
           isOpenhub={isOpenhubDialog}
+          efforts={effortsForAgent(dialog.agent)}
           initial={
             dialog.kind === "add"
               ? { model: "", label: "", efforts: [], is_preselected: false }

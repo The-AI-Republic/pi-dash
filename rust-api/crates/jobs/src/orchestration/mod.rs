@@ -41,7 +41,7 @@ pub use fire_tick_live::LiveFireTickSeam;
 pub use fire_tick_seam::{
     bounce_issue_no_eligible_runner, dispatch_continuation_run, dispatch_run_ai_run,
     dispatch_run_ai_run_with_reason, maybe_apply_deferred_pause, preflight_eligibility_or_bounce,
-    re_tick_ticker, run_ai_for_human, shim_is_ticking_state, shim_tick_interval_seconds,
+    re_tick_ticker, run_ai_for_human, shim_stage_runs_automatically, shim_tick_interval_seconds,
     wait_ticker, DispatchJobsError, DispatchOutcome, FireTickShim, StateView,
 };
 pub use handoff::{

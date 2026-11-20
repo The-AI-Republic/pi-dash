@@ -9,12 +9,12 @@ This issue's work type is **software**: when a task changes the project's produc
 
 ### Classify the task first (during "Analyze & scope")
 
-Record a **task type** alongside the `Deliverable` line of your workpad `### Analysis`:
+Decide the **task type** and note it in the workpad `Notes`:
 
-- `code_change` — your proposed approach edits files in the repository. When uncertain, default to `code_change` — the heavier path is the safer default.
+- `code_change` — your approach edits files in the repository. When uncertain, choose `code_change`: the heavier path is the safer default.
 - `noncode` — no repository edits (an investigation, a status check, a CLI-only action, a comment-only response).
 
-For a `noncode` task, skip the rest of this section entirely — no sync, no branch, no commit, no {{ repo.code_review_term }}. The deliverable is the answer or action itself, recorded on the issue; mark the `delivered` checkpoint `n/a` in the workpad.
+For a `noncode` task, skip the rest of this section — no sync, no branch, no commit, no {{ repo.code_review_term }}. The deliverable is the answer or action itself, posted in your finishing comment.
 
 ### Read the project's conventions before forming a plan
 
@@ -23,11 +23,10 @@ The agent's working directory is a real checkout — read these directly while a
 - `CLAUDE.md` and `AGENTS.md` at the repo root — authoritative project conventions, day-to-day commands, and folder map. Treat these as ground truth when they conflict with priors from training data.
 - `.ai_design/` — current architectural design notes for ongoing initiatives. Skim subdirectories relevant to the area you are touching; they describe constraints that aren't visible from code alone.
 - If the issue mentions a feature, file, function, component, or symbol, locate the actual code with `grep` / `find` / your editor before forming a plan. Do not guess paths or names.
-- Reproduce the problem before changing code. Record the reproduction signal in the workpad `Notes` section.
 
 ### Sync the repository and stand on the right branch
 
-1. **If `task_type == code_change`**, sync with the repository after the workpad is set up ("Workpad setup") and before any code edits. Skip this entirely for `noncode` tasks — do not run `git fetch`, `git checkout`, or any other git operation.
+1. **If `task_type == code_change`**, sync with the repository after the workpad is set up and before any code edits. Skip this entirely for `noncode` tasks — do not run `git fetch`, `git checkout`, or any other git operation.
    - `git fetch origin`
 {% if repo.work_branch %}
    - `git checkout {{ repo.work_branch }}` — this is the existing branch for this issue; operate on it directly and commit onto it. If it does not exist locally, `git checkout -b {{ repo.work_branch }} origin/{{ repo.work_branch }}`. Do not create a new feature branch.
@@ -47,7 +46,7 @@ The agent's working directory is a real checkout — read these directly while a
    - `git checkout "$BASE" && git pull --rebase origin "$BASE"`.
    - Create a derived branch off `$BASE`: `BRANCH="pi-dash/{{ issue.identifier|lower }}"; git checkout -b "$BRANCH"`. Always derive — never commit on `$BASE`. Persistence (`pidash issue patch ... --git-work-branch`) happens *after* the first successful push (below), so a crashed run never leaves a recorded branch with no remote ref.
 {% endif %}
-   - Record the resulting `HEAD` short SHA in the workpad `Notes` and re-run `pidash workpad update` so the stamp survives a crash. The workpad environment stamp's `@<baseline marker>` is this checkout's short commit SHA (`<host>:<abs-workdir>@<short-sha>`).
+   - Record the resulting `HEAD` short SHA and the base in the workpad `Notes`.
 
 Before editing any files, make sure you are on the work branch — the platform performs **no** branch checkout for you; every git operation is yours to run. For a **multi-part plan**, stack a part's branch on the previous part's branch when the part depends on it; otherwise branch from the base.
 
@@ -69,13 +68,21 @@ This is what "deliver the current part" in "Implementation and validation" means
    - Post the link back to the issue so the human sees it in the conversation: `pidash comment add {{ issue.identifier }} --body "Code review opened: <url>"`.
    - Associate the {{ repo.code_review_term }} with the issue so Pi Dash links it and can show its status: `pidash issue attach-review {{ issue.identifier }} --url <url>`.
 
-   Mark `delivered` in the workpad — and for a multi-part plan, record this part's {{ repo.code_review_term }} URL against its entry in the workpad `### Plan`.
+   For a multi-part plan, record this part's {{ repo.code_review_term }} URL against its entry in the workpad `Plan`.
 
-### Testing hand-off specifics
+### Branch sync
 
-In the hand-off comment's `### How to Test` block ("Implementation and validation"), `Setup` names the branch to check out alongside services/env/creds and seed data, and when the issue was delivered as several {{ repo.code_review_term }}s, list **every** one so the test phase exercises them together.
+When the work branch already exists (a later run, or work sent back from review or test), bring it up to date with its base before you build on it, and again before you hand it off if the base has moved:
 
-For `Kind`, pick from how software changes are verified: `AUTOMATED` (the user is a program — API client, CLI, library caller; verified by real calls and this repo's own gates), `UI / EXPLORATORY` (the user is a human at a screen; verified by driving the changed flow), `OPS / INFRA` (the user is an operator or the deploy machinery; verified by running the procedure), or `DESIGN` (the user is a reader who must act on the doc). The test phase's guidance defines each in full — name the kind here so that phase starts on the right foot.
+- `git fetch origin`, check out the work branch. The base is the {{ repo.code_review_term }}'s base branch; when that is not visible, `{{ repo.base_branch or "the repository's default branch" }}`. For a stacked {{ repo.code_review_term }}, sync against that same base branch.
+- `git merge origin/<base>` — merge, never rebase, and never force-push: the branch is shared and may carry review history.
+- Conflicts: resolve them so the base's newer structure wins and this issue's change is re-applied on top.
+- Run the repository's own checks on the merged tree, then push the merge commit if it is not a no-op.
+- When the base rewrote the code this issue changes, rebuild the change on the current base rather than forcing the old one through.
+
+### Hand-off specifics
+
+In the hand-off, **Produced** lists every {{ repo.code_review_term }} (URL and branch), and **How to verify** names the repository's checks to run and the flows to exercise from the user's side: an API or CLI call, a screen to drive, an operator procedure, or a document to read.
 
 ### Repository guardrails
 

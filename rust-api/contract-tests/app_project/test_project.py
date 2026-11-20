@@ -32,7 +32,7 @@ DETAIL_KEYS = [
     "is_time_tracking_enabled", "issue_views_view", "logo_props",
     "member_role", "members", "members_can_edit_states", "module_view",
     "name", "network", "next_work_item_sequence", "page_view",
-    "project_lead", "repo_url", "sort_order", "timezone", "updated_at",
+    "project_lead", "repo_url", "settings", "sort_order", "timezone", "updated_at",
     "updated_by", "workspace",
 ]
 
@@ -172,7 +172,7 @@ def test_create_project_shape_and_side_effects(world, db):
     pid = resp.json()["id"]
     with db.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT COUNT(*) AS n FROM states WHERE project_id=%s", (pid,))
-        assert cur.fetchone()["n"] == 8
+        assert cur.fetchone()["n"] == 9  # NEWPIDASH-305: +AI Completed
         # Default pod (runner post_save signal): one active row, named
         # {identifier}_pod_1, carrying the signal's description verbatim.
         cur.execute(
@@ -197,7 +197,7 @@ def test_create_project_shape_and_side_effects(world, db):
         cur.execute(
             "SELECT COUNT(*) AS n FROM states WHERE project_id=%s AND \"group\"<>'triage'",
             (pid,))
-        assert cur.fetchone()["n"] == 7
+        assert cur.fetchone()["n"] == 8  # NEWPIDASH-305: +AI Completed
         cur.execute(
             "SELECT role FROM project_members WHERE project_id=%s AND member_id=%s",
             (pid, str(user["id"])))

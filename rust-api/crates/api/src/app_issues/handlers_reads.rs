@@ -1806,6 +1806,21 @@ fn decode_ticker(row: &Map<String, Value>) -> Result<Option<IssueAgentTicker>, D
     }))
 }
 
+/// The project's `settings` blob (`{}` when the row or id is missing).
+async fn fetch_project_settings(pool: &sqlx::PgPool, project_id: &str) -> Result<Value, Denial> {
+    let Ok(project_id) = uuid::Uuid::parse_str(project_id) else {
+        return Ok(Value::Object(Map::new()));
+    };
+    let settings: Option<Value> = pidash_db::entity::projects::Entity::find_by_id(project_id)
+        .select_only()
+        .column(pidash_db::entity::projects::Column::Settings)
+        .into_tuple()
+        .one(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(settings.unwrap_or_else(|| Value::Object(Map::new())))
+}
+
 /// `IssueDetailSerializer(issue)` (`:1488`): the 38-key full body —
 /// `is_intake` INCLUDED on this path (unlike retrieve).
 async fn render_full(
@@ -1840,6 +1855,15 @@ async fn render_full(
             "p_agent_review_default_interval_seconds",
         ),
         agent_test_default_interval_seconds: get_i64(row, "p_agent_test_default_interval_seconds"),
+        ..Default::default()
+    };
+    // The stage switches (`settings.agent_stages`) gate `can_re_tick`;
+    // only read when there is a ticker to render.
+    let policy = match (ticker_row.is_some(), get_str(row, "i_project_id")) {
+        (true, Some(project_id)) => {
+            policy.with_stages(&fetch_project_settings(pool, project_id).await?)
+        }
+        _ => policy,
     };
     let state_owned;
     let state = match get_str(row, "i_state_id") {

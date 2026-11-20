@@ -580,6 +580,7 @@ pidash_sdk::ops::SAVE_CLOCK_SQL
 pidash_sdk::ops::SetValue
 pidash_sdk::ops::SettingsSchema
 pidash_sdk::ops::SourceIssueRow
+pidash_sdk::ops::StageSwitches
 pidash_sdk::ops::StateRef
 pidash_sdk::ops::StateView
 pidash_sdk::ops::TERMINAL_RUN_STATUSES
@@ -615,7 +616,6 @@ pidash_sdk::ops::fire_plan
 pidash_sdk::ops::fire_revoke_bundle
 pidash_sdk::ops::get_setting
 pidash_sdk::ops::has_open_blockers_sql
-pidash_sdk::ops::is_ticking_state
 pidash_sdk::ops::issue_activity_kwargs
 pidash_sdk::ops::latest_prior_run_sql
 pidash_sdk::ops::lock_ticker_sql
@@ -645,6 +645,7 @@ pidash_sdk::ops::saved_sort_order
 pidash_sdk::ops::seed_builtin_schedulers
 pidash_sdk::ops::select_parent_for_next_run
 pidash_sdk::ops::send_to_runner
+pidash_sdk::ops::stage_runs_automatically
 pidash_sdk::ops::summary_list
 pidash_sdk::ops::summary_sql
 pidash_sdk::ops::validate_settings_patch

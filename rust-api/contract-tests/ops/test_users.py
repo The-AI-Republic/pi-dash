@@ -1127,10 +1127,8 @@ DJANGO_SETTINGS_1268 = os.environ.get(
 DJANGO_API_DIR_1268 = os.environ.get(
     "DJANGO_API_DIR", str(REPO_ROOT_1268 / "apps/api"))
 
-EXPECTED_BUILTIN_SCHEDULERS = [
-    ("fable-security-audit", "builtin", None),
-    ("security-audit", "builtin", None),
-]
+# NEWPIDASH-256: catalog empty → no builtin schedulers seeded.
+EXPECTED_BUILTIN_SCHEDULERS: list[tuple] = []
 DEFAULT_POD_DESCRIPTION = "Auto-created default pod. Add tier pods anytime."
 
 

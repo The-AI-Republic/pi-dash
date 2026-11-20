@@ -68,6 +68,13 @@ pub struct Model {
     // `Project.default_work_type` (PDASHOSS01-234): NOT NULL, no DB
     // default; `Project.save()` fills a blank one from the repo binding.
     pub default_work_type: String,
+    // `Project.settings` (NEWPIDASH-278, db 0182): namespaced
+    // per-project settings bag, owned by the Rust system. NOT NULL
+    // with a DB-level default `'{}'` so writers that do not name the
+    // column (legacy Django `Project.save()`) keep working; Django
+    // never reads or writes it beyond storing it.
+    #[sea_orm(column_type = "JsonBinary")]
+    pub settings: Json,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

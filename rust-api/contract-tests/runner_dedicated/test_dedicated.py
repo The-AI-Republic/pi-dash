@@ -158,5 +158,7 @@ def test_cross_project_pod_move_refused(admin_client, world, dedicated_issue, on
         f"/api/runners/{online_runner['id']}/",
         json={"pod": pod2["id"]},
     )
-    assert resp.status_code == 409, resp.text[:500]
-    assert resp.json()["code"] == "runner_has_assigned_issues"
+    # A runner's project is fixed at registration: any cross-project pod
+    # move is refused, dedicated issues or not.
+    assert resp.status_code == 400, resp.text[:500]
+    assert resp.json()["code"] == "runner_project_fixed"

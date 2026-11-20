@@ -43,9 +43,10 @@ pub use outcomes::{
 #[allow(deprecated)]
 pub use outcomes::{SCHEDULING_DELEGATION_STATE_NAME, SERVICE_DELEGATION_STATE_NAME};
 pub use phases::{
-    auto_pauses_on_cap, cadence_fields_by_group, cadence_fields_for, is_ticking_state,
-    phase_config_for, template_name_for, ticking_state_names_by_group, CadenceFields, PhaseConfig,
-    StateRef, CADENCE_FIELDS, DEFAULT_CADENCE_KEY, KIND_CODING_TASK, PHASES,
+    agent_move_refusal, auto_pauses_on_cap, cadence_fields_by_group, cadence_fields_for,
+    phase_config_for, stage_runs_automatically, template_name_for, ticking_state_names_by_group,
+    AgentMoveRefusal, CadenceFields, PhaseConfig, StageSwitches, StateRef, AI_COMPLETED_STATE_NAME,
+    CADENCE_FIELDS, DEFAULT_CADENCE_KEY, KIND_CODING_TASK, PHASES,
 };
 pub use ticker::{TickerDecision, TickerEvent, TickerEventKind};
 

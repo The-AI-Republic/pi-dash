@@ -7,9 +7,15 @@ halves share the ``EMPTY_CONTEXT_CLEAN`` agreement table — update both
 sides together when a section body changes.
 
 Also locks the fixture meaning on the Python side (FIX-render goldens
-reproduce live) and the data-mirror integrity (``rust-api`` mirrors are
-byte-identical to the Django sources; normalized bodies match the
-fixture ``body_sha256`` values).
+reproduce live).
+
+The data-mirror checks (``rust-api`` section mirrors byte-identical to the
+Django sources, ``FIX-registry`` / ``FIX-recipes`` reproduced from the
+Django tree) were removed with the lean agent workflow change: the Rust
+sections and recipes are the source of truth from that change on (design
+``.ai_design/lean_agent_workflow/design.md`` D13, DIFF-54), and those
+fixtures are re-based on the Rust implementation. The checks below read the
+Django tree only.
 
 The Django side defaults to this checkout's ``apps/api``. When the
 checkout's Django is older than the port (rust-dev's ``apps/api`` is
@@ -19,7 +25,6 @@ a worktree of ``origin/main`` at or after the fixtures' ``ported_from`` —
 so the comparison runs against the Django the port follows.
 """
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -36,14 +41,11 @@ PROMPTING_DIR = Path(
 )
 SECTIONS_DIR = PROMPTING_DIR / "sections"
 WORK_TYPES_DIR = PROMPTING_DIR / "work_types"
-RECIPES_PATH = PROMPTING_DIR / "recipes.py"
-MIRROR_DIR = REPO / "rust-api/crates/services/src/prompting/sections"
-WORK_TYPES_MIRROR_DIR = REPO / "rust-api/crates/services/src/prompting/work_types"
 FIXTURES_DIR = REPO / "rust-api/fixtures/prompting"
 
-# Sections that render clean under an empty context in the Jinja2 sandbox
-# (verified against Jinja2 3.1.6; the minijinja half asserts the same set
-# in ``prompting::renderer::tests::all_stored_sections_render_like_jinja2``).
+# Django sections that render clean under an empty context in the Jinja2
+# sandbox (verified against Jinja2 3.1.6). The minijinja half no longer
+# shares this table: the Rust section set diverged (DIFF-54).
 EMPTY_CONTEXT_CLEAN = [
     "autonomy",
     "cloud-direct-task",
@@ -93,63 +95,6 @@ def work_type_section_files():
         for path in sorted(WORK_TYPES_DIR.glob("*/*.md"))
         if path.name != "work_type.md"
     ]
-
-
-def section_path(key: str) -> Path:
-    """Source file of a registry section: core ``sections/<key>.md`` or a
-    work-type ``work_types/<type>/<slot>.md`` for namespaced keys."""
-    if "." in key:
-        work_type, slot = key.split(".", 1)
-        return WORK_TYPES_DIR / work_type / f"{slot}.md"
-    return SECTIONS_DIR / f"{key}.md"
-
-
-def test_mirrors_are_byte_identical_to_sources():
-    # P3 step B deleted the 15 cloud-* sections from the Rust mirror;
-    # the Django tree still carries them. Every other section mirrors
-    # byte for byte, with no extras.
-    sources = sorted(
-        path for path in SECTIONS_DIR.glob("*.md") if not path.name.startswith("cloud-")
-    )
-    assert len(sources) == 23
-    for source in sources:
-        mirror = MIRROR_DIR / source.name
-        assert mirror.is_file(), f"mirror missing for {source.name}"
-        assert (
-            mirror.read_bytes() == source.read_bytes()
-        ), f"mirror diverged for {source.name}"
-    assert sorted(path.name for path in MIRROR_DIR.glob("*.md")) == [
-        source.name for source in sources
-    ], "mirror carries a section the Django tree no longer has"
-
-
-def test_work_type_mirrors_are_byte_identical_to_sources():
-    """Every ``work_types/<type>/*.md`` (slot sections and the
-    ``work_type.md`` metadata) is mirrored byte for byte, with no extras."""
-    sources = sorted(WORK_TYPES_DIR.glob("*/*.md"))
-    assert len(sources) == 9
-    relative = [source.relative_to(WORK_TYPES_DIR) for source in sources]
-    for rel, source in zip(relative, sources):
-        mirror = WORK_TYPES_MIRROR_DIR / rel
-        assert mirror.is_file(), f"mirror missing for {rel}"
-        assert mirror.read_bytes() == source.read_bytes(), f"mirror diverged for {rel}"
-    assert sorted(
-        path.relative_to(WORK_TYPES_MIRROR_DIR)
-        for path in WORK_TYPES_MIRROR_DIR.glob("*/*.md")
-    ) == relative
-
-
-def test_fixture_registry_matches_sources():
-    fixture = json.loads((FIXTURES_DIR / "FIX-registry.json").read_text())
-    assert fixture["bugs"] == []
-    entries = fixture["data"]["registry"]["sections"]
-    assert fixture["data"]["registry"]["section_count"] == 30 == len(entries)
-    for entry in entries:
-        body = section_body(section_path(entry["key"]))
-        assert len(body) == entry["body_len"], entry["key"]
-        assert hashlib.sha256(body.encode()).hexdigest() == entry["body_sha256"], entry[
-            "key"
-        ]
 
 
 def test_all_sections_parse(env):
@@ -302,70 +247,6 @@ def test_render_goldens_reproduce_live(env):
     with pytest.raises(Exception):
         env.parse("{% if %}")
     assert syntax["bad_tag"]["ok"] is False
-
-
-def test_recipe_goldens_match_sources():
-    """FIX-recipes tables reproduce the RECIPES/CLOUD_RECIPES literals.
-
-    Parsed with ``ast`` (no Django import: ``recipes.py`` pulls in
-    ``pi_dash.core.agent_execution`` at call time for ``recipe_for``).
-    """
-    import ast
-
-    source = RECIPES_PATH.read_text()
-    module = ast.parse(source)
-    # Module-level `NAME = "..."` string constants (the KIND_* names the
-    # recipe tables reference).
-    consts = {
-        node.targets[0].id: node.value.value
-        for node in module.body
-        if isinstance(node, ast.Assign)
-        and len(node.targets) == 1
-        and isinstance(node.targets[0], ast.Name)
-        and isinstance(node.value, ast.Constant)
-    }
-
-    # `SLOT_X = Slot("x")` (PDASHOSS01-234): work-type slots, encoded in
-    # the fixture as `{"slot": "x"}`.
-    slots = {
-        node.targets[0].id: node.value.args[0].value
-        for node in module.body
-        if isinstance(node, ast.Assign)
-        and len(node.targets) == 1
-        and isinstance(node.targets[0], ast.Name)
-        and isinstance(node.value, ast.Call)
-        and isinstance(node.value.func, ast.Name)
-        and node.value.func.id == "Slot"
-    }
-
-    class Resolve(ast.NodeTransformer):
-        def visit_Name(self, node):
-            if node.id in slots:
-                return ast.copy_location(
-                    ast.Dict(
-                        keys=[ast.Constant(value="slot")],
-                        values=[ast.Constant(value=slots[node.id])],
-                    ),
-                    node,
-                )
-            return ast.copy_location(ast.Constant(value=consts[node.id]), node)
-
-    tables = {}
-    for node in module.body:
-        if (
-            isinstance(node, ast.AnnAssign)
-            and isinstance(node.target, ast.Name)
-            and node.target.id in ("RECIPES", "CLOUD_RECIPES")
-        ):
-            tables[node.target.id] = ast.literal_eval(Resolve().visit(node.value))
-    fixture = json.loads((FIXTURES_DIR / "FIX-recipes.json").read_text())
-    assert fixture["bugs"] == []
-    data = fixture["data"]["recipes"]
-    assert {k: list(v) for k, v in tables["RECIPES"].items()} == data["local_recipes"]
-    assert {k: list(v) for k, v in tables["CLOUD_RECIPES"].items()} == data[
-        "cloud_recipes"
-    ]
-    assert list(tables["RECIPES"]) == list(data["all_kinds"])
 
 
 DJANGO_DEFAULT_LIMITS = {

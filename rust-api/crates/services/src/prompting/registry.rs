@@ -3,10 +3,13 @@
 //! Port of `apps/api/pi_dash/prompting/registry.py` (178 lines):
 //!
 //! * `registry.py:26` (`SECTIONS_DIR`) — here the catalog is baked in at
-//!   compile time: byte-identical mirrors of `prompting/sections/*.md` live
-//!   under `src/prompting/sections/` and are embedded with `include_str!`,
-//!   so the server has no runtime path dependency. A contract test asserts
-//!   every mirror is byte-identical to its Python source.
+//!   compile time: the section files live under `src/prompting/sections/`
+//!   and are embedded with `include_str!`, so the server has no runtime
+//!   path dependency. Since the lean agent workflow change (design
+//!   `.ai_design/lean_agent_workflow/design.md`, D13) these files are the
+//!   source of truth and no longer mirror the Django
+//!   `prompting/sections/*.md`; the byte-identical mirror contract test
+//!   was removed with that change.
 //! * `registry.py:28-56` (tier constants + `tier_allows_workspace_override` /
 //!   `tier_allows_personal_override`).
 //! * `registry.py:62-66` (`MAX_SECTION_BODY_LENGTH`).
@@ -222,20 +225,21 @@ const SECTION_FILES: &[(&str, &str)] = &[
         "default-posture.md",
         include_str!("sections/default-posture.md"),
     ),
-    ("ending-run.md", include_str!("sections/ending-run.md")),
     ("guardrails.md", include_str!("sections/guardrails.md")),
     (
         "implementation.md",
         include_str!("sections/implementation.md"),
     ),
     ("intro.md", include_str!("sections/intro.md")),
+    ("lifecycle.md", include_str!("sections/lifecycle.md")),
     ("pidash-cli.md", include_str!("sections/pidash-cli.md")),
     (
         "relationships.md",
         include_str!("sections/relationships.md"),
     ),
-    ("review-cycle.md", include_str!("sections/review-cycle.md")),
+    ("review.md", include_str!("sections/review.md")),
     ("review-intro.md", include_str!("sections/review-intro.md")),
+    ("run-framing.md", include_str!("sections/run-framing.md")),
     (
         "scheduler-ending.md",
         include_str!("sections/scheduler-ending.md"),
@@ -252,28 +256,9 @@ const SECTION_FILES: &[(&str, &str)] = &[
         "session-framing.md",
         include_str!("sections/session-framing.md"),
     ),
-    (
-        "state-routing.md",
-        include_str!("sections/state-routing.md"),
-    ),
-    (
-        "task-lifecycle.md",
-        include_str!("sections/task-lifecycle.md"),
-    ),
-    ("test-cycle.md", include_str!("sections/test-cycle.md")),
+    ("test.md", include_str!("sections/test.md")),
     ("test-intro.md", include_str!("sections/test-intro.md")),
-    (
-        "workpad-context.md",
-        include_str!("sections/workpad-context.md"),
-    ),
-    (
-        "workpad-setup.md",
-        include_str!("sections/workpad-setup.md"),
-    ),
-    (
-        "workpad-template.md",
-        include_str!("sections/workpad-template.md"),
-    ),
+    ("workpad.md", include_str!("sections/workpad.md")),
 ];
 
 /// Filename reserved for work-type metadata inside a work-type folder

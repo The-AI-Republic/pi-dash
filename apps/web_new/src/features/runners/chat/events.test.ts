@@ -214,6 +214,16 @@ describe("activityLabel", () => {
 });
 
 describe("activityRows", () => {
+  it("clears a prior failure when the next turn starts", () => {
+    expect(
+      activityRows([
+        { seq: 1, kind: "chat_failed", payload: { detail: "missing metadata" } },
+        { seq: 2, kind: "message_started", payload: {} },
+        { seq: 3, kind: "turn_completed", payload: {} },
+      ])
+    ).toEqual([]);
+  });
+
   it("caps to the last few and collapses a started/completed pair", () => {
     const events = [
       {

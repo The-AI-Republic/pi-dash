@@ -2048,8 +2048,8 @@ pub async fn execute_dispatch_coding_run<S: ToolStore>(
 ) -> Result<Value, ToolFailure> {
     use pidash_services::assistant::tools_runs::{
         already_in_state_result, dispatch_success_result, dispatch_summary, invalid_state_error,
-        is_ticking_state, no_delegation_state_result, non_ticking_state_error, validate_pin,
-        PHASES,
+        no_delegation_state_result, non_ticking_state_error, stage_off_error,
+        stage_runs_automatically, validate_pin, PHASES,
     };
     // `_scoping.get_issue` → `scoped_issues` → `user_for` is the first
     // statement (`runs.py:41`, `_scoping.py:67-85`): a missing user fails
@@ -2076,7 +2076,21 @@ pub async fn execute_dispatch_coding_run<S: ToolStore>(
                 .find(|state| state.id == wanted)
                 .cloned()
                 .ok_or_else(invalid_state_error)?;
-            if !is_ticking_state(Some(&target.group), Some(&target.name)) {
+            // A stage switched off in this project starts no run, so a
+            // move there cannot dispatch one.
+            let settings = store.project_settings(deps, &issue.project_id).await?;
+            let switches = pidash_services::domain::project_settings::stage_switches_of(&settings);
+            if !stage_runs_automatically(Some(&target.group), Some(&target.name), switches) {
+                // A registered stage that is merely switched off gets its own
+                // message; anything else is not a delegated state at all.
+                let registered = stage_runs_automatically(
+                    Some(&target.group),
+                    Some(&target.name),
+                    pidash_types::orchestration::StageSwitches::ALL,
+                );
+                if registered {
+                    return Err(stage_off_error(&target.name).into());
+                }
                 return Err(non_ticking_state_error().into());
             }
             target
@@ -2336,6 +2350,8 @@ mod tests {
         pr_fetch: PrFetch,
         pr_fetch_calls: Mutex<Vec<PrFetchCall>>,
         next_seq: Mutex<i64>,
+        /// `projects.settings` per project (lean workflow stage switches).
+        project_settings: HashMap<Uuid, Value>,
     }
 
     fn project_row(
@@ -2619,6 +2635,7 @@ mod tests {
                 pr_fetch: PrFetch::NetworkError,
                 pr_fetch_calls: Mutex::new(Vec::new()),
                 next_seq: Mutex::new(100),
+                project_settings: HashMap::new(),
             }
         }
 
@@ -2859,6 +2876,18 @@ mod tests {
             project_id: &Uuid,
         ) -> Result<Vec<StateRow>, StoreError> {
             Ok(self.states.get(project_id).cloned().unwrap_or_default())
+        }
+
+        async fn project_settings(
+            &self,
+            _deps: &AssistantDeps,
+            project_id: &Uuid,
+        ) -> Result<Value, StoreError> {
+            Ok(self
+                .project_settings
+                .get(project_id)
+                .cloned()
+                .unwrap_or_else(|| json!({})))
         }
 
         async fn project_labels(
@@ -4674,6 +4703,41 @@ mod tests {
             .await,
         );
         assert_eq!(out["new_state"], json!("In Review"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_coding_run_refuses_a_switched_off_stage() {
+        // Lean workflow §6.1: a move into a stage the project switched off
+        // starts no run, so the tool answers its non-ticking error and
+        // never transitions.
+        let mut store = FixtureStore::standard();
+        store.project_settings.insert(
+            uid(101),
+            json!({"agent_stages": {"mode": "custom", "review": false, "test": true}}),
+        );
+        let result = call(
+            &store,
+            "dispatch_coding_run",
+            json!({"issue_id": uid(301).to_string(), "target_state_id": uid(203).to_string()}),
+        )
+        .await;
+        assert_eq!(
+            retry_message(&result),
+            "Agent runs are switched off for 'In Review' in this project, so moving there starts no run. Pick 'In Progress' or another state that runs an agent."
+        );
+        assert!(store.transitions.lock().unwrap().is_empty());
+        assert!(store.record_writes.lock().unwrap().is_empty());
+        // In Progress has no switch: the default target still dispatches.
+        let out = ok_value(
+            call(
+                &store,
+                "dispatch_coding_run",
+                json!({"issue_id": uid(301).to_string()}),
+            )
+            .await,
+        );
+        assert_eq!(out["dispatched"], json!(true));
+        assert_eq!(out["new_state"], json!("In Progress"));
     }
 
     #[tokio::test]

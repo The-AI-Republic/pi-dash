@@ -434,7 +434,8 @@ pub mod ops {
     pub use pidash_services::user_settings::UserSettingsSchema;
     pub use pidash_services::v1_projects::tasks::model_activity_kwargs;
     pub use pidash_services::v1_work_items::tasks::issue_activity_kwargs;
-    pub use pidash_types::orchestration::is_ticking_state;
+    pub use pidash_types::orchestration::stage_runs_automatically;
+    pub use pidash_types::orchestration::StageSwitches;
     pub use pidash_types::orchestration::StateRef;
     pub use pidash_types::orchestration::TickerDecision;
     pub use pidash_types::orchestration::TickerEvent;

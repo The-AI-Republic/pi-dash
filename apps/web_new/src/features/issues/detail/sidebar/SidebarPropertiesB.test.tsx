@@ -641,7 +641,7 @@ describe("IssuePropertiesSidebar rows B", () => {
     const { queryClient } = harness();
     render(
       <QueryClientProvider client={queryClient}>
-        <IssuePropertiesSidebar workspaceSlug={SLUG} projectId={PROJECT} issue={issueFixture()} editable />
+        <IssuePropertiesSidebar workspaceSlug={SLUG} projectId={PROJECT} issue={issueFixture()} editable canRun />
       </QueryClientProvider>
     );
     expect(await screen.findByRole("group", { name: "Modules" })).toBeInTheDocument();
@@ -661,7 +661,7 @@ describe("IssuePropertiesSidebar rows B", () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={queryClient}>
-        <IssuePropertiesSidebar workspaceSlug={SLUG} projectId={PROJECT} issue={issueFixture()} editable />
+        <IssuePropertiesSidebar workspaceSlug={SLUG} projectId={PROJECT} issue={issueFixture()} editable canRun />
       </QueryClientProvider>
     );
     expect(await screen.findByText(PROPERTIES_LOAD_FAILED)).toBeInTheDocument();

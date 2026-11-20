@@ -234,7 +234,7 @@ fn json_string(value: &str) -> String {
 
 /// Map a database/driver failure to the generic 500 while logging the site
 /// and error for operators (no secrets: messages never include tokens).
-fn db_error<E: std::fmt::Display>(error: E, site: &str) -> Denial {
+pub(super) fn db_error<E: std::fmt::Display>(error: E, site: &str) -> Denial {
     tracing::warn!(%error, site, "v1_work_items actions database failure");
     Denial::ServerError
 }
@@ -480,7 +480,7 @@ async fn load_timezone_name(pool: &PgPool, user_id: &uuid::Uuid) -> Result<Optio
 /// `KeyError` branch (`api/views/base.py:160-164`). An EMPTY zone 500s:
 /// `ZoneInfo('')` raises `ValueError` (not `KeyError`), which falls
 /// through to the generic 500 (`api/views/base.py:166-171`).
-fn activate_timezone(timezone: Option<&str>) -> Result<Tz, Denial> {
+pub(super) fn activate_timezone(timezone: Option<&str>) -> Result<Tz, Denial> {
     match timezone {
         None => Ok(chrono_tz::UTC),
         Some("") => Err(Denial::ServerError),
@@ -649,9 +649,10 @@ pub struct IssueRow {
     pub state_group: Option<String>,
 }
 
-/// The [`fetch_issue`] statement: INNER JOIN `workspaces` (the slug),
-/// LEFT JOIN `states` (nullable FK), plain soft-delete scope, `LIMIT 1`.
-fn issue_row_select(slug: &str, project_id: &Uuid, pk: &Uuid) -> sea_orm::Select<issues::Entity> {
+/// The [`IssueRow`] projection: the issue columns plus the LEFT JOINed
+/// `states` name/group (nullable FK). Shared by [`fetch_issue`] and
+/// [`fetch_issue_by_id`].
+fn issue_row_columns() -> sea_orm::Select<issues::Entity> {
     issues::Entity::find()
         .select_only()
         .columns([
@@ -664,8 +665,14 @@ fn issue_row_select(slug: &str, project_id: &Uuid, pk: &Uuid) -> sea_orm::Select
         ])
         .column_as(states::Column::Name, "state_name")
         .column_as(states::Column::Group, "state_group")
-        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
         .join(JoinType::LeftJoin, issues::Relation::States.def())
+}
+
+/// The [`fetch_issue`] statement: INNER JOIN `workspaces` (the slug),
+/// LEFT JOIN `states` (nullable FK), plain soft-delete scope, `LIMIT 1`.
+fn issue_row_select(slug: &str, project_id: &Uuid, pk: &Uuid) -> sea_orm::Select<issues::Entity> {
+    issue_row_columns()
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
         .filter(workspaces::Column::Slug.eq(slug))
         .filter(issues::Column::ProjectId.eq(*project_id))
         .filter(issues::Column::Id.eq(*pk))
@@ -684,6 +691,19 @@ pub async fn fetch_issue(
         .one(&sea_orm_connection(pool))
         .await
         .map_err(|error| db_error(error, "fetch-issue"))
+}
+
+/// `Issue.all_objects.filter(pk=pk).first()` with the [`fetch_issue`]
+/// columns: no workspace/project scope and no soft-delete filter, as the
+/// web re-tick endpoint (`runner/views/runs.py:733`) reads it.
+pub async fn fetch_issue_by_id(pool: &PgPool, pk: &Uuid) -> Result<Option<IssueRow>, Denial> {
+    issue_row_columns()
+        .filter(issues::Column::Id.eq(*pk))
+        .limit(1)
+        .into_model::<IssueRow>()
+        .one(&sea_orm_connection(pool))
+        .await
+        .map_err(|error| db_error(error, "fetch-issue-by-id"))
 }
 
 /// `AgentRun.objects.select_related("runner").filter(pk=run_id).first()`
@@ -722,7 +742,7 @@ pub struct YieldRun {
     pub scheduler_binding_id: Option<Uuid>,
 }
 
-async fn fetch_yield_run(
+pub(super) async fn fetch_yield_run(
     pool: &PgPool,
     slug: &str,
     run_id: &Uuid,
@@ -740,7 +760,7 @@ async fn fetch_yield_run(
 
 /// `is_workspace_member` (`core/permissions.py:28-34`): any active
 /// membership row. `deleted_at IS NULL` is the manager scope.
-async fn is_workspace_member(
+pub(super) async fn is_workspace_member(
     pool: &PgPool,
     user_id: &Uuid,
     workspace_id: &Uuid,
@@ -776,6 +796,7 @@ struct ProjectLookup {
     agent_default_interval_seconds: Option<i32>,
     agent_review_default_interval_seconds: Option<i32>,
     agent_test_default_interval_seconds: Option<i32>,
+    settings: serde_json::Value,
     default_agent_executor: String,
     project_lead_id: Option<Uuid>,
     default_assignee_id: Option<Uuid>,
@@ -790,6 +811,7 @@ pub async fn fetch_project(pool: &PgPool, project_id: &Uuid) -> Result<Option<Pr
             projects::Column::AgentDefaultIntervalSeconds,
             projects::Column::AgentReviewDefaultIntervalSeconds,
             projects::Column::AgentTestDefaultIntervalSeconds,
+            projects::Column::Settings,
             projects::Column::DefaultAgentExecutor,
             projects::Column::ProjectLeadId,
             projects::Column::DefaultAssigneeId,
@@ -813,7 +835,9 @@ pub async fn fetch_project(pool: &PgPool, project_id: &Uuid) -> Result<Option<Pr
             agent_test_default_interval_seconds: row
                 .agent_test_default_interval_seconds
                 .map(i64::from),
-        };
+            ..Default::default()
+        }
+        .with_stages(&row.settings);
         ProjectRow {
             policy,
             default_agent_executor: row.default_agent_executor,
@@ -1156,7 +1180,7 @@ pub fn draw_jitter(
 /// microseconds only when nonzero (the `app_integrations` precedent).
 /// Python datetimes carry only micros, so sub-microsecond nanos truncate
 /// first (PIDASHCONV-867); `AutoSi` would otherwise emit 9 digits.
-fn isoformat(dt: &DateTime<Utc>) -> String {
+pub(super) fn isoformat(dt: &DateTime<Utc>) -> String {
     let truncated =
         DateTime::from_timestamp_micros(dt.timestamp_micros()).expect("micros in range");
     truncated.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false)
@@ -1509,45 +1533,55 @@ async fn retick_inner(
             refused.body,
         ));
     }
-    let project = fetch_project(&pre.pool, &project_id)
+    let (status, body) = retick_issue(state, &pre.pool, pre.actor.id, &issue).await?;
+    Ok(json_response(status, body))
+}
+
+/// `scheduling.re_tick_ticker(issue, actor=...)` plus the shared re-tick
+/// payload, after the caller's auth/lookup arms. Shared by the v1
+/// `IssueReTickAPIEndpoint` and the web `AgentReTickEndpoint`
+/// (`POST /api/runners/re-tick/`, `runner/views/runs.py:699-753`), whose
+/// payloads are identical; the web one used to proxy this tail to Django,
+/// which the all-Rust stack answers with a 502.
+pub async fn retick_issue(
+    state: &AppState,
+    pool: &PgPool,
+    actor_id: Uuid,
+    issue: &IssueRow,
+) -> Result<(StatusCode, String), Denial> {
+    let project_id = issue.project_id.ok_or(Denial::ServerError)?;
+    let project = fetch_project(pool, &project_id)
         .await?
         .ok_or(Denial::ServerError)?;
     let now = Utc::now();
-    let jitter = draw_jitter(&issue, &project.policy);
-    let (deps, matcher) = dispatch_deps(
-        state,
-        &pre.pool,
-        pre.actor.id,
-        &issue,
-        &project,
-        now.timestamp(),
-    )
-    .await?;
+    let jitter = draw_jitter(issue, &project.policy);
+    let (deps, matcher) =
+        dispatch_deps(state, pool, actor_id, issue, &project, now.timestamp()).await?;
     let out = pidash_jobs::orchestration::re_tick_ticker(
-        &pre.pool,
+        pool,
         deps,
         &matcher,
         now,
         jitter,
         issue.id,
-        Some(pre.actor.id),
+        Some(actor_id),
     )
     .await
     .map_err(|error| db_error(error, "retick-driver"))?;
     let outcome = out.outcome;
-    let pool =
+    let pool_size =
         pidash_db::tasks_ticker::pool_size_or_default(project.policy.agent_default_max_ticks);
-    let (status, body) = retick_response(
+    let response = retick_response(
         outcome.granted,
         &outcome.reason,
         outcome.run_id,
-        outcome.ticker.as_ref().map(|ticker| (ticker, pool)),
+        outcome.ticker.as_ref().map(|ticker| (ticker, pool_size)),
     );
     // Drain after the body is built: the re-tick body carries no run
     // status, and the committed row must be assigned before the
     // response returns (PIDASHCONV-1494).
-    drain_dispatch_decisions(&pre.pool, state, &out.dispatch_decisions, "retick-drain").await?;
-    Ok(json_response(status, body))
+    drain_dispatch_decisions(pool, state, &out.dispatch_decisions, "retick-drain").await?;
+    Ok(response)
 }
 
 /// `POST .../work-items/<pk>/wait/` (`views/issue.py:987-1069`).
@@ -1740,6 +1774,37 @@ async fn run_ai_inner(
     let project = fetch_project(&pre.pool, &project_id)
         .await?
         .ok_or(Denial::ServerError)?;
+    // NEWPIDASH-261: gate the human trigger by the project's
+    // `issue_run_policy` before any run is created. Agent actions
+    // are already refused above (`refuse_agent_action`), so every
+    // caller reaching here is human.
+    {
+        let orm_pool = sea_orm_connection(&pre.pool);
+        let issue_row = issues::Entity::find_by_id(issue.id)
+            .one(&orm_pool)
+            .await
+            .map_err(|error| db_error(error, "run-policy-issue"))?
+            .ok_or(Denial::ServerError)?;
+        let project_row = projects::Entity::find_by_id(project_id)
+            .one(&orm_pool)
+            .await
+            .map_err(|error| db_error(error, "run-policy-project"))?
+            .ok_or(Denial::ServerError)?;
+        let allowed = pidash_services::domain::project_settings::can_run_issue(
+            &orm_pool,
+            pre.actor.id,
+            &issue_row,
+            &project_row,
+        )
+        .await
+        .map_err(|error| db_error(error, "run-policy-check"))?;
+        if !allowed {
+            return Ok(json_response(
+                StatusCode::FORBIDDEN,
+                pidash_services::domain::project_settings::not_issue_runner_body(),
+            ));
+        }
+    }
     let now = Utc::now();
     let jitter = draw_jitter(&issue, &project.policy);
     let (deps, matcher) = dispatch_deps(
@@ -1831,7 +1896,7 @@ async fn run_ai_inner(
 /// `run.done_payload = payload; run.save(update_fields=["done_payload"])`
 /// (`:1300-1308`): one column, no other stamp. `agent_run` is not a
 /// design §4 table, so the entity write runs here.
-async fn write_done_payload<C: ConnectionTrait>(
+pub(super) async fn write_done_payload<C: ConnectionTrait>(
     db: &C,
     run_id: Uuid,
     payload: Value,

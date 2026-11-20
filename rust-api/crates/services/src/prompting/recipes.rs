@@ -1,6 +1,9 @@
 //! Prompt recipes — ordered section lists per prompt kind.
 //!
-//! Port of `apps/api/pi_dash/prompting/recipes.py` (189 lines):
+//! Originally a port of `apps/api/pi_dash/prompting/recipes.py` (189
+//! lines); the issue-run recipes ([`RECIPES`]) diverged from it with the
+//! lean agent workflow change and are now Rust-owned (`FIX-recipes` was
+//! re-based on this file). Python line references below are historical:
 //!
 //! * `recipes.py:24-28` (kind constants) + `30-84` (`RECIPES`).
 //! * `recipes.py:88-129` (`CLOUD_RECIPES`).
@@ -84,9 +87,13 @@ impl RecipeNotFound {
 }
 
 /// Local-runner recipes: section keys and work-type slots per kind, in
-/// order (`recipes.py` `RECIPES`). Review and test share the lifecycle, the
-/// work-type context block, the inlined workpad, and the blocking flow with
-/// the coding task.
+/// order. Since the lean agent workflow change (design
+/// `.ai_design/lean_agent_workflow/design.md` §9.2) these are the Rust
+/// source of truth and no longer mirror `recipes.py`: one `lifecycle`
+/// section carries the path, the moves and the closing `pidash run finish`
+/// command for all three stages; review and test read the hand-off instead
+/// of the workpad. The scheduler recipe is unchanged and is now the only
+/// user of `session-framing` and `guardrails`.
 pub const RECIPES: &[(&str, &[RecipeEntry])] = &[
     (
         KIND_CODING_TASK,
@@ -94,20 +101,16 @@ pub const RECIPES: &[(&str, &[RecipeEntry])] = &[
             S("intro"),
             SLOT_CONTEXT,
             S("relationships"),
-            S("session-framing"),
+            S("run-framing"),
             S("pidash-cli"),
-            S("task-lifecycle"),
+            S("lifecycle"),
             S("default-posture"),
             S("autonomy"),
-            S("state-routing"),
             S("analyze-and-scope"),
-            S("workpad-setup"),
+            S("workpad"),
             SLOT_EXECUTE,
             S("implementation"),
             S("blocking"),
-            S("guardrails"),
-            S("workpad-template"),
-            S("ending-run"),
         ],
     ),
     (
@@ -115,15 +118,12 @@ pub const RECIPES: &[(&str, &[RecipeEntry])] = &[
         &[
             S("review-intro"),
             SLOT_CONTEXT,
-            S("session-framing"),
+            S("run-framing"),
             S("pidash-cli"),
-            S("task-lifecycle"),
-            S("workpad-context"),
-            S("review-cycle"),
+            S("lifecycle"),
+            S("review"),
             SLOT_REVIEW,
             S("blocking"),
-            S("guardrails"),
-            S("ending-run"),
         ],
     ),
     (
@@ -131,15 +131,12 @@ pub const RECIPES: &[(&str, &[RecipeEntry])] = &[
         &[
             S("test-intro"),
             SLOT_CONTEXT,
-            S("session-framing"),
+            S("run-framing"),
             S("pidash-cli"),
-            S("task-lifecycle"),
-            S("workpad-context"),
-            S("test-cycle"),
+            S("lifecycle"),
+            S("test"),
             SLOT_TEST,
             S("blocking"),
-            S("guardrails"),
-            S("ending-run"),
         ],
     ),
     (

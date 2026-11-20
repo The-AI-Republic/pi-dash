@@ -47,6 +47,9 @@ pub struct SpawnArgs<'a> {
     pub binary: &'a str,
     pub cwd: &'a Path,
     pub model: Option<&'a str>,
+    /// `--effort` level (`low` … `max`). `None` omits the flag so Claude Code
+    /// applies its own default. Sourced from `[runner.claude_code].effort_default`.
+    pub effort: Option<&'a str>,
     pub resume_session_id: Option<&'a str>,
     /// When `true`, pass `--permission-mode bypassPermissions`. Always `true`
     /// for MVP; wiring a real permission prompt needs an MCP bridge.
@@ -58,6 +61,13 @@ impl ClaudeProcess {
         // Route through the platform spawn helper so the probe and real
         // launch behavior stay aligned. See
         // `util::shell::login_shell_command` for why.
+        let argv = Self::argv(&args);
+        let cmd = login_shell_command(args.binary, &argv, Some(args.cwd));
+        Self::spawn_command(cmd).await
+    }
+
+    /// The `claude` arguments for `args` (everything after the binary).
+    fn argv<'a>(args: &SpawnArgs<'a>) -> Vec<&'a str> {
         let mut argv: Vec<&str> = vec![
             "--print",
             "--verbose",
@@ -70,14 +80,16 @@ impl ClaudeProcess {
         if args.bypass_permissions {
             argv.extend(["--permission-mode", "bypassPermissions"]);
         }
-        if let Some(model) = args.model {
+        if let Some(model) = args.model.filter(|s| !s.is_empty()) {
             argv.extend(["--model", model]);
+        }
+        if let Some(effort) = args.effort.filter(|s| !s.is_empty()) {
+            argv.extend(["--effort", effort]);
         }
         if let Some(session_id) = args.resume_session_id.filter(|s| !s.is_empty()) {
             argv.extend(["--resume", session_id]);
         }
-        let cmd = login_shell_command(args.binary, &argv, Some(args.cwd));
-        Self::spawn_command(cmd).await
+        argv
     }
 
     /// Test-friendly constructor: any `Command` that writes newline-delimited
@@ -310,5 +322,44 @@ async fn drain_stderr(stderr: tokio::process::ChildStderr, ring: StderrRing) {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod argv_tests {
+    use super::*;
+
+    fn args<'a>(model: Option<&'a str>, effort: Option<&'a str>) -> SpawnArgs<'a> {
+        SpawnArgs {
+            binary: "claude",
+            cwd: Path::new("/tmp"),
+            model,
+            effort,
+            resume_session_id: None,
+            bypass_permissions: true,
+        }
+    }
+
+    #[test]
+    fn passes_effort_after_the_model() {
+        let argv = ClaudeProcess::argv(&args(Some("claude-opus-4-8"), Some("max")));
+        let m = argv.iter().position(|a| *a == "--model").expect("--model");
+        let e = argv
+            .iter()
+            .position(|a| *a == "--effort")
+            .expect("--effort");
+        assert_eq!(argv.get(m + 1).copied(), Some("claude-opus-4-8"));
+        assert_eq!(argv.get(e + 1).copied(), Some("max"));
+        assert!(e > m, "--effort must follow --model: {argv:?}");
+    }
+
+    #[test]
+    fn omits_effort_by_default() {
+        let argv = ClaudeProcess::argv(&args(Some("claude-opus-4-8"), None));
+        assert!(!argv.contains(&"--effort"), "argv: {argv:?}");
+        // Empty strings (a hand-edited config) are omitted, not passed blank.
+        let argv = ClaudeProcess::argv(&args(Some(""), Some("")));
+        assert!(!argv.contains(&"--effort"), "argv: {argv:?}");
+        assert!(!argv.contains(&"--model"), "argv: {argv:?}");
     }
 }
