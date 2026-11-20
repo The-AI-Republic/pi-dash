@@ -1094,20 +1094,30 @@ def test_review_kind_splits_external_wait_from_human_wait():
     assert "**waiting on an external process**" in body
     assert "**keep the clock ticking**" in body
     assert "`waiting_on_human --stop-ticking`" in body
-    # An approved review with no test state parks explicitly, not by inference.
+    # NEWPIDASH-305: an approved review with no test state moves the issue
+    # to AI Completed (never to Done); the old "leave In Review" ending
+    # survives only when there is no AI Completed state.
+    assert "Move the issue to **AI Completed**" in body
+    assert 'never\n  move it to "Done"' in body
+    assert '--state "AI Completed"' in body
     assert "`done --stop-ticking`" in body
     assert "waiting on a human reviewer / nothing changed" not in body
 
 
 @pytest.mark.unit
 def test_test_kind_pass_stops_clock_explicitly_or_moves_on():
-    """Test Step 3: a human-gated pass leaves In Test with
-    `done --stop-ticking`; only a project that explicitly lets agents
-    merge and close moves to Done (the move leaves the ticking states).
-    The runner still never offers `--state "Done"` as a command."""
+    """Test Step 3: a pass moves the issue to AI Completed (the agent's
+    terminal state; the move leaves the ticking states so no
+    `--stop-ticking` is needed). The old ending survives only as the
+    fallback for projects with no "AI Completed" state (leave In Test,
+    `done --stop-ticking`). The runner never offers `--state "Done"`
+    as a command."""
     body = compose("test", workspace=None, project=None, user=None, context=_ctx("test")).text
     assert "`done --stop-ticking`" in body
-    assert "explicitly lets agents accept and close" in body
+    assert "move the issue to\n  **AI Completed**" in body
+    assert 'never fall back to "Done"' in body
+    assert '--state "AI Completed"' in body
+    assert "explicitly lets agents accept and close" not in body
     assert '--state "Done"' not in body
     # Waiting splits by cause, as in review.
     assert "**nothing changed, waiting on an external process**" in body
