@@ -683,9 +683,21 @@ mod tests {
     fn filtered_help_covers_help_subcommand_form() {
         use super::wants_filtered_help_for;
         let argv = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
-        assert!(wants_filtered_help_for(&argv(&["pidash", "--help"]), true, false));
-        assert!(wants_filtered_help_for(&argv(&["pidash", "-h"]), true, false));
-        assert!(wants_filtered_help_for(&argv(&["pidash", "help"]), true, false));
+        assert!(wants_filtered_help_for(
+            &argv(&["pidash", "--help"]),
+            true,
+            false
+        ));
+        assert!(wants_filtered_help_for(
+            &argv(&["pidash", "-h"]),
+            true,
+            false
+        ));
+        assert!(wants_filtered_help_for(
+            &argv(&["pidash", "help"]),
+            true,
+            false
+        ));
         assert!(!wants_filtered_help_for(
             &argv(&["pidash", "help", "issue"]),
             true,
@@ -696,8 +708,16 @@ mod tests {
             true,
             false
         ));
-        assert!(!wants_filtered_help_for(&argv(&["pidash", "--help"]), false, false));
-        assert!(!wants_filtered_help_for(&argv(&["pidash", "help"]), true, true));
+        assert!(!wants_filtered_help_for(
+            &argv(&["pidash", "--help"]),
+            false,
+            false
+        ));
+        assert!(!wants_filtered_help_for(
+            &argv(&["pidash", "help"]),
+            true,
+            true
+        ));
         assert!(!wants_filtered_help_for(&argv(&["pidash"]), true, false));
     }
 
