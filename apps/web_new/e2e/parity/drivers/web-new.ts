@@ -18487,9 +18487,51 @@ export class WebNewDriver implements ParityDriver {
     return this.page.locator('button[aria-label="Send message"]').first();
   }
 
-  /** The assistant rail beside the landing and conversation routes. */
-  private assistantSidebar() {
-    return this.page.locator('[data-testid="assistant-rail"]').first();
+  /**
+   * The Chat History button in the assistant page header. The conversation
+   * uses the full width (NEWPIDASH-337): the history opens from here, not
+   * from a persistent rail.
+   */
+  private assistantHistoryButton() {
+    return this.page
+      .locator('[data-testid="assistant-layout"]')
+      .first()
+      .getByRole("button", { name: "Chat History" })
+      .first();
+  }
+
+  /**
+   * The history dialog; present only while open. Its thread rows keep the
+   * rail's contract (newest-first links, untitled fallback, archived
+   * hidden, open-row highlight, resolved-empty placeholder, refused reads
+   * show neither rows nor placeholder).
+   */
+  private assistantHistoryDialog() {
+    return this.page.locator('[data-testid="assistant-history-dialog"]').first();
+  }
+
+  /** Open the history dialog unless it is already open. */
+  private async assistantEnsureHistoryOpen(): Promise<void> {
+    if (
+      await this.assistantHistoryDialog()
+        .isVisible()
+        .catch(() => false)
+    )
+      return;
+    await this.assistantHistoryButton().click();
+    await this.assistantHistoryDialog().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  /** Close the history dialog when a read left it open (it blocks the page). */
+  private async assistantEnsureHistoryClosed(): Promise<void> {
+    if (
+      !(await this.assistantHistoryDialog()
+        .isVisible()
+        .catch(() => false))
+    )
+      return;
+    await this.page.keyboard.press("Escape");
+    await this.assistantHistoryDialog().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
 
   /**
@@ -18790,7 +18832,8 @@ export class WebNewDriver implements ParityDriver {
       .click();
   }
   async assistantSidebarThreads(): Promise<AssistantSidebarThread[]> {
-    const links = this.assistantSidebar().locator("nav a");
+    await this.assistantEnsureHistoryOpen();
+    const links = this.assistantHistoryDialog().locator("nav a");
     const total = await links.count();
     const out: AssistantSidebarThread[] = [];
     for (let i = 0; i < total; i++) {
@@ -18804,8 +18847,8 @@ export class WebNewDriver implements ParityDriver {
     return out;
   }
   async assistantSidebarEmptyVisible(): Promise<boolean> {
-    return this.page
-      .locator('[data-testid="assistant-rail"]')
+    await this.assistantEnsureHistoryOpen();
+    return this.assistantHistoryDialog()
       .getByText("No conversations yet.", { exact: true })
       .first()
       .isVisible()
@@ -18815,10 +18858,17 @@ export class WebNewDriver implements ParityDriver {
       );
   }
   async assistantClickNewChat(): Promise<void> {
-    await this.assistantSidebar().getByRole("link", { name: "New chat" }).click();
+    // The dialog's backdrop blocks the page while open, so a read that
+    // left it open has to close first.
+    await this.assistantEnsureHistoryClosed();
+    await this.page.locator('[data-testid="assistant-layout"]').first().getByRole("link", { name: "New chat" }).click();
   }
   async assistantClickSidebarThread(index: number): Promise<void> {
-    await this.assistantSidebar().locator("nav a").nth(index).click();
+    await this.assistantEnsureHistoryOpen();
+    await this.assistantHistoryDialog().locator("nav a").nth(index).click();
+    // Picking a row navigates and closes the dialog; wait for the close so
+    // the next read sees the thread, not the backdrop.
+    await this.assistantHistoryDialog().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
   async assistantCardVisible(): Promise<boolean> {
     return (await this.assistantHomeCardInput().count()) > 0;
@@ -19212,44 +19262,58 @@ export class WebNewDriver implements ParityDriver {
     return [...this.assistantTranscribeSeen];
   }
   async assistantSidebarButtons(): Promise<string[]> {
-    const sidebar = this.assistantSidebar();
-    if ((await sidebar.count()) === 0) return [];
-    return sidebar.locator("button").allInnerTexts();
+    // The history dialog is links-only (no close button of its own), so a
+    // closed dialog and an open one both report no buttons.
+    const dialog = this.assistantHistoryDialog();
+    if ((await dialog.count()) === 0) return [];
+    return dialog.locator("button").allInnerTexts();
   }
   async assistantThreadManagementControls(): Promise<string[]> {
-    // The assistant layout (sidebar + outlet) must offer no thread
-    // rename/archive/delete affordance; the report names any violator.
+    // The assistant layout (header + outlet) must offer no thread
+    // rename/archive/delete affordance; the report names any violator. An
+    // open history dialog is portaled outside the layout, so it is scanned
+    // too — history reads in the negative specs leave it open.
+    const hits: string[] = [];
+    const scan = async (scope: Locator): Promise<void> => {
+      const candidates = scope.locator("button, a");
+      const total = await candidates.count();
+      for (let i = 0; i < total; i += 1) {
+        const text = ((await candidates.nth(i).textContent()) ?? "").trim().toLowerCase();
+        if (text.includes("rename") || text.includes("archive") || text.includes("delete")) hits.push(text);
+      }
+    };
     const layout = this.page.locator('[data-testid="assistant-layout"]').first();
     if ((await layout.count()) === 0) return [];
-    const candidates = layout.locator("button, a");
-    const total = await candidates.count();
-    const hits: string[] = [];
-    for (let i = 0; i < total; i += 1) {
-      const text = ((await candidates.nth(i).textContent()) ?? "").trim().toLowerCase();
-      if (text.includes("rename") || text.includes("archive") || text.includes("delete")) hits.push(text);
-    }
+    await scan(layout);
+    const dialog = this.assistantHistoryDialog();
+    if (await dialog.isVisible().catch(() => false)) await scan(dialog);
     return hits;
   }
   async assistantSidebarHeader(): Promise<string | null> {
-    const header = this.assistantSidebar().locator('[data-testid="assistant-rail-header"]').first();
-    if ((await header.count()) === 0) return null;
+    // The history surface's label: the header button that opens it. Null
+    // where the button is absent (the desktop local chat has no server
+    // history).
+    const button = this.assistantHistoryButton();
+    if ((await button.count()) === 0) return null;
     // textContent: innerText would apply CSS text transforms.
-    const text = ((await header.textContent()) ?? "").trim();
+    const text = ((await button.textContent()) ?? "").trim();
     return text === "" ? null : text;
   }
   async assistantSidebarRowKinds(): Promise<{ newChat: string | null; rows: string[] }> {
-    const sidebar = this.assistantSidebar();
-    if ((await sidebar.count()) === 0) return { newChat: null, rows: [] };
-    const links = sidebar.locator(":scope a, :scope button");
+    // New chat lives in the page header; thread rows live in the history
+    // dialog. Both stay links, never buttons, on the new app as on the old.
+    const layout = this.page.locator('[data-testid="assistant-layout"]').first();
+    if ((await layout.count()) === 0) return { newChat: null, rows: [] };
+    const newChatLink = layout.getByRole("link", { name: "New chat" }).first();
+    const newChat =
+      (await newChatLink.count()) > 0 ? await newChatLink.evaluate((element) => element.tagName.toLowerCase()) : null;
+    if ((await this.assistantHistoryButton().count()) === 0) return { newChat, rows: [] };
+    await this.assistantEnsureHistoryOpen();
+    const links = this.assistantHistoryDialog().locator("nav a");
     const total = await links.count();
-    let newChat: string | null = null;
     const rows: string[] = [];
     for (let i = 0; i < total; i += 1) {
-      const node = links.nth(i);
-      const tag = await node.evaluate((element) => element.tagName.toLowerCase());
-      const text = ((await node.textContent()) ?? "").trim();
-      if (text === "New chat") newChat = tag;
-      else rows.push(tag);
+      rows.push(await links.nth(i).evaluate((element) => element.tagName.toLowerCase()));
     }
     return { newChat, rows };
   }

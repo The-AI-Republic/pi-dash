@@ -577,9 +577,24 @@ describe("assistant API spy and thread-create stubs", () => {
   });
 });
 
-describe("assistant conversation rail", () => {
-  it("reads each thread link's title, href and active marker", async () => {
-    const links = [
+describe("assistant conversation history", () => {
+  // NEWPIDASH-337: the conversation uses the full width and the history
+  // opens from the Chat History header button into a dialog. The threads,
+  // empty and click reads below open (or close) that dialog around the
+  // same row/link selectors the rail used.
+  function historyPage(dialog: StubLocator, layout: StubLocator, keyboard?: { press: (key: string) => Promise<void> }) {
+    return pageOf({
+      ...(keyboard === undefined ? {} : { keyboard }),
+      locator: (selector: string) => {
+        if (selector === '[data-testid="assistant-history-dialog"]') return dialog as never;
+        if (selector === '[data-testid="assistant-layout"]') return layout as never;
+        return locator();
+      },
+    });
+  }
+
+  function threadLinks(): StubLocator[] {
+    return [
       locator({
         innerText: async () => " First ",
         getAttribute: async (name: string) => (name === "href" ? "/acme/assistant/1" : "page"),
@@ -589,18 +604,42 @@ describe("assistant conversation rail", () => {
         getAttribute: async (name: string) => (name === "href" ? "/acme/assistant/2" : null),
       }),
     ];
-    const page = pageOf({
-      locator: (selector: string) =>
-        selector === '[data-testid="assistant-rail"]'
-          ? locator({
-              locator: (inner: string) =>
-                inner === "nav a"
-                  ? locator({ count: async () => links.length, nth: (i: number) => links[i]! })
-                  : locator(),
-            })
-          : locator(),
+  }
+
+  it("opens the dialog from the header button, then reads each thread link", async () => {
+    const buttonClick = vi.fn(async () => undefined);
+    const dialogWait = vi.fn(async (_options?: unknown) => undefined);
+    const links = threadLinks();
+    const dialog = locator({
+      isVisible: async () => false,
+      waitFor: dialogWait,
+      locator: (inner: string) =>
+        inner === "nav a" ? locator({ count: async () => links.length, nth: (i: number) => links[i]! }) : locator(),
     });
-    const driver = new WebNewDriver(page);
+    const layout = locator({ getByRole: () => locator({ click: buttonClick }) });
+    const driver = new WebNewDriver(historyPage(dialog, layout));
+
+    await expect(driver.assistantSidebarThreads()).resolves.toEqual([
+      { title: "First", href: "/acme/assistant/1", active: true },
+      { title: "Second", href: "/acme/assistant/2", active: false },
+    ]);
+    expect(buttonClick).toHaveBeenCalledTimes(1);
+    expect(dialogWait).toHaveBeenCalledWith({ state: "visible", timeout: 30_000 });
+  });
+
+  it("reads threads without reopening when the dialog is already open", async () => {
+    const links = threadLinks();
+    const dialog = locator({
+      isVisible: async () => true,
+      locator: (inner: string) =>
+        inner === "nav a" ? locator({ count: async () => links.length, nth: (i: number) => links[i]! }) : locator(),
+    });
+    const layout = locator({
+      getByRole: () => {
+        throw new Error("history button must not be clicked while the dialog is open");
+      },
+    });
+    const driver = new WebNewDriver(historyPage(dialog, layout));
 
     await expect(driver.assistantSidebarThreads()).resolves.toEqual([
       { title: "First", href: "/acme/assistant/1", active: true },
@@ -608,59 +647,64 @@ describe("assistant conversation rail", () => {
     ]);
   });
 
-  it("reports an empty rail with no placeholder when the list is absent", async () => {
-    const page = pageOf({
-      locator: (selector: string) =>
-        selector === '[data-testid="assistant-rail"]'
-          ? locator({
-              locator: (inner: string) => (inner === "nav a" ? locator({ count: async () => 0 }) : locator()),
-              getByText: () => locator({ isVisible: async () => Promise.reject(new Error("no placeholder")) }),
-            })
-          : locator(),
+  it("reports an empty dialog with no placeholder when the list is absent", async () => {
+    const dialog = locator({
+      isVisible: async () => true,
+      locator: (inner: string) => (inner === "nav a" ? locator({ count: async () => 0 }) : locator()),
+      getByText: () => locator({ isVisible: async () => Promise.reject(new Error("no placeholder")) }),
     });
-    const driver = new WebNewDriver(page);
+    const driver = new WebNewDriver(historyPage(dialog, locator()));
 
     await expect(driver.assistantSidebarThreads()).resolves.toEqual([]);
     await expect(driver.assistantSidebarEmptyVisible()).resolves.toBe(false);
   });
 
-  it("reports the empty rail placeholder when it is shown", async () => {
-    const page = pageOf({
-      locator: (selector: string) =>
-        selector === '[data-testid="assistant-rail"]'
-          ? locator({ getByText: () => locator({ isVisible: async () => true }) })
-          : locator(),
+  it("reports the empty dialog placeholder when it is shown", async () => {
+    const dialog = locator({
+      isVisible: async () => true,
+      getByText: () => locator({ isVisible: async () => true }),
     });
-    const driver = new WebNewDriver(page);
+    const driver = new WebNewDriver(historyPage(dialog, locator()));
 
     await expect(driver.assistantSidebarEmptyVisible()).resolves.toBe(true);
   });
 
-  it("clicks the new-chat link and a thread by index", async () => {
+  it("closes an open dialog before clicking the header new-chat link", async () => {
+    const escape = vi.fn(async (_key: string) => undefined);
+    const hiddenWait = vi.fn(async (_options?: unknown) => undefined);
     const newChatClick = vi.fn(async () => undefined);
-    const threadClick = vi.fn(async () => undefined);
-    const links = [locator({ click: newChatClick }), locator({ click: threadClick })];
-    const getByRole = vi.fn((_role: string, options?: unknown) => {
-      expect(options).toEqual({ name: "New chat" });
-      return links[0]!;
+    const dialog = locator({ isVisible: async () => true, waitFor: hiddenWait });
+    const layout = locator({
+      getByRole: (role: string, options?: unknown) => {
+        expect(role).toBe("link");
+        expect(options).toEqual({ name: "New chat" });
+        return locator({ click: newChatClick });
+      },
     });
-    const page = pageOf({
-      locator: (selector: string) =>
-        selector === '[data-testid="assistant-rail"]'
-          ? locator({
-              getByRole,
-              locator: (inner: string) => (inner === "nav a" ? locator({ nth: (i: number) => links[i]! }) : locator()),
-            })
-          : locator(),
-    });
-    const driver = new WebNewDriver(page);
+    const driver = new WebNewDriver(historyPage(dialog, layout, { press: escape }));
 
     await driver.assistantClickNewChat();
+
+    expect(escape).toHaveBeenCalledWith("Escape");
+    expect(hiddenWait).toHaveBeenCalledWith({ state: "hidden", timeout: 30_000 });
+    expect(newChatClick).toHaveBeenCalledTimes(1);
+  });
+
+  it("clicks a thread by index and waits for the dialog to close", async () => {
+    const threadClick = vi.fn(async () => undefined);
+    const hiddenWait = vi.fn(async (_options?: unknown) => undefined);
+    const dialog = locator({
+      isVisible: async () => true,
+      waitFor: hiddenWait,
+      locator: (inner: string) =>
+        inner === "nav a" ? locator({ nth: () => locator({ click: threadClick }) }) : locator(),
+    });
+    const driver = new WebNewDriver(historyPage(dialog, locator()));
+
     await driver.assistantClickSidebarThread(1);
 
-    expect(getByRole).toHaveBeenCalledTimes(1);
-    expect(newChatClick).toHaveBeenCalledTimes(1);
     expect(threadClick).toHaveBeenCalledTimes(1);
+    expect(hiddenWait).toHaveBeenCalledWith({ state: "hidden", timeout: 30_000 });
   });
 });
 

@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Assistant layout route (parity/specs/agents.md §9/§11). Prefetches the
-// conversation list the rail renders and mounts the rail beside the
-// routed landing or conversation. The list read is tolerated: guests are
-// refused server-side, and the rail has to render that refusal as an
-// empty, placeholder-free sidebar (AGT-041).
+// conversation list the history dialog renders and mounts the page header
+// (history button plus New chat) above the routed landing or conversation.
+// The list read is tolerated: guests are refused server-side, and the
+// dialog has to render that refusal with neither rows nor the placeholder
+// (AGT-041).
 
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
