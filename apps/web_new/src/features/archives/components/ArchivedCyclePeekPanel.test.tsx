@@ -3,12 +3,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // The archived-cycle quick look: the archived record's state marker,
-// dates and progress summary from the archived detail read, with the
-// live panel's editing affordances left out. A skeleton covers the
-// load and a failed read offers a retry.
+// dates, progress summary, lead and members, and the States,
+// Assignees and Labels analytics summaries from the archived detail
+// read, with the live panel's editing affordances left out. A
+// skeleton covers the load and a failed read offers a retry.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import type { ArchivedCycleDetail } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -21,13 +22,16 @@ vi.mock("../../cycles/index.js", async (importOriginal) => {
 });
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
-import { jsonResponse } from "../../cycles/testing.js";
+import { jsonResponse, makeWorkspaceMembers } from "../../cycles/testing.js";
 import { FULL_SCREEN_PORTAL_ID } from "../../../shared/shell/document.js";
 import { ArchivedCyclePeekPanel } from "./ArchivedCyclePeekPanel.js";
 
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
 const CYCLE = "323e4567-e89b-12d3-a456-426614174002";
 const DETAIL_PATH = `/api/workspaces/acme/projects/${PROJECT}/archived-cycles/${CYCLE}/`;
+const MEMBERS_PATH = `/api/workspaces/acme/members/`;
+const ADA_ID = "aaaaaaaa-0000-4000-8000-000000000001";
+const GRACE_ID = "aaaaaaaa-0000-4000-8000-000000000003";
 
 let detail: ArchivedCycleDetail | null;
 let status: number;
@@ -60,12 +64,29 @@ function archivedDetail(): ArchivedCycleDetail {
   };
 }
 
+function staffedDetail(): ArchivedCycleDetail {
+  return {
+    ...archivedDetail(),
+    owned_by_id: ADA_ID,
+    assignee_ids: [ADA_ID, GRACE_ID],
+    distribution: {
+      assignees: [
+        { display_name: "Ada Lovelace", assignee_id: ADA_ID, total_issues: 3 },
+        { display_name: "Grace Hopper", assignee_id: GRACE_ID, total_issues: 1 },
+      ],
+      labels: [{ label_name: "Bug", label_id: "bbbbbbbb-0000-4000-8000-000000000002", total_issues: 2 }],
+      completion_chart: { "2026-01-10": 4, "2026-01-20": 1 },
+    },
+  };
+}
+
 beforeEach(() => {
   document.body.innerHTML = `<div id="${FULL_SCREEN_PORTAL_ID}"></div>`;
   detail = archivedDetail();
   status = 200;
   createAppClient("https://api.test", (async (url: string) => {
     if (url.endsWith(DETAIL_PATH)) return jsonResponse(url, status, detail ?? { detail: "missing" });
+    if (url.endsWith(MEMBERS_PATH)) return jsonResponse(url, 200, makeWorkspaceMembers());
     throw new Error(`unexpected request: ${url}`);
   }) as never);
 });
@@ -108,6 +129,73 @@ describe("ArchivedCyclePeekPanel", () => {
     expect(body).toHaveTextContent("3 of 4 work items");
     expect(screen.getByTestId("archived-cycle-peek-summary")).toBeInTheDocument();
     expect(screen.getByTestId("cycle-date-span")).toBeInTheDocument();
+  });
+
+  it("shows the lead and both members with no editing control", async () => {
+    detail = staffedDetail();
+    renderPeek();
+    await screen.findByTestId("archived-cycle-peek-body");
+
+    expect(screen.getByTestId("archived-cycle-peek-lead-name")).toHaveTextContent("Ada Lovelace");
+    const members = screen.getByTestId("archived-cycle-peek-members");
+    const avatars = within(members).getAllByRole("img");
+    expect(avatars).toHaveLength(2);
+    expect(within(members).getByRole("img", { name: "Ada Lovelace" })).not.toBeNull();
+    expect(within(members).getByRole("img", { name: "Grace Hopper" })).not.toBeNull();
+    const panel = screen.getByTestId("archived-cycle-preview");
+    expect(panel.querySelector('[role="combobox"], select')).toBeNull();
+    for (const row of [screen.getByTestId("archived-cycle-peek-lead"), members]) {
+      expect(row.querySelector("button")).toBeNull();
+    }
+  });
+
+  it("names an unknown lead instead of an empty row", async () => {
+    detail = { ...staffedDetail(), owned_by_id: "ffffffff-0000-4000-8000-000000000009" };
+    renderPeek();
+    await screen.findByTestId("archived-cycle-peek-body");
+
+    expect(screen.getByTestId("archived-cycle-peek-lead-name")).toHaveTextContent("Unknown member");
+  });
+
+  it("shows the states breakdown and the burndown chart by default", async () => {
+    detail = staffedDetail();
+    renderPeek();
+    await screen.findByTestId("archived-cycle-peek-body");
+
+    expect(screen.getByTestId("archived-cycle-peek-tabs")).toBeInTheDocument();
+    expect(screen.getByTestId("archived-cycle-peek-tab-States")).toHaveAttribute("aria-selected", "true");
+    const entries = screen.getByTestId("archived-cycle-peek-entries");
+    expect(entries).toHaveTextContent("Completed");
+    expect(entries).toHaveTextContent("75%");
+    expect(entries).toHaveTextContent("Started");
+    expect(entries).toHaveTextContent("25%");
+    expect(screen.getByTestId("archived-cycle-peek-chart")).toBeInTheDocument();
+  });
+
+  it("switches the breakdown to assignees and labels", async () => {
+    detail = staffedDetail();
+    renderPeek();
+    await screen.findByTestId("archived-cycle-peek-body");
+
+    fireEvent.click(screen.getByTestId("archived-cycle-peek-tab-Assignees"));
+    let entries = screen.getByTestId("archived-cycle-peek-entries");
+    expect(entries).toHaveTextContent("Ada Lovelace");
+    expect(entries).toHaveTextContent("Grace Hopper");
+
+    fireEvent.click(screen.getByTestId("archived-cycle-peek-tab-Labels"));
+    entries = screen.getByTestId("archived-cycle-peek-entries");
+    expect(entries).toHaveTextContent("Bug");
+    expect(entries).toHaveTextContent("50%");
+  });
+
+  it("keeps the breakdown entries inert instead of filter controls", async () => {
+    detail = staffedDetail();
+    renderPeek();
+    await screen.findByTestId("archived-cycle-peek-body");
+
+    const entries = screen.getByTestId("archived-cycle-peek-entries");
+    expect(entries.querySelector("button")).toBeNull();
+    expect(entries.querySelector("[aria-pressed]")).toBeNull();
   });
 
   it("reads a lone work item in the singular", async () => {
