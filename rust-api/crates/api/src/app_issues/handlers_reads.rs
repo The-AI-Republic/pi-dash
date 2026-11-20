@@ -1425,6 +1425,17 @@ async fn identifier(
     {
         return Err(not_allowed_body());
     }
+    // DIFF-45: like every other project-scoped read, the identifier paths
+    // 409 on an archived project after the auth and role gate, ahead of
+    // the issue fetch (covers lite and full with one gate).
+    if let Some(info) = crate::project_archived::archived_by_id(&pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError.into_response())?
+    {
+        return Err(
+            Denial::ProjectArchived(crate::project_archived::archived_body(&info)).into_response(),
+        );
+    }
     // Out-of-`i32` integers are valid but unmatchable (`sequence_id` is an
     // `IntegerField`): 404 at the query position, after the member check.
     let sequence = match sequence {

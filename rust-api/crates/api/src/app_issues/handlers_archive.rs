@@ -1301,10 +1301,11 @@ fn archive_denial(error: domain::DomainError) -> Denial {
 // Bulk archive (`archive.py:306-344`)
 // ---------------------------------------------------------------------------
 
-/// `POST .../bulk-archive-issues/`: the entity gate, the id parse, then
-/// per issue (model `-created_at` order) the literal gate plus the
-/// enqueue — a bad issue answers 400 *after* the earlier enqueues fired
-/// — and one `archived_at`-only `bulk_update`.
+/// `POST .../bulk-archive-issues/`: the entity gate, the allow gate, the
+/// archived-project 409 (DIFF-45), the id parse, then per issue (model
+/// `-created_at` order) the literal gate plus the enqueue — a bad issue
+/// answers 400 *after* the earlier enqueues fired — and one
+/// `archived_at`-only `bulk_update`.
 pub async fn bulk_archive(
     State(state): State<AppState>,
     Path((slug, project_raw)): Path<(String, String)>,
@@ -1320,6 +1321,18 @@ pub async fn bulk_archive(
         return Ok(status_response(StatusCode::FORBIDDEN, ENTITY_DENIED_BODY));
     }
     archive_allow(&base.pool, &base.slug, &base.project_id, &base.user_id).await?;
+    // DIFF-45: the bulk arm 409s on an archived project like
+    // `bulk-operation-issues` and `bulk-subscribe-issues` do — without
+    // this the issues would be archived on a project every other write
+    // refuses.
+    if let Some(info) = crate::project_archived::archived_by_id(&base.pool, base.project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     let context = archive_tenant(base, false).await?;
     // `request.data` through the shared negotiator: empty (by the
     // Content-Length header, whatever the content-type) short-circuits
