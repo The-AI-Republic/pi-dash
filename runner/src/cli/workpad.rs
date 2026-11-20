@@ -179,7 +179,7 @@ async fn cmd_get(
         .ok_or_else(|| {
             CliError::new(
                 EXIT_SERVER,
-                "workpad response missing 'body_sha256' (old server: upgrade the runner)",
+                "workpad response missing 'body_sha256' (old server: needs the new API deploy)",
             )
         })?;
     if let Some(parent) = dest.parent()
@@ -515,5 +515,37 @@ mod tests {
             let warning = warn_on_cleanup(outcome).expect("failure warns");
             assert!(warning.starts_with("warning:"));
         }
+    }
+
+    /// A server predating the workpad guard answers no `body_sha256`;
+    /// `--to-file` must fail loudly pointing at the server deploy (not the
+    /// runner) and write nothing, so no unguarded sha file is ever stored.
+    #[tokio::test]
+    async fn get_to_file_blames_the_server_deploy_when_sha_is_absent() {
+        let handler: crate::pidash_agent::test_server::Handler = std::sync::Arc::new(|req| {
+            if req.path.ends_with("/work-items/ENG-7/") {
+                return (200, r#"{"id":"iid-1","project":"pid-1"}"#.to_string());
+            }
+            assert!(req.path.contains("/workpad/"), "unexpected {}", req.path);
+            (
+                200,
+                r#"{"body":"hello","updated_at":"2026-01-01T00:00:00Z"}"#.to_string(),
+            )
+        });
+        let server = crate::pidash_agent::test_server::start(handler).await;
+        let client = crate::api_client::ApiClient::new(crate::api_client::CliEnv {
+            api_url: server.url.clone(),
+            workspace_slug: "ws".to_string(),
+            token: "tok".to_string(),
+            run_id: None,
+        })
+        .expect("client");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dest = dir.path().join("wd.md");
+        let err = super::cmd_get(&client, Some("ENG-7".to_string()), Some(dest.clone()))
+            .await
+            .expect_err("old server must fail --to-file");
+        assert!(err.message.contains("new API deploy"), "{}", err.message);
+        assert!(!dest.exists(), "no body file may be written on failure");
     }
 }
