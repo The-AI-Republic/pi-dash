@@ -1075,7 +1075,7 @@ owned by `lifecycle` (rendered heading "Where this task is, and how the run
 ends"); the workpad by `workpad`; blocking by `blocking`. Section references
 use the headings the agent actually sees.
 
-````markdown
+```jinja
 ## Pi Dash CLI (`pidash`)
 
 `pidash` is your only channel to Pi Dash. It is already authenticated **as
@@ -1083,50 +1083,60 @@ this runner's owner**; your writes carry their identity plus this run's id.
 Do not use `curl` or raw HTTP. Never print, log or record any `PIDASH_*`
 value or anything from the pidash config.
 
-{% if run.kind != "scheduler" %}`PIDASH_ISSUE_IDENTIFIER`, `PIDASH_PROJECT`
-and `PIDASH_RUN_ID` are set, so commands default to this issue and run. (If a
-bare command says the issue identifier is missing, pass `{{ issue.identifier }}`.)
-{% else %}`PIDASH_PROJECT` (`{{ project.identifier }}`) and `PIDASH_RUN_ID`
-are set. There is no current issue: pass identifiers explicitly.
+{% if run.kind != "scheduler" %}
+`PIDASH_ISSUE_IDENTIFIER`, `PIDASH_PROJECT` and `PIDASH_RUN_ID` are set, so
+commands default to this issue and run. (If a bare command says the issue
+identifier is missing, pass `{{ issue.identifier }}`.)
+{% else %}
+`PIDASH_PROJECT` (`{{ project.identifier }}`) and `PIDASH_RUN_ID` are set.
+There is no current issue: pass identifiers explicitly.
 {% endif %}
+
 Every command prints one JSON document on stdout and exits 0. On failure it
 prints `{"error": …}` on stderr and exits non-zero: read it, retry only
 transient failures, and never retry the same command more than twice.
 
 ### What you already have
 
-{% if run.kind == "scheduler" %}The project and its states shown in this
-prompt were read at `{{ run.rendered_at }}`.{% else %}The issue, its
-comments, the available states{% if run.kind == "coding-task" %} and your
-workpad{% else %} and the hand-off{% endif %} shown in this prompt were read
-at `{{ run.rendered_at }}`. Don't fetch them again. Two exceptions: check
-for newer comments with `pidash comment list --since {{ run.rendered_at }}`
-when "How this run works" tells you to, or when you have worked long enough
-that a person may have replied; and re-read after a write is rejected as
-stale. (If `--since` is not a known flag, use `pidash comment list`.){% endif %}
+{% if run.kind == "scheduler" %}
+The project and its states shown in this prompt were read at
+`{{ run.rendered_at }}`.
+{% else %}
+The issue, its comments, the available states
+{%- if run.kind == "coding-task" %} and your workpad{% else %} and the hand-off{% endif %}
+shown in this prompt were read at `{{ run.rendered_at }}`. Don't fetch them
+again. Two exceptions: check for newer comments with
+`pidash comment list --since {{ run.rendered_at }}` when "How this run works"
+tells you to, or when you have worked long enough that a person may have
+replied; and re-read after a write is rejected as stale. (If `--since` is
+not a known flag, use `pidash comment list`.)
+{% endif %}
 
 ### Core commands
 
-{% if run.kind != "scheduler" %}- `pidash comment add --body-file .pidash/<name>.md [--fold]`: post a
-comment during the run, as this agent run. Your closing comment goes
-through `pidash run finish`, not this. Use `--fold` only for low-value
-status notes.
-{% if run.kind == "coding-task" %}- `pidash workpad update` / `pidash workpad get --to-file`: write and
-re-read `.pidash/workpad.md`. See "Workpad".
-{% endif %}- `pidash issue get` / `pidash comment list [--since <time>]`: refresh only
-(see above).
-
+{% if run.kind != "scheduler" %}
+- `pidash comment add --body-file .pidash/<name>.md [--fold]`: post a comment
+  during the run, as this agent run. Your closing comment goes through
+  `pidash run finish`, not this. Use `--fold` only for low-value status notes.
+{% if run.kind == "coding-task" %}
+- `pidash workpad update` / `pidash workpad get --to-file`: write and re-read
+  `.pidash/workpad.md`. See "Workpad".
+{% endif %}
+- `pidash issue get` / `pidash comment list [--since <time>]`: refresh only
+  (see above).
 - `pidash run finish …`: ends the run; your **last** `pidash` call. The
   syntax, the results and the state to pass are in "Where this task is, and
   how the run ends".
-  {% else %}- `pidash issue create --project {{ project.identifier }} --title "<summary>" --description-file .pidash/finding.md`:
+{% else %}
+- `pidash issue create --project {{ project.identifier }} --title "<summary>" --description-file .pidash/finding.md`:
   file a finding.
 - `pidash comment add <issue> --body-file .pidash/<name>.md [--fold]`: post a
   comment as this agent run.
 - `pidash run yield --outcome <progressed|waiting_on_human|waiting_on_external|done|blocked> [--note "<one line>"]`:
   optional; if sent, your last `pidash` call. See "Ending the scheduled run".
-  {% endif %}
-  Keep every scratch file under `.pidash/`; it is never committed.
+{% endif %}
+
+Keep every scratch file under `.pidash/`; it is never committed.
 
 ### Other commands
 
@@ -1155,11 +1165,17 @@ refused inside a run; if one seems necessary, the run is blocked (see
 ### Conventions
 
 - All writes are real and immediate; there is no undo. Check intent against
-  {% if run.kind == "coding-task" %}your workpad plan{% else %}the issue and
-  its comments{% endif %} before mutating.
-- When pasting `pidash` JSON into a comment{% if run.kind == "coding-task" %}
-  or the workpad{% endif %}, fence it in ` ``` `.
-````
+  {% if run.kind == "coding-task" %}your workpad plan{% else %}the issue and its comments{% endif %}
+  before mutating.
+- When pasting `pidash` JSON into a comment
+  {%- if run.kind == "coding-task" %} or the workpad{% endif %}, fence it in
+  three backticks.
+```
+
+The fence is tagged `jinja`, not `markdown`, so the repository's formatter
+leaves the template tags and list items where they are. Whitespace around
+the tags is for reading; when writing the real file, trim it the way the
+current `pidash-cli.md` does, so no blank lines or stray spaces are rendered.
 
 Changes to other sections that go with it (issue C):
 
