@@ -92,8 +92,15 @@ export function Dialog({
   // tall form keeps its tab strip, fields and footer actions reachable.
   // The body's basis stays content-sized (`flex-auto`): the card's height is
   // automatic up to the cap, unlike the docked panel's definite full height.
+  // A caller width replaces the default instead of competing with it: `cn`
+  // is a plain joiner and Tailwind sorts arbitrary `max-w-[...]` before
+  // named `max-w-*`, so two max-widths always resolve to the default.
+  const callerSetsWidth = `${className ?? ""} ${popupClassName ?? ""}`
+    .split(/\s+/)
+    .some((part) => (part.split(":").pop() ?? "").startsWith("max-w-"));
   const centered = [
-    "top-1/2 left-1/2 flex max-h-[calc(100dvh-2rem)] w-full max-w-md flex-col -translate-x-1/2 -translate-y-1/2",
+    "top-1/2 left-1/2 flex max-h-[calc(100dvh-2rem)] w-full flex-col -translate-x-1/2 -translate-y-1/2",
+    ...(callerSetsWidth ? [] : ["max-w-md"]),
     "rounded-(--radius-dialog)",
   ];
   // A right panel keeps the dialog's fieldset role and focus trap but

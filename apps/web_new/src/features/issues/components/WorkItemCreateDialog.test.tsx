@@ -3213,6 +3213,9 @@ describe("WorkItemCreateDialog modal refresh (NEWPIDASH-361)", () => {
     const dialog = screen.getByRole("dialog", { name: "Create new work item" });
     expect(dialog).toHaveClass("max-w-[min(84rem,calc(100vw-2rem))]");
     expect(dialog).toHaveClass("min-h-[min(44rem,calc(100dvh-2rem))]");
+    // The kit default must not compete: two max-widths resolve to the
+    // default in the Tailwind cascade, which is what kept this modal narrow.
+    expect(dialog).not.toHaveClass("max-w-md");
   });
 
   it("renders the issue type as the last property chip", () => {
