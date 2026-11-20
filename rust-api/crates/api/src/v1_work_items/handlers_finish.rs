@@ -222,6 +222,18 @@ pub fn parse_finish_body(data: &Value) -> Result<FinishRequest, Refusal> {
             &[],
         ));
     }
+    // NEWPIDASH-338 item 5: identical texts would collapse into one
+    // comment (the hand-off lookup matches the just-posted comment by
+    // body), so refuse them with a clear message instead of silently
+    // posting once.
+    if let (Some(comment_text), Some(handoff_text)) = (comment.as_deref(), handoff.as_deref()) {
+        if comment_text.trim() == handoff_text.trim() {
+            return Err(bad_request(
+                "comment and handoff are identical: write them separately, or leave one flag out",
+                &[],
+            ));
+        }
+    }
     Ok(FinishRequest {
         to: to.trim().to_owned(),
         result,
@@ -308,8 +320,22 @@ pub fn resolve_target<'a>(
         ));
     };
     if Some(target.id) != current && target.is_human_only() {
+        // NEWPIDASH-338 item 4: never name a state the project does not
+        // have. With no "AI Completed" state the agent retries the named
+        // state, gets "unknown state", and burns retries without recording
+        // a result — so name staying + `waiting_on_human` instead, as the
+        // lifecycle prompt does.
+        use pidash_types::orchestration::AI_COMPLETED_STATE_NAME;
+        let names_ai_completed = states
+            .iter()
+            .any(|s| s.group == "completed" && s.name == AI_COMPLETED_STATE_NAME);
+        let guidance = if names_ai_completed {
+            "finish in \"AI Completed\" or the current state instead".to_owned()
+        } else {
+            "stay in the current state and finish with `waiting_on_human` instead".to_owned()
+        };
         return Err(bad_request(
-            &format!("\"{to}\" is for a person to set; finish in \"AI Completed\" or the current state instead"),
+            &format!("\"{to}\" is for a person to set; {guidance}"),
             &[("available", names())],
         ));
     }
@@ -608,6 +634,13 @@ async fn finish_inner(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),
     );
+    // NEWPIDASH-338 (unlisted composition defect): the inner handlers
+    // re-negotiate the body from headers, and a missing `content-length`
+    // reads as an empty body (`content_length_is_empty`). Dropping the
+    // incoming length here — without setting the new one — silently
+    // turned every inner call into a no-op: the move never persisted and
+    // the comments posted empty. Each inner call below stamps the length
+    // of the body it actually sends (`forward_json`).
     forwarded.remove(header::CONTENT_LENGTH);
     forwarded.insert(
         RUN_ID_HEADER,
@@ -632,9 +665,10 @@ async fn finish_inner(
     if let Some(target_id) = plan.move_to {
         let body = serde_json::to_vec(&json!({ "state": target_id.to_string() }))
             .map_err(|_| Denial::ServerError)?;
+        let headers = forward_json(&forwarded, body.len());
         let response = match super::handlers_core::patch_issue_inner(
             state,
-            &forwarded,
+            &headers,
             slug,
             &project_raw,
             &issue_id,
@@ -742,6 +776,16 @@ async fn finish_inner(
     ))
 }
 
+/// The headers for one forwarded inner call: the shared base plus the
+/// `content-length` of the body it actually sends. Without the length
+/// the inner handler's body negotiation reads an empty body and the call
+/// silently no-ops (NEWPIDASH-338 unlisted composition defect).
+fn forward_json(base: &HeaderMap, body_len: usize) -> HeaderMap {
+    let mut headers = base.clone();
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(body_len));
+    headers
+}
+
 /// Post one agent comment through the v1 comment-create path. `Ok(Ok(id))`
 /// on success; `Ok(Err(response))` passes a refusal through unchanged.
 #[allow(clippy::too_many_arguments)]
@@ -762,9 +806,10 @@ async fn post_agent_comment(
         "speaker_agent_run_id": run_id.to_string(),
     }))
     .map_err(|_| Denial::ServerError)?;
+    let headers = forward_json(headers, body.len());
     let response = match super::handlers_social::comment_post_inner(
         state,
-        headers,
+        &headers,
         slug,
         project_raw,
         &issue_id,
@@ -1488,6 +1533,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn identical_comment_and_hand_off_are_refused() {
+        // NEWPIDASH-338 item 5: same text twice would post once (the
+        // hand-off lookup finds the just-posted comment), so refuse it.
+        let (status, body) = body_of(
+            parse_finish_body(&json!({
+                "to": "In Review", "result": "done",
+                "comment": "same text", "handoff": "same text",
+            }))
+            .unwrap_err(),
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert!(
+            body["error"].as_str().expect("error").contains("identical"),
+            "{body}"
+        );
+        // Different texts still pass.
+        assert!(parse_finish_body(&json!({
+            "to": "In Review", "result": "done",
+            "comment": "the answer", "handoff": "### Hand-off",
+        }))
+        .is_ok());
+    }
+
+    #[tokio::test]
     async fn a_blank_comment_or_hand_off_is_refused() {
         for key in ["comment", "handoff"] {
             let (status, body) = body_of(
@@ -1534,6 +1604,43 @@ mod tests {
         // An issue a person already closed may stay where it is.
         let done = states[5].id;
         assert!(resolve_target(&states, "Done", StageSwitches::ALL, Some(done)).is_ok());
+
+        // NEWPIDASH-338 item 4: in a project with no "AI Completed" state
+        // the refusal names only states that exist — never "AI Completed".
+        let mut bare = project_states();
+        bare.retain(|s| s.name != "AI Completed");
+        let progress = bare[1].id;
+        let (status, body) =
+            body_of(resolve_target(&bare, "Done", StageSwitches::ALL, Some(progress)).unwrap_err())
+                .await;
+        assert_eq!(status, 400);
+        let error = body["error"].as_str().expect("error");
+        assert!(
+            error.contains("waiting_on_human"),
+            "stay guidance, not a missing state: {error}"
+        );
+        assert!(
+            !error.contains("AI Completed"),
+            "never names a state the project lacks: {error}"
+        );
+        assert!(
+            !body["available"]
+                .as_array()
+                .expect("available")
+                .iter()
+                .any(|v| v == "AI Completed"),
+            "available lists only real states"
+        );
+        // With the state present the old guidance stays.
+        let (status, body) = body_of(
+            resolve_target(&states, "Done", StageSwitches::ALL, Some(progress)).unwrap_err(),
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert!(body["error"]
+            .as_str()
+            .expect("error")
+            .contains("AI Completed"));
     }
 
     #[test]

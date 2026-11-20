@@ -538,6 +538,28 @@ pub fn active_run_of_caller(
         .map(|run| run.id)
 }
 
+/// Whether the lean-workflow agent-move gate applies to a state patch:
+/// the move is attributed to a run on this issue (NEWPIDASH-338 item 3).
+/// An explicit header proves it through the header run's own row; the
+/// headerless inference only ever resolves the caller's active run on
+/// this issue, so an attributed move with no header row is one too.
+/// Anything unattributed (`moved_by_run` unset) is a human move and skips
+/// the gate — as does a header naming a run that lives elsewhere.
+pub fn is_own_issue_run(
+    moved_by_run: Option<Uuid>,
+    header_run_work_item: Option<Uuid>,
+    header_present: bool,
+    issue_id: Uuid,
+) -> bool {
+    if moved_by_run.is_none() {
+        return false;
+    }
+    match header_run_work_item {
+        Some(work_item) => work_item == issue_id,
+        None => !header_present,
+    }
+}
+
 /// A refused human-only lever: always 403 with
 /// `{"error":"{action} is a human action; it cannot be requested from inside
 /// an agent run"}` (`views/issue.py:1155-1158`).
@@ -1120,6 +1142,29 @@ mod tests {
         };
         assert_eq!(active_run_of_caller(Some(me), issue(), &[elsewhere]), None);
         assert_eq!(active_run_of_caller(None, issue(), &[owner_run]), None);
+    }
+
+    #[test]
+    fn own_issue_run_covers_headerless_attribution() {
+        // NEWPIDASH-338 item 3: the agent-move gate applies whenever the
+        // move is attributed to a run, however derived.
+        let run = Uuid::parse_str("32bbc5d2-1407-45d8-8df2-266935de26e7").unwrap();
+        // Explicit header naming a run on this issue: gated (as before).
+        assert!(is_own_issue_run(Some(run), Some(issue()), true, issue()));
+        // Headerless inference: attributed, no header row — still gated.
+        assert!(is_own_issue_run(Some(run), None, false, issue()));
+        // Unattributed moves are human: never gated.
+        assert!(!is_own_issue_run(None, None, false, issue()));
+        assert!(!is_own_issue_run(None, Some(issue()), true, issue()));
+        // A header naming a run that lives elsewhere: not this issue.
+        assert!(!is_own_issue_run(
+            Some(run),
+            Some(other_issue()),
+            true,
+            issue()
+        ));
+        // A present-but-unusable header with no attribution: not gated.
+        assert!(!is_own_issue_run(None, None, true, issue()));
     }
 
     #[test]
