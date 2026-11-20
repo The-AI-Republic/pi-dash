@@ -3179,7 +3179,7 @@ pub async fn create_project_inner(
     if lead.is_some() {
         return Err(Denial::BadError("Please provide valid detail".to_owned()));
     }
-    // The 8 `DEFAULT_STATES` (`views/project.py:240-254`): `bulk_create`
+    // The 9 `DEFAULT_STATES` (`views/project.py:240-254`): `bulk_create`
     // calls no `save()`, so every row keeps `slug ""`.
     for (name, color, sequence, group, default) in
         pidash_db::v1_projects::models::state::DEFAULT_STATES.iter()

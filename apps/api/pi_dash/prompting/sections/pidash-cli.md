@@ -174,19 +174,21 @@ pidash issue patch {{ issue.identifier }} --state "Blocked"
 pidash issue patch {{ issue.identifier }} --state "In Review"
 pidash run yield --outcome done   # turn done — the issue moved on; review runs still belong on it, so no --stop-ticking
 ```
-{% elif run.kind == "review" %}End a review pass (workpad `### Path to done` already written) — **approved** moves the issue on to In Test; **changes needed** sends it back to In Progress with the open items listed; the runner never moves it to `completed`/Done. Staying In Review keeps or stops the clock depending on what the wait is for (see "Review cycle" Step 3 and "Available states"):
+{% elif run.kind == "review" %}End a review pass (workpad `### Path to done` already written) — **approved** moves the issue on to In Test (or, if the project has no `test` state, to **AI Completed** by name); **changes needed** sends it back to In Progress with the open items listed; the runner never moves it to Done. Staying In Review keeps or stops the clock depending on what the wait is for (see "Review cycle" Step 3 and "Available states"):
 
 ```sh
 pidash issue patch {{ issue.identifier }} --state "In Test"      # approved
+pidash issue patch {{ issue.identifier }} --state "AI Completed" # approved, no test state
 pidash issue patch {{ issue.identifier }} --state "In Progress"  # changes needed
-pidash run yield --outcome done                                  # after either move: your turn is done
+pidash run yield --outcome done                                  # after any move: your turn is done
 pidash run yield --outcome waiting_on_external                   # staying: waiting on an external process — keep ticking
 pidash run yield --outcome waiting_on_human --stop-ticking       # staying: waiting on a human reviewer
 ```
-{% else %}End a test pass (workpad `### Path to done` already written) — a **pass** leaves the issue In Test and stops the clock so a human takes it from there (unless the project explicitly lets agents accept and close — then accept the deliverable and move it to Done instead); **defects** send it back to In Progress with the open items listed (see "Test cycle" Step 3 and "Available states"):
+{% else %}End a test pass (workpad `### Path to done` already written) — a **pass** moves the issue to **AI Completed** by name (never to Done — only a human does that; `done` with no `--stop-ticking`, the move stops the clock); if the project has no state named "AI Completed", leave it In Test with `done --stop-ticking` — never fall back to Done; **defects** send it back to In Progress with the open items listed (see "Test cycle" Step 3 and "Available states"):
 
 ```sh
-pidash run yield --outcome done --stop-ticking                   # pass — leave In Test; a human takes it from here
+pidash issue patch {{ issue.identifier }} --state "AI Completed"  # pass
+pidash run yield --outcome done                                   # after the move: your turn is done
 pidash issue patch {{ issue.identifier }} --state "In Progress"  # defects
 pidash run yield --outcome done                                  # after the move: your turn is done
 pidash run yield --outcome waiting_on_external                   # nothing changed — an external process or a dependency still pending

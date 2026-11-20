@@ -172,7 +172,7 @@ def test_create_project_shape_and_side_effects(world, db):
     pid = resp.json()["id"]
     with db.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT COUNT(*) AS n FROM states WHERE project_id=%s", (pid,))
-        assert cur.fetchone()["n"] == 8
+        assert cur.fetchone()["n"] == 9  # NEWPIDASH-305: +AI Completed
         # Default pod (runner post_save signal): one active row, named
         # {identifier}_pod_1, carrying the signal's description verbatim.
         cur.execute(
@@ -197,7 +197,7 @@ def test_create_project_shape_and_side_effects(world, db):
         cur.execute(
             "SELECT COUNT(*) AS n FROM states WHERE project_id=%s AND \"group\"<>'triage'",
             (pid,))
-        assert cur.fetchone()["n"] == 7
+        assert cur.fetchone()["n"] == 8  # NEWPIDASH-305: +AI Completed
         cur.execute(
             "SELECT role FROM project_members WHERE project_id=%s AND member_id=%s",
             (pid, str(user["id"])))

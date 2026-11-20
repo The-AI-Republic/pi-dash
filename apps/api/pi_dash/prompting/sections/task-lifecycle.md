@@ -8,10 +8,10 @@ customizable: locked
 This issue is a **task with a goal**, and In Progress / In Review / In Test are three stages that same task passes through — not three unrelated jobs. Your run has a small stage goal (below), but every run in every stage shares one picture of the whole path:
 
 ```
-In Progress ──► In Review ──► In Test ──► Done
-     ▲              │             │         (a human closes it — an agent only
-     └──────────────┴─────────────┘          where the project explicitly allows)
-          a run may send the task back with an open-items list
+In Progress ──► In Review ──► In Test ──► AI Completed ──► Done
+     ▲              │             │         (AI Completed is the agent's
+     └──────────────┴─────────────┘          terminal state; a human moves
+          a run may send the task back         it to Done)
 ```
 
 Each run is a fresh session. The **workpad** (its `### Path to done` block in particular) is the only memory that survives between runs, in any stage — read it first, write it last.
@@ -22,8 +22,8 @@ Each run is a fresh session. The **workpad** (its `### Path to done` block in pa
 |---|---|---|
 | In Progress | **every** planned part is built and validated — each part's deliverable is produced and recorded on the issue (or the answer is posted, for a task that needed only one); acceptance criteria are written to the workpad | → In Review |
 | In Review | no unresolved findings against the work product | → In Test (clean) · → In Progress (real defects, listed as open items) · stay In Review (waiting on an external process — keep ticking · waiting on a human reviewer — `--stop-ticking`) |
-| In Test | every acceptance criterion is verified from the user's side | stay In Test (pass — a human closes it) · → Done (pass, **only** where the project explicitly lets agents accept and close) · → In Progress (defects, listed as open items) |
-| Done / Cancelled | — | **a human decides.** You never move an issue to a `completed` or `cancelled` state on your own; the one exception is a test pass in a project that explicitly lets agents accept and close. |
+| In Test | every acceptance criterion is verified from the user's side | → AI Completed (pass) · → In Progress (defects, listed as open items) |
+| Done / Cancelled | — | **a human decides.** You may move an issue to **AI Completed** as the end of your work (a test pass, or an approved review in a project with no `test` state — match by name "AI Completed", since it shares the `completed` group with "Done"), but never to **Done** — only a human moves an issue to Done. Never move to `cancelled`. |
 
 **Multi-part issues stay In Progress until the whole issue is done.** When a run records a multi-part plan in the workpad, delivering one part does **not** finish the In Progress stage. The issue moves to In Review only when every planned part is built and the acceptance criteria are covered; until then a run delivers as many parts as it can and reports `progressed` (or `waiting_on_external` when the only thing left is an external event, such as a delivered part being accepted). This keeps a partial implementation from firing a review run that could only report "not done".
 
