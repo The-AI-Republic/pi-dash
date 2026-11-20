@@ -658,10 +658,23 @@ pub const GLOBAL_VIEW_KEYS: &[&str] = &[
 /// for real data. Ported as-is (B9).
 pub const PAGE_AGG_EXCLUDED_PROJECT_ID: &str = "00000000-0000-0000-0000-000000000001";
 
+/// `Page.PUBLIC_ACCESS` (`db/models/page.py:24-28`): the `access` value a
+/// non-owner may read (DIFF-56 reuses it in the guest arm below).
+const PAGE_PUBLIC_ACCESS: i32 = 0;
+
 /// `filter_pages` (`base.py:159-203`): `name` icontains over pages whose
 /// projects the user actively belongs to, with the `project_ids` /
 /// `project_identifiers` `ArrayAgg` annotations; the project narrow goes
 /// through the `ProjectPage` subquery annotate+filter (`:192-197`).
+///
+/// DIFF-56 (NEWPIDASH-342): the old filter has no pages-list scope, so the
+/// section leaks other users' private page names to members and every
+/// page name to restricted guests. The new system mirrors the list
+/// (`page/base.py:126-131` + `guest_sees_own_pages_only`, `:84-96`):
+/// owner-or-public, and a guest of a project without
+/// `guest_view_all_features` sees only pages they own — evaluated per
+/// linked project, so a page stays visible when any linked project shows
+/// it in its own list.
 pub fn global_pages(scope: &GlobalScope<'_>, query: Option<&str>) -> SelectStatement {
     // B9: `~Q(projects__id=True)` coerces True to uuid(int=1), so the
     // ArrayAgg keeps every project except that impossible id (no-op).
@@ -744,11 +757,61 @@ pub fn global_pages(scope: &GlobalScope<'_>, query: Option<&str>) -> SelectState
                 .add(col("project_members", "is_active").eq(Expr::val(true)))
                 .add(col_eq_uuid("project_members", "member_id", scope.user_id))
                 .add(col_eq("workspaces", "slug", scope.workspace_slug)),
+        );
+    // DIFF-56: owner-or-public (`page/base.py:131`).
+    stmt.cond_where(
+        Condition::any()
+            .add(col_eq_uuid("pages", "owned_by_id", scope.user_id))
+            .add(col_eq("pages", "access", PAGE_PUBLIC_ACCESS)),
+    );
+    // DIFF-56: per linked project, an active membership that is not a
+    // restricted guest (`role = GUEST` without
+    // `guest_view_all_features`, `page/base.py:84-96`); a page owned by
+    // the caller is visible through every membership, so the arm keeps
+    // the owner shortcut and only non-owned pages need the EXISTS.
+    let mut browsable_link = Query::select();
+    browsable_link
+        .expr(Expr::val(1))
+        .from(Alias::new("project_pages"))
+        .join_as(
+            sea_query::JoinType::InnerJoin,
+            "projects",
+            Alias::new("browsable_projects"),
+            col("project_pages", "project_id").equals(("browsable_projects", "id")),
         )
-        .group_by_columns([
-            (Alias::new("pages"), Alias::new("id")),
-            (Alias::new("workspaces"), Alias::new("slug")),
-        ]);
+        .join_as(
+            sea_query::JoinType::InnerJoin,
+            "project_members",
+            Alias::new("browsable_members"),
+            col("browsable_projects", "id").equals(("browsable_members", "project_id")),
+        )
+        .cond_where(
+            Condition::all()
+                .add(col("project_pages", "page_id").equals(("pages", "id")))
+                .add(col_is_null("browsable_projects", "archived_at"))
+                .add(col_eq_uuid("browsable_members", "member_id", scope.user_id))
+                .add(col("browsable_members", "is_active").eq(Expr::val(true)))
+                .add(
+                    Condition::any()
+                        .add(
+                            col("browsable_members", "role")
+                                .ne(Expr::val(super::permissions::GUEST)),
+                        )
+                        .add(
+                            col("browsable_projects", "guest_view_all_features")
+                                .eq(Expr::val(true)),
+                        ),
+                ),
+        );
+    stmt.cond_where(
+        Condition::any()
+            .add(col_eq_uuid("pages", "owned_by_id", scope.user_id))
+            .add(Expr::exists(browsable_link)),
+    );
+    stmt.group_by_columns([
+        (Alias::new("pages"), Alias::new("id")),
+        (Alias::new("workspaces"), Alias::new("slug")),
+    ]);
     if let Some(q) = opt(query) {
         if let Some(arm) = icontains_arm("pages", &["name"], q) {
             stmt.and_where(arm);
@@ -1810,6 +1873,26 @@ mod tests {
         assert!(sql.contains(") = cast($"), "{sql}");
         let plain = sql_of(global_pages(&global_scope(None), None));
         assert!(!plain.contains("limit"), "{plain}");
+    }
+
+    // DIFF-56 (NEWPIDASH-342): the page section mirrors the pages-list
+    // scope — owner-or-public plus the restricted-guest arm.
+    #[test]
+    fn pages_carry_owner_public_and_guest_arms() {
+        let sql = sql_of(global_pages(&global_scope(None), Some("acme")));
+        // `page/base.py:131`: owner or public.
+        assert!(sql.contains("\"pages\".\"owned_by_id\""), "{sql}");
+        assert!(sql.contains("\"pages\".\"access\""), "{sql}");
+        // `page/base.py:84-96`: per linked project, an active membership
+        // that is not a restricted guest (role 5 without
+        // `guest_view_all_features`).
+        assert!(sql.contains("\"browsable_members\".\"role\""), "{sql}");
+        assert!(
+            sql.contains("\"browsable_projects\".\"guest_view_all_features\""),
+            "{sql}"
+        );
+        assert!(sql.contains("\"browsable_members\".\"is_active\""), "{sql}");
+        assert!(sql.contains("exists"), "{sql}");
     }
 
     #[test]
