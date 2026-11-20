@@ -192,6 +192,9 @@ pub enum Denial {
     NotFound(String),
     /// 409, archived project (NEWPIDASH-236, pre-rendered body).
     ProjectArchived(String),
+    /// 412, workpad stale-write guard (NEWPIDASH-320 §6.1, pre-rendered
+    /// body carrying the current hash).
+    PreconditionFailed(String),
     /// 500, generic branch.
     ServerError,
 }
@@ -230,6 +233,7 @@ impl Denial {
             ),
             Denial::NotFound(body) => (StatusCode::NOT_FOUND, body.clone()),
             Denial::ProjectArchived(body) => (StatusCode::CONFLICT, body.clone()),
+            Denial::PreconditionFailed(body) => (StatusCode::PRECONDITION_FAILED, body.clone()),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 SERVER_ERROR_BODY.to_owned(),
@@ -305,6 +309,7 @@ impl From<operations::Error> for Denial {
             operations::Error::NotFound => Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()),
             operations::Error::NotFoundBody(body) => Denial::NotFound(body),
             operations::Error::ServerError => Denial::ServerError,
+            operations::Error::PreconditionFailed(body) => Denial::PreconditionFailed(body),
             operations::Error::Conflict(_)
             | operations::Error::ProjectNotFound
             | operations::Error::Rejection { .. } => Denial::ServerError,
@@ -1548,10 +1553,19 @@ async fn workpad_get_inner(
     };
     let workpad = row.workpad;
     let updated_at = crate::serializer::render_datetime_in(&row.updated_at, &tz);
-    let body = render_workpad(&WorkpadRow {
+    let mut body = render_workpad(&WorkpadRow {
         body: &workpad,
         updated_at: &updated_at,
     });
+    // Stale-write guard read (NEWPIDASH-320 §6.1): additive Rust-only
+    // field — the Django serializer this port mirrors emits `{body,
+    // updated_at}` only, so the hash joins here, not in `render_workpad`.
+    body.insert(
+        "body_sha256".to_owned(),
+        Value::String(pidash_services::orchestration::creation::workpad_sha256(
+            &workpad,
+        )),
+    );
     let body = serde_json::to_string(&body).map_err(|_| Denial::ServerError)?;
     Ok(json_response(StatusCode::OK, body))
 }
@@ -1614,11 +1628,22 @@ async fn workpad_patch_inner(
         transition,
         enqueue,
     };
+    // Stale-write guard (NEWPIDASH-320 §6.1): an optional hex hash of the
+    // body the caller read. Missing or null means unconditional, as
+    // today. A present non-string can never equal a hex digest, so it
+    // 412s exactly like a changed body instead of silently disarming
+    // the guard.
+    let if_body_sha256 = match parsed_body.value.get("if_body_sha256") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(hash)) => Some(hash.clone()),
+        Some(_) => Some(String::new()),
+    };
     let write = operations::workpad::WorkpadWrite {
         slug,
         project_id,
         issue_id: *issue_id,
         body: &parsed_body.value,
+        if_body_sha256,
     };
     let outcome = operations::workpad::update(&deps, &ctx, &write).await?;
     op_response(outcome)

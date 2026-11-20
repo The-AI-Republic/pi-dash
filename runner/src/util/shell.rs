@@ -88,6 +88,15 @@ pub struct RunEnv {
     /// Canonical path of the daemon binary itself; the agent sees it as
     /// [`RUNNER_EXE_ENV`] so the CLI can warn when it is not that binary.
     pub runner_exe: Option<PathBuf>,
+    /// Issue identifier for issue runs (NEWPIDASH-320 §6.3). `None` for
+    /// scheduler runs, chat sessions, and assigns from old servers.
+    pub issue_identifier: Option<String>,
+    /// Project identifier for issue and scheduler runs (NEWPIDASH-320
+    /// §6.3). `None` for chat sessions and old servers.
+    pub project_identifier: Option<String>,
+    /// Agent display name plus model, e.g. `Claude Code (claude-opus-4-8)`
+    /// (NEWPIDASH-320 §6.3). `None` for chat sessions.
+    pub agent_name: Option<String>,
 }
 
 /// Environment variable name the agent reads for its run id.
@@ -107,10 +116,33 @@ pub const RUNNER_EXE_OUTER_ENV: &str = "PIDASH_AGENT_RUNNER_EXE";
 /// differs from this (NEWPIDASH-363 safety net).
 pub const RUNNER_EXE_ENV: &str = "PIDASH_RUNNER_EXE";
 
+/// Environment variable naming the run's issue (NEWPIDASH-320 §6.3).
+pub const ISSUE_IDENTIFIER_ENV: &str = "PIDASH_ISSUE_IDENTIFIER";
+
+/// Environment variable naming the run's project (NEWPIDASH-320 §6.3).
+pub const PROJECT_ENV: &str = "PIDASH_PROJECT";
+
+/// Environment variable naming the agent (NEWPIDASH-320 §6.3).
+pub const AGENT_NAME_ENV: &str = "PIDASH_AGENT_NAME";
+
 /// Apply the task-scoped per-run environment, when there is one.
+///
+/// The `PIDASH_*` namespacing is the rc-file hardening (see the module
+/// docs): rc files set names like `CODEX_HOME` and `PATH`, never these,
+/// so plain inheritance through the login shell is exactly as safe as
+/// `PIDASH_RUN_ID` has always been.
 fn apply_run_env(cmd: &mut Command) {
     if let Ok(env) = RUN_ENV.try_with(|e| e.clone()) {
         cmd.env(RUN_ID_ENV, env.run_id.to_string());
+        if let Some(issue) = env.issue_identifier {
+            cmd.env(ISSUE_IDENTIFIER_ENV, issue);
+        }
+        if let Some(project) = env.project_identifier {
+            cmd.env(PROJECT_ENV, project);
+        }
+        if let Some(agent) = env.agent_name {
+            cmd.env(AGENT_NAME_ENV, agent);
+        }
         #[cfg(unix)]
         if env.backend == BackendKind::ProcessGroup {
             // Own process group so cleanup can signal the whole group.
@@ -590,6 +622,9 @@ mod tests {
                     config_dir: None,
                     data_dir: None,
                     runner_exe: None,
+                    issue_identifier: None,
+                    project_identifier: None,
+                    agent_name: None,
                 },
                 async { login_shell_command("claude", &[], None) },
             )
@@ -597,6 +632,63 @@ mod tests {
         assert_eq!(
             env_value(&cmd, RUN_ID_ENV),
             Some(OsString::from(run_id.to_string()))
+        );
+    }
+
+    /// NEWPIDASH-320 §6.3: issue runs export the issue, project and agent
+    /// name; scheduler runs omit the issue; chat (no scope) exports none.
+    #[tokio::test]
+    async fn run_env_scope_exports_run_context() {
+        let run_id = uuid::Uuid::new_v4();
+        let issue_cmd = RUN_ENV
+            .scope(
+                RunEnv {
+                    run_id,
+                    backend: BackendKind::None,
+                    runner_bin_dir: None,
+                    config_dir: None,
+                    data_dir: None,
+                    runner_exe: None,
+                    issue_identifier: Some("FX-7".into()),
+                    project_identifier: Some("FX".into()),
+                    agent_name: Some("Muse Code (muse-spark)".into()),
+                },
+                async { login_shell_command("muse", &[], None) },
+            )
+            .await;
+        assert_eq!(
+            env_value(&issue_cmd, ISSUE_IDENTIFIER_ENV),
+            Some(OsString::from("FX-7"))
+        );
+        assert_eq!(
+            env_value(&issue_cmd, PROJECT_ENV),
+            Some(OsString::from("FX"))
+        );
+        assert_eq!(
+            env_value(&issue_cmd, AGENT_NAME_ENV),
+            Some(OsString::from("Muse Code (muse-spark)"))
+        );
+
+        let sched_cmd = RUN_ENV
+            .scope(
+                RunEnv {
+                    run_id,
+                    backend: BackendKind::None,
+                    runner_bin_dir: None,
+                    config_dir: None,
+                    data_dir: None,
+                    runner_exe: None,
+                    issue_identifier: None,
+                    project_identifier: Some("FX".into()),
+                    agent_name: Some("Codex".into()),
+                },
+                async { login_shell_command("codex", &[], None) },
+            )
+            .await;
+        assert_eq!(env_value(&sched_cmd, ISSUE_IDENTIFIER_ENV), None);
+        assert_eq!(
+            env_value(&sched_cmd, PROJECT_ENV),
+            Some(OsString::from("FX"))
         );
     }
 
@@ -975,6 +1067,9 @@ mod tests {
             config_dir: Some(PathBuf::from("/daemon/pidash")),
             data_dir: Some(PathBuf::from("/daemon/pidash/data")),
             runner_exe: Some(exe.to_path_buf()),
+            issue_identifier: None,
+            project_identifier: None,
+            agent_name: None,
         }
     }
 

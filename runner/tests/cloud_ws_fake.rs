@@ -61,6 +61,10 @@ async fn start_fake_cloud() -> (SocketAddr, tokio::task::JoinHandle<()>) {
         let assign = Envelope::new(ServerMsg::Assign {
             run_id: uuid::Uuid::new_v4(),
             work_item_id: None,
+            issue_identifier: None,
+            project_identifier: None,
+            workpad_body: None,
+            workpad_sha256: None,
             prompt: "test".into(),
             repo_url: None,
             repo_ref: None,

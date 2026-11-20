@@ -279,7 +279,8 @@ impl From<operations::Error> for Denial {
             operations::Error::BadError(_)
             | operations::Error::FieldErrors(_)
             | operations::Error::NotFoundBody(_)
-            | operations::Error::Conflict(_) => Denial::ServerError,
+            | operations::Error::Conflict(_)
+            | operations::Error::PreconditionFailed(_) => Denial::ServerError,
         }
     }
 }

@@ -88,12 +88,15 @@ pub async fn update(
     let updated_at = now_utc();
     let transition: Arc<dyn IssueTransitionHook> = deps.transition.clone();
     let enqueue: Arc<dyn TaskEnqueueHook> = deps.enqueue.clone();
+    let if_body_sha256 = write.if_body_sha256.clone();
+    let new_sha = crate::orchestration::creation::workpad_sha256(&workpad);
     let outcome = domain::run(ctx, &deps.orm, |txn| {
         let transition = transition.clone();
         let enqueue = enqueue.clone();
         let pool = deps.pool.clone();
         let ctx = ctx.clone();
         let slug = slug.to_owned();
+        let if_body_sha256 = if_body_sha256.clone();
         Box::pin(async move {
             txn.hooks_mut().register(transition);
             txn.hooks_mut().register(enqueue);
@@ -107,6 +110,7 @@ pub async fn update(
                     slug,
                     workpad,
                     updated_at,
+                    if_body_sha256,
                 },
             )
             .await
@@ -114,6 +118,19 @@ pub async fn update(
     })
     .await
     .map_err(|error| {
+        if let Some(current) = domain_issues::stale_workpad_sha(&error) {
+            // 412 with the current hash echo (NEWPIDASH-320 §6.1): the
+            // caller re-reads, re-applies its edit, and retries.
+            let mut out = Map::with_capacity(2);
+            out.insert(
+                "error".to_owned(),
+                Value::String("workpad changed since you read it".to_owned()),
+            );
+            out.insert("body_sha256".to_owned(), Value::String(current.to_owned()));
+            return Error::PreconditionFailed(
+                serde_json::to_string(&out).expect("412 body serializes"),
+            );
+        }
         if error.is_not_found() {
             Error::NotFound
         } else {
@@ -123,8 +140,9 @@ pub async fn update(
     if outcome.stopped().is_some() {
         return Err(Error::ServerError);
     }
-    // The timestamp only — the body just came from the caller (`:3315-3320`).
-    let mut out = Map::with_capacity(1);
+    // The timestamp plus the new body's hash — the body itself just came
+    // from the caller (`:3315-3320`), so it is not repeated.
+    let mut out = Map::with_capacity(2);
     out.insert(
         "updated_at".to_owned(),
         Value::String(pidash_compat::datetime::render_datetime_in(
@@ -132,6 +150,7 @@ pub async fn update(
             &tz,
         )),
     );
+    out.insert("body_sha256".to_owned(), Value::String(new_sha));
     Ok(Outcome::ok(
         serde_json::to_string(&out).map_err(|_| Error::ServerError)?,
     ))
@@ -150,6 +169,10 @@ pub struct WorkpadWrite<'a> {
     pub issue_id: Uuid,
     /// The negotiated payload.
     pub body: &'a Value,
+    /// Stale-write guard (NEWPIDASH-320 §6.1): the caller-read body hash
+    /// the locked row must still match. `None` (old CLI) writes
+    /// unconditionally, as today.
+    pub if_body_sha256: Option<String>,
 }
 
 #[cfg(test)]
