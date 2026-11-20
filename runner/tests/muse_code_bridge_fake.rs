@@ -5,6 +5,10 @@
 //! - `meta_completed_run.jsonl` — a real Meta-provider run (tool calls, one
 //!   failed tool call, streamed final answer, `run.terminal.completed`), with
 //!   prompt / tool output / answer text redacted;
+//! - `meta_usage_run.jsonl` — the same capture with a `run.usage` record
+//!   (muse 1.4.x shape, verified against a live 1.4.24 run) inserted just
+//!   before the terminal record, so the completion `done_payload` carries
+//!   canonical usage;
 //! - `echo_completed_run.jsonl` / `echo_resumed_run.jsonl` — two turns of
 //!   `muse exec --json --provider echo`, the second resumed with
 //!   `--session-id <first run's session stream id>`;
@@ -177,6 +181,34 @@ async fn echo_turn_then_resumed_turn_share_the_session() {
             if done_payload["result"] == "echo: second turn"),
         "{events:?}"
     );
+}
+
+#[tokio::test]
+async fn run_usage_reaches_the_completion_payload() {
+    // End to end: the 1.4.x-shaped `run.usage` record in the fixture must
+    // surface as canonical `usage` in the completion `done_payload` the
+    // daemon ships to the cloud (this is what populates `AgentRun.usage`).
+    let mut bridge = new_bridge(None).await;
+    let mut cursor = bridge
+        .run_with_command(replay_cmd("meta_usage_run.jsonl"), None, Uuid::new_v4())
+        .await
+        .expect("bridge run setup");
+    let events = drain(&mut bridge, &mut cursor).await;
+    assert!(
+        raw_methods(&events).contains(&"muse/run.usage"),
+        "{:?}",
+        raw_methods(&events)
+    );
+    match events.last() {
+        Some(BridgeEvent::Completed { done_payload, .. }) => {
+            let usage = &done_payload["usage"];
+            assert_eq!(usage["input"], 32590, "{done_payload}");
+            assert_eq!(usage["output"], 16, "{done_payload}");
+            assert_eq!(usage["total"], 32606, "{done_payload}");
+            assert_eq!(usage["reasoning"], 6, "{done_payload}");
+        }
+        other => panic!("expected Completed last, got {other:?}"),
+    }
 }
 
 #[tokio::test]
