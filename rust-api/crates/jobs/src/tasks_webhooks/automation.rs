@@ -44,11 +44,14 @@
 //!   and `str(None)` is `"None"` — the activity payload carries the
 //!   literal string `"None"` when the project has no creator.
 //!   [`actor_string`] keeps it.
-//! * QUIRK-5 (close fallback `:120-123`): when `default_state` is
-//!   `None`, the close state is the first `group='cancelled'` row —
-//!   which may itself not exist, in which case issues are bulk-set to
-//!   `state = NULL` and the payload carries `"closed_to": "None"`.
-//!   [`resolve_close_state`] ports the `None` through.
+//! * QUIRK-5 (close fallback `:120-123`, NEWPIDASH-353 / DIFF-59): when
+//!   `default_state` is `None`, the old code takes the first
+//!   `group='cancelled'` row database-wide — another tenant's state, or
+//!   nothing at all (issues bulk-set to `state = NULL`, payload
+//!   `"closed_to": "None"`). The new system scopes the fallback to the
+//!   project and skips the project's close run when it has no cancelled
+//!   state of its own: [`resolve_close_state`] returns `None` and
+//!   [`run_close`] logs and continues instead of writing.
 //! * QUIRK-6: `timezone.now()` is read fresh at every site — the
 //!   updated-at cutoff, the cycle bound and the module bound are three
 //!   independent timestamps per project, `archive_at` is read once per
@@ -145,15 +148,20 @@ fn close_projects_query() -> Select<projects::Entity> {
         .filter(projects::Column::DeletedAt.is_null())
 }
 
-/// Cancelled fallback (`:121`):
-/// `State.objects.filter(group=\"cancelled\").first()` — the soft-deleting
-/// `StateManager` (the triage exclusion is vacuous for `cancelled`) with
-/// `Meta.ordering = (\"sequence\",)`, so `.first()` renders
-/// `ORDER BY sequence ASC LIMIT 1`. May return no row (QUIRK-5).
-fn cancelled_state_query() -> Select<states::Entity> {
+/// Cancelled fallback (`:121`, NEWPIDASH-353 / DIFF-59): the old
+/// `State.objects.filter(group=\"cancelled\").first()` is unscoped — the
+/// lowest-sequence cancelled state of any project in any workspace, or
+/// no row at all (NULL close). The new system scopes the fallback to
+/// the project: its first non-deleted `group='cancelled'` state by
+/// sequence. The soft-deleting `StateManager` (the triage exclusion is
+/// vacuous for `cancelled`) with `Meta.ordering = (\"sequence\",)` still
+/// renders `ORDER BY sequence ASC LIMIT 1`, now with a project filter;
+/// when the project has no cancelled state the query returns no row.
+fn cancelled_state_query(project_id: Uuid) -> Select<states::Entity> {
     states::Entity::find()
         .select_only()
         .column(states::Column::Id)
+        .filter(states::Column::ProjectId.eq(project_id))
         .filter(states::Column::Group.eq("cancelled"))
         .filter(states::Column::DeletedAt.is_null())
         .order_by_asc(states::Column::Sequence)
@@ -325,8 +333,10 @@ pub fn archive_current_instance() -> String {
 
 /// Close payload (`:136`): `json.dumps({\"closed_to\": str(issue.state_id)})`
 /// with the FK read AFTER `issue.state = close_state` (`:127`), i.e. the
-/// resolved close state — or `"None"` when the cancelled fallback itself
-/// found no row (QUIRK-5).
+/// resolved close state. The `None` arm still renders `"None"` exactly
+/// as the old code did when its unscoped fallback found no row
+/// (QUIRK-5); the driver no longer produces it (DIFF-59 skips the
+/// project instead).
 pub fn close_requested_data(closed_to: Option<Uuid>) -> String {
     let mut fields = Map::with_capacity(1);
     fields.insert(
@@ -450,7 +460,10 @@ async fn candidate_issue_ids(
 
 /// Which single-column `bulk_update` a chunked write runs: the archive
 /// stamp (`["archived_at"]`, `:69`) or the close state (`["state"]`,
-/// `:132`, nullable — QUIRK-5).
+/// `:132`). The column stays nullable in the ORM mapping (the old code
+/// wrote NULL via QUIRK-5, now DIFF-59), but the driver only ever
+/// constructs `Close(Some(..))` — [`run_close`] skips projects with no
+/// close state instead of writing NULL.
 enum BulkIssueWrite {
     Archive(NaiveDate),
     Close(Option<Uuid>),
@@ -544,10 +557,11 @@ async fn run_archive(pool: &PgPool) -> Result<(), AutomationError> {
     Ok(())
 }
 
-/// Resolve the close state for one project (`:118-123`): the prefetched
-/// `default_state` FK as-is (never re-validated), else the first
-/// `group='cancelled'` row — which may not exist (QUIRK-5: `None` ports
-/// through to a NULL bulk write and a `"None"` payload).
+/// Resolve the close state for one project (`:118-123`, NEWPIDASH-353 /
+/// DIFF-59): the prefetched `default_state` FK as-is (never
+/// re-validated), else the project's own first `group='cancelled'` row
+/// by sequence — which may not exist, in which case `None` means the
+/// caller skips the project instead of writing a foreign or NULL state.
 async fn resolve_close_state(
     pool: &PgPool,
     project: &CloseProject,
@@ -556,7 +570,7 @@ async fn resolve_close_state(
         return Ok(Some(state_id));
     }
     let db = pidash_db::pool::sea_orm_connection(pool);
-    let id: Option<Uuid> = cancelled_state_query()
+    let id: Option<Uuid> = cancelled_state_query(project.id)
         .into_tuple::<Uuid>()
         .one(&db)
         .await
@@ -599,11 +613,29 @@ async fn run_close(pool: &PgPool) -> Result<(), AutomationError> {
         if ids.is_empty() {
             continue;
         }
-        let close_state = resolve_close_state(pool, project).await?;
-        bulk_update_in_chunks(pool, "close", &BulkIssueWrite::Close(close_state), &ids).await?;
+        // NEWPIDASH-353 / DIFF-59: no close state of its own (no
+        // default_state and no project cancelled state) skips the
+        // project — the old code wrote a foreign tenant's state here,
+        // or NULL with a `"closed_to": "None"` activity when no
+        // cancelled state existed anywhere.
+        let Some(close_state) = resolve_close_state(pool, project).await? else {
+            tracing::warn!(
+                task = ARCHIVE_AND_CLOSE_TASK,
+                project_id = %project.id,
+                "close: no close state for project, skipping"
+            );
+            continue;
+        };
+        bulk_update_in_chunks(
+            pool,
+            "close",
+            &BulkIssueWrite::Close(Some(close_state)),
+            &ids,
+        )
+        .await?;
         // `str(issue.state_id)` AFTER the assignment (`:136`): every
         // issue in this project reports the same resolved state.
-        let requested_data = close_requested_data(close_state);
+        let requested_data = close_requested_data(Some(close_state));
         for issue_id in &ids {
             // QUIRK-6: `epoch` reads `now()` per issue (`:143`).
             let job = build_issue_activity_job(
@@ -760,7 +792,8 @@ mod tests {
     #[test]
     fn close_payload_goldens() {
         // FX-AUTO-01 `close.delay_per_issue`: str() of the FK AFTER
-        // assignment; QUIRK-5: missing cancelled state -> "None".
+        // assignment. The `None` arm keeps the old QUIRK-5 rendering
+        // ("None"); the driver no longer emits it (DIFF-59 skips).
         let id = Uuid::parse_str("22222222-2222-4222-8222-222222222222").expect("valid uuid");
         assert_eq!(
             close_requested_data(Some(id)),
@@ -932,11 +965,14 @@ mod tests {
         // moved to `domain::issues::ticker_and_automation_bare_sql_shapes`
         // with the SQL; the batch size stays here with the chunking).
         assert_eq!(BULK_BATCH_SIZE, 100);
-        // Cancelled fallback: soft-filtered, sequence-ordered, first row.
-        let cancelled_sql = cancelled_state_query()
+        // Cancelled fallback (DIFF-59): project-scoped, soft-filtered,
+        // sequence-ordered, first row — never another tenant's state.
+        let project = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").expect("valid uuid");
+        let cancelled_sql = cancelled_state_query(project)
             .build(DbBackend::Postgres)
             .to_string();
         assert!(cancelled_sql.contains("cancelled"), "{cancelled_sql}");
+        assert!(cancelled_sql.contains("\"project_id\""), "{cancelled_sql}");
         assert!(
             cancelled_sql.contains("\"deleted_at\" IS NULL"),
             "{cancelled_sql}"
@@ -961,5 +997,266 @@ mod tests {
             crate::worker::route_for(&registry, "pi_dash.bgtasks.logger_task.process_logs"),
             crate::worker::Route::Unknown
         );
+    }
+
+    // NEWPIDASH-353 (Old bug fix, DIFF-59): auto-close with no close
+    // state must neither take another tenant's cancelled state nor NULL
+    // the issue — the close run for that project is skipped. Project A:
+    // close_in=1, default_state NULL, and no cancelled state of its own.
+    // Project B: another workspace whose only cancelled state has the
+    // lowest sequence in the database — the old unscoped fallback's
+    // pick. Project C: close_in=1, default NULL, but WITH its own
+    // cancelled state, so the project-scoped fallback still closes into
+    // it. On the pre-fix code this fails: both A and C land on B's
+    // cancelled state (and A would go NULL with no cancelled state
+    // anywhere). Post-fix A is untouched and C closes into its own.
+    // Live-DB by repo convention (cf. tasks_ticker/scan.rs): skips when
+    // DATABASE_URL is unset; when set it must point at a migrated
+    // scratch database (this test's rows are uniquely tagged and
+    // deleted afterwards, and they only touch the close path).
+    #[tokio::test]
+    async fn close_without_close_state_skips_project() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = PgPool::connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        crate::queue::ensure_schema(&pool)
+            .await
+            .expect("ensure rust_job_queue");
+        let tag = Uuid::new_v4().simple().to_string()[..8].to_owned();
+        let now = Utc::now();
+        let stale = now - chrono::Duration::days(60);
+        let user_id = Uuid::new_v4();
+        let ws_a = Uuid::new_v4();
+        let ws_b = Uuid::new_v4();
+        let proj_a = Uuid::new_v4();
+        let proj_b = Uuid::new_v4();
+        let proj_c = Uuid::new_v4();
+        let ws_c = ws_a;
+        let a_open = Uuid::new_v4();
+        let b_cancelled = Uuid::new_v4();
+        let c_open = Uuid::new_v4();
+        let c_cancelled = Uuid::new_v4();
+        let issue_a = Uuid::new_v4();
+        let issue_c = Uuid::new_v4();
+
+        sqlx::query(
+            "INSERT INTO users (id, password, username, first_name, last_name, avatar, \
+             date_joined, created_at, updated_at, last_location, created_location, \
+             is_superuser, is_managed, is_password_expired, is_active, is_staff, \
+             is_email_verified, is_password_autoset, token, user_timezone, last_login_ip, \
+             last_logout_ip, last_login_medium, last_login_uagent, is_bot, display_name, \
+             is_email_valid, is_password_reset_required) \
+             VALUES ($1, 'x', $2, '', '', '', $3, $3, $3, '', '', false, false, false, true, \
+             false, true, false, $4, 'UTC', '127.0.0.1', '', '', '', false, $2, true, false)",
+        )
+        .bind(user_id)
+        .bind(format!("n353-{tag}"))
+        .bind(now)
+        .bind(format!("tok353-{tag}"))
+        .execute(&pool)
+        .await
+        .expect("seed user");
+        for (ws, slug) in [
+            (ws_a, format!("n353a-{tag}")),
+            (ws_b, format!("n353b-{tag}")),
+        ] {
+            sqlx::query(
+                "INSERT INTO workspaces (id, name, slug, owner_id, timezone, background_color, \
+                 created_at, updated_at) \
+                 VALUES ($1, $2, $2, $3, 'UTC', '#4A90D9', $4, $4)",
+            )
+            .bind(ws)
+            .bind(slug)
+            .bind(user_id)
+            .bind(now)
+            .execute(&pool)
+            .await
+            .expect("seed workspace");
+        }
+        // (project id, workspace, identifier, close_in): A and C run the
+        // close phase with no default_state; B is inert (close_in=0) and
+        // exists only to own the global lowest-sequence cancelled state.
+        for (proj, ws, ident, close_in) in [
+            (proj_a, ws_a, format!("A353{}", &tag[..7]).to_uppercase(), 1),
+            (proj_b, ws_b, format!("B353{}", &tag[..7]).to_uppercase(), 0),
+            (proj_c, ws_c, format!("C353{}", &tag[..7]).to_uppercase(), 1),
+        ] {
+            sqlx::query(
+                "INSERT INTO projects (id, name, description, network, identifier, workspace_id, \
+                 cycle_view, module_view, issue_views_view, page_view, intake_view, archive_in, \
+                 close_in, logo_props, is_time_tracking_enabled, is_issue_type_enabled, \
+                 guest_view_all_features, timezone, members_can_edit_states, repo_url, \
+                 base_branch, agent_default_interval_seconds, agent_default_max_ticks, \
+                 agent_ticking_enabled, is_default, agent_review_default_interval_seconds, \
+                 default_agent_executor, dedicated_runner_lost_action, \
+                 agent_test_default_interval_seconds, default_work_type, created_at, updated_at) \
+                 VALUES ($1, $2, '', 0, $3, $4, false, false, false, false, false, 0, $5, '{}', \
+                 false, false, false, 'UTC', false, '', '', 0, 0, false, false, 0, '', \
+                 'fail_to_backlog', 0, 'software', $6, $6)",
+            )
+            .bind(proj)
+            .bind(format!("N353 {ident}"))
+            .bind(ident)
+            .bind(ws)
+            .bind(close_in)
+            .bind(now)
+            .execute(&pool)
+            .await
+            .expect("seed project");
+        }
+        // B's cancelled state sorts before C's (1000 < 2000), so the old
+        // unscoped `ORDER BY sequence LIMIT 1` deterministically picks B.
+        for (state, proj, ws, name, group, seq) in [
+            (
+                a_open,
+                proj_a,
+                ws_a,
+                format!("N353 open A {tag}"),
+                "backlog",
+                1.0,
+            ),
+            (
+                b_cancelled,
+                proj_b,
+                ws_b,
+                format!("N353 cancelled B {tag}"),
+                "cancelled",
+                1000.0,
+            ),
+            (
+                c_open,
+                proj_c,
+                ws_c,
+                format!("N353 open C {tag}"),
+                "backlog",
+                1.0,
+            ),
+            (
+                c_cancelled,
+                proj_c,
+                ws_c,
+                format!("N353 cancelled C {tag}"),
+                "cancelled",
+                2000.0,
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO states (id, name, description, color, slug, project_id, workspace_id, \
+                 sequence, \"group\", \"default\", is_triage, created_at, updated_at) \
+                 VALUES ($1, $2, '', '#4A90D9', $3, $4, $5, $6, $7, false, false, $8, $8)",
+            )
+            .bind(state)
+            .bind(name)
+            .bind(format!("n353-{state}"))
+            .bind(proj)
+            .bind(ws)
+            .bind(seq)
+            .bind(group)
+            .bind(now)
+            .execute(&pool)
+            .await
+            .expect("seed state");
+        }
+        for (issue, proj, ws, state, seq) in [
+            (issue_a, proj_a, ws_a, a_open, 1),
+            (issue_c, proj_c, ws_c, c_open, 2),
+        ] {
+            sqlx::query(
+                "INSERT INTO issues (id, name, description_json, description_html, priority, \
+                 sequence_id, state_id, project_id, workspace_id, sort_order, is_draft, \
+                 git_work_branch, workpad, complexity_score, created_at, updated_at) \
+                 VALUES ($1, $2, '{}', '<p></p>', 'none', $3, $4, $5, $6, 65535.0, false, \
+                 '', '', 0, $7, $8)",
+            )
+            .bind(issue)
+            .bind(format!("N353 issue {tag}"))
+            .bind(seq)
+            .bind(state)
+            .bind(proj)
+            .bind(ws)
+            .bind(now)
+            .bind(stale)
+            .execute(&pool)
+            .await
+            .expect("seed issue");
+        }
+
+        run_close(&pool)
+            .await
+            .expect("run_close never fails the driver");
+
+        async fn issue_state(pool: &PgPool, id: Uuid) -> Option<Uuid> {
+            sqlx::query_scalar("SELECT state_id FROM issues WHERE id = $1")
+                .bind(id)
+                .fetch_one(pool)
+                .await
+                .expect("read issue state")
+        }
+        let state_of = |id: Uuid| issue_state(&pool, id);
+        // A keeps its open state: not B's cancelled state, and not NULL.
+        assert_eq!(state_of(issue_a).await, Some(a_open), "A must not move");
+        // C still closes, into its own cancelled state — never B's.
+        assert_eq!(
+            state_of(issue_c).await,
+            Some(c_cancelled),
+            "C must close into its own"
+        );
+        // No phantom activity was enqueued for the skipped project.
+        let jobs_for_a: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM rust_job_queue WHERE kwargs ->> 'issue_id' = $1",
+        )
+        .bind(issue_a.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("count activity jobs");
+        assert_eq!(jobs_for_a, 0, "skipped close enqueues nothing");
+
+        // Best-effort cleanup so the scratch DB stays reusable.
+        // (`->>` yields text, so the queue delete binds strings.)
+        sqlx::query("DELETE FROM rust_job_queue WHERE kwargs ->> 'issue_id' IN ($1, $2)")
+            .bind(issue_a.to_string())
+            .bind(issue_c.to_string())
+            .execute(&pool)
+            .await
+            .expect("cleanup rows");
+        sqlx::query("DELETE FROM issues WHERE id IN ($1, $2)")
+            .bind(issue_a)
+            .bind(issue_c)
+            .execute(&pool)
+            .await
+            .expect("cleanup rows");
+        for (table, a, b) in [
+            ("states", a_open, b_cancelled),
+            ("states", c_open, c_cancelled),
+            ("projects", proj_a, proj_b),
+        ] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE id IN ($1, $2)"))
+                .bind(a)
+                .bind(b)
+                .execute(&pool)
+                .await
+                .expect("cleanup rows");
+        }
+        sqlx::query("DELETE FROM projects WHERE id = $1")
+            .bind(proj_c)
+            .execute(&pool)
+            .await
+            .expect("cleanup project");
+        sqlx::query("DELETE FROM workspaces WHERE id IN ($1, $2)")
+            .bind(ws_a)
+            .bind(ws_b)
+            .execute(&pool)
+            .await
+            .expect("cleanup workspaces");
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup user");
+        pool.close().await;
     }
 }
