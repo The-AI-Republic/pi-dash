@@ -30,6 +30,7 @@ use super::api::{
     MachinePayload, PidashAgentApi, PidashAgentApiError, PidashAgentPause, PidashAgentProfile,
     reason,
 };
+use super::chat_server::{ChatAvailability, ENGINE_PAUSED, ENGINE_SIGNED_OUT, ServerLifecycle};
 use super::codex_config::{AuthHelper, codex_home, write_engine_config};
 use crate::daemon::workspace_tokens::WorkspaceTokens;
 use crate::ipc::protocol::{EngineSignInState, EngineState, EngineStatusInfo};
@@ -93,6 +94,10 @@ pub struct PidashAgentManager {
     /// Serialises model-token fetches, so concurrent helpers share one.
     fetch: tokio::sync::Mutex<()>,
     changed: Notify,
+    /// The shared chat server's lifecycle hooks (stop on sign-out/pause,
+    /// restart-when-idle on profile change). Set once by the daemon; the
+    /// server itself is owned by the local-chat profile.
+    chat_lifecycle: std::sync::Mutex<Option<std::sync::Arc<dyn ServerLifecycle>>>,
 }
 
 impl PidashAgentManager {
@@ -119,6 +124,7 @@ impl PidashAgentManager {
             }),
             fetch: tokio::sync::Mutex::new(()),
             changed: Notify::new(),
+            chat_lifecycle: std::sync::Mutex::new(None),
         })
     }
 
@@ -132,6 +138,50 @@ impl PidashAgentManager {
         codex_home(&self.paths, user_id.as_deref().or(email.as_deref()))
     }
 
+    /// Register the shared chat server's lifecycle hooks. Called once by
+    /// the daemon after the local-chat profile is built.
+    pub fn set_chat_lifecycle(&self, lifecycle: std::sync::Arc<dyn ServerLifecycle>) {
+        *self
+            .chat_lifecycle
+            .lock()
+            .expect("chat lifecycle lock poisoned") = Some(lifecycle);
+    }
+
+    fn chat_lifecycle(&self) -> Option<std::sync::Arc<dyn ServerLifecycle>> {
+        self.chat_lifecycle
+            .lock()
+            .expect("chat lifecycle lock poisoned")
+            .clone()
+    }
+
+    /// Whether the shared chat server may run right now, as this manager
+    /// sees the engine. Backs the server's readiness check.
+    pub fn chat_availability(&self) -> ChatAvailability {
+        let st = self.status();
+        if st.paused_by_owner == Some(true) || st.auto_pause_reason.is_some() {
+            return ChatAvailability {
+                can_run: false,
+                code: ENGINE_PAUSED.to_string(),
+            };
+        }
+        match st.state {
+            EngineState::Available | EngineState::Expiring => ChatAvailability {
+                can_run: true,
+                code: "ok".to_string(),
+            },
+            EngineState::SignedOut => ChatAvailability {
+                can_run: false,
+                code: ENGINE_SIGNED_OUT.to_string(),
+            },
+            EngineState::Unavailable => ChatAvailability {
+                can_run: false,
+                code: st
+                    .reason_code
+                    .unwrap_or_else(|| super::api::reason::PROFILE_PENDING.to_string()),
+            },
+        }
+    }
+
     /// The engine credential changed (`CredentialsReload` after a login or
     /// logout): drop the model token and fetch the profile again.
     pub fn credentials_changed(&self) {
@@ -143,11 +193,20 @@ impl PidashAgentManager {
             st.server_sign_in = self.tokens.engine_sign_in_state();
         }
         self.changed.notify_waiters();
+        // A sign-out (or revoke) stops the shared chat server; a sign-in
+        // clears the stop once the profile lands.
+        if let Some(lifecycle) = self.chat_lifecycle() {
+            lifecycle.refresh_availability();
+        }
     }
 
     /// Cache the machine's pause state the server reported.
     pub fn set_pause(&self, pause: PidashAgentPause) {
         self.state().pause = Some((pause, Utc::now()));
+        // Pausing stops the shared chat server; unpausing clears the stop.
+        if let Some(lifecycle) = self.chat_lifecycle() {
+            lifecycle.refresh_availability();
+        }
     }
 
     /// Cache the pause state from a machine payload, when it carries one.
@@ -333,6 +392,10 @@ impl PidashAgentManager {
     }
 
     fn apply_profile(&self, profile: PidashAgentProfile) {
+        // Restart-when-idle only fires when the profile's content actually
+        // changed: the refresh loop re-applies an identical profile every
+        // 15 minutes, and that must not churn the shared child.
+        let changed = self.state().profile.as_ref() != Some(&profile);
         let codex_home = self.codex_home();
         if profile.available {
             let helper = AuthHelper::for_paths(self.helper_program.clone(), &self.paths);
@@ -366,6 +429,14 @@ impl PidashAgentManager {
             && self.tokens.engine_sign_in_state() != Some(server)
         {
             self.mirror_sign_in_state(server);
+        }
+        // A new model profile restarts the shared child once idle; a
+        // withdrawn profile (or any other availability change) stops it.
+        if let Some(lifecycle) = self.chat_lifecycle() {
+            if changed {
+                lifecycle.note_profile_changed();
+            }
+            lifecycle.refresh_availability();
         }
     }
 

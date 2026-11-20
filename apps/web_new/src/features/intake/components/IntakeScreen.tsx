@@ -26,7 +26,7 @@ import { DetailSkeleton } from "../../issues/index.js";
 import { isProjectAdmin } from "../../projects/index.js";
 import { intakeKeys } from "../api/keys.js";
 import { intakeTotal, intakeRows, useIntakeList } from "../api/queries.js";
-import { todayUtcIsoDay } from "../lib/dates.js";
+import { todayLocalIsoDay } from "../lib/dates.js";
 import { selectIntakeEmptyState } from "../lib/emptyStates.js";
 import {
   defaultSelectionForTab,
@@ -84,7 +84,19 @@ export function IntakeScreen({
   const weekStart = useWeekStart();
   const gateOff = project.data?.inbox_view === false;
   const ready = project.isSuccess && !gateOff;
-  const [today] = React.useState(() => todayUtcIsoDay());
+  // The viewer's local day. It refreshes while the screen stays open, so
+  // leaving intake up across local midnight moves the presets (and the
+  // custom-range seed) onto the new day instead of keeping yesterday's.
+  const [today, setToday] = React.useState(() => todayLocalIsoDay());
+  React.useEffect(() => {
+    const id = window.setInterval(() => {
+      setToday((previous) => {
+        const next = todayLocalIsoDay();
+        return next === previous ? previous : next;
+      });
+    }, 60_000);
+    return () => window.clearInterval(id);
+  }, []);
   // Narrow viewports go single-pane (INT-030): the detail fills the
   // width and the list rides an overlay the mobile header toggles. The
   // overlay starts open; picking a row closes it.
