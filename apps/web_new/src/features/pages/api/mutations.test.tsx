@@ -197,7 +197,7 @@ describe("useQuickCreatePage", () => {
 });
 
 describe("useDuplicatePage", () => {
-  it("confirms the copy and re-reads the collection", async () => {
+  it("confirms the copy and re-reads the whole pages subtree", async () => {
     const client = newClient();
     const copy = { ...makePageRow(), id: COPY_ID, name: "Launch notes (Copy)" };
     contracts.duplicatePage.mockResolvedValue(copy);
@@ -210,7 +210,10 @@ describe("useDuplicatePage", () => {
 
     expect(contracts.duplicatePage).toHaveBeenCalledWith(expect.anything(), SLUG, PAGES_PROJECT_ID, PAGES_PAGE_ID);
     expect(shell.notifySuccess).toHaveBeenCalledWith(PAGE_DUPLICATED_TITLE);
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: pageKeys.list(SLUG, PAGES_PROJECT_ID) });
+    // The copy can surface on any tab, in discovery or under an expanded
+    // parent, so the forest and children entries are re-read too
+    // (NEWPIDASH-347).
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: pageKeys.all(SLUG) });
     expect(shell.notifyError).not.toHaveBeenCalled();
   });
 
@@ -269,6 +272,9 @@ describe("usePageFavorite", () => {
     expect(shell.setFavoritesSectionOpen).toHaveBeenCalledWith(true);
     expect(invalidate).toHaveBeenCalledWith({ queryKey: pageKeys.list(SLUG, PAGES_PROJECT_ID) });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: pageKeys.detail(SLUG, PAGES_PROJECT_ID, PAGES_PAGE_ID) });
+    // The star also renders on discovery hits and expanded child rows, so
+    // the forest and children entries are re-read too (NEWPIDASH-347).
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: pageKeys.all(SLUG) });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: expect.arrayContaining(["favorites"]) });
   });
 
@@ -370,7 +376,8 @@ describe("usePageFavorite", () => {
     seed(client, true);
     contracts.removePageFavorite.mockRejectedValue(new Error("Server said no"));
     const hook = renderHook(
-      () => usePageFavorite({ workspaceSlug: SLUG, projectId: PAGES_PROJECT_ID, page: makePageRow({ is_favorite: true }) }),
+      () =>
+        usePageFavorite({ workspaceSlug: SLUG, projectId: PAGES_PROJECT_ID, page: makePageRow({ is_favorite: true }) }),
       { wrapper: wrapper(client) }
     );
 
