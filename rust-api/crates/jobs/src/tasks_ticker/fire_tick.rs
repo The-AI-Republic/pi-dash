@@ -795,8 +795,46 @@ pub enum StageGate {
     /// Not a stage at all (Done, Todo, no state): skip, leave the row.
     Skip,
     /// A registered stage the project switched off while the issue sat in
-    /// it: disarm so the ticker stops firing; the issue stays where it is.
-    Disarm { disarm_reason: TickerDisarmReason },
+    /// it: skip this tick without disarming. No run, no budget spent, the
+    /// ticker stays enabled, and the next tick is scheduled one interval
+    /// ahead as a fired tick would be, so turning the stage back on
+    /// resumes the existing schedule.
+    Reschedule,
+}
+
+/// When a skipped tick (§6.4) next comes due: one interval plus the jitter
+/// draw from `now`, the same as a fired tick's `next_run_at`.
+pub fn skipped_tick_next_run_at(
+    now: DateTime<Utc>,
+    interval_seconds: i64,
+    jitter_seconds: f64,
+) -> DateTime<Utc> {
+    now + chrono::Duration::milliseconds(
+        ((interval_seconds as f64 + jitter_seconds) * 1000.0).round() as i64,
+    )
+}
+
+/// The skipped-tick write: `next_run_at` and `updated_at` only. `used`,
+/// `enabled`, `disarm_reason` and the pending columns are untouched.
+async fn write_skip_reschedule(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ticker_id: Uuid,
+    next_run_at: DateTime<Utc>,
+    now: &DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    use pidash_db::entity::issue_agent_ticker;
+    let conn = pidash_db::orm_tx::TxConn::new(&mut *tx);
+    issue_agent_ticker::Entity::update_many()
+        .col_expr(
+            issue_agent_ticker::Column::NextRunAt,
+            Expr::value(Some(next_run_at)),
+        )
+        .col_expr(issue_agent_ticker::Column::UpdatedAt, Expr::value(*now))
+        .filter(issue_agent_ticker::Column::Id.eq(ticker_id))
+        .exec(&conn)
+        .await
+        .map(|_| ())
+        .map_err(orm_sqlx)
 }
 
 /// Decide the stage check from the seam's verdict (`runs_automatically`)
@@ -815,9 +853,7 @@ pub fn stage_gate(runs_automatically: bool, state: Option<&StateView>) -> StageG
         .is_some()
     });
     if registered_stage {
-        StageGate::Disarm {
-            disarm_reason: TickerDisarmReason::LeftTickingState,
-        }
+        StageGate::Reschedule
     } else {
         StageGate::Skip
     }
@@ -865,8 +901,11 @@ pub async fn fire_tick(
             match stage_gate(runs, read.state.as_ref()) {
                 StageGate::Proceed => {}
                 StageGate::Skip => return Ok(false),
-                StageGate::Disarm { disarm_reason } => {
-                    write_preclaim_disarm(&mut tx, ticker_id, disarm_reason, &now).await?;
+                StageGate::Reschedule => {
+                    let interval = seam.tick_interval_seconds(read.state.as_ref(), &read.project);
+                    let next =
+                        skipped_tick_next_run_at(now, interval, jitter_seconds(interval, rng));
+                    write_skip_reschedule(&mut tx, ticker_id, next, &now).await?;
                     tx.commit().await?;
                     tracing::info!(
                         "agent_ticker.fire_tick: skip issue={} reason=stage-switched-off",
@@ -1024,10 +1063,23 @@ mod tests {
     }
 
     #[test]
-    fn stage_gate_disarms_a_stage_switched_off_under_the_issue() {
-        let disarm = StageGate::Disarm {
-            disarm_reason: TickerDisarmReason::LeftTickingState,
-        };
+    fn a_skipped_tick_is_scheduled_one_interval_ahead() {
+        let now = DateTime::parse_from_rfc3339("2026-11-19T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            skipped_tick_next_run_at(now, 7200, 0.0),
+            now + chrono::Duration::hours(2)
+        );
+        assert_eq!(
+            skipped_tick_next_run_at(now, 7200, 1.5),
+            now + chrono::Duration::milliseconds(7_201_500)
+        );
+    }
+
+    #[test]
+    fn stage_gate_skips_and_reschedules_a_stage_switched_off_under_the_issue() {
+        let skip = StageGate::Reschedule;
         let progress = view("In Progress", "started");
         let review = view("In Review", "review");
         let test = view("In Test", "test");
@@ -1035,9 +1087,9 @@ mod tests {
         for state in [&progress, &review, &test] {
             assert_eq!(gate_for(Some(state), true, true), StageGate::Proceed);
         }
-        // Turned off while the issue sits there: disarm, once.
-        assert_eq!(gate_for(Some(&review), false, true), disarm);
-        assert_eq!(gate_for(Some(&test), true, false), disarm);
+        // Turned off while the issue sits there: skip and reschedule.
+        assert_eq!(gate_for(Some(&review), false, true), skip);
+        assert_eq!(gate_for(Some(&test), true, false), skip);
         // The other stage and In Progress are unaffected.
         assert_eq!(gate_for(Some(&test), false, true), StageGate::Proceed);
         assert_eq!(gate_for(Some(&progress), false, false), StageGate::Proceed);

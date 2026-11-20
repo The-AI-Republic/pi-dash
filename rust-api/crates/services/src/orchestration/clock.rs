@@ -1011,14 +1011,7 @@ pub fn on_retick(
                 .disarm_reason
                 .parse::<TickerDisarmReason>()
                 .is_ok_and(TickerDisarmReason::is_failure_stop);
-        // The stage was switched off while the issue sat in it (§6.4), and
-        // is on again: Re-tick is how a person resumes it. Only in a stage
-        // that runs — never from Paused, which Re-tick leaves only through
-        // a granted pool.
-        let stage_stopped = !paused
-            && !ticker.enabled
-            && ticker.disarm_reason == TickerDisarmReason::LeftTickingState.as_str();
-        if failure_stopped || stage_stopped {
+        if failure_stopped {
             // The clock was stopped by the failure policy (needs-human /
             // repeated failure) with budget left in the pool. Re-tick is
             // the advertised "I fixed it, run again" lever, so re-arm and
@@ -1028,12 +1021,7 @@ pub fn on_retick(
             let mut decision = TickerDecision {
                 ticker: Some(ticker_id),
                 granted: true,
-                reason: if stage_stopped {
-                    "rearmed-after-stage-on"
-                } else {
-                    "rearmed-after-failure"
-                }
-                .to_string(),
+                reason: "rearmed-after-failure".to_string(),
                 ..TickerDecision::default()
             };
             if event.want_run && has_active_run {
@@ -2939,49 +2927,9 @@ mod tests {
     }
 
     #[test]
-    fn retick_resumes_a_stage_switched_off_and_back_on() {
-        // Review was switched off with the issue In Review (the tick worker
-        // disarmed it, left_ticking_state), then switched on again.
-        let mut row = armed_row(2);
-        row.enabled = false;
-        row.disarm_reason = TickerDisarmReason::LeftTickingState.as_str().to_string();
-        let on = clock_issue(Some(in_review()), policy_with_stages(true, true));
-        let mut slot = Some(row.clone());
-        let outcome = reconcile(
-            &mut slot,
-            &on,
-            &TickerEvent::retick(true, None),
-            None,
-            false,
-            now(),
-            JITTER,
-            None,
-        )
-        .expect("retick reconciles");
-        assert_eq!(outcome.decision.reason, "rearmed-after-stage-on");
-        assert!(outcome.decision.dispatch_now);
-        let rearmed = slot.expect("row");
-        assert!(rearmed.enabled);
-        assert_eq!(rearmed.granted, row.granted, "no fresh pool");
-        // Still off: refused.
-        let off = clock_issue(Some(in_review()), policy_with_stages(false, true));
-        let mut slot = Some(row);
-        let outcome = reconcile(
-            &mut slot,
-            &off,
-            &TickerEvent::retick(true, None),
-            None,
-            false,
-            now(),
-            JITTER,
-            None,
-        )
-        .expect("retick reconciles");
-        assert_eq!(outcome.decision.reason, "not_ticking_state");
-    }
-
-    #[test]
-    fn retick_never_resumes_a_left_stage_stop_from_paused() {
+    fn retick_in_paused_with_budget_left_answers_budget_not_exhausted() {
+        // §6.4 (revised): a switched-off stage no longer disarms, so Re-tick
+        // keeps its earlier behaviour here.
         let mut row = armed_row(2);
         row.enabled = false;
         row.disarm_reason = TickerDisarmReason::LeftTickingState.as_str().to_string();
