@@ -28,6 +28,7 @@ import { getAppClient } from "../../../core/api/client.js";
 import { applyOptimisticUpdate } from "../../../core/query/optimistic.js";
 import { getRealtimeHub } from "../../../core/query/realtime.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/toaster.js";
+import { sidebarKeys } from "../../sidebar/index.js";
 import {
   PAGE_ARCHIVED_TITLE,
   PAGE_ARCHIVE_FAILED_TITLE,
@@ -45,6 +46,7 @@ import {
   PAGE_VISIBILITY_SUFFIX,
 } from "../lib/pageActions.js";
 import { pageKeys } from "./keys.js";
+import { PAGE_RESTORE_TO_TOP_TITLE, restoreDetaches } from "../lib/pageNested.js";
 
 /** Topic the pages area publishes state changes on. */
 export const PAGES_REALTIME_TOPIC = "pages";
@@ -92,7 +94,8 @@ export function removePageRow<T extends { id: string }>(
 export interface PageRowTarget {
   workspaceSlug: string;
   projectId: string;
-  page: Pick<PageRowData, "id" | "name">;
+  /** The row's parenthood travels along when the caller knows it, so a restore can say it detached. */
+  page: Pick<PageRowData, "id" | "name"> & Partial<Pick<PageRowData, "parent" | "parent_id">>;
 }
 
 interface RowCache {
@@ -140,6 +143,11 @@ function useRowCache(target: PageRowTarget): RowCache {
     invalidate: () => {
       void queryClient.invalidateQueries({ queryKey: listKey });
       void queryClient.invalidateQueries({ queryKey: detailKey });
+      // The Archived tab and discovery render from the forest, expanded
+      // rows from per-parent children entries: every one of them lives
+      // under the pages root, so a row write re-reads the whole subtree,
+      // not just the flat list (NEWPIDASH-347).
+      void queryClient.invalidateQueries({ queryKey: pageKeys.all(target.workspaceSlug) });
     },
   };
 }
@@ -225,8 +233,18 @@ export function localCalendarDate(date: Date): string {
   return `${year}-${month}-${day}`;
 }
 
-/** One page's shelve/restore switch (PAGE-015, shared with PAGE-059). */
-export function usePageArchiveWrite(target: PageRowTarget): {
+/**
+ * One page's shelve/restore switch (PAGE-015, shared with PAGE-059).
+ *
+ * Restoring under a still-archived parent detaches the page to the top
+ * level (PAGE-088): when the caller hands over the pool it already holds,
+ * the restore notice says so, mirroring the subtree hook. Without a pool
+ * the notice stays the plain restored one.
+ */
+export function usePageArchiveWrite(
+  target: PageRowTarget,
+  options?: { rows?: readonly PageRowData[] | undefined }
+): {
   pending: boolean;
   toggleArchive: (archived: boolean) => void;
 } {
@@ -248,7 +266,22 @@ export function usePageArchiveWrite(target: PageRowTarget): {
         ...(archived ? { is_favorite: false } : {}),
       }),
     onSuccess: (_data, archived) => {
-      notifySuccess(archived ? PAGE_ARCHIVED_TITLE : PAGE_RESTORED_TITLE);
+      if (archived) {
+        notifySuccess(PAGE_ARCHIVED_TITLE);
+        // Shelving clears the favourite alongside the page, so the sidebar
+        // favourites the old app drops at once must be re-read too.
+        void cache.queryClient.invalidateQueries({ queryKey: sidebarKeys.favorites(target.workspaceSlug) });
+      } else if (
+        options?.rows !== undefined &&
+        restoreDetaches(options.rows, {
+          parent: target.page.parent ?? null,
+          parent_id: target.page.parent_id,
+        })
+      ) {
+        notifySuccess(PAGE_RESTORE_TO_TOP_TITLE);
+      } else {
+        notifySuccess(PAGE_RESTORED_TITLE);
+      }
       publish(target, archived ? PAGE_EVENT_ARCHIVED : PAGE_EVENT_UNARCHIVED);
     },
     onError: (_error, archived, context) => {
@@ -280,6 +313,9 @@ export function usePageDeleteWrite(target: PageRowTarget): {
       cache.drop();
       notifySuccess(PAGE_DELETED_TITLE);
       publish(target, PAGE_EVENT_DELETED);
+      // Deleting drops the favourite with the page, so the sidebar must be
+      // re-read or the ghost row lingers until a reload.
+      void cache.queryClient.invalidateQueries({ queryKey: sidebarKeys.favorites(target.workspaceSlug) });
     },
     onError: () => {
       notifyError(PAGE_DELETE_FAILED_TITLE);
