@@ -10,7 +10,7 @@ import { Button, Combobox, IconButton, type ButtonVariant, type ComboboxOption }
 import { Package, X } from "lucide-react";
 import * as React from "react";
 
-import { PropertyChip } from "./PropertyChip.js";
+import { describeChip, PropertyChip } from "./PropertyChip.js";
 import { selectModuleOptions, type ModuleOption } from "./modules.js";
 import { usePickerModules } from "./reference.js";
 
@@ -156,7 +156,7 @@ export function ModulePicker(props: ModulePickerProps): React.ReactElement {
             icon={<ModuleGlyph />}
             text={text}
             placeholder={!filled}
-            {...(filled ? { title: text } : {})}
+            tooltip={describeChip(label, filled ? text : null, "The product area this work item belongs to.")}
             {...(triggerId === undefined ? {} : { id: triggerId })}
             {...(tabIndex === undefined ? {} : { tabIndex })}
           />
@@ -198,7 +198,7 @@ export function ModulePicker(props: ModulePickerProps): React.ReactElement {
           icon={<ModuleGlyph />}
           text={text}
           placeholder={!filled}
-          {...(filled ? { title: text } : {})}
+          tooltip={describeChip(label, filled ? text : null, "The product areas this work item belongs to.")}
           {...(triggerId === undefined ? {} : { id: triggerId })}
           {...(tabIndex === undefined ? {} : { tabIndex })}
         />

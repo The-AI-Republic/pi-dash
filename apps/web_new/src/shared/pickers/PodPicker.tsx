@@ -17,7 +17,7 @@ import { Container, Server } from "lucide-react";
 import * as React from "react";
 
 import { useWorkspace } from "../../core/session/hooks.js";
-import { PropertyChip } from "./PropertyChip.js";
+import { describeChip, PropertyChip } from "./PropertyChip.js";
 import {
   buildExecutionTargets,
   executionSelectionId,
@@ -193,7 +193,7 @@ export function PodPicker({
           icon={glyph}
           text={text}
           placeholder={!filled}
-          {...(filled ? { title: fullText } : {})}
+          tooltip={describeChip(label, filled ? fullText : null, "The agent/runner that will execute this work item.")}
           trailing={
             <>
               {podName === null ? null : (
