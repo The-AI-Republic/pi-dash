@@ -17,14 +17,11 @@ fn main() -> Result<()> {
         eprintln!("{error}");
         std::process::exit(2);
     }
-    // Inside an agent run, a bare top-level `pidash --help` lists only
-    // agent commands. Subcommand help keeps clap's default rendering: an
-    // operator command is refused when actually run.
-    if argv.len() == 2
-        && (argv[1] == "--help" || argv[1] == "-h")
-        && cli::in_agent_run()
-        && !cli::operator_bypassed()
-    {
+    // Inside an agent run, a bare top-level help request (`pidash --help`
+    // or the equivalent `pidash help`) lists only agent commands.
+    // Subcommand help keeps clap's default rendering: an operator command
+    // is refused when actually run.
+    if cli::wants_filtered_help(&argv) {
         print!("{}", cli::agent_help());
         return Ok(());
     }

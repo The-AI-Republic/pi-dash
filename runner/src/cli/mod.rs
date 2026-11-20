@@ -226,6 +226,23 @@ pub fn refusal_for(
     }
 }
 
+/// Whether this invocation should render the filtered top-level help
+/// (NEWPIDASH-320 §6.5): inside an agent run, `pidash --help`, `pidash -h`
+/// and the equivalent `pidash help` list only agent commands. Pure over
+/// its inputs so the rule is unit-testable; per-command help (`pidash
+/// <cmd> --help`, `pidash help <cmd>`) keeps clap's default rendering.
+pub fn wants_filtered_help_for(argv: &[String], in_run: bool, bypassed: bool) -> bool {
+    if !in_run || bypassed || argv.len() != 2 {
+        return false;
+    }
+    matches!(argv[1].as_str(), "--help" | "-h" | "help")
+}
+
+/// Env-reading wrapper for [`wants_filtered_help_for`].
+pub fn wants_filtered_help(argv: &[String]) -> bool {
+    wants_filtered_help_for(argv, in_agent_run(), operator_bypassed())
+}
+
 /// Top-level help with operator commands hidden, for agent runs
 /// (NEWPIDASH-320 §6.5). `pidash --help` inside a run lists only agent
 /// commands, plus a note saying the rest are refused.
@@ -657,6 +674,31 @@ mod tests {
             None
         );
         assert_eq!(refusal_for(None, Some("run-1"), false), None);
+    }
+
+    /// Bare `pidash help` is the same top-level request as `pidash --help`
+    /// (NEWPIDASH-320 review): it renders the filtered list in a run, while
+    /// per-command `pidash help <cmd>` keeps clap's default rendering.
+    #[test]
+    fn filtered_help_covers_help_subcommand_form() {
+        use super::wants_filtered_help_for;
+        let argv = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        assert!(wants_filtered_help_for(&argv(&["pidash", "--help"]), true, false));
+        assert!(wants_filtered_help_for(&argv(&["pidash", "-h"]), true, false));
+        assert!(wants_filtered_help_for(&argv(&["pidash", "help"]), true, false));
+        assert!(!wants_filtered_help_for(
+            &argv(&["pidash", "help", "issue"]),
+            true,
+            false
+        ));
+        assert!(!wants_filtered_help_for(
+            &argv(&["pidash", "issue", "--help"]),
+            true,
+            false
+        ));
+        assert!(!wants_filtered_help_for(&argv(&["pidash", "--help"]), false, false));
+        assert!(!wants_filtered_help_for(&argv(&["pidash", "help"]), true, true));
+        assert!(!wants_filtered_help_for(&argv(&["pidash"]), true, false));
     }
 
     /// `pidash --help` inside a run lists agent commands and no operator
