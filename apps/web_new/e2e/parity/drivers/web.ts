@@ -24800,6 +24800,37 @@ export class WebDriver implements ParityDriver {
     await expect.poll(() => this.archivesPeekParam(), { timeout: WebDriver.WAIT_MS }).toBeNull();
   }
 
+  /** The peek header `…` trigger on the archived issues tab. */
+  private archivesIssuePeekMenuTrigger() {
+    const portalTrigger = this.page
+      .locator("#full-screen-portal")
+      .locator('button:has(svg.lucide-ellipsis), button[aria-haspopup="menu"]')
+      .first();
+    const dockedTrigger = this.archivesIssuePeekDockedPanel()
+      .locator('button:has(svg.lucide-ellipsis), button[aria-haspopup="menu"]')
+      .first();
+    return { portalTrigger, dockedTrigger };
+  }
+
+  async archivesPeekQuickActionNames(): Promise<string[]> {
+    const { portalTrigger, dockedTrigger } = this.archivesIssuePeekMenuTrigger();
+    const trigger = (await portalTrigger.count()) > 0 ? portalTrigger : dockedTrigger;
+    await trigger.click({ timeout: WebDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const entries = await this.archivesRowMenuEntries();
+    await this.page.keyboard.press("Escape").catch(() => undefined);
+    return entries;
+  }
+
+  async archivesPeekChoose(entry: string): Promise<void> {
+    const { portalTrigger, dockedTrigger } = this.archivesIssuePeekMenuTrigger();
+    const trigger = (await portalTrigger.count()) > 0 ? portalTrigger : dockedTrigger;
+    await trigger.click({ timeout: WebDriver.WAIT_MS });
+    const item = this.page.getByRole("menuitem").filter({ hasText: entry }).first();
+    await item.waitFor({ timeout: WebDriver.WAIT_MS });
+    await item.click({ timeout: WebDriver.WAIT_MS });
+  }
+
   async archivesDetailBannerText(): Promise<string | null> {
     // Page-wide: the detail page carries no tab strip, so the content
     // helper does not resolve there; the banner text is distinctive.

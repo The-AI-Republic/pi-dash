@@ -418,3 +418,71 @@ describe("archivesSearchType and archivesSearchText", () => {
     expect(await new WebNewDriver(page).archivesSearchText()).toBe("");
   });
 });
+
+describe("archivesPeekQuickActionNames and archivesPeekChoose", () => {
+  const MENU = ["Restore", "Open in new tab", "Copy link", "Delete"];
+
+  function peekMenuPage(clicked: string[]): { page: Page; presses: string[] } {
+    const presses: string[] = [];
+    const trigger = {
+      click: async () => {
+        clicked.push("trigger");
+      },
+    };
+    const items = {
+      first: () => ({ waitFor: async () => undefined }),
+      allTextContents: async () => MENU,
+    };
+    const entry = {
+      waitFor: async () => undefined,
+      click: async () => {
+        clicked.push("entry");
+      },
+    };
+    const panel = {
+      getByTestId: (id: string) => {
+        if (id !== "detail-menu-trigger") throw new Error(`unexpected peek testid ${id}`);
+        return { first: () => trigger };
+      },
+    };
+    const page = {
+      url: () => "http://new.test/acme/projects/p1/archives/issues?peekIssueId=i1",
+      locator: (selector: string) => {
+        if (selector !== '[role="menuitem"]:visible') throw new Error(`unexpected locator ${selector}`);
+        return items;
+      },
+      getByTestId: (id: string) => {
+        if (id !== "issue-preview") throw new Error(`unexpected page testid ${id}`);
+        return panel;
+      },
+      getByRole: (role: string) => {
+        if (role !== "menuitem") throw new Error(`unexpected role ${role}`);
+        return { filter: () => ({ first: () => entry }) };
+      },
+      keyboard: {
+        press: async (key: string) => {
+          presses.push(key);
+        },
+      },
+    };
+    return { page: page as unknown as Page, presses };
+  }
+
+  it("lists the archived peek menu entries and dismisses the menu", async () => {
+    const clicked: string[] = [];
+    const { page, presses } = peekMenuPage(clicked);
+
+    expect(await new WebNewDriver(page).archivesPeekQuickActionNames()).toEqual(MENU);
+    expect(clicked).toEqual(["trigger"]);
+    expect(presses).toEqual(["Escape"]);
+  });
+
+  it("chooses an archived peek menu entry", async () => {
+    const clicked: string[] = [];
+    const { page } = peekMenuPage(clicked);
+
+    await new WebNewDriver(page).archivesPeekChoose("Restore");
+
+    expect(clicked).toEqual(["trigger", "entry"]);
+  });
+});

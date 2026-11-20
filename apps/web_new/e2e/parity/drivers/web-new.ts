@@ -22602,6 +22602,31 @@ export class WebNewDriver implements ParityDriver {
     }
     await expect.poll(() => this.archivesPeekParamName(), { timeout: WebNewDriver.WAIT_MS }).toBeNull();
   }
+  async archivesPeekQuickActionNames(): Promise<string[]> {
+    const panel = this.archivesPeekPanel();
+    const trigger = panel.getByTestId("detail-menu-trigger").first();
+    const visibleItems = this.page.locator('[role="menuitem"]:visible');
+    for (let attempt = 0; ; attempt++) {
+      await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+      try {
+        await visibleItems.first().waitFor({ timeout: 5000 });
+        break;
+      } catch {
+        if (attempt >= 2) throw new Error("[parity] archived peek quick-action menu did not open.");
+      }
+    }
+    const names = (await visibleItems.allTextContents()).map((t) => t.trim()).filter((t) => t.length > 0);
+    await this.page.keyboard.press("Escape").catch(() => {});
+    return names;
+  }
+  async archivesPeekChoose(entry: string): Promise<void> {
+    const panel = this.archivesPeekPanel();
+    const trigger = panel.getByTestId("detail-menu-trigger").first();
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    const item = this.page.getByRole("menuitem").filter({ hasText: entry }).first();
+    await item.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await item.click({ timeout: WebNewDriver.WAIT_MS });
+  }
   async archivesDetailBannerText(): Promise<string | null> {
     return this.archivesDetailBannerRead();
   }
