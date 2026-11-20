@@ -102,8 +102,8 @@ use chrono_tz::Tz;
 use sea_orm::sea_query::{Condition, Expr, Func, Query as SeaQuery, SimpleExpr};
 use sea_orm::{
     ActiveValue::{NotSet, Set},
-    ColumnTrait, ConnectionTrait, DbErr, EntityTrait, FromQueryResult, QueryFilter, QueryOrder,
-    QuerySelect, QueryTrait,
+    ColumnTrait, ConnectionTrait, DbErr, EntityTrait, FromQueryResult, PaginatorTrait, QueryFilter,
+    QueryOrder, QuerySelect, QueryTrait,
 };
 use serde_json::{Map, Value};
 use sqlx::PgPool;
@@ -920,6 +920,32 @@ fn page_list_query_with_archived_project(
     } else {
         scope.filter(pages::Column::ArchivedAt.is_null())
     }
+}
+
+/// The list window Django's `queryset[offset:stop]` compiles: the same scope
+/// as [`page_list_query_with_archived_project`] with
+/// `LIMIT (stop - offset)` `OFFSET offset` (`-created_at` from the scope).
+/// The caller passes the [`crate::paginator::offset_window`] bounds, so the
+/// row holds at most `per_page + 1` full rows however many pages exist.
+fn page_list_window_query(
+    slug: &str,
+    project_id: &Uuid,
+    user_id: &Uuid,
+    include_archived: bool,
+    include_archived_project: bool,
+    offset: i64,
+    stop: i64,
+) -> sea_orm::Select<pages::Entity> {
+    let fetch = (stop - offset).max(0) as u64;
+    page_list_query_with_archived_project(
+        slug,
+        project_id,
+        user_id,
+        include_archived,
+        include_archived_project,
+    )
+    .limit(fetch)
+    .offset(offset.max(0) as u64)
 }
 
 /// Page list rows, every column, in `-created_at` order.
@@ -3189,18 +3215,55 @@ async fn page_list_inner(
     // `project_status` fields instead of the old 0 rows.
     let archived = archived_info_for(&pre.pool, &project_id).await?;
     let include_archived_project = archived.is_some();
-    let rows = page_list_query_with_archived_project(
+    // The paginator window (`OffsetPaginator.get_result`): `[offset, stop)`
+    // reads `LIMIT (stop - offset)` `OFFSET offset`, and the total is a
+    // `COUNT(*)` over the same scope — Django never evaluates the whole
+    // queryset. Computed before any DB hit so a bad cursor errors exactly
+    // like the lazy slice (before the count).
+    let window = crate::paginator::offset_window(
+        per_page,
+        cursor.offset,
+        cursor.value,
+        cursor.is_prev,
+        None,
+    )
+    .map_err(page_denial)?;
+    // `results[:limit]` runs on the lazy queryset, whose negative limit
+    // raises `ValueError` into the 500 — after the offset checks above
+    // (a negative offset still 400s first).
+    if per_page < 0 {
+        return Err(page_denial(crate::paginator::PageError::NegativeSlice));
+    }
+    let db = sea_orm_connection(&pre.pool);
+    // NEWPIDASH-346: `COUNT(*)` the scope, then fetch only the window.
+    let total_count = page_list_query_with_archived_project(
         slug,
         &project_id,
         &pre.actor.id,
         include_archived,
         include_archived_project,
     )
-    .all(&sea_orm_connection(&pre.pool))
+    .count(&db)
+    .await
+    .map_err(|error| db_error(error, "page-list-count"))? as i64;
+    let rows = page_list_window_query(
+        slug,
+        &project_id,
+        &pre.actor.id,
+        include_archived,
+        include_archived_project,
+        window.offset,
+        window.stop,
+    )
+    .all(&db)
     .await
     .map_err(|error| db_error(error, "page-list"))?;
-    let total_count = rows.len() as i64;
-    let (page_rows, has_more) = window_rows(&rows, per_page, &cursor)?;
+    // Backwards walk with a mismatched cursor value reads nothing
+    // (`results[-(limit + 1):]` on the lazy queryset raises into the 500):
+    // `offset_window` already refused it above.
+    let has_more = rows.len() as i64 > per_page;
+    let trim = (per_page as usize).min(rows.len());
+    let page_rows = &rows[..trim];
     let (field_specs, kept, expand) = field_selection(query, PAGE_LITE_FIELDS)?;
     let expand_refs: Vec<&str> = expand.iter().map(String::as_str).collect();
     let (project_status, project_archived_at) = match &archived {
@@ -8933,6 +8996,60 @@ mod orm_tests {
                 "{text}"
             );
         }
+    }
+
+    /// NEWPIDASH-346: the list serves the paginator window from SQL
+    /// (`COUNT(*)` plus one `LIMIT/OFFSET` fetch), never the whole scope.
+    /// `per_page=1` on a project with N pages must compile to
+    /// `LIMIT 2` — one row plus the next-page probe — however large N is.
+    #[test]
+    fn page_list_window_query_carries_limit_and_offset() {
+        use crate::paginator::{offset_window, CursorValue};
+
+        let (project, user) = (Uuid::nil(), Uuid::nil());
+        // `per_page=1`, first page: `[0, 2)` — one row plus the probe.
+        let window = offset_window(1, 0, CursorValue::Int(1), false, None).expect("window");
+        let first = sql(&page_list_window_query(
+            "acme",
+            &project,
+            &user,
+            false,
+            false,
+            window.offset,
+            window.stop,
+        ));
+        assert!(first.contains("LIMIT 2"), "{first}");
+        assert!(first.contains("OFFSET 0"), "{first}");
+        assert!(
+            first.contains(r#"ORDER BY "pages"."created_at" DESC"#),
+            "{first}"
+        );
+        // Second page offsets by `per_page`.
+        let window = offset_window(1, 1, CursorValue::Int(1), false, None).expect("window");
+        let second = sql(&page_list_window_query(
+            "acme",
+            &project,
+            &user,
+            false,
+            false,
+            window.offset,
+            window.stop,
+        ));
+        assert!(second.contains("LIMIT 2"), "{second}");
+        assert!(second.contains("OFFSET 1"), "{second}");
+        // The default list width still bounds the row: `LIMIT 1001`.
+        let window = offset_window(1000, 0, CursorValue::Int(1000), false, None).expect("window");
+        let wide = sql(&page_list_window_query(
+            "acme",
+            &project,
+            &user,
+            false,
+            false,
+            window.offset,
+            window.stop,
+        ));
+        assert!(wide.contains("LIMIT 1001"), "{wide}");
+        assert!(wide.contains("OFFSET 0"), "{wide}");
     }
 
     #[test]
