@@ -463,21 +463,23 @@ pub fn runs_usable_by_runner_predicate(
         // in `project_members` mode the owner may run any project issue
         // (`triggerer`); in the default `creator_and_assignees` mode only
         // one they created or are assigned to (`issue`). Without the
-        // `issue` half the default mode stranded every run an engine owner
-        // started on their own issue (it queued forever, while
-        // `runner_may_take` reported it dispatchable).
+        // `issue` half the default mode stranded every run a Pi Dash Agent
+        // owner started on their own issue (it queued forever, while
+        // `runner_may_take` reported it dispatchable). The arms are
+        // grouped so the `issue` EXISTS subquery appears once:
+        // `(created AND triggerer) OR (issue AND (created OR automatic))
+        // OR (sched AND automatic)`.
+        let created = Expr::col((Alias::new(run_alias), "created_by_id")).eq(owner_id);
+        let automatic = Expr::col((Alias::new(run_alias), "trigger")).is_not_in(triggers);
         return Some(
             Condition::any()
+                .add(Condition::all().add(created.clone()).add(triggerer))
                 .add(
                     Condition::all()
-                        .add(Expr::col((Alias::new(run_alias), "created_by_id")).eq(owner_id))
-                        .add(Condition::any().add(triggerer.clone()).add(issue.clone())),
+                        .add(issue)
+                        .add(Condition::any().add(created).add(automatic.clone())),
                 )
-                .add(
-                    Condition::all()
-                        .add(Expr::col((Alias::new(run_alias), "trigger")).is_not_in(triggers))
-                        .add(Condition::any().add(issue).add(sched)),
-                ),
+                .add(Condition::all().add(sched).add(automatic)),
         );
     }
     Some(
@@ -1016,13 +1018,13 @@ mod tests {
             .is_empty());
     }
 
-    /// The PO-3 engine predicate executed against Postgres (only the five
-    /// tables it reads). An engine owner's own click on their own issue
+    /// The PO-3 Pi Dash Agent predicate executed against Postgres (only the
+    /// five tables it reads). A Pi Dash Agent owner's own click on their own issue
     /// in default `issue_run_policy` mode is takable; the cases
     /// NEWPIDASH-261 meant to exclude stay excluded.
     #[tokio::test]
     #[ignore = "needs a scratch Postgres via DATABASE_URL"]
-    async fn live_engine_owner_click_on_own_issue_default_policy() {
+    async fn live_pidash_agent_owner_click_on_own_issue_default_policy() {
         use sea_query::PostgresQueryBuilder;
         let url = std::env::var("DATABASE_URL").expect("export DATABASE_URL");
         let pool = sqlx::postgres::PgPoolOptions::new()
@@ -1110,7 +1112,10 @@ mod tests {
             ),
         ];
         let predicate = runs_usable_by_runner_predicate(0, owner, "agent_run", true, false)
-            .expect("private engine");
+            .expect("private Pi Dash Agent");
+        // Collect mismatches and drop the scratch schema before asserting,
+        // so a failing case does not leak the schema into the database.
+        let mut mismatches = Vec::new();
         for (label, project, creator, assigned, run_creator, trigger, takable) in cases {
             let issue = Uuid::new_v4();
             let run = Uuid::new_v4();
@@ -1148,12 +1153,15 @@ mod tests {
                 .fetch_optional(&pool)
                 .await
                 .expect(label);
-            assert_eq!(found.is_some(), takable, "{label}");
+            if found.is_some() != takable {
+                mismatches.push(label);
+            }
         }
         sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
             .execute(&pool)
             .await
             .unwrap();
+        assert!(mismatches.is_empty(), "wrong takability: {mismatches:?}");
     }
 
     // -- denial bodies ------------------------------------------------------

@@ -167,8 +167,8 @@ pub async fn pod_has_runner_for_issue_principal(
 /// `project_members` mode always (`triggerer_admitted`), in the default
 /// `creator_and_assignees` mode when the owner created the issue or is
 /// assigned to it (`in_issue_people`). Without the second half the
-/// default mode stranded every run an engine owner started on their own
-/// issue.
+/// default mode stranded every run a Pi Dash Agent owner started on
+/// their own issue.
 #[allow(clippy::too_many_arguments)]
 fn engine_counts(
     owner_id: Uuid,
