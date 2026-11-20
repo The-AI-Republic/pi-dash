@@ -49,7 +49,22 @@ class FakeResp:
         return self._json
 
 
+@pytest.fixture(autouse=True)
+def dictation_enabled(settings):
+    settings.VOICE_DICTATION_ENABLED = True
+
+
 # --- gating ---
+
+
+def test_transcribe_refuses_when_dictation_disabled(world, kms_crypto, settings, mocker):
+    configure_stt(world.member)
+    settings.VOICE_DICTATION_ENABLED = False
+    post = mocker.patch("httpx.post")
+    res = client_for(world.member).post(URL, {"file": audio()}, format="multipart")
+    assert res.status_code == 404
+    assert res.data["error"] == "dictation_disabled"
+    post.assert_not_called()
 
 
 def test_transcribe_rejects_when_no_config(world, kms_crypto, mocker):
