@@ -22627,6 +22627,13 @@ export class WebNewDriver implements ParityDriver {
     await item.waitFor({ timeout: WebNewDriver.WAIT_MS });
     await item.click({ timeout: WebNewDriver.WAIT_MS });
   }
+  async archivesPeekCopyLink(): Promise<void> {
+    // The archived peek header carries its own copy-link control beside
+    // the row-menu trigger; it writes the archived detail address.
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    const panel = this.archivesPeekPanel();
+    await panel.getByRole("button", { name: "Copy work item link" }).first().click({ timeout: WebNewDriver.WAIT_MS });
+  }
   async archivesDetailBannerText(): Promise<string | null> {
     return this.archivesDetailBannerRead();
   }

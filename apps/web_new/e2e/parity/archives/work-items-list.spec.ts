@@ -670,18 +670,18 @@ test(
         await driver.clickListRow(issue.name);
         await expect.poll(() => driver.archivesPeekTitle(), LIST_POLL).toBe(issue.name);
         const entries = await driver.archivesPeekQuickActionNames();
-        // Both apps offer the archived set's copy and restore entries to an
-        // editor; exact order and the surrounding open/delete entries are
-        // pinned by the row-menu scenarios, not here.
-        expect(entries).toContain("Copy link");
+        // Both apps offer Restore to an editor here. The new app's peek
+        // menu additionally offers Copy link; the old peek offers copy
+        // only through its header control, so the menu assertion stays at
+        // Restore — exact order and the surrounding entries are pinned by
+        // the row-menu scenarios, not here.
         expect(entries).toContain("Restore");
       });
 
       await test.step("copy-link copies the archived address", async () => {
-        // Headless denies clipboard writes by default; grant first, like a
-        // real session where the user already allowed it.
-        await driver.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
-        await driver.archivesPeekChoose("Copy link");
+        // Both editions copy the archived address through the peek header
+        // control (the old peek menu has no copy entry at all).
+        await driver.archivesPeekCopyLink();
         await expect.poll(() => driver.sawToast("Link copied"), { timeout: 60_000 }).toBe(true);
         expect(await driver.readClipboard()).toContain(`/archives/issues/${issue.id}`);
       });
