@@ -1847,7 +1847,7 @@ pub(crate) mod live {
                     sorted(
                         engine::fetch_group_totals(
                             pool,
-                            &engine::group_totals(&pair.new, group).expect("stmt")
+                            &engine::group_totals(&pair.new, group, false).expect("stmt")
                         )
                         .await
                         .expect("new totals")
@@ -1864,7 +1864,7 @@ pub(crate) mod live {
                         sorted(
                             engine::fetch_sub_totals(
                                 pool,
-                                &engine::sub_totals(&pair.new, group, sub).expect("stmt")
+                                &engine::sub_totals(&pair.new, group, sub, false).expect("stmt")
                             )
                             .await
                             .expect("new subs")

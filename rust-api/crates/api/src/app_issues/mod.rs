@@ -1869,6 +1869,7 @@ async fn list_issues_inner(
             &key,
             per_page,
             cursor,
+            false,
         )
         .await;
     }
@@ -2006,6 +2007,9 @@ pub(crate) async fn grouped_response(
     key: &list_engine::OrderExpr,
     per_page: i64,
     cursor: crate::paginator::Cursor,
+    // True for the archive list: group totals count archived rows
+    // (`archived_at IS NOT NULL`) instead of live rows (DIFF-58).
+    count_archived: bool,
 ) -> HandlerResult {
     use crate::paginator::{
         grouped_max_hits, grouped_window, next_cursor, prev_cursor, process_grouped_results,
@@ -2049,9 +2053,11 @@ pub(crate) async fn grouped_response(
     let window_empty = page.is_empty();
     let window_len = page.len();
     // Totals over the filtered set with the intake/archived/draft count filter.
-    let group_totals =
-        list_engine::fetch_group_totals(&context.pool, &list_engine::group_totals(set, group_by)?)
-            .await?;
+    let group_totals = list_engine::fetch_group_totals(
+        &context.pool,
+        &list_engine::group_totals(set, group_by, count_archived)?,
+    )
+    .await?;
     if !window_empty && group_totals.is_empty() {
         // `...order_by("-count")[0]` on an empty group list: IndexError.
         return Err(Denial::ServerError);
@@ -2086,7 +2092,7 @@ pub(crate) async fn grouped_response(
         Some(sub) => {
             let sub_pairs = list_engine::fetch_sub_totals(
                 &context.pool,
-                &list_engine::sub_totals(set, group_by, sub)?,
+                &list_engine::sub_totals(set, group_by, sub, count_archived)?,
             )
             .await?;
             let (group_totals_map, sub_totals_map) = sub_total_dicts(&group_totals, &sub_pairs);

@@ -32,11 +32,13 @@
 //!
 //! # Ported bugs (translate, don't redesign — also listed in the PR)
 //!
-//! * The grouped `count_filter` counts *non*-archived rows
-//!   (`archived_at__isnull=True` inside the archived list).
-//! * `group_by`/`sub_group_by` of `target_date`, `start_date` or
-//!   `created_by` always 500s (archive passes no `queryset` to
-//!   `issue_group_values`, so `None.values_list` raises).
+//! * (fixed by NEWPIDASH-350, DIFF-58) The grouped `count_filter`
+//!   counted *non*-archived rows (`archived_at__isnull=True` inside the
+//!   archived list); the archive grouped path now counts archived rows.
+//! * (fixed by NEWPIDASH-350, DIFF-58) `group_by`/`sub_group_by` of
+//!   `target_date`, `start_date` or `created_by` always 500d (archive
+//!   passes no `queryset` to `issue_group_values`, so `None.values_list`
+//!   raises); the port no longer 500s and buckets over the archived set.
 //! * Bulk-archive enqueues for the issues *before* the first bad one,
 //!   then answers 400 (partial side effects on failure).
 //! * Re-archiving answers 404 (`issue_objects` excludes archived rows).
@@ -414,13 +416,12 @@ pub async fn archived_list(
     };
     let group_by = list_context.params.group_by.clone();
     let sub_group_by = list_context.params.sub_group_by.clone();
-    // Ported crash: archive passes no `queryset` to `issue_group_values`,
-    // so these three group fields raise on `None.values_list` (500).
-    for group in [&group_by, &sub_group_by].into_iter().flatten() {
-        if matches!(group.as_str(), "target_date" | "start_date" | "created_by") {
-            return Err(Denial::ServerError);
-        }
-    }
+    // DIFF-58 (old bug fix): the old archive list 500s on `target_date`,
+    // `start_date` and `created_by` (no `queryset` reaches
+    // `issue_group_values`, so `None.values_list` raises) and counts every
+    // group with `archived_at__isnull=True` (always 0, rendered as 1). The
+    // new list computes those buckets over the archived set like the live
+    // list does and counts archived rows.
     if let Some(group) = group_by.clone() {
         return grouped_response(
             &list_context,
@@ -430,6 +431,7 @@ pub async fn archived_list(
             &key,
             per_page,
             cursor,
+            true,
         )
         .await;
     }
