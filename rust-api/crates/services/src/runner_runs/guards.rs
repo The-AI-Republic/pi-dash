@@ -430,7 +430,8 @@ fn issue_triggerer_admitted(run_alias: &str) -> Condition {
 /// runs (no work item) keep the current rule.
 ///
 /// Pi Dash Agent runners without `engine_team_runs` use the narrower
-/// PO-3 rule (#2903): owner-created runs, plus *automatic* runs
+/// PO-3 rule (#2903): owner-created runs (in default mode only on an
+/// issue the owner created or is assigned to), plus *automatic* runs
 /// (`trigger NOT IN HUMAN_TRIGGERS`) on owner issues or from
 /// owner-authored bindings — the `owner_id` arm is dropped.
 ///
@@ -458,12 +459,19 @@ pub fn runs_usable_by_runner_predicate(
             .iter()
             .map(|trigger| trigger.value().into())
             .collect();
+        // The owner-created arm follows the project's `issue_run_policy`:
+        // in `project_members` mode the owner may run any project issue
+        // (`triggerer`); in the default `creator_and_assignees` mode only
+        // one they created or are assigned to (`issue`). Without the
+        // `issue` half the default mode stranded every run an engine owner
+        // started on their own issue (it queued forever, while
+        // `runner_may_take` reported it dispatchable).
         return Some(
             Condition::any()
                 .add(
                     Condition::all()
                         .add(Expr::col((Alias::new(run_alias), "created_by_id")).eq(owner_id))
-                        .add(triggerer.clone()),
+                        .add(Condition::any().add(triggerer.clone()).add(issue.clone())),
                 )
                 .add(
                     Condition::all()
@@ -1006,6 +1014,146 @@ mod tests {
             .as_array()
             .expect("rows")
             .is_empty());
+    }
+
+    /// The PO-3 engine predicate executed against Postgres (only the five
+    /// tables it reads). An engine owner's own click on their own issue
+    /// in default `issue_run_policy` mode is takable; the cases
+    /// NEWPIDASH-261 meant to exclude stay excluded.
+    #[tokio::test]
+    #[ignore = "needs a scratch Postgres via DATABASE_URL"]
+    async fn live_engine_owner_click_on_own_issue_default_policy() {
+        use sea_query::PostgresQueryBuilder;
+        let url = std::env::var("DATABASE_URL").expect("export DATABASE_URL");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("pool");
+        let schema = format!("po3_{}", Uuid::new_v4().simple());
+        for stmt in [
+            format!("CREATE SCHEMA {schema}"),
+            format!("SET search_path TO {schema}"),
+            "CREATE TABLE projects (id uuid PRIMARY KEY, deleted_at timestamptz, settings jsonb NOT NULL DEFAULT '{}')".to_owned(),
+            "CREATE TABLE issues (id uuid PRIMARY KEY, project_id uuid, created_by_id uuid, deleted_at timestamptz)".to_owned(),
+            "CREATE TABLE issue_assignees (issue_id uuid, assignee_id uuid, deleted_at timestamptz)".to_owned(),
+            "CREATE TABLE scheduler_bindings (id uuid PRIMARY KEY, actor_id uuid, deleted_at timestamptz)".to_owned(),
+            "CREATE TABLE agent_run (id uuid PRIMARY KEY, created_by_id uuid, owner_id uuid, trigger text, work_item_id uuid, scheduler_binding_id uuid)".to_owned(),
+        ] {
+            sqlx::query(&stmt).execute(&pool).await.expect("setup");
+        }
+        let owner = Uuid::new_v4();
+        let mate = Uuid::new_v4();
+        let default_project = Uuid::new_v4();
+        let members_project = Uuid::new_v4();
+        sqlx::query("INSERT INTO projects (id, settings) VALUES ($1, '{}'), ($2, '{\"issue_run_policy\": \"project_members\"}')")
+            .bind(default_project)
+            .bind(members_project)
+            .execute(&pool)
+            .await
+            .unwrap();
+        // (label, project, issue creator, owner assigned, run creator, trigger, takable)
+        let cases = [
+            (
+                "owner click, own issue, default",
+                default_project,
+                owner,
+                false,
+                owner,
+                "state_transition",
+                true,
+            ),
+            (
+                "owner click, assigned issue, default",
+                default_project,
+                mate,
+                true,
+                owner,
+                "run_ai",
+                true,
+            ),
+            (
+                "owner click, foreign issue, default",
+                default_project,
+                mate,
+                false,
+                owner,
+                "state_transition",
+                false,
+            ),
+            (
+                "owner click, foreign issue, members",
+                members_project,
+                mate,
+                false,
+                owner,
+                "state_transition",
+                true,
+            ),
+            (
+                "teammate click, owner issue, default",
+                default_project,
+                owner,
+                false,
+                mate,
+                "state_transition",
+                false,
+            ),
+            (
+                "tick, owner issue, default",
+                default_project,
+                owner,
+                false,
+                mate,
+                "tick",
+                true,
+            ),
+        ];
+        let predicate = runs_usable_by_runner_predicate(0, owner, "agent_run", true, false)
+            .expect("private engine");
+        for (label, project, creator, assigned, run_creator, trigger, takable) in cases {
+            let issue = Uuid::new_v4();
+            let run = Uuid::new_v4();
+            sqlx::query("INSERT INTO issues (id, project_id, created_by_id) VALUES ($1, $2, $3)")
+                .bind(issue)
+                .bind(project)
+                .bind(creator)
+                .execute(&pool)
+                .await
+                .unwrap();
+            if assigned {
+                sqlx::query("INSERT INTO issue_assignees (issue_id, assignee_id) VALUES ($1, $2)")
+                    .bind(issue)
+                    .bind(owner)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            sqlx::query("INSERT INTO agent_run (id, created_by_id, trigger, work_item_id) VALUES ($1, $2, $3, $4)")
+                .bind(run)
+                .bind(run_creator)
+                .bind(trigger)
+                .bind(issue)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let query = Query::select()
+                .column((Alias::new("agent_run"), Alias::new("id")))
+                .from(Alias::new("agent_run"))
+                .and_where(Expr::col((Alias::new("agent_run"), Alias::new("id"))).eq(run))
+                .cond_where(predicate.clone())
+                .to_owned()
+                .to_string(PostgresQueryBuilder);
+            let found = sqlx::query(&query)
+                .fetch_optional(&pool)
+                .await
+                .expect(label);
+            assert_eq!(found.is_some(), takable, "{label}");
+        }
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     // -- denial bodies ------------------------------------------------------
