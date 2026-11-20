@@ -165,7 +165,9 @@ impl IpcServer {
                 self.spawn_ctx.reload_credentials().await?;
                 Ok(Response::Ack)
             }
-            Request::SessionHandoff { challenge } => self.spawn_ctx.session_handoff(&challenge).await,
+            Request::SessionHandoff { challenge } => {
+                self.spawn_ctx.session_handoff(&challenge).await
+            }
             Request::MachineRunLimitSet { limit } => {
                 if !(1..=65535).contains(&limit) {
                     return Ok(Response::Error(crate::ipc::protocol::RpcError {
@@ -446,21 +448,39 @@ impl IpcServer {
                 let target = self
                     .chat_target(runner.as_deref(), chat_session_id, cwd.as_deref())
                     .await?;
-                let host = self.chat_host(&target);
                 let mut sink = chat::SocketSink { buf };
-                chat::handle_warm(
-                    &host,
-                    chat::WarmArgs {
-                        chat_session_id,
-                        cwd,
-                        model,
-                        mode,
-                        local_thread_id,
-                        local_session_id,
-                    },
-                    &mut sink,
-                )
-                .await
+                match &target {
+                    ChatTarget::Runner(inst) => {
+                        chat::handle_warm(
+                            &chat::ChatHost::runner(inst),
+                            chat::WarmArgs {
+                                chat_session_id,
+                                cwd,
+                                model,
+                                mode,
+                                local_thread_id,
+                                local_session_id,
+                            },
+                            &mut sink,
+                        )
+                        .await
+                    }
+                    ChatTarget::Engine => {
+                        chat::handle_engine_warm(
+                            &self.engine_ctx(),
+                            chat::WarmArgs {
+                                chat_session_id,
+                                cwd,
+                                model,
+                                mode,
+                                local_thread_id,
+                                local_session_id,
+                            },
+                            &mut sink,
+                        )
+                        .await
+                    }
+                }
             }
             Request::ChatSend {
                 chat_session_id,
@@ -476,23 +496,43 @@ impl IpcServer {
                 let target = self
                     .chat_target(runner.as_deref(), chat_session_id, cwd.as_deref())
                     .await?;
-                let host = self.chat_host(&target);
                 let mut sink = chat::SocketSink { buf };
-                chat::handle_send(
-                    &host,
-                    chat::SendArgs {
-                        chat_session_id,
-                        message_id,
-                        content,
-                        cwd,
-                        model,
-                        mode,
-                        local_thread_id,
-                        local_session_id,
-                    },
-                    &mut sink,
-                )
-                .await
+                match &target {
+                    ChatTarget::Runner(inst) => {
+                        chat::handle_send(
+                            &chat::ChatHost::runner(inst),
+                            chat::SendArgs {
+                                chat_session_id,
+                                message_id,
+                                content,
+                                cwd,
+                                model,
+                                mode,
+                                local_thread_id,
+                                local_session_id,
+                            },
+                            &mut sink,
+                        )
+                        .await
+                    }
+                    ChatTarget::Engine => {
+                        chat::handle_engine_send(
+                            &self.engine_ctx(),
+                            chat::SendArgs {
+                                chat_session_id,
+                                message_id,
+                                content,
+                                cwd,
+                                model,
+                                mode,
+                                local_thread_id,
+                                local_session_id,
+                            },
+                            &mut sink,
+                        )
+                        .await
+                    }
+                }
             }
             Request::ChatCancel {
                 chat_session_id,
@@ -502,7 +542,14 @@ impl IpcServer {
                 let target = self
                     .chat_target(runner.as_deref(), chat_session_id, None)
                     .await?;
-                chat::handle_cancel(&self.chat_host(&target), chat_session_id).await
+                match &target {
+                    ChatTarget::Runner(inst) => {
+                        chat::handle_cancel(&chat::ChatHost::runner(inst), chat_session_id).await
+                    }
+                    ChatTarget::Engine => {
+                        chat::handle_engine_cancel(&self.engine_ctx(), chat_session_id).await
+                    }
+                }
             }
             Request::ChatClose {
                 chat_session_id,
@@ -512,9 +559,21 @@ impl IpcServer {
                 let target = self
                     .chat_target(runner.as_deref(), chat_session_id, None)
                     .await?;
-                let host = self.chat_host(&target);
                 let mut sink = chat::SocketSink { buf };
-                chat::handle_close(&host, chat_session_id, &mut sink).await
+                match &target {
+                    ChatTarget::Runner(inst) => {
+                        chat::handle_close(
+                            &chat::ChatHost::runner(inst),
+                            chat_session_id,
+                            &mut sink,
+                        )
+                        .await
+                    }
+                    ChatTarget::Engine => {
+                        chat::handle_engine_close(&self.engine_ctx(), chat_session_id, &mut sink)
+                            .await
+                    }
+                }
             }
             Request::ChatDecide {
                 chat_session_id,
@@ -525,7 +584,11 @@ impl IpcServer {
                 let target = self
                     .chat_target(runner.as_deref(), chat_session_id, None)
                     .await?;
-                chat::handle_decide(&self.chat_host(&target), &local_approval_id, decision).await
+                let approvals = match &target {
+                    ChatTarget::Runner(inst) => &inst.approvals,
+                    ChatTarget::Engine => &self.spawn_ctx.local_chat.approvals,
+                };
+                chat::handle_decide(approvals, &local_approval_id, decision).await
             }
         }
     }
@@ -555,8 +618,8 @@ impl IpcServer {
         if self
             .spawn_ctx
             .local_chat
-            .sessions
-            .contains(chat_session_id)
+            .server()
+            .contains_session(chat_session_id)
             .await
         {
             return Ok(ChatTarget::Engine);
@@ -586,12 +649,10 @@ impl IpcServer {
         }
     }
 
-    fn chat_host<'a>(&'a self, target: &'a ChatTarget) -> chat::ChatHost<'a> {
-        match target {
-            ChatTarget::Runner(inst) => chat::ChatHost::runner(inst),
-            ChatTarget::Engine => {
-                chat::ChatHost::engine(&self.spawn_ctx.local_chat, self.runner_working_dirs())
-            }
+    fn engine_ctx(&self) -> chat::EngineCtx<'_> {
+        chat::EngineCtx {
+            profile: &self.spawn_ctx.local_chat,
+            runner_dirs: self.runner_working_dirs(),
         }
     }
 
@@ -993,19 +1054,42 @@ mod tests {
     use crate::config::schema::{AgentSection, DaemonConfig, RunnerConfig, WorkspaceSection};
     use crate::ipc::pidash_agent_chat::PidashAgentChatProfile;
 
-    /// A fake `pidash-agent-engine app-server`: records the folder it was
-    /// started in under `$CODEX_HOME/cwd`, then answers one turn.
+    /// A fake `pidash-agent-engine app-server` for the shared server: it
+    /// records each thread's `cwd` under `$CODEX_HOME/cwd` (the last one
+    /// wins) and completes every turn. The thread `cwd` is what the
+    /// "runs in the chat folder" assertion checks: the shared child itself
+    /// runs in `CODEX_HOME`, one thread per chat inside it.
     const FAKE_ENGINE: &str = r#"#!/bin/sh
-pwd -P > "$CODEX_HOME/cwd"
-read _
-printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
-read _
-read _
-printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"threadId":"th_engine"}}'
-read _
-printf '%s\n' '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"text":"hi from the engine"}}'
-printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"conclusion":"success","done":{"status":"ok","summary":"done"}}}'
-sleep 1
+rid() { printf '%s' "$1" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p'; }
+tidp() { printf '%s' "$1" | sed -n 's/.*"threadId":"\([^"]*\)".*/\1/p'; }
+cwdp() { printf '%s' "$1" | sed -n 's/.*"cwd":"\([^"]*\)".*/\1/p'; }
+read -r line
+id=$(rid "$line")
+printf '{"jsonrpc":"2.0","id":%s,"result":{"capabilities":{}}}\n' "$id"
+read -r line
+n=0
+while read -r line; do
+  case "$line" in
+    *'"method":"thread/start"'*)
+      n=$((n+1)); id=$(rid "$line")
+      cwdp "$line" > "$CODEX_HOME/thread-cwd"
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"threadId":"th-engine-%s"}}\n' "$id" "$n";;
+    *'"method":"thread/resume"'*)
+      id=$(rid "$line"); t=$(tidp "$line")
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"threadId":"%s"}}\n' "$id" "$t";;
+    *'"method":"turn/start"'*)
+      id=$(rid "$line"); t=$(tidp "$line")
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"turn":{"id":"turn-%s"}}}\n' "$id" "$t"
+      printf '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"%s","text":"hi from the engine"}}\n' "$t"
+      printf '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"%s","turn":{"id":"turn-%s","status":"completed"},"done":{"text":"done"}}}\n' "$t" "$t";;
+    *'"method":"turn/interrupt"'*)
+      id=$(rid "$line")
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id";;
+    *'"method":"thread/unsubscribe"'*)
+      id=$(rid "$line")
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"status":"unsubscribed"}}\n' "$id";;
+  esac
+done
 "#;
 
     struct ChatDaemon {
@@ -1188,8 +1272,9 @@ sleep 1
         let folder = chat_folder(&d);
         let frames = chat_send(&d, &folder, None).await;
         assert!(completed(&frames), "frames: {frames:?}");
-        // The engine ran in the chat folder with the profile's CODEX_HOME.
-        let ran_in = std::fs::read_to_string(d.codex_home.join("cwd")).unwrap();
+        // The thread ran in the chat folder with the profile's CODEX_HOME
+        // (the shared child itself runs in CODEX_HOME).
+        let ran_in = std::fs::read_to_string(d.codex_home.join("thread-cwd")).unwrap();
         assert_eq!(
             ran_in.trim(),
             std::fs::canonicalize(&folder)
@@ -1238,8 +1323,8 @@ sleep 1
             }
         }
         assert!(
-            !d.codex_home.join("cwd").exists(),
-            "the engine never started in a task folder"
+            !d.codex_home.join("thread-cwd").exists(),
+            "no thread ever started in a task folder"
         );
     }
 

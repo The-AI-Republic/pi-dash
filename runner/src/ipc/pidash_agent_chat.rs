@@ -12,89 +12,53 @@
 //!   asks for through its auth helper (`pidash __engine model-token`).
 //!
 //! A `Chat*` request with no `runner` selector and an absolute `cwd` runs
-//! here, with its own session registry and approval router: no project
-//! runner, no shared busy flag. The folder is the caller's (the app's chat
-//! folder, PIDESKAPP-42) and is refused when it is inside any runner's
-//! working dir, so a chat can never edit a task folder under a run.
-
-use std::path::{Component, Path, PathBuf};
+//! here, on the daemon's shared engine app-server
+//! ([`super::chat_server::EngineChatServer`], NEWPIDASH-333): one child
+//! process, one thread per chat session. The folder is the caller's (the
+//! app's chat folder, PIDESKAPP-42) and is refused when it is inside any
+//! runner's working dir, so a chat can never edit a task folder under a run.
 
 use anyhow::Result;
+use std::path::{Component, PathBuf};
+use std::sync::Arc;
+
 use uuid::Uuid;
 
-use super::chat::ChatRegistry;
-use crate::agent::AgentBridge;
 use crate::approval::router::ApprovalRouter;
-use crate::cloud::protocol::ApprovalMode;
 use crate::config::schema::{
     AgentKind, AgentSection, ApprovalPolicySection, RunnerConfig, WorkspaceSection,
     canonical_for_compare,
 };
+use crate::pidash_agent::chat_server::{
+    AvailabilitySource, EngineChatServer, ServerLifecycle, spawn_production_child,
+};
+#[cfg(test)]
+use crate::pidash_agent::chat_server::{ChatAvailability, SpawnFuture, SpawnSource};
 
 /// Name the profile reports in approvals and logs. Never a configured
 /// runner's name: the server names engine runners `builtin-<machine>-…`.
 pub const PROFILE_NAME: &str = "builtin-engine-local-chat";
 
-/// Where the profile's engine comes from.
-enum Launch {
-    /// The daemon's resolved engine and published `CODEX_HOME`.
-    Daemon,
-    /// A fixed binary and home (tests).
-    #[cfg(test)]
-    Fixed {
-        binary: PathBuf,
-        codex_home: PathBuf,
-    },
-}
-
 /// The machine-level engine profile local chat runs on.
 pub struct PidashAgentChatProfile {
-    pub(crate) sessions: ChatRegistry,
+    pub(crate) server: EngineChatServer,
     pub(crate) approvals: ApprovalRouter,
     config: RunnerConfig,
-    launch: Launch,
 }
 
 impl PidashAgentChatProfile {
     /// The profile of a daemon whose dev machine is `machine_id` (the id
     /// approvals are recorded under; nil before the first sign-in).
-    pub fn new(machine_id: Option<Uuid>) -> Self {
-        Self::with_launch(machine_id, Launch::Daemon)
-    }
-
-    /// A profile that launches `binary` with `codex_home` (tests).
-    #[cfg(test)]
-    pub(crate) fn for_tests(binary: PathBuf, codex_home: PathBuf) -> Self {
-        Self::with_launch(None, Launch::Fixed { binary, codex_home })
-    }
-
-    fn with_launch(machine_id: Option<Uuid>, launch: Launch) -> Self {
-        let config = RunnerConfig {
-            name: PROFILE_NAME.to_string(),
-            runner_id: machine_id.unwrap_or_else(Uuid::nil),
-            workspace_slug: None,
-            project_slug: None,
-            pod_id: None,
-            // Never used: every profile chat names its own absolute folder.
-            workspace: WorkspaceSection {
-                working_dir: PathBuf::new(),
-            },
-            agent: AgentSection {
-                kind: AgentKind::PidashAgent,
-            },
-            codex: Default::default(),
-            claude_code: Default::default(),
-            cursor_agent: Default::default(),
-            openclaw: Default::default(),
-            grok: Default::default(),
-            muse_code: Default::default(),
-            approval_policy: ApprovalPolicySection::default(),
-        };
+    /// `availability` decides whether the shared child may run; the daemon
+    /// wires it to the engine manager (a weak handle, so the profile never
+    /// keeps the manager alive).
+    pub fn new(machine_id: Option<Uuid>, availability: AvailabilitySource) -> Self {
+        let config = base_config(machine_id);
+        let server = EngineChatServer::new(spawn_production_child(config.clone()), availability);
         Self {
-            sessions: ChatRegistry::new(),
+            server,
             approvals: ApprovalRouter::new(),
             config,
-            launch,
         }
     }
 
@@ -103,43 +67,82 @@ impl PidashAgentChatProfile {
         &self.config
     }
 
-    /// The Codex launch settings, or why the engine cannot start (not
-    /// installed, no model profile yet — the reason code leads the message).
-    fn prepared(&self) -> Result<RunnerConfig> {
-        match &self.launch {
-            Launch::Daemon => crate::pidash_agent::agent::prepare(&self.config),
-            #[cfg(test)]
-            Launch::Fixed { binary, codex_home } => Ok(crate::pidash_agent::agent::engine_runner_config(
-                &self.config,
-                binary,
-                codex_home,
-                None,
-            )),
-        }
+    /// The shared engine app-server this profile's chats run on.
+    pub(crate) fn server(&self) -> &EngineChatServer {
+        &self.server
     }
 
-    /// Start the engine for one chat session in `cwd`. The model is the
-    /// profile's (`CODEX_HOME/config.toml`), as for an engine runner. When
-    /// `resume_id` is the session's saved engine thread, the bridge's first
-    /// `warm` resumes it via `thread/resume` instead of starting a new thread.
-    pub(crate) async fn spawn(
-        &self,
-        cwd: &Path,
-        mode: ApprovalMode,
-        resume_id: Option<&str>,
-    ) -> Result<AgentBridge> {
-        let prepared = self.prepared()?;
-        let b = crate::codex::bridge::Bridge::spawn_with_env_and_resume(
-            &prepared.codex.binary,
-            cwd,
-            None,
-            None,
-            crate::approval::engine_thread_settings(mode),
-            &crate::agent::agent_env_for_config(&prepared),
-            resume_id,
-        )
-        .await?;
-        Ok(AgentBridge::Codex(b))
+    /// The server's lifecycle hooks for the engine manager.
+    pub(crate) fn server_lifecycle(&self) -> Arc<dyn ServerLifecycle> {
+        Arc::new(self.server.clone())
+    }
+
+    /// A profile that launches `binary` with `codex_home` (tests): the
+    /// daemon-side of the engine IPC tests in `ipc::server`.
+    #[cfg(test)]
+    pub(crate) fn for_tests(binary: PathBuf, codex_home: PathBuf) -> Self {
+        use crate::util::shell::AgentEnv;
+        let spawn: SpawnSource = {
+            let codex_home = codex_home.clone();
+            Arc::new(move || {
+                let (binary, codex_home) = (binary.clone(), codex_home.clone());
+                Box::pin(async move {
+                    crate::util::fs::create_dir_all_private(&codex_home)?;
+                    let env = AgentEnv {
+                        codex_home: Some(codex_home.clone()),
+                        path_prepend: None,
+                        config_dir: None,
+                        data_dir: None,
+                        model_token_file: None,
+                    };
+                    crate::codex::app_server::AppServer::spawn_with_env(
+                        &binary.to_string_lossy(),
+                        &codex_home,
+                        &env,
+                    )
+                    .await
+                }) as SpawnFuture
+            })
+        };
+        let availability: AvailabilitySource = Arc::new(|| ChatAvailability {
+            can_run: true,
+            code: "ok".to_string(),
+        });
+        let server = EngineChatServer::with_backoff(
+            spawn,
+            availability,
+            std::time::Duration::ZERO,
+            std::time::Duration::ZERO,
+        );
+        Self {
+            server,
+            approvals: ApprovalRouter::new(),
+            config: base_config(None),
+        }
+    }
+}
+
+fn base_config(machine_id: Option<Uuid>) -> RunnerConfig {
+    RunnerConfig {
+        name: PROFILE_NAME.to_string(),
+        runner_id: machine_id.unwrap_or_else(Uuid::nil),
+        workspace_slug: None,
+        project_slug: None,
+        pod_id: None,
+        // Never used: every profile chat names its own absolute folder.
+        workspace: WorkspaceSection {
+            working_dir: PathBuf::new(),
+        },
+        agent: AgentSection {
+            kind: AgentKind::PidashAgent,
+        },
+        codex: Default::default(),
+        claude_code: Default::default(),
+        cursor_agent: Default::default(),
+        openclaw: Default::default(),
+        grok: Default::default(),
+        muse_code: Default::default(),
+        approval_policy: ApprovalPolicySection::default(),
     }
 }
 
@@ -234,7 +237,13 @@ mod tests {
 
     #[test]
     fn the_profile_is_the_engine_with_no_project() {
-        let p = PidashAgentChatProfile::new(None);
+        let p = PidashAgentChatProfile::new(
+            None,
+            Arc::new(|| ChatAvailability {
+                can_run: true,
+                code: "ok".to_string(),
+            }),
+        );
         assert_eq!(p.config().agent.kind, AgentKind::PidashAgent);
         assert!(p.config().project_slug.is_none());
         assert_eq!(p.config().runner_id, Uuid::nil());
