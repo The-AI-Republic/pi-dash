@@ -583,10 +583,6 @@ pub const BUNDLE_STAGE_HISTORY_SQL: &str = "SELECT phase_kind, \
     done_payload->>'status' AS result, done_payload->>'note' AS note, created_at \
     FROM agent_run WHERE work_item_id = $1 AND id != $2 ORDER BY created_at DESC LIMIT 10";
 
-/// The project's Rust-owned settings bag, for `agent_stages` (lean
-/// workflow design §5.1). `$1` is the project id.
-pub const BUNDLE_PROJECT_SETTINGS_SQL: &str = "SELECT settings FROM projects WHERE id = $1";
-
 /// The lean-workflow prompt inputs the creation bundle carries on top of
 /// the Django-era ones: the project's stage setting, the latest hand-off
 /// and the run history. Loaded by [`load_stage_inputs`].
@@ -597,36 +593,35 @@ pub struct StageInputs {
     pub stage_history: Vec<context::StageHistoryRow>,
 }
 
-/// Run [`BUNDLE_PROJECT_SETTINGS_SQL`], [`BUNDLE_HANDOFF_SQL`] and
-/// [`BUNDLE_STAGE_HISTORY_SQL`] (through their [`orm`] builders) on any
-/// connection — every render-bundle store (jobs creation + handoff, the
-/// services move twin, the api preview) shares this one loader. A settings
-/// bag that fails to parse reads as the default (Auto), like
-/// `ProjectClockPolicy::with_stages`.
+/// Run the stage-inputs queries on any connection — every render-bundle
+/// store (jobs creation + handoff, the services move twin, the api preview)
+/// shares this one loader. The settings come from the one stage-switch
+/// read ([`crate::domain::project_settings::stage_switches_for_project`]);
+/// a bag that fails to parse reads as the default (Auto), like
+/// `ProjectClockPolicy::with_stages`. The hand-off query is skipped
+/// unless the run is review or test (NEWPIDASH-338 item 8): the
+/// coding-task recipe never renders it.
 pub async fn load_stage_inputs(
     conn: &impl sea_orm::ConnectionTrait,
     project_id: Uuid,
     issue_id: Uuid,
     run_id: Uuid,
+    phase_kind: &str,
 ) -> Result<StageInputs, sea_orm::DbErr> {
     use sea_orm::DbBackend;
     let backend = DbBackend::Postgres;
-    let agent_stages = match conn
-        .query_one(backend.build(&orm::bundle_project_settings_select(project_id)))
-        .await?
-    {
-        Some(row) => {
-            let settings: Value = row.try_get("", "settings")?;
-            crate::domain::project_settings::agent_stages_of(&settings)
+    let agent_stages =
+        crate::domain::project_settings::agent_stages_for_project(conn, project_id).await?;
+    let handoff = if phase_kind == recipes::KIND_REVIEW || phase_kind == recipes::KIND_TEST {
+        match conn
+            .query_one(backend.build(&orm::bundle_handoff_select(issue_id)))
+            .await?
+        {
+            Some(row) => row.try_get::<Option<String>>("", "handoff")?,
+            None => None,
         }
-        None => AgentStages::default(),
-    };
-    let handoff = match conn
-        .query_one(backend.build(&orm::bundle_handoff_select(issue_id)))
-        .await?
-    {
-        Some(row) => row.try_get::<Option<String>>("", "handoff")?,
-        None => None,
+    } else {
+        None
     };
     let rows = conn
         .query_all(backend.build(&orm::bundle_stage_history_select(issue_id, run_id)))
@@ -1473,15 +1468,6 @@ pub mod orm {
             .to_owned()
     }
 
-    /// [`super::BUNDLE_PROJECT_SETTINGS_SQL`].
-    pub fn bundle_project_settings_select(project_id: Uuid) -> SelectStatement {
-        Query::select()
-            .column(projects::Column::Settings)
-            .from(projects::Entity)
-            .and_where(Expr::col(projects::Column::Id).eq(project_id))
-            .to_owned()
-    }
-
     /// [`super::BUNDLE_WORKSPACE_SQL`].
     pub fn bundle_workspace_select(workspace_id: Uuid) -> SelectStatement {
         Query::select()
@@ -2004,6 +1990,17 @@ pub fn work_type_for_issue(issue: &IssueView, project: &ProjectView) -> &'static
     )
 }
 
+/// The template (== phase kind) a state renders, from its registry name
+/// and group: the render-bundle loader takes it so it can skip the
+/// hand-off query for runs whose recipe never renders one
+/// (NEWPIDASH-338 item 8). `None` (no state) renders the coding-task
+/// recipe, exactly like [`template_name_for`](pidash_types::orchestration::template_name_for).
+pub fn template_kind_for_state(
+    state: Option<pidash_types::orchestration::StateRef<'_>>,
+) -> &'static str {
+    pidash_types::orchestration::template_name_for(state.as_ref())
+}
+
 /// The prompt kind a run created for the issue *now* will render
 /// (`_phase_kind_for_issue`, `service.py:157-167`): stamped on
 /// `AgentRun.phase_kind`.
@@ -2333,7 +2330,10 @@ pub fn render_first_turn(
             project.interval_test,
             bundle.state.as_ref(),
         ),
-        comments_section: context::comments_section(&bundle.comments),
+        comments_section: context::comments_section(
+            &bundle.comments,
+            bundle.stages.handoff.as_deref().unwrap_or_default(),
+        ),
         parent_done_payload: parent_done_payload(
             bundle.direct_parent_payload.as_ref(),
             bundle.has_parent_run,

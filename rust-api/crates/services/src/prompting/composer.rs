@@ -1254,6 +1254,12 @@ mod tests {
         ctx["parent"]["state"] = Value::from("Todo");
         ctx["blocked_by"][0]["state"] = Value::from("Todo");
         ctx["handoff"] = Value::from("### Hand-off\n**Produced:** the sample.");
+        // The populated sample's comments carry the sample hand-off
+        // (NEWPIDASH-338 item 9), whose stripped text names a stage
+        // ("Next stage: In Review") — neutralise it here, like every
+        // other stage-name mention in the sample data.
+        ctx["comments_section"] =
+            Value::from("### Comment 1 — Human: Sample at 2026-01-01\n\nHello.");
         ctx
     }
 

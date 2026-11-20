@@ -178,6 +178,49 @@ pub fn stage_switches_of(settings: &Value) -> pidash_types::orchestration::Stage
     }
 }
 
+/// The one read of `projects.settings` for stage switches (NEWPIDASH-338
+/// item 8): every caller that only needs the switches comes here instead
+/// of selecting the blob itself. A missing row reads as the default
+/// (both stages on), exactly like a missing key or a malformed value;
+/// a database failure is the caller's error to map.
+pub async fn stage_switches_for_project(
+    db: &impl ConnectionTrait,
+    project_id: Uuid,
+) -> Result<pidash_types::orchestration::StageSwitches, sea_orm::DbErr> {
+    Ok(stage_switches_of(
+        &project_settings_blob(db, project_id).await?,
+    ))
+}
+
+/// The full `agent_stages` value for the same single select: the
+/// render-bundle loader needs `mode` too (`agent_decides`), which the
+/// bare switches do not carry.
+pub async fn agent_stages_for_project(
+    db: &impl ConnectionTrait,
+    project_id: Uuid,
+) -> Result<AgentStages, sea_orm::DbErr> {
+    Ok(agent_stages_of(
+        &project_settings_blob(db, project_id).await?,
+    ))
+}
+
+/// The single `projects.settings` select both readers above share: the
+/// stored blob, or `Null` for a missing row (which reads as all
+/// defaults, like a missing key or a malformed value).
+async fn project_settings_blob(
+    db: &impl ConnectionTrait,
+    project_id: Uuid,
+) -> Result<Value, sea_orm::DbErr> {
+    use sea_orm::QuerySelect;
+    let settings: Option<Value> = projects::Entity::find_by_id(project_id)
+        .select_only()
+        .column(projects::Column::Settings)
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(settings.unwrap_or(Value::Null))
+}
+
 /// The typed settings: the single definition of each key, its type
 /// and its default. Stored as one JSON object; missing keys read as
 /// their `#[serde(default)]` value.

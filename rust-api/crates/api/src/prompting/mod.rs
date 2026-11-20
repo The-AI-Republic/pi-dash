@@ -2180,10 +2180,15 @@ async fn load_issue_context(
     // `_FakeRun` (`views.py:65-72`): a fresh id, so the stage history
     // excludes nothing.
     let preview_run_id = uuid::Uuid::new_v4();
-    let stages =
-        creation::load_stage_inputs(&orm(pool), issue.project_id, issue.id, preview_run_id)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+    let stages = creation::load_stage_inputs(
+        &orm(pool),
+        issue.project_id,
+        issue.id,
+        preview_run_id,
+        &template_name_for(state.as_ref()),
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
 
     let input = context::IssueContextInput {
         issue_id: issue.id.to_string(),
@@ -2225,7 +2230,10 @@ async fn load_issue_context(
         extra_toolsets_schema_tool: String::new(),
         limits: Value::Null,
         tick,
-        comments_section: context::comments_section(&comments),
+        comments_section: context::comments_section(
+            &comments,
+            stages.handoff.as_deref().unwrap_or_default(),
+        ),
         parent_done_payload,
         workpad_body: issue.workpad.clone().unwrap_or_default(),
         agent_stages: stages.agent_stages,

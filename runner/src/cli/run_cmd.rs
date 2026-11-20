@@ -347,6 +347,32 @@ mod tests {
     }
 
     #[test]
+    fn finish_results_match_the_server_vocabulary() {
+        // NEWPIDASH-338 item 10: the runner cannot import the types crate
+        // (no pidash-types dep), so the five wire names are pinned here as
+        // literals against `rust-api/crates/types/src/orchestration/outcomes.rs`
+        // (`OUTCOME_*`, source order below). A rename on either side fails
+        // this test.
+        let wires = [
+            FinishResult::Done.as_wire(),
+            FinishResult::Progressed.as_wire(),
+            FinishResult::WaitingOnExternal.as_wire(),
+            FinishResult::WaitingOnHuman.as_wire(),
+            FinishResult::Blocked.as_wire(),
+        ];
+        assert_eq!(
+            wires,
+            [
+                "done",
+                "progressed",
+                "waiting_on_external",
+                "waiting_on_human",
+                "blocked",
+            ]
+        );
+    }
+
+    #[test]
     fn yield_path_shape() {
         assert_eq!(
             yield_path("acme", "123e4567-e89b-12d3-a456-426614174000"),
