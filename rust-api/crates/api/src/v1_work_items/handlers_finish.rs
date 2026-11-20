@@ -313,8 +313,9 @@ pub fn resolve_target<'a>(
 }
 
 /// The hand-off rules (step 1): only an In Progress (`coding-task`) run
-/// writes one, and such a run moving to review or test must have one
-/// (now or stored earlier on the issue).
+/// writes one, and such a run moving to review or test must have one: now,
+/// or stored by an In Progress run since the issue's last review or test
+/// run (`earlier_handoff_exists`).
 pub fn check_handoff(
     phase_kind: &str,
     has_handoff: bool,
@@ -594,7 +595,7 @@ async fn finish_inner(
     let to_review_or_test = target.is_review_or_test();
     let earlier_handoff =
         if phase_kind == KIND_CODING_TASK && to_review_or_test && req.handoff.is_none() {
-            handoff_exists(&pre.pool, issue_id).await?
+            current_handoff_exists(&pre.pool, issue_id).await?
         } else {
             false
         };
@@ -800,8 +801,8 @@ async fn post_agent_comment(
 /// the database has it.
 async fn merge_done_payload(pool: &PgPool, run_id: Uuid, delta: &Value) -> Result<(), Denial> {
     use sea_orm::QueryFilter as _;
-    // raw-sql: SeaORM cannot express the jsonb `||` merge itself;
     // `cust_with_values` binds the delta as one `$N`.
+    // raw-sql: SeaORM cannot express the jsonb `||` merge itself.
     let merged = Expr::cust_with_values(
         "COALESCE(\"done_payload\", '{}'::jsonb) || $1::jsonb",
         [delta.clone()],
@@ -907,21 +908,40 @@ async fn fetch_phase_kind(pool: &PgPool, run_id: Uuid) -> Result<String, Denial>
     Ok(kind.unwrap_or_default())
 }
 
-/// Whether any In Progress run on the issue stored a hand-off.
-async fn handoff_exists(pool: &PgPool, issue_id: Uuid) -> Result<bool, Denial> {
-    // raw-sql: a jsonb text extraction has no SeaORM column operator. The
-    // same test as the prompt's hand-off query (`BUNDLE_HANDOFF_SQL`), so
-    // a JSON-null key counts as no hand-off in both places.
-    let found: Option<Uuid> = agent_run::Entity::find()
+/// Whether an In Progress run stored a hand-off that still describes the
+/// current work: one from a run created after the issue's latest review or
+/// test run. After review or test sends the work back, the next In
+/// Progress run must write a fresh hand-off; the pre-fix one would show
+/// the next review stale "what was produced".
+async fn current_handoff_exists(pool: &PgPool, issue_id: Uuid) -> Result<bool, Denial> {
+    use sea_orm::QueryOrder;
+    let db = sea_orm_connection(pool);
+    let last_check: Option<sea_orm::prelude::DateTimeWithTimeZone> = agent_run::Entity::find()
+        .select_only()
+        .column(agent_run::Column::CreatedAt)
+        .filter(agent_run::Column::WorkItemId.eq(issue_id))
+        .filter(agent_run::Column::PhaseKind.is_in(["review", "test"]))
+        .order_by_desc(agent_run::Column::CreatedAt)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|error| db_error(error, "finish-last-check"))?;
+    // The same test as the prompt's hand-off query (`BUNDLE_HANDOFF_SQL`),
+    // so a JSON-null key counts as no hand-off in both places.
+    let has_handoff =
+        pidash_services::orchestration::creation::orm::done_payload_text(STAGE_HANDOFF_KEY);
+    let mut query = agent_run::Entity::find()
         .select_only()
         .column(agent_run::Column::Id)
         .filter(agent_run::Column::WorkItemId.eq(issue_id))
         .filter(agent_run::Column::PhaseKind.eq(KIND_CODING_TASK))
-        .filter(Expr::cust(
-            "\"agent_run\".\"done_payload\" ->> 'stage_handoff' IS NOT NULL",
-        ))
+        .filter(Expr::expr(has_handoff).is_not_null());
+    if let Some(after) = last_check {
+        query = query.filter(agent_run::Column::CreatedAt.gt(after));
+    }
+    let found: Option<Uuid> = query
         .into_tuple()
-        .one(&sea_orm_connection(pool))
+        .one(&db)
         .await
         .map_err(|error| db_error(error, "finish-handoff-exists"))?;
     Ok(found.is_some())

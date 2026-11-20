@@ -1437,19 +1437,21 @@ pub mod orm {
             .to_owned()
     }
 
+    /// `"agent_run"."done_payload" ->> '<key>'`: one `done_payload` key as
+    /// text (NULL when absent or JSON null).
+    pub fn done_payload_text(key: &str) -> sea_orm::sea_query::SimpleExpr {
+        use sea_orm::sea_query::extension::postgres::PgExpr;
+        Expr::col((run::Entity, run::Column::DonePayload)).cast_json_field(key)
+    }
+
     /// [`super::BUNDLE_HANDOFF_SQL`]: output name `handoff`.
     pub fn bundle_handoff_select(issue_id: Uuid) -> SelectStatement {
         Query::select()
-            .expr_as(
-                Expr::cust("\"agent_run\".\"done_payload\" ->> 'stage_handoff'"),
-                alias("handoff"),
-            )
+            .expr_as(done_payload_text("stage_handoff"), alias("handoff"))
             .from(run::Entity)
             .and_where(run_col(run::Column::WorkItemId).eq(issue_id))
             .and_where(run_col(run::Column::PhaseKind).eq(super::recipes::KIND_CODING_TASK))
-            .and_where(Expr::cust(
-                "\"agent_run\".\"done_payload\" ->> 'stage_handoff' IS NOT NULL",
-            ))
+            .and_where(Expr::expr(done_payload_text("stage_handoff")).is_not_null())
             .order_by((run::Entity, run::Column::CreatedAt), Order::Desc)
             .limit(1)
             .to_owned()
@@ -1460,14 +1462,8 @@ pub mod orm {
     pub fn bundle_stage_history_select(issue_id: Uuid, run_id: Uuid) -> SelectStatement {
         Query::select()
             .column((run::Entity, run::Column::PhaseKind))
-            .expr_as(
-                Expr::cust("\"agent_run\".\"done_payload\" ->> 'status'"),
-                alias("result"),
-            )
-            .expr_as(
-                Expr::cust("\"agent_run\".\"done_payload\" ->> 'note'"),
-                alias("note"),
-            )
+            .expr_as(done_payload_text("status"), alias("result"))
+            .expr_as(done_payload_text("note"), alias("note"))
             .column((run::Entity, run::Column::CreatedAt))
             .from(run::Entity)
             .and_where(run_col(run::Column::WorkItemId).eq(issue_id))
@@ -3317,6 +3313,25 @@ const LEAN_REVIEW_SECTIONS: usize = 8;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stage_queries_read_done_payload_keys_with_the_builder() {
+        use sea_orm::sea_query::PostgresQueryBuilder;
+        let issue = Uuid::nil();
+        let handoff = orm::bundle_handoff_select(issue).to_string(PostgresQueryBuilder);
+        assert_eq!(
+            handoff,
+            "SELECT \"agent_run\".\"done_payload\" ->> 'stage_handoff' AS \"handoff\" \
+             FROM \"agent_run\" WHERE \"agent_run\".\"work_item_id\" = '00000000-0000-0000-0000-000000000000' \
+             AND \"agent_run\".\"phase_kind\" = 'coding-task' \
+             AND (\"agent_run\".\"done_payload\" ->> 'stage_handoff') IS NOT NULL \
+             ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1"
+        );
+        let history =
+            orm::bundle_stage_history_select(issue, issue).to_string(PostgresQueryBuilder);
+        assert!(history.contains("\"agent_run\".\"done_payload\" ->> 'status' AS \"result\""));
+        assert!(history.contains("\"agent_run\".\"done_payload\" ->> 'note' AS \"note\""));
+    }
     use serde_json::json;
 
     static CREATE_DISPATCH: &str = include_str!(

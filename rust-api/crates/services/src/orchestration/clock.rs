@@ -1012,8 +1012,11 @@ pub fn on_retick(
                 .parse::<TickerDisarmReason>()
                 .is_ok_and(TickerDisarmReason::is_failure_stop);
         // The stage was switched off while the issue sat in it (§6.4), and
-        // is on again (checked above): Re-tick is how a person resumes it.
-        let stage_stopped = !ticker.enabled
+        // is on again: Re-tick is how a person resumes it. Only in a stage
+        // that runs — never from Paused, which Re-tick leaves only through
+        // a granted pool.
+        let stage_stopped = !paused
+            && !ticker.enabled
             && ticker.disarm_reason == TickerDisarmReason::LeftTickingState.as_str();
         if failure_stopped || stage_stopped {
             // The clock was stopped by the failure policy (needs-human /
@@ -2975,6 +2978,29 @@ mod tests {
         )
         .expect("retick reconciles");
         assert_eq!(outcome.decision.reason, "not_ticking_state");
+    }
+
+    #[test]
+    fn retick_never_resumes_a_left_stage_stop_from_paused() {
+        let mut row = armed_row(2);
+        row.enabled = false;
+        row.disarm_reason = TickerDisarmReason::LeftTickingState.as_str().to_string();
+        let paused = clock_issue(Some(paused_state()), policy_with_stages(true, true));
+        let mut slot = Some(row);
+        let outcome = reconcile(
+            &mut slot,
+            &paused,
+            &TickerEvent::retick(true, None),
+            None,
+            false,
+            now(),
+            JITTER,
+            None,
+        )
+        .expect("retick reconciles");
+        assert_eq!(outcome.decision.reason, "budget_not_exhausted");
+        assert!(!outcome.decision.dispatch_now);
+        assert!(!slot.expect("row").enabled, "stays disarmed in Paused");
     }
 
     #[test]
