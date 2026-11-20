@@ -880,6 +880,13 @@ export function WorkItemCreateDialog({
     // editor, and keep the kept title/project draft in step. An edit is
     // pinned to its row's project instead.
     setForm(seededForm(nextProjectId, form.name));
+    // The type belongs to the old project too: clear the pick so the
+    // defaulting effect preselects the new project's default (NEWPIDASH-361).
+    // A pick from the old list may not exist in the new project, and the
+    // chip would otherwise show "No type" while the payload sends the stale id.
+    setTypeId(null);
+    typeTouched.current = false;
+    typeDefaultedFor.current = null;
     setFieldError(null);
     setExecutionError(null);
     setStateError(null);

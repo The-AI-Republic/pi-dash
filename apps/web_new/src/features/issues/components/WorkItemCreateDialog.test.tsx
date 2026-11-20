@@ -3241,6 +3241,32 @@ describe("WorkItemCreateDialog modal refresh (NEWPIDASH-361)", () => {
     await waitFor(() => expect(screen.getByTestId("stub-type-id")).toHaveTextContent(TYPE_ONE));
   });
 
+  it("re-defaults the type after a project switch instead of keeping the stale pick", async () => {
+    const user = userEvent.setup();
+    const TYPE_BEACON = "b23e4567-e89b-12d3-a456-426614174010";
+    registerEditionIssuesProviders({
+      workItemTypes: async (input: { workspaceSlug: string; projectId: string }) =>
+        input.projectId === PROJECT_BEACON
+          ? [{ id: TYPE_BEACON, name: "Beacon type", isDefault: true }]
+          : [
+              { id: TYPE_ONE, name: "Bug" },
+              { id: TYPE_TWO, name: "Task", isDefault: true },
+            ],
+    });
+    registerIssueTypeExtension({ typePicker: StubTypePicker });
+    const h = setup();
+    await waitFor(() => expect(screen.getByTestId("stub-type-id")).toHaveTextContent(TYPE_TWO));
+    await user.click(screen.getByRole("button", { name: "Pick one" }));
+    await waitFor(() => expect(screen.getByTestId("stub-type-id")).toHaveTextContent(TYPE_ONE));
+    await user.click(screen.getByRole("button", { name: "Atlas" }));
+    await user.click(await screen.findByRole("option", { name: "Beacon" }));
+    await waitFor(() => expect(screen.getByTestId("stub-type-id")).toHaveTextContent(TYPE_BEACON));
+    await user.type(titleField(), "Moved");
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toMatchObject({ type: TYPE_BEACON });
+  });
+
   it("shows Field: Value tooltips on the property buttons", async () => {
     setup();
     const chip = await screen.findByRole("button", { name: "State: Todo" });
