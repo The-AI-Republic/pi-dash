@@ -646,14 +646,7 @@ async fn finish_inner(
         {
             return Ok(denial.into_response());
         }
-        if let Some(info) = crate::project_archived::archived_by_id(&pre.pool, project_id)
-            .await
-            .map_err(|_| Denial::ServerError)?
-        {
-            return Err(Denial::ProjectArchived(
-                crate::project_archived::archived_body(&info),
-            ));
-        }
+        refuse_if_archived(&pre.pool, project_id).await?;
     }
     if plan.comment.is_some() || plan.handoff_comment.is_some() {
         if let Err(denial) = require_gate(
@@ -670,6 +663,10 @@ async fn finish_inner(
         {
             return Ok(denial.into_response());
         }
+        // The comment endpoint's own gate carries the archived check, so
+        // a stay that only posts still refuses on an archived project,
+        // exactly like the composed `comment_post_inner` did.
+        refuse_if_archived(&pre.pool, project_id).await?;
     }
 
     // One shared operation context for the move and both comments: the
@@ -840,6 +837,23 @@ async fn finish_inner(
         req.result,
         plan.ticking,
     ))
+}
+
+/// The archived-project refusal the composed handler inners ran: the
+/// patch path checked it after its gate and the comment endpoint's own
+/// gate carries it. Each `finish` branch checks it after its gate, so a
+/// move and a comment-only stay are each refused on an archived project,
+/// exactly as before.
+async fn refuse_if_archived(pool: &PgPool, project_id: Uuid) -> Result<(), Denial> {
+    if let Some(info) = crate::project_archived::archived_by_id(pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
+    Ok(())
 }
 
 /// Map an operation failure onto the exact status and body the v1

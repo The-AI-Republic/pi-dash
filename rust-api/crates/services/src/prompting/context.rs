@@ -590,13 +590,18 @@ pub fn comments_section(comments: &[CommentView], handoff: &str) -> String {
 
 /// The hand-off markdown as its posted comment reads in the section: the
 /// same strip pipeline the write path stores (`strip_comment_html` over
-/// `to_safe_html`), so an unchanged hand-off comment matches exactly.
+/// `to_safe_html`), plus the section's own edge trim — the section
+/// compares against the comment body after `python_strip`, so the
+/// hand-off side is trimmed the same way. Without this, edge whitespace
+/// the strip leaves (e.g. a trailing no-break space surviving the
+/// markdown round-trip) silently disables the match and the hand-off
+/// renders twice.
 pub(crate) fn strip_handoff(handoff: &str) -> String {
     let html = crate::assistant::markdown::to_safe_html(Some(handoff));
     if html.is_empty() {
         String::new()
     } else {
-        pidash_db::app_pages::strip::ml_strip_tags(&html)
+        python_strip(&pidash_db::app_pages::strip::ml_strip_tags(&html)).to_owned()
     }
 }
 
@@ -2276,6 +2281,20 @@ mod tests {
         // A hand-off that matches no comment changes nothing.
         let section = comments_section(&[comment("other work")], handoff);
         assert!(section.contains("other work"));
+        // Edge whitespace the strip leaves must not silently disable
+        // the match: a trailing no-break space survives the markdown
+        // round-trip into the stored stripped text, while the section
+        // compares after its own trim — so the hand-off side is trimmed
+        // the same way.
+        let padded = "### Hand-off\n\n**Produced:** the sample.\u{a0}";
+        let trimmed = strip_handoff(padded);
+        assert!(trimmed.ends_with("sample."), "{trimmed:?}");
+        // The write path stores the strip raw (edge whitespace kept);
+        // the section compares after its own trim.
+        let stored = format!("{trimmed}\u{a0}");
+        let section = comments_section(&[comment(&stored), comment("unrelated")], padded);
+        assert!(!section.contains("Comment 2"), "{section}");
+        assert!(section.contains("unrelated"));
     }
 
     // -- scheduler ---------------------------------------------------------
