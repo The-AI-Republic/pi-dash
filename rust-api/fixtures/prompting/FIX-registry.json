@@ -163,8 +163,8 @@
           "is_overridable": false,
           "allows_workspace_override": false,
           "allows_personal_override": false,
-          "body_len": 3573,
-          "body_sha256": "12b2bdf4084b29f6914c5c66782cb48e1c92aceeafe977d179997bcbc690d21a"
+          "body_len": 3755,
+          "body_sha256": "b8fe87eba17411827dce2ab966ea1f3fd705ddfe902f304c9f268a50b8a40468"
         },
         {
           "key": "pidash-cli",
