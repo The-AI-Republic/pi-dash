@@ -113,6 +113,48 @@ def test_archived_comments_409(clients, seed, archived_project):
         _assert_archived_body(response, archived_project)
 
 
+def test_archived_identifier_409(clients, seed, archived_project):
+    admin = clients["admin"]
+    ws = seed["ws_slug"]
+    response = admin.get(f"/api/workspaces/{ws}/work-items/{archived_project}-1/")
+    assert response.status_code == expect("DIFF-45", django=200, rust=409)
+    if response.status_code == 409:
+        _assert_archived_body(response, archived_project)
+
+
+def test_archived_identifier_lite_409(clients, seed, archived_project):
+    admin = clients["admin"]
+    ws = seed["ws_slug"]
+    response = admin.get(
+        f"/api/workspaces/{ws}/work-items/{archived_project}-1/?lite=true"
+    )
+    assert response.status_code == expect("DIFF-45", django=200, rust=409)
+    if response.status_code == 409:
+        _assert_archived_body(response, archived_project)
+
+
+def test_archived_bulk_archive_409(clients, seed, archived_project, db_conn):
+    admin = clients["admin"]
+    ws, pid, i3 = seed["ws_slug"], seed["project"], seed["issue3"]
+    try:
+        response = admin.post(
+            f"{_base(ws, pid)}/bulk-archive-issues/", json={"issue_ids": [i3]}
+        )
+        assert response.status_code == expect("DIFF-45", django=200, rust=409)
+        if response.status_code == 409:
+            _assert_archived_body(response, archived_project)
+            with db_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT archived_at FROM issues WHERE id = %s", (i3,)
+                )
+                assert cur.fetchone()[0] is None
+    finally:
+        with db_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE issues SET archived_at = NULL WHERE id = %s", (i3,)
+            )
+
+
 def test_active_list_unchanged(clients, seed):
     admin = clients["admin"]
     ws, pid, i1 = seed["ws_slug"], seed["project"], seed["issue1"]
