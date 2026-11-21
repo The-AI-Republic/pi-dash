@@ -410,7 +410,7 @@ def test_search_requires_auth(api, tenant_a):
 def test_global_search_pages_hide_other_users_private_pages(
     api, seed, tenant_a, project_a, auth_a
 ):
-    """NEWPIDASH-342 (DIFF-56): the global search page section must mirror
+    """NEWPIDASH-342 (DIFF-59): the global search page section must mirror
     the pages-list scope — a member sees only pages they own or public
     ones, and a restricted guest (no ``guest_view_all_features``) sees
     only pages they own. Django leaks both (frozen); the Rust port fixes
@@ -495,10 +495,10 @@ def test_global_search_pages_hide_other_users_private_pages(
     # subquery's parameterized LIMIT never executes there (pre-existing
     # defect, reported as "found:" on NEWPIDASH-1; Django narrows fine).
     assert page_names(member_headers) == expect(
-        "DIFF-56", django=member_leak, rust=member_fixed
+        "DIFF-59", django=member_leak, rust=member_fixed
     )
     assert page_names(guest_headers) == expect(
-        "DIFF-56", django=member_leak, rust=guest_fixed
+        "DIFF-59", django=member_leak, rust=guest_fixed
     )
 
 

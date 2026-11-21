@@ -659,7 +659,7 @@ pub const GLOBAL_VIEW_KEYS: &[&str] = &[
 pub const PAGE_AGG_EXCLUDED_PROJECT_ID: &str = "00000000-0000-0000-0000-000000000001";
 
 /// `Page.PUBLIC_ACCESS` (`db/models/page.py:24-28`): the `access` value a
-/// non-owner may read (DIFF-58 reuses it in the guest arm below).
+/// non-owner may read (DIFF-59 reuses it in the guest arm below).
 const PAGE_PUBLIC_ACCESS: i32 = 0;
 
 /// `filter_pages` (`base.py:159-203`): `name` icontains over pages whose
@@ -667,7 +667,7 @@ const PAGE_PUBLIC_ACCESS: i32 = 0;
 /// `project_identifiers` `ArrayAgg` annotations; the project narrow goes
 /// through the `ProjectPage` subquery annotate+filter (`:192-197`).
 ///
-/// DIFF-58 (NEWPIDASH-342): the old filter has no pages-list scope, so the
+/// DIFF-59 (NEWPIDASH-342): the old filter has no pages-list scope, so the
 /// section leaks other users' private page names to members and every
 /// page name to restricted guests. The new system mirrors the list
 /// (`page/base.py:126-131` + `guest_sees_own_pages_only`, `:84-96`):
@@ -758,13 +758,13 @@ pub fn global_pages(scope: &GlobalScope<'_>, query: Option<&str>) -> SelectState
                 .add(col_eq_uuid("project_members", "member_id", scope.user_id))
                 .add(col_eq("workspaces", "slug", scope.workspace_slug)),
         );
-    // DIFF-58: owner-or-public (`page/base.py:131`).
+    // DIFF-59: owner-or-public (`page/base.py:131`).
     stmt.cond_where(
         Condition::any()
             .add(col_eq_uuid("pages", "owned_by_id", scope.user_id))
             .add(col_eq("pages", "access", PAGE_PUBLIC_ACCESS)),
     );
-    // DIFF-58: per linked project, an active membership that is not a
+    // DIFF-59: per linked project, an active membership that is not a
     // restricted guest (`role = GUEST` without
     // `guest_view_all_features`, `page/base.py:84-96`); a page owned by
     // the caller is visible through every membership, so the arm keeps
@@ -1875,7 +1875,7 @@ mod tests {
         assert!(!plain.contains("limit"), "{plain}");
     }
 
-    // DIFF-58 (NEWPIDASH-342): the page section mirrors the pages-list
+    // DIFF-59 (NEWPIDASH-342): the page section mirrors the pages-list
     // scope — owner-or-public plus the restricted-guest arm.
     #[test]
     fn pages_carry_owner_public_and_guest_arms() {
