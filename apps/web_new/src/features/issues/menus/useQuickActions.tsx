@@ -15,6 +15,7 @@ import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { useMe } from "../../../core/session/index.js";
+import { archivesKeys } from "../../archives/index.js";
 import { projectsQueryOptions } from "../../projects/index.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { copyLinkWithToast } from "../../../shared/shell/shareLink.js";
@@ -179,6 +180,13 @@ export function useQuickActions(input: QuickActionsInput | null): QuickActionsSt
 
   const refresh = React.useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: issueKeys.all(workspaceSlug) });
+    // Restore and delete move the archived count with the lists, so the
+    // archives badge (ARCH-002) goes with the issue reads. The idle target
+    // carries no project; its key prefix would match nothing.
+    const projectId = input?.target.projectId;
+    if (projectId !== undefined && projectId !== "") {
+      void queryClient.invalidateQueries({ queryKey: archivesKeys.all(workspaceSlug, projectId) });
+    }
     input?.onChanged?.();
   }, [queryClient, input, workspaceSlug]);
 
