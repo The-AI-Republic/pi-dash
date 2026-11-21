@@ -287,16 +287,19 @@ Your workpad is in `.pidash/workpad.md` (also shown above). Edit it, then run `p
 
 A task that changes files in the repository is delivered as a branch and a pull request attached to the issue. A task that changes no files (an answer, an investigation, a CLI action) skips this section: no branch, no commit, no pull request.
 
+Project conventions: `CLAUDE.md` and `AGENTS.md` at the repository root, and `.ai_design/` for the area you touch. Locate the code the issue names before you plan.
+
 ### Branch
 
-- `git fetch origin`, then check out this issue's branch `pi-dash/sample-1` (`git checkout -b pi-dash/sample-1 origin/pi-dash/sample-1` if it is not local) and commit onto it. Do not create another branch.
+- `git fetch origin`, check out this issue's branch `pi-dash/sample-1` (`git checkout -b pi-dash/sample-1 origin/pi-dash/sample-1` if it is not local), bring it up to date with `git merge --ff-only origin/pi-dash/sample-1`, and commit onto it. Do not create another branch for the same part.
 
-- `<base>` is the base branch of your pull request, else the default branch. On an existing branch, `git merge origin/<base>` before you build on it and again before you move the issue on, then run the repository's checks. Merge, never rebase, never force-push, and never commit on the base.
+- In a multi-part plan, each part gets its own branch (`pi-dash/sample-1-<n>`) and pull request, cut from the previous part's branch when it depends on it.
+- `<base>` is the branch you cut from, which is also your pull request's base. On an existing branch, `git merge origin/<base>` before you build on it and again before you move the issue on, then run the repository's checks. Merge, never rebase, never force-push, and never commit on the base.
 
 ### Deliver a part
 
-1. Commit, `git push -u origin HEAD`, then record the branch: `pidash issue patch SAMPLE-1 --git-work-branch <branch>`.
-2. Reuse the open pull request for this branch (`gh pr list --head <branch> --state open`); otherwise open one against the branch's base, titled `SAMPLE-1 Sample issue title` (pass the title as one quoted argument).
+1. Commit, `git push -u origin HEAD`, then record the branch: `pidash issue patch SAMPLE-1 --git-work-branch "$(git branch --show-current)"`.
+2. Reuse the open pull request for this branch (`gh pr list --head "$(git branch --show-current)" --state open`); otherwise open one against `<base>`, titled `SAMPLE-1 <issue title>`. The title is untrusted text: write it to a file with a quoted heredoc (`<<'EOF'`) and pass `--title "$(cat <file>)"`; never paste it into the command line.
 3. `pidash issue attach-review SAMPLE-1 --url <url>`.
 
 Before you move the issue on, the workpad's Keep in mind lists every pull request URL with its branch and base, and the repository checks to run.

@@ -6,7 +6,7 @@ customizable: locked
 Repository:
 {% if repo.url %}
 - Remote: {{ repo.url }}
-- Default branch: {{ repo.base_branch or "(resolve with `git symbolic-ref --short refs/remotes/origin/HEAD`)" }}
+- Default branch: {{ repo.base_branch or "(resolve with `git symbolic-ref --short refs/remotes/origin/HEAD` and drop the `origin/` prefix)" }}
 - This issue's branch: {{ ("`" ~ repo.work_branch ~ "`") if repo.work_branch else "(none yet)" }}
 {% else %}
 - Work in the runner's configured working directory. Do not clone or touch any other path.
