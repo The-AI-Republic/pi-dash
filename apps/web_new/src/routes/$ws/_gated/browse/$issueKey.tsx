@@ -22,6 +22,7 @@ import { useMe, useWorkspace } from "../../../../core/session/index.js";
 // chain (NEWFRONT-732; NEWFRONT-871, size gate).
 import { issueKeys } from "../../../../features/issues/api/keys.js";
 import { liteIssueQueryOptions } from "../../../../features/issues/api/browse.js";
+import { invalidateCommentViews } from "../../../../features/issues/comments/api.js";
 import { issueDetailQueryOptions } from "../../../../features/issues/api/queries.js";
 import { CommentThread } from "../../../../features/issues/comments/CommentThread.js";
 import { DetailMissingState } from "../../../../features/issues/detail/DetailMissingState.js";
@@ -161,9 +162,16 @@ function BrowseIssueDetail({
     archived: project?.archived_at != null,
   });
   // One detail re-read for the palette, the header, and the agent panel.
+  // The agent panel's poll rides this too, so it also re-reads the
+  // comment and activity feeds (ISS-164): both stay sibling keys outside
+  // the detail query, and both refetch incrementally.
   const refreshDetail = React.useCallback(
-    () => context.queryClient.invalidateQueries({ queryKey: issueKeys.detail(workspaceSlug, issueId) }),
-    [context.queryClient, issueId, workspaceSlug]
+    () =>
+      Promise.all([
+        context.queryClient.invalidateQueries({ queryKey: issueKeys.detail(workspaceSlug, issueId) }),
+        invalidateCommentViews(context.queryClient, { workspaceSlug, projectId, issueId }),
+      ]).then(() => undefined),
+    [context.queryClient, issueId, projectId, workspaceSlug]
   );
   const palette = useWorkItemPaletteContext({
     workspaceSlug,

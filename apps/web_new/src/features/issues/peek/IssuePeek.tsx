@@ -24,6 +24,7 @@ import { canEditInProject } from "../../../shared/shell/contextual/index.js";
 import { projectDetailsQueryOptions } from "../../projects/index.js";
 import { issueKeys } from "../api/keys.js";
 import { TITLE_SAVE_FAILED_TITLE, useUpdateIssue } from "../api/mutations.js";
+import { invalidateCommentViews } from "../comments/api.js";
 import { issueDetailQueryOptions } from "../api/queries.js";
 import type { SubIssueItem } from "@pidash/api-client";
 import { CommentThread } from "../comments/CommentThread.js";
@@ -196,9 +197,16 @@ export function IssuePeek({
   const me = useMe();
   useRefocusOrigin();
 
+  // The agent panel's poll rides this too, so it also re-reads the
+  // comment and activity feeds (ISS-164): both stay sibling keys outside
+  // the detail query, and both refetch incrementally.
   const refreshDetail = React.useCallback(
-    () => queryClient.invalidateQueries({ queryKey: issueKeys.detail(workspaceSlug, issueId) }),
-    [queryClient, issueId, workspaceSlug]
+    () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: issueKeys.detail(workspaceSlug, issueId) }),
+        invalidateCommentViews(queryClient, { workspaceSlug, projectId, issueId }),
+      ]).then(() => undefined),
+    [queryClient, issueId, projectId, workspaceSlug]
   );
 
   const writeNesting = React.useCallback(

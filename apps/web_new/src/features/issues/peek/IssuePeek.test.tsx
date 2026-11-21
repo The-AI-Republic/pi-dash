@@ -811,6 +811,22 @@ describe("IssuePeek loaded", () => {
     });
     expect(await screen.findByRole("button", { name: "Unsubscribe" })).toBeInTheDocument();
   });
+
+  it("refreshes comments and activity with the detail (ISS-164)", async () => {
+    const user = userEvent.setup();
+    const { queryClient } = renderPeek({ details: {} });
+    // The agent-status poll rides this shared refresh, so a comment posted
+    // while a run is active joins the feed without a reload.
+    await screen.findByRole("button", { name: "Subscribe" });
+    const spy = vi.spyOn(queryClient, "invalidateQueries");
+    await user.click(screen.getByRole("button", { name: "Subscribe" }));
+    await waitFor(() => {
+      expect(spy).toHaveBeenCalledWith({ queryKey: issueKeys.comments(SLUG, PROJECT, ISSUE) });
+    });
+    expect(spy).toHaveBeenCalledWith({ queryKey: issueKeys.activity(SLUG, PROJECT, ISSUE) });
+    expect(spy).toHaveBeenCalledWith({ queryKey: issueKeys.detail(SLUG, ISSUE) });
+    spy.mockRestore();
+  });
 });
 
 describe("IssuePeek modes", () => {
