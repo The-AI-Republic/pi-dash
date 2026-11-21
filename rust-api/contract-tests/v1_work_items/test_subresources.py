@@ -586,3 +586,107 @@ def test_comment_patch_recomputes_stripped_without_html(api, world, db):
         (row["description_id"],),
     )
     assert desc["description_stripped"] == "hello"
+
+
+def _identifier_url(world):
+    project_identifier = world["issue"]["url"].rsplit("/", 1)[-1].rsplit("-", 1)[0]
+    identifier = f"{project_identifier}-{world['issue']['sequence_id']}"
+    return f"/api/v1/workspaces/{world['workspace']['slug']}/work-items/{identifier}/"
+
+
+def test_issue_detail_code_reviews_empty(api, world):
+    """NEWPIDASH-366 (DIFF-64): an issue with no reviews renders `"code_reviews": []`.
+
+    Django (the ``django=`` arm) has no such key: the field is
+    new-system-only. Rust (the ``rust=`` arm) renders the empty list.
+    """
+    from _harness.diffs import expect
+
+    expected = expect("DIFF-64", django=None, rust=[])
+    for url in (issue_url(world, world["issue"]["id"]), _identifier_url(world)):
+        response = api.get(url)
+        assert response.status_code == 200, response.text
+        body = response.json()
+        if expected is None:
+            assert "code_reviews" not in body
+        else:
+            assert body["code_reviews"] == []
+
+
+def test_issue_detail_code_reviews(api, world, db, seeder):
+    """NEWPIDASH-366 (DIFF-64): detail carries attached reviews newest-first.
+
+    Two attached reviews (one merged, one open) both appear under
+    ``code_reviews`` with the stored ``state``/``merged``; a soft-deleted
+    review is excluded. Django (the ``django=`` arm) has no such key.
+    Rust renders the read-time join on both the by-pk detail and the
+    by-identifier lookup the CLI uses.
+    """
+    from _harness.diffs import expect
+
+    issue_id = world["issue"]["id"]
+    workspace_id = world["workspace"]["id"]
+    project_id = world["project"]["id"]
+    open_link = seeder.create_code_review_link(
+        workspace_id, project_id, issue_id, external_iid="101"
+    )
+    merged_link = seeder.create_code_review_link(
+        workspace_id, project_id, issue_id, external_iid="102"
+    )
+    dead_link = seeder.create_code_review_link(
+        workspace_id, project_id, issue_id, external_iid="103"
+    )
+    db.execute(
+        "UPDATE git_code_review_links SET url=%s, title='Open PR', state='open',"
+        " merged=false, draft=false, created_at='2026-03-01T00:00:00Z',"
+        " updated_at='2026-03-01T00:00:00Z' WHERE id=%s",
+        (
+            "https://github.com/contract-owner/contract-repo/pull/101",
+            open_link["id"],
+        ),
+    )
+    db.execute(
+        "UPDATE git_code_review_links SET url=%s, title='Merged PR', state='merged',"
+        " merged=true, draft=false, created_at='2026-04-01T00:00:00Z',"
+        " updated_at='2026-04-01T00:00:00Z' WHERE id=%s",
+        (
+            "https://github.com/contract-owner/contract-repo/pull/102",
+            merged_link["id"],
+        ),
+    )
+    db.execute(
+        "UPDATE git_code_review_links SET deleted_at=now() WHERE id=%s",
+        (dead_link["id"],),
+    )
+    expected = expect(
+        "DIFF-64",
+        django=None,
+        rust=[
+            {
+                "url": "https://github.com/contract-owner/contract-repo/pull/102",
+                "title": "Merged PR",
+                "state": "merged",
+                "merged": True,
+                "draft": False,
+                "provider": "github",
+                "external_iid": "102",
+            },
+            {
+                "url": "https://github.com/contract-owner/contract-repo/pull/101",
+                "title": "Open PR",
+                "state": "open",
+                "merged": False,
+                "draft": False,
+                "provider": "github",
+                "external_iid": "101",
+            },
+        ],
+    )
+    for url in (issue_url(world, issue_id), _identifier_url(world)):
+        response = api.get(url)
+        assert response.status_code == 200, response.text
+        body = response.json()
+        if expected is None:
+            assert "code_reviews" not in body
+        else:
+            assert body["code_reviews"] == expected

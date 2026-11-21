@@ -8,6 +8,8 @@ must reproduce them byte for byte.
 
 import pytest
 
+from _harness.diffs import expect
+
 from .conftest import ENVELOPE_KEYS, issue_url
 
 pytestmark = pytest.mark.contract
@@ -56,7 +58,11 @@ ISSUE_ROW_KEYS = {
 
 ISSUE_WRITE_KEYS = ISSUE_ROW_KEYS | {"relations_summary", "has_open_blockers"}
 
-ISSUE_DETAIL_KEYS = ISSUE_WRITE_KEYS | {"relations"}
+ISSUE_DETAIL_KEYS = (
+    ISSUE_WRITE_KEYS
+    | {"relations"}
+    | expect("DIFF-64", django=set(), rust={"code_reviews"})
+)
 
 
 def test_issue_list_shape(api, world):
