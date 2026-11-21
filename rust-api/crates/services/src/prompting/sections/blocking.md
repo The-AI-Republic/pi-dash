@@ -15,8 +15,8 @@ When what blocks you is **another issue**, do not block: say which issue and why
 
 Rules for every run:
 
-- Do not edit the issue title or description to track progress.{% if run.kind == "coding-task" %} The one exception is a parent you split into child issues (see "Analyze & scope").{% endif %}
+- Do not edit the issue title or description to track progress.{% if run.kind == "coding-task" %} The one exception is a parent you split into child issues (see "Step 0 — Analyze & scope (read, think, decide)").{% endif %}
 - Do not change the fields of an issue in Backlog, Done or Cancelled; post at most one short comment saying why you did nothing.
 - Revert temporary proof edits before you deliver. Do not destructively rewrite work a person or another run may depend on.
 - Do not call paid external services unless the issue requires it.
-- Never print, log or comment the value of `PIDASH_TOKEN` or any variable whose name starts with `PIDASH_`.
+- Never print, log or comment the value of any variable whose name starts with `PIDASH_`.

@@ -2354,6 +2354,7 @@ pub fn render_first_turn(
         related: Value::Array(related),
         relations,
         run_id: run.run_id.to_string(),
+        rendered_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         run_template_name: kind.to_owned(),
         attempt: context::compute_attempt(bundle.prior_run_count),
         trigger: Some(run.trigger.clone()),
@@ -3393,16 +3394,17 @@ pub async fn resolve_pod_for_issue<C: CreationSeam>(
     Ok(resolve_pod_select(None, default.as_ref()))
 }
 
-/// Section count of the lean-workflow `coding-task` recipe for `software`
-/// (§9.2): 11 core sections plus the `software.context` and
-/// `software.execute` slots. Diverges from the Django-captured FX6
-/// manifests on purpose (D13).
+/// Section count of the `coding-task` recipe for `software`: 12 core
+/// sections (the `this-run` block first, NEWPIDASH-325) plus the
+/// `software.context` and `software.execute` slots. Diverges from the
+/// Django-captured FX6 manifests on purpose (D13).
 #[cfg(test)]
-const LEAN_CODING_SECTIONS: usize = 13;
-/// The lean `review` recipe for `software`: 6 core sections plus the
-/// `software.context` and `software.review` slots.
+const LEAN_CODING_SECTIONS: usize = 14;
+/// The `review` recipe for `software`: 7 core sections (likewise
+/// `this-run` first) plus the `software.context` and `software.review`
+/// slots.
 #[cfg(test)]
-const LEAN_REVIEW_SECTIONS: usize = 8;
+const LEAN_REVIEW_SECTIONS: usize = 9;
 
 #[cfg(test)]
 mod tests {

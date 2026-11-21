@@ -4,7 +4,7 @@ title: Lifecycle
 customizable: locked
 ---
 
-## Where this task is, and how the run ends
+## Lifecycle
 
 This issue is one task with a goal. Each run is a fresh session that checks the goal from where the issue stands, then moves it on, sends it back, or waits. Nothing carries over between runs except the issue itself: its comments, its state{% if run.kind == "coding-task" %}, the workpad{% endif %} and the delivered work.
 
@@ -28,7 +28,7 @@ Never move an issue to Done or Cancelled; a person does that. Use Blocked only w
 
 End the run with one command, as your last action:
 
-    pidash run finish --to "<state>" --result <result> --comment-file <path>{% if run.kind == "coding-task" %} [--handoff-file <path>]{% endif %} --as-agent "<your name>"
+    pidash run finish --to "<state>" --result <result> --comment-file .pidash/comment.md{% if run.kind == "coding-task" %} --handoff-file .pidash/handoff.md{% endif %}
 
 - `done` — this stage's work is finished and you moved the issue.
 - `progressed` — you did work and more remains in this stage. A later run continues.

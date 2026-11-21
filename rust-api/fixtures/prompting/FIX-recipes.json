@@ -73,14 +73,15 @@
         "work_kind_coding": "coding"
       },
       "local_recipe_lengths": {
-        "coding-task": 13,
-        "review": 8,
-        "test": 8,
-        "scheduler": 6
+        "coding-task": 14,
+        "review": 9,
+        "test": 9,
+        "scheduler": 7
       },
       "local_recipes": {
         "coding-task": [
-          "intro",
+          "this-run",
+                    "intro",
           {
             "slot": "context"
           },
@@ -99,7 +100,8 @@
           "blocking"
         ],
         "review": [
-          "review-intro",
+          "this-run",
+                    "review-intro",
           {
             "slot": "context"
           },
@@ -113,7 +115,8 @@
           "blocking"
         ],
         "test": [
-          "test-intro",
+          "this-run",
+                    "test-intro",
           {
             "slot": "context"
           },
@@ -127,7 +130,8 @@
           "blocking"
         ],
         "scheduler": [
-          "scheduler-intro",
+          "this-run",
+                    "scheduler-intro",
           "session-framing",
           "pidash-cli",
           "scheduler-task",
@@ -150,6 +154,7 @@
         "expanded": {
           "coding-task": {
             "general": [
+              "this-run",
               "intro",
               "relationships",
               "run-framing",
@@ -164,6 +169,7 @@
               "blocking"
             ],
             "software": [
+              "this-run",
               "intro",
               "software.context",
               "relationships",
@@ -181,6 +187,7 @@
           },
           "review": {
             "general": [
+              "this-run",
               "review-intro",
               "run-framing",
               "pidash-cli",
@@ -190,6 +197,7 @@
               "blocking"
             ],
             "software": [
+              "this-run",
               "review-intro",
               "software.context",
               "run-framing",
@@ -202,6 +210,7 @@
           },
           "scheduler": {
             "general": [
+              "this-run",
               "scheduler-intro",
               "session-framing",
               "pidash-cli",
@@ -210,6 +219,7 @@
               "scheduler-ending"
             ],
             "software": [
+              "this-run",
               "scheduler-intro",
               "session-framing",
               "pidash-cli",
@@ -220,6 +230,7 @@
           },
           "test": {
             "general": [
+              "this-run",
               "test-intro",
               "run-framing",
               "pidash-cli",
@@ -229,6 +240,7 @@
               "blocking"
             ],
             "software": [
+              "this-run",
               "test-intro",
               "software.context",
               "run-framing",

@@ -16,6 +16,8 @@ import re
 
 import pytest
 
+from _harness.diffs import expect
+
 UNKNOWN_BODY = {
     "error": "unknown work type 'bogus'",
     "work_types": ["general", "software"],
@@ -104,10 +106,19 @@ def test_list_scheduler_ignores_work_type(api, tenant_a, auth_a):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["work_type"] == "general"
-    assert [s["key"] for s in body["sections"]] == [
-        "scheduler-intro", "session-framing", "pidash-cli",
-        "scheduler-task", "guardrails", "scheduler-ending",
-    ]
+    # DIFF-61: the Rust scheduler recipe opens with the "This run" block;
+    # Django keeps the old order.
+    assert [s["key"] for s in body["sections"]] == list(expect(
+        "DIFF-61",
+        django=(
+            "scheduler-intro", "session-framing", "pidash-cli",
+            "scheduler-task", "guardrails", "scheduler-ending",
+        ),
+        rust=(
+            "this-run", "scheduler-intro", "session-framing", "pidash-cli",
+            "scheduler-task", "guardrails", "scheduler-ending",
+        ),
+    ))
 
 
 def test_list_unknown_work_type_400(api, tenant_a, auth_a):
