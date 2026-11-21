@@ -366,6 +366,18 @@ export function tickerStatusView(ticker: AgentTicker, nowMs: number): AgentStatu
       icon: "pause",
     };
   }
+  if (ticker.disarm_reason === "failure_needs_human" || ticker.disarm_reason === "repeated_failure") {
+    const repeated = ticker.disarm_reason === "repeated_failure";
+    return {
+      title: "Agent ticking is paused after a failure",
+      detail: repeated
+        ? "Several runs in a row failed the same way. Check the failure comment for the cause, then press Re-tick to resume."
+        : "The last run failed in a way a retry cannot fix. Check the failure comment for the cause, then press Re-tick to resume.",
+      badge: "Needs attention",
+      tone: "warning",
+      icon: "alert",
+    };
+  }
   if (ticker.disarm_reason === "cap_hit" || ticker.disarm_reason === "pool_spent") {
     return {
       title: "Agent run budget spent",
