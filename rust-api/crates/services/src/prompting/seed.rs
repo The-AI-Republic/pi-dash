@@ -471,6 +471,10 @@ pub const LEAN_WORKFLOW_RETIRED_MARKERS: &[&str] = &[
     "Autonomy / Escalation",
     "Acceptance Criteria / How to Test",
     "workpad-template",
+    // NEWPIDASH-325: the pre-rewrite workpad recipe fetched the whole body
+    // back before every edit (`pidash workpad get | jq`); the workpad file
+    // round-trip replaced it.
+    "pidash workpad get | jq",
 ];
 
 /// Whether an active override of `section_key` is flagged because the

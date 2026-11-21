@@ -69,6 +69,14 @@ impl OverrideValidationError {
 /// (`validation.py:42-220`). `kind` lands in `run.kind`, as in Python.
 fn issue_sample(kind: &str, populated: bool) -> serde_json::Value {
     if populated {
+        // NEWPIDASH-338 item 9: the populated sample carries the
+        // hand-off as a posted comment too, so the size-budget test
+        // sees it (stripped, as the section renders a posted comment).
+        let handoff = "### Hand-off\n**Produced:** https://example.com/pr/1\n**Acceptance criteria:**\n- The sample works.\n**How to verify:** run the sample.\n**Review focus:** the sample.\n**Next stage:** In Review — a code change.";
+        let comments_section = format!(
+            "### Comment 1 — Human: Sample at 2026-01-01\n\nHello.\n\n### Comment 2 — AI Agent: Sample at 2026-01-01\nAgent run: 00000000-0000-0000-0000-000000000003\n\n{}",
+            super::context::strip_handoff(handoff)
+        );
         serde_json::json!({
             "issue": {
                 "id": "00000000-0000-0000-0000-000000000001",
@@ -162,6 +170,7 @@ fn issue_sample(kind: &str, populated: bool) -> serde_json::Value {
                 "turn_number": 1,
                 "trigger": "tick",
                 "executor_kind": "local_runner",
+                "rendered_at": "2026-01-01T00:00:00Z",
             },
             "available_tools": [],
             "unavailable_capabilities": [],
@@ -185,7 +194,7 @@ fn issue_sample(kind: &str, populated: bool) -> serde_json::Value {
                 "interval_seconds": 10800,
                 "interval_human": "3 hours",
             },
-            "comments_section": "### Comment 1 — Human: Sample at 2026-01-01\n\nHello.",
+            "comments_section": comments_section,
             "parent_done_payload": "{\n  \"pr_url\": \"https://example.com/pr/1\"\n}",
             "workpad_body": "### Path to done\n- **Goal**: sample",
             "stages": {
@@ -197,7 +206,7 @@ fn issue_sample(kind: &str, populated: bool) -> serde_json::Value {
                 "current_stage_switched_off": false,
                 "final_state": "AI Completed",
             },
-            "handoff": "### Hand-off\n**Produced:** https://example.com/pr/1\n**Acceptance criteria:**\n- The sample works.\n**How to verify:** run the sample.\n**Review focus:** the sample.\n**Next stage:** In Review — a code change.",
+            "handoff": handoff,
             "stage_history": "- 2026-01-01 In Progress: done — opened the sample PR",
         })
     } else {
@@ -248,6 +257,7 @@ fn issue_sample(kind: &str, populated: bool) -> serde_json::Value {
                 "turn_number": 1,
                 "trigger": "state_transition",
                 "executor_kind": "local_runner",
+                "rendered_at": "2026-01-01T00:00:00Z",
             },
             "available_tools": [],
             "unavailable_capabilities": [],
@@ -296,6 +306,7 @@ fn scheduler_sample(populated: bool) -> serde_json::Value {
                 "attempt": 1,
                 "turn_number": 1,
                 "executor_kind": "local_runner",
+                "rendered_at": "2026-01-01T00:00:00Z",
             },
             "available_tools": [],
             "unavailable_capabilities": [],
@@ -319,6 +330,7 @@ fn scheduler_sample(populated: bool) -> serde_json::Value {
                 "attempt": 1,
                 "turn_number": 1,
                 "executor_kind": "local_runner",
+                "rendered_at": "2026-01-01T00:00:00Z",
             },
             "available_tools": [],
             "unavailable_capabilities": [],

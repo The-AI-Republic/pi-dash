@@ -1254,6 +1254,12 @@ mod tests {
         ctx["parent"]["state"] = Value::from("Todo");
         ctx["blocked_by"][0]["state"] = Value::from("Todo");
         ctx["handoff"] = Value::from("### Hand-off\n**Produced:** the sample.");
+        // The populated sample's comments carry the sample hand-off
+        // (NEWPIDASH-338 item 9), whose stripped text names a stage
+        // ("Next stage: In Review") — neutralise it here, like every
+        // other stage-name mention in the sample data.
+        ctx["comments_section"] =
+            Value::from("### Comment 1 — Human: Sample at 2026-01-01\n\nHello.");
         ctx
     }
 
@@ -1527,6 +1533,170 @@ mod tests {
                 size <= budget,
                 "{kind}: {size} bytes exceeds budget {budget}"
             );
+        }
+    }
+
+    /// Rendered `pidash-cli` section budget (NEWPIDASH-325 §6.6): the core
+    /// stays at most 6 KB for every kind, on the populated sample context.
+    const CLI_SECTION_BUDGET: usize = 6_000;
+
+    /// Whole-prompt budgets on the populated sample issue (NEWPIDASH-325
+    /// §6.6): the lean change shrank each step, and the CLI rewrite shrinks
+    /// them again (about 7k tokens per step). Lower a budget when the
+    /// prompt shrinks; do not raise one without a design note.
+    const WHOLE_PROMPT_BUDGETS: [(&str, usize); 3] = [
+        (recipes::KIND_CODING_TASK, 56_000),
+        (recipes::KIND_REVIEW, 18_000),
+        (recipes::KIND_TEST, 19_000),
+    ];
+
+    /// Rendered `pidash-cli` section bytes per kind.
+    fn measured_cli_sizes() -> Vec<(&'static str, usize)> {
+        let cli = &registry::get_section("pidash-cli")
+            .expect("pidash-cli")
+            .default_body;
+        [
+            recipes::KIND_CODING_TASK,
+            recipes::KIND_REVIEW,
+            recipes::KIND_TEST,
+            recipes::KIND_SCHEDULER,
+        ]
+        .iter()
+        .map(|kind| {
+            let ctx = crate::prompting::validation::sample_contexts(kind)
+                .into_iter()
+                .next()
+                .expect("populated sample first");
+            let len = renderer::render(cli, &ctx).expect("cli renders").len();
+            (*kind, len)
+        })
+        .collect()
+    }
+
+    #[test]
+    fn rendered_cli_section_stays_within_budget() {
+        for (kind, size) in measured_cli_sizes() {
+            eprintln!("{kind}: pidash-cli section {size} bytes (budget {CLI_SECTION_BUDGET})");
+            assert!(
+                size <= CLI_SECTION_BUDGET,
+                "{kind}: pidash-cli section {size} bytes exceeds budget {CLI_SECTION_BUDGET}"
+            );
+        }
+    }
+
+    #[test]
+    fn rendered_whole_prompts_stay_within_budgets() {
+        for (kind, budget) in WHOLE_PROMPT_BUDGETS {
+            let ctx = crate::prompting::validation::sample_contexts(kind)
+                .into_iter()
+                .next()
+                .expect("populated sample first");
+            let size = compose_ctx(kind, "software", &ctx).len();
+            eprintln!("{kind}: whole prompt {size} bytes (budget {budget})");
+            assert!(
+                size <= budget,
+                "{kind}: whole prompt {size} bytes exceeds budget {budget}"
+            );
+        }
+    }
+
+    /// Rendered-prompt fixtures for the runner-side prompt↔CLI contract
+    /// test (NEWPIDASH-325 §6.9): one file per recipe kind, with stage
+    /// settings covering Auto and a switched-off stage (scheduler kinds
+    /// have no stages, so they render the populated and minimal samples).
+    /// The runner test parses every `pidash …` line in these files with the
+    /// real clap `Command`, so a prompt change that teaches an unparsable
+    /// command fails there. Regenerate with
+    /// `UPDATE_PROMPT_FIXTURES=1 cargo test -p pidash-services prompting::composer::`
+    /// after an intended prompt change; otherwise the checked-in files must
+    /// match byte for byte (`fixtures/prompting/rendered/`).
+    const RENDERED_ISSUE_KINDS: [&str; 3] = [
+        recipes::KIND_CODING_TASK,
+        recipes::KIND_REVIEW,
+        recipes::KIND_TEST,
+    ];
+
+    /// `(fixture file stem, kind, context)`: the Auto render plus the
+    /// switched-off-stage render per issue kind, and both scheduler
+    /// samples. The switched-off variant keeps the populated sample's
+    /// data and flips the stage settings (no review/test stages, and the
+    /// current-stage-switched-off branch for review/test), so the export
+    /// covers both lifecycle branches; `agent_decides` is false there so
+    /// the no-choice branch renders too.
+    fn rendered_fixture_cases() -> Vec<(String, &'static str, Value)> {
+        let mut cases = Vec::new();
+        for kind in RENDERED_ISSUE_KINDS {
+            let auto = crate::prompting::validation::sample_contexts(kind)
+                .into_iter()
+                .next()
+                .expect("populated sample first");
+            cases.push((format!("{kind}-auto"), kind, auto.clone()));
+            let mut off = auto;
+            off["stages"] = serde_json::json!({
+                "agent_decides": false,
+                "review": false,
+                "test": false,
+                "path": ["In Progress", "AI Completed"],
+                "current_runs_automatically": false,
+                "current_stage_switched_off": kind != recipes::KIND_CODING_TASK,
+                "final_state": "AI Completed",
+            });
+            cases.push((format!("{kind}-switchedoff"), kind, off));
+        }
+        let mut scheduler = crate::prompting::validation::sample_contexts(recipes::KIND_SCHEDULER);
+        let minimal = scheduler.pop().expect("minimal scheduler sample");
+        let populated = scheduler.pop().expect("populated scheduler sample");
+        cases.push((
+            "scheduler-populated".to_owned(),
+            recipes::KIND_SCHEDULER,
+            populated,
+        ));
+        cases.push((
+            "scheduler-minimal".to_owned(),
+            recipes::KIND_SCHEDULER,
+            minimal,
+        ));
+        cases
+    }
+
+    fn rendered_fixture_path(stem: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(format!(
+            "{}/../../fixtures/prompting/rendered/{stem}.md",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+    }
+
+    #[test]
+    fn rendered_prompts_match_fixtures() {
+        let regenerate = std::env::var("UPDATE_PROMPT_FIXTURES").as_deref() == Ok("1");
+        for (stem, kind, ctx) in rendered_fixture_cases() {
+            let text = compose(
+                kind,
+                None,
+                None,
+                &OverrideIndex::new(),
+                &ctx,
+                None,
+                None,
+                None,
+            )
+            .unwrap_or_else(|err| panic!("{stem} composes: {}", err.message()))
+            .text;
+            let path = rendered_fixture_path(&stem);
+            if regenerate {
+                std::fs::create_dir_all(path.parent().expect("rendered dir"))
+                    .expect("rendered dir creatable");
+                std::fs::write(&path, &text).expect("fixture writable");
+                eprintln!("{stem}: regenerated ({} bytes)", text.len());
+            } else {
+                let expected = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+                    panic!("{stem}: missing fixture; regenerate with UPDATE_PROMPT_FIXTURES=1")
+                });
+                assert_eq!(
+                    text, expected,
+                    "{stem}: rendered prompt changed; regenerate with UPDATE_PROMPT_FIXTURES=1"
+                );
+            }
         }
     }
 

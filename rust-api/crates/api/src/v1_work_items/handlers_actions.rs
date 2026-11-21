@@ -740,6 +740,9 @@ pub struct YieldRun {
     pub done_payload: Option<Value>,
     /// `AgentRun.scheduler_binding_id` (nullable; set on scheduler runs).
     pub scheduler_binding_id: Option<Uuid>,
+    /// `AgentRun.phase_kind`, stamped at creation (read with the row, so
+    /// `finish` never re-selects it — NEWPIDASH-338 item 7).
+    pub phase_kind: String,
 }
 
 pub(super) async fn fetch_yield_run(
@@ -755,6 +758,7 @@ pub(super) async fn fetch_yield_run(
         workspace_id: row.workspace_id,
         done_payload: row.done_payload,
         scheduler_binding_id: row.scheduler_binding_id,
+        phase_kind: row.phase_kind,
     }))
 }
 

@@ -148,7 +148,11 @@
         "run_config": {
           "repo_ref": "main",
           "repo_url": "https://example.com/fx6.git",
-          "git_work_branch": null
+          "git_work_branch": null,
+          "issue_identifier": "FX6-1",
+          "project_identifier": "FX6",
+          "workpad_body": "",
+          "workpad_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         },
         "executor_kind": "local_runner",
         "tool_plan": {},
@@ -184,7 +188,11 @@
         "run_config": {
           "repo_ref": "main",
           "repo_url": "https://example.com/fx6.git",
-          "git_work_branch": null
+          "git_work_branch": null,
+          "issue_identifier": "FX6-1",
+          "project_identifier": "FX6",
+          "workpad_body": "",
+          "workpad_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         },
         "executor_kind": "local_runner",
         "tool_plan": {},

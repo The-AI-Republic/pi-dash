@@ -399,6 +399,36 @@ def test_summary_requires_auth(anon_client, world):
     assert anon_client.get(f"{pages_base(world)}/pages-summary/").status_code in (401, 403)
 
 
+def test_summary_ignores_soft_deleted_project_link(user_client, world, seeder, db):
+    """pages-summary skips a page whose only URL-project link is soft-deleted.
+
+    NEWPIDASH-343: ``PageViewSet.summary`` (``app/views/page/base.py:476``)
+    annotates ``project=Exists(ProjectPage.objects.filter(...))`` and
+    ``ProjectPage.objects`` is a ``SoftDeletionManager`` (``db/mixins.py:58``),
+    so a soft-deleted ``project_pages`` link never matches. The Rust
+    ``summary_query`` joined ``project_pages pp`` on ``project_id`` alone and
+    counted the page. The ghost page keeps a live link to a second project
+    (the NEWPIDASH-240 move state that makes this reachable) but must not
+    count toward the URL project, and the list omits it on both backends.
+    """
+    ghost = seeder.create_page(world["workspace"]["id"], world["owner"]["id"], name="Ghost")
+    seeder.link_page_project(world["workspace"]["id"], world["project"]["id"], ghost["id"])
+    db.execute(
+        "UPDATE project_pages SET deleted_at=now() WHERE page_id=%s AND project_id=%s",
+        (ghost["id"], world["project"]["id"]),
+    )
+    other_project = seeder.create_project(world["workspace"]["id"])
+    seeder.create_project_member(
+        world["workspace"]["id"], other_project["id"], world["owner"]["id"], role=20
+    )
+    seeder.link_page_project(world["workspace"]["id"], other_project["id"], ghost["id"])
+    response = user_client.get(f"{pages_base(world)}/pages-summary/")
+    assert response.status_code == 200
+    assert response.json() == {"public_pages": 1, "private_pages": 0, "archived_pages": 0}
+    rows = user_client.get(page_url(world)).json()
+    assert ghost["id"] not in {row["id"] for row in rows}
+
+
 def _page_label_rows(db, page_id):
     """``(label_id, deleted_at_is_null)`` for the page, label-id ordered."""
     return [
@@ -470,3 +500,66 @@ def test_partial_update_labels_clear_keeps_soft_rows(user_client, world, seeder,
     assert _page_label_rows(db, world["page"]["id"]) == sorted(
         [(label_x["id"], False), (label_y["id"], False)]
     )
+
+
+def _multi_linked_page(seeder, world, db):
+    """A page linked to the URL project plus four links the caller cannot
+    use through ``project_ids`` (NEWPIDASH-344): a live link to a private
+    project the caller is not a member of, a live link to a project whose
+    membership is inactive, a live link to an archived project, and a
+    soft-deleted link to an accessible project (which Django still lists —
+    the M2M traversal carries no ``deleted_at`` predicate — so the
+    expectation keeps it)."""
+    private_project = seeder.create_project(world["workspace"]["id"])
+    dormant_project = seeder.create_project(world["workspace"]["id"])
+    seeder.create_project_member(
+        world["workspace"]["id"], dormant_project["id"], world["owner"]["id"], role=20
+    )
+    db.execute(
+        "UPDATE project_members SET is_active = false WHERE project_id = %s AND member_id = %s",
+        (dormant_project["id"], world["owner"]["id"]),
+    )
+    archived_project = seeder.create_project(world["workspace"]["id"])
+    seeder.create_project_member(
+        world["workspace"]["id"], archived_project["id"], world["owner"]["id"], role=20
+    )
+    db.execute("UPDATE projects SET archived_at = now() WHERE id = %s", (archived_project["id"],))
+    stale_project = seeder.create_project(world["workspace"]["id"])
+    seeder.create_project_member(
+        world["workspace"]["id"], stale_project["id"], world["owner"]["id"], role=20
+    )
+    page = seeder.create_page(world["workspace"]["id"], world["owner"]["id"], name="Multi-linked")
+    seeder.link_page_project(world["workspace"]["id"], world["project"]["id"], page["id"])
+    seeder.link_page_project(world["workspace"]["id"], private_project["id"], page["id"])
+    seeder.link_page_project(world["workspace"]["id"], dormant_project["id"], page["id"])
+    seeder.link_page_project(world["workspace"]["id"], archived_project["id"], page["id"])
+    seeder.link_page_project(world["workspace"]["id"], stale_project["id"], page["id"])
+    db.execute(
+        "UPDATE project_pages SET deleted_at = now() WHERE page_id = %s AND project_id = %s AND deleted_at IS NULL",
+        (page["id"], stale_project["id"]),
+    )
+    return page, stale_project
+
+
+def _expected_project_ids(world, stale_project):
+    # ArrayAgg has no ORDER BY, so compare order-insensitively.
+    return sorted([world["project"]["id"], stale_project["id"]])
+
+
+def test_list_project_ids_excludes_inaccessible_projects(user_client, world, seeder, db):
+    """NEWPIDASH-344: ``project_ids`` lists only linked projects the caller
+    can access — not a private project they are not in, not an inactive
+    membership, not an archived project. A soft-deleted link to an
+    accessible project stays, matching Django's filtered join."""
+    page, stale_project = _multi_linked_page(seeder, world, db)
+    rows = user_client.get(page_url(world)).json()
+    row = next(row for row in rows if row["id"] == page["id"])
+    assert sorted(row["project_ids"]) == _expected_project_ids(world, stale_project)
+
+
+def test_retrieve_project_ids_excludes_inaccessible_projects(user_client, world, seeder, db):
+    """NEWPIDASH-344: retrieve agrees with the list."""
+    page, stale_project = _multi_linked_page(seeder, world, db)
+    response = user_client.get(page_url(world, page["id"]), params={"track_visit": "false"})
+    assert response.status_code == 200
+    assert sorted(response.json()["project_ids"]) == _expected_project_ids(world, stale_project)

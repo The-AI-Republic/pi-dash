@@ -7,8 +7,9 @@
 //! `unexpected status <code> ...` string. A retry cannot change the outcome,
 //! so lanes stop the turn on the first such notice instead of forwarding it.
 //!
-//! Chat's `ChatFailed.code` mapping lives in `crate::ipc::chat`; this module
-//! only knows the wire shape and the gateway's text.
+//! The local-chat `ChatFailed.code` mapping lives here too, so the runner's
+//! per-session lane (`crate::ipc::chat`) and the shared engine server
+//! (`crate::pidash_agent::chat_server`) classify gateway answers identically.
 
 /// Split the engine's `unexpected status 402 Payment Required: <text>, url:
 /// <endpoint>, request id: <id>` into the status and the gateway's text.
@@ -63,6 +64,86 @@ pub fn gateway_refusal(method: &str, params: &serde_json::Value) -> Option<(u64,
         return None;
     }
     Some((status, text))
+}
+
+/// `ChatFailed.code` for a model gateway that answered 402: the account has
+/// no credit left. The detail is the gateway's own sentence.
+pub const CHAT_MODEL_CREDIT_EXHAUSTED: &str = "model_credit_exhausted";
+/// `ChatFailed.code` for a model gateway that answered 401: the credential
+/// the engine holds is not accepted.
+pub const CHAT_MODEL_AUTH_FAILED: &str = "model_auth_failed";
+/// `ChatFailed.code` for an engine turn that failed on its own.
+pub const CHAT_AGENT_FAILED: &str = "agent_failed";
+
+/// The `ChatFailed.code` for a gateway status that repeating the request
+/// cannot change, or `None` for one worth retrying.
+pub fn gateway_refusal_code(status: u64) -> Option<&'static str> {
+    match status {
+        401 => Some(CHAT_MODEL_AUTH_FAILED),
+        402 => Some(CHAT_MODEL_CREDIT_EXHAUSTED),
+        _ => None,
+    }
+}
+
+/// Recognise the engine's "I will retry" notice for a gateway answer that no
+/// retry can change, as `(ChatFailed code, gateway text)`. Both chat turn
+/// drivers use this so a 401/402 stops the turn before the engine retries.
+pub fn gateway_chat_refusal(
+    method: &str,
+    params: &serde_json::Value,
+) -> Option<(&'static str, String)> {
+    let (status, text) = gateway_refusal(method, params)?;
+    Some((gateway_refusal_code(status)?, text))
+}
+
+/// Whether a raw engine frame is an assistant text delta. `drive_turn` in
+/// `crate::ipc::chat` and the shared server's driver both map these to the
+/// `assistant_delta` chat event kind; everything else raw stays `raw`.
+pub fn is_assistant_text_delta(method: &str, params: &serde_json::Value) -> bool {
+    if method == "item/agentMessage/delta" {
+        return assistant_delta_text(params).is_some();
+    }
+    method == "stream_event/content_block_delta"
+        && params
+            .get("delta")
+            .and_then(|delta| delta.get("type"))
+            .and_then(|value| value.as_str())
+            == Some("text_delta")
+        && params
+            .get("delta")
+            .and_then(|delta| delta.get("text"))
+            .and_then(|value| value.as_str())
+            .is_some()
+}
+
+fn assistant_delta_text(params: &serde_json::Value) -> Option<&str> {
+    if let Some(delta) = params.get("delta") {
+        if let Some(text) = delta.as_str() {
+            return Some(text);
+        }
+        if let Some(text) = delta.get("text").and_then(|value| value.as_str()) {
+            return Some(text);
+        }
+    }
+    params.get("text").and_then(|value| value.as_str())
+}
+
+/// The human-readable assistant text carried by a completed turn's `done`
+/// payload, if it carries one as text. Both turn drivers use this for the
+/// terminal `ChatMessageCompleted.assistant_message`.
+pub fn assistant_text_from_done_payload(payload: &serde_json::Value) -> Option<String> {
+    if let Some(text) = payload.as_str() {
+        return Some(text.to_string());
+    }
+    let obj = payload.as_object()?;
+    for key in ["result", "message", "text", "output", "summary", "content"] {
+        if let Some(text) = obj.get(key).and_then(|value| value.as_str())
+            && !text.is_empty()
+        {
+            return Some(text.to_string());
+        }
+    }
+    None
 }
 
 #[cfg(test)]

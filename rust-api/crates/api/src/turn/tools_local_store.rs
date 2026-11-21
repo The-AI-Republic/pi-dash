@@ -378,14 +378,16 @@ pub trait ToolStore {
         project_id: &Uuid,
     ) -> Result<Vec<StateRow>, StoreError>;
 
-    /// The project's `settings` blob, for the stage switches the
-    /// dispatch tool honours. Defaults to `{}` (all defaults).
+    /// The project's stage switches, for the dispatch tool's
+    /// switched-off-stage check. Defaults to both stages on.
+    /// Implemented by the one stage-switch read in
+    /// `pidash_services::domain::project_settings` (NEWPIDASH-338 item 8).
     async fn project_settings(
         &self,
         _deps: &AssistantDeps,
         _project_id: &Uuid,
-    ) -> Result<serde_json::Value, StoreError> {
-        Ok(serde_json::Value::Object(serde_json::Map::new()))
+    ) -> Result<pidash_types::orchestration::StageSwitches, StoreError> {
+        Ok(pidash_types::orchestration::StageSwitches::ALL)
     }
 
     /// `Label.objects.filter(project_id, workspace__slug)` in name
@@ -1400,17 +1402,11 @@ impl ToolStore for PgToolStore {
         &self,
         _deps: &AssistantDeps,
         project_id: &Uuid,
-    ) -> Result<serde_json::Value, StoreError> {
+    ) -> Result<pidash_types::orchestration::StageSwitches, StoreError> {
         let db = pidash_db::pool::sea_orm_connection(&self.pool);
-        let settings: Option<serde_json::Value> =
-            pidash_db::entity::projects::Entity::find_by_id(*project_id)
-                .select_only()
-                .column(pidash_db::entity::projects::Column::Settings)
-                .into_tuple()
-                .one(&db)
-                .await
-                .map_err(orm_err)?;
-        Ok(settings.unwrap_or(serde_json::Value::Null))
+        pidash_services::domain::project_settings::stage_switches_for_project(&db, *project_id)
+            .await
+            .map_err(orm_err)
     }
 
     async fn project_states(

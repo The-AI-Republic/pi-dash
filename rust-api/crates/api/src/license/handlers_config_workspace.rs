@@ -2350,7 +2350,9 @@ async fn list_workspaces(
         Err(err) => return Denial::BadDetail(err.detail()).into_response(),
     };
     let page = cursor.offset;
-    let offset = page.saturating_mul(per_page);
+    // `page` rides `i128` (NEWPIDASH-345); the negativity check runs in
+    // `i128` and the DB fetch takes the saturated `i64` page below.
+    let offset = page.saturating_mul(per_page as i128);
     if offset < 0 {
         // `BadPaginationError("Pagination offset cannot be negative")`.
         return Denial::BadDetail("Error in parsing".to_owned()).into_response();
@@ -2367,10 +2369,13 @@ async fn list_workspaces(
         Ok(total) => total,
         Err(denial) => return denial.into_response(),
     };
+    // The DB `OFFSET` stays `i64`: a huge positive page saturates to an
+    // empty page past the end (NEWPIDASH-345).
+    let db_page = page.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
     let (rows, has_more) = match pidash_db::license::queries::fetch_workspace_page(
         &pool,
         search.as_deref(),
-        page,
+        db_page,
         per_page,
     )
     .await

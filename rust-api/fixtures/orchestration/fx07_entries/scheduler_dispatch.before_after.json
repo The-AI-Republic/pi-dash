@@ -68,7 +68,9 @@
             "section_key": "scheduler-ending"
           }
         ],
-        "run_config": {},
+        "run_config": {
+          "project_identifier": "FX7"
+        },
         "executor_kind": "local_runner",
         "tool_plan": {},
         "error_code": "",
@@ -202,7 +204,9 @@
         "work_item": null,
         "prompt": "",
         "prompt_manifest": null,
-        "run_config": {},
+        "run_config": {
+          "project_identifier": "FX7"
+        },
         "executor_kind": "local_runner",
         "tool_plan": {},
         "error_code": "run_quota_exceeded",
@@ -235,7 +239,9 @@
         "work_item": null,
         "prompt": "",
         "prompt_manifest": null,
-        "run_config": {},
+        "run_config": {
+          "project_identifier": "FX7"
+        },
         "executor_kind": "local_runner",
         "tool_plan": {},
         "error_code": "prompt_build_failed",

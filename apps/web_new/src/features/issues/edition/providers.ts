@@ -53,6 +53,8 @@ export interface WorkItemTypeOption {
   id: string;
   name: string;
   color?: string | null;
+  /** The project's default type (NEWPIDASH-361): preselected on create. */
+  isDefault?: boolean | undefined;
 }
 
 /** Properties the detail badge surface reads for one issue. */

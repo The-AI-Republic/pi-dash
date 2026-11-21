@@ -43,7 +43,7 @@
       "all_sections_sorted": true,
       "get_section_unknown": "PromptRegistryError: unknown section key: 'no-such-section'",
       "max_section_body_length": 100000,
-      "section_count": 27,
+      "section_count": 28,
       "sections": [
         {
           "key": "analyze-and-scope",
@@ -53,8 +53,8 @@
           "is_overridable": true,
           "allows_workspace_override": true,
           "allows_personal_override": true,
-          "body_len": 6026,
-          "body_sha256": "4025d3c1708c92a7d3f0a45700df25c18582fec1d5cc530cd2e7e36aa7e0b881"
+          "body_len": 6033,
+          "body_sha256": "db25d8cb6221468b3b155bd28f50b8b46ac60659b429c719df9340ce83d26dea"
         },
         {
           "key": "autonomy",
@@ -75,8 +75,8 @@
           "is_overridable": false,
           "allows_workspace_override": false,
           "allows_personal_override": false,
-          "body_len": 1786,
-          "body_sha256": "fcc06b57dc2244df38dccc7dbf3181db90107cd9fbf410dfaa792bb8a9c1910d"
+          "body_len": 1799,
+          "body_sha256": "b09dcafc8d97935fb9af3c7872ad679aa6346cc7ec5c6623068e3fa3e69d9f81"
         },
         {
           "key": "default-posture",
@@ -130,8 +130,8 @@
           "is_overridable": false,
           "allows_workspace_override": false,
           "allows_personal_override": false,
-          "body_len": 690,
-          "body_sha256": "1b3041b9a5a8eeb928ca02886033159ad7bfa8e56c5e9bad421676cdea80f2dc"
+          "body_len": 672,
+          "body_sha256": "c77ee563fa0a2b2e1f9195bee5cbf2df2c92350c3af40b5241d77563e20ee47d"
         },
         {
           "key": "implementation",
@@ -163,8 +163,8 @@
           "is_overridable": false,
           "allows_workspace_override": false,
           "allows_personal_override": false,
-          "body_len": 3573,
-          "body_sha256": "12b2bdf4084b29f6914c5c66782cb48e1c92aceeafe977d179997bcbc690d21a"
+          "body_len": 3721,
+          "body_sha256": "369e36eb34626d0cd83e7307f6b5715bad47d861e4704aaaba22353a41f65da6"
         },
         {
           "key": "pidash-cli",
@@ -174,8 +174,8 @@
           "is_overridable": false,
           "allows_workspace_override": false,
           "allows_personal_override": false,
-          "body_len": 37435,
-          "body_sha256": "4d49407c582ce01c5c4cae3da9ed87bc0a4ee672148652d4f387d8b4d4a64b80"
+          "body_len": 5164,
+          "body_sha256": "3836d37977727f4b5fa9448307ef0b76523220f294ec873f8e4bed2043ac8121"
         },
         {
           "key": "relationships",
@@ -218,8 +218,8 @@
           "is_overridable": false,
           "allows_workspace_override": false,
           "allows_personal_override": false,
-          "body_len": 1494,
-          "body_sha256": "cade44ad72d95fd36f662f9da9898d20cba62f70d77266c68abe73cdcd90dd59"
+          "body_len": 1501,
+          "body_sha256": "a92eb2784b33747ef50c6d0eb68ada6fa758dc0bdf5154e5d50af823e4908b14"
         },
         {
           "key": "scheduler-ending",
@@ -332,6 +332,17 @@
           "body_sha256": "c4a8e5ec816b2ac799d9dbb10a1e4356d0f7ca5875b4e370c48a5516c1b4f716"
         },
         {
+          "key": "this-run",
+          "title": "This run",
+          "customizable": "locked",
+          "is_locked": true,
+          "is_overridable": false,
+          "allows_workspace_override": false,
+          "allows_personal_override": false,
+          "body_len": 413,
+          "body_sha256": "097a4b80a04a572ded7bfd1ab1fbc877d444798144b2ce4801caa3eba0025905"
+        },
+        {
           "key": "workpad",
           "title": "Workpad",
           "customizable": "overridable",
@@ -339,8 +350,8 @@
           "is_overridable": true,
           "allows_workspace_override": true,
           "allows_personal_override": true,
-          "body_len": 1419,
-          "body_sha256": "4fae3a64e372b12151f74856ad6cc0d2b81fcb0274c26dba42d39bb7b5fd7af1"
+          "body_len": 1396,
+          "body_sha256": "c012290ec1131d919fff5b86ce67f4f2377543b980a1975beb19025e32171331"
         }
       ],
       "sections_dir_glob": "*.md",

@@ -8,11 +8,12 @@ mod comment;
 pub mod config_cmd;
 pub mod connect;
 pub mod context;
+pub mod docs;
 pub mod doctor;
-pub mod pidash_agent_cmd;
 mod install;
 pub mod issue;
 pub mod managed;
+pub mod pidash_agent_cmd;
 // `pub` so the CLI contract tests can drive the label subcommands directly.
 pub mod label;
 // `pub` so the CLI contract tests can drive the page subcommands directly.
@@ -42,6 +43,231 @@ mod workspace;
 /// Re-exported for integration tests that want to exercise the daemon-entry
 /// error paths without routing through clap.
 pub use run::Args as RunArgs;
+
+/// Whether a top-level `pidash` subcommand may run inside an agent run
+/// (NEWPIDASH-320 §6.5). Agent commands are the run's own tools (issue,
+/// comment, workpad, …); everything that manages the runner, its service
+/// or the operator's login is refused in-run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandClass {
+    Agent,
+    Operator,
+}
+
+use CommandClass::{Agent, Operator};
+
+/// Every top-level subcommand and its class, keyed by the clap command
+/// name. The single source of truth for the in-run refusal and the
+/// filtered `--help`. `command_name`'s exhaustive match fails to compile
+/// on a new variant, and `every_subcommand_is_classified` fails on a
+/// name missing here.
+const COMMAND_CLASSES: &[(&str, CommandClass)] = &[
+    ("login", Operator),
+    ("auth", Operator),
+    ("connect", Operator),
+    ("config", Operator),
+    ("runner", Operator),
+    ("project", Agent),
+    ("context", Agent),
+    ("install", Operator),
+    ("uninstall", Operator),
+    ("start", Operator),
+    ("stop", Operator),
+    ("restart", Operator),
+    ("reconnect", Operator),
+    ("status", Operator),
+    ("tui", Operator),
+    ("doctor", Operator),
+    ("update", Operator),
+    ("engine", Operator),
+    ("remove", Operator),
+    ("ai", Operator),
+    ("issue", Agent),
+    ("label", Agent),
+    ("comment", Agent),
+    ("page", Agent),
+    ("state", Agent),
+    ("scheduler", Agent),
+    ("workpad", Agent),
+    ("workspace", Operator),
+    ("run", Agent),
+    ("docs", Agent),
+    ("__run", Operator),
+    ("__managed", Operator),
+    ("__engine", Operator),
+];
+
+/// The clap command name for a parsed subcommand. Exhaustive on purpose:
+/// adding a variant without a name here is a compile error, which forces
+/// the author to also pick its [`CommandClass`] in [`COMMAND_CLASSES`].
+fn command_name(cmd: &Command) -> &'static str {
+    match cmd {
+        Command::Login(_) => "login",
+        Command::Auth(_) => "auth",
+        Command::Connect(_) => "connect",
+        Command::Config(_) => "config",
+        Command::Runner(_) => "runner",
+        Command::Project(_) => "project",
+        Command::Context(_) => "context",
+        Command::Install(_) => "install",
+        Command::Uninstall(_) => "uninstall",
+        Command::Start(_) => "start",
+        Command::Stop(_) => "stop",
+        Command::Restart(_) => "restart",
+        Command::Reconnect(_) => "reconnect",
+        Command::Status(_) => "status",
+        Command::Tui(_) => "tui",
+        Command::Doctor(_) => "doctor",
+        Command::Update(_) => "update",
+        Command::Engine(_) => "engine",
+        Command::Remove(_) => "remove",
+        Command::Ai(_) => "ai",
+        Command::Issue(_) => "issue",
+        Command::Docs(_) => "docs",
+        Command::Label(_) => "label",
+        Command::Comment(_) => "comment",
+        Command::Page(_) => "page",
+        Command::State(_) => "state",
+        Command::Scheduler(_) => "scheduler",
+        Command::Workpad(_) => "workpad",
+        Command::Workspace(_) => "workspace",
+        Command::RunCmd(_) => "run",
+        Command::Run(_) => "__run",
+        Command::Managed(_) => "__managed",
+        Command::EngineHelper(_) => "__engine",
+    }
+}
+
+/// The class of a parsed subcommand, or `None` when its name is missing
+/// from [`COMMAND_CLASSES`] (a bug the classification test catches).
+pub fn classify_command(cmd: &Command) -> Option<CommandClass> {
+    classify_name(command_name(cmd))
+}
+
+/// The class for a clap command name, or `None` when unclassified.
+/// Table lookup, so tests can pin every pinned name without building
+/// arg structs.
+pub fn classify_name(name: &str) -> Option<CommandClass> {
+    COMMAND_CLASSES
+        .iter()
+        .find(|(entry, _)| *entry == name)
+        .map(|(_, class)| *class)
+}
+
+/// Error JSON printed when an operator command is refused inside a run.
+pub const OPERATOR_REFUSED_ERROR: &str =
+    r#"{"error": "operator command not available inside an agent run"}"#;
+
+/// Whether this process runs inside an agent run: the daemon exports
+/// `PIDASH_RUN_ID` on every agent process (see `util::shell::RunEnv`).
+/// Chat sessions never set it.
+pub fn in_agent_run() -> bool {
+    std::env::var_os(crate::api_client::RUN_ID_ENV).is_some_and(|v| !v.is_empty())
+}
+
+/// Operator bypass for genuine debugging inside a shell that inherited
+/// the run variable (NEWPIDASH-320 §6.5).
+pub fn operator_bypassed() -> bool {
+    std::env::var_os("PIDASH_ALLOW_OPERATOR").is_some_and(|v| v == "1")
+}
+
+/// The refusal for an operator subcommand named on the command line,
+/// checked before clap parsing (NEWPIDASH-320 §6.5). Clap validates
+/// required flags first, so a refusal inside `run()` would come back as
+/// a usage error instead of the refusal JSON for commands like
+/// `pidash runner add` (whose `--project` is required). Help and version
+/// requests are exempt: reading help is never an operation.
+pub fn early_operator_refusal(argv: &[String]) -> Option<&'static str> {
+    let run_id = std::env::var(crate::api_client::RUN_ID_ENV).ok();
+    early_refusal_for(argv, run_id.as_deref(), operator_bypassed())
+}
+
+/// Pure core of [`early_operator_refusal`] for unit tests.
+fn early_refusal_for(argv: &[String], run_id: Option<&str>, bypass: bool) -> Option<&'static str> {
+    if run_id.is_none_or(|id| id.is_empty()) || bypass {
+        return None;
+    }
+    if argv.iter().any(|arg| {
+        arg == "-h" || arg == "--help" || arg == "-V" || arg == "--version" || arg == "help"
+    }) {
+        return None;
+    }
+    // Skip the binary name plus global flags and their values; the first
+    // remaining positional is the subcommand.
+    let mut args = argv.iter().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--config-dir" || arg == "--data-dir" || arg == "--log" {
+            args.next();
+            continue;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        if classify_name(arg) == Some(Operator) {
+            return Some(OPERATOR_REFUSED_ERROR);
+        }
+        return None;
+    }
+    None
+}
+
+/// The refusal for `cmd` inside an agent run, if it is refused: operator
+/// commands exit non-zero with [`OPERATOR_REFUSED_ERROR`] unless the
+/// bypass is set. Pure over its inputs so the rule is unit-testable.
+pub fn refusal_for(
+    class: Option<CommandClass>,
+    run_id: Option<&str>,
+    bypass: bool,
+) -> Option<&'static str> {
+    if run_id.is_some_and(|id| !id.is_empty()) && !bypass && class == Some(Operator) {
+        Some(OPERATOR_REFUSED_ERROR)
+    } else {
+        None
+    }
+}
+
+/// Whether this invocation should render the filtered top-level help
+/// (NEWPIDASH-320 §6.5): inside an agent run, `pidash --help`, `pidash -h`
+/// and the equivalent `pidash help` list only agent commands. Pure over
+/// its inputs so the rule is unit-testable; per-command help (`pidash
+/// <cmd> --help`, `pidash help <cmd>`) keeps clap's default rendering.
+pub fn wants_filtered_help_for(argv: &[String], in_run: bool, bypassed: bool) -> bool {
+    if !in_run || bypassed || argv.len() != 2 {
+        return false;
+    }
+    matches!(argv[1].as_str(), "--help" | "-h" | "help")
+}
+
+/// Env-reading wrapper for [`wants_filtered_help_for`].
+pub fn wants_filtered_help(argv: &[String]) -> bool {
+    wants_filtered_help_for(argv, in_agent_run(), operator_bypassed())
+}
+
+/// Top-level help with operator commands hidden, for agent runs
+/// (NEWPIDASH-320 §6.5). `pidash --help` inside a run lists only agent
+/// commands, plus a note saying the rest are refused.
+pub fn agent_help() -> String {
+    let mut cmd = Cli::command();
+    let hidden: Vec<&str> = COMMAND_CLASSES
+        .iter()
+        .filter(|(_, class)| *class == Operator)
+        .map(|(name, _)| *name)
+        .collect();
+    // `Command::hide` takes ownership, so swap each hidden subcommand out,
+    // hide it, and put it back.
+    for sub in cmd.get_subcommands_mut() {
+        if hidden.contains(&sub.get_name()) {
+            let owned = std::mem::replace(sub, clap::Command::new(""));
+            *sub = owned.hide(true);
+        }
+    }
+    cmd.after_help(
+        "Inside an agent run (PIDASH_RUN_ID is set) only the agent commands above are available; \
+         operator commands are refused. Set PIDASH_ALLOW_OPERATOR=1 to bypass for debugging.",
+    )
+    .render_help()
+    .to_string()
+}
 
 #[doc(hidden)]
 pub async fn run_for_tests(args: RunArgs, paths: &crate::util::paths::Paths) -> anyhow::Result<()> {
@@ -142,6 +368,10 @@ pub enum Command {
     /// Read or update a Pi Dash work item (fetch, change state, edit fields).
     Issue(issue::IssueArgs),
 
+    /// Show the on-demand CLI reference (`docs <topic>` for the full text
+    /// behind the prompt's core commands).
+    Docs(docs::DocsArgs),
+
     /// Manage a project's labels (`label list` / `create` / `update` /
     /// `delete`). Attaching a label to a work item lives on `pidash issue`.
     Label(label::LabelArgs),
@@ -198,6 +428,19 @@ pub async fn run(cli: Cli) -> Result<()> {
         return run_default(&paths).await;
     };
 
+    // Operator commands are refused inside an agent run (NEWPIDASH-320
+    // §6.5): they manage the runner or the operator's login, never the
+    // run. `PIDASH_ALLOW_OPERATOR=1` bypasses for debugging.
+    let run_id = std::env::var(crate::api_client::RUN_ID_ENV).ok();
+    if let Some(error) = refusal_for(
+        classify_command(&command),
+        run_id.as_deref(),
+        operator_bypassed(),
+    ) {
+        eprintln!("{error}");
+        std::process::exit(2);
+    }
+
     match command {
         Command::Login(args) => auth::login::run(args, &paths).await,
         Command::Auth(args) => auth::run(args, &paths).await,
@@ -220,6 +463,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Remove(args) => remove::run(args, &paths).await,
         Command::Ai(args) => ai::run(args, &paths).await,
         Command::Issue(args) => run_crud(issue::run(args, &paths).await),
+        Command::Docs(args) => run_crud(docs::run(args)),
         Command::Label(args) => run_crud(label::run(args, &paths).await),
         Command::Comment(args) => run_crud(comment::run(args, &paths).await),
         Command::Page(args) => run_crud(page::run(args, &paths).await),
@@ -253,8 +497,14 @@ async fn run_default(paths: &crate::util::paths::Paths) -> Result<()> {
         };
         return auth::run(args, paths).await;
     }
-    Cli::command().print_help()?;
-    println!();
+    // Inside an agent run the bare command lists only agent commands
+    // (NEWPIDASH-320 §6.5), like `pidash --help` does.
+    if in_agent_run() && !operator_bypassed() {
+        print!("{}", agent_help());
+    } else {
+        Cli::command().print_help()?;
+        println!();
+    }
     Ok(())
 }
 
@@ -263,5 +513,241 @@ fn run_crud(code: i32) -> Result<()> {
         Ok(())
     } else {
         std::process::exit(code);
+    }
+}
+
+#[cfg(test)]
+mod prompt_contract;
+
+#[cfg(test)]
+mod tests {
+    use super::{COMMAND_CLASSES, CommandClass, agent_help, classify_name, refusal_for};
+    use clap::CommandFactory;
+
+    /// Every name clap serves must appear in [`COMMAND_CLASSES`]. A new
+    /// subcommand without a class fails here.
+    #[test]
+    fn every_subcommand_is_classified() {
+        let mut missing = Vec::new();
+        for sub in super::Cli::command().get_subcommands() {
+            let name = sub.get_name();
+            if !COMMAND_CLASSES.iter().any(|(entry, _)| *entry == name) {
+                missing.push(name.to_string());
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "unclassified subcommands (add them to COMMAND_CLASSES): {missing:?}"
+        );
+        // The table must not name commands that do not exist either.
+        let top = super::Cli::command();
+        let served: Vec<&str> = top.get_subcommands().map(|s| s.get_name()).collect();
+        let stale: Vec<&&str> = COMMAND_CLASSES
+            .iter()
+            .map(|(name, _)| name)
+            .filter(|name| !served.contains(name))
+            .collect();
+        assert!(stale.is_empty(), "stale classification entries: {stale:?}");
+    }
+
+    /// The table pins the required classes, including the three the
+    /// design calls out: `ai` is operator, `run` and `docs` are agent.
+    #[test]
+    fn pinned_commands_classify_correctly() {
+        for name in [
+            "login",
+            "auth",
+            "config",
+            "runner",
+            "install",
+            "uninstall",
+            "start",
+            "stop",
+            "restart",
+            "reconnect",
+            "status",
+            "tui",
+            "doctor",
+            "update",
+            "engine",
+            "remove",
+            "ai",
+            "workspace",
+            "__run",
+            "__managed",
+            "__engine",
+        ] {
+            assert_eq!(classify_name(name), Some(CommandClass::Operator), "{name}");
+        }
+        for name in [
+            "project",
+            "context",
+            "issue",
+            "label",
+            "comment",
+            "page",
+            "state",
+            "scheduler",
+            "workpad",
+            "run",
+            "docs",
+        ] {
+            assert_eq!(classify_name(name), Some(CommandClass::Agent), "{name}");
+        }
+        assert_eq!(classify_name("not-a-command"), None);
+    }
+
+    /// The pre-parse refusal fires for operator subcommands even when
+    /// required flags are missing (clap would otherwise usage-error
+    /// first). Help requests pass through; agent commands and runs
+    /// outside runs pass.
+    #[test]
+    fn early_refusal_fires_before_parsing() {
+        use super::early_refusal_for;
+        let argv = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        // Operator, no required flags given — still the refusal JSON.
+        assert_eq!(
+            early_refusal_for(&argv(&["pidash", "runner", "add"]), Some("run-1"), false),
+            Some(super::OPERATOR_REFUSED_ERROR)
+        );
+        assert_eq!(
+            early_refusal_for(&argv(&["pidash", "ai"]), Some("run-1"), false),
+            Some(super::OPERATOR_REFUSED_ERROR)
+        );
+        // Global flags before the subcommand do not hide it.
+        assert_eq!(
+            early_refusal_for(
+                &argv(&["pidash", "--config-dir", "/tmp/x", "update"]),
+                Some("run-1"),
+                false
+            ),
+            Some(super::OPERATOR_REFUSED_ERROR)
+        );
+        // Help passes through to clap's rendering.
+        assert_eq!(
+            early_refusal_for(&argv(&["pidash", "runner", "--help"]), Some("run-1"), false),
+            None
+        );
+        assert_eq!(
+            early_refusal_for(&argv(&["pidash", "--help"]), Some("run-1"), false),
+            None
+        );
+        // Agent commands, bypasses and outside-run invocations pass.
+        assert_eq!(
+            early_refusal_for(
+                &argv(&["pidash", "issue", "get", "ENG-42"]),
+                Some("run-1"),
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            early_refusal_for(&argv(&["pidash", "runner", "add"]), Some("run-1"), true),
+            None
+        );
+        assert_eq!(
+            early_refusal_for(&argv(&["pidash", "runner", "add"]), None, false),
+            None
+        );
+        assert_eq!(
+            early_refusal_for(&argv(&["pidash"]), Some("run-1"), false),
+            None
+        );
+    }
+
+    /// The in-run refusal rule: operator commands refuse with the exact
+    /// JSON unless bypassed; agent commands and runs outside runs pass.
+    #[test]
+    fn refusal_rule() {
+        assert_eq!(
+            refusal_for(Some(CommandClass::Operator), Some("run-1"), false),
+            Some(super::OPERATOR_REFUSED_ERROR)
+        );
+        assert_eq!(
+            refusal_for(Some(CommandClass::Operator), Some("run-1"), true),
+            None
+        );
+        assert_eq!(refusal_for(Some(CommandClass::Operator), None, false), None);
+        assert_eq!(
+            refusal_for(Some(CommandClass::Operator), Some(""), false),
+            None
+        );
+        assert_eq!(
+            refusal_for(Some(CommandClass::Agent), Some("run-1"), false),
+            None
+        );
+        assert_eq!(refusal_for(None, Some("run-1"), false), None);
+    }
+
+    /// Bare `pidash help` is the same top-level request as `pidash --help`
+    /// (NEWPIDASH-320 review): it renders the filtered list in a run, while
+    /// per-command `pidash help <cmd>` keeps clap's default rendering.
+    #[test]
+    fn filtered_help_covers_help_subcommand_form() {
+        use super::wants_filtered_help_for;
+        let argv = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        assert!(wants_filtered_help_for(
+            &argv(&["pidash", "--help"]),
+            true,
+            false
+        ));
+        assert!(wants_filtered_help_for(
+            &argv(&["pidash", "-h"]),
+            true,
+            false
+        ));
+        assert!(wants_filtered_help_for(
+            &argv(&["pidash", "help"]),
+            true,
+            false
+        ));
+        assert!(!wants_filtered_help_for(
+            &argv(&["pidash", "help", "issue"]),
+            true,
+            false
+        ));
+        assert!(!wants_filtered_help_for(
+            &argv(&["pidash", "issue", "--help"]),
+            true,
+            false
+        ));
+        assert!(!wants_filtered_help_for(
+            &argv(&["pidash", "--help"]),
+            false,
+            false
+        ));
+        assert!(!wants_filtered_help_for(
+            &argv(&["pidash", "help"]),
+            true,
+            true
+        ));
+        assert!(!wants_filtered_help_for(&argv(&["pidash"]), true, false));
+    }
+
+    /// `pidash --help` inside a run lists agent commands and no operator
+    /// command, plus the refusal note.
+    #[test]
+    fn agent_help_hides_operator_commands() {
+        let help = agent_help();
+        for agent in ["issue", "comment", "workpad", "state", "run", "docs"] {
+            assert!(help.contains(agent), "help should list {agent}");
+        }
+        for operator in [
+            "runner",
+            "install",
+            "update",
+            "reconnect",
+            "login",
+            "auth",
+            "config",
+            "engine",
+        ] {
+            // Match the command entry line, not prose that names it.
+            assert!(
+                !help.lines().any(|l| l.trim_start().starts_with(operator)),
+                "help should hide {operator}"
+            );
+        }
+        assert!(help.contains("PIDASH_ALLOW_OPERATOR=1"));
     }
 }

@@ -47,7 +47,9 @@ use pidash_services::domain::clock::apply_clock_write;
 use pidash_services::domain::identity::{get_agent_system_user, GetAgentUserError};
 use pidash_services::extensions::AssistantModelSeam;
 use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
-use pidash_services::orchestration::creation::{CreationError, PodView, RenderedTurn, RunView};
+use pidash_services::orchestration::creation::{
+    stamp_run_context, CreationError, PodView, RenderedTurn, RunView,
+};
 use pidash_services::orchestration::dispatch::DispatchError;
 use pidash_services::orchestration::entries::{
     dispatch_scheduler_run as services_dispatch_scheduler_run, BindingView, EntriesError,
@@ -557,7 +559,14 @@ where
                 phase_kind: Set(String::new()),
                 // No stamp on scheduler runs (the model default).
                 work_type: Set(String::new()),
-                run_config: Set(serde_json::json!({})),
+                // Runner context (NEWPIDASH-320 §6.3): the scheduler's
+                // project identifier, so the runner defaults PIDASH_PROJECT.
+                run_config: Set(stamp_run_context(
+                    serde_json::json!({}),
+                    None,
+                    Some(&row.project_identifier),
+                    None,
+                )),
                 required_capabilities: Set(serde_json::json!([])),
                 thread_id: Set(String::new()),
                 agent_metadata: Set(serde_json::json!({})),
@@ -1133,6 +1142,7 @@ mod tests {
             executor_kind: AgentExecutorKind::RetiredCloudRun,
             error_details: serde_json::json!({}),
             tool_plan: serde_json::json!([]),
+            project_identifier: "FX7".to_owned(),
             now,
         };
         let new_run_id = new_run.id;
@@ -1150,7 +1160,10 @@ mod tests {
         assert_eq!(view.pinned_runner_id, None);
         assert_eq!(view.parent_run_id, None);
         assert_eq!(view.work_item_id, None);
-        assert_eq!(view.run_config, serde_json::json!({}));
+        assert_eq!(
+            view.run_config,
+            serde_json::json!({"project_identifier": "FX7"})
+        );
         assert_eq!(view.tool_plan, serde_json::json!([]));
         assert_eq!(view.error_details, serde_json::json!({}));
         assert_eq!(view.prompt, "");

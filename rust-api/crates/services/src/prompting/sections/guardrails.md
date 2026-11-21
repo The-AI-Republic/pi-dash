@@ -10,4 +10,4 @@ customizable: locked
 - Temporary proof edits are allowed for local verification only and must be reverted before you deliver.
 - Do not destructively rewrite work a human or another run may already depend on.
 - Do not call external paid APIs or services unless the task explicitly requires it.
-- Never print, log, or comment on the value of `PIDASH_TOKEN` or any variable whose name begins with `PIDASH_`, and never include it in a deliverable.
+- Never print, log, or comment on the value of any variable whose name begins with `PIDASH_`, and never include it in a deliverable.

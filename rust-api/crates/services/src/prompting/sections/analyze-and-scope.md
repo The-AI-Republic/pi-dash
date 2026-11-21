@@ -9,7 +9,7 @@ Before you build anything, understand the task and decide whether you can respon
 
 Ambiguity and size are different questions. When the **direction** is unclear (an unanswered product, UX, scope or interface question), one clarifying round-trip is much cheaper than a wrong deliverable. A large but well-specified issue is not a reason to ask, and not a reason to keep slicing the work: plan it and build it. Once a plan is in the workpad, or a person approved one, build to it.
 
-1. **Read the issue.** The title, description and comments are above. Weight the most recent human comments most: they often narrow or change the scope. Run `pidash comment list {{ issue.identifier }}` only if a newer comment may have arrived.
+1. **Read the issue.** The title, description and comments are above. Weight the most recent human comments most: they often narrow or change the scope. Run `pidash comment list --since {{ run.rendered_at }}` only if a newer comment may have arrived.
 {% if parent %}
 2. **Read the ancestor chain and judge whether the parent is ready.** This issue is a sub-issue of {{ parent.identifier }} ("{{ parent.title }}"){% if lineage %} inside a deeper lineage{% endif %}. Run `pidash issue get` and `pidash comment list` on each ancestor, from {{ parent.identifier }}{% if lineage %} up to {{ lineage[-1].identifier }}{% endif %}, once, and record what matters in the workpad. Then:
    - Parent is **research, design or a spec**: its text is context, not a blocker.

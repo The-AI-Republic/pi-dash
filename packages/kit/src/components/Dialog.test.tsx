@@ -290,6 +290,28 @@ describe("Dialog", () => {
     expect(screen.getByText("Body copy").parentElement).toHaveAttribute("role", "document");
   });
 
+  it("lets a caller width replace the default instead of competing with it", () => {
+    render(
+      <Dialog title="Wide" open onOpenChange={() => undefined} className="max-w-[min(84rem,calc(100vw-2rem))]">
+        <p>Body copy</p>
+      </Dialog>
+    );
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveClass("max-w-[min(84rem,calc(100vw-2rem))]");
+    expect(dialog).not.toHaveClass("max-w-md");
+  });
+
+  it("lets a named caller width replace the default", () => {
+    render(
+      <Dialog title="Large" open onOpenChange={() => undefined} className="max-w-2xl">
+        <p>Body copy</p>
+      </Dialog>
+    );
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveClass("max-w-2xl");
+    expect(dialog).not.toHaveClass("max-w-md");
+  });
+
   it("caps a centred card to the viewport and scrolls its body", () => {
     render(
       <Dialog

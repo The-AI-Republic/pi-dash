@@ -3047,16 +3047,8 @@ async fn is_ticking_issue(
     else {
         return Ok(false);
     };
-    let settings: Option<serde_json::Value> =
-        pidash_db::entity::projects::Entity::find_by_id(issue.project_id)
-            .select_only()
-            .column(pidash_db::entity::projects::Column::Settings)
-            .into_tuple()
-            .one(db)
-            .await?;
-    let switches = crate::domain::project_settings::stage_switches_of(
-        &settings.unwrap_or(serde_json::Value::Null),
-    );
+    let switches =
+        crate::domain::project_settings::stage_switches_for_project(db, issue.project_id).await?;
     Ok(pidash_types::orchestration::stage_runs_automatically(
         Some(&pidash_types::orchestration::StateRef {
             group: state.group.as_str(),

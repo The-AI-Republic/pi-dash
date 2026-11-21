@@ -61,22 +61,18 @@ pub const TERMINAL_EFFECTS_TASK: &str = "runner.apply_agent_run_terminal_effects
 pub const YIELD_KEYS: [&str; 4] = ["status", "note", "yielded_at", "stop_ticking"];
 
 /// `done_payload` keys `pidash run finish` stores (Rust-only, no Django
-/// counterpart): the In Progress hand-off plus the id and digest keys the
-/// finish retry guard reads. The runner's COMPLETED frame replaces
-/// `done_payload` wholesale, and the pause frame merges over it — both go
-/// through [`merge_done_payload`] — so without this list the stored
-/// hand-off is lost when the run ends and the review/test entry run finds
-/// nothing (NEWPIDASH-338 item 1). Kept as a separate Rust-only list:
-/// `YIELD_KEYS` is pinned by the Django parity fixture and keeps its
-/// ported meaning. The literals must match the `*_KEY` constants in
-/// `api/src/v1_work_items/handlers_finish.rs`.
-pub const FINISH_KEPT_KEYS: [&str; 5] = [
-    "stage_handoff",
-    "finish_comment_id",
-    "finish_comment_sha256",
-    "handoff_comment_id",
-    "handoff_comment_sha256",
-];
+/// counterpart): the In Progress hand-off. The runner's COMPLETED frame
+/// replaces `done_payload` wholesale, and the pause frame merges over
+/// it — both go through [`merge_done_payload`] — so without this list
+/// the stored hand-off is lost when the run ends and the review/test
+/// entry run finds nothing (NEWPIDASH-338 item 1). Kept as a separate
+/// Rust-only list: `YIELD_KEYS` is pinned by the Django parity fixture
+/// and keeps its ported meaning. Since item 6 the finish retry guard
+/// lives in the comment operation's external id, so no comment keys are
+/// stored anymore — only the hand-off needs keeping. The literal must
+/// match the api crate's `STAGE_HANDOFF_KEY` — services cannot import
+/// the api crate, so the pin test below holds the coupling.
+pub const FINISH_KEPT_KEYS: [&str; 1] = ["stage_handoff"];
 
 /// `runner` columns in Django `_meta` order (captured from
 /// `Runner._meta.concrete_fields`, plus the `09738d222` pause pair):
@@ -129,8 +125,8 @@ pub enum FinalizeError {
 /// (`yielded_at` set) and the incoming one carries no `status` of its
 /// own — then the stored yield keys survive onto a copy of the
 /// incoming payload (or onto `{}` for a non-dict incoming), along with
-/// the Rust-only [`FINISH_KEPT_KEYS`] a `finish` stored (the hand-off
-/// and its retry-guard keys). A present `status`, even null, suppresses
+/// the Rust-only [`FINISH_KEPT_KEYS`] a `finish` stored (the hand-off).
+/// A present `status`, even null, suppresses
 /// the merge. Django never writes the finish keys, so parity is
 /// unaffected.
 pub fn merge_done_payload(existing: &Value, incoming: &Value) -> Value {
@@ -1202,10 +1198,6 @@ mod tests {
             "yielded_at": "2026-11-19T00:00:00Z",
             "note": "moved to review",
             "stage_handoff": "### Hand-off\n**Produced:** the PR.",
-            "finish_comment_id": "c1",
-            "finish_comment_sha256": "d1",
-            "handoff_comment_id": "h1",
-            "handoff_comment_sha256": "d2",
         });
         let merged = merge_done_payload(&stored, &json!({}));
         for key in FINISH_KEPT_KEYS {
@@ -1219,19 +1211,13 @@ mod tests {
 
     #[test]
     fn finish_kept_keys_match_the_finish_endpoint() {
-        // The literals must stay identical to the `*_KEY` constants in
-        // `api/src/v1_work_items/handlers_finish.rs`; services cannot
-        // import the api crate, so this pins the coupling.
-        assert_eq!(
-            FINISH_KEPT_KEYS,
-            [
-                "stage_handoff",
-                "finish_comment_id",
-                "finish_comment_sha256",
-                "handoff_comment_id",
-                "handoff_comment_sha256",
-            ]
-        );
+        // The literal must stay identical to the api crate's
+        // `STAGE_HANDOFF_KEY` in `v1_work_items/handlers_finish.rs`;
+        // services cannot import the api crate, so this pins the
+        // coupling. (Since item 6 the retry guard lives in the comment
+        // operation's external id, so the hand-off is the only kept
+        // finish key.)
+        assert_eq!(FINISH_KEPT_KEYS, ["stage_handoff"]);
     }
 
     // ------------------------------------------------------------------

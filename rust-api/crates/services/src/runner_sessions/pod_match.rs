@@ -6,7 +6,9 @@
 //! visibility. A runner counts as potentially serviceable when its
 //! owner is the issue's creator or a live assignee, or (only in
 //! `project_members` mode) the run's triggerer — the triggerer-only
-//! runner never takes an issue run in default mode (NEWPIDASH-261).
+//! runner never takes an issue run in default mode (NEWPIDASH-261);
+//! an owner who is also the issue's creator or assignee is not
+//! "triggerer-only" and keeps their own runs.
 //! Transient status is deliberately ignored — OFFLINE / BUSY /
 //! paused runners still count; REVOKED runners (permanent) and
 //! `pinned_only` runners (never take unpinned work) never count.
@@ -157,10 +159,16 @@ pub async fn pod_has_runner_for_issue_principal(
 }
 
 /// The PO-3 engine gate (§8): does this engine's owner serve the
-/// run? The owner starts it (triggerer admitted only in
-/// `project_members` mode, NEWPIDASH-261), or the run is automatic
-/// on one of the owner's issues, or the machine opted into
-/// teammates' runs.
+/// run? The owner starts it, or the run is automatic on one of the
+/// owner's issues, or the machine opted into teammates' runs.
+///
+/// An owner-started run counts when the owner may run this issue under
+/// the project's `issue_run_policy` (NEWPIDASH-261): in
+/// `project_members` mode always (`triggerer_admitted`), in the default
+/// `creator_and_assignees` mode when the owner created the issue or is
+/// assigned to it (`in_issue_people`). Without the second half the
+/// default mode stranded every run a Pi Dash Agent owner started on
+/// their own issue.
 #[allow(clippy::too_many_arguments)]
 fn engine_counts(
     owner_id: Uuid,
@@ -170,7 +178,9 @@ fn engine_counts(
     team_runs: bool,
     triggerer_admitted: bool,
 ) -> bool {
-    (triggerer_admitted && Some(owner_id) == creator_id) || (!human && in_issue_people) || team_runs
+    (Some(owner_id) == creator_id && (triggerer_admitted || in_issue_people))
+        || (!human && in_issue_people)
+        || team_runs
 }
 
 /// The single live [`PodRunnerMatcher`]: SeaORM over the caller's
@@ -292,6 +302,9 @@ mod tests {
         ));
         assert!(engine_counts(owner, Some(mate), false, true, false, false));
         assert!(engine_counts(owner, Some(owner), true, false, true, false));
+        // Default mode, the owner's own click on an issue they created or
+        // are assigned to: the policy lets them run it, so it counts.
+        assert!(engine_counts(owner, Some(owner), true, true, false, false));
         // Own-agent candidates count for every principal; the
         // pinned-only and stranger cases never reach the gate.
         assert_eq!(ph["own_agent_human"]["value"].as_bool(), Some(true));

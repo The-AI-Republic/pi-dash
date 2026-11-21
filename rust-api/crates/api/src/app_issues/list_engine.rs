@@ -1460,18 +1460,26 @@ fn group_member(stmt: &mut SelectStatement, group_by: &str) {
 }
 
 /// The grouped totals' count filter: an intake row in (1, -1, 2) or none,
-/// not archived, not a draft.
-fn count_filter() -> SimpleExpr {
+/// not a draft — and archived exactly when the listed scope is archived.
+/// The archive list shares the live filter shape with the archived leg
+/// flipped (`archived_at IS NOT NULL`): counting the archived rows it
+/// lists instead of the non-archived rows it excludes (DIFF-58).
+fn count_filter(count_archived: bool) -> SimpleExpr {
+    let archived = if count_archived {
+        issue(issues::Column::ArchivedAt).is_not_null()
+    } else {
+        issue(issues::Column::ArchivedAt).is_null()
+    };
     col("issue_intake", intake_issues::Column::Status)
         .is_in([1, -1, 2])
         .or(col("issue_intake", intake_issues::Column::Id).is_null())
-        .and(issue(issues::Column::ArchivedAt).is_null())
+        .and(archived)
         .and(issue(issues::Column::IsDraft).eq(false))
 }
 
 /// `COUNT(DISTINCT CASE WHEN <count filter> THEN issue.id END)`.
-fn filtered_distinct_count() -> SimpleExpr {
-    let case = CaseStatement::new().case(count_filter(), issue(issues::Column::Id));
+fn filtered_distinct_count(count_archived: bool) -> SimpleExpr {
+    let case = CaseStatement::new().case(count_filter(count_archived), issue(issues::Column::Id));
     Func::count_distinct(SimpleExpr::Case(Box::new(case))).into()
 }
 
@@ -1594,11 +1602,16 @@ pub fn grouped_page(
     Ok(outer)
 }
 
-/// `(bucket, n)` per group: the filtered distinct count.
-pub fn group_totals(set: &IssueSet, group_by: &str) -> Result<SelectStatement, Denial> {
+/// `(bucket, n)` per group: the filtered distinct count. `count_archived`
+/// selects the archived count leg for the archive list (DIFF-58).
+pub fn group_totals(
+    set: &IssueSet,
+    group_by: &str,
+    count_archived: bool,
+) -> Result<SelectStatement, Denial> {
     let mut stmt = set.select();
     stmt.expr_as(bucket(group_expr(group_by)?), a("bucket"))
-        .expr_as(filtered_distinct_count(), a("n"))
+        .expr_as(filtered_distinct_count(count_archived), a("n"))
         .group_by_col(a("bucket"));
     Ok(stmt)
 }
@@ -1608,11 +1621,12 @@ pub fn sub_totals(
     set: &IssueSet,
     group_by: &str,
     sub_group_by: &str,
+    count_archived: bool,
 ) -> Result<SelectStatement, Denial> {
     let mut stmt = set.select();
     stmt.expr_as(bucket(group_expr(group_by)?), a("bucket"))
         .expr_as(bucket(group_expr(sub_group_by)?), a("sub"))
-        .expr_as(filtered_distinct_count(), a("n"))
+        .expr_as(filtered_distinct_count(count_archived), a("n"))
         .group_by_col(a("bucket"))
         .group_by_col(a("sub"));
     Ok(stmt)
@@ -2326,7 +2340,7 @@ mod tests {
         assert!(page.contains(r#""label_issue"."label_id" AS "labels__id""#));
         assert!(page.contains(r#"WHERE "__w"."__rn" > 0 AND "__w"."__rn" <= 3"#));
         assert!(page.contains("FROM (SELECT DISTINCT"), "{page}");
-        let totals = sql(&sub_totals(&set, "labels__id", "priority").expect("totals"));
+        let totals = sql(&sub_totals(&set, "labels__id", "priority", false).expect("totals"));
         assert!(totals.contains(r#"COUNT(DISTINCT (CASE WHEN"#), "{totals}");
         assert!(totals.ends_with(r#"GROUP BY "bucket", "sub""#));
     }
