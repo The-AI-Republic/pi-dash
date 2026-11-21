@@ -49,7 +49,7 @@
 //!   both backends — there is no wipe).
 //! - PUT/partial-update `completed_at` input is discarded (the update
 //!   overlay drops it and the save keeps the stored stamp unless the
-//!   state group changed — DIFF-59); create without `state_id` keeps it.
+//!   state group changed — DIFF-62); create without `state_id` keeps it.
 //! - explicit `sort_order`/`sequence_id` on create are overwritten
 //!   (sibling max + 10000 / project max + 1).
 //! - `agent_executor=""` 400s `"unknown agent executor"` (ChoiceField
@@ -4154,7 +4154,7 @@ fn assemble_new_issue(
 /// (`Null` clears); absent keys keep the row. `description_stripped`
 /// input is skipped — `save()` recomputes it unconditionally.
 /// `completed_at` input is skipped too — Django's `save()` recomputes it
-/// from the state group, and DIFF-59 keeps the stored stamp unless the
+/// from the state group, and DIFF-62 keeps the stored stamp unless the
 /// group changed. The state decision (default assignment,
 /// `completed_at`) moved to the save hooks.
 fn apply_validated_to_existing(
@@ -4246,7 +4246,7 @@ fn apply_validated_to_existing(
     }
     // `completed_at` input is discarded on update (Django's `save()`
     // recomputes it from the state group, so the serializer value never
-    // survives; DIFF-59 keeps the stored stamp unless the group changed,
+    // survives; DIFF-62 keeps the stored stamp unless the group changed,
     // which likewise ignores the input). The row's stored value rides
     // through untouched.
     if validated.contains_key("archived_at") {
@@ -4277,7 +4277,7 @@ fn apply_validated_to_existing(
         row.created_via = v_text(validated, "created_via").map(str::to_owned);
     }
     // `state` overlays here; the default assignment (when the final id
-    // is `None`) and the `completed_at` transition rule (DIFF-59) run in
+    // is `None`) and the `completed_at` transition rule (DIFF-62) run in
     // the save hooks.
     let (touched, state_id, _) = v_state(validated);
     if touched {

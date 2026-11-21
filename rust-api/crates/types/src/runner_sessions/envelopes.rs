@@ -339,9 +339,12 @@ pub fn ensure_envelope(message: &Map<String, Value>, fresh_mid: &str) -> Map<Str
 ///
 /// Key order is `v, type, run_id, work_item_id, prompt, repo_url,
 /// repo_ref, git_work_branch, expected_codex_model,
-/// approval_policy_overrides, deadline`. `run_config` lookups default
-/// to `null` exactly like `dict.get` (note `expected_codex_model`
-/// reads the `model` key).
+/// approval_policy_overrides, deadline`, then — only when the run's
+/// `run_config` carries them — `issue_identifier`, `project_identifier`,
+/// `workpad_body`, `workpad_sha256` (NEWPIDASH-320 §6.1, §6.3).
+/// `run_config` lookups default to `null` exactly like `dict.get`
+/// (note `expected_codex_model` reads the `model` key). Old daemons
+/// ignore the new keys; old servers never send them.
 pub fn build_assign_msg(
     run_id: &str,
     work_item_id: Option<&str>,
@@ -349,7 +352,7 @@ pub fn build_assign_msg(
     run_config: &Map<String, Value>,
 ) -> Map<String, Value> {
     let get = |key: &str| run_config.get(key).cloned().unwrap_or(Value::Null);
-    let mut msg = Map::with_capacity(11);
+    let mut msg = Map::with_capacity(15);
     msg.insert("v".to_string(), Value::from(1));
     msg.insert("type".to_string(), Value::String("assign".to_string()));
     msg.insert("run_id".to_string(), Value::String(run_id.to_string()));
@@ -367,6 +370,19 @@ pub fn build_assign_msg(
         get("approval_policy_overrides"),
     );
     msg.insert("deadline".to_string(), Value::Null);
+    for key in [
+        "issue_identifier",
+        "project_identifier",
+        "workpad_body",
+        "workpad_sha256",
+    ] {
+        match run_config.get(key) {
+            Some(value) if !value.is_null() => {
+                msg.insert(key.to_string(), value.clone());
+            }
+            _ => {}
+        }
+    }
     msg
 }
 
@@ -833,6 +849,113 @@ mod tests {
             &Map::new(),
         );
         assert_eq!(Value::Object(rebuilt), *msg);
+    }
+
+    /// NEWPIDASH-320 §6.1, §6.3: the run-context keys ride the assign
+    /// envelope only when the run's `run_config` carries them — the
+    /// identifiers for issue and scheduler runs, the workpad snapshot
+    /// for `coding-task` runs, and no workpad keys for any other kind.
+    #[test]
+    fn build_assign_msg_carries_run_context_by_kind() {
+        let base = || {
+            let mut config = Map::new();
+            config.insert(
+                "repo_url".to_string(),
+                Value::String("https://example.com/fx.git".to_string()),
+            );
+            config
+        };
+        // Issue coding-task run: identifiers plus the workpad snapshot.
+        let mut coding = base();
+        coding.insert(
+            "issue_identifier".to_string(),
+            Value::String("FX-7".to_string()),
+        );
+        coding.insert(
+            "project_identifier".to_string(),
+            Value::String("FX".to_string()),
+        );
+        coding.insert(
+            "workpad_body".to_string(),
+            Value::String("# plan".to_string()),
+        );
+        coding.insert(
+            "workpad_sha256".to_string(),
+            Value::String("abc123".to_string()),
+        );
+        let msg = build_assign_msg("run-1", Some("item-1"), "do it", &coding);
+        assert_eq!(
+            msg.get("issue_identifier").and_then(Value::as_str),
+            Some("FX-7")
+        );
+        assert_eq!(
+            msg.get("project_identifier").and_then(Value::as_str),
+            Some("FX")
+        );
+        assert_eq!(
+            msg.get("workpad_body").and_then(Value::as_str),
+            Some("# plan")
+        );
+        assert_eq!(
+            msg.get("workpad_sha256").and_then(Value::as_str),
+            Some("abc123")
+        );
+        let keys: Vec<&str> = msg.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            [
+                "v",
+                "type",
+                "run_id",
+                "work_item_id",
+                "prompt",
+                "repo_url",
+                "repo_ref",
+                "git_work_branch",
+                "expected_codex_model",
+                "approval_policy_overrides",
+                "deadline",
+                "issue_identifier",
+                "project_identifier",
+                "workpad_body",
+                "workpad_sha256",
+            ]
+        );
+        // Review run: identifiers, but no workpad keys.
+        let mut review = base();
+        review.insert(
+            "issue_identifier".to_string(),
+            Value::String("FX-7".to_string()),
+        );
+        review.insert(
+            "project_identifier".to_string(),
+            Value::String("FX".to_string()),
+        );
+        let msg = build_assign_msg("run-2", Some("item-1"), "review it", &review);
+        assert!(msg.contains_key("issue_identifier"));
+        assert!(msg.contains_key("project_identifier"));
+        assert!(!msg.contains_key("workpad_body"));
+        assert!(!msg.contains_key("workpad_sha256"));
+        // Scheduler run: project only, no issue and no workpad.
+        let mut sched = base();
+        sched.insert(
+            "project_identifier".to_string(),
+            Value::String("FX".to_string()),
+        );
+        let msg = build_assign_msg("run-3", None, "sweep it", &sched);
+        assert!(!msg.contains_key("issue_identifier"));
+        assert_eq!(
+            msg.get("project_identifier").and_then(Value::as_str),
+            Some("FX")
+        );
+        assert!(!msg.contains_key("workpad_body"));
+        assert!(!msg.contains_key("workpad_sha256"));
+        // Old run configs (no context keys) stay byte-identical: nulls
+        // are skipped, never emitted.
+        let mut legacy = base();
+        legacy.insert("issue_identifier".to_string(), Value::Null);
+        let msg = build_assign_msg("run-4", Some("item-1"), "do it", &legacy);
+        assert!(!msg.contains_key("issue_identifier"));
     }
 
     #[test]

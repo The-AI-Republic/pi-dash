@@ -262,7 +262,7 @@ def test_archived_list_state_id_in_filter(clients, seed):
 
 
 def test_completed_at_preserved_without_state_change(clients, seed, db_conn):
-    """NEWPIDASH-351 (DIFF-59, PB-0306, PB-0286): archiving, unarchiving,
+    """NEWPIDASH-351 (DIFF-62, PB-0306, PB-0286): archiving, unarchiving,
     PATCHing an unrelated field of, and soft-deleting a completed issue
     must not rewrite its ``completed_at`` stamp.
 
@@ -275,8 +275,8 @@ def test_completed_at_preserved_without_state_change(clients, seed, db_conn):
     ws, pid, done = seed["ws_slug"], seed["project"], seed["state_done"]
     made = []
     try:
-        for name in ("DIFF-59 archive probe", "DIFF-59 patch probe",
-                     "DIFF-59 delete probe"):
+        for name in ("DIFF-62 archive probe", "DIFF-62 patch probe",
+                     "DIFF-62 delete probe"):
             row = admin.post(
                 f"{_base(ws, pid)}/issues/", json={"name": name}).json()
             assert admin.patch(
@@ -296,7 +296,7 @@ def test_completed_at_preserved_without_state_change(clients, seed, db_conn):
         after_archive = admin.get(
             f"{_base(ws, pid)}/issues/{aid}/archive/").json()["completed_at"]
         assert (after_archive != before_a) == expect(
-            "DIFF-59", django=True, rust=False)
+            "DIFF-62", django=True, rust=False)
         # Unarchive leg (PB-0306).
         assert admin.request(
             "DELETE",
@@ -304,7 +304,7 @@ def test_completed_at_preserved_without_state_change(clients, seed, db_conn):
         after_unarchive = admin.get(
             f"{_base(ws, pid)}/issues/{aid}/").json()["completed_at"]
         assert (after_unarchive != before_a) == expect(
-            "DIFF-59", django=True, rust=False)
+            "DIFF-62", django=True, rust=False)
         # Unrelated PATCH leg (PB-0286).
         assert admin.patch(
             f"{_base(ws, pid)}/issues/{bid}/",
@@ -312,7 +312,7 @@ def test_completed_at_preserved_without_state_change(clients, seed, db_conn):
         after_patch = admin.get(
             f"{_base(ws, pid)}/issues/{bid}/").json()["completed_at"]
         assert (after_patch != before_b) == expect(
-            "DIFF-59", django=True, rust=False)
+            "DIFF-62", django=True, rust=False)
         # Soft-delete leg: the destroy save preserves the stamp too.
         from datetime import datetime
         before_d = admin.get(
@@ -324,7 +324,7 @@ def test_completed_at_preserved_without_state_change(clients, seed, db_conn):
                         (did,))
             after_delete = cur.fetchone()[0]
         assert (after_delete != datetime.fromisoformat(before_d)) == expect(
-            "DIFF-59", django=True, rust=False)
+            "DIFF-62", django=True, rust=False)
     finally:
         for iid in made:
             admin.request("DELETE", f"{_base(ws, pid)}/issues/{iid}/archive/")
@@ -332,7 +332,7 @@ def test_completed_at_preserved_without_state_change(clients, seed, db_conn):
 
 
 def test_completed_at_transitions_with_state_group(clients, seed):
-    """NEWPIDASH-351 (DIFF-59): moving into a completed-group state stamps
+    """NEWPIDASH-351 (DIFF-62): moving into a completed-group state stamps
     ``completed_at`` and moving back out clears it — on both backends.
     """
     admin = clients["admin"]
@@ -340,7 +340,7 @@ def test_completed_at_transitions_with_state_group(clients, seed):
     backlog, done = seed["state_backlog"], seed["state_done"]
     made = admin.post(
         f"{_base(ws, pid)}/issues/",
-        json={"name": "DIFF-59 transition probe"}).json()
+        json={"name": "DIFF-62 transition probe"}).json()
     iid = made["id"]
     try:
         assert admin.get(

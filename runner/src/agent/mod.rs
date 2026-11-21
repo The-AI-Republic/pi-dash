@@ -313,9 +313,12 @@ pub fn agent_env_for_config(runner: &RunnerConfig) -> crate::util::shell::AgentE
         // calls land on the same tree the daemon is using. Read from this
         // process's environment rather than the runner config because they are
         // a property of the daemon (the desktop sets them when it spawns
-        // `pidash __run`), not of any one runner. Only forwarded for a managed
-        // runner: a user-enrolled agent should keep resolving config the way
-        // it always has, including from the default XDG location.
+        // `pidash __run`), not of any one runner. Only set here for a managed
+        // runner: a user-enrolled runner receives them from the per-run
+        // `RUN_ENV` scope instead (NEWPIDASH-363), so its `AgentEnv` stays
+        // empty. When the daemon itself does not set them, neither path
+        // forwards anything and the agent keeps resolving config the way it
+        // always has, including from the default XDG location.
         config_dir: managed
             .then(|| std::env::var_os("PIDASH_CONFIG_DIR").map(std::path::PathBuf::from))
             .flatten(),

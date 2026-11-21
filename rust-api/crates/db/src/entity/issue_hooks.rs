@@ -115,7 +115,7 @@ async fn default_state_marked<C: ConnectionTrait>(
 }
 
 /// The stored `state_id` of the row under save (update legs only): the
-/// DIFF-59 transition check compares it against the incoming state so
+/// DIFF-62 transition check compares it against the incoming state so
 /// `completed_at` moves only when the group changes.
 async fn stored_state<C: ConnectionTrait>(db: &C, issue_id: Uuid) -> Result<Option<Uuid>, DbErr> {
     use super::issues;
@@ -244,7 +244,7 @@ impl ActiveModelBehavior for ActiveModel {
         // found — the assembled value persists, exactly as Django's
         // `if/else` falls.
         //
-        // DIFF-59 (old bug fix): Django's `else` arm restamps
+        // DIFF-62 (old bug fix): Django's `else` arm restamps
         // `completed_at` from the group on EVERY save, so archiving,
         // unarchiving or editing an unrelated field of a completed issue
         // moves its completion date to now. The port keeps the stamp only

@@ -288,6 +288,18 @@ pub enum ServerMsg {
     Assign {
         run_id: Uuid,
         work_item_id: Option<Uuid>,
+        /// Run context (NEWPIDASH-320 §6.3, §6.1): the issue and project
+        /// identifiers plus, for `coding-task` runs, the workpad snapshot.
+        /// Additive optional fields — old servers never send them and old
+        /// daemons ignore them, both via `#[serde(default)]`.
+        #[serde(default)]
+        issue_identifier: Option<String>,
+        #[serde(default)]
+        project_identifier: Option<String>,
+        #[serde(default)]
+        workpad_body: Option<String>,
+        #[serde(default)]
+        workpad_sha256: Option<String>,
         prompt: String,
         repo_url: Option<String>,
         repo_ref: Option<String>,
@@ -725,6 +737,10 @@ mod tests {
         let msg = ServerMsg::Assign {
             run_id: Uuid::new_v4(),
             work_item_id: Some(Uuid::new_v4()),
+            issue_identifier: Some("FX-7".into()),
+            project_identifier: Some("FX".into()),
+            workpad_body: Some("# plan".into()),
+            workpad_sha256: Some("abc123".into()),
             prompt: "do the thing".into(),
             repo_url: Some("https://example.invalid/x.git".into()),
             repo_ref: Some("main".into()),
@@ -739,6 +755,36 @@ mod tests {
         let s = serde_json::to_string(&env).unwrap();
         let back: Envelope<ServerMsg> = serde_json::from_str(&s).unwrap();
         assert_eq!(back.version, WIRE_VERSION);
+    }
+
+    /// NEWPIDASH-320 §6.1, §6.3: run-context fields are additive — an old
+    /// server's `assign` (without them) still parses, with everything `None`.
+    #[test]
+    fn assign_without_run_context_parses_to_none() {
+        let body = serde_json::json!({
+            "type": "assign",
+            "run_id": "11111111-1111-1111-1111-111111111111",
+            "work_item_id": null,
+            "prompt": "do the thing",
+            "repo_url": null,
+            "repo_ref": null,
+        });
+        let msg: ServerMsg = serde_json::from_value(body).expect("old assign shape parses");
+        match msg {
+            ServerMsg::Assign {
+                issue_identifier,
+                project_identifier,
+                workpad_body,
+                workpad_sha256,
+                ..
+            } => {
+                assert!(issue_identifier.is_none());
+                assert!(project_identifier.is_none());
+                assert!(workpad_body.is_none());
+                assert!(workpad_sha256.is_none());
+            }
+            other => panic!("expected assign, got {other:?}"),
+        }
     }
 
     #[test]

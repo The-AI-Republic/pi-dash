@@ -68,7 +68,9 @@
             "section_key": "scheduler-ending"
           }
         ],
-        "run_config": {},
+        "run_config": {
+          "project_identifier": "FX7"
+        },
         "executor_kind": "local_runner",
         "tool_plan": {},
         "error_code": "",
@@ -76,9 +78,7 @@
         "ended_at": null,
         "scheduler_binding": "77777777-aaaa-bbbb-cccc-000000007301"
       },
-      "dispatched": [
-        "run-S1"
-      ],
+      "dispatched": ["run-S1"],
       "on_commit": []
     },
     "S1b_pod_override_honored": {
@@ -202,7 +202,9 @@
         "work_item": null,
         "prompt": "",
         "prompt_manifest": null,
-        "run_config": {},
+        "run_config": {
+          "project_identifier": "FX7"
+        },
         "executor_kind": "local_runner",
         "tool_plan": {},
         "error_code": "run_quota_exceeded",
@@ -211,9 +213,7 @@
         "scheduler_binding": "77777777-aaaa-bbbb-cccc-000000007313"
       },
       "dispatched": [],
-      "on_commit": [
-        "finalize_agent_run.<locals>.<lambda>"
-      ]
+      "on_commit": ["finalize_agent_run.<locals>.<lambda>"]
     },
     "S8_render_failed_returned": {
       "binding": "77777777-aaaa-bbbb-cccc-000000007314",
@@ -235,7 +235,9 @@
         "work_item": null,
         "prompt": "",
         "prompt_manifest": null,
-        "run_config": {},
+        "run_config": {
+          "project_identifier": "FX7"
+        },
         "executor_kind": "local_runner",
         "tool_plan": {},
         "error_code": "prompt_build_failed",
@@ -244,9 +246,7 @@
         "scheduler_binding": "77777777-aaaa-bbbb-cccc-000000007314"
       },
       "dispatched": [],
-      "on_commit": [
-        "finalize_agent_run.<locals>.<lambda>"
-      ]
+      "on_commit": ["finalize_agent_run.<locals>.<lambda>"]
     },
     "S9_executor_unavailable": {
       "binding": "77777777-aaaa-bbbb-cccc-000000007315",

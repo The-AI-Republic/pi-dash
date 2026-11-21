@@ -35,6 +35,10 @@ pub struct CliError {
     /// Optional upstream body (already trimmed) — surfaced in the stderr JSON
     /// so agents can inspect the server's error detail without a second call.
     pub detail: Option<String>,
+    /// HTTP status that produced this error, when it came from a response
+    /// (NEWPIDASH-320 §6.1: the workpad caller matches on 412 to print
+    /// the re-read-and-retry instruction).
+    pub status: Option<u16>,
 }
 
 impl CliError {
@@ -43,11 +47,17 @@ impl CliError {
             exit_code,
             message: message.into(),
             detail: None,
+            status: None,
         }
     }
 
     pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(detail.into());
+        self
+    }
+
+    pub fn with_status(mut self, status: u16) -> Self {
+        self.status = Some(status);
         self
     }
 }
@@ -100,8 +110,23 @@ pub const RUN_ID_HEADER: &str = "X-Pi-Dash-Run-Id";
 /// current `AgentRun` id. See `util::shell::RunEnv`.
 pub const RUN_ID_ENV: &str = "PIDASH_RUN_ID";
 
+/// Environment variable the daemon sets on the agent process with the
+/// agent's display name plus model (NEWPIDASH-320 §6.3), e.g.
+/// `Claude Code (claude-opus-4-8)`. `comment add` and `run finish`
+/// default `--as-agent` from it.
+pub const AGENT_NAME_ENV: &str = "PIDASH_AGENT_NAME";
+
 fn run_id_from_env() -> Option<String> {
     std::env::var(RUN_ID_ENV)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// The daemon-exported agent name, if this process runs inside an agent
+/// run. Explicit flags always win over this default.
+pub fn agent_name_from_env() -> Option<String> {
+    std::env::var(AGENT_NAME_ENV)
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -366,7 +391,7 @@ impl ApiClient {
 
 fn map_error_status(status: StatusCode, body: String) -> CliError {
     let exit_code = match status.as_u16() {
-        400 | 409 | 422 => EXIT_INVALID,
+        400 | 409 | 412 | 422 => EXIT_INVALID,
         401 | 403 => EXIT_AUTH,
         404 => EXIT_NOT_FOUND,
         429 => EXIT_THROTTLED,
@@ -378,6 +403,7 @@ fn map_error_status(status: StatusCode, body: String) -> CliError {
     // fixes, and agent process reports quote this string as evidence.
     let msg = match status.as_u16() {
         400 | 409 | 422 => "invalid request",
+        412 => "precondition failed",
         401 => "authentication failed",
         403 => "permission denied",
         404 => "not found",
@@ -389,7 +415,9 @@ fn map_error_status(status: StatusCode, body: String) -> CliError {
         Some(reason) => format!("HTTP {status}: {msg}: {reason}"),
         None => format!("HTTP {status}: {msg}"),
     };
-    CliError::new(exit_code, message).with_detail(body)
+    CliError::new(exit_code, message)
+        .with_detail(body)
+        .with_status(status.as_u16())
 }
 
 /// Pull the human-readable reason out of a Pi Dash error body so it lands in

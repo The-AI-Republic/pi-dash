@@ -98,6 +98,7 @@ pub const RECIPES: &[(&str, &[RecipeEntry])] = &[
     (
         KIND_CODING_TASK,
         &[
+            S("this-run"),
             S("intro"),
             SLOT_CONTEXT,
             S("relationships"),
@@ -116,6 +117,7 @@ pub const RECIPES: &[(&str, &[RecipeEntry])] = &[
     (
         KIND_REVIEW,
         &[
+            S("this-run"),
             S("review-intro"),
             SLOT_CONTEXT,
             S("run-framing"),
@@ -129,6 +131,7 @@ pub const RECIPES: &[(&str, &[RecipeEntry])] = &[
     (
         KIND_TEST,
         &[
+            S("this-run"),
             S("test-intro"),
             SLOT_CONTEXT,
             S("run-framing"),
@@ -142,6 +145,7 @@ pub const RECIPES: &[(&str, &[RecipeEntry])] = &[
     (
         KIND_SCHEDULER,
         &[
+            S("this-run"),
             S("scheduler-intro"),
             S("session-framing"),
             S("pidash-cli"),

@@ -2036,6 +2036,53 @@ pub fn run_config_for_issue(
     Value::Object(config)
 }
 
+/// Hex SHA-256 of a workpad body (NEWPIDASH-320 §6.1). The endpoint's
+/// `updated_at` is the issue row's stamp — the agent's own state moves
+/// change it — so the stale-write guard hashes the body instead, which
+/// needs no migration.
+pub fn workpad_sha256(body: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(body.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Stamp the runner-context fields onto a run config (NEWPIDASH-320 §6.3,
+/// §6.1): `issue_identifier` for issue runs, `project_identifier` for
+/// issue and scheduler runs, and the workpad snapshot (`workpad_body` +
+/// `workpad_sha256`) for `coding-task` runs only. `None` leaves the config
+/// untouched, so old runners and old servers keep working: the envelope
+/// copies only keys that are present.
+pub fn stamp_run_context(
+    config: Value,
+    issue_identifier: Option<&str>,
+    project_identifier: Option<&str>,
+    workpad_body: Option<&str>,
+) -> Value {
+    let mut map = config.as_object().cloned().unwrap_or_default();
+    if let Some(identifier) = issue_identifier {
+        map.insert(
+            "issue_identifier".to_owned(),
+            Value::String(identifier.to_owned()),
+        );
+    }
+    if let Some(identifier) = project_identifier {
+        map.insert(
+            "project_identifier".to_owned(),
+            Value::String(identifier.to_owned()),
+        );
+    }
+    if let Some(body) = workpad_body {
+        map.insert("workpad_body".to_owned(), Value::String(body.to_owned()));
+        map.insert(
+            "workpad_sha256".to_owned(),
+            Value::String(workpad_sha256(body)),
+        );
+    }
+    Value::Object(map)
+}
+
 /// The runner to pin a follow-up to (`_pinned_runner_for`,
 /// `service.py:528-547`, `70d684af`): the parent's runner when still
 /// eligible. `runner` is `None` when the parent has no runner;
@@ -2307,6 +2354,7 @@ pub fn render_first_turn(
         related: Value::Array(related),
         relations,
         run_id: run.run_id.to_string(),
+        rendered_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         run_template_name: kind.to_owned(),
         attempt: context::compute_attempt(bundle.prior_run_count),
         trigger: Some(run.trigger.clone()),
@@ -2716,6 +2764,25 @@ pub async fn create_and_dispatch_run<S: CreationSeam + FinalizeAgentRunSeam>(
     let state = seam.state(issue.state_id).await?;
     let kind = phase_kind_for_issue(state);
     let run_id = Uuid::new_v4();
+    // Runner context (NEWPIDASH-320 §6.1, §6.3): the workpad snapshot
+    // rides along for `coding-task` runs only; review/test runs read the
+    // hand-off inline and never touch the workpad.
+    let workpad_snapshot =
+        (kind == recipes::KIND_CODING_TASK).then(|| issue.workpad.clone().unwrap_or_default());
+    let run_config = stamp_run_context(
+        run_config_for_issue(
+            project.repo_url.as_deref(),
+            project.base_branch.as_deref(),
+            issue.git_work_branch.as_deref(),
+            None,
+        ),
+        Some(&context::issue_identifier(
+            &project.identifier,
+            i64::from(issue.sequence_id),
+        )),
+        Some(&project.identifier),
+        workpad_snapshot.as_deref(),
+    );
     let run = seam
         .insert_run(&NewAgentRun {
             id: run_id,
@@ -2733,12 +2800,7 @@ pub async fn create_and_dispatch_run<S: CreationSeam + FinalizeAgentRunSeam>(
             trigger: req.trigger.clone(),
             phase_kind: kind.clone(),
             work_type: work_type_for_issue(&issue, &project).to_owned(),
-            run_config: run_config_for_issue(
-                project.repo_url.as_deref(),
-                project.base_branch.as_deref(),
-                issue.git_work_branch.as_deref(),
-                None,
-            ),
+            run_config,
             now: req.now,
             pin_kind: pin_kind.clone(),
         })
@@ -2861,17 +2923,28 @@ pub async fn create_continuation_run<S: CreationSeam + FinalizeAgentRunSeam>(
     } else {
         String::new()
     };
-    // Continuation inserts the literal repo snapshot, not the
-    // `_run_config_for_issue` refresh (`service.py:489-493`): same
-    // three keys, no base to strip.
-    let run_config = run_config_for_issue(
-        project.repo_url.as_deref(),
-        project.base_branch.as_deref(),
-        issue.git_work_branch.as_deref(),
-        None,
-    );
     let state = seam.state(issue.state_id).await?;
     let kind = phase_kind_for_issue(state);
+    // Continuation inserts the literal repo snapshot, not the
+    // `_run_config_for_issue` refresh (`service.py:489-493`): same
+    // three keys, no base to strip — plus the runner context
+    // (NEWPIDASH-320 §6.1, §6.3).
+    let workpad_snapshot =
+        (kind == recipes::KIND_CODING_TASK).then(|| issue.workpad.clone().unwrap_or_default());
+    let run_config = stamp_run_context(
+        run_config_for_issue(
+            project.repo_url.as_deref(),
+            project.base_branch.as_deref(),
+            issue.git_work_branch.as_deref(),
+            None,
+        ),
+        Some(&context::issue_identifier(
+            &project.identifier,
+            i64::from(issue.sequence_id),
+        )),
+        Some(&project.identifier),
+        workpad_snapshot.as_deref(),
+    );
     let run_id = Uuid::new_v4();
     let run = seam
         .insert_run(&NewAgentRun {
@@ -2988,11 +3061,33 @@ pub async fn create_project_move_handoff_run<S: CreationSeam + FinalizeAgentRunS
     if let Some(existing) = seam.active_run_for(issue.id).await? {
         return Ok(existing);
     }
-    let run_config = run_config_for_issue(
+    // The render kind still comes from the issue's current state even
+    // though the row stamps no `phase_kind` (see below): a handoff into
+    // In Progress renders the coding-task prompt, so it snapshots the
+    // current workpad exactly like the other builders (NEWPIDASH-320
+    // §6.1, §6.3). The parent's snapshot never rides along — it is
+    // stale by construction.
+    let render_kind = phase_kind_for_issue(seam.state(issue.state_id).await?);
+    let workpad_snapshot = (render_kind == recipes::KIND_CODING_TASK)
+        .then(|| issue.workpad.clone().unwrap_or_default());
+    let mut run_config = run_config_for_issue(
         project.repo_url.as_deref(),
         project.base_branch.as_deref(),
         issue.git_work_branch.as_deref(),
         Some(&req.parent.run_config),
+    );
+    if let Some(map) = run_config.as_object_mut() {
+        map.remove("workpad_body");
+        map.remove("workpad_sha256");
+    }
+    let run_config = stamp_run_context(
+        run_config,
+        Some(&context::issue_identifier(
+            &project.identifier,
+            i64::from(issue.sequence_id),
+        )),
+        Some(&project.identifier),
+        workpad_snapshot.as_deref(),
     );
     let run_id = Uuid::new_v4();
     // The dedicated pin (§9.2) survives a project move — the issue
@@ -3043,9 +3138,9 @@ pub async fn create_project_move_handoff_run<S: CreationSeam + FinalizeAgentRunS
             .await;
     }
     // The render kind still comes from the issue's current state even
-    // though the row stamps no `phase_kind`.
-    let state = seam.state(issue.state_id).await?;
-    let kind = phase_kind_for_issue(state);
+    // though the row stamps no `phase_kind` (read once above for the
+    // workpad snapshot).
+    let kind = render_kind;
     let turn = match render_new_run(
         seam,
         issue.id,
@@ -3299,16 +3394,17 @@ pub async fn resolve_pod_for_issue<C: CreationSeam>(
     Ok(resolve_pod_select(None, default.as_ref()))
 }
 
-/// Section count of the lean-workflow `coding-task` recipe for `software`
-/// (§9.2): 11 core sections plus the `software.context` and
-/// `software.execute` slots. Diverges from the Django-captured FX6
-/// manifests on purpose (D13).
+/// Section count of the `coding-task` recipe for `software`: 12 core
+/// sections (the `this-run` block first, NEWPIDASH-325) plus the
+/// `software.context` and `software.execute` slots. Diverges from the
+/// Django-captured FX6 manifests on purpose (D13).
 #[cfg(test)]
-const LEAN_CODING_SECTIONS: usize = 13;
-/// The lean `review` recipe for `software`: 6 core sections plus the
-/// `software.context` and `software.review` slots.
+const LEAN_CODING_SECTIONS: usize = 14;
+/// The `review` recipe for `software`: 7 core sections (likewise
+/// `this-run` first) plus the `software.context` and `software.review`
+/// slots.
 #[cfg(test)]
-const LEAN_REVIEW_SECTIONS: usize = 8;
+const LEAN_REVIEW_SECTIONS: usize = 9;
 
 #[cfg(test)]
 mod tests {
@@ -4186,6 +4282,77 @@ mod tests {
         );
     }
 
+    /// NEWPIDASH-320 §6.1, §6.3: the runner-context stamp — identifiers
+    /// for issue and scheduler runs, the workpad snapshot for
+    /// `coding-task` runs only. `None` leaves the config untouched.
+    #[test]
+    fn stamp_run_context_covers_kinds() {
+        let base = json!({
+            "repo_url": null,
+            "repo_ref": null,
+            "git_work_branch": null,
+        });
+        // Issue coding-task run: identifiers plus the workpad snapshot.
+        let coding = stamp_run_context(base.clone(), Some("FX6-1"), Some("FX6"), Some("# plan"));
+        assert_eq!(
+            coding,
+            json!({
+                "repo_url": null,
+                "repo_ref": null,
+                "git_work_branch": null,
+                "issue_identifier": "FX6-1",
+                "project_identifier": "FX6",
+                "workpad_body": "# plan",
+                "workpad_sha256": workpad_sha256("# plan"),
+            })
+        );
+        // Review run: identifiers, no workpad keys.
+        let review = stamp_run_context(base.clone(), Some("FX6-1"), Some("FX6"), None);
+        assert_eq!(
+            review,
+            json!({
+                "repo_url": null,
+                "repo_ref": null,
+                "git_work_branch": null,
+                "issue_identifier": "FX6-1",
+                "project_identifier": "FX6",
+            })
+        );
+        // Scheduler run: project only.
+        let sched = stamp_run_context(base.clone(), None, Some("FX6"), None);
+        assert_eq!(
+            sched,
+            json!({
+                "repo_url": null,
+                "repo_ref": null,
+                "git_work_branch": null,
+                "project_identifier": "FX6",
+            })
+        );
+        // Empty workpad still snapshots (the runner writes an empty file).
+        let empty = stamp_run_context(base.clone(), Some("FX6-1"), Some("FX6"), Some(""));
+        assert_eq!(empty["workpad_body"], json!(""));
+        assert_eq!(
+            empty["workpad_sha256"],
+            json!("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        );
+        // The base value is never mutated.
+        assert_eq!(
+            base,
+            json!({"repo_url": null, "repo_ref": null, "git_work_branch": null})
+        );
+    }
+
+    #[test]
+    fn workpad_sha256_is_hex_of_body() {
+        assert_eq!(
+            workpad_sha256(""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(workpad_sha256("# plan").len(), 64);
+        assert_ne!(workpad_sha256("# plan"), workpad_sha256("# plan\n"));
+    }
+
     #[test]
     fn pin_matrix_matches_m1_m10() {
         let clock = now();
@@ -4618,6 +4785,10 @@ mod tests {
                 "repo_url": "https://example.com/fx6.git",
                 "repo_ref": "main",
                 "git_work_branch": null,
+                "issue_identifier": "FX6-1",
+                "project_identifier": "FX6",
+                "workpad_body": "",
+                "workpad_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             })
         );
         let (prompt, manifest) = seam.saved_prompts.borrow()[&created].clone();
@@ -5036,13 +5207,19 @@ mod tests {
         );
         assert_eq!(seam.dispatched, vec![replacement.id]);
         // The replacement's config refreshed the repo snapshot (the
-        // marker never reaches the new row).
+        // marker never reaches the new row), stamped with the runner
+        // context (NEWPIDASH-320 §6.1, §6.3): H2 renders the coding-task
+        // prompt, so the current (empty) workpad rides along.
         assert_eq!(
             replacement.run_config,
             json!({
                 "repo_url": "https://example.com/fx6.git",
                 "repo_ref": "main",
                 "git_work_branch": null,
+                "issue_identifier": "FX6-1",
+                "project_identifier": "FX6",
+                "workpad_body": "",
+                "workpad_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             })
         );
     }

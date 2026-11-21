@@ -16,7 +16,9 @@ use std::path::{Path, PathBuf};
 use clap::{Args, Subcommand, ValueEnum};
 use serde_json::{Value, json};
 
-use crate::api_client::{ApiClient, CliEnv, CliError, EXIT_INVALID, EXIT_UNKNOWN, report_error};
+use crate::api_client::{
+    ApiClient, CliEnv, CliError, EXIT_INVALID, EXIT_UNKNOWN, agent_name_from_env, report_error,
+};
 
 #[derive(Debug, Args)]
 pub struct RunCmdArgs {
@@ -90,7 +92,8 @@ pub struct FinishArgs {
     #[arg(long)]
     pub note: Option<String>,
     /// Name shown as the comment's speaker (`Codex`, `Claude Code`, …).
-    /// Defaults to `AI Agent` on the server.
+    /// Defaults to `PIDASH_AGENT_NAME` inside an agent run, else to
+    /// `AI Agent` on the server.
     #[arg(long)]
     pub as_agent: Option<String>,
     /// Override the run id. Defaults to `PIDASH_RUN_ID`.
@@ -276,7 +279,12 @@ pub fn check_comment_for_result(args: &FinishArgs) -> Result<(), CliError> {
     Ok(())
 }
 
-pub async fn cmd_finish(client: &ApiClient, args: FinishArgs) -> Result<(), CliError> {
+pub async fn cmd_finish(client: &ApiClient, mut args: FinishArgs) -> Result<(), CliError> {
+    // The closing comment carries the agent's name, not "AI Agent"
+    // (NEWPIDASH-320 §6.3). Explicit `--as-agent` wins.
+    if args.as_agent.is_none() {
+        args.as_agent = agent_name_from_env();
+    }
     check_comment_for_result(&args)?;
     let run_id = resolve_run_id(args.run_id.as_deref(), client.env.run_id.as_deref())?;
     let comment = args

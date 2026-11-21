@@ -21,6 +21,13 @@ async fn spawn_leaky_agent(backend: BackendKind, script: &str) -> (u32, tokio::p
             RunEnv {
                 run_id: Uuid::new_v4(),
                 backend,
+                runner_bin_dir: None,
+                config_dir: None,
+                data_dir: None,
+                runner_exe: None,
+                issue_identifier: None,
+                project_identifier: None,
+                agent_name: None,
             },
             async { login_shell_command("bash", &["-c", script], None) },
         )

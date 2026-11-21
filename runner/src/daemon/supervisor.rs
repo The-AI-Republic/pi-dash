@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, mpsc, oneshot, watch};
@@ -2372,6 +2373,71 @@ struct CurrentRun {
     done_rx: oneshot::Receiver<()>,
 }
 
+/// Run context the cloud attaches to an `Assign` (NEWPIDASH-320 §6.3,
+/// §6.1): the issue and project identifiers plus, for `coding-task`
+/// runs, the workpad snapshot. All-`None` for old servers; chat turns
+/// never carry it.
+#[derive(Debug, Clone, Default)]
+struct AssignContext {
+    issue_identifier: Option<String>,
+    project_identifier: Option<String>,
+    workpad_body: Option<String>,
+    workpad_sha256: Option<String>,
+}
+
+impl AssignContext {
+    /// The `PIDASH_AGENT_NAME` value for this run:
+    /// `<display name> (<model>)`, e.g. `Claude Code (claude-opus-4-8)`.
+    /// The model is the assign's expected model, else the runner's
+    /// configured default, else omitted (NEWPIDASH-320 §6.3, decision D5).
+    fn agent_name(
+        &self,
+        kind: AgentKind,
+        expected_model: Option<&str>,
+        configured_model: Option<&str>,
+    ) -> String {
+        let display = kind.display_name();
+        match expected_model.or(configured_model) {
+            Some(model) => format!("{display} ({model})"),
+            None => display.to_string(),
+        }
+    }
+}
+
+/// Write the run's workpad snapshot to `<working_dir>/.pidash/` before
+/// the agent launches (NEWPIDASH-320 §6.1): `workpad.md` (empty when the
+/// workpad is empty) plus its `workpad.sha256` guard file. The CLI's
+/// `workpad update` sends the hash back as `if_body_sha256` and rewrites
+/// it from each response.
+fn materialise_workpad_snapshot(
+    working_dir: &std::path::Path,
+    body: &str,
+    sha256: &str,
+) -> std::io::Result<()> {
+    let dir = working_dir.join(".pidash");
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("workpad.md"), body)?;
+    std::fs::write(dir.join("workpad.sha256"), format!("{sha256}\n"))?;
+    Ok(())
+}
+
+/// Remove a stale workpad snapshot from `<working_dir>/.pidash/`
+/// (NEWPIDASH-320 review): review/test/scheduler assigns carry no
+/// snapshot, and the runner reuses one `working_dir` across runs, so a
+/// previous coding-task run's `workpad.md` + `workpad.sha256` must not
+/// leak into a run that owns no workpad. Best-effort like the write
+/// path — missing files are fine, other errors warn.
+fn discard_stale_workpad_snapshot(working_dir: &std::path::Path) {
+    for name in ["workpad.md", "workpad.sha256"] {
+        let path = working_dir.join(".pidash").join(name);
+        if let Err(err) = std::fs::remove_file(&path)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(path = %path.display(), error = %err, "stale workpad snapshot delete failed; continuing without the file");
+        }
+    }
+}
+
 struct CurrentChat {
     chat_session_id: uuid::Uuid,
     tx: mpsc::Sender<ChatCommand>,
@@ -2574,6 +2640,7 @@ impl RunnerLoop {
         prompt: String,
         repo_url: Option<String>,
         expected_codex_model: Option<String>,
+        context: AssignContext,
     ) {
         let cancel = tokio_util::sync::CancellationToken::new();
         let (done_tx, done_rx) = oneshot::channel();
@@ -2614,7 +2681,7 @@ impl RunnerLoop {
                 queue_blocked,
             };
             if let Err(e) = worker
-                .run(run_id, prompt, repo_url, expected_codex_model)
+                .run(run_id, prompt, repo_url, expected_codex_model, context)
                 .await
             {
                 tracing::error!("run {run_id} failed: {e:#}");
@@ -2661,7 +2728,17 @@ impl RunnerLoop {
                         .get("expected_codex_model")
                         .and_then(|m| m.as_str())
                         .map(|s| s.to_string());
-                    self.reserve_and_spawn(entry.run_id, prompt, repo_url, model)
+                    // Payloads written before the run-context change lack
+                    // these keys — they read back as absent (old servers).
+                    let opt =
+                        |key: &str| v.get(key).and_then(|s| s.as_str()).map(|s| s.to_string());
+                    let context = AssignContext {
+                        issue_identifier: opt("issue_identifier"),
+                        project_identifier: opt("project_identifier"),
+                        workpad_body: opt("workpad_body"),
+                        workpad_sha256: opt("workpad_sha256"),
+                    };
+                    self.reserve_and_spawn(entry.run_id, prompt, repo_url, model, context)
                         .await;
                 }
                 _ => {
@@ -2789,6 +2866,10 @@ impl RunnerLoop {
                     repo_url,
                     expected_codex_model,
                     assignment_token,
+                    issue_identifier,
+                    project_identifier,
+                    workpad_body,
+                    workpad_sha256,
                     ..
                 } => {
                     // Cross-lane exclusion: a runner has one working dir shared
@@ -2901,11 +2982,25 @@ impl RunnerLoop {
                     // the FIFO sequence and persist the payload. The worker
                     // below holds this runner without starting until the
                     // coordinator admits it (oldest-first).
+                    // Run context rides the durable queue too, so a restart
+                    // between enqueue and admission keeps the env and the
+                    // workpad file (old daemons' payloads lack these keys —
+                    // the re-hydration reader treats them as absent).
+                    let context = AssignContext {
+                        issue_identifier,
+                        project_identifier,
+                        workpad_body,
+                        workpad_sha256,
+                    };
                     if let Some(coord) = self.coordinator.as_ref() {
                         let payload = serde_json::to_vec(&serde_json::json!({
                             "prompt": prompt,
                             "repo_url": repo_url,
                             "expected_codex_model": expected_codex_model,
+                            "issue_identifier": context.issue_identifier,
+                            "project_identifier": context.project_identifier,
+                            "workpad_body": context.workpad_body,
+                            "workpad_sha256": context.workpad_sha256,
                         }))
                         .unwrap_or_default();
                         if let Err(e) = coord.enqueue_assign(
@@ -2922,7 +3017,7 @@ impl RunnerLoop {
                             continue;
                         }
                     }
-                    self.reserve_and_spawn(run_id, prompt, repo_url, expected_codex_model)
+                    self.reserve_and_spawn(run_id, prompt, repo_url, expected_codex_model, context)
                         .await;
                 }
                 ServerMsg::Cancel { run_id, reason } => {
@@ -4562,6 +4657,7 @@ impl AssignWorker {
         prompt: String,
         repo_url: Option<String>,
         expected_codex_model: Option<String>,
+        context: AssignContext,
     ) -> Result<()> {
         // Machine FIFO gate (NEWPIDASH-241 T6): hold this runner without
         // workspace preparation or agent start until the coordinator
@@ -4582,7 +4678,7 @@ impl AssignWorker {
                 Err(e) => anyhow::bail!("queue admission failed: {e}"),
             }
         }
-        self.handle_assign(run_id, prompt, repo_url, expected_codex_model)
+        self.handle_assign(run_id, prompt, repo_url, expected_codex_model, context)
             .await
     }
 
@@ -4592,6 +4688,7 @@ impl AssignWorker {
         prompt: String,
         repo_url: Option<String>,
         expected_codex_model: Option<String>,
+        context: AssignContext,
     ) -> Result<()> {
         // Per-run process containment (NEWPIDASH-255): create the run's
         // cgroup now and carry its backend on RUN_ENV so every agent
@@ -4599,15 +4696,43 @@ impl AssignWorker {
         // covering every exit path — normal end, failure, cancellation,
         // daemon shutdown and task abort alike.
         let mut guard = containment::create_run_group(run_id);
-        // Scope the run id over everything this run does so every agent
-        // subprocess the bridges spawn (and re-spawn per turn) inherits
-        // `PIDASH_RUN_ID` — see `util::shell::RUN_ENV`.
+        // Scope the run context over everything this run does so every
+        // agent subprocess the bridges spawn (and re-spawn per turn)
+        // inherits `PIDASH_RUN_ID` plus the issue/project/agent names —
+        // see `util::shell::RUN_ENV`. Chat turns never enter this scope,
+        // so they export none of them.
+        // Pin every agent run's `pidash` to this daemon binary
+        // (NEWPIDASH-363): `RUN_ENV` reaches all bridges (every agent kind,
+        // managed or user-enrolled) without per-bridge changes, and the
+        // wrapper re-exports it after rc files run. Config/data dirs ride
+        // along whenever the daemon itself has them set.
+        let agent_name = context.agent_name(
+            self.runner_config.agent.kind,
+            expected_codex_model.as_deref(),
+            self.runner_config.configured_model(),
+        );
         let scope = crate::util::shell::RUN_ENV.scope(
             crate::util::shell::RunEnv {
                 run_id,
                 backend: guard.backend_kind(),
+                runner_bin_dir: Some(crate::util::shell::ensure_daemon_pidash_link(
+                    &self.daemon_paths.data_dir,
+                )),
+                config_dir: std::env::var_os("PIDASH_CONFIG_DIR").map(PathBuf::from),
+                data_dir: std::env::var_os("PIDASH_DATA_DIR").map(PathBuf::from),
+                runner_exe: crate::util::shell::current_exe_canonical(),
+                issue_identifier: context.issue_identifier.clone(),
+                project_identifier: context.project_identifier.clone(),
+                agent_name: Some(agent_name),
             },
-            self.handle_assign_inner(run_id, prompt, repo_url, expected_codex_model, &mut guard),
+            self.handle_assign_inner(
+                run_id,
+                prompt,
+                repo_url,
+                expected_codex_model,
+                context,
+                &mut guard,
+            ),
         );
         // Cleanup runs even when the run fails: a failed run must not
         // leave its processes (or its parity-stack hook) behind.
@@ -4627,6 +4752,7 @@ impl AssignWorker {
         prompt: String,
         repo_url: Option<String>,
         expected_codex_model: Option<String>,
+        context: AssignContext,
         guard: &mut RunGroup,
     ) -> Result<()> {
         // Resolve the directory the agent runs in: this runner's single,
@@ -4664,6 +4790,27 @@ impl AssignWorker {
                 }
             }
         };
+        // Workpad snapshot (NEWPIDASH-320 §6.1): for `coding-task` runs the
+        // server attached `workpad_body` + `workpad_sha256` to the assign.
+        // Materialise them as files before the agent launches so the prompt
+        // never needs a re-fetch. Review/test/scheduler assigns carry
+        // neither field: drop a previous run's files (the runner reuses one
+        // `working_dir` across runs) so they can't leak into this run. A
+        // stale or missing file is never fatal — the CLI falls back to
+        // `workpad get --to-file`.
+        if let Some(body) = context.workpad_body.as_deref() {
+            let sha = context.workpad_sha256.as_deref().unwrap_or("");
+            if let Err(err) = materialise_workpad_snapshot(&workspace_path, body, sha) {
+                tracing::warn!(%run_id, error = %err, "workpad snapshot write failed; continuing without the file");
+            }
+        } else {
+            discard_stale_workpad_snapshot(&workspace_path);
+        }
+        // The `.pidash/` scratch dir must never be committed, whatever the
+        // run carries (reuses the CLI context helper).
+        if let Err(err) = crate::cli::context::exclude_pidash_from_git(&workspace_path) {
+            tracing::warn!(%run_id, error = %err, ".pidash git exclude failed");
+        }
         // Fresh run starts clean: drop any hook left by a previous run
         // (the daemon-start sweep is the only other consumer), then
         // record the workspace so containment cleanup can find a hook
@@ -5738,6 +5885,68 @@ mod tests {
     use chrono::TimeZone;
     use std::path::PathBuf;
     use tokio::sync::Notify;
+
+    /// NEWPIDASH-320 §6.3, decision D5: `PIDASH_AGENT_NAME` is
+    /// `<display name> (<model>)`, with the assign's expected model first,
+    /// else the runner default, else the bare display name.
+    #[test]
+    fn agent_name_prefers_expected_model_then_default() {
+        let ctx = AssignContext::default();
+        assert_eq!(
+            ctx.agent_name(
+                AgentKind::ClaudeCode,
+                Some("claude-opus-4-8"),
+                Some("other")
+            ),
+            "Claude Code (claude-opus-4-8)"
+        );
+        assert_eq!(
+            ctx.agent_name(AgentKind::Codex, None, Some("gpt-5.3-codex")),
+            "Codex (gpt-5.3-codex)"
+        );
+        assert_eq!(ctx.agent_name(AgentKind::MuseCode, None, None), "Muse Code");
+    }
+
+    /// NEWPIDASH-320 §6.1: the workpad snapshot lands as two files under
+    /// `.pidash/`, byte-verbatim (the CLI sends the file content back
+    /// unchanged, so the guard hash must match exactly).
+    #[test]
+    fn workpad_snapshot_writes_body_and_hash_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let body = "# Plan\n\n- [ ] 1. Parent task\n";
+        materialise_workpad_snapshot(dir.path(), body, "deadbeef").expect("snapshot");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(".pidash/workpad.md")).expect("body"),
+            body
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(".pidash/workpad.sha256")).expect("hash"),
+            "deadbeef\n"
+        );
+    }
+
+    #[test]
+    fn workpad_snapshot_empty_body_writes_empty_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        materialise_workpad_snapshot(dir.path(), "", "e3b0c4").expect("snapshot");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(".pidash/workpad.md")).expect("body"),
+            ""
+        );
+    }
+
+    /// NEWPIDASH-320 review: non-coding-task assigns carry no snapshot, so
+    /// a previous run's files must be removed — and missing files are fine.
+    #[test]
+    fn stale_workpad_snapshot_is_discarded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        materialise_workpad_snapshot(dir.path(), "stale", "deadbeef").expect("snapshot");
+        discard_stale_workpad_snapshot(dir.path());
+        assert!(!dir.path().join(".pidash/workpad.md").exists());
+        assert!(!dir.path().join(".pidash/workpad.sha256").exists());
+        // Idempotent: nothing there is not an error.
+        discard_stale_workpad_snapshot(dir.path());
+    }
 
     #[tokio::test]
     async fn cloud_decide_resolves_engine_rpc_approval_handle() {
@@ -6846,6 +7055,7 @@ mod tests {
                     "Summarize these notes".into(),
                     None,
                     None,
+                    AssignContext::default(),
                 )
                 .await
                 .unwrap();

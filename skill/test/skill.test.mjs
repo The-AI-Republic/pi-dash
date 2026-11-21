@@ -15,7 +15,7 @@ const SKILL_PKG_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SKILL_DIR = join(SKILL_PKG_DIR, "pidash");
 const INSTALLER = join(SKILL_PKG_DIR, "install.mjs");
 const CLI_SRC_DIR = resolve(SKILL_PKG_DIR, "..", "runner", "src", "cli");
-const SKILL_DOCS = [join(SKILL_DIR, "SKILL.md"), join(SKILL_DIR, "references", "pidash-workflows.md")];
+const SKILL_DOCS = [join(SKILL_DIR, "SKILL.md")];
 
 function runInstaller(args, homes) {
   return spawnSync(process.execPath, [INSTALLER, ...args], {
@@ -44,8 +44,29 @@ test("--all installs the skill into both agents", () => {
         readFileSync(join(installed, "SKILL.md"), "utf8"),
         readFileSync(join(SKILL_DIR, "SKILL.md"), "utf8")
       );
-      assert.ok(existsSync(join(installed, "references", "pidash-workflows.md")));
+      // NEWPIDASH-320: the workflows reference is deleted; the thin skill
+      // points at `pidash docs` instead. Stale copies must not survive.
+      assert.ok(!existsSync(join(installed, "references")));
     }
+  });
+});
+
+test("the installed skill is thin (SKILL.md <= 2 KB, no references)", () => {
+  withTempHomes((homes) => {
+    const result = runInstaller(["--all"], homes);
+    assert.equal(result.status, 0, result.stderr);
+
+    const installed = readFileSync(join(homes.claude, "skills", "pidash", "SKILL.md"), "utf8");
+    assert.ok(
+      Buffer.byteLength(installed, "utf8") <= 2048,
+      `installed SKILL.md is ${Buffer.byteLength(installed, "utf8")} bytes; keep it <= 2 KB`
+    );
+    // First body line: inside a Pi Dash agent run the prompt already has
+    // the CLI instructions, so no further references should be loaded.
+    const body = installed.split(/^---\r?\n[\s\S]*?\r?\n---\r?\n/)[1] ?? installed;
+    const firstLine = body.trimStart().split("\n")[0];
+    assert.match(firstLine, /If `PIDASH_RUN_ID` is set you are inside a Pi Dash agent run/);
+    assert.match(installed, /pidash docs <topic>/);
   });
 });
 
@@ -72,15 +93,20 @@ test("reinstalling replaces stale files and removes the legacy pi-dash folder", 
   withTempHomes((homes) => {
     const skillsDir = join(homes.claude, "skills");
     const staleFile = join(skillsDir, "pidash", "stale.md");
+    const staleRef = join(skillsDir, "pidash", "references", "pidash-workflows.md");
     const legacyDir = join(skillsDir, "pi-dash");
     mkdirSync(dirname(staleFile), { recursive: true });
     writeFileSync(staleFile, "left over from an older install");
+    mkdirSync(dirname(staleRef), { recursive: true });
+    writeFileSync(staleRef, "left over from the pre-thin skill");
     mkdirSync(legacyDir, { recursive: true });
 
     const result = runInstaller(["--claude-code"], homes);
 
     assert.equal(result.status, 0, result.stderr);
     assert.ok(!existsSync(staleFile));
+    assert.ok(!existsSync(staleRef));
+    assert.ok(!existsSync(join(skillsDir, "pidash", "references")));
     assert.ok(!existsSync(legacyDir));
     assert.ok(existsSync(join(skillsDir, "pidash", "SKILL.md")));
   });
@@ -139,6 +165,7 @@ const COMMAND_SOURCES = {
   workspace: "workspace.rs",
   scheduler: "scheduler.rs",
   run: "run_cmd.rs",
+  docs: "docs.rs",
   config: "config_cmd.rs",
   auth: "auth/mod.rs",
   ai: null,
@@ -200,7 +227,10 @@ test("the command check actually finds commands to check", () => {
 
   assert.ok(mentions.includes("issue create"));
   assert.ok(mentions.includes("comment add"));
-  assert.ok(mentions.length > 20, `only found ${mentions.length} command mentions`);
+  assert.ok(mentions.includes("docs"));
+  // Thin skill (NEWPIDASH-320): core commands plus the `pidash docs`
+  // pointer — far fewer mentions than the old manual, but never zero.
+  assert.ok(mentions.length > 10, `only found ${mentions.length} command mentions`);
 });
 
 // Every `--flag` the skill docs mention must be declared somewhere in the CLI
@@ -231,6 +261,10 @@ test("every flag the skill mentions is declared in the CLI source", () => {
 
   const undeclared = [...mentioned].filter((flag) => !declared.has(flag)).toSorted();
 
-  assert.ok(mentioned.size > 30, `only found ${mentioned.size} flag mentions`);
+  // Thin skill (NEWPIDASH-320): fewer flags than the old manual, but the
+  // core ones must still be mentioned and every mention must be real.
+  assert.ok(mentioned.has("project"));
+  assert.ok(mentioned.has("body-file"));
+  assert.ok(mentioned.size > 5, `only found ${mentioned.size} flag mentions`);
   assert.deepEqual(undeclared, []);
 });

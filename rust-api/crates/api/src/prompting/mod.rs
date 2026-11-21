@@ -2220,6 +2220,7 @@ async fn load_issue_context(
         // `_FakeRun` (`views.py:65-72`): a fresh id with no trigger,
         // `local_runner` executor, and an empty tool plan.
         run_id: preview_run_id.to_string(),
+        rendered_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         run_template_name: template_name_for(state.as_ref()),
         attempt: context::compute_attempt(prior_runs),
         trigger: None,
@@ -3227,6 +3228,7 @@ async fn load_scheduler_context(
         scheduler_description,
         // `_FakeRun`: fresh id, `local_runner` executor, empty tool plan.
         run_id: uuid::Uuid::new_v4().to_string(),
+        rendered_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         executor_kind: "local_runner".to_owned(),
         available_tools: Value::Null,
         unavailable_capabilities: Value::Null,

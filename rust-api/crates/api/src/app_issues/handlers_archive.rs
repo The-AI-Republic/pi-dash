@@ -44,7 +44,7 @@
 //! * Re-archiving answers 404 (`issue_objects` excludes archived rows).
 //! * Archiving a NULL-state issue 500s (`None.group`); unarchiving one
 //!   assigns the default state instead.
-//! * (fixed by NEWPIDASH-351, DIFF-59) `save()` recomputed `completed_at`
+//! * (fixed by NEWPIDASH-351, DIFF-62) `save()` recomputed `completed_at`
 //!   from the state group on every archive/unarchive (clobbering it on
 //!   completed issues); archive/unarchive never change state, so the
 //!   stamp is now left untouched, while `updated_at` +
@@ -63,7 +63,7 @@
 //!   keys — the pilot-2 `SERIALIZER_FIELDS` rule, verified live).
 //! * FX-ISS-19 omits the `save()` recomputes (`updated_at`,
 //!   `description_stripped`, NULL-state default; `completed_at` was a
-//!   recompute too before DIFF-59 and is now preserved).
+//!   recompute too before DIFF-62 and is now preserved).
 //!
 //! # Known gaps (precedent: pilot-2 records the same)
 //!
@@ -912,7 +912,7 @@ async fn fetch_blockers(
 
 /// One issue row for the write paths: the base scalars plus the state
 /// group for the gate (the save() hooks, not the archive write, own the
-/// DIFF-59 `completed_at` transition rule).
+/// DIFF-62 `completed_at` transition rule).
 struct WriteRow {
     id: uuid::Uuid,
     name: String,

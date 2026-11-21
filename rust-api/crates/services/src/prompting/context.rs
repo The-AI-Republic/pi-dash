@@ -997,6 +997,10 @@ pub struct IssueContextInput {
     /// The five keys of [`relations_context`] (spread into the top level).
     pub relations: Value,
     pub run_id: String,
+    /// UTC RFC 3339 instant the prompt is built (NEWPIDASH-325 §6.2): the
+    /// freshness anchor the prompt quotes back as `run.rendered_at`, so the
+    /// agent's `comment list --since` re-check costs a few lines.
+    pub rendered_at: String,
     /// Phase template name; mapped via [`issue_run_kind`].
     pub run_template_name: String,
     pub attempt: i64,
@@ -1125,6 +1129,7 @@ pub fn build_context(input: &IssueContextInput) -> Value {
             "turn_number": 1,
             "trigger": input.trigger.clone().map(Value::String).unwrap_or(Value::Null),
             "executor_kind": input.executor_kind,
+            "rendered_at": input.rendered_at,
         },
         "available_tools": null_or(&input.available_tools, Value::Array(vec![])),
         "unavailable_capabilities": null_or(&input.unavailable_capabilities, Value::Array(vec![])),
@@ -1361,6 +1366,9 @@ pub struct SchedulerContextInput {
     pub scheduler_name: String,
     pub scheduler_description: Option<String>,
     pub run_id: String,
+    /// UTC RFC 3339 instant the prompt is built (NEWPIDASH-325 §6.2); see
+    /// [`IssueContextInput::rendered_at`].
+    pub rendered_at: String,
     pub executor_kind: String,
     pub available_tools: Value,
     pub unavailable_capabilities: Value,
@@ -1403,6 +1411,7 @@ pub fn build_scheduler_context(input: &SchedulerContextInput) -> Value {
             "attempt": 1,
             "turn_number": 1,
             "executor_kind": input.executor_kind,
+            "rendered_at": input.rendered_at,
         },
         "available_tools": null_or(&input.available_tools, Value::Array(vec![])),
         "unavailable_capabilities": null_or(&input.unavailable_capabilities, Value::Array(vec![])),
@@ -1914,6 +1923,7 @@ mod tests {
             related: Value::Array(vec![]),
             relations: relations_context(&by_type),
             run_id: "run-1".to_owned(),
+            rendered_at: "2026-01-01T00:00:00Z".to_owned(),
             run_template_name: "coding-task".to_owned(),
             attempt: 1,
             trigger: Some("tick".to_owned()),
@@ -2311,6 +2321,7 @@ mod tests {
             scheduler_name: "Security Audit".to_owned(),
             scheduler_description: Some("Scans.".to_owned()),
             run_id: "run-1".to_owned(),
+            rendered_at: "2026-01-01T00:00:00Z".to_owned(),
             executor_kind: "local_runner".to_owned(),
             available_tools: Value::Array(vec![]),
             unavailable_capabilities: Value::Array(vec![]),
