@@ -1226,10 +1226,21 @@ fn summary_query(
                 .add(pages::Column::Access.eq(0)),
         )
         .filter(
-            Condition::all().add(
-                sea_orm::sea_query::Expr::col((Alias::new("pp"), project_pages::Column::ProjectId))
+            Condition::all()
+                .add(
+                    sea_orm::sea_query::Expr::col((
+                        Alias::new("pp"),
+                        project_pages::Column::ProjectId,
+                    ))
                     .eq(*project_id),
-            ),
+                )
+                .add(
+                    sea_orm::sea_query::Expr::col((
+                        Alias::new("pp"),
+                        project_pages::Column::DeletedAt,
+                    ))
+                    .is_null(),
+                ),
         );
     query = query
         .filter(workspaces::Column::Slug.eq(slug))
@@ -4593,10 +4604,21 @@ fn parent_probe_query(
                 .add(pages::Column::Access.eq(0)),
         )
         .filter(
-            Condition::all().add(
-                sea_orm::sea_query::Expr::col((Alias::new("pp"), project_pages::Column::ProjectId))
+            Condition::all()
+                .add(
+                    sea_orm::sea_query::Expr::col((
+                        Alias::new("pp"),
+                        project_pages::Column::ProjectId,
+                    ))
                     .eq(*project_id),
-            ),
+                )
+                .add(
+                    sea_orm::sea_query::Expr::col((
+                        Alias::new("pp"),
+                        project_pages::Column::DeletedAt,
+                    ))
+                    .is_null(),
+                ),
         )
 }
 
@@ -6591,6 +6613,21 @@ mod tests {
         bridge(&pool, ws, p7, archived_project).await;
         bridge(&pool, ws, p8, project).await;
         // p9: no bridge.
+        // p10: soft-deleted URL-project link + a live link to the other
+        // project (NEWPIDASH-343: the NEWPIDASH-240 move state). The legacy
+        // scope ignores the soft-deleted bridge, so p10 stays out of the
+        // counts and the probe.
+        let p10 = seed_page(&pool, ws, "p10", user, 0, None, None, false).await;
+        bridge(&pool, ws, p10, project).await;
+        sqlx::query(
+            "UPDATE project_pages SET deleted_at = now() WHERE page_id = $1 AND project_id = $2",
+        )
+        .bind(p10)
+        .bind(project)
+        .execute(&pool)
+        .await
+        .expect("soft-delete bridge");
+        bridge(&pool, ws, p10, other_project).await;
 
         // Legacy summary SQL (pre-conversion form, binds slug/user/project).
         let legacy_summary: String = "SELECT COUNT(CASE WHEN __r.access = 0 AND __r.archived_at IS NULL THEN 1 END) AS public_pages, \
@@ -6633,6 +6670,7 @@ mod tests {
             "converted summary matches legacy"
         );
         // Expected shape: p1 (public) + p5 (public, other) = 2; p2 = 1; p3+p4 archived = 2.
+        // p10 (soft-deleted URL-project link) is excluded.
         assert_eq!(legacy, (2, 1, 2));
 
         // Guest-only view: only owned rows. The owned-by predicate goes
@@ -6671,13 +6709,13 @@ mod tests {
         assert_eq!(legacy_guest, (1, 1, 2));
 
         // Parent probe differential (visible archived parent, visible live
-        // parent, invisible parent p9).
+        // parent, invisible parent p9, soft-deleted-link parent p10).
         let legacy_probe = format!(
             "SELECT pages.archived_at IS NOT NULL FROM pages WHERE {} AND ({}) = TRUE AND pages.id = $4",
             read_scope_where("$1", "$2"),
             project_annotation("$3"),
         );
-        for (target, want) in [(p3, Some(true)), (p1, Some(false)), (p9, None)] {
+        for (target, want) in [(p3, Some(true)), (p1, Some(false)), (p9, None), (p10, None)] {
             let old: Option<(bool,)> = sqlx::query_as(&legacy_probe)
                 .bind(&slug)
                 .bind(user)
