@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, mpsc, oneshot, watch};
@@ -4602,10 +4603,21 @@ impl AssignWorker {
         // Scope the run id over everything this run does so every agent
         // subprocess the bridges spawn (and re-spawn per turn) inherits
         // `PIDASH_RUN_ID` — see `util::shell::RUN_ENV`.
+        // Pin every agent run's `pidash` to this daemon binary
+        // (NEWPIDASH-363): `RUN_ENV` reaches all bridges (every agent kind,
+        // managed or user-enrolled) without per-bridge changes, and the
+        // wrapper re-exports it after rc files run. Config/data dirs ride
+        // along whenever the daemon itself has them set.
         let scope = crate::util::shell::RUN_ENV.scope(
             crate::util::shell::RunEnv {
                 run_id,
                 backend: guard.backend_kind(),
+                runner_bin_dir: Some(crate::util::shell::ensure_daemon_pidash_link(
+                    &self.daemon_paths.data_dir,
+                )),
+                config_dir: std::env::var_os("PIDASH_CONFIG_DIR").map(PathBuf::from),
+                data_dir: std::env::var_os("PIDASH_DATA_DIR").map(PathBuf::from),
+                runner_exe: crate::util::shell::current_exe_canonical(),
             },
             self.handle_assign_inner(run_id, prompt, repo_url, expected_codex_model, &mut guard),
         );
