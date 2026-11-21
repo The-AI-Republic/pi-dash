@@ -246,9 +246,7 @@ def release_pins_on_offline_runners() -> int:
         return 0
     cutoff = timezone.now() - timedelta(seconds=grace)
     gone_q = _pinned_runner_gone_q(cutoff)
-    candidates = (
-        _releasable_pins().filter(created_at__lt=cutoff).filter(gone_q).values_list("id", flat=True)[:500]
-    )
+    candidates = _releasable_pins().filter(created_at__lt=cutoff).filter(gone_q).values_list("id", flat=True)[:500]
     released = _release_pins(candidates, gone_q)
     if released:
         logger.info("release_pins_on_offline_runners unpinned %s queued run(s)", released)
@@ -637,6 +635,15 @@ def reconcile_stalled_runs() -> int:
     reaped = 0
     for run in stalled:
         if run.runner is None:
+            continue
+        # Fresh same-attempt ``waiting_for_capacity`` reports are
+        # normal polling, not agent silence (T2 reaper guards): a run
+        # still waiting for machine capacity has no agent subprocess
+        # to have stalled. Stale reports fall through to the watchdog
+        # as before; offline recovery is untouched.
+        from pi_dash.runner.services.capacity import fresh_capacity_wait
+
+        if fresh_capacity_wait(run):
             continue
         # Per-row guard: a single bad finalize (DB constraint, optimistic-
         # concurrency conflict, scheduler-hook error) must not abort the
