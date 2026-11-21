@@ -1780,9 +1780,11 @@ pub async fn set_workpad(
         row.try_get("", "completed_at")?;
     // The sparse save: only the workpad, audit and hook recomputes move —
     // current values ride `Unchanged` for the hook reads (the archive
-    // shape). Hook-`Set` fields join the `UPDATE`, so `completed_at` /
+    // shape). Hook-`Set` fields join the `UPDATE`, so
     // `description_stripped` (and the default state on the NULL leg) land
-    // exactly the ported columns.
+    // exactly the ported columns; `completed_at` stays `Unchanged`
+    // (DIFF-59: a workpad write never changes state, so the stamp is
+    // preserved).
     let model = issues::ActiveModel {
         id: sea_orm::Unchanged(input.issue_id),
         project_id: sea_orm::Unchanged(input.project_id),
@@ -3170,9 +3172,10 @@ async fn archive_driver(
         .await;
     // The sparse save: only the archived flag, audit and hook recomputes
     // are `Set` — current values ride `Unchanged` for the hook reads.
-    // Hook-`Set` fields join the `UPDATE`, so `completed_at` /
-    // `description_stripped` (and the default state on the NULL leg) land
-    // exactly the ported columns.
+    // Hook-`Set` fields join the `UPDATE`, so `description_stripped`
+    // (and the default state on the NULL leg) land exactly the ported
+    // columns; `completed_at` stays `Unchanged` (DIFF-59: archiving never
+    // changes state, so the stamp is preserved).
     let am = issues::ActiveModel {
         id: sea_orm::Unchanged(issue_id),
         project_id: sea_orm::Unchanged(project_id),

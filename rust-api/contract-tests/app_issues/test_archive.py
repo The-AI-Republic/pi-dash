@@ -6,6 +6,7 @@ throwaways so the seed is untouched.
 """
 
 import json
+import time
 
 from _harness.diffs import expect, is_rust
 
@@ -258,6 +259,105 @@ def test_archived_list_state_id_in_filter(clients, seed):
     )
     assert resp.status_code == 200, resp.text
     assert i5 not in {row["id"] for row in resp.json()["results"]}
+
+
+def test_completed_at_preserved_without_state_change(clients, seed, db_conn):
+    """NEWPIDASH-351 (DIFF-59, PB-0306, PB-0286): archiving, unarchiving,
+    PATCHing an unrelated field of, and soft-deleting a completed issue
+    must not rewrite its ``completed_at`` stamp.
+
+    Django's ``Issue.save()`` restamps ``completed_at`` from the state
+    group on every save, so each leg below visibly moves the stamp; the
+    Rust save stamps only on transitions into ``completed`` and preserves
+    the original stamp here.
+    """
+    admin = clients["admin"]
+    ws, pid, done = seed["ws_slug"], seed["project"], seed["state_done"]
+    made = []
+    try:
+        for name in ("DIFF-59 archive probe", "DIFF-59 patch probe",
+                     "DIFF-59 delete probe"):
+            row = admin.post(
+                f"{_base(ws, pid)}/issues/", json={"name": name}).json()
+            assert admin.patch(
+                f"{_base(ws, pid)}/issues/{row['id']}/",
+                json={"state_id": done}).status_code == 204
+            made.append(row["id"])
+        aid, bid, did = made
+        before_a = admin.get(
+            f"{_base(ws, pid)}/issues/{aid}/").json()["completed_at"]
+        before_b = admin.get(
+            f"{_base(ws, pid)}/issues/{bid}/").json()["completed_at"]
+        assert before_a is not None and before_b is not None
+        time.sleep(1.2)
+        # Archive leg (PB-0306).
+        assert admin.post(
+            f"{_base(ws, pid)}/issues/{aid}/archive/").status_code == 200
+        after_archive = admin.get(
+            f"{_base(ws, pid)}/issues/{aid}/archive/").json()["completed_at"]
+        assert (after_archive != before_a) == expect(
+            "DIFF-59", django=True, rust=False)
+        # Unarchive leg (PB-0306).
+        assert admin.request(
+            "DELETE",
+            f"{_base(ws, pid)}/issues/{aid}/archive/").status_code == 204
+        after_unarchive = admin.get(
+            f"{_base(ws, pid)}/issues/{aid}/").json()["completed_at"]
+        assert (after_unarchive != before_a) == expect(
+            "DIFF-59", django=True, rust=False)
+        # Unrelated PATCH leg (PB-0286).
+        assert admin.patch(
+            f"{_base(ws, pid)}/issues/{bid}/",
+            json={"priority": "high"}).status_code == 204
+        after_patch = admin.get(
+            f"{_base(ws, pid)}/issues/{bid}/").json()["completed_at"]
+        assert (after_patch != before_b) == expect(
+            "DIFF-59", django=True, rust=False)
+        # Soft-delete leg: the destroy save preserves the stamp too.
+        from datetime import datetime
+        before_d = admin.get(
+            f"{_base(ws, pid)}/issues/{did}/").json()["completed_at"]
+        assert admin.delete(
+            f"{_base(ws, pid)}/issues/{did}/").status_code == 204
+        with db_conn.cursor() as cur:
+            cur.execute("SELECT completed_at FROM issues WHERE id = %s",
+                        (did,))
+            after_delete = cur.fetchone()[0]
+        assert (after_delete != datetime.fromisoformat(before_d)) == expect(
+            "DIFF-59", django=True, rust=False)
+    finally:
+        for iid in made:
+            admin.request("DELETE", f"{_base(ws, pid)}/issues/{iid}/archive/")
+            admin.delete(f"{_base(ws, pid)}/issues/{iid}/")
+
+
+def test_completed_at_transitions_with_state_group(clients, seed):
+    """NEWPIDASH-351 (DIFF-59): moving into a completed-group state stamps
+    ``completed_at`` and moving back out clears it — on both backends.
+    """
+    admin = clients["admin"]
+    ws, pid = seed["ws_slug"], seed["project"]
+    backlog, done = seed["state_backlog"], seed["state_done"]
+    made = admin.post(
+        f"{_base(ws, pid)}/issues/",
+        json={"name": "DIFF-59 transition probe"}).json()
+    iid = made["id"]
+    try:
+        assert admin.get(
+            f"{_base(ws, pid)}/issues/{iid}/").json()["completed_at"] is None
+        assert admin.patch(
+            f"{_base(ws, pid)}/issues/{iid}/",
+            json={"state_id": done}).status_code == 204
+        stamped = admin.get(
+            f"{_base(ws, pid)}/issues/{iid}/").json()["completed_at"]
+        assert stamped is not None
+        assert admin.patch(
+            f"{_base(ws, pid)}/issues/{iid}/",
+            json={"state_id": backlog}).status_code == 204
+        assert admin.get(
+            f"{_base(ws, pid)}/issues/{iid}/").json()["completed_at"] is None
+    finally:
+        admin.delete(f"{_base(ws, pid)}/issues/{iid}/")
 
 
 def test_archived_grouped_rows_match_ungrouped_shape(clients, seed):

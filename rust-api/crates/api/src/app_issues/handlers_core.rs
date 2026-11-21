@@ -47,8 +47,9 @@
 //!   `{"error": "The required key does not exist."}` (the `KeyError`
 //!   branch); PUT ignores `label_ids` (labels are kept, verified live on
 //!   both backends — there is no wipe).
-//! - PUT/partial-update `completed_at` input is discarded (save() recomputes
-//!   it from the state group); create without `state_id` keeps it.
+//! - PUT/partial-update `completed_at` input is discarded (the update
+//!   overlay drops it and the save keeps the stored stamp unless the
+//!   state group changed — DIFF-59); create without `state_id` keeps it.
 //! - explicit `sort_order`/`sequence_id` on create are overwritten
 //!   (sibling max + 10000 / project max + 1).
 //! - `agent_executor=""` 400s `"unknown agent executor"` (ChoiceField
@@ -4151,8 +4152,11 @@ fn assemble_new_issue(
 
 /// `super().update(instance, validated_data)`: every present key applies
 /// (`Null` clears); absent keys keep the row. `description_stripped`
-/// input is skipped — `save()` recomputes it unconditionally. The state
-/// decision (default assignment, `completed_at`) moved to the save hooks.
+/// input is skipped — `save()` recomputes it unconditionally.
+/// `completed_at` input is skipped too — Django's `save()` recomputes it
+/// from the state group, and DIFF-59 keeps the stored stamp unless the
+/// group changed. The state decision (default assignment,
+/// `completed_at`) moved to the save hooks.
 fn apply_validated_to_existing(
     row: &mut IssueSaveRow,
     validated: &BTreeMap<&'static str, Validated>,
@@ -4240,12 +4244,11 @@ fn apply_validated_to_existing(
             row.sort_order = *order;
         }
     }
-    if validated.contains_key("completed_at") {
-        row.completed_at = match validated.get("completed_at") {
-            Some(Validated::DateTime(moment)) => Some(*moment),
-            _ => None,
-        };
-    }
+    // `completed_at` input is discarded on update (Django's `save()`
+    // recomputes it from the state group, so the serializer value never
+    // survives; DIFF-59 keeps the stored stamp unless the group changed,
+    // which likewise ignores the input). The row's stored value rides
+    // through untouched.
     if validated.contains_key("archived_at") {
         row.archived_at = match validated.get("archived_at") {
             Some(Validated::Date(date)) => Some(*date),
@@ -4274,7 +4277,8 @@ fn apply_validated_to_existing(
         row.created_via = v_text(validated, "created_via").map(str::to_owned);
     }
     // `state` overlays here; the default assignment (when the final id
-    // is `None`) and the `completed_at` recompute run in the save hooks.
+    // is `None`) and the `completed_at` transition rule (DIFF-59) run in
+    // the save hooks.
     let (touched, state_id, _) = v_state(validated);
     if touched {
         row.state_id = state_id;

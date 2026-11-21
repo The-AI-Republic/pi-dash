@@ -114,6 +114,21 @@ async fn default_state_marked<C: ConnectionTrait>(
         .await
 }
 
+/// The stored `state_id` of the row under save (update legs only): the
+/// DIFF-59 transition check compares it against the incoming state so
+/// `completed_at` moves only when the group changes.
+async fn stored_state<C: ConnectionTrait>(db: &C, issue_id: Uuid) -> Result<Option<Uuid>, DbErr> {
+    use super::issues;
+    use sea_orm::{EntityTrait, QuerySelect};
+    issues::Entity::find_by_id(issue_id)
+        .select_only()
+        .column(issues::Column::StateId)
+        .into_tuple::<Option<Uuid>>()
+        .one(db)
+        .await
+        .map(|row| row.flatten())
+}
+
 /// `self.state` on a save (`issue.py:306`): a forward-FK read, which Django
 /// 4.2 resolves through `State._base_manager` (a plain `Manager` — `State`
 /// sets no `base_manager_name`), so triage and soft-deleted states still
@@ -223,10 +238,22 @@ impl ActiveModelBehavior for ActiveModel {
         }
 
         // `if self.state is None: <default assignment> else: <completed_at
-        // recompute>` (`issue.py:288-311`). Runs on every save, insert and
-        // update alike. When the id starts `None` the `completed_at` branch
-        // is skipped even if a default state is found — the assembled
-        // value persists, exactly as Django's `if/else` falls.
+        // recompute>` (`issue.py:288-311`). The default leg runs on every
+        // save, insert and update alike: when the id starts `None` the
+        // `completed_at` branch is skipped even if a default state is
+        // found — the assembled value persists, exactly as Django's
+        // `if/else` falls.
+        //
+        // DIFF-59 (old bug fix): Django's `else` arm restamps
+        // `completed_at` from the group on EVERY save, so archiving,
+        // unarchiving or editing an unrelated field of a completed issue
+        // moves its completion date to now. The port keeps the stamp only
+        // across real transitions: on creation the stamp follows the new
+        // group (entering a state from nothing); on update the stored
+        // row's group is compared against the new one — stamp `now` only
+        // when entering `completed`, clear only when leaving it, and
+        // leave the driver's value (the stored stamp on full saves,
+        // unwritten on sparse saves) otherwise.
         match active_opt_uuid(&self.state_id) {
             None => {
                 let default = default_state_marked(db, project_id).await?;
@@ -239,15 +266,48 @@ impl ActiveModelBehavior for ActiveModel {
                 }
             }
             Some(state_id) => {
-                let group = state_group(db, state_id)
-                    .await?
-                    .ok_or_else(|| DbErr::RecordNotFound("state for issue save".to_owned()))?;
-                if group == "completed" {
-                    // `DateTimeWithTimeZone` is `FixedOffset`; the instant
-                    // is the same one the handlers stamp as `Utc`.
-                    self.completed_at = Set(Some(now_micros().into()));
+                if insert {
+                    let group = state_group(db, state_id)
+                        .await?
+                        .ok_or_else(|| DbErr::RecordNotFound("state for issue save".to_owned()))?;
+                    if group == "completed" {
+                        // `DateTimeWithTimeZone` is `FixedOffset`; the instant
+                        // is the same one the handlers stamp as `Utc`.
+                        self.completed_at = Set(Some(now_micros().into()));
+                    } else {
+                        self.completed_at = Set(None);
+                    }
                 } else {
-                    self.completed_at = Set(None);
+                    let issue_id = require_uuid(&self.id, "id")?;
+                    let prior = stored_state(db, issue_id).await?;
+                    if prior != Some(state_id) {
+                        let new_group = state_group(db, state_id).await?.ok_or_else(|| {
+                            DbErr::RecordNotFound("state for issue save".to_owned())
+                        })?;
+                        // A missing (or NULL) prior state counts as
+                        // non-completed: only a real transition out of a
+                        // completed group clears the stamp.
+                        let was_completed = match prior {
+                            Some(old_id) => {
+                                state_group(db, old_id).await?.as_deref() == Some("completed")
+                            }
+                            None => false,
+                        };
+                        if new_group == "completed" && !was_completed {
+                            // `DateTimeWithTimeZone` is `FixedOffset`; the
+                            // instant is the same one the handlers stamp as
+                            // `Utc`.
+                            self.completed_at = Set(Some(now_micros().into()));
+                        } else if new_group != "completed" && was_completed {
+                            self.completed_at = Set(None);
+                        }
+                        // Same-group moves (including
+                        // completed-to-completed) and non-completed
+                        // shuffles leave the driver's `completed_at` alone.
+                    }
+                    // Unchanged state: the driver's value rides through
+                    // untouched (the stored stamp on full saves, `NotSet`
+                    // — unwritten — on sparse saves).
                 }
             }
         }
