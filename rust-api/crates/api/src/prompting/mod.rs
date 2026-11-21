@@ -2983,7 +2983,6 @@ async fn parent_and_lineage(
                         work_branch,
                         description_stripped: description.and_then(|row| row.0),
                         comments_count,
-                        code_reviews: load_code_reviews(pool, &node.id).await?,
                     })
                 }
             }

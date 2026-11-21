@@ -1098,7 +1098,6 @@ async fn twin_bundle_parent_and_lineage(
                         None => None,
                     };
                     let sequence = twin_bundle_sequence(conn, node.id).await?;
-                    let code_reviews = twin_bundle_reviews(conn, node.id).await?;
                     Some(context::ParentView {
                         identifier: context::issue_identifier(&node.project_identifier, sequence),
                         title: name,
@@ -1106,7 +1105,6 @@ async fn twin_bundle_parent_and_lineage(
                         work_branch,
                         description_stripped: description,
                         comments_count,
-                        code_reviews,
                     })
                 }
             }

@@ -921,10 +921,6 @@ pub struct ParentView {
     pub work_branch: Option<String>,
     pub description_stripped: Option<String>,
     pub comments_count: i64,
-    /// Code reviews attached to the parent, newest first: tells a child
-    /// whether the parent's work is still open (base off its branch) or
-    /// already merged (base off the default branch).
-    pub code_reviews: Vec<CodeReviewView>,
 }
 
 /// One lineage node for the current → root trail (`context.py:600-604`).
@@ -1032,7 +1028,6 @@ pub fn build_context(input: &IssueContextInput) -> Value {
             },
             "description": issue_description_markdown(parent.description_stripped.as_deref()),
             "comments_count": parent.comments_count,
-            "code_reviews": code_reviews_context(&parent.code_reviews),
         }),
         None => Value::Null,
     };

@@ -10,6 +10,9 @@ You are testing the work product of an earlier run on Pi Dash issue `{{ issue.id
 Project-level instructions in the description apply to this test as well.
 {% endif %}
 Issue: {{ issue.title }}
+{% if parent %}
+Parent issue: {{ parent.identifier }} — {{ parent.title }}. This issue may build on the parent's delivered work (`pidash issue get {{ parent.identifier }}`, field `code_reviews`); focus on what this issue adds.
+{% endif %}
 
 Issue description:
 {{ issue.description if issue.description else "No description provided." }}

@@ -19,10 +19,3 @@ This issue's {{ repo.code_review_term }}s (reuse an open one; never open a dupli
 - {{ cr.title or cr.url }} — {{ cr.url }} ({{ "merged" if cr.merged else cr.state }}{% if cr.draft %}, draft{% endif %})
 {% endfor %}
 {% endif %}
-{% if parent and (parent.work_branch or parent.code_reviews) %}
-
-Parent {{ parent.identifier }}{% if parent.work_branch %}, branch `{{ parent.work_branch }}`{% endif %}{% if parent.code_reviews %}, {{ repo.code_review_term }}s:{% endif %}
-{% for cr in parent.code_reviews %}
-- {{ cr.title or cr.url }} — {{ cr.url }} ({{ "merged" if cr.merged else cr.state }}{% if cr.draft %}, draft{% endif %})
-{% endfor %}
-{% endif %}
