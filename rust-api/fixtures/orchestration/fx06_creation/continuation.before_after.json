@@ -160,7 +160,9 @@
         "error": "",
         "ended_at": null
       },
-      "dispatched": ["run-K1"],
+      "dispatched": [
+        "run-K1"
+      ],
       "on_commit": []
     },
     "K3_render_failed": {
@@ -199,7 +201,9 @@
         "ended_at": "2026-06-01T12:00:00+00:00"
       },
       "dispatched": [],
-      "on_commit": ["finalize_agent_run.<locals>.<lambda>"]
+      "on_commit": [
+        "finalize_agent_run.<locals>.<lambda>"
+      ]
     },
     "K4_executor_unavailable_no_run": {
       "before_runs": 1,

@@ -1,5 +1,6 @@
 ## This run
 
+
 - Issue: `SAMPLE-1`; run id: `00000000-0000-0000-0000-000000000003`; stage: **In Progress**.
 
 - Rendered at: `2026-01-01T00:00:00Z` (UTC) — the freshness anchor. Everything quoted from Pi Dash below was read then; "What you already have" and "How this run works" say when to re-check.
@@ -18,27 +19,22 @@ Sample description body.
 Hand-off from the In Progress run (what was produced, the acceptance criteria, how to verify, where to look first):
 
 ### Hand-off
-
 **Produced:** https://example.com/pr/1
 **Acceptance criteria:**
-
 - The sample works.
-  **How to verify:** run the sample.
-  **Review focus:** the sample.
-  **Next stage:** In Review — a code change.
+**How to verify:** run the sample.
+**Review focus:** the sample.
+**Next stage:** In Review — a code change.
 
 Runs so far on this issue (oldest first):
-
 - 2026-01-01 In Progress: done — opened the sample PR
 
 Comments to date (chronological — people and earlier runs; a later human comment overrides the hand-off):
-
 ### Comment 1 — Human: Sample at 2026-01-01
 
 Hello.
 
 ### Comment 2 — AI Agent: Sample at 2026-01-01
-
 Agent run: 00000000-0000-0000-0000-000000000003
 
 Hand-offProduced: https://example.com/pr/1 Acceptance criteria:The sample works. How to verify: run the sample. Review focus: the sample. Next stage: In Review — a code change.
@@ -50,11 +46,15 @@ Repository:
 
 - Work branch: pi-dash/sample-1 — check this branch out and commit directly onto it. Do not create a new feature branch.
 
+
+
+
 Associated pull requests (git PRs/MRs already linked to this issue):
 
 - Sample PR title — https://github.com/sample-org/sample-repo/pull/7 (state: open)
 
 These are existing code reviews already attached to this issue. Inspect any that are relevant before starting — your task may build on this prior work. When you open a new pull request, do not duplicate one that is already open here; reuse it instead.
+
 
 ## How this run works
 
@@ -68,20 +68,26 @@ If a tool the task needs is missing, follow "Blocking the run".
 
 `pidash` is your only channel to Pi Dash. It is already authenticated **as this runner's owner**; your writes carry their identity plus this run's id. Do not use `curl` or raw HTTP. Never print, log or record any `PIDASH_*` value or anything from the pidash config.
 
+
 `PIDASH_ISSUE_IDENTIFIER`, `PIDASH_PROJECT` and `PIDASH_RUN_ID` are set, so commands default to this issue and run. (If a bare command says the issue identifier is missing, pass `SAMPLE-1`.)
+
 
 Every command prints one JSON document on stdout and exits `0`. On failure it prints `{"error": …}` on stderr and exits non-zero: read it, retry only transient failures, and never retry the same command more than twice.
 
 ### What you already have
 
+
 The issue, its comments, the available states and the hand-off shown in this prompt were read at `2026-01-01T00:00:00Z`. Don't fetch them again. Two exceptions: check for newer comments with `pidash comment list --since 2026-01-01T00:00:00Z` when "How this run works" tells you to, or when you have worked long enough that a person may have replied; and re-read after a write is rejected as stale. (If `--since` is not a known flag, use `pidash comment list`.)
 
+
 ### Core commands
+
 
 - `pidash comment add --body-file .pidash/<name>.md [--fold]` — post a comment during the run, as this agent run. Your closing comment goes through `pidash run finish`, not this. Use `--fold` only for low-value status notes.
 
 - `pidash issue get` / `pidash comment list [--since <time>]` — refresh only (see above).
 - `pidash run finish` — ends the run; your **last** `pidash` call. The syntax, the results and the state to pass are in "Lifecycle".
+
 
 Keep every scratch file under `.pidash/`; that directory stays out of version control.
 
@@ -101,6 +107,8 @@ You don't need to load a `pidash` / `pi-dash` skill: this section and `pidash do
 
 ### Available states
 
+
+
 - **In Progress** (group: `started`) — Active
 
 - **In Review** (group: `review`) — Awaiting human review
@@ -110,6 +118,8 @@ You don't need to load a `pidash` / `pi-dash` skill: this section and `pidash do
 - **AI Completed** (group: `completed`) — Finished by the agent
 
 - **Done** (group: `completed`) — Finished
+
+
 
 Use the list above to pick the correct `--state` value. Match your intent to the state's `group` first, then to the name and description. Where a finished stage goes is set by "Lifecycle"; never move an issue to Done or Cancelled yourself.
 
@@ -124,7 +134,9 @@ This issue is one task with a goal. Each run is a fresh session that checks the 
 
 Path in this project: In Progress → In Review → In Test → AI Completed. You are in **In Progress**.
 
+
 You choose the path. Each later stage is a separate, fresh agent run, so send the work on only when a second pass can add something:
+
 
 - **In Review** — the work product can be wrong in a way a careful read would catch: a code change, a document someone will act on, a change to data or configuration.
 - **In Test** — the work product has behaviour that can be exercised from its user's side.
@@ -146,6 +158,7 @@ End the run with one command, as your last action:
 Pass the current state's name to `--to` to stay. `--comment-file` is optional for `done`, `progressed` and `waiting_on_external`: when nothing changed since the last run, post nothing. With `waiting_on_human` and `blocked` it is required: say what the person must do. If `pidash run finish` is not a known command, the `pidash` on PATH lacks `run finish` (a different `pidash` build than the runner's own binary is resolving first on PATH): post your comment with `pidash comment add`, move with `pidash issue patch SAMPLE-1 --state "<state>"`, then `pidash run yield --outcome <result>`, adding `--stop-ticking` when the result is `waiting_on_human` or `blocked`; say in your comment that the `pidash` on PATH lacks `run finish` and include the output of `command -v pidash` and `pidash --version`.
 
 Budget: 5 of 12 runs used on this issue. The budget never changes which state is true.
+
 
 ## Test
 
