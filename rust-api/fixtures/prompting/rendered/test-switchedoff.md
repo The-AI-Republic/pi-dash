@@ -1,6 +1,5 @@
 ## This run
 
-
 - Issue: `SAMPLE-1`; run id: `00000000-0000-0000-0000-000000000003`; stage: **In Progress**.
 
 - Rendered at: `2026-01-01T00:00:00Z` (UTC) — the freshness anchor. Everything quoted from Pi Dash below was read then; "What you already have" and "How this run works" say when to re-check.
@@ -13,18 +12,23 @@ Project-level instructions in the description apply to this test as well.
 
 Issue: Sample issue title
 
+Parent issue: SAMPLE-0 — Parent issue. This issue may build on the parent's delivered work (`pidash issue get SAMPLE-0`); focus on what this issue adds.
+
 Issue description:
 Sample description body.
 
 Runs so far on this issue (oldest first):
+
 - 2026-01-01 In Progress: done — opened the sample PR
 
 Comments to date (chronological — people and earlier runs; a later human comment overrides anything earlier):
+
 ### Comment 1 — Human: Sample at 2026-01-01
 
 Hello.
 
 ### Comment 2 — AI Agent: Sample at 2026-01-01
+
 Agent run: 00000000-0000-0000-0000-000000000003
 
 Opened https://example.com/pr/1 with the sample change.
@@ -32,19 +36,14 @@ Opened https://example.com/pr/1 with the sample change.
 Repository:
 
 - Remote: https://example.com/repo.git
-- Base branch: main
+- Default branch: main
+- This issue's branch: `pi-dash/sample-1`
 
-- Work branch: pi-dash/sample-1 — check this branch out and commit directly onto it. Do not create a new feature branch.
+This issue's pull requests (reuse an open one; never open a duplicate):
 
+- Sample PR title — https://github.com/sample-org/sample-repo/pull/7 (open)
 
-
-
-Associated pull requests (git PRs/MRs already linked to this issue):
-
-- Sample PR title — https://github.com/sample-org/sample-repo/pull/7 (state: open)
-
-These are existing code reviews already attached to this issue. Inspect any that are relevant before starting — your task may build on this prior work. When you open a new pull request, do not duplicate one that is already open here; reuse it instead.
-
+A parent issue's delivered work is its pull requests (`code_reviews` in `pidash issue get SAMPLE-0`). When one is unmerged, this issue's change builds on its code.
 
 ## How this run works
 
@@ -58,26 +57,20 @@ If a tool the task needs is missing, follow "Blocking the run".
 
 `pidash` is your only channel to Pi Dash. It is already authenticated **as this runner's owner**; your writes carry their identity plus this run's id. Do not use `curl` or raw HTTP. Never print, log or record any `PIDASH_*` value or anything from the pidash config.
 
-
 `PIDASH_ISSUE_IDENTIFIER`, `PIDASH_PROJECT` and `PIDASH_RUN_ID` are set, so commands default to this issue and run. (If a bare command says the issue identifier is missing, pass `SAMPLE-1`.)
-
 
 Every command prints one JSON document on stdout and exits `0`. On failure it prints `{"error": …}` on stderr and exits non-zero: read it, retry only transient failures, and never retry the same command more than twice.
 
 ### What you already have
 
-
 The issue, its comments, the available states and the workpad shown in this prompt were read at `2026-01-01T00:00:00Z`. Don't fetch them again. Two exceptions: check for newer comments with `pidash comment list --since 2026-01-01T00:00:00Z` when "How this run works" tells you to, or when you have worked long enough that a person may have replied; and re-read after a write is rejected as stale. (If `--since` is not a known flag, use `pidash comment list`.)
 
-
 ### Core commands
-
 
 - `pidash comment add --body-file .pidash/<name>.md [--fold]` — post a comment during the run, as this agent run. Your closing comment goes through `pidash run finish`, not this. Use `--fold` only for low-value status notes.
 - `pidash workpad update` / `pidash workpad get --to-file` — write and re-read `.pidash/workpad.md`. See "Workpad". (If the workpad file is missing, run `pidash workpad get --to-file` first; if that flag is unknown, `pidash workpad get | jq -r .body > .pidash/workpad.md`.)
 - `pidash issue get` / `pidash comment list [--since <time>]` — refresh only (see above).
 - `pidash run finish` — ends the run; your **last** `pidash` call. The syntax, the results and the state to pass are in "Lifecycle".
-
 
 Keep every scratch file under `.pidash/`; that directory stays out of version control.
 
@@ -97,8 +90,6 @@ You don't need to load a `pidash` / `pi-dash` skill: this section and `pidash do
 
 ### Available states
 
-
-
 - **In Progress** (group: `started`) — Active
 
 - **In Review** (group: `review`) — Awaiting human review
@@ -108,8 +99,6 @@ You don't need to load a `pidash` / `pi-dash` skill: this section and `pidash do
 - **AI Completed** (group: `completed`) — Finished by the agent
 
 - **Done** (group: `completed`) — Finished
-
-
 
 Use the list above to pick the correct `--state` value. Match your intent to the state's `group` first, then to the name and description. Where a finished stage goes is set by "Lifecycle"; never move an issue to Done or Cancelled yourself.
 
@@ -125,7 +114,6 @@ This issue is one task with a goal. Each run is a fresh session that checks the 
 Path in this project: In Progress → AI Completed. You are in **In Progress**.
 
 Agent runs are switched off for this stage in this project. A person started this run by hand, and no run will follow it here. Do not wait: finish with a verdict and move the issue, or say exactly what a person must do.
-
 
 Move forward to the next state on the path when this stage's work passes. Move back to In Progress when it has defects.
 
@@ -144,11 +132,9 @@ Pass the current state's name to `--to` to stay. `--comment-file` is optional fo
 
 Budget: 5 of 12 runs used on this issue. The budget never changes which state is true.
 
-
 ## Workpad
 
 The workpad is the shared memory of the agent runs on this issue: a short note of what happened and what is true, like a shift note on a production line. It is memory, not instructions. Every run on this issue starts from it. It is for agents only and never shown in the comments: write what the next run needs and a person does not. The issue and comments are already in front of the next run, so do not copy them.
-
 
 The workpad so far:
 
@@ -164,12 +150,13 @@ The workpad so far:
 
 Read it first, and do not redo what it says is done. If it uses an older layout, rewrite it in the shape below on your first update, keeping only what is still true.
 
-
 ```md
 ### Keep in mind
+
 - <only what the next run must not have to rediscover>
 
 ### Log
+
 - <YYYY-MM-DD> <stage>: <one line: what this run did>
 ```
 
@@ -201,15 +188,13 @@ Verdict:
 
 ### Software
 
-Test the synced branch, never a stale one: `git fetch origin`, check out the pull request branch, `git merge origin/<base>` (the pull request's base, else `main`; never rebase, never force-push), run the repository's own checks, and push the merge if it is not a no-op. If the base rewrote the code under test and you cannot resolve it with confidence, abort the merge and send the issue back to In Progress saying what changed. If the base has moved since an earlier verdict, test again.
+Test the branch synced with its base: `git fetch origin`, check out the pull request branch, `git merge origin/<base>` (the pull request's base, else `main`), run the repository's checks, and push the merge if it is not a no-op. Merge, never rebase, never force-push. If the merge cannot be resolved with confidence, abort it and send the issue back to In Progress saying what changed upstream. If the base has moved since an earlier verdict, test again.
 
-The repository's own checks are discovered, never assumed: read the README/CONTRIBUTING, the CI config (`.github/workflows/`, `.gitlab-ci.yml`) and the package manifests (`package.json` scripts, `Makefile`, `pyproject.toml`, `Cargo.toml`, `go.mod`), and run what they declare for the stack you touched. If you cannot determine them, say so instead of inventing commands. Green CI is supporting evidence, not a verdict.
+The repository's checks are discovered, never assumed: run what the README, CI config and package manifests declare; if you cannot determine them, say so. Green CI supports a verdict but is not one.
 
-Act as the consumer. A program (API client, CLI, library caller): make real calls with real inputs against a running instance. A person at a screen: launch the app and drive the changed flow; if you cannot boot it or drive a browser here, finish `blocked` rather than pass. An operator: run the procedure, dry-run first, health-check the result. A reader of a design document: read it cold and check it can be acted on without its author.
+Act as the consumer: a program's caller makes real calls; a person at a screen drives the changed flow (if you cannot boot or drive it here, finish `blocked`); an operator runs the procedure, dry-run first; a reader of a design document reads it cold and checks it can be acted on without its author. Run software where it can be used: locally, in an ephemeral environment, or on a preview deploy.
 
-To act as the user you need somewhere the software runs: run it locally, stand up an ephemeral environment (containers, seed data), or use a preview deploy the project's own automation produces.
-
-Fixing: push only a trivial fix to the branch (re-run the checks first); anything else goes back as a defect. Waiting on CI or on a merge is `waiting_on_external`.
+Push only a trivial fix to the branch, after re-running the checks; anything else goes back as a defect. Waiting on CI or on a merge is `waiting_on_external`.
 
 ## Blocking the run
 
