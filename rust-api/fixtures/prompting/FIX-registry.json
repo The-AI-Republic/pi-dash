@@ -185,8 +185,8 @@
           "is_overridable": false,
           "allows_workspace_override": false,
           "allows_personal_override": false,
-          "body_len": 4332,
-          "body_sha256": "718b9da53283deea93cc4a52cb9974e4532b424113e54124e0059856a5f4a6ea"
+          "body_len": 4315,
+          "body_sha256": "74d753fa13ce29094de351345f99c9c3ed779f22b2125bbef74664c484b23dcf"
         },
         {
           "key": "review",
@@ -207,8 +207,8 @@
           "is_overridable": false,
           "allows_workspace_override": false,
           "allows_personal_override": false,
-          "body_len": 891,
-          "body_sha256": "5a51e67de5a628373981e22b25ce6f3402a75a48a9de06024a2583ccc605af68"
+          "body_len": 869,
+          "body_sha256": "a7cfecb708321c51fc8a15dd2733c374947eac6eb1d251939f3621124911499a"
         },
         {
           "key": "run-framing",
@@ -273,8 +273,8 @@
           "is_overridable": false,
           "allows_workspace_override": false,
           "allows_personal_override": false,
-          "body_len": 851,
-          "body_sha256": "66ae827c87d0fe191d81f4c1e31eb1d753b29e1c6bbabb7f9433c6583caae1be"
+          "body_len": 1074,
+          "body_sha256": "d7c98a43b62b0594eac60584f4937c43c3447132ccb04d628e3e5627e3732218"
         },
         {
           "key": "software.execute",
@@ -328,8 +328,8 @@
           "is_overridable": false,
           "allows_workspace_override": false,
           "allows_personal_override": false,
-          "body_len": 885,
-          "body_sha256": "0d3919f73c33c4ea92a80b6bfb70cf499a8dc27e9902c3185dcf9c85c875c52f"
+          "body_len": 863,
+          "body_sha256": "479ea57ddf12feb02e66dd698148e90c55b71179dc95d4b66e3267317852fc47"
         },
         {
           "key": "this-run",

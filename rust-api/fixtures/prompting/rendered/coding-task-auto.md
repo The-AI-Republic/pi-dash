@@ -51,6 +51,8 @@ This issue's pull requests (reuse an open one; never open a duplicate):
 
 - Sample PR title — https://github.com/sample-org/sample-repo/pull/7 (open)
 
+A parent issue's delivered work is its pull requests (`code_reviews` in `pidash issue get SAMPLE-0`). When one is unmerged, this issue's change builds on its code.
+
 ## Work item relationships
 
 This work item is connected to the work items below.
@@ -64,7 +66,7 @@ Ancestors (up):
 Parent description.
 
 - The parent has 3 comment(s); run `pidash comment list SAMPLE-0` to read them.
-- Run `pidash issue get SAMPLE-0` for its current state and delivered work (`code_reviews`). When it has delivered work, this issue builds on it rather than redoing it.
+- Run `pidash issue get SAMPLE-0` for its current state and delivered work. When it has delivered work, this issue builds on it rather than redoing it.
 
 Children (down):
 

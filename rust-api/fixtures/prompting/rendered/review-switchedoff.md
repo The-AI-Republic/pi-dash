@@ -12,7 +12,7 @@ Project-level instructions in the description apply to this review as well.
 
 Issue: Sample issue title
 
-Parent issue: SAMPLE-0 — Parent issue. This issue may build on the parent's delivered work (`pidash issue get SAMPLE-0`, field `code_reviews`); judge only what this issue adds.
+Parent issue: SAMPLE-0 — Parent issue. This issue may build on the parent's delivered work (`pidash issue get SAMPLE-0`); judge only what this issue adds.
 
 Issue description:
 Sample description body.
@@ -42,6 +42,8 @@ Repository:
 This issue's pull requests (reuse an open one; never open a duplicate):
 
 - Sample PR title — https://github.com/sample-org/sample-repo/pull/7 (open)
+
+A parent issue's delivered work is its pull requests (`code_reviews` in `pidash issue get SAMPLE-0`). When one is unmerged, this issue's change builds on its code.
 
 ## How this run works
 

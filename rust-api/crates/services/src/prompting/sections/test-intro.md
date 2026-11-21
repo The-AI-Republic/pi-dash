@@ -11,7 +11,7 @@ Project-level instructions in the description apply to this test as well.
 {% endif %}
 Issue: {{ issue.title }}
 {% if parent %}
-Parent issue: {{ parent.identifier }} — {{ parent.title }}. This issue may build on the parent's delivered work (`pidash issue get {{ parent.identifier }}`, field `code_reviews`); focus on what this issue adds.
+Parent issue: {{ parent.identifier }} — {{ parent.title }}. This issue may build on the parent's delivered work (`pidash issue get {{ parent.identifier }}`); focus on what this issue adds.
 {% endif %}
 
 Issue description:

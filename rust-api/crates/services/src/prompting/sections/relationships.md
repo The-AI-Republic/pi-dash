@@ -19,7 +19,7 @@ Ancestors (up):
 (no description on the parent issue)
 {% endif %}
 - The parent has {{ parent.comments_count }} comment(s); run `pidash comment list {{ parent.identifier }}` to read them.
-- Run `pidash issue get {{ parent.identifier }}` for its current state and delivered work (`code_reviews`). When it has delivered work, this issue builds on it rather than redoing it.
+- Run `pidash issue get {{ parent.identifier }}` for its current state and delivered work. When it has delivered work, this issue builds on it rather than redoing it.
 {% endif %}
 {% if children %}
 Children (down):

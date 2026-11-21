@@ -19,3 +19,7 @@ This issue's {{ repo.code_review_term }}s (reuse an open one; never open a dupli
 - {{ cr.title or cr.url }} — {{ cr.url }} ({{ "merged" if cr.merged else cr.state }}{% if cr.draft %}, draft{% endif %})
 {% endfor %}
 {% endif %}
+{% if parent %}
+
+A parent issue's delivered work is its {{ repo.code_review_term }}s (`code_reviews` in `pidash issue get {{ parent.identifier }}`). When one is unmerged, this issue's change builds on its code.
+{% endif %}
