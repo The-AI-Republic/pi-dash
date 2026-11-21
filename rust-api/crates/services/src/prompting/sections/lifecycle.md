@@ -6,7 +6,7 @@ customizable: locked
 
 ## Lifecycle
 
-This issue is one task with a goal. Each run is a fresh session that checks the goal from where the issue stands, then moves it on, sends it back, or waits. Nothing carries over between runs except the issue itself: its comments, its state{% if run.kind == "coding-task" %}, the workpad{% endif %} and the delivered work.
+This issue is one task with a goal. Each run is a fresh session that checks the goal from where the issue stands, then moves it on, sends it back, or waits. Nothing carries over between runs except the issue itself: its comments, its state, the workpad and the delivered work.
 
 Path in this project: {{ stages.path | join(" → ") }}. You are in **{{ issue.state }}**.
 {% if stages.current_stage_switched_off %}
@@ -28,14 +28,14 @@ Never move an issue to Done or Cancelled; a person does that. Use Blocked only w
 
 End the run with one command, as your last action:
 
-    pidash run finish --to "<state>" --result <result> --comment-file .pidash/comment.md{% if run.kind == "coding-task" %} --handoff-file .pidash/handoff.md{% endif %}
+    pidash run finish --to "<state>" --result <result> --comment-file .pidash/comment.md
 
 - `done` — this stage's work is finished and you moved the issue.
 - `progressed` — you did work and more remains in this stage. A later run continues.
 - `waiting_on_external` — waiting on automated checks, an approval, or another issue. A later run re-checks.
 - `waiting_on_human`, `blocked` — a person must act first. No run follows until they do.
 
-Pass the current state's name to `--to` to stay. `--comment-file` is optional for `done`, `progressed` and `waiting_on_external`: when nothing changed since the last run, post nothing. With `waiting_on_human` and `blocked` it is required: say what the person must do. If `pidash run finish` is not a known command, the `pidash` on PATH lacks `run finish` (a different `pidash` build than the runner's own binary is resolving first on PATH): post your comment{% if run.kind == "coding-task" %} and then the hand-off as a second comment{% endif %} with `pidash comment add`, move with `pidash issue patch {{ issue.identifier }} --state "<state>"`, then `pidash run yield --outcome <result>`, adding `--stop-ticking` when the result is `waiting_on_human` or `blocked`; say in your comment that the `pidash` on PATH lacks `run finish` and include the output of `command -v pidash` and `pidash --version`.
+Pass the current state's name to `--to` to stay. `--comment-file` is optional for `done`, `progressed` and `waiting_on_external`: when nothing changed since the last run, post nothing. With `waiting_on_human` and `blocked` it is required: say what the person must do. If `pidash run finish` is not a known command, the `pidash` on PATH lacks `run finish` (a different `pidash` build than the runner's own binary is resolving first on PATH): post your comment with `pidash comment add`, move with `pidash issue patch {{ issue.identifier }} --state "<state>"`, then `pidash run yield --outcome <result>`, adding `--stop-ticking` when the result is `waiting_on_human` or `blocked`; say in your comment that the `pidash` on PATH lacks `run finish` and include the output of `command -v pidash` and `pidash --version`.
 {% if tick %}
 Budget: {{ tick.count }}{% if tick.cap is not none %} of {{ tick.cap }}{% endif %} runs used on this issue. The budget never changes which state is true.{% if tick.spent %} **This is the last run.** Leave the task ready to hand over and tell the person in your comment that no run will follow.{% endif %}
 {% endif %}

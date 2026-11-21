@@ -74,8 +74,8 @@
       },
       "local_recipe_lengths": {
         "coding-task": 14,
-        "review": 9,
-        "test": 9,
+        "review": 10,
+        "test": 10,
         "scheduler": 7
       },
       "local_recipes": {
@@ -108,6 +108,7 @@
           "run-framing",
           "pidash-cli",
           "lifecycle",
+          "workpad",
           "review",
           {
             "slot": "review"
@@ -123,6 +124,7 @@
           "run-framing",
           "pidash-cli",
           "lifecycle",
+          "workpad",
           "test",
           {
             "slot": "test"
@@ -192,6 +194,7 @@
               "run-framing",
               "pidash-cli",
               "lifecycle",
+              "workpad",
               "review",
               "general.review",
               "blocking"
@@ -203,6 +206,7 @@
               "run-framing",
               "pidash-cli",
               "lifecycle",
+              "workpad",
               "review",
               "software.review",
               "blocking"
@@ -235,6 +239,7 @@
               "run-framing",
               "pidash-cli",
               "lifecycle",
+              "workpad",
               "test",
               "general.test",
               "blocking"
@@ -246,6 +251,7 @@
               "run-framing",
               "pidash-cli",
               "lifecycle",
+              "workpad",
               "test",
               "software.test",
               "blocking"

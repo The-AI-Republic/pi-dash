@@ -2422,10 +2422,10 @@ fn materialise_workpad_snapshot(
 }
 
 /// Remove a stale workpad snapshot from `<working_dir>/.pidash/`
-/// (NEWPIDASH-320 review): review/test/scheduler assigns carry no
-/// snapshot, and the runner reuses one `working_dir` across runs, so a
-/// previous coding-task run's `workpad.md` + `workpad.sha256` must not
-/// leak into a run that owns no workpad. Best-effort like the write
+/// (NEWPIDASH-320 review): an assign without a snapshot (a scheduler run,
+/// or any run from a server older than the unified workpad) owns no
+/// workpad, and the runner reuses one `working_dir` across runs, so a
+/// previous run's `workpad.md` + `workpad.sha256` must not leak into it. Best-effort like the write
 /// path — missing files are fine, other errors warn.
 fn discard_stale_workpad_snapshot(working_dir: &std::path::Path) {
     for name in ["workpad.md", "workpad.sha256"] {
@@ -4790,11 +4790,12 @@ impl AssignWorker {
                 }
             }
         };
-        // Workpad snapshot (NEWPIDASH-320 §6.1): for `coding-task` runs the
-        // server attached `workpad_body` + `workpad_sha256` to the assign.
-        // Materialise them as files before the agent launches so the prompt
-        // never needs a re-fetch. Review/test/scheduler assigns carry
-        // neither field: drop a previous run's files (the runner reuses one
+        // Workpad snapshot (NEWPIDASH-320 §6.1): for issue runs (In
+        // Progress, review and test; unified workpad U1) the server attached
+        // `workpad_body` + `workpad_sha256` to the assign. Materialise them
+        // as files before the agent launches so the prompt never needs a
+        // re-fetch. An assign without them (scheduler runs, older servers)
+        // drops a previous run's files (the runner reuses one
         // `working_dir` across runs) so they can't leak into this run. A
         // stale or missing file is never fatal — the CLI falls back to
         // `workpad get --to-file`.
@@ -5935,8 +5936,8 @@ mod tests {
         );
     }
 
-    /// NEWPIDASH-320 review: non-coding-task assigns carry no snapshot, so
-    /// a previous run's files must be removed — and missing files are fine.
+    /// NEWPIDASH-320 review: an assign without a snapshot (scheduler runs)
+    /// must not see a previous run's files: they are removed — and missing files are fine.
     #[test]
     fn stale_workpad_snapshot_is_discarded() {
         let dir = tempfile::tempdir().expect("tempdir");

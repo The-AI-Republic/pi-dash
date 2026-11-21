@@ -20,16 +20,14 @@ Every command prints one JSON document on stdout and exits `0`. On failure it pr
 {% if run.kind == "scheduler" %}
 The project and its states shown in this prompt were read at `{{ run.rendered_at }}`.
 {% else %}
-The issue, its comments, the available states{% if run.kind == "coding-task" %} and your workpad{% else %} and the hand-off{% endif %} shown in this prompt were read at `{{ run.rendered_at }}`. Don't fetch them again. Two exceptions: check for newer comments with `pidash comment list --since {{ run.rendered_at }}` when "How this run works" tells you to, or when you have worked long enough that a person may have replied; and re-read after a write is rejected as stale. (If `--since` is not a known flag, use `pidash comment list`.)
+The issue, its comments, the available states and the workpad shown in this prompt were read at `{{ run.rendered_at }}`. Don't fetch them again. Two exceptions: check for newer comments with `pidash comment list --since {{ run.rendered_at }}` when "How this run works" tells you to, or when you have worked long enough that a person may have replied; and re-read after a write is rejected as stale. (If `--since` is not a known flag, use `pidash comment list`.)
 {% endif %}
 
 ### Core commands
 
 {% if run.kind != "scheduler" %}
 - `pidash comment add --body-file .pidash/<name>.md [--fold]` — post a comment during the run, as this agent run. Your closing comment goes through `pidash run finish`, not this. Use `--fold` only for low-value status notes.
-{% if run.kind == "coding-task" %}
-- `pidash workpad update` / `pidash workpad get --to-file` — write and re-read `.pidash/workpad.md`. See "Step 1 — Workpad". (If the workpad file is missing, run `pidash workpad get --to-file` first; if that flag is unknown, `pidash workpad get | jq -r .body > .pidash/workpad.md`.)
-{% endif %}
+- `pidash workpad update` / `pidash workpad get --to-file` — write and re-read `.pidash/workpad.md`. See "{% if run.kind == "coding-task" %}Step 1 — {% endif %}Workpad". (If the workpad file is missing, run `pidash workpad get --to-file` first; if that flag is unknown, `pidash workpad get | jq -r .body > .pidash/workpad.md`.)
 - `pidash issue get` / `pidash comment list [--since <time>]` — refresh only (see above).
 - `pidash run finish` — ends the run; your **last** `pidash` call. The syntax, the results and the state to pass are in "Lifecycle".
 {% else %}
@@ -68,5 +66,5 @@ Use the list above to pick the correct `--state` value. Match your intent to the
 
 ### Conventions
 
-- All writes are real and immediate; there is no undo. Check intent against {% if run.kind == "coding-task" %}your workpad plan{% else %}the issue and its comments{% endif %} before mutating.
-- When pasting `pidash` JSON into {% if run.kind == "coding-task" %}the workpad{% else %}a comment{% endif %}, fence it in three backticks.
+- All writes are real and immediate; there is no undo. Check intent against the issue{% if run.kind != "scheduler" %}, its comments and the workpad{% else %} and its comments{% endif %} before mutating.
+- When pasting `pidash` JSON into a comment, fence it in three backticks.

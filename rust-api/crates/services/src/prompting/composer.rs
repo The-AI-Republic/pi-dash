@@ -1065,8 +1065,9 @@ mod tests {
     ];
 
     /// Lean workflow acceptance (design §13 issue C): no built-in issue-run
-    /// section mentions `--stop-ticking` or `parent_done_payload`, review
-    /// and test never touch the workpad, and `pidash run yield` survives
+    /// section mentions `--stop-ticking` or `parent_done_payload`, every
+    /// issue run carries the workpad (unified workpad design U1), and
+    /// `pidash run yield` survives
     /// only in the lifecycle's old-runner fallback line (D11).
     #[test]
     fn issue_run_prompts_drop_the_retired_end_of_run_commands() {
@@ -1094,21 +1095,34 @@ mod tests {
                     yield_lines[0].contains("If `pidash run finish` is not a known command"),
                     "{kind}/{work_type}: yield only in the fallback"
                 );
-                if kind != recipes::KIND_CODING_TASK {
-                    // Review and test have no workpad: not even a mention, or
-                    // an agent may guess a write over In Progress's notes.
-                    let mentions: Vec<&str> = body
-                        .lines()
-                        .filter(|line| line.to_lowercase().contains("workpad"))
-                        .collect();
-                    assert!(mentions.is_empty(), "{kind}/{work_type}: {mentions:?}");
-                    assert!(!body.contains("pidash workpad"), "{kind}/{work_type}");
-                    assert!(!body.contains("workpad_body"), "{kind}/{work_type}");
-                }
+                // Every issue run reads and writes the workpad.
+                assert!(body.contains("pidash workpad update"), "{kind}/{work_type}");
+                assert!(body.contains("### Keep in mind"), "{kind}/{work_type}");
+                assert!(!body.contains("workpad_body"), "{kind}/{work_type}");
                 let template =
                     compile_template(kind, None, None, &OverrideIndex::new(), Some(work_type))
                         .expect("compiles")
                         .text;
+                // The stage hand-off is gone from every template. The
+                // in-flight sentence in review and test (an earlier run's
+                // hand-off comment) is the only mention left.
+                for retired in [
+                    "--handoff-file",
+                    "{{ handoff }}",
+                    "### Hand-off",
+                    "### Path to done",
+                ] {
+                    assert!(!template.contains(retired), "{kind}/{work_type}: {retired}");
+                }
+                for line in body.lines().filter(|line| line.contains("hand-off")) {
+                    assert!(
+                        kind != recipes::KIND_CODING_TASK
+                            && line.contains(
+                                "an earlier run may have posted a hand-off in the comments"
+                            ),
+                        "{kind}/{work_type}: {line}"
+                    );
+                }
                 assert!(
                     !template.contains("parent_done_payload"),
                     "{kind}/{work_type}"
@@ -1127,10 +1141,9 @@ mod tests {
     }
 
     /// The fallback for a runner without `finish` still stops the clock for
-    /// `waiting_on_human` / `blocked`, and an In Progress run posts its
-    /// hand-off as a comment there.
+    /// `waiting_on_human` / `blocked`, and posts no hand-off for any kind.
     #[test]
-    fn old_runner_fallback_stops_the_clock_and_posts_the_hand_off() {
+    fn old_runner_fallback_stops_the_clock() {
         let coding = composed_text_with_work_type(recipes::KIND_CODING_TASK, "software");
         let fallback = coding
             .lines()
@@ -1140,16 +1153,16 @@ mod tests {
         assert!(fallback.contains(
             "adding `--stop-ticking` when the result is `waiting_on_human` or `blocked`"
         ));
-        assert!(fallback.contains("the hand-off as a second comment"));
+        assert!(
+            !fallback.contains("hand-off"),
+            "no hand-off since the unified workpad"
+        );
         let review = composed_text_with_work_type(recipes::KIND_REVIEW, "software");
         let fallback = review
             .lines()
             .find(|line| line.contains("If `pidash run finish` is not a known command"))
             .expect("fallback line");
-        assert!(
-            !fallback.contains("hand-off"),
-            "only In Progress writes one"
-        );
+        assert!(!fallback.contains("hand-off"), "no stage writes one");
     }
 
     /// Auto never offers a stage the project lacks (it would cost the agent
@@ -1253,11 +1266,8 @@ mod tests {
         ctx["stages"] = context::stages_context(agent_stages, &views, Some(state), Some(group));
         ctx["parent"]["state"] = Value::from("Todo");
         ctx["blocked_by"][0]["state"] = Value::from("Todo");
-        ctx["handoff"] = Value::from("### Hand-off\n**Produced:** the sample.");
-        // The populated sample's comments carry the sample hand-off
-        // (NEWPIDASH-338 item 9), whose stripped text names a stage
-        // ("Next stage: In Review") — neutralise it here, like every
-        // other stage-name mention in the sample data.
+        // Neutralise the sample comments, like every other stage-name
+        // mention in the sample data.
         ctx["comments_section"] =
             Value::from("### Comment 1 — Human: Sample at 2026-01-01\n\nHello.");
         ctx
@@ -1436,32 +1446,43 @@ mod tests {
     }
 
     #[test]
-    fn coding_task_writes_the_hand_off() {
+    fn coding_task_leaves_the_note() {
         let body = composed_text(recipes::KIND_CODING_TASK);
-        assert!(body.contains("### Step 7 — Write the hand-off"));
-        assert!(body.contains("**Review focus:**"));
-        assert!(body.contains("--handoff-file"));
+        assert!(body.contains("## Step 1 — Workpad"));
+        assert!(body.contains("### Step 7 — Leave the note"));
+        assert!(body.contains(
+            "A move to review or test is refused until this run has updated the workpad."
+        ));
+        assert!(!body.contains("--handoff-file"));
     }
 
+    /// Unified workpad U1: review and test read the same workpad, and
+    /// the run history, with no hand-off block.
     #[test]
-    fn review_and_test_read_the_hand_off_and_history() {
+    fn review_and_test_read_the_workpad_and_history() {
         for kind in [recipes::KIND_REVIEW, recipes::KIND_TEST] {
             let body = composed_text(kind);
-            assert!(body.contains("Hand-off from the In Progress run"), "{kind}");
-            assert!(body.contains("**Acceptance criteria:**"), "{kind}");
+            assert!(body.contains("\n## Workpad\n"), "{kind}");
+            assert!(!body.contains("Step 1 — Workpad"), "{kind}");
+            assert!(body.contains("The workpad so far:"), "{kind}");
             assert!(body.contains("Runs so far on this issue"), "{kind}");
             assert!(body.contains("- 2026-01-01 In Progress: done"), "{kind}");
+            assert!(
+                !body.contains("Hand-off from the In Progress run"),
+                "{kind}"
+            );
+            // Review and test are not gated: no refusal sentence.
+            assert!(!body.contains("refused until this run"), "{kind}");
         }
-        // No hand-off: the stage works from the issue.
+        // No workpad yet: the section says how to start one.
         let mut ctx = crate::prompting::validation::sample_contexts(recipes::KIND_REVIEW)
             .into_iter()
             .next()
             .expect("sample");
-        ctx["handoff"] = Value::from("");
+        ctx["workpad_body"] = Value::from("");
         let body = compose_ctx(recipes::KIND_REVIEW, "software", &ctx);
-        assert!(body.contains("There is no stored hand-off"));
-        assert!(!body.contains("a person moved the issue here"));
-        assert!(!body.contains("Hand-off from the In Progress run"));
+        assert!(body.contains("There is no workpad yet."));
+        assert!(!body.contains("The workpad so far:"));
     }
 
     /// Design §9.1: the review and test rules that change behaviour on hard
@@ -1476,7 +1497,7 @@ mod tests {
                 "git merge origin/<base>",
                 "never rebase, never force-push",
                 "send the issue back to In Progress",
-                "If nothing has changed since your last pass, write none.",
+                "If nothing has changed since your last pass, write no comment.",
                 "Move back to In Progress",
             ] {
                 assert!(body.contains(phrase), "{kind} carries {phrase:?}");

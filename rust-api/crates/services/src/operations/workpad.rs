@@ -24,6 +24,24 @@ use super::error::{Error, Outcome};
 pub const WORKPAD_MISSING_BODY: &str =
     r#"{"error":"PATCH requires a `body` field in the request payload."}"#;
 
+/// The workpad size cap, in characters (`.ai_design/unified_workpad/
+/// design.md` U7, §8.5). The workpad is inlined into every issue-run
+/// prompt, so a runaway note costs every later run. Existing longer
+/// workpads are not truncated; the next agent write must fit. Applies to
+/// agent writes only ([`WorkpadWrite::from_run`]).
+pub const WORKPAD_MAX_CHARS: usize = 16_000;
+
+/// The [`WORKPAD_MAX_CHARS`] refusal body.
+pub const WORKPAD_TOO_LONG: &str = r#"{"error":"workpad is longer than 16000 characters: shorten it (drop Keep in mind bullets that are no longer true and keep the last ten Log lines) and retry"}"#;
+
+/// Refuse a workpad body over [`WORKPAD_MAX_CHARS`] characters.
+pub fn check_workpad_size(workpad: &str) -> Result<(), Error> {
+    if workpad.chars().count() > WORKPAD_MAX_CHARS {
+        return Err(Error::FieldErrors(WORKPAD_TOO_LONG.to_owned()));
+    }
+    Ok(())
+}
+
 /// `"body" in request.data` (`:3287`): key membership on objects,
 /// element membership on arrays, substring on strings — and `TypeError`
 /// (500) on numbers/bools/null.
@@ -82,6 +100,9 @@ pub async fn update(
         // and validation only omits it when absent.
         return Err(Error::ServerError);
     };
+    if write.from_run {
+        check_workpad_size(&workpad)?;
+    }
     // The locked read + sparse `save()` (workpad, audit, hook recomputes)
     // run in the domain write; the completion pair when the state moved.
     // No orchestration fire — the port has none.
@@ -173,11 +194,27 @@ pub struct WorkpadWrite<'a> {
     /// the locked row must still match. `None` (old CLI) writes
     /// unconditionally, as today.
     pub if_body_sha256: Option<String>,
+    /// The write came from an agent run (the request carries the run
+    /// header). Only these are held to [`WORKPAD_MAX_CHARS`]: the cap keeps
+    /// agent notes short, and a person's edit is never refused for length
+    /// (unified workpad §8.5).
+    pub from_run: bool,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workpad_size_cap_counts_characters() {
+        assert_eq!(check_workpad_size(&"x".repeat(WORKPAD_MAX_CHARS)), Ok(()));
+        assert_eq!(
+            check_workpad_size(&"x".repeat(WORKPAD_MAX_CHARS + 1)),
+            Err(Error::FieldErrors(WORKPAD_TOO_LONG.to_owned()))
+        );
+        // Characters, not bytes: a multi-byte note at the cap still fits.
+        assert_eq!(check_workpad_size(&"é".repeat(WORKPAD_MAX_CHARS)), Ok(()));
+    }
 
     #[test]
     fn workpad_body_membership() {

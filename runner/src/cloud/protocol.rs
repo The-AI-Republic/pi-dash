@@ -289,7 +289,7 @@ pub enum ServerMsg {
         run_id: Uuid,
         work_item_id: Option<Uuid>,
         /// Run context (NEWPIDASH-320 §6.3, §6.1): the issue and project
-        /// identifiers plus, for `coding-task` runs, the workpad snapshot.
+        /// identifiers plus, for issue runs, the workpad snapshot.
         /// Additive optional fields — old servers never send them and old
         /// daemons ignore them, both via `#[serde(default)]`.
         #[serde(default)]

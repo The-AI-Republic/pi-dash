@@ -4,7 +4,8 @@
 
 //! `pidash workpad …` subcommands.
 //!
-//! The workpad is the coding agent's durable per-issue scratchpad. It used
+//! The workpad is the shared memory of the agent runs on one issue (In
+//! Progress, review and test; `.ai_design/unified_workpad/design.md`). It used
 //! to live in a dedicated `## Agent Workpad` IssueComment; with the comment
 //! thread now reserved for human ↔ agent conversation, the workpad is a
 //! plain markdown field on the issue itself and these commands are the

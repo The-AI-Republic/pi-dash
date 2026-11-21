@@ -1645,6 +1645,7 @@ async fn workpad_patch_inner(
         issue_id: *issue_id,
         body: &parsed_body.value,
         if_body_sha256,
+        from_run: headers.contains_key(crate::v1_work_items::perms::RUN_ID_HEADER),
     };
     let outcome = operations::workpad::update(&deps, &ctx, &write).await?;
     op_response(outcome)

@@ -69,14 +69,9 @@ impl OverrideValidationError {
 /// (`validation.py:42-220`). `kind` lands in `run.kind`, as in Python.
 fn issue_sample(kind: &str, populated: bool) -> serde_json::Value {
     if populated {
-        // NEWPIDASH-338 item 9: the populated sample carries the
-        // hand-off as a posted comment too, so the size-budget test
-        // sees it (stripped, as the section renders a posted comment).
-        let handoff = "### Hand-off\n**Produced:** https://example.com/pr/1\n**Acceptance criteria:**\n- The sample works.\n**How to verify:** run the sample.\n**Review focus:** the sample.\n**Next stage:** In Review — a code change.";
-        let comments_section = format!(
-            "### Comment 1 — Human: Sample at 2026-01-01\n\nHello.\n\n### Comment 2 — AI Agent: Sample at 2026-01-01\nAgent run: 00000000-0000-0000-0000-000000000003\n\n{}",
-            super::context::strip_handoff(handoff)
-        );
+        // The populated sample carries an agent's finishing comment too,
+        // so the size-budget test sees a realistic thread.
+        let comments_section = "### Comment 1 — Human: Sample at 2026-01-01\n\nHello.\n\n### Comment 2 — AI Agent: Sample at 2026-01-01\nAgent run: 00000000-0000-0000-0000-000000000003\n\nOpened https://example.com/pr/1 with the sample change.";
         serde_json::json!({
             "issue": {
                 "id": "00000000-0000-0000-0000-000000000001",
@@ -196,7 +191,7 @@ fn issue_sample(kind: &str, populated: bool) -> serde_json::Value {
             },
             "comments_section": comments_section,
             "parent_done_payload": "{\n  \"pr_url\": \"https://example.com/pr/1\"\n}",
-            "workpad_body": "### Path to done\n- **Goal**: sample",
+            "workpad_body": "### Keep in mind\n- PR https://example.com/pr/1, branch `sample-1`; check with `make test`.\n- Open: the empty-input path is untested.\n- The sample service needs `SAMPLE_ENV=dev` locally.\n\n### Log\n- 2026-01-01 in progress: opened the sample PR.",
             "stages": {
                 "agent_decides": true,
                 "review": true,
@@ -206,7 +201,8 @@ fn issue_sample(kind: &str, populated: bool) -> serde_json::Value {
                 "current_stage_switched_off": false,
                 "final_state": "AI Completed",
             },
-            "handoff": handoff,
+            // Removed by the unified workpad (U2); always empty until cleanup.
+            "handoff": "",
             "stage_history": "- 2026-01-01 In Progress: done — opened the sample PR",
         })
     } else {

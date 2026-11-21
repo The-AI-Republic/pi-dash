@@ -472,8 +472,10 @@ mod tests {
         "general.review",
         "general.test",
         "guardrails",
+        "review",
         "scheduler-ending",
         "session-framing",
+        "test",
     ];
 
     #[test]

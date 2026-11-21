@@ -7,16 +7,18 @@
 //!
 //! 1. validates the target state (by exact name; never a move into a
 //!    stage the project switched off, though staying put is always
-//!    allowed), the result, and the hand-off rules;
-//! 2. keeps the hand-off as pending in `agent_run.done_payload`;
-//! 3. moves the issue through the issue-update operation with the run as
+//!    allowed), the result, and the workpad gate (an In Progress run must
+//!    have updated the workpad before it moves the issue to review or
+//!    test; `.ai_design/unified_workpad/design.md` §8.2);
+//! 2. moves the issue through the issue-update operation with the run as
 //!    mover, so the transition (and an enabled stage's entry run) fires
 //!    as for any agent move — first, so a refused move leaves nothing
 //!    that claims it happened;
-//! 4. stores the hand-off as `stage_handoff`;
-//! 5. posts the comment, attributed to the run;
-//! 6. posts the hand-off as a comment when the issue goes to review/test;
-//! 7. merges the outcome into `done_payload` — the same keys `yield`
+//! 3. posts the comment, attributed to the run;
+//! 4. posts a legacy hand-off as a comment when the issue goes to
+//!    review/test (compatibility window only: prompts no longer send
+//!    one, and nothing stores it);
+//! 5. merges the outcome into `done_payload` — the same keys `yield`
 //!    writes, with `stop_ticking` *derived* from the result. Written last,
 //!    so a step refused on the way leaves no stop signal behind.
 //!
@@ -48,10 +50,11 @@ use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{WriteActor, WriteCtx, WriteScope};
 use pidash_services::operations;
+use pidash_services::orchestration::creation;
 use pidash_types::orchestration::{
-    agent_move_refusal, phase_config_for, stage_runs_automatically, AgentMoveRefusal,
-    StageSwitches, StateRef, KIND_CODING_TASK, OUTCOME_BLOCKED, OUTCOME_DONE, OUTCOME_PROGRESSED,
-    OUTCOME_WAITING_ON_EXTERNAL, OUTCOME_WAITING_ON_HUMAN,
+    agent_move_refusal, phase_config_for, stage_runs_automatically, template_name_for,
+    AgentMoveRefusal, StageSwitches, StateRef, KIND_CODING_TASK, OUTCOME_BLOCKED, OUTCOME_DONE,
+    OUTCOME_PROGRESSED, OUTCOME_WAITING_ON_EXTERNAL, OUTCOME_WAITING_ON_HUMAN,
 };
 
 use crate::domain_hooks::AppTaskEnqueueHook;
@@ -73,13 +76,10 @@ pub const HANDOFF_MAX_CHARS: usize = 20_000;
 /// The comment label when the caller names no agent runtime.
 pub const DEFAULT_AGENT_LABEL: &str = "AI Agent";
 
-/// `done_payload` key holding the In Progress hand-off. Not `handoff`:
-/// that word already names the project-move handoff in orchestration.
+/// `done_payload` key that held the In Progress hand-off before the
+/// unified workpad (`.ai_design/unified_workpad/design.md` U2, U8). Nothing
+/// writes or reads it any more; old `done_payload` rows may still carry it.
 pub const STAGE_HANDOFF_KEY: &str = "stage_handoff";
-/// `done_payload` key holding a hand-off whose move has not happened yet.
-/// Nothing reads it: it only becomes [`STAGE_HANDOFF_KEY`] once the issue
-/// moved (or stays), so a refused move leaves no hand-off that counts.
-pub const PENDING_HANDOFF_KEY: &str = "pending_stage_handoff";
 /// The comment operation's dedupe source for `finish` posts (NEWPIDASH-338
 /// item 6): retries carry the same external id, so a retry that already
 /// posted hits the `409` instead of posting twice.
@@ -357,31 +357,26 @@ pub fn resolve_target<'a>(
     Ok(target)
 }
 
-/// The hand-off rules (step 1): only an In Progress (`coding-task`) run
-/// writes one, and such a run moving to review or test must have one: now,
-/// or stored by an In Progress run since the issue's last review or test
-/// run (`earlier_handoff_exists`).
-pub fn check_handoff(
-    phase_kind: &str,
-    has_handoff: bool,
-    moving_to_review_or_test: bool,
-    earlier_handoff_exists: bool,
-) -> Result<(), Refusal> {
-    let coding = phase_kind == KIND_CODING_TASK;
-    if has_handoff && !coding {
-        return Err(bad_request(
-            "only an In Progress run writes a hand-off; put findings in the comment",
-            &[],
-        ));
+/// The workpad gate (step 1; `.ai_design/unified_workpad/design.md` §8.2):
+/// an In Progress (`coding-task`) run that moves the issue into review or
+/// test must have changed the workpad since the In Progress pass started,
+/// so the next stage finds a note that describes this pass. The caller
+/// applies it only to that move, and not when a legacy hand-off is sent
+/// (it is posted as a comment, which review and test read).
+///
+/// `stamped_sha` is the workpad hash when the pass started
+/// ([`fetch_workpad_hashes`]); a run created before NEWPIDASH-320 carries
+/// none and is not gated.
+pub fn check_workpad_written(stamped_sha: Option<&str>, current_sha: &str) -> Result<(), Refusal> {
+    match stamped_sha {
+        Some(stamped) if stamped == current_sha => Err(bad_request(WORKPAD_UNCHANGED_MESSAGE, &[])),
+        _ => Ok(()),
     }
-    if coding && moving_to_review_or_test && !has_handoff && !earlier_handoff_exists {
-        return Err(bad_request(
-            "a move to review or test needs a hand-off: write it to a file and pass --handoff-file",
-            &[],
-        ));
-    }
-    Ok(())
 }
+
+/// The [`check_workpad_written`] refusal.
+pub const WORKPAD_UNCHANGED_MESSAGE: &str =
+    "update the workpad before moving to review or test: note where the work is and how to check it";
 
 /// The keys the last write merges in: the result, its time, the note, and
 /// the derived `stop_ticking`.
@@ -421,13 +416,13 @@ pub fn scheduler_run_refusal() -> Response {
 /// is skipped when the issue already sits in the target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinishPlan<'a> {
-    /// Step 5: the comment to post, if the request carries one.
+    /// Step 3: the comment to post, if the request carries one.
     pub comment: Option<&'a str>,
-    /// Step 6: the hand-off to post as a comment, if the request carries
+    /// Step 4: a legacy hand-off to post as a comment, if the request carries
     /// one. Only for a move into review or test, where humans read what
     /// the stage reads.
     pub handoff_comment: Option<&'a str>,
-    /// Step 3: the state to move to, if the issue is not there yet.
+    /// Step 2: the state to move to, if the issue is not there yet.
     pub move_to: Option<Uuid>,
     /// Whether the clock keeps running after this run ends.
     pub ticking: bool,
@@ -542,7 +537,7 @@ async fn finish_inner(
         serde_json::from_slice(raw_body)
             .map_err(|error| Denial::BadDetail(format!("JSON parse error - {error}")))?
     };
-    let req = match parse_finish_body(&data) {
+    let mut req = match parse_finish_body(&data) {
         Ok(req) => req,
         Err(refusal) => return Ok(refusal.into_response()),
     };
@@ -584,34 +579,31 @@ async fn finish_inner(
         Err(refusal) => return Ok(refusal.into_response()),
     };
     // The run row is already loaded: no second select for its phase kind.
-    let phase_kind = run.phase_kind.clone();
-    let to_review_or_test = target.is_review_or_test();
-    let earlier_handoff =
-        if phase_kind == KIND_CODING_TASK && to_review_or_test && req.handoff.is_none() {
-            current_handoff_exists(&pre.pool, issue_id).await?
-        } else {
-            false
-        };
-    if let Err(refusal) = check_handoff(
-        &phase_kind,
-        req.handoff.is_some(),
-        to_review_or_test,
-        earlier_handoff,
-    ) {
-        return Ok(refusal.into_response());
+    // A project-move replacement run stamps no kind but renders the prompt
+    // for the issue's state (`create_project_move_handoff_run`), so an
+    // empty kind is read from the state the run is finishing in.
+    let phase_kind = if run.phase_kind.is_empty() {
+        let current = current_state_id.and_then(|id| choices.iter().find(|c| c.id == id));
+        template_name_for(current.map(StateChoice::as_ref).as_ref()).to_owned()
+    } else {
+        run.phase_kind.clone()
+    };
+    // A legacy hand-off (a prompt rendered before the unified workpad) is
+    // stored nowhere. An In Progress run's is still posted as a comment on
+    // a move to review or test (step 4); any other run's is dropped.
+    if req.handoff.is_some() {
+        tracing::info!(run_id = %run.facts.id, phase_kind = %phase_kind, "finish: legacy hand-off received; not stored");
+        if phase_kind != KIND_CODING_TASK {
+            req.handoff = None;
+        }
     }
-
-    // Step 2: keep the hand-off as pending (the result is written last,
-    // step 7). Every write merges only its own keys into the stored
-    // payload, so a concurrent `yield` write is never overwritten from a
-    // stale snapshot.
-    if let Some(handoff) = req.handoff.as_ref() {
-        merge_done_payload(
-            &pre.pool,
-            run.facts.id,
-            &json!({ PENDING_HANDOFF_KEY: handoff }),
-        )
-        .await?;
+    let moving_to_review_or_test =
+        current_state_id != Some(target.id) && target.is_review_or_test();
+    if phase_kind == KIND_CODING_TASK && moving_to_review_or_test && req.handoff.is_none() {
+        let (stamped, current) = fetch_workpad_hashes(&pre.pool, run.facts.id, issue_id).await?;
+        if let Err(refusal) = check_workpad_written(stamped.as_deref(), &current) {
+            return Ok(refusal.into_response());
+        }
     }
 
     let clock = fetch_clock_view(&pre.pool, issue_id, &project.policy).await?;
@@ -704,10 +696,9 @@ async fn finish_inner(
             Ok((now, rendered_now.clone()))
         };
 
-    // Step 3: the move, through the issue-update operation with the run as
+    // Step 2: the move, through the issue-update operation with the run as
     // mover, before anything that says the issue moved. A refused move
-    // leaves no comment and no hand-off behind (only the pending copy,
-    // which nothing reads).
+    // leaves no comment behind.
     //
     // Attribution and gates preserved from the patch path: `moved_by_run`
     // is this run (the inner path inferred the same id from the forwarded
@@ -769,17 +760,7 @@ async fn finish_inner(
         }
     }
 
-    // Step 4: the hand-off counts only now that the issue moved (or stays).
-    if let Some(handoff) = req.handoff.as_ref() {
-        merge_done_payload(
-            &pre.pool,
-            run.facts.id,
-            &json!({ STAGE_HANDOFF_KEY: handoff }),
-        )
-        .await?;
-    }
-
-    // Step 5: the comment.
+    // Step 3: the comment.
     if let Some(comment) = plan.comment {
         if let Some(response) = post_finish_comment(
             &deps,
@@ -801,7 +782,8 @@ async fn finish_inner(
         }
     }
 
-    // Step 6: the hand-off, shown to humans where review and test read it.
+    // Step 4: a legacy hand-off (compatibility window), posted where
+    // review and test look for one when the workpad does not say.
     if let Some(handoff) = plan.handoff_comment {
         if let Some(response) = post_finish_comment(
             &deps,
@@ -823,7 +805,7 @@ async fn finish_inner(
         }
     }
 
-    // Step 7: the result, now that every step succeeded.
+    // Step 5: the result, now that every step succeeded.
     merge_done_payload(
         &pre.pool,
         run.facts.id,
@@ -1001,43 +983,42 @@ async fn fetch_state_choices(pool: &PgPool, project_id: Uuid) -> Result<Vec<Stat
         .collect())
 }
 
-/// Whether an In Progress run stored a hand-off that still describes the
-/// current work: one from a run created after the issue's latest review or
-/// test run. After review or test sends the work back, the next In
-/// Progress run must write a fresh hand-off; the pre-fix one would show
-/// the next review stale "what was produced".
-async fn current_handoff_exists(pool: &PgPool, issue_id: Uuid) -> Result<bool, Denial> {
-    use sea_orm::QueryOrder;
+/// The workpad hash when the run's In Progress pass started and the hash of
+/// the issue's workpad now, for [`check_workpad_written`]. The start hash is
+/// `run_config.stage_start_workpad_sha256` (a continuation carries its
+/// parent's, [`creation::STAGE_START_WORKPAD_SHA256`]), else the run's own
+/// `workpad_sha256`; `None` for a run created before NEWPIDASH-320.
+async fn fetch_workpad_hashes(
+    pool: &PgPool,
+    run_id: Uuid,
+    issue_id: Uuid,
+) -> Result<(Option<String>, String), Denial> {
     let db = sea_orm_connection(pool);
-    let last_check: Option<sea_orm::prelude::DateTimeWithTimeZone> = agent_run::Entity::find()
+    let run_config: Option<Value> = agent_run::Entity::find_by_id(run_id)
         .select_only()
-        .column(agent_run::Column::CreatedAt)
-        .filter(agent_run::Column::WorkItemId.eq(issue_id))
-        .filter(agent_run::Column::PhaseKind.is_in(["review", "test"]))
-        .order_by_desc(agent_run::Column::CreatedAt)
+        .column(agent_run::Column::RunConfig)
         .into_tuple()
         .one(&db)
         .await
-        .map_err(|error| db_error(error, "finish-last-check"))?;
-    // The same test as the prompt's hand-off query (`BUNDLE_HANDOFF_SQL`),
-    // so a JSON-null key counts as no hand-off in both places.
-    let has_handoff =
-        pidash_services::orchestration::creation::orm::done_payload_text(STAGE_HANDOFF_KEY);
-    let mut query = agent_run::Entity::find()
+        .map_err(|error| db_error(error, "finish-run-config"))?;
+    let stamped = run_config
+        .as_ref()
+        .and_then(|config| {
+            config
+                .get(creation::STAGE_START_WORKPAD_SHA256)
+                .or_else(|| config.get("workpad_sha256"))
+        })
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let workpad: Option<String> = issues::Entity::find_by_id(issue_id)
         .select_only()
-        .column(agent_run::Column::Id)
-        .filter(agent_run::Column::WorkItemId.eq(issue_id))
-        .filter(agent_run::Column::PhaseKind.eq(KIND_CODING_TASK))
-        .filter(Expr::expr(has_handoff).is_not_null());
-    if let Some(after) = last_check {
-        query = query.filter(agent_run::Column::CreatedAt.gt(after));
-    }
-    let found: Option<Uuid> = query
+        .column(issues::Column::Workpad)
         .into_tuple()
         .one(&db)
         .await
-        .map_err(|error| db_error(error, "finish-handoff-exists"))?;
-    Ok(found.is_some())
+        .map_err(|error| db_error(error, "finish-workpad"))?;
+    let current = creation::workpad_sha256(workpad.as_deref().unwrap_or_default());
+    Ok((stamped, current))
 }
 
 #[cfg(test)]
@@ -1174,21 +1155,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handoff_rules() {
-        // A hand-off from a review run is refused.
-        assert!(check_handoff("review", true, false, false).is_err());
-        // A coding run moving to review needs one...
+    async fn workpad_gate() {
+        // A coding run moving to review with the workpad unchanged since
+        // the run was created is refused...
         let (status, body) =
-            body_of(check_handoff(KIND_CODING_TASK, false, true, false).unwrap_err()).await;
+            body_of(check_workpad_written(Some("same"), "same").unwrap_err()).await;
         assert_eq!(status, 400);
-        assert!(body["error"].as_str().unwrap().contains("--handoff-file"));
-        // ...unless one was stored earlier on the issue.
-        assert!(check_handoff(KIND_CODING_TASK, false, true, true).is_ok());
-        assert!(check_handoff(KIND_CODING_TASK, true, true, false).is_ok());
-        // A coding run finishing anywhere else needs none.
-        assert!(check_handoff(KIND_CODING_TASK, false, false, false).is_ok());
-        // Review/test runs moving back need none.
-        assert!(check_handoff("review", false, false, false).is_ok());
+        assert_eq!(body["error"], json!(WORKPAD_UNCHANGED_MESSAGE));
+        // ...and allowed once the workpad changed.
+        assert!(check_workpad_written(Some("old"), "new").is_ok());
+        // A run created before NEWPIDASH-320 carries no stamped hash.
+        assert!(check_workpad_written(None, "same").is_ok());
     }
 
     #[test]
@@ -1230,7 +1207,7 @@ mod tests {
         assert_eq!(delta["yielded_at"], json!("2026-11-19T00:00:00Z"));
         assert!(
             !delta.contains_key(STAGE_HANDOFF_KEY),
-            "stored by its own step"
+            "the hand-off is never stored"
         );
 
         let done = parse_finish_body(&json!({"to": "AI Completed", "result": "done"})).unwrap();
@@ -1304,19 +1281,11 @@ mod tests {
         let got = body_of(parse_finish_body(&request).unwrap_err()).await;
         assert_eq!(got, (status, body));
 
-        let (status, request, body) = fixture_call("finish_missing_handoff");
+        let (status, request, body) = fixture_call("finish_workpad_unchanged");
         let req = parse_finish_body(&request).unwrap();
         let target = resolve_target(&states, &req.to, StageSwitches::ALL, None).unwrap();
-        let got = body_of(
-            check_handoff(
-                KIND_CODING_TASK,
-                req.handoff.is_some(),
-                target.is_review_or_test(),
-                false,
-            )
-            .unwrap_err(),
-        )
-        .await;
+        assert!(target.is_review_or_test() && req.handoff.is_none());
+        let got = body_of(check_workpad_written(Some("unchanged"), "unchanged").unwrap_err()).await;
         assert_eq!(got, (status, body));
 
         let (status, _request, body) = fixture_call("finish_scheduler_run");
@@ -1352,7 +1321,7 @@ mod tests {
     fn the_result_is_not_written_before_the_steps() {
         // A refused comment or move must not leave `stop_ticking: true`
         // behind for a later `yield --outcome progressed` to inherit:
-        // step 7 writes the result only after every step succeeded.
+        // step 5 writes the result only after every step succeeded.
         let req = finish_req(json!({
             "to": "In Progress", "result": "waiting_on_human", "comment": "?", "handoff": "h"
         }));
@@ -1361,7 +1330,7 @@ mod tests {
         assert_eq!(delta["status"], json!("waiting_on_human"));
         assert!(
             !delta.contains_key(STAGE_HANDOFF_KEY),
-            "the hand-off is stored by its own step"
+            "the hand-off is never stored"
         );
     }
 

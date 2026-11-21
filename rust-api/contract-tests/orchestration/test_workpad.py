@@ -3,6 +3,7 @@ clearing, the timestamp-only PATCH response, and the `body_sha256`
 stale-write guard (NEWPIDASH-320 §6.1, DIFF-60)."""
 
 import hashlib
+import uuid
 
 from _harness import db, world
 from _harness.db import get_database_url
@@ -169,3 +170,31 @@ def test_workpad_guard_survives_state_move(api_client):
     )
     assert r.status_code == 200, r.text
     assert _db_workpad(issue) == SAMPLE
+
+
+def test_workpad_patch_over_the_size_cap_is_refused(api_client):
+    """Unified workpad U7/§8.5: the workpad is inlined into every issue-run
+    prompt, so the Rust API refuses an agent write (one sent from a run,
+    with the run header) over 16,000 characters with a 400 and leaves the
+    stored body as it was. A person's edit is not capped. Django has no cap."""
+    w, client = api_client
+    issue = world.make_issue(w, "padcap", "In Progress")
+    assert client.patch_workpad(w.workspace_slug, w.project_id, issue, {"body": SAMPLE}).status_code == 200
+
+    # Characters, not bytes: a multi-byte body exactly at the cap fits.
+    run_id = str(uuid.uuid4())
+    at_cap = "é" * 16_000
+    r = client.patch_workpad(w.workspace_slug, w.project_id, issue, {"body": at_cap}, run_id=run_id)
+    assert r.status_code == 200, r.text
+
+    r = client.patch_workpad(w.workspace_slug, w.project_id, issue, {"body": "x" * 16_001}, run_id=run_id)
+    if is_rust():
+        assert r.status_code == 400, r.text
+        assert "longer than 16000 characters" in r.json()["error"], r.text
+        assert _db_workpad(issue) == at_cap
+    else:
+        assert r.status_code == 200, r.text
+
+    # A person's edit (no run header) is never capped.
+    r = client.patch_workpad(w.workspace_slug, w.project_id, issue, {"body": "y" * 16_001})
+    assert r.status_code == 200, r.text
