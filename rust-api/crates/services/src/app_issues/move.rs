@@ -1687,6 +1687,7 @@ async fn render_current_instance<S: MoveStore>(
         expanded_labels: &[],
         blockers: Some(&blockers),
         relations: None,
+        code_reviews: None,
         active_run: None,
         expansions: &[],
     };

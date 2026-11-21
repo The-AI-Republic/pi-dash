@@ -2549,6 +2549,7 @@ async fn expand_issue(
         expanded_labels: &[],
         blockers: Some(&blockers),
         relations: None,
+        code_reviews: None,
         active_run: None,
         expansions: &[],
     })
