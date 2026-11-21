@@ -399,6 +399,36 @@ def test_summary_requires_auth(anon_client, world):
     assert anon_client.get(f"{pages_base(world)}/pages-summary/").status_code in (401, 403)
 
 
+def test_summary_ignores_soft_deleted_project_link(user_client, world, seeder, db):
+    """pages-summary skips a page whose only URL-project link is soft-deleted.
+
+    NEWPIDASH-343: ``PageViewSet.summary`` (``app/views/page/base.py:476``)
+    annotates ``project=Exists(ProjectPage.objects.filter(...))`` and
+    ``ProjectPage.objects`` is a ``SoftDeletionManager`` (``db/mixins.py:58``),
+    so a soft-deleted ``project_pages`` link never matches. The Rust
+    ``summary_query`` joined ``project_pages pp`` on ``project_id`` alone and
+    counted the page. The ghost page keeps a live link to a second project
+    (the NEWPIDASH-240 move state that makes this reachable) but must not
+    count toward the URL project, and the list omits it on both backends.
+    """
+    ghost = seeder.create_page(world["workspace"]["id"], world["owner"]["id"], name="Ghost")
+    seeder.link_page_project(world["workspace"]["id"], world["project"]["id"], ghost["id"])
+    db.execute(
+        "UPDATE project_pages SET deleted_at=now() WHERE page_id=%s AND project_id=%s",
+        (ghost["id"], world["project"]["id"]),
+    )
+    other_project = seeder.create_project(world["workspace"]["id"])
+    seeder.create_project_member(
+        world["workspace"]["id"], other_project["id"], world["owner"]["id"], role=20
+    )
+    seeder.link_page_project(world["workspace"]["id"], other_project["id"], ghost["id"])
+    response = user_client.get(f"{pages_base(world)}/pages-summary/")
+    assert response.status_code == 200
+    assert response.json() == {"public_pages": 1, "private_pages": 0, "archived_pages": 0}
+    rows = user_client.get(page_url(world)).json()
+    assert ghost["id"] not in {row["id"] for row in rows}
+
+
 def _page_label_rows(db, page_id):
     """``(label_id, deleted_at_is_null)`` for the page, label-id ordered."""
     return [
