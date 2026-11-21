@@ -1377,6 +1377,7 @@ async fn render_scheduler_turn<S: EntriesSeam>(
         scheduler_name: scheduler.name.clone(),
         scheduler_description: Some(scheduler.description.clone()),
         run_id: run.id.to_string(),
+        rendered_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         executor_kind: run.executor_kind.value().to_owned(),
         available_tools: tool_plan.get("tools").cloned().unwrap_or(Value::Null),
         unavailable_capabilities: tool_plan
@@ -3550,7 +3551,9 @@ mod tests {
         assert!(run.prompt.contains(&run_id.to_string()));
         let manifest = run.prompt_manifest.expect("manifest stamped");
         assert!(manifest.is_array());
-        assert_eq!(manifest.as_array().expect("bare list").len(), 6);
+        // Six scheduler sections plus the `this-run` block first
+        // (NEWPIDASH-325).
+        assert_eq!(manifest.as_array().expect("bare list").len(), 7);
         assert_eq!(seam.dispatched, vec![run_id]);
         assert!(seam.finalized.is_empty());
         assert_eq!(seam.compose_calls, 1);

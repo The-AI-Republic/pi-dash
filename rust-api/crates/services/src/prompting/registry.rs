@@ -258,6 +258,7 @@ const SECTION_FILES: &[(&str, &str)] = &[
     ),
     ("test.md", include_str!("sections/test.md")),
     ("test-intro.md", include_str!("sections/test-intro.md")),
+    ("this-run.md", include_str!("sections/this-run.md")),
     ("workpad.md", include_str!("sections/workpad.md")),
 ];
 

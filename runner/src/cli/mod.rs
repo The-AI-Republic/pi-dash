@@ -517,6 +517,9 @@ fn run_crud(code: i32) -> Result<()> {
 }
 
 #[cfg(test)]
+mod prompt_contract;
+
+#[cfg(test)]
 mod tests {
     use super::{COMMAND_CLASSES, CommandClass, agent_help, classify_name, refusal_for};
     use clap::CommandFactory;

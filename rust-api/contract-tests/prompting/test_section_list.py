@@ -16,7 +16,9 @@ SECTION_KEYS = {
 # work-type slots filled for the default work type (`software`,
 # PDASHOSS01-234). DIFF-54: the lean agent workflow change replaced the
 # Rust issue-run recipes (design .ai_design/lean_agent_workflow/design.md
-# §9.2), so each backend pins its own order.
+# §9.2), so each backend pins its own order. DIFF-61 adds the Rust
+# "This run" block first (design
+# .ai_design/optimize_pidash_cli_prompt/design.md §6.10).
 DJANGO_CODING_TASK_ORDER = (
     "intro", "software.context", "relationships", "session-framing",
     "pidash-cli", "task-lifecycle", "default-posture", "autonomy",
@@ -25,10 +27,10 @@ DJANGO_CODING_TASK_ORDER = (
     "workpad-template", "ending-run",
 )
 RUST_CODING_TASK_ORDER = (
-    "intro", "software.context", "relationships", "run-framing",
-    "pidash-cli", "lifecycle", "default-posture", "autonomy",
-    "analyze-and-scope", "workpad", "software.execute", "implementation",
-    "blocking",
+    "this-run", "intro", "software.context", "relationships",
+    "run-framing", "pidash-cli", "lifecycle", "default-posture",
+    "autonomy", "analyze-and-scope", "workpad", "software.execute",
+    "implementation", "blocking",
 )
 CODING_TASK_ORDER = expect(
     "DIFF-54", django=DJANGO_CODING_TASK_ORDER, rust=RUST_CODING_TASK_ORDER
@@ -76,10 +78,19 @@ def test_list_scheduler_kind(api, tenant_a, auth_a):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["kind"] == "scheduler"
-    assert [s["key"] for s in body["sections"]] == [
-        "scheduler-intro", "session-framing", "pidash-cli",
-        "scheduler-task", "guardrails", "scheduler-ending",
-    ]
+    # DIFF-61: the Rust scheduler recipe opens with the "This run" block;
+    # Django keeps the old order.
+    assert [s["key"] for s in body["sections"]] == list(expect(
+        "DIFF-61",
+        django=(
+            "scheduler-intro", "session-framing", "pidash-cli",
+            "scheduler-task", "guardrails", "scheduler-ending",
+        ),
+        rust=(
+            "this-run", "scheduler-intro", "session-framing", "pidash-cli",
+            "scheduler-task", "guardrails", "scheduler-ending",
+        ),
+    ))
 
 
 def test_list_tier_capabilities(api, tenant_a, auth_a):

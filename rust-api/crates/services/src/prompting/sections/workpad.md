@@ -34,4 +34,4 @@ Keep exactly these blocks:
 - <decisions and why, dead ends, environment quirks, file pointers, which blocker you are waiting on>
 ```
 
-Write it with `pidash workpad update --body-file <path>`; there is no append, so always write the full body. A successful update deletes the file, so before each later edit re-fetch with `set -o pipefail; pidash workpad get | jq -r .body > <path>; test -s <path>`. Never upload an empty body after a failed fetch. Update the workpad after each meaningful step, so a crashed run loses little.
+Your workpad is in `.pidash/workpad.md` (also shown above). Edit it, then run `pidash workpad update`; there is no append, so the file is always the full body. If the file is missing, run `pidash workpad get --to-file` first. If an update is rejected as changed, run `pidash workpad get --to-file` and re-apply your edit. Update the workpad after each meaningful step.
