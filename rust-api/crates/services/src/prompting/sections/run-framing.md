@@ -11,6 +11,6 @@ This is an unattended run on an issue already delegated to the agent. Work in th
 {% elif run.trigger == "comment_and_run" %}This run was started by **a new human comment**. Read the latest human comments first and address them before anything else.
 {% elif run.trigger == "run_ai" %}A person **started this run by hand**. They expect visible progress or an answer from it.
 {% elif run.trigger == "state_transition" %}This run started because the issue **just entered {{ issue.state }}**. It is the first run in this stage.
-{% else %}Work out where things stand from the issue and its comments, then continue.
+{% else %}Work out where things stand from the issue, its comments and the workpad, then continue.
 {% endif %}
 If a tool the task needs is missing, follow "Blocking the run".

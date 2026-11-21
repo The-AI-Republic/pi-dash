@@ -9,7 +9,7 @@ This issue's work type is **software**: when a task changes the project's produc
 
 ### Classify the task first (during "Analyze & scope")
 
-Decide the **task type** and note it in the workpad `Notes`:
+Decide the **task type** and note it in the workpad's Keep in mind:
 
 - `code_change` — your approach edits files in the repository. When uncertain, choose `code_change`: the heavier path is the safer default.
 - `noncode` — no repository edits (an investigation, a status check, a CLI-only action, a comment-only response).
@@ -37,7 +37,7 @@ The agent's working directory is a real checkout — read these directly while a
      - This issue has a parent ({{ parent.identifier }}) with an active implementation branch. Use the parent's branch as base: `BASE={{ parent.work_branch }}`.
 {% elif parent %}
      - This issue has a parent ({{ parent.identifier }}) with no implementation branch yet. **Do not treat this as an automatic fall-back to the project base** — route it through the parent-readiness judgment you made in "Analyze & scope":
-       - Parent is a **research / design / spec** issue (no code expected), or an implementation issue whose work is already merged into the base branch: base off the project base — `BASE={% if repo.base_branch %}{{ repo.base_branch }}{% else %}$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||'){% endif %}` — and note in the workpad `Notes` why the parent's lack of a branch is expected here.
+       - Parent is a **research / design / spec** issue (no code expected), or an implementation issue whose work is already merged into the base branch: base off the project base — `BASE={% if repo.base_branch %}{{ repo.base_branch }}{% else %}$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||'){% endif %}` — and note in the workpad's Keep in mind why the parent's lack of a branch is expected here.
        - Parent is a **tracking issue** (it was split into child issues; it carries no branch of its own and will never get one): base off the project base — `BASE={% if repo.base_branch %}{{ repo.base_branch }}{% else %}$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||'){% endif %}` — **or**, when this child's description says it depends on a sibling child, base off that sibling's work branch (`BASE=$(pidash issue get <sibling> | jq -r '.git_work_branch')`, falling back to the project base if the sibling has no branch yet). Do **not** block on the tracking parent's lack of a branch.
        - Parent is an **implementation** issue still in progress with no branch yet **and this issue depends on its code**: do **not** base off the project base. Treat it as a blocker — follow "Blocking the run" instead of creating a branch, and stop.
 {% else %}
@@ -46,7 +46,7 @@ The agent's working directory is a real checkout — read these directly while a
    - `git checkout "$BASE" && git pull --rebase origin "$BASE"`.
    - Create a derived branch off `$BASE`: `BRANCH="pi-dash/{{ issue.identifier|lower }}"; git checkout -b "$BRANCH"`. Always derive — never commit on `$BASE`. Persistence (`pidash issue patch ... --git-work-branch`) happens *after* the first successful push (below), so a crashed run never leaves a recorded branch with no remote ref.
 {% endif %}
-   - Record the resulting `HEAD` short SHA and the base in the workpad `Notes`.
+   - Note the branch and its base in the workpad's Keep in mind.
 
 Before editing any files, make sure you are on the work branch — the platform performs **no** branch checkout for you; every git operation is yours to run. For a **multi-part plan**, stack a part's branch on the previous part's branch when the part depends on it; otherwise branch from the base.
 
@@ -68,7 +68,7 @@ This is what "deliver the current part" in "Implementation and validation" means
    - Post the link back to the issue so the human sees it in the conversation: `pidash comment add {{ issue.identifier }} --body "Code review opened: <url>"`.
    - Associate the {{ repo.code_review_term }} with the issue so Pi Dash links it and can show its status: `pidash issue attach-review {{ issue.identifier }} --url <url>`.
 
-   For a multi-part plan, record this part's {{ repo.code_review_term }} URL against its entry in the workpad `Plan`.
+   For a multi-part plan, note this part's {{ repo.code_review_term }} URL against the part in the workpad's Keep in mind (`Part 1 of 3 (export): done, <URL>`).
 
 ### Branch sync
 
@@ -80,12 +80,12 @@ When the work branch already exists (a later run, or work sent back from review 
 - Run the repository's own checks on the merged tree, then push the merge commit if it is not a no-op.
 - When the base rewrote the code this issue changes, rebuild the change on the current base rather than forcing the old one through.
 
-### Hand-off specifics
+### What the next run needs
 
-In the hand-off, **Produced** lists every {{ repo.code_review_term }} (URL and branch), and **How to verify** names the repository's checks to run and the flows to exercise from the user's side: an API or CLI call, a screen to drive, an operator procedure, or a document to read.
+Before you move on, the workpad's Keep in mind lists every {{ repo.code_review_term }} (URL and branch) and names the repository's checks to run and the flows to exercise from the user's side: an API or CLI call, a screen to drive, an operator procedure, or a document to read.
 
 ### Repository guardrails
 
 - Never commit on the base branch; work only on the issue's derived (or pinned) branch.
-- Do not `git push --force` to shared branches. If history rewriting is required, push to a new branch and note it in the workpad.
+- Do not `git push --force` to shared branches. If history rewriting is required, push to a new branch and note it in the workpad's Keep in mind.
 - Temporary proof edits must be reverted before commit.

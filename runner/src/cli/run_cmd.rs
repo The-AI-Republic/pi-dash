@@ -84,9 +84,11 @@ pub struct FinishArgs {
     /// the test results, or the question to a person.
     #[arg(long)]
     pub comment_file: Option<PathBuf>,
-    /// In Progress runs only: markdown file with the hand-off review and
-    /// test read. Required for a move to In Review or In Test.
-    #[arg(long)]
+    /// Deprecated and hidden (`.ai_design/unified_workpad/design.md` §7.1):
+    /// the hand-off was replaced by the workpad. Still read and sent during
+    /// the compatibility window, so a prompt rendered before the change
+    /// keeps working against either server; prints a deprecation note.
+    #[arg(long, hide = true)]
     pub handoff_file: Option<PathBuf>,
     /// One line for the run history.
     #[arg(long)]
@@ -292,6 +294,11 @@ pub async fn cmd_finish(client: &ApiClient, mut args: FinishArgs) -> Result<(), 
         .as_deref()
         .map(|p| read_markdown("--comment-file", p))
         .transpose()?;
+    if args.handoff_file.is_some() {
+        eprintln!(
+            "note: --handoff-file is deprecated: write what the next run needs in the workpad"
+        );
+    }
     let handoff = args
         .handoff_file
         .as_deref()

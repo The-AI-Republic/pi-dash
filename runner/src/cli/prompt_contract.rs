@@ -9,8 +9,8 @@
 //!    placeholder substitution. A span that names a command without its
 //!    required arguments (e.g. the `pidash run finish` mention whose syntax
 //!    lives in `lifecycle`) passes only when its subcommand path resolves.
-//! 2. `--handoff-file` appears only on coding-task renders (the lifecycle
-//!    syntax line owns it there).
+//! 2. No render mentions `--handoff-file` (the stage hand-off was removed;
+//!    `.ai_design/unified_workpad/design.md` U2).
 //! 3. Every `PIDASH_*` variable a render promises is set by `apply_run_env`
 //!    for that kind (observed through `login_shell_command`, i.e. what the
 //!    agent process actually receives).
@@ -671,35 +671,22 @@ fn every_prompt_command_parses() {
 }
 
 #[test]
-fn handoff_file_is_coding_task_only() {
+fn no_render_mentions_handoff_file() {
+    // The stage hand-off was removed (`.ai_design/unified_workpad/
+    // design.md` U2): no kind is taught `--handoff-file`, though every
+    // issue run still renders the run-finish syntax line.
     for (kind, stem, text) in fixture_texts() {
-        // The lifecycle-owned syntax line carries `--handoff-file` exactly
-        // on coding-task renders (matched on the invocation form, not on
-        // prose that merely names the command).
-        let finish_lines: Vec<&str> = text
-            .lines()
-            .filter(|line| line.starts_with("    ") && line.contains("pidash run finish --to"))
-            .collect();
         if kind != "scheduler" {
             assert!(
-                !finish_lines.is_empty(),
+                text.lines()
+                    .any(|line| line.starts_with("    ") && line.contains("pidash run finish --to")),
                 "{kind}/{stem}: no run-finish syntax line rendered"
             );
         }
-        for line in &finish_lines {
-            assert_eq!(
-                line.contains("--handoff-file"),
-                kind == "coding-task",
-                "{kind}/{stem}: {line}"
-            );
-        }
-        // … and no other render mentions the flag at all.
-        if kind != "coding-task" {
-            assert!(
-                !text.contains("handoff-file"),
-                "{kind}/{stem} mentions --handoff-file"
-            );
-        }
+        assert!(
+            !text.contains("handoff-file"),
+            "{kind}/{stem} mentions --handoff-file"
+        );
     }
 }
 

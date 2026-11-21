@@ -565,17 +565,6 @@ pub const BUNDLE_OVERRIDES_SQL: &str = "SELECT section_key, body, version, user_
 /// workspace id.
 pub const BUNDLE_WORKSPACE_SQL: &str = "SELECT slug, name FROM workspaces WHERE id = $1";
 
-/// The hand-off review and test read (lean workflow design §8.2): the
-/// `stage_handoff` of the most recent `coding-task` run on the issue that
-/// stored one. Read directly rather than through the parent-payload pick,
-/// which follows the run's parent and can miss the latest In Progress run
-/// after a hand-back. `IS NOT NULL` stands in for the design's `?` key
-/// test (it also skips a stored JSON null) so no raw `?` reaches a
-/// placeholder-rewriting driver. `$1` is the issue id.
-pub const BUNDLE_HANDOFF_SQL: &str = "SELECT done_payload->>'stage_handoff' AS handoff \
-    FROM agent_run WHERE work_item_id = $1 AND phase_kind = 'coding-task' \
-    AND done_payload->>'stage_handoff' IS NOT NULL ORDER BY created_at DESC LIMIT 1";
-
 /// The issue's last runs for `stage_history` (lean workflow design §8.3),
 /// newest first; the context renders them oldest first. `$1` is the issue
 /// id, `$2` the new run id (excluded).
@@ -584,12 +573,10 @@ pub const BUNDLE_STAGE_HISTORY_SQL: &str = "SELECT phase_kind, \
     FROM agent_run WHERE work_item_id = $1 AND id != $2 ORDER BY created_at DESC LIMIT 10";
 
 /// The lean-workflow prompt inputs the creation bundle carries on top of
-/// the Django-era ones: the project's stage setting, the latest hand-off
-/// and the run history. Loaded by [`load_stage_inputs`].
+/// the Django-era ones: the project's stage setting and the run history. Loaded by [`load_stage_inputs`].
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct StageInputs {
     pub agent_stages: AgentStages,
-    pub handoff: Option<String>,
     pub stage_history: Vec<context::StageHistoryRow>,
 }
 
@@ -598,31 +585,17 @@ pub struct StageInputs {
 /// shares this one loader. The settings come from the one stage-switch
 /// read ([`crate::domain::project_settings::stage_switches_for_project`]);
 /// a bag that fails to parse reads as the default (Auto), like
-/// `ProjectClockPolicy::with_stages`. The hand-off query is skipped
-/// unless the run is review or test (NEWPIDASH-338 item 8): the
-/// coding-task recipe never renders it.
+/// `ProjectClockPolicy::with_stages`.
 pub async fn load_stage_inputs(
     conn: &impl sea_orm::ConnectionTrait,
     project_id: Uuid,
     issue_id: Uuid,
     run_id: Uuid,
-    phase_kind: &str,
 ) -> Result<StageInputs, sea_orm::DbErr> {
     use sea_orm::DbBackend;
     let backend = DbBackend::Postgres;
     let agent_stages =
         crate::domain::project_settings::agent_stages_for_project(conn, project_id).await?;
-    let handoff = if phase_kind == recipes::KIND_REVIEW || phase_kind == recipes::KIND_TEST {
-        match conn
-            .query_one(backend.build(&orm::bundle_handoff_select(issue_id)))
-            .await?
-        {
-            Some(row) => row.try_get::<Option<String>>("", "handoff")?,
-            None => None,
-        }
-    } else {
-        None
-    };
     let rows = conn
         .query_all(backend.build(&orm::bundle_stage_history_select(issue_id, run_id)))
         .await?;
@@ -638,7 +611,6 @@ pub async fn load_stage_inputs(
     }
     Ok(StageInputs {
         agent_stages,
-        handoff,
         stage_history,
     })
 }
@@ -1439,19 +1411,6 @@ pub mod orm {
         Expr::col((run::Entity, run::Column::DonePayload)).cast_json_field(key)
     }
 
-    /// [`super::BUNDLE_HANDOFF_SQL`]: output name `handoff`.
-    pub fn bundle_handoff_select(issue_id: Uuid) -> SelectStatement {
-        Query::select()
-            .expr_as(done_payload_text("stage_handoff"), alias("handoff"))
-            .from(run::Entity)
-            .and_where(run_col(run::Column::WorkItemId).eq(issue_id))
-            .and_where(run_col(run::Column::PhaseKind).eq(super::recipes::KIND_CODING_TASK))
-            .and_where(Expr::expr(done_payload_text("stage_handoff")).is_not_null())
-            .order_by((run::Entity, run::Column::CreatedAt), Order::Desc)
-            .limit(1)
-            .to_owned()
-    }
-
     /// [`super::BUNDLE_STAGE_HISTORY_SQL`]: output names `phase_kind`,
     /// `result`, `note`, `created_at`.
     pub fn bundle_stage_history_select(issue_id: Uuid, run_id: Uuid) -> SelectStatement {
@@ -2048,11 +2007,22 @@ pub fn workpad_sha256(body: &str) -> String {
         .collect()
 }
 
+/// Whether a run of this phase kind carries the workpad snapshot: every
+/// issue run (In Progress, review and test) reads and writes the workpad
+/// (`.ai_design/unified_workpad/design.md` U1). Scheduler runs have no
+/// issue and no workpad.
+pub fn carries_workpad(kind: &str) -> bool {
+    matches!(
+        kind,
+        recipes::KIND_CODING_TASK | recipes::KIND_REVIEW | recipes::KIND_TEST
+    )
+}
+
 /// Stamp the runner-context fields onto a run config (NEWPIDASH-320 §6.3,
 /// §6.1): `issue_identifier` for issue runs, `project_identifier` for
 /// issue and scheduler runs, and the workpad snapshot (`workpad_body` +
-/// `workpad_sha256`) for `coding-task` runs only. `None` leaves the config
-/// untouched, so old runners and old servers keep working: the envelope
+/// `workpad_sha256`) for issue runs ([`carries_workpad`]). `None` leaves the
+/// config untouched, so old runners and old servers keep working: the envelope
 /// copies only keys that are present.
 pub fn stamp_run_context(
     config: Value,
@@ -2378,10 +2348,7 @@ pub fn render_first_turn(
             project.interval_test,
             bundle.state.as_ref(),
         ),
-        comments_section: context::comments_section(
-            &bundle.comments,
-            bundle.stages.handoff.as_deref().unwrap_or_default(),
-        ),
+        comments_section: context::comments_section(&bundle.comments),
         parent_done_payload: parent_done_payload(
             bundle.direct_parent_payload.as_ref(),
             bundle.has_parent_run,
@@ -2389,7 +2356,6 @@ pub fn render_first_turn(
         ),
         workpad_body: issue.workpad.clone().unwrap_or_default(),
         agent_stages: bundle.stages.agent_stages,
-        handoff: bundle.stages.handoff.clone().unwrap_or_default(),
         stage_history: context::stage_history(&bundle.stages.stage_history),
     };
     let context_value = context::build_context(&input);
@@ -2765,10 +2731,9 @@ pub async fn create_and_dispatch_run<S: CreationSeam + FinalizeAgentRunSeam>(
     let kind = phase_kind_for_issue(state);
     let run_id = Uuid::new_v4();
     // Runner context (NEWPIDASH-320 §6.1, §6.3): the workpad snapshot
-    // rides along for `coding-task` runs only; review/test runs read the
-    // hand-off inline and never touch the workpad.
+    // rides along for every issue run (`.ai_design/unified_workpad/`).
     let workpad_snapshot =
-        (kind == recipes::KIND_CODING_TASK).then(|| issue.workpad.clone().unwrap_or_default());
+        carries_workpad(&kind).then(|| issue.workpad.clone().unwrap_or_default());
     let run_config = stamp_run_context(
         run_config_for_issue(
             project.repo_url.as_deref(),
@@ -2930,7 +2895,7 @@ pub async fn create_continuation_run<S: CreationSeam + FinalizeAgentRunSeam>(
     // three keys, no base to strip — plus the runner context
     // (NEWPIDASH-320 §6.1, §6.3).
     let workpad_snapshot =
-        (kind == recipes::KIND_CODING_TASK).then(|| issue.workpad.clone().unwrap_or_default());
+        carries_workpad(&kind).then(|| issue.workpad.clone().unwrap_or_default());
     let run_config = stamp_run_context(
         run_config_for_issue(
             project.repo_url.as_deref(),
@@ -3068,8 +3033,8 @@ pub async fn create_project_move_handoff_run<S: CreationSeam + FinalizeAgentRunS
     // §6.1, §6.3). The parent's snapshot never rides along — it is
     // stale by construction.
     let render_kind = phase_kind_for_issue(seam.state(issue.state_id).await?);
-    let workpad_snapshot = (render_kind == recipes::KIND_CODING_TASK)
-        .then(|| issue.workpad.clone().unwrap_or_default());
+    let workpad_snapshot =
+        carries_workpad(&render_kind).then(|| issue.workpad.clone().unwrap_or_default());
     let mut run_config = run_config_for_issue(
         project.repo_url.as_deref(),
         project.base_branch.as_deref(),
@@ -3400,11 +3365,11 @@ pub async fn resolve_pod_for_issue<C: CreationSeam>(
 /// Django-captured FX6 manifests on purpose (D13).
 #[cfg(test)]
 const LEAN_CODING_SECTIONS: usize = 14;
-/// The `review` recipe for `software`: 7 core sections (likewise
-/// `this-run` first) plus the `software.context` and `software.review`
-/// slots.
+/// The `review` recipe for `software`: 8 core sections (likewise
+/// `this-run` first; `workpad` since the unified workpad) plus the
+/// `software.context` and `software.review` slots.
 #[cfg(test)]
-const LEAN_REVIEW_SECTIONS: usize = 9;
+const LEAN_REVIEW_SECTIONS: usize = 10;
 
 #[cfg(test)]
 mod tests {
@@ -3414,15 +3379,6 @@ mod tests {
     fn stage_queries_read_done_payload_keys_with_the_builder() {
         use sea_orm::sea_query::PostgresQueryBuilder;
         let issue = Uuid::nil();
-        let handoff = orm::bundle_handoff_select(issue).to_string(PostgresQueryBuilder);
-        assert_eq!(
-            handoff,
-            "SELECT \"agent_run\".\"done_payload\" ->> 'stage_handoff' AS \"handoff\" \
-             FROM \"agent_run\" WHERE \"agent_run\".\"work_item_id\" = '00000000-0000-0000-0000-000000000000' \
-             AND \"agent_run\".\"phase_kind\" = 'coding-task' \
-             AND (\"agent_run\".\"done_payload\" ->> 'stage_handoff') IS NOT NULL \
-             ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1"
-        );
         let history =
             orm::bundle_stage_history_select(issue, issue).to_string(PostgresQueryBuilder);
         assert!(history.contains("\"agent_run\".\"done_payload\" ->> 'status' AS \"result\""));
@@ -4284,7 +4240,7 @@ mod tests {
 
     /// NEWPIDASH-320 §6.1, §6.3: the runner-context stamp — identifiers
     /// for issue and scheduler runs, the workpad snapshot for
-    /// `coding-task` runs only. `None` leaves the config untouched.
+    /// every issue run. `None` leaves the config untouched.
     #[test]
     fn stamp_run_context_covers_kinds() {
         let base = json!({
@@ -4306,7 +4262,12 @@ mod tests {
                 "workpad_sha256": workpad_sha256("# plan"),
             })
         );
-        // Review run: identifiers, no workpad keys.
+        // Every issue run carries the workpad; scheduler runs never do.
+        assert!(carries_workpad(recipes::KIND_CODING_TASK));
+        assert!(carries_workpad(recipes::KIND_REVIEW));
+        assert!(carries_workpad(recipes::KIND_TEST));
+        assert!(!carries_workpad(recipes::KIND_SCHEDULER));
+        // No snapshot passed: identifiers only, no workpad keys.
         let review = stamp_run_context(base.clone(), Some("FX6-1"), Some("FX6"), None);
         assert_eq!(
             review,

@@ -440,12 +440,17 @@ pub enum RevalidateAction {
 /// yield` or workpad blocks that no longer exist), so the revalidate scan
 /// flags it for review. Deleted keys (`review-cycle`, `test-cycle`,
 /// `workpad-setup`, …) need no entry: they are unknown keys and are
-/// flagged with [`UNKNOWN_SECTION_DETAIL`].
+/// flagged with [`UNKNOWN_SECTION_DETAIL`]. The unified workpad change
+/// (`.ai_design/unified_workpad/design.md` §6.4) rewrote `workpad`,
+/// `review` and `test` as well.
 pub const LEAN_WORKFLOW_REWRITTEN_KEYS: &[&str] = &[
     "analyze-and-scope",
     "autonomy",
     "default-posture",
     "implementation",
+    "workpad",
+    "review",
+    "test",
     "general.execute",
     "general.review",
     "general.test",
@@ -475,13 +480,24 @@ pub const LEAN_WORKFLOW_RETIRED_MARKERS: &[&str] = &[
     // back before every edit (`pidash workpad get | jq`); the workpad file
     // round-trip replaced it.
     "pidash workpad get | jq",
+    // Unified workpad (`.ai_design/unified_workpad/design.md` §6.4): the
+    // stage hand-off and the old workpad blocks are gone.
+    "--handoff-file",
+    "{{ handoff }}",
+    "{% if handoff",
+    "### Hand-off",
+    "### Path to done",
+    "workpad `Plan`",
+    "workpad `Notes`",
+    "not read by review or test",
+    "Pick up from its open items and plan",
 ];
 
 /// Whether an active override of `section_key` is flagged because the
 /// lean workflow change rewrote that section (§9.5), returning the detail.
 /// An override is flagged while its body still uses the retired procedure,
 /// or drops a step only that section carries (the `implementation`
-/// hand-off), so the flag clears once an admin brings it up to date (and
+/// workpad note), so the flag clears once an admin brings it up to date (and
 /// `--clear` can clear it).
 pub fn rewritten_section_detail(section_key: &str, body: &str) -> Option<&'static str> {
     if !LEAN_WORKFLOW_REWRITTEN_KEYS.contains(&section_key) {
@@ -496,12 +512,11 @@ pub fn rewritten_section_detail(section_key: &str, body: &str) -> Option<&'stati
 
 /// Sections that carry a step of the new procedure no other section
 /// repeats: an override that replaces one must keep that step. The
-/// `implementation` section is where an In Progress run is told to write
-/// the hand-off; without it, `finish --to "In Review"` is refused.
-pub const LEAN_WORKFLOW_REQUIRED_STEPS: &[(&str, &[&str])] = &[(
-    "implementation",
-    &["hand-off", "handoff", "Hand-off", "Handoff"],
-)];
+/// `implementation` section is where an In Progress run is told to leave
+/// its note in the workpad; without it, `finish --to "In Review"` is
+/// refused (`.ai_design/unified_workpad/design.md` §8.2).
+pub const LEAN_WORKFLOW_REQUIRED_STEPS: &[(&str, &[&str])] =
+    &[("implementation", &["Keep in mind"])];
 
 /// Whether an override of `section_key` drops a step of the new procedure
 /// that only that section carries ([`LEAN_WORKFLOW_REQUIRED_STEPS`]).

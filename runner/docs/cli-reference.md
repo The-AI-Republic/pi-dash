@@ -25,7 +25,7 @@ seems necessary, the run is blocked. `pidash --help` outside a run lists
 them all. `pidash issue re-tick <identifier>` is a human decision; never call it.
 
 All writes are real and immediate; there is no undo. When pasting `pidash`
-JSON into a comment or the workpad for audit, enclose it in a fenced
+JSON into a comment for audit, enclose it in a fenced
 code block.
 
 ## Issue
@@ -77,11 +77,11 @@ total_count, next_cursor, prev_cursor, next_page_results, results:
   follow-up bug, a separated task, a missing prerequisite), or — with
   `--parent` — for filing a **child issue** when you split an issue into
   genuinely separate tasks. Do **not** create an issue to track sub-steps
-  of the current run — use the workpad for that. `--parent` attaches the
+  of the current run. `--parent` attaches the
   new item as a sub-issue of the given issue (project-scoped identifier
   like `PROJ-123`, or a raw UUID); the server validates the parent.
-  `--label` attaches labels that **already exist** in the project. Record
-  the new issue's identifier in the workpad so the operator can find it.
+  `--label` attaches labels that **already exist** in the project. Mention
+  the new issue's identifier in your comment so a person can find it.
   The description is markdown and keeps its structure (headings, nested
   and task lists, code blocks, tables). For a long or multi-line body,
   write it to a file or pipe it with `--description-file -` instead of
@@ -101,7 +101,7 @@ total_count, next_cursor, prev_cursor, next_page_results, results:
   exclusive. Prefer `--add-label` / `--remove-label` over `--label`: they
   keep the labels a human already set, while `--label` and
   `--clear-labels` replace the whole set. Do **not** edit title or
-  description for planning or progress tracking — use the workpad instead.
+  description for planning or progress tracking.
   The one case where `--description` is correct is recording the child
   list on a **tracking parent** after a split.
 - `pidash issue relate <identifier> --blocked-by <ID>` — record that the
@@ -122,8 +122,8 @@ conflicts, relations}`.
 - `pidash issue wait <identifier>` — record that you have read this
   issue's open blockers, decided you cannot safely proceed, and are
   yielding. It buys back the tick this run is spending, so waiting costs
-  no net budget: call it, then finish the run with `--result waiting_on_external`. Say _why_ in your workpad first — nothing on the
-  platform reads that note, but the next tick's you will. Read `applied`
+  no net budget: call it, then finish the run with `--result waiting_on_external`. Note what you are waiting on in the workpad's Keep in mind first — the
+  platform does not read it, but the next run will. Read `applied`
   and `reason` in the printed `{applied, reason, used, granted, waited,
 cap}`: a refusal (`wait_cap_reached` once the one-pool allowance is
   spent, `infinite_pool` when the issue has no cap, `no_ticker`) is a
@@ -158,8 +158,8 @@ created_at, updated_at, completed_at, rank, url}]}`. `snippet` is empty
 
 Comments are the human ↔ agent conversation channel. Use them to ask
 clarifying questions, post blocker notices, share links to deliverables,
-and announce completion. **Comments are not for tracking your own
-progress — that's what the workpad is for.**
+and announce completion. **Notes for the next agent run go in the
+workpad, not in comments.**
 
 - `pidash comment list [<issue>] [--since <time>]` — list comments on the
   issue, oldest first. The issue defaults to `PIDASH_ISSUE_IDENTIFIER`.
@@ -195,10 +195,11 @@ results, or other context a future run needs.
 
 ## Workpad
 
-The workpad is your durable per-issue scratchpad — a single markdown
-document the agent owns. It is the only carrier of state between runs. It
-is **not** visible to humans in the comment thread; treat it as your own
-working memory, not a message to the operator.
+The workpad is the shared memory of the agent runs on one issue — In
+Progress, review and test alike: a short markdown note of what happened
+and what is true (`### Keep in mind` bullets and a `### Log` line per
+run). It is memory, not instructions for the next run, and it is **not**
+visible to humans in the comment thread.
 
 Before the agent launches, the runner writes the run's workpad snapshot
 to `.pidash/workpad.md` (empty when the workpad is empty) with its guard
@@ -232,7 +233,7 @@ first.
 
 Project pages are the project's wiki: durable shared knowledge —
 decisions, conventions, plans — that humans and future runs read. A
-workpad is different: scratch state for one issue's runs. Read pages
+workpad is different: the agent runs' short note for one issue. Read pages
 **before** you re-derive a convention from the code — a page is cheaper
 and more authoritative than a guess. Write one only when you have
 knowledge worth keeping for the project, not progress notes.
@@ -467,9 +468,9 @@ run with `run yield`. The end-of-run flow itself — which state to move to —
 lives in the prompt section that owns it; this topic is the flag and
 result reference.
 
-- `pidash run finish --to <state-name> --result <result> [--comment-file <path>] [--handoff-file <path>] [--note <line>] [--as-agent <name>] [--run-id <uuid>]` —
+- `pidash run finish --to <state-name> --result <result> [--comment-file <path>] [--note <line>] [--as-agent <name>] [--run-id <uuid>]` —
   end an issue run in one call: posts the comment (as this agent run),
-  stores the hand-off (In Progress runs), moves the issue (pass the current
+  moves the issue (pass the current
   state's name to stay) and records the result. Call it once, as your
   **last** `pidash` command.
   - `--result` is one of five: `done` (this stage's work is finished and
@@ -541,7 +542,7 @@ pidash workpad get --to-file
 ```
 
 then re-apply your edit and run `pidash workpad update` again. Update the
-workpad after each meaningful step. An empty file is refused unless you
+workpad when something happens the next run must not lose. An empty file is refused unless you
 pass `pidash workpad update --allow-empty` for an intentional clear.
 
 File a finding as a new issue under the scheduler's project:

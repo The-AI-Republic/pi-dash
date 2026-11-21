@@ -13,13 +13,9 @@ Issue: {{ issue.title }}
 
 Issue description:
 {{ issue.description if issue.description else "No description provided." }}
-{% if handoff %}
-Hand-off from the In Progress run (what was produced, the acceptance criteria, how to verify, where to look first):
-
-{{ handoff }}
-{% endif %}{% if stage_history %}
+{% if stage_history %}
 Runs so far on this issue (oldest first):
 {{ stage_history }}
 {% endif %}
-Comments to date (chronological — people and earlier runs; a later human comment overrides the hand-off):
+Comments to date (chronological — people and earlier runs; a later human comment overrides anything earlier):
 {{ comments_section }}

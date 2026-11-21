@@ -1772,8 +1772,8 @@
         "allowed": ["done", "progressed", "waiting_on_external", "waiting_on_human", "blocked"]
       }
     },
-    "finish_missing_handoff": {
-      "_note": "Rust-only route (lean agent workflow §8.1); no Django twin. Recorded from the Rust implementation. An In Progress run moving to review with no hand-off stored.",
+    "finish_workpad_unchanged": {
+      "_note": "Rust-only route (lean agent workflow §8.1); no Django twin. Recorded from the Rust implementation. An In Progress run moving to review without having updated the workpad since the run was created (unified workpad design §8.2).",
       "method": "POST",
       "url": "/api/v1/workspaces/ws-conv659-2/agent-runs/640d8cdf-08fb-4772-82d3-2c693d0e105f/finish/",
       "request": {
@@ -1782,7 +1782,7 @@
       },
       "status": 400,
       "body": {
-        "error": "a move to review or test needs a hand-off: write it to a file and pass --handoff-file"
+        "error": "update the workpad before moving to review or test: note where the work is and how to check it"
       }
     },
     "finish_scheduler_run": {

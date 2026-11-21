@@ -91,8 +91,9 @@ impl RecipeNotFound {
 /// `.ai_design/lean_agent_workflow/design.md` §9.2) these are the Rust
 /// source of truth and no longer mirror `recipes.py`: one `lifecycle`
 /// section carries the path, the moves and the closing `pidash run finish`
-/// command for all three stages; review and test read the hand-off instead
-/// of the workpad. The scheduler recipe is unchanged and is now the only
+/// command for all three stages. Since `.ai_design/unified_workpad/design.md`
+/// every issue run, review and test included, reads and writes the workpad
+/// (there is no separate hand-off). The scheduler recipe is unchanged and is now the only
 /// user of `session-framing` and `guardrails`.
 pub const RECIPES: &[(&str, &[RecipeEntry])] = &[
     (
@@ -123,6 +124,7 @@ pub const RECIPES: &[(&str, &[RecipeEntry])] = &[
             S("run-framing"),
             S("pidash-cli"),
             S("lifecycle"),
+            S("workpad"),
             S("review"),
             SLOT_REVIEW,
             S("blocking"),
@@ -137,6 +139,7 @@ pub const RECIPES: &[(&str, &[RecipeEntry])] = &[
             S("run-framing"),
             S("pidash-cli"),
             S("lifecycle"),
+            S("workpad"),
             S("test"),
             SLOT_TEST,
             S("blocking"),

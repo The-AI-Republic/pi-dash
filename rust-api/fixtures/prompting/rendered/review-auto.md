@@ -16,20 +16,10 @@ Issue: Sample issue title
 Issue description:
 Sample description body.
 
-Hand-off from the In Progress run (what was produced, the acceptance criteria, how to verify, where to look first):
-
-### Hand-off
-**Produced:** https://example.com/pr/1
-**Acceptance criteria:**
-- The sample works.
-**How to verify:** run the sample.
-**Review focus:** the sample.
-**Next stage:** In Review — a code change.
-
 Runs so far on this issue (oldest first):
 - 2026-01-01 In Progress: done — opened the sample PR
 
-Comments to date (chronological — people and earlier runs; a later human comment overrides the hand-off):
+Comments to date (chronological — people and earlier runs; a later human comment overrides anything earlier):
 ### Comment 1 — Human: Sample at 2026-01-01
 
 Hello.
@@ -37,7 +27,7 @@ Hello.
 ### Comment 2 — AI Agent: Sample at 2026-01-01
 Agent run: 00000000-0000-0000-0000-000000000003
 
-Hand-offProduced: https://example.com/pr/1 Acceptance criteria:The sample works. How to verify: run the sample. Review focus: the sample. Next stage: In Review — a code change.
+Opened https://example.com/pr/1 with the sample change.
 
 Repository:
 
@@ -77,14 +67,14 @@ Every command prints one JSON document on stdout and exits `0`. On failure it pr
 ### What you already have
 
 
-The issue, its comments, the available states and the hand-off shown in this prompt were read at `2026-01-01T00:00:00Z`. Don't fetch them again. Two exceptions: check for newer comments with `pidash comment list --since 2026-01-01T00:00:00Z` when "How this run works" tells you to, or when you have worked long enough that a person may have replied; and re-read after a write is rejected as stale. (If `--since` is not a known flag, use `pidash comment list`.)
+The issue, its comments, the available states and the workpad shown in this prompt were read at `2026-01-01T00:00:00Z`. Don't fetch them again. Two exceptions: check for newer comments with `pidash comment list --since 2026-01-01T00:00:00Z` when "How this run works" tells you to, or when you have worked long enough that a person may have replied; and re-read after a write is rejected as stale. (If `--since` is not a known flag, use `pidash comment list`.)
 
 
 ### Core commands
 
 
 - `pidash comment add --body-file .pidash/<name>.md [--fold]` — post a comment during the run, as this agent run. Your closing comment goes through `pidash run finish`, not this. Use `--fold` only for low-value status notes.
-
+- `pidash workpad update` / `pidash workpad get --to-file` — write and re-read `.pidash/workpad.md`. See "Workpad". (If the workpad file is missing, run `pidash workpad get --to-file` first; if that flag is unknown, `pidash workpad get | jq -r .body > .pidash/workpad.md`.)
 - `pidash issue get` / `pidash comment list [--since <time>]` — refresh only (see above).
 - `pidash run finish` — ends the run; your **last** `pidash` call. The syntax, the results and the state to pass are in "Lifecycle".
 
@@ -125,12 +115,12 @@ Use the list above to pick the correct `--state` value. Match your intent to the
 
 ### Conventions
 
-- All writes are real and immediate; there is no undo. Check intent against the issue and its comments before mutating.
+- All writes are real and immediate; there is no undo. Check intent against the issue, its comments and the workpad before mutating.
 - When pasting `pidash` JSON into a comment, fence it in three backticks.
 
 ## Lifecycle
 
-This issue is one task with a goal. Each run is a fresh session that checks the goal from where the issue stands, then moves it on, sends it back, or waits. Nothing carries over between runs except the issue itself: its comments, its state and the delivered work.
+This issue is one task with a goal. Each run is a fresh session that checks the goal from where the issue stands, then moves it on, sends it back, or waits. Nothing carries over between runs except the issue itself: its comments, its state, the workpad and the delivered work.
 
 Path in this project: In Progress → In Review → In Test → AI Completed. You are in **In Progress**.
 
@@ -160,29 +150,63 @@ Pass the current state's name to `--to` to stay. `--comment-file` is optional fo
 Budget: 5 of 12 runs used on this issue. The budget never changes which state is true.
 
 
+## Workpad
+
+The workpad is the shared memory of the agent runs on this issue: a short note of what happened and what is true, like a shift note on a production line. It is memory, not instructions. Every run on this issue starts from it. It is for agents only and never shown in the comments: write what the next run needs and a person does not. The issue and comments are already in front of the next run, so do not copy them.
+
+
+The workpad so far:
+
+```text
+### Keep in mind
+- PR https://example.com/pr/1, branch `sample-1`; check with `make test`.
+- Open: the empty-input path is untested.
+- The sample service needs `SAMPLE_ENV=dev` locally.
+
+### Log
+- 2026-01-01 in progress: opened the sample PR.
+```
+
+Read it first, and do not redo what it says is done. If it uses an older layout, rewrite it in the shape below on your first update, keeping only what is still true.
+
+
+```md
+### Keep in mind
+- <only what the next run must not have to rediscover>
+
+### Log
+- <YYYY-MM-DD> <stage>: <one line: what this run did>
+```
+
+**Keep in mind** holds, one short bullet each: where the work is and how to check it; what is still open, as `Open: …`; decisions the next run might otherwise undo; traps and the commands that actually work. Write facts, never instructions for the next run: its own prompt tells it what to do. Change or remove bullets that are no longer true.
+
+Each run that does something: update **Keep in mind** and add one **Log** line, keeping the last ten. A run that only finds nothing changed adds nothing. Keep it to about 40 lines, with no pasted output.
+
+Your workpad is in `.pidash/workpad.md` (also shown above). Edit it, then run `pidash workpad update`; the file is always the full body. If the file is missing, run `pidash workpad get --to-file` first. If an update is rejected as changed, run `pidash workpad get --to-file` and re-apply your edit.
+
 ## Review
 
 Your question: **is the work product correct and complete against the goal, judged by reading it?**
 
-The hand-off above says what was produced, the acceptance criteria, and where to look first. Start there.
+The workpad above says where the work product is and how to check it. Find it there, then judge the work product itself, not the note about it. If the workpad does not say where the work is, an earlier run may have posted a hand-off in the comments: use that.
 
 1. Read the work product itself, not the description of it.
-2. Look for what is wrong or missing against the acceptance criteria. Give the "review focus" items the most attention.
+2. Look for what is wrong or missing against the acceptance criteria.
 3. Confirm each finding by re-reading the source. Drop any you cannot confirm.
 4. Fix what is small and clearly right, where the work-type guidance allows it. Leave the rest as findings.
-5. Write one comment: what you checked, confirmed findings, what you fixed, what still needs action. If nothing has changed since your last pass, write none.
+5. Add each confirmed finding to the workpad's Keep in mind as `Open: …`, then write one comment for people: the verdict, what you checked, and what is wrong. If nothing has changed since your last pass, write no comment.
 
 Match the depth to the work. A short answer needs one careful read. A large change needs every changed file read in context.
 
 Verdict:
 
 - **Pass** — no unresolved findings. Move forward.
-- **Defects** — findings you could not fix. Move back to In Progress; your comment is the open-items list.
+- **Defects** — findings you could not fix. Move back to In Progress; the workpad's `Open:` bullets are the list.
 - **Cannot proceed** — stay, and say what you are waiting on.
 
 ### Software
 
-The work product is usually a pull request; the hand-off links it. Read existing reviewer comments there (use the `gh` CLI) and post your findings there. Fixes may be committed and pushed to its branch. A design document is reviewed where it lives; fix it by editing it.
+The work product is usually a pull request; the workpad links it. Read existing reviewer comments there (use the `gh` CLI) and post your findings there. Fixes may be committed and pushed to its branch. A design document is reviewed where it lives; fix it by editing it.
 
 Judge the branch synced with its base: `git fetch origin`, check out the branch, `git merge origin/<base>` (the pull request's base, else `main`; never rebase, never force-push), run the repository's own checks, and push the merge if it is not a no-op. If the base rewrote the code under review and you cannot resolve it with confidence, abort the merge and send the issue back to In Progress saying what changed. If the base has moved since an earlier verdict, review again.
 
@@ -193,7 +217,8 @@ Waiting on checks or on a merge is `waiting_on_external`.
 Block only when a person must act: missing tools, access or credentials you cannot get in this session, or a decision only a person can make. A defect is never a reason to block.
 
 1. Write the comment as a colleague would. Lead with what is blocking, then exactly what you need. If there is a sensible default, name it and say you will take it unless told otherwise. One focused question beats five vague ones.
-2. Stop, and finish: `pidash run finish --to "Blocked" --result blocked --comment-file <path>` when the project has a "Blocked" state, otherwise pass the current state's name to `--to`. A person's reply starts the next run.
+2. Note in the workpad's Keep in mind what you are waiting on.
+3. Stop, and finish: `pidash run finish --to "Blocked" --result blocked --comment-file <path>` when the project has a "Blocked" state, otherwise pass the current state's name to `--to`. A person's reply starts the next run.
 
 When what blocks you is **another issue**, do not block: say which issue and why, call `pidash issue wait SAMPLE-1`, and finish with `--result waiting_on_external` in the current state. A later run re-reads the blocker and decides again.
 

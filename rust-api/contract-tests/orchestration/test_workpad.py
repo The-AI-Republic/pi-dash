@@ -169,3 +169,25 @@ def test_workpad_guard_survives_state_move(api_client):
     )
     assert r.status_code == 200, r.text
     assert _db_workpad(issue) == SAMPLE
+
+
+def test_workpad_patch_over_the_size_cap_is_refused(api_client):
+    """Unified workpad U7/§8.5: the workpad is inlined into every issue-run
+    prompt, so the Rust API refuses a body over 16,000 characters with a
+    400 and leaves the stored body as it was. Django has no cap."""
+    w, client = api_client
+    issue = world.make_issue(w, "padcap", "In Progress")
+    assert client.patch_workpad(w.workspace_slug, w.project_id, issue, {"body": SAMPLE}).status_code == 200
+
+    # Characters, not bytes: a multi-byte body exactly at the cap fits.
+    at_cap = "é" * 16_000
+    r = client.patch_workpad(w.workspace_slug, w.project_id, issue, {"body": at_cap})
+    assert r.status_code == 200, r.text
+
+    r = client.patch_workpad(w.workspace_slug, w.project_id, issue, {"body": "x" * 16_001})
+    if is_rust():
+        assert r.status_code == 400, r.text
+        assert "longer than 16000 characters" in r.json()["error"], r.text
+        assert _db_workpad(issue) == at_cap
+    else:
+        assert r.status_code == 200, r.text
