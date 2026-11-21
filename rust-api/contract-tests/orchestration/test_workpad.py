@@ -1,6 +1,6 @@
 """Workpad endpoint: byte-parity round-trip, the `body` wire-field rule,
 clearing, the timestamp-only PATCH response, and the `body_sha256`
-stale-write guard (NEWPIDASH-320 §6.1, DIFF-59)."""
+stale-write guard (NEWPIDASH-320 §6.1, DIFF-60)."""
 
 import hashlib
 
@@ -88,7 +88,7 @@ def _sha(body):
 
 def test_workpad_get_carries_body_sha256(api_client):
     """GET answers `body_sha256` — the stored body's hex digest — on Rust
-    (DIFF-59); Django answers `{body, updated_at}` only."""
+    (DIFF-60); Django answers `{body, updated_at}` only."""
     w, client = api_client
     issue = world.make_issue(w, "padsha", "In Progress")
     assert client.patch_workpad(w.workspace_slug, w.project_id, issue, {"body": SAMPLE}).status_code == 200
@@ -102,7 +102,7 @@ def test_workpad_get_carries_body_sha256(api_client):
 
 
 def test_workpad_patch_returns_body_sha256(api_client):
-    """PATCH answers the new body's hash on Rust (DIFF-59) alongside
+    """PATCH answers the new body's hash on Rust (DIFF-60) alongside
     `updated_at`; Django answers the timestamp only."""
     w, client = api_client
     issue = world.make_issue(w, "padshap", "In Progress")
@@ -117,7 +117,7 @@ def test_workpad_patch_returns_body_sha256(api_client):
 
 def test_workpad_patch_stale_guard_returns_412(api_client):
     """A PATCH whose `if_body_sha256` no longer matches the stored body is
-    refused on Rust (DIFF-59): 412 with the current hash, and nothing is
+    refused on Rust (DIFF-60): 412 with the current hash, and nothing is
     written. Django ignores the unknown field and writes unconditionally."""
     w, client = api_client
     issue = world.make_issue(w, "padstale", "In Progress")
@@ -129,7 +129,7 @@ def test_workpad_patch_stale_guard_returns_412(api_client):
     r = client.patch_workpad(
         w.workspace_slug, w.project_id, issue, {"body": "new notes", "if_body_sha256": "0" * 64}
     )
-    assert r.status_code == expect("DIFF-59", django=200, rust=412), r.text
+    assert r.status_code == expect("DIFF-60", django=200, rust=412), r.text
     if is_rust():
         assert r.json() == {
             "error": "workpad changed since you read it",
