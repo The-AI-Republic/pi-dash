@@ -75,6 +75,18 @@ describe("PeekChrome", () => {
     expect(screen.queryByRole("textbox", { name: "Work item title" })).not.toBeInTheDocument();
   });
 
+  it("renders a wrapping multiline title field when the caller opts in", () => {
+    setup({ titleMultiline: true, title: `${"word ".repeat(40).trim()} ${"x".repeat(80)}` });
+    const field = screen.getByRole("textbox", { name: "Work item title" });
+    expect(field.tagName).toBe("TEXTAREA");
+    expect(field.className).toContain("wrap-anywhere");
+  });
+
+  it("keeps the single-line title field by default", () => {
+    setup();
+    expect(screen.getByRole("textbox", { name: "Work item title" }).tagName).toBe("INPUT");
+  });
+
   it("commits title edits and tags nested panels", async () => {
     const user = userEvent.setup();
     const onCommitTitle = vi.fn();

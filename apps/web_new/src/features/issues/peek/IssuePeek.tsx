@@ -450,6 +450,7 @@ export function IssuePeek({
         onModeChange={setMode}
         title={issue.name}
         titleAsHeading={readOnly}
+        titleMultiline
         {...(readOnly ? {} : { onCommitTitle: commitTitle })}
         onClose={onClose}
         suppressEscape={nested !== null}

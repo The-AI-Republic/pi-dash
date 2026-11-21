@@ -22,6 +22,8 @@ export interface PeekChromeProps {
   onCommitTitle?: ((next: string) => void) | undefined;
   /** Render the title as a heading for read-only surfaces. */
   titleAsHeading?: boolean | undefined;
+  /** Wrapping auto-growing title field for long work-item titles. */
+  titleMultiline?: boolean | undefined;
   /** Context line above the title (e.g. the work-item key). */
   eyebrow?: React.ReactNode;
   /** Controls between the mode toggle and the close button. */
@@ -46,6 +48,7 @@ export function PeekChrome({
   title,
   onCommitTitle,
   titleAsHeading = false,
+  titleMultiline = false,
   eyebrow,
   actions,
   onClose,
@@ -64,6 +67,7 @@ export function PeekChrome({
       title={title}
       titleLabel="Work item title"
       titleAsHeading={titleAsHeading}
+      titleMultiline={titleMultiline}
       onClose={onClose}
       suppressEscape={suppressEscape || embedded}
       {...(embedded || suppressOutsideClick ? {} : { onOutsideClick: onClose })}

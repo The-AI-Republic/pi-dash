@@ -120,6 +120,12 @@ export interface PeekPanelProps {
   titleLabel: string;
   /** Render the title as a heading instead of an editable field. */
   titleAsHeading?: boolean | undefined;
+  /**
+   * Render the editable title as an auto-growing textarea instead of a
+   * single-line input, so long work-item titles wrap in the peek.
+   * Callers with short fixed titles (cycles, modules) leave this off.
+   */
+  titleMultiline?: boolean | undefined;
   /** Skip the title block (loading and error states render their own body). */
   hideTitle?: boolean | undefined;
   /**
@@ -174,6 +180,7 @@ export function PeekPanel({
   title,
   titleLabel,
   titleAsHeading = false,
+  titleMultiline = false,
   hideTitle = false,
   titleSkeleton = false,
   onClose,
@@ -289,7 +296,36 @@ export function PeekPanel({
             <Skeleton width="70%" height="20px" />
           </div>
         ) : titleAsHeading ? (
-          <h4 className="text-h3 w-full px-(--space-2) py-(--space-1) text-(--text)">{title}</h4>
+          <h4 className="text-h3 w-full min-w-0 px-(--space-2) py-(--space-1) wrap-anywhere text-(--text)">{title}</h4>
+        ) : titleMultiline ? (
+          <textarea
+            aria-label={titleLabel}
+            value={draft}
+            rows={1}
+            style={{ fieldSizing: "content" }}
+            onChange={(event) => {
+              // Titles stay single-line: pasted line breaks become spaces,
+              // matching what the single-line input historically accepted.
+              setDraft(event.target.value.replace(/[\r\n]+/g, " "));
+            }}
+            onBlur={commit}
+            onKeyDown={(event) => {
+              // Enter commits instead of inserting a newline; Escape
+              // reverts the edit instead of closing: the typing guard
+              // above already stood the close down, and the blur hands
+              // the next Escape back to the panel.
+              if (event.key === "Enter") {
+                event.preventDefault();
+                commit();
+              }
+              if (event.key === "Escape") {
+                setDraft(title);
+                revertingRef.current = true;
+                event.currentTarget.blur();
+              }
+            }}
+            className="text-h3 block w-full min-w-0 resize-none overflow-hidden rounded-(--radius-control) border border-transparent bg-transparent px-(--space-2) py-(--space-1) wrap-anywhere whitespace-pre-wrap text-(--text) hover:border-(--border) focus:border-(--accent) focus:outline-none"
+          />
         ) : (
           <input
             aria-label={titleLabel}
@@ -309,7 +345,7 @@ export function PeekPanel({
                 event.currentTarget.blur();
               }
             }}
-            className="text-h3 w-full rounded-(--radius-control) border border-transparent bg-transparent px-(--space-2) py-(--space-1) text-(--text) hover:border-(--border) focus:border-(--accent) focus:outline-none"
+            className="text-h3 w-full min-w-0 rounded-(--radius-control) border border-transparent bg-transparent px-(--space-2) py-(--space-1) text-(--text) hover:border-(--border) focus:border-(--accent) focus:outline-none"
           />
         )}
         {scrollBody ? (
