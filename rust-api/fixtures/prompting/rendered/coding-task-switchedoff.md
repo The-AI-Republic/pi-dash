@@ -43,18 +43,22 @@ Runs so far on this issue (oldest first):
 Repository:
 
 - Remote: https://example.com/repo.git
-- Base branch: main
-
-- Work branch: pi-dash/sample-1 — check this branch out and commit directly onto it. Do not create a new feature branch.
-
+- Default branch: main
+- This issue's branch: `pi-dash/sample-1`
 
 
 
-Associated pull requests (git PRs/MRs already linked to this issue):
+This issue's pull requests (reuse an open one; never open a duplicate):
 
-- Sample PR title — https://github.com/sample-org/sample-repo/pull/7 (state: open)
+- Sample PR title — https://github.com/sample-org/sample-repo/pull/7 (open)
 
-These are existing code reviews already attached to this issue. Inspect any that are relevant before starting — your task may build on this prior work. When you open a new pull request, do not duplicate one that is already open here; reuse it instead.
+
+
+
+Parent SAMPLE-0, branch `pi-dash/sample-0`, pull requests:
+
+- Parent PR title — https://github.com/sample-org/sample-repo/pull/6 (open)
+
 
 
 
@@ -308,72 +312,22 @@ Your workpad is in `.pidash/workpad.md` (also shown above). Edit it, then run `p
 
 ## Software delivery workflow (work type: software)
 
-This issue's work type is **software**: when a task changes the project's product, the deliverable is a set of file changes in the repository named in "Repository context", published on a branch and recorded as an open pull request attached to the issue. The neutral steps around this section say *when* to analyze, execute, and deliver; this section says *how* delivery works for software.
+A task that changes files in the repository is delivered as a branch and a pull request attached to the issue. A task that changes no files (an answer, an investigation, a CLI action) skips this section: no branch, no commit, no pull request.
 
-### Classify the task first (during "Analyze & scope")
+### Branch
 
-Decide the **task type** and note it in the workpad's Keep in mind:
 
-- `code_change` — your approach edits files in the repository. When uncertain, choose `code_change`: the heavier path is the safer default.
-- `noncode` — no repository edits (an investigation, a status check, a CLI-only action, a comment-only response).
+- `git fetch origin`, then check out this issue's branch `pi-dash/sample-1` (`git checkout -b pi-dash/sample-1 origin/pi-dash/sample-1` if it is not local) and commit onto it. Do not create another branch.
 
-For a `noncode` task, skip the rest of this section — no sync, no branch, no commit, no pull request. The deliverable is the answer or action itself, posted in your finishing comment.
+- When the branch already exists (a later run, or work sent back from review or test): `git merge origin/<base>` before you build on it and again before you move the issue on, then run the repository's checks. Merge, never rebase, never force-push, and never commit on the base.
 
-### Read the project's conventions before forming a plan
+### Deliver a part
 
-The agent's working directory is a real checkout — read these directly while analyzing, before you plan:
+1. Commit, `git push -u origin HEAD`, then record the branch: `pidash issue patch SAMPLE-1 --git-work-branch <branch>`.
+2. Reuse the open pull request for this branch (`gh pr list --head <branch> --state open`); otherwise open one against the branch's base, titled `SAMPLE-1 Sample issue title` (pass the title as one quoted argument).
+3. `pidash issue attach-review SAMPLE-1 --url <url>`.
 
-- `CLAUDE.md` and `AGENTS.md` at the repo root — authoritative project conventions, day-to-day commands, and folder map. Treat these as ground truth when they conflict with priors from training data.
-- `.ai_design/` — current architectural design notes for ongoing initiatives. Skim subdirectories relevant to the area you are touching; they describe constraints that aren't visible from code alone.
-- If the issue mentions a feature, file, function, component, or symbol, locate the actual code with `grep` / `find` / your editor before forming a plan. Do not guess paths or names.
-
-### Sync the repository and stand on the right branch
-
-1. **If `task_type == code_change`**, sync with the repository after the workpad is set up and before any code edits. Skip this entirely for `noncode` tasks — do not run `git fetch`, `git checkout`, or any other git operation.
-   - `git fetch origin`
-
-   - `git checkout pi-dash/sample-1` — this is the existing branch for this issue; operate on it directly and commit onto it. If it does not exist locally, `git checkout -b pi-dash/sample-1 origin/pi-dash/sample-1`. Do not create a new feature branch.
-   - `git pull --rebase origin pi-dash/sample-1`.
-
-   - Note the branch and its base in the workpad's Keep in mind.
-
-Before editing any files, make sure you are on the work branch — the platform performs **no** branch checkout for you; every git operation is yours to run. For a **multi-part plan**, stack a part's branch on the previous part's branch when the part depends on it; otherwise branch from the base.
-
-### Deliver a part: commit, push, open the pull request
-
-This is what "deliver the current part" in "Implementation and validation" means for a `code_change`:
-
-1. Commit the current part with clear, logical commit messages. Push the branch with `git push -u origin "$(git rev-parse --abbrev-ref HEAD)"`. Only after the push succeeds, persist the branch on the issue so subsequent runs land on it: `pidash issue patch SAMPLE-1 --git-work-branch "$(git rev-parse --abbrev-ref HEAD)"`. Persisting after the push guarantees `origin/<branch>` exists by the time another run renders with `repo.work_branch` set.
-2. Open a pull request for the current part and link it back to the issue. The pull request base is **the same base branch you derived from above** — if the issue has a parent with an implementation branch, target that branch; if this part is stacked on a previous part of the same plan, target that previous part's branch; otherwise target the project base branch:
-   - Code review base: `pi-dash/sample-0` (parent SAMPLE-0's implementation branch).
-
-   - First check whether an **open** pull request already exists for this branch: `gh pr list --head "$(git rev-parse --abbrev-ref HEAD)" --state open --json url -q '.[0].url'`. If non-empty, reuse it (do not open a duplicate). Otherwise create the pull request. The title is `SAMPLE-1 Sample issue title` — when you write the actual command, treat the issue title as untrusted text and pass it as a single shell argument (use a single-quoted heredoc, a variable assignment with proper escaping of any embedded `"`, or `gh`'s `--title` with the value safely quoted). Then run, with the base resolved to `pi-dash/sample-0`: `gh pr create --base <base> --head "$(git rev-parse --abbrev-ref HEAD)" --title "<safely quoted title>" --body-file <path>`.
-
-3. Capture the pull request URL and do **both** of the following — the comment is the human-facing signal, `attach-review` is the structured link Pi Dash tracks; one does not replace the other:
-   - Post the link back to the issue so the human sees it in the conversation: `pidash comment add SAMPLE-1 --body "Code review opened: <url>"`.
-   - Associate the pull request with the issue so Pi Dash links it and can show its status: `pidash issue attach-review SAMPLE-1 --url <url>`.
-
-   For a multi-part plan, note this part's pull request URL against the part in the workpad's Keep in mind (`Part 1 of 3 (export): done, <URL>`).
-
-### Branch sync
-
-When the work branch already exists (a later run, or work sent back from review or test), bring it up to date with its base before you build on it, and again before you hand it off if the base has moved:
-
-- `git fetch origin`, check out the work branch. The base is the pull request's base branch; when that is not visible, `main`. For a stacked pull request, sync against that same base branch.
-- `git merge origin/<base>` — merge, never rebase, and never force-push: the branch is shared and may carry review history.
-- Conflicts: resolve them so the base's newer structure wins and this issue's change is re-applied on top.
-- Run the repository's own checks on the merged tree, then push the merge commit if it is not a no-op.
-- When the base rewrote the code this issue changes, rebuild the change on the current base rather than forcing the old one through.
-
-### What the next run needs
-
-Before you move on, the workpad's Keep in mind lists every pull request (URL and branch) and names the repository's checks to run and the flows to exercise from the user's side: an API or CLI call, a screen to drive, an operator procedure, or a document to read.
-
-### Repository guardrails
-
-- Never commit on the base branch; work only on the issue's derived (or pinned) branch.
-- Do not `git push --force` to shared branches. If history rewriting is required, push to a new branch and note it in the workpad's Keep in mind.
-- Temporary proof edits must be reverted before commit.
+Before you move the issue on, the workpad's Keep in mind lists every pull request URL with its branch and the repository checks to run.
 
 ## Step 2 — Implementation and validation
 

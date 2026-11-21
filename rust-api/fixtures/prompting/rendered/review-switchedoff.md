@@ -32,18 +32,22 @@ Opened https://example.com/pr/1 with the sample change.
 Repository:
 
 - Remote: https://example.com/repo.git
-- Base branch: main
-
-- Work branch: pi-dash/sample-1 — check this branch out and commit directly onto it. Do not create a new feature branch.
-
+- Default branch: main
+- This issue's branch: `pi-dash/sample-1`
 
 
 
-Associated pull requests (git PRs/MRs already linked to this issue):
+This issue's pull requests (reuse an open one; never open a duplicate):
 
-- Sample PR title — https://github.com/sample-org/sample-repo/pull/7 (state: open)
+- Sample PR title — https://github.com/sample-org/sample-repo/pull/7 (open)
 
-These are existing code reviews already attached to this issue. Inspect any that are relevant before starting — your task may build on this prior work. When you open a new pull request, do not duplicate one that is already open here; reuse it instead.
+
+
+
+Parent SAMPLE-0, branch `pi-dash/sample-0`, pull requests:
+
+- Parent PR title — https://github.com/sample-org/sample-repo/pull/6 (open)
+
 
 
 ## How this run works
@@ -201,9 +205,9 @@ Verdict:
 
 ### Software
 
-The work product is usually a pull request; the workpad links it. Read existing reviewer comments there (use the `gh` CLI) and post your findings there. Fixes may be committed and pushed to its branch. A design document is reviewed where it lives; fix it by editing it.
+The work product is usually a pull request; the workpad links it. Read its existing reviewer comments (`gh`) and post your findings there. Small fixes may be pushed to its branch. A design document is reviewed, and fixed, where it lives.
 
-Judge the branch synced with its base: `git fetch origin`, check out the branch, `git merge origin/<base>` (the pull request's base, else `main`; never rebase, never force-push), run the repository's own checks, and push the merge if it is not a no-op. If the base rewrote the code under review and you cannot resolve it with confidence, abort the merge and send the issue back to In Progress saying what changed. If the base has moved since an earlier verdict, review again.
+Review the branch synced with its base: `git fetch origin`, check out the branch, `git merge origin/<base>` (the pull request's base, else `main`), run the repository's checks, and push the merge if it is not a no-op. Merge, never rebase, never force-push. If the merge cannot be resolved with confidence, abort it and send the issue back to In Progress saying what changed upstream.
 
 Waiting on checks or on a merge is `waiting_on_external`.
 

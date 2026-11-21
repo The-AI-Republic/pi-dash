@@ -32,18 +32,22 @@ Opened https://example.com/pr/1 with the sample change.
 Repository:
 
 - Remote: https://example.com/repo.git
-- Base branch: main
-
-- Work branch: pi-dash/sample-1 — check this branch out and commit directly onto it. Do not create a new feature branch.
-
+- Default branch: main
+- This issue's branch: `pi-dash/sample-1`
 
 
 
-Associated pull requests (git PRs/MRs already linked to this issue):
+This issue's pull requests (reuse an open one; never open a duplicate):
 
-- Sample PR title — https://github.com/sample-org/sample-repo/pull/7 (state: open)
+- Sample PR title — https://github.com/sample-org/sample-repo/pull/7 (open)
 
-These are existing code reviews already attached to this issue. Inspect any that are relevant before starting — your task may build on this prior work. When you open a new pull request, do not duplicate one that is already open here; reuse it instead.
+
+
+
+Parent SAMPLE-0, branch `pi-dash/sample-0`, pull requests:
+
+- Parent PR title — https://github.com/sample-org/sample-repo/pull/6 (open)
+
 
 
 ## How this run works
@@ -201,15 +205,13 @@ Verdict:
 
 ### Software
 
-Test the synced branch, never a stale one: `git fetch origin`, check out the pull request branch, `git merge origin/<base>` (the pull request's base, else `main`; never rebase, never force-push), run the repository's own checks, and push the merge if it is not a no-op. If the base rewrote the code under test and you cannot resolve it with confidence, abort the merge and send the issue back to In Progress saying what changed. If the base has moved since an earlier verdict, test again.
+Test the branch synced with its base: `git fetch origin`, check out the pull request branch, `git merge origin/<base>` (the pull request's base, else `main`), and push the merge if it is not a no-op. Merge, never rebase, never force-push. If the merge cannot be resolved with confidence, abort it and send the issue back to In Progress saying what changed upstream.
 
-The repository's own checks are discovered, never assumed: read the README/CONTRIBUTING, the CI config (`.github/workflows/`, `.gitlab-ci.yml`) and the package manifests (`package.json` scripts, `Makefile`, `pyproject.toml`, `Cargo.toml`, `go.mod`), and run what they declare for the stack you touched. If you cannot determine them, say so instead of inventing commands. Green CI is supporting evidence, not a verdict.
+The repository's checks are discovered, never assumed: run what the README, CI config and package manifests declare; if you cannot determine them, say so. Green CI supports a verdict but is not one.
 
-Act as the consumer. A program (API client, CLI, library caller): make real calls with real inputs against a running instance. A person at a screen: launch the app and drive the changed flow; if you cannot boot it or drive a browser here, finish `blocked` rather than pass. An operator: run the procedure, dry-run first, health-check the result. A reader of a design document: read it cold and check it can be acted on without its author.
+Act as the consumer, against a running instance (local, an ephemeral environment, or a preview deploy): a program's caller makes real calls; a person at a screen drives the changed flow (if you cannot boot or drive it here, finish `blocked`); an operator runs the procedure, dry-run first.
 
-To act as the user you need somewhere the software runs: run it locally, stand up an ephemeral environment (containers, seed data), or use a preview deploy the project's own automation produces.
-
-Fixing: push only a trivial fix to the branch (re-run the checks first); anything else goes back as a defect. Waiting on CI or on a merge is `waiting_on_external`.
+Push only a trivial fix to the branch; anything else goes back as a defect. Waiting on CI or on a merge is `waiting_on_external`.
 
 ## Blocking the run
 

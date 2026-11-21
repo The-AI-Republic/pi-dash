@@ -6,21 +6,23 @@ customizable: locked
 Repository:
 {% if repo.url %}
 - Remote: {{ repo.url }}
-- Base branch: {{ repo.base_branch or "(use the repository's default branch — run `git symbolic-ref refs/remotes/origin/HEAD` to resolve it)" }}
-{% if repo.work_branch %}
-- Work branch: {{ repo.work_branch }} — check this branch out and commit directly onto it. Do not create a new feature branch.
-{% else %}
-- Work branch: (none) — create a fresh feature branch off the base branch for your work.
-{% endif %}
+- Default branch: {{ repo.base_branch or "(resolve with `git symbolic-ref --short refs/remotes/origin/HEAD`)" }}
+- This issue's branch: {{ ("`" ~ repo.work_branch ~ "`") if repo.work_branch else "(none yet)" }}
 {% else %}
 - Work in the runner's configured working directory. Do not clone or touch any other path.
-- This may be an ordinary folder, not a Git repository. A Git repository is optional for this task: execute it normally, and do not require Git setup, commits, or a PR for non-coding work. Do not initialize a repository or demand a repository URL merely to perform the task.
+- This may be an ordinary folder, not a Git repository. Git is optional here: do not initialize a repository, demand a repository URL, or require commits or a code review for this task.
 {% endif %}
 {% if code_reviews %}
 
-Associated {{ repo.code_review_term }}s (git PRs/MRs already linked to this issue):
+This issue's {{ repo.code_review_term }}s (reuse an open one; never open a duplicate):
 {% for cr in code_reviews %}
-- {{ cr.title or cr.url }} — {{ cr.url }} (state: {{ cr.state }}{% if cr.merged %}, merged{% endif %}{% if cr.draft %}, draft{% endif %})
+- {{ cr.title or cr.url }} — {{ cr.url }} ({{ "merged" if cr.merged else cr.state }}{% if cr.draft %}, draft{% endif %})
 {% endfor %}
-These are existing code reviews already attached to this issue. Inspect any that are relevant before starting — your task may build on this prior work. When you open a new {{ repo.code_review_term }}, do not duplicate one that is already open here; reuse it instead.
+{% endif %}
+{% if parent and (parent.work_branch or parent.code_reviews) %}
+
+Parent {{ parent.identifier }}{% if parent.work_branch %}, branch `{{ parent.work_branch }}`{% endif %}{% if parent.code_reviews %}, {{ repo.code_review_term }}s:{% endif %}
+{% for cr in parent.code_reviews %}
+- {{ cr.title or cr.url }} — {{ cr.url }} ({{ "merged" if cr.merged else cr.state }}{% if cr.draft %}, draft{% endif %})
+{% endfor %}
 {% endif %}

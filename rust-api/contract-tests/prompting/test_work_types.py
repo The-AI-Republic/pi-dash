@@ -140,12 +140,12 @@ def test_compiled_work_type(api, tenant_a, auth_a):
     body = r.json()
     assert list(body)[:3] == ["kind", "scope", "work_type"]
     assert body["work_type"] == "software"
-    assert 'git checkout "$BASE"' in body["template_body"]
+    assert "git merge origin/<base>" in body["template_body"]
     r = api.get(_compiled_url(tenant_a, work_type="general"), headers=auth_a)
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["work_type"] == "general"
-    assert 'git checkout "$BASE"' not in body["template_body"]
+    assert "git merge origin/<base>" not in body["template_body"]
 
 
 def test_compiled_unknown_work_type_400(api, tenant_a, auth_a):
@@ -173,7 +173,7 @@ def test_preview_software_keeps_coding_guidance(api, tenant_a, issue_a,
                  json={"issue_id": str(issue_a), "work_type": "software"})
     assert r.status_code == 200, r.text
     prompt = r.json()["prompt"]
-    assert 'git checkout "$BASE"' in prompt
+    assert "git merge origin/<base>" in prompt
     assert "pidash issue attach-review" in prompt
 
 

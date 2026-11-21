@@ -1522,7 +1522,7 @@ mod tests {
     /// rendered `pidash-cli` section (design §9.6). Lower a budget when a
     /// section shrinks; do not raise one without a design note.
     const SIZE_BUDGETS: [(&str, usize); 3] = [
-        (recipes::KIND_CODING_TASK, 50_000),
+        (recipes::KIND_CODING_TASK, 26_000),
         (recipes::KIND_REVIEW, 12_000),
         (recipes::KIND_TEST, 13_000),
     ];
@@ -1566,7 +1566,7 @@ mod tests {
     /// them again (about 7k tokens per step). Lower a budget when the
     /// prompt shrinks; do not raise one without a design note.
     const WHOLE_PROMPT_BUDGETS: [(&str, usize); 3] = [
-        (recipes::KIND_CODING_TASK, 56_000),
+        (recipes::KIND_CODING_TASK, 30_000),
         (recipes::KIND_REVIEW, 18_000),
         (recipes::KIND_TEST, 19_000),
     ];

@@ -1637,6 +1637,7 @@ async fn bundle_parent_and_lineage(
                     }
                     .flatten();
                     let sequence = issue_sequence(tx, node.id).await?;
+                    let code_reviews = bundle_reviews(tx, node.id).await?;
                     Some(context::ParentView {
                         identifier: context::issue_identifier(&node.project_identifier, sequence),
                         title: Some(row.name),
@@ -1644,6 +1645,7 @@ async fn bundle_parent_and_lineage(
                         work_branch: Some(row.git_work_branch),
                         description_stripped: description,
                         comments_count: row.comments_count,
+                        code_reviews,
                     })
                 }
             }

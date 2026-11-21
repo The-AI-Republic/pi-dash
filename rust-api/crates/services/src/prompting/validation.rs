@@ -129,6 +129,17 @@ fn issue_sample(kind: &str, populated: bool) -> serde_json::Value {
                 "work_branch": "pi-dash/sample-0",
                 "description": "Parent description.",
                 "comments_count": 3,
+                "code_reviews": [
+                    {
+                        "url": "https://github.com/sample-org/sample-repo/pull/6",
+                        "title": "Parent PR title",
+                        "state": "open",
+                        "merged": false,
+                        "draft": false,
+                        "provider": "github",
+                        "external_iid": "6",
+                    },
+                ],
             },
             "lineage": [
                 {"identifier": "SAMPLE-1", "title": "Sample issue title"},
