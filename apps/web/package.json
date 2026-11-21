@@ -2,6 +2,7 @@
   "name": "web",
   "version": "1.3.0",
   "private": true,
+  "description": "DEPRECATED legacy frontend, replaced by apps/web_new. See DEPRECATED.md.",
   "license": "AGPL-3.0",
   "type": "module",
   "scripts": {
@@ -95,5 +96,6 @@
     "vite": "catalog:",
     "vite-tsconfig-paths": "^5.1.4",
     "vitest": "^4.0.15"
-  }
+  },
+  "deprecated": "Replaced by apps/web_new. See apps/web/DEPRECATED.md."
 }
