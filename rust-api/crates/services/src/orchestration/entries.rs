@@ -356,6 +356,10 @@ pub struct NewSchedulerRun {
     /// path's `{"code": …}`).
     pub error_details: Value,
     pub tool_plan: Value,
+    /// The scheduler's project identifier (`NEWPIDASH-320` §6.3): stamped
+    /// into `run_config` at insert so the runner can default
+    /// `PIDASH_PROJECT` for scheduler runs.
+    pub project_identifier: String,
     /// `created_at` (`auto_now_add`, supplied explicitly).
     pub now: DateTime<Utc>,
 }
@@ -1289,6 +1293,7 @@ pub async fn dispatch_scheduler_run<S: EntriesSeam>(
                 execution.error_code.as_deref().unwrap_or_default(),
             ),
             tool_plan: execution.tool_plan.clone(),
+            project_identifier: project.identifier.clone(),
             now: req.now,
         })
         .await?;
@@ -2319,7 +2324,12 @@ mod tests {
                 trigger: AgentRunTrigger::Scheduler.value().to_owned(),
                 executor_kind: row.executor_kind,
                 phase_kind: String::new(),
-                run_config: json!({}),
+                run_config: crate::orchestration::creation::stamp_run_context(
+                    json!({}),
+                    None,
+                    Some(&row.project_identifier),
+                    None,
+                ),
                 tool_plan,
                 error_details: row.error_details.clone(),
                 prompt: String::new(),

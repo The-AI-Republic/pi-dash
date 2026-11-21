@@ -255,6 +255,7 @@ impl From<operations::Error> for Denial {
             | operations::Error::NotFoundBody(_)
             | operations::Error::Conflict(_)
             | operations::Error::ProjectNotFound
+            | operations::Error::PreconditionFailed(_)
             | operations::Error::Rejection { .. } => Denial::ServerError,
         }
     }

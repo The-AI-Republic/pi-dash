@@ -208,9 +208,9 @@ impl From<operations::Error> for Denial {
             operations::Error::NotFoundBody(body) => Denial::NotFound(body),
             operations::Error::Conflict(body) => Denial::Conflict(body),
             operations::Error::ServerError => Denial::ServerError,
-            operations::Error::ProjectNotFound | operations::Error::Rejection { .. } => {
-                Denial::ServerError
-            }
+            operations::Error::ProjectNotFound
+            | operations::Error::PreconditionFailed(_)
+            | operations::Error::Rejection { .. } => Denial::ServerError,
         }
     }
 }

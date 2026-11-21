@@ -280,6 +280,7 @@ impl From<operations::Error> for Denial {
             operations::Error::NotFound
             | operations::Error::NotFoundBody(_)
             | operations::Error::ProjectNotFound
+            | operations::Error::PreconditionFailed(_)
             | operations::Error::Rejection { .. } => Denial::ServerError,
         }
     }
