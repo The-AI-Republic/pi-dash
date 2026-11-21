@@ -75,10 +75,11 @@
 //!   every full `save()` re-stamps actors from the request user, so
 //!   `relate()` rows land with `updated_by=NULL` (the adding branch
 //!   nulls it, discarding the explicit actor), workpad PATCH stamps
-//!   `updated_by` and recomputes `description_stripped` / `completed_at`
-//!   (untouched when the issue had no state — the recompute is the `else`
-//!   arm), and a workpad PATCH on a stateless issue ASSIGNS a default
-//!   state.
+//!   `updated_by` and recomputes `description_stripped` (and, fixed by
+//!   NEWPIDASH-351, DIFF-62, preserves `completed_at` unless the state
+//!   group changed — untouched when the issue had no state and on every
+//!   stateless save, since the recompute was the `else` arm), and a
+//!   workpad PATCH on a stateless issue ASSIGNS a default state.
 //!
 //! Deliberate edges (all unpinned — no fixture or contract case sends
 //! them):

@@ -44,9 +44,11 @@
 //! * Re-archiving answers 404 (`issue_objects` excludes archived rows).
 //! * Archiving a NULL-state issue 500s (`None.group`); unarchiving one
 //!   assigns the default state instead.
-//! * `save()` recomputes `completed_at` from the state group on every
-//!   archive/unarchive (clobbering it on completed issues) and always
-//!   rewrites `updated_at` + `description_stripped`; `bulk_update`
+//! * (fixed by NEWPIDASH-351, DIFF-62) `save()` recomputed `completed_at`
+//!   from the state group on every archive/unarchive (clobbering it on
+//!   completed issues); archive/unarchive never change state, so the
+//!   stamp is now left untouched, while `updated_at` +
+//!   `description_stripped` are still always rewritten; `bulk_update`
 //!   touches `archived_at` only.
 //! * The bulk response date is recomputed after the loop (this port
 //!   stamps one date; the two differ only across a midnight rollover).
@@ -59,8 +61,9 @@
 //! * FX-ISS-19 says `current_instance` is the 31-key shape; the enqueue
 //!   serializes a bare instance, so DRF omits the 7 annotation keys (24
 //!   keys — the pilot-2 `SERIALIZER_FIELDS` rule, verified live).
-//! * FX-ISS-19 omits the `save()` recomputes (`completed_at`,
-//!   `updated_at`, `description_stripped`, NULL-state default).
+//! * FX-ISS-19 omits the `save()` recomputes (`updated_at`,
+//!   `description_stripped`, NULL-state default; `completed_at` was a
+//!   recompute too before DIFF-62 and is now preserved).
 //!
 //! # Known gaps (precedent: pilot-2 records the same)
 //!
@@ -908,7 +911,8 @@ async fn fetch_blockers(
 // ---------------------------------------------------------------------------
 
 /// One issue row for the write paths: the base scalars plus the state
-/// group for the gate and the save() recomputes.
+/// group for the gate (the save() hooks, not the archive write, own the
+/// DIFF-62 `completed_at` transition rule).
 struct WriteRow {
     id: uuid::Uuid,
     name: String,
