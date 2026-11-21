@@ -8,13 +8,6 @@
 > Rust only) is in §11, and a draft of the new core prompt section is in
 > Appendix A.
 >
-> **Superseded in part (2026-11-20):** `.ai_design/unified_workpad/design.md`
-> removes the stage hand-off. The workpad is again read and written by every
-> issue run, and the `.pidash/workpad.md` snapshot rides on review and test
-> assigns too. Where this document says the workpad or its file is
-> "coding-task only", or names `--handoff-file` / `.pidash/handoff.md`,
-> that design wins.
->
 > **Companion:** `review.md`, a line-by-line review of the current
 > `pidash-cli` section with the evidence behind each change here (findings
 > R1–R10). It was written before the lean agent workflow change and is kept
