@@ -50,10 +50,11 @@ use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{WriteActor, WriteCtx, WriteScope};
 use pidash_services::operations;
+use pidash_services::orchestration::creation;
 use pidash_types::orchestration::{
-    agent_move_refusal, phase_config_for, stage_runs_automatically, AgentMoveRefusal,
-    StageSwitches, StateRef, KIND_CODING_TASK, OUTCOME_BLOCKED, OUTCOME_DONE, OUTCOME_PROGRESSED,
-    OUTCOME_WAITING_ON_EXTERNAL, OUTCOME_WAITING_ON_HUMAN,
+    agent_move_refusal, phase_config_for, stage_runs_automatically, template_name_for,
+    AgentMoveRefusal, StageSwitches, StateRef, KIND_CODING_TASK, OUTCOME_BLOCKED, OUTCOME_DONE,
+    OUTCOME_PROGRESSED, OUTCOME_WAITING_ON_EXTERNAL, OUTCOME_WAITING_ON_HUMAN,
 };
 
 use crate::domain_hooks::AppTaskEnqueueHook;
@@ -358,23 +359,15 @@ pub fn resolve_target<'a>(
 
 /// The workpad gate (step 1; `.ai_design/unified_workpad/design.md` §8.2):
 /// an In Progress (`coding-task`) run that moves the issue into review or
-/// test must have changed the workpad since the run was created, so the
-/// next stage finds a note that describes this pass.
+/// test must have changed the workpad since the In Progress pass started,
+/// so the next stage finds a note that describes this pass. The caller
+/// applies it only to that move, and not when a legacy hand-off is sent
+/// (it is posted as a comment, which review and test read).
 ///
-/// `stamped_sha` is the run's `run_config.workpad_sha256` (NEWPIDASH-320);
-/// a run created before it carries none and is not gated. A legacy
-/// `handoff` in the request (a prompt rendered before the unified workpad)
-/// also passes: it is posted as a comment, which review and test read.
-pub fn check_workpad_written(
-    phase_kind: &str,
-    moving_to_review_or_test: bool,
-    has_legacy_handoff: bool,
-    stamped_sha: Option<&str>,
-    current_sha: &str,
-) -> Result<(), Refusal> {
-    if phase_kind != KIND_CODING_TASK || !moving_to_review_or_test || has_legacy_handoff {
-        return Ok(());
-    }
+/// `stamped_sha` is the workpad hash when the pass started
+/// ([`fetch_workpad_hashes`]); a run created before NEWPIDASH-320 carries
+/// none and is not gated.
+pub fn check_workpad_written(stamped_sha: Option<&str>, current_sha: &str) -> Result<(), Refusal> {
     match stamped_sha {
         Some(stamped) if stamped == current_sha => Err(bad_request(WORKPAD_UNCHANGED_MESSAGE, &[])),
         _ => Ok(()),
@@ -586,10 +579,12 @@ async fn finish_inner(
         Err(refusal) => return Ok(refusal.into_response()),
     };
     // The run row is already loaded: no second select for its phase kind.
-    // A project-move replacement run stamps no kind and renders the
-    // coding-task prompt (`creation.rs`), so empty reads as coding-task.
+    // A project-move replacement run stamps no kind but renders the prompt
+    // for the issue's state (`create_project_move_handoff_run`), so an
+    // empty kind is read from the state the run is finishing in.
     let phase_kind = if run.phase_kind.is_empty() {
-        KIND_CODING_TASK.to_owned()
+        let current = current_state_id.and_then(|id| choices.iter().find(|c| c.id == id));
+        template_name_for(current.map(StateChoice::as_ref).as_ref()).to_owned()
     } else {
         run.phase_kind.clone()
     };
@@ -606,13 +601,7 @@ async fn finish_inner(
         current_state_id != Some(target.id) && target.is_review_or_test();
     if phase_kind == KIND_CODING_TASK && moving_to_review_or_test && req.handoff.is_none() {
         let (stamped, current) = fetch_workpad_hashes(&pre.pool, run.facts.id, issue_id).await?;
-        if let Err(refusal) = check_workpad_written(
-            &phase_kind,
-            moving_to_review_or_test,
-            false,
-            stamped.as_deref(),
-            &current,
-        ) {
+        if let Err(refusal) = check_workpad_written(stamped.as_deref(), &current) {
             return Ok(refusal.into_response());
         }
     }
@@ -709,8 +698,7 @@ async fn finish_inner(
 
     // Step 2: the move, through the issue-update operation with the run as
     // mover, before anything that says the issue moved. A refused move
-    // leaves no comment and no hand-off behind (only the pending copy,
-    // which nothing reads).
+    // leaves no comment behind.
     //
     // Attribution and gates preserved from the patch path: `moved_by_run`
     // is this run (the inner path inferred the same id from the forwarded
@@ -995,10 +983,11 @@ async fn fetch_state_choices(pool: &PgPool, project_id: Uuid) -> Result<Vec<Stat
         .collect())
 }
 
-/// The run's stamped workpad hash (`run_config.workpad_sha256`, taken
-/// when the run was created; `None` for a run created before
-/// NEWPIDASH-320) and the hash of the issue's workpad now, for
-/// [`check_workpad_written`].
+/// The workpad hash when the run's In Progress pass started and the hash of
+/// the issue's workpad now, for [`check_workpad_written`]. The start hash is
+/// `run_config.stage_start_workpad_sha256` (a continuation carries its
+/// parent's, [`creation::STAGE_START_WORKPAD_SHA256`]), else the run's own
+/// `workpad_sha256`; `None` for a run created before NEWPIDASH-320.
 async fn fetch_workpad_hashes(
     pool: &PgPool,
     run_id: Uuid,
@@ -1014,7 +1003,11 @@ async fn fetch_workpad_hashes(
         .map_err(|error| db_error(error, "finish-run-config"))?;
     let stamped = run_config
         .as_ref()
-        .and_then(|config| config.get("workpad_sha256"))
+        .and_then(|config| {
+            config
+                .get(creation::STAGE_START_WORKPAD_SHA256)
+                .or_else(|| config.get("workpad_sha256"))
+        })
         .and_then(Value::as_str)
         .map(str::to_owned);
     let workpad: Option<String> = issues::Entity::find_by_id(issue_id)
@@ -1024,9 +1017,7 @@ async fn fetch_workpad_hashes(
         .one(&db)
         .await
         .map_err(|error| db_error(error, "finish-workpad"))?;
-    let current = pidash_services::orchestration::creation::workpad_sha256(
-        workpad.as_deref().unwrap_or_default(),
-    );
+    let current = creation::workpad_sha256(workpad.as_deref().unwrap_or_default());
     Ok((stamped, current))
 }
 
@@ -1167,25 +1158,14 @@ mod tests {
     async fn workpad_gate() {
         // A coding run moving to review with the workpad unchanged since
         // the run was created is refused...
-        let (status, body) = body_of(
-            check_workpad_written(KIND_CODING_TASK, true, false, Some("same"), "same").unwrap_err(),
-        )
-        .await;
+        let (status, body) =
+            body_of(check_workpad_written(Some("same"), "same").unwrap_err()).await;
         assert_eq!(status, 400);
         assert_eq!(body["error"], json!(WORKPAD_UNCHANGED_MESSAGE));
         // ...and allowed once the workpad changed.
-        assert!(check_workpad_written(KIND_CODING_TASK, true, false, Some("old"), "new").is_ok());
+        assert!(check_workpad_written(Some("old"), "new").is_ok());
         // A run created before NEWPIDASH-320 carries no stamped hash.
-        assert!(check_workpad_written(KIND_CODING_TASK, true, false, None, "same").is_ok());
-        // A legacy hand-off from an old prompt satisfies the gate.
-        assert!(check_workpad_written(KIND_CODING_TASK, true, true, Some("same"), "same").is_ok());
-        // Staying, or finishing anywhere but review or test: no gate.
-        assert!(
-            check_workpad_written(KIND_CODING_TASK, false, false, Some("same"), "same").is_ok()
-        );
-        // Review and test runs are never gated.
-        assert!(check_workpad_written("review", true, false, Some("same"), "same").is_ok());
-        assert!(check_workpad_written("test", true, false, Some("same"), "same").is_ok());
+        assert!(check_workpad_written(None, "same").is_ok());
     }
 
     #[test]
@@ -1304,17 +1284,8 @@ mod tests {
         let (status, request, body) = fixture_call("finish_workpad_unchanged");
         let req = parse_finish_body(&request).unwrap();
         let target = resolve_target(&states, &req.to, StageSwitches::ALL, None).unwrap();
-        let got = body_of(
-            check_workpad_written(
-                KIND_CODING_TASK,
-                target.is_review_or_test(),
-                req.handoff.is_some(),
-                Some("unchanged"),
-                "unchanged",
-            )
-            .unwrap_err(),
-        )
-        .await;
+        assert!(target.is_review_or_test() && req.handoff.is_none());
+        let got = body_of(check_workpad_written(Some("unchanged"), "unchanged").unwrap_err()).await;
         assert_eq!(got, (status, body));
 
         let (status, _request, body) = fixture_call("finish_scheduler_run");

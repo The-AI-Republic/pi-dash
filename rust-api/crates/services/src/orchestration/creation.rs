@@ -1949,17 +1949,6 @@ pub fn work_type_for_issue(issue: &IssueView, project: &ProjectView) -> &'static
     )
 }
 
-/// The template (== phase kind) a state renders, from its registry name
-/// and group: the render-bundle loader takes it so it can skip the
-/// hand-off query for runs whose recipe never renders one
-/// (NEWPIDASH-338 item 8). `None` (no state) renders the coding-task
-/// recipe, exactly like [`template_name_for`](pidash_types::orchestration::template_name_for).
-pub fn template_kind_for_state(
-    state: Option<pidash_types::orchestration::StateRef<'_>>,
-) -> &'static str {
-    pidash_types::orchestration::template_name_for(state.as_ref())
-}
-
 /// The prompt kind a run created for the issue *now* will render
 /// (`_phase_kind_for_issue`, `service.py:157-167`): stamped on
 /// `AgentRun.phase_kind`.
@@ -2005,6 +1994,30 @@ pub fn workpad_sha256(body: &str) -> String {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
+}
+
+/// The `run_config` key holding the workpad hash when the In Progress pass
+/// started, which the `finish` workpad gate compares against
+/// (`.ai_design/unified_workpad/design.md` §8.2). Only a continuation stamps
+/// it, copied from its In Progress parent, so a note written by an earlier
+/// run of the same pass counts. Server-only: the runner envelope never
+/// copies it, and `workpad_sha256` stays the snapshot's own hash (the
+/// update guard).
+pub const STAGE_START_WORKPAD_SHA256: &str = "stage_start_workpad_sha256";
+
+/// The [`STAGE_START_WORKPAD_SHA256`] a continuation of `parent` carries:
+/// the parent's own start hash, else its snapshot hash, when both runs are
+/// In Progress runs. `None` starts a new pass.
+pub fn continued_stage_start_sha(parent: &RunView, kind: &str) -> Option<String> {
+    if kind != recipes::KIND_CODING_TASK || parent.phase_kind != recipes::KIND_CODING_TASK {
+        return None;
+    }
+    parent
+        .run_config
+        .get(STAGE_START_WORKPAD_SHA256)
+        .or_else(|| parent.run_config.get("workpad_sha256"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 /// Whether a run of this phase kind carries the workpad snapshot: every
@@ -2896,7 +2909,7 @@ pub async fn create_continuation_run<S: CreationSeam + FinalizeAgentRunSeam>(
     // (NEWPIDASH-320 §6.1, §6.3).
     let workpad_snapshot =
         carries_workpad(&kind).then(|| issue.workpad.clone().unwrap_or_default());
-    let run_config = stamp_run_context(
+    let mut run_config = stamp_run_context(
         run_config_for_issue(
             project.repo_url.as_deref(),
             project.base_branch.as_deref(),
@@ -2910,6 +2923,14 @@ pub async fn create_continuation_run<S: CreationSeam + FinalizeAgentRunSeam>(
         Some(&project.identifier),
         workpad_snapshot.as_deref(),
     );
+    // The workpad gate measures from the start of the In Progress pass,
+    // not from this continuation (design §8.2).
+    if let (Some(start), Some(map)) = (
+        continued_stage_start_sha(&req.parent, &kind),
+        run_config.as_object_mut(),
+    ) {
+        map.insert(STAGE_START_WORKPAD_SHA256.to_owned(), Value::String(start));
+    }
     let run_id = Uuid::new_v4();
     let run = seam
         .insert_run(&NewAgentRun {
@@ -3027,9 +3048,9 @@ pub async fn create_project_move_handoff_run<S: CreationSeam + FinalizeAgentRunS
         return Ok(existing);
     }
     // The render kind still comes from the issue's current state even
-    // though the row stamps no `phase_kind` (see below): a handoff into
-    // In Progress renders the coding-task prompt, so it snapshots the
-    // current workpad exactly like the other builders (NEWPIDASH-320
+    // though the row stamps no `phase_kind` (see below; `finish` reads the
+    // kind from the state for such a run): it snapshots the current
+    // workpad exactly like the other builders (NEWPIDASH-320
     // §6.1, §6.3). The parent's snapshot never rides along — it is
     // stale by construction.
     let render_kind = phase_kind_for_issue(seam.state(issue.state_id).await?);
@@ -3044,6 +3065,7 @@ pub async fn create_project_move_handoff_run<S: CreationSeam + FinalizeAgentRunS
     if let Some(map) = run_config.as_object_mut() {
         map.remove("workpad_body");
         map.remove("workpad_sha256");
+        map.remove(STAGE_START_WORKPAD_SHA256);
     }
     let run_config = stamp_run_context(
         run_config,
@@ -4240,6 +4262,42 @@ mod tests {
 
     /// NEWPIDASH-320 §6.1, §6.3: the runner-context stamp — identifiers
     /// for issue and scheduler runs, the workpad snapshot for
+    /// Unified workpad §8.2: a continuation inside the In Progress pass
+    /// carries the pass's start hash, so a note an earlier run of the pass
+    /// wrote still counts; any other pairing starts a new pass.
+    #[test]
+    fn continuation_carries_the_pass_start_workpad_hash() {
+        let mut parent = run_view(uid(0x60));
+        parent.run_config = json!({"workpad_sha256": "first"});
+        assert_eq!(
+            continued_stage_start_sha(&parent, recipes::KIND_CODING_TASK).as_deref(),
+            Some("first")
+        );
+        // A continuation of a continuation keeps the original start.
+        parent.run_config = json!({"workpad_sha256": "later", STAGE_START_WORKPAD_SHA256: "first"});
+        assert_eq!(
+            continued_stage_start_sha(&parent, recipes::KIND_CODING_TASK).as_deref(),
+            Some("first")
+        );
+        // Not an In Progress continuation: a new pass.
+        assert_eq!(
+            continued_stage_start_sha(&parent, recipes::KIND_REVIEW),
+            None
+        );
+        parent.phase_kind = recipes::KIND_REVIEW.to_owned();
+        assert_eq!(
+            continued_stage_start_sha(&parent, recipes::KIND_CODING_TASK),
+            None
+        );
+        // A parent from before NEWPIDASH-320 has no hash: not gated.
+        parent.phase_kind = recipes::KIND_CODING_TASK.to_owned();
+        parent.run_config = json!({});
+        assert_eq!(
+            continued_stage_start_sha(&parent, recipes::KIND_CODING_TASK),
+            None
+        );
+    }
+
     /// every issue run. `None` leaves the config untouched.
     #[test]
     fn stamp_run_context_covers_kinds() {

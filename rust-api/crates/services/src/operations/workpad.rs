@@ -27,7 +27,8 @@ pub const WORKPAD_MISSING_BODY: &str =
 /// The workpad size cap, in characters (`.ai_design/unified_workpad/
 /// design.md` U7, §8.5). The workpad is inlined into every issue-run
 /// prompt, so a runaway note costs every later run. Existing longer
-/// workpads are not truncated; the next write must fit.
+/// workpads are not truncated; the next agent write must fit. Applies to
+/// agent writes only ([`WorkpadWrite::from_run`]).
 pub const WORKPAD_MAX_CHARS: usize = 16_000;
 
 /// The [`WORKPAD_MAX_CHARS`] refusal body.
@@ -99,7 +100,9 @@ pub async fn update(
         // and validation only omits it when absent.
         return Err(Error::ServerError);
     };
-    check_workpad_size(&workpad)?;
+    if write.from_run {
+        check_workpad_size(&workpad)?;
+    }
     // The locked read + sparse `save()` (workpad, audit, hook recomputes)
     // run in the domain write; the completion pair when the state moved.
     // No orchestration fire — the port has none.
@@ -191,6 +194,11 @@ pub struct WorkpadWrite<'a> {
     /// the locked row must still match. `None` (old CLI) writes
     /// unconditionally, as today.
     pub if_body_sha256: Option<String>,
+    /// The write came from an agent run (the request carries the run
+    /// header). Only these are held to [`WORKPAD_MAX_CHARS`]: the cap keeps
+    /// agent notes short, and a person's edit is never refused for length
+    /// (unified workpad §8.5).
+    pub from_run: bool,
 }
 
 #[cfg(test)]
