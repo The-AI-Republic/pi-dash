@@ -4,7 +4,10 @@ Covers the create-time resolution in ``Project.save()`` (blank → ``software``
 when a repo is bound, else ``general``), the ``_validate_default_work_type``
 registry check on create and PATCH, the key's position in the
 ``ProjectSerializer`` output (``fields="__all__"``: right after
-``default_agent_executor``), and the PATCH lock that refuses an agent run
+``dedicated_runner_lost_action``, i.e. model definition order —
+``default_agent_executor``, ``dedicated_runner_lost_action``,
+``default_work_type``, ``settings`` — verified against live Django in
+NEWPIDASH-313), and the PATCH lock that refuses an agent run
 (non-blank ``X-Pi-Dash-Run-Id``) changing the value.
 """
 
@@ -48,10 +51,10 @@ def _stored(conn, project_id):
     return row["default_work_type"]
 
 
-def _assert_after_executor(item):
+def _assert_after_dedicated(item):
     keys = list(item.keys())
     assert "default_work_type" in keys
-    assert keys.index("default_work_type") == keys.index("default_agent_executor") + 1, keys
+    assert keys.index("default_work_type") == keys.index("dedicated_runner_lost_action") + 1, keys
 
 
 def test_create_without_repo_resolves_general(seed, conn):
@@ -59,7 +62,7 @@ def test_create_without_repo_resolves_general(seed, conn):
     assert r.status_code == 201, r.text
     body = r.json()
     assert body["default_work_type"] == "general"
-    _assert_after_executor(body)
+    _assert_after_dedicated(body)
     assert _stored(conn, body["id"]) == "general"
 
 
@@ -99,13 +102,26 @@ def test_create_too_long_value_400(seed):
 
 
 def test_list_and_detail_key_position(seed):
+    # A repo-bound project resolves `software` at create; both read shapes
+    # render it right after `dedicated_runner_lost_action`.
+    r = _create(seed, repo_url="https://github.com/example/repo.git")
+    assert r.status_code == 201, r.text
+    pid = r.json()["id"]
     r = http.get(seed["keys"][KEY], base(seed) + "/")
-    row = next(p for p in r.json()["results"] if p["id"] == seed["project"]["id"])
-    _assert_after_executor(row)
+    assert r.status_code == 200, r.text
+    row = next(p for p in r.json()["results"] if p["id"] == pid)
+    _assert_after_dedicated(row)
     assert row["default_work_type"] == "software"
-    r = http.get(seed["keys"][KEY], f"{base(seed)}/{seed['project']['id']}/")
-    _assert_after_executor(r.json())
+    r = http.get(seed["keys"][KEY], f"{base(seed)}/{pid}/")
+    assert r.status_code == 200, r.text
+    _assert_after_dedicated(r.json())
     assert r.json()["default_work_type"] == "software"
+    # The harness seeds its project with a raw INSERT (no `save()`
+    # resolution), so the stored blank renders verbatim at the same spot.
+    seed_row = next(p for p in http.get(seed["keys"][KEY], base(seed) + "/").json()["results"]
+                    if p["id"] == seed["project"]["id"])
+    _assert_after_dedicated(seed_row)
+    assert seed_row["default_work_type"] == ""
 
 
 def test_patch_unknown_value_400(seed, conn):
@@ -121,7 +137,7 @@ def test_human_patch_changes_value(seed, conn):
     r = _patch(seed, pid, {"default_work_type": "software"})
     assert r.status_code == 200, r.text
     assert r.json()["default_work_type"] == "software"
-    _assert_after_executor(r.json())
+    _assert_after_dedicated(r.json())
     assert _stored(conn, pid) == "software"
 
 
