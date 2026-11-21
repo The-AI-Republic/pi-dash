@@ -773,12 +773,26 @@ fn label_ids_annotation() -> &'static str {
 }
 
 /// The `project_ids` annotation (`base.py:120-123`): distinct project ids
-/// over the traversal join with the observed nil-plus-one predicate and no
-/// soft-delete predicate (matches the printed Django SQL).
-fn project_ids_annotation() -> String {
+/// over the filtered join — the caller's active-membership, unarchived
+/// projects — with the observed nil-plus-one predicate. Django's `ArrayAgg`
+/// runs over the already-filtered M2M join, so links carry no live-link
+/// predicate (a soft-deleted link to an accessible project stays, verified
+/// against live Django in NEWPIDASH-344); only the membership and archived
+/// legs filter. The archived-project list (NEWPIDASH-240) keeps the URL
+/// project in the array via `url_project`.
+/// Binds: `user`, then `url_project` when `Some`.
+fn project_ids_annotation(user: &str, url_project: Option<&str>) -> String {
+    let archived_leg = match url_project {
+        Some(project) => {
+            format!("AND (p2.archived_at IS NULL OR pp2.project_id = {project})")
+        }
+        None => "AND p2.archived_at IS NULL".to_owned(),
+    };
     format!(
         "COALESCE((SELECT ARRAY_AGG(DISTINCT pp2.project_id) FROM project_pages pp2 \
-         WHERE pp2.page_id = pages.id \
+         JOIN projects p2 ON p2.id = pp2.project_id \
+         JOIN project_members pm2 ON pm2.project_id = p2.id AND pm2.member_id = {user} AND pm2.is_active = TRUE \
+         WHERE pp2.page_id = pages.id {archived_leg} \
          AND NOT (pp2.project_id = '{PROJECT_IDS_NIL_PLUS_ONE}')), '{{}}')"
     )
 }
@@ -1140,7 +1154,7 @@ fn read_rows_sql_with_archived(
         favorite_annotation("$2", "$1"),
         project_annotation("$3"),
         label_ids_annotation(),
-        project_ids_annotation(),
+        project_ids_annotation("$2", include_archived.then_some("$3")),
     );
     let scope = if include_archived {
         read_scope_where_archived("$1", "$2")
@@ -3882,9 +3896,11 @@ struct ScopedPage {
 /// narrowed to one `pk`): the scope predicates that can still miss
 /// (`parent__isnull`, owner-or-public, project bridge) plus the
 /// `is_favorite` / `label_ids` / `project_ids` annotations. `project_ids`
-/// keeps the ported `~Q(projects__id=True)` no-op shape: Django compiles
+/// keeps the ported `~Q(projects__id=True)` no-op shape (Django compiles
 /// the `True` through `UUIDField.get_prep_value` into `UUID(int=1)`, so the
-/// predicate below compares against the zero-`1` UUID, never boolean `TRUE`.
+/// predicate below compares against the zero-`1` UUID, never boolean `TRUE`)
+/// over the filtered join: the caller's active-membership, unarchived
+/// projects (NEWPIDASH-344; no live-link leg, matching Django's join).
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct DetailRow {
     #[sqlx(flatten)]
@@ -3970,9 +3986,10 @@ async fn fetch_detail_row(
                      WHERE pl.page_id = p.id AND pl.label_id IS NOT NULL
                      AND pl.deleted_at IS NULL), '{{}}') AS label_ids,
            COALESCE((SELECT ARRAY_AGG(DISTINCT pp2.project_id) FROM project_pages pp2
-                     WHERE pp2.page_id = p.id
-                     AND NOT (pp2.project_id = '00000000-0000-0000-0000-000000000001')
-                     AND pp2.deleted_at IS NULL), '{{}}') AS project_ids
+                     JOIN projects p2 ON p2.id = pp2.project_id
+                     JOIN project_members pm2 ON pm2.project_id = p2.id AND pm2.member_id = $4 AND pm2.is_active = TRUE
+                     WHERE pp2.page_id = p.id AND p2.archived_at IS NULL
+                     AND NOT (pp2.project_id = '00000000-0000-0000-0000-000000000001')), '{{}}') AS project_ids
            FROM pages p
            JOIN workspaces w ON w.id = p.workspace_id
            JOIN project_pages pp ON pp.page_id = p.id
@@ -7048,6 +7065,45 @@ mod read_tests {
             "{list}"
         );
         assert_eq!(INVALID_PARENT_MESSAGE, "Invalid parent page id");
+    }
+
+    /// `project_ids` aggregates the filtered join (NEWPIDASH-344): the
+    /// caller's active-membership, unarchived projects — never the raw
+    /// traversal ids. No live-link leg: Django's M2M join carries no
+    /// `deleted_at` predicate, so a soft-deleted link to an accessible
+    /// project stays. The archived-project list keeps the URL project.
+    #[test]
+    fn project_ids_annotation_filters_join() {
+        let list = project_ids_annotation("$2", None);
+        assert!(
+            list.contains("JOIN projects p2 ON p2.id = pp2.project_id"),
+            "{list}"
+        );
+        assert!(
+            list.contains(
+                "JOIN project_members pm2 ON pm2.project_id = p2.id \
+                 AND pm2.member_id = $2 AND pm2.is_active = TRUE"
+            ),
+            "{list}"
+        );
+        assert!(list.contains("pp2.page_id = pages.id"), "{list}");
+        assert!(list.contains("AND p2.archived_at IS NULL"), "{list}");
+        assert!(!list.contains("pp2.deleted_at"), "{list}");
+        assert!(
+            list.contains(&format!(
+                "NOT (pp2.project_id = '{PROJECT_IDS_NIL_PLUS_ONE}')"
+            )),
+            "{list}"
+        );
+        let archived = project_ids_annotation("$2", Some("$3"));
+        assert!(
+            archived.contains("AND (p2.archived_at IS NULL OR pp2.project_id = $3)"),
+            "{archived}"
+        );
+        let sql = read_rows_sql_with_archived(false, RowFilter::TopLevel, false, &[], true);
+        assert!(sql.contains("OR pp2.project_id = $3"), "{sql}");
+        let live = read_rows_sql_with_archived(false, RowFilter::TopLevel, false, &[], false);
+        assert!(!live.contains("OR pp2.project_id = $3"), "{live}");
     }
 
     /// Datetime shaping: aware values render in the request zone with the
