@@ -2560,6 +2560,8 @@ pub async fn access_page(
 /// description endpoints fetch (`base.py:502-508` retrieve, `:522-528`
 /// partial_update): workspace slug, project bridge (live rows only), live
 /// page, owner-or-public predicate. A miss is `DoesNotExist` → 404.
+/// `owned_by` rides along for the DIFF-63 guest rule (retrieve's
+/// `base.py:212-229` needs the owner; the PATCH below ignores it).
 async fn fetch_description_page(
     pool: &PgPool,
     slug: &str,
@@ -2571,6 +2573,7 @@ async fn fetch_description_page(
         .select_only()
         .column(pages::Column::IsLocked)
         .column(pages::Column::ArchivedAt)
+        .column(pages::Column::OwnedById)
         .column(pages::Column::DescriptionHtml)
         .column(pages::Column::DescriptionBinary)
         .column(pages::Column::DescriptionJson)
@@ -2593,13 +2596,53 @@ async fn fetch_description_page(
 }
 
 /// One description-scoped page row (`archived_at` is a `DateField`).
+/// `owned_by_id` serves the DIFF-63 guest rule only.
 #[derive(Debug, sea_orm::FromQueryResult)]
 struct DescriptionPage {
     is_locked: bool,
     archived_at: Option<chrono::NaiveDate>,
+    owned_by_id: uuid::Uuid,
     description_html: String,
     description_binary: Option<Vec<u8>>,
     description_json: Option<Value>,
+}
+
+/// DIFF-63 (NEWPIDASH-341): the page-visibility owner lookup the version
+/// reads resolve through — retrieve's project-scoped visibility
+/// (`visible_pages`' URL-project leg plus owner-or-public): workspace slug,
+/// a live `project_pages` link to the URL project, a live page, and
+/// `owned_by = requester OR access = public`. Returns the page owner when
+/// visible, `None` when not. Callers answer what retrieve answers for the
+/// same URL: 404 `"Page not found"` for invisible pages, 400 for restricted
+/// guests reading another member's page. A missing page 404s even for
+/// restricted guests — retrieve's `AttributeError`-into-500 on that edge
+/// (PB-0462) is Django wrongness, not visibility to copy.
+async fn page_visibility_owner(
+    pool: &PgPool,
+    slug: &str,
+    project_id: &uuid::Uuid,
+    page_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+) -> Result<Option<uuid::Uuid>, Denial> {
+    pages::Entity::find()
+        .select_only()
+        .column(pages::Column::OwnedById)
+        .join(JoinType::InnerJoin, pages::Relation::Workspaces.def())
+        .join(JoinType::InnerJoin, pages::Relation::ProjectPages.def())
+        .filter(pages::Column::Id.eq(*page_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(project_pages::Column::ProjectId.eq(*project_id))
+        .filter(project_pages::Column::DeletedAt.is_null())
+        .filter(pages::Column::DeletedAt.is_null())
+        .filter(
+            Condition::any()
+                .add(pages::Column::OwnedById.eq(*user_id))
+                .add(pages::Column::Access.eq(0)),
+        )
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)
 }
 
 /// `GET .../pages/<page_id>/description/` (`PagesDescriptionViewSet.retrieve`,
@@ -2649,6 +2692,17 @@ pub async fn description_retrieve(
     let Some(page) = page else {
         return Denial::ObjectNotFound.into_response();
     };
+    // DIFF-63 (NEWPIDASH-341): retrieve's restricted-guest rule
+    // (`base.py:212-229`), which Django's description retrieve never
+    // applied: a restricted guest reading another member's page answers
+    // what retrieve answers. The fetch above already 404s invisible pages
+    // with the description miss body, so only found pages reach this rule.
+    if gate.guest_scoped && page.owned_by_id != gate.user_id {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            gate::RETRIEVE_GUEST_BODY.to_owned(),
+        );
+    }
     // `stream_data` (`base.py:509-514`): exactly one chunk either way, so
     // the response is chunked with no content-length like Django's
     // `StreamingHttpResponse` (never a `Body::from` with a fixed length).

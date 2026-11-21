@@ -536,6 +536,30 @@ async fn versions_response(
     if let Err(denial) = super::require_not_archived(pool, &project_id).await {
         return denial.into_response();
     }
+    // DIFF-63 (NEWPIDASH-341): resolve the page through retrieve's
+    // project-scoped visibility before touching versions — a live link to
+    // the URL project plus owner-or-public (`version.py:21-28` filtered on
+    // workspace slug + page id only, so a page linked solely to another
+    // project, even a private one, leaked its rows here). Invisible pages
+    // answer what retrieve answers (`base.py:202-244`): 404 "Page not
+    // found", or the restricted-guest 400 for another member's page.
+    // A missing page 404s even for restricted guests — retrieve's
+    // `AttributeError`-into-500 on that edge (PB-0462) is Django wrongness,
+    // not visibility to copy.
+    let visible_owner =
+        match super::page_visibility_owner(pool, slug, &project_id, page_id, &gate.user_id).await {
+            Ok(owner) => owner,
+            Err(denial) => return denial.into_response(),
+        };
+    let Some(visible_owner) = visible_owner else {
+        return json_response(StatusCode::NOT_FOUND, gate::PAGE_NOT_FOUND_BODY.to_owned());
+    };
+    if gate.guest_scoped && visible_owner != gate.user_id {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            gate::RETRIEVE_GUEST_BODY.to_owned(),
+        );
+    }
     let tz = match request_timezone(pool, &gate.user_id).await {
         Ok(tz) => tz,
         Err(denial) => return denial.into_response(),
