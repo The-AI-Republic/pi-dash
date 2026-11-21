@@ -57,6 +57,9 @@ def test_list_archived_returns_pages_with_status(settings, archived_world):
         assert row["project_status"] == "archived"
         assert row["project_archived_at"] == "2026-11-13T18:57:37Z"
         assert row["id"] == archived_world["page"]["id"]
+        # NEWPIDASH-344: the archived-project list keeps the URL project in
+        # the array even though it is archived.
+        assert row["project_ids"] == [archived_world["project"]["id"]]
     else:
         assert rows == [], rows
     client.close()
