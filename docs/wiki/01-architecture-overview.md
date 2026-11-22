@@ -11,11 +11,11 @@ The product is the orchestration layer. It does **not** ship its own coding agen
 │   Pi Dash Platform        │         │    Pi Dash Runner          │
 │   (cloud / self-hosted)   │  ◀─────▶│    (on your dev machine)   │
 │                           │  HTTPS  │                            │
-│ • Web UI (React Router 7) │  + WS   │ • Rust daemon (`pidash`)   │
-│ • Django REST API         │         │ • Supervisor + state mach. │
-│ • Channels / WebSockets   │         │ • Codex / Claude bridge    │
-│ • Celery (background)     │         │ • Local TUI + IPC socket   │
-│ • Live editor (Hocuspocus)│         │                            │
+│ • Web UI (`apps/web_new`) │  + WS   │ • Rust daemon (`pidash`)   │
+│ • Rust API (`rust-api`)   │         │ • Supervisor + state mach. │
+│ • Realtime (`apps/live`)  │         │ • Codex / Claude bridge    │
+│ • Postgres job queue      │         │ • Local TUI + IPC socket   │
+│   (Rust worker)           │         │                            │
 └───────────────────────────┘         └─────────────┬──────────────┘
                                                     │ subprocess
                                                     ▼
@@ -29,7 +29,9 @@ The product is the orchestration layer. It does **not** ship its own coding agen
 
 ### 1. Pi Dash Platform (cloud or self-hosted)
 
-The orchestration hub: work items, cycles, modules, views, pages, analytics — plus the cloud side of the runner protocol. Lives under `apps/` and the Django backend in `apps/api/`.
+The orchestration hub: work items, cycles, modules, views, pages, analytics — plus the cloud side of the runner protocol. It is the Rust API in `rust-api/` (binary `pidash-api`: `serve` for HTTP, `worker` for background jobs) with the new React frontend in `apps/web_new/` and the realtime server in `apps/live/`, behind the Caddy reverse proxy in `apps/proxy/`.
+
+The Django backend (`apps/api/`) and the legacy frontends (`apps/web/`, `apps/admin/`, `apps/space/`) are frozen and kept only as a fallback — see [03 — Repository layout](./03-repository-layout.md).
 
 See [05 — Frontend architecture](./05-frontend-architecture.md) and [06 — Backend architecture](./06-backend-architecture.md).
 
@@ -45,9 +47,9 @@ Pi Dash is agent-agnostic. The runner ships first-class support for **Claude Cod
 
 ## End-to-end task lifecycle
 
-1. **User creates a work item** in the web UI (`apps/web`).
+1. **User creates a work item** in the web UI (`apps/web_new`).
 2. **Platform assigns** the work item to a project that has at least one connected runner.
-3. **Orchestration layer** (`apps/api/pi_dash/orchestration/`) produces an agent run plan — phase, prompt, working dir, approval policy — and persists it.
+3. **Orchestration layer** (the Rust services in `rust-api/crates/services/`, driven by the `worker`) produces an agent run plan — phase, prompt, working dir, approval policy — and persists it.
 4. **Runner polls** the cloud for new runs over HTTPS long-poll (wire protocol v4, see [08](./08-cloud-runner-protocol.md)).
 5. **Runner spawns** the configured agent (`codex app-server` or `claude`) in the project's workspace, streaming the JSON-RPC bridge into the daemon.
 6. **Approval router** (first-writer-wins between TUI / cloud / policy) handles any approval prompts the agent emits.
@@ -60,22 +62,22 @@ When a change spans more than one layer, you almost always cross one of these:
 
 | Seam                                                         | Files                                                            | Versioned?                                                             |
 | ------------------------------------------------------------ | ---------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| **REST API** (browser ↔ Django)                              | `apps/api/pi_dash/{app,api}/urls/` + `packages/services/` client | No (internal, deploy together)                                         |
-| **Channels WebSocket** (live editor, runner WS in legacy v3) | `apps/api/pi_dash/runner/consumers.py`, `apps/live/`             | Yes for runner — bumped on incompatible shape changes                  |
-| **Runner ↔ cloud protocol**                                  | `runner/src/cloud/protocol.rs`, `apps/api/pi_dash/runner/views/` | **Yes** — wire version pinned, see [08](./08-cloud-runner-protocol.md) |
+| **REST API** (browser ↔ Rust API)                          | `rust-api/crates/api/` routers + `packages/api-client/`          | No (internal, deploy together)                                         |
+| **Realtime WebSocket** (live editor)                         | `apps/live/` (Yjs/Hocuspocus), session validated by the Rust API | No (internal, deploy together)                                         |
+| **Runner ↔ cloud protocol**                                  | `runner/src/cloud/protocol.rs`, `rust-api/` runner handlers      | **Yes** — wire version pinned, see [08](./08-cloud-runner-protocol.md) |
 
 Internal REST is allowed to change freely because the web frontend and the API ship together. The runner protocol is the one external contract — it gates auto-update behavior. Bump deliberately.
 
 ## Where state lives
 
-- **Postgres** — primary OLTP store (work items, users, runs, approvals, etc.). Django ORM models in `apps/api/pi_dash/db/` and per-app `models.py`.
-- **Redis / Valkey** — Django Channels layer, cache, throttling, ephemeral pub/sub between web ↔ runner.
-- **RabbitMQ** — Celery broker for background tasks (`apps/api/pi_dash/bgtasks/`).
+- **Postgres** — primary OLTP store (work items, users, runs, approvals, etc.). The Rust backend reads it through SeaORM entities in `rust-api/crates/db/src/entity/` (Django's migration history in `apps/api/` stays the single schema history for the shared database, so the frozen fallback can still run against it).
+- **Postgres job queue** — background jobs run on the `rust_job_queue` tables drained by `pidash-api worker`. There is no AMQP path in the active system (the old Celery + RabbitMQ broker is frozen with the Django backend).
+- **Redis / Valkey** — cache, throttling, ephemeral pub/sub between web ↔ runner.
 - **MinIO / S3** — file/attachment object storage.
 - **Local runner state** — TOML config + JSONL transcripts under the platform config/data dirs (`~/.config/pidash/...` on Linux). All on-disk secrets and the IPC socket are `0600`.
 
 ## What this wiki does **not** cover
 
-- API endpoint reference — see DRF Spectacular at `/api/schema/swagger-ui/` when running locally.
-- Frontend component catalog — see Storybook (`pnpm --filter @pi-dash/ui storybook`).
+- API endpoint reference — see the contract suites in `rust-api/contract-tests/` (run against the Rust binary; the Django server is the oracle for the old system's behaviour).
+- Frontend component catalog — see the unit-tested components in `packages/kit/` (the `@pi-dash/ui` Storybook is the frozen legacy path).
 - The closed-source `private-pi-dash` cloud overlay — that lives in a separate repo and is documented there.

@@ -61,57 +61,7 @@ Pi Dash はエージェント非依存であり、お好みのコーディング
 
 ### 1. Pi Dash Platform（セルフホスト）
 
-#### 要件
-
-- Docker Engine がインストールされ、稼働していること
-- Node.js バージョン 22 以上 [LTS バージョン](https://nodejs.org/en/about/previous-releases)
-- Python バージョン 3.12 以上
-- Postgres バージョン v15 以上
-- Valkey v7 以上（または Redis 7 以上、ドロップイン互換）
-- **メモリ**: 最低 **12 GB RAM** を推奨
-  > RAM が 8 GB しかないシステムでプロジェクトを実行すると、セットアップの失敗やメモリクラッシュ（特に Docker コンテナのビルド/起動時や依存関係のインストール時）につながる可能性があります。GitHub Codespaces などのクラウド環境を使用するか、可能であればローカルの RAM を増設してください。
-
-#### セットアップ
-
-1. リポジトリをクローンする
-
-```bash
-git clone https://github.com/The-AI-Republic/pi-dash.git [folder-name]
-cd [folder-name]
-chmod +x setup.sh
-```
-
-2. setup.sh を実行する
-
-```bash
-./setup.sh
-```
-
-`setup.sh` は、すべての `.env.example` を対応する `.env` にコピーし（リポジトリのルートに加えて `apps/web`、`apps/api`、`apps/space`、`apps/admin`、`apps/live`）、一意の Django `SECRET_KEY` を生成して `apps/api/.env` に追記し、その後 `pnpm install` を実行します。デフォルトのループバック開発セットアップでは、`.env` ファイルを手動で編集する必要はありません。`.env.example` のデフォルト値（localhost の URL、`pi-dash` データベースの認証情報、ローカルの MinIO エンドポイントなど）はそのまま動作します。デフォルト以外のホスト/ポートにバインドする場合や、外部サービスを組み込む場合にのみ編集してください。
-
-3. コンテナを起動する
-
-```bash
-docker compose -f docker-compose-local.yml up
-```
-
-4. Web アプリを起動する:
-
-```bash
-pnpm dev
-```
-
-5. ブラウザで http://localhost:3001/god-mode/ を開き、インスタンス管理者として自身を登録する
-6. ブラウザで http://localhost:3000 を開き、同じ認証情報でログインする
-
-#### 本番デプロイ
-
-実際のセルフホストデプロイ（ローカル開発ではない場合）では、どれだけ自分で管理したいかに応じて適した方法を選んでください。
-
-- **[オールインワン Docker イメージ](./deployments/aio/community/README.md)** — すべての Pi Dash サービスをバンドルし、内部で `supervisord` によって管理される単一コンテナ。最もシンプルな方法で、単一の `docker run` コマンドで済みます。デモ、ホームラボ環境、評価、小規模チームに最適です。外部の Postgres / Redis / RabbitMQ / S3 互換ストレージは引き続き必要です。
-- **[Docker Compose / Swarm によるセルフホスト](./deployments/cli/community/README.md)** — フルのマイクロサービススタック（6 つのサービスコンテナ + データベース + キュー + ストレージ）。設定は多くなりますが、サービスごとに独立したスケーリングとローリングアップデートが可能です。評価目的を超えるあらゆる用途に推奨します。
-- **Kubernetes / Helm** — Helm チャートの公開は計画中ですが、まだ提供されていません。[`deployments/kubernetes/community/README.md`](./deployments/kubernetes/community/README.md) を参照してください。
-
+現在のプラットフォームは Rust API（`rust-api/`）と新しいフロントエンド（`apps/web_new/`）、リアルタイムサーバー（`apps/live/`）です。[英語版のインストールガイド](./README.md#-installation)を参照してください — このセクションの翻訳は準備中です。
 ### 2. Pi Dash CLI & Runner Daemon
 
 エージェントにタスクを受け取らせて実行させたい任意のマシンに CLI をインストールします。現在サポートされているプラットフォーム:
@@ -188,7 +138,7 @@ Codex ユーザーは、Codex セッション内から組み込みの `$skill-in
 ## ⚙️ 使用技術
 
 [![React Router](https://img.shields.io/badge/-React%20Router-CA4245?logo=react-router&style=for-the-badge&logoColor=white)](https://reactrouter.com/)
-[![Django](https://img.shields.io/badge/Django-092E20?style=for-the-badge&logo=django&logoColor=green)](https://www.djangoproject.com/)
+[![Rust](https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Node JS](https://img.shields.io/badge/node.js-339933?style=for-the-badge&logo=Node.js&logoColor=white)](https://nodejs.org/en)
 
 ## 📝 ドキュメント

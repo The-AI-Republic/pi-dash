@@ -1,6 +1,6 @@
 # 14 — Testing
 
-Each stack has its own test runner. There is **no** unified "pnpm test" — root `pnpm check` covers JS/TS lint+format+types, but not Python tests and not the Rust runner.
+Each stack has its own test runner. There is **no** unified "pnpm test" — root `pnpm check` covers JS/TS lint+format+types, and the Rust stacks use cargo.
 
 ## TS workspace (Vitest)
 
@@ -8,59 +8,36 @@ Vitest runs per-app and per-package where tests exist.
 
 ```bash
 # Per app / package:
-pnpm --filter web test
+pnpm --filter web_new test
 pnpm --filter live test
-pnpm --filter @pi-dash/ui test
+pnpm --filter @pidash/kit test
 
 # Across workspace via Turbo:
 pnpm turbo run test
 ```
 
-Test files live next to source (`*.test.ts` / `*.test.tsx`) or in app-local `tests/` dirs (e.g. `apps/web/tests/`, `apps/live/tests/`).
+Test files live next to source (`*.test.ts` / `*.test.tsx`) or in app-local `tests/` dirs (e.g. `apps/live/tests/`). `web_new` additionally gates on `test:changed --coverage`, the parity suites (`test:parity:oracle` / `test:parity:new`), and the `check:*` gates — never run the whole `web_new` suite yourself.
 
-### Storybook
+## Rust backend (contract tests + cargo)
 
-`@pi-dash/ui` ships Storybook for component-in-isolation development:
-
-```bash
-pnpm --filter @pi-dash/ui storybook   # http://localhost:6006
-```
-
-Build new components in Storybook first, wire them into an app second.
-
-## Django backend (pytest)
-
-`apps/api/pytest.ini` configures:
-
-- `--reuse-db --nomigrations` — DB persists between runs; migrations are skipped.
-- Markers: `unit | contract | smoke`.
+Backend behaviour is pinned by the pytest contract suites in `rust-api/contract-tests/<domain>/`:
 
 ```bash
-cd apps/api
-
-./run_tests.sh                   # wraps tests/run_tests.sh
-python run_tests.py -u           # unit only
-python run_tests.py -u -o -p     # unit + coverage + parallel (-n auto)
-python run_tests.py              # full suite
-
-pytest -m smoke                  # direct pytest, smoke marker only
-pytest --create-db               # rebuild DB — required for schema-altering changes
-pytest apps/api/pi_dash/runner/tests/test_session.py::test_welcome_frame  # one test
+cd rust-api/contract-tests
+python3 -m venv .venv && source .venv/bin/activate && pip install -e .
+BASE_URL=http://127.0.0.1:8000 DATABASE_URL="postgresql://..." pytest app_intake
 ```
 
-### Markers
+Suites run unmodified against live Django (the oracle: the old system's real behaviour) and against the Rust binary with every `PIDASH_RUST_*` flag on. Always run a new or changed case against **both** — against Django to prove it encodes the old system's real behaviour (or, for a deliberate-difference case, that the old system really differs), and against Rust to prove the fix. See `rust-api/contract-tests/README.md` for the full env contract.
 
-| Marker     | Meaning                                                       |
-| ---------- | ------------------------------------------------------------- |
-| `unit`     | Fast, isolated. Default for new tests.                        |
-| `contract` | Cross-module contract tests — wire-format, serializer parity. |
-| `smoke`    | Coarse-grained end-to-end happy-path.                         |
+Rust unit tests live inline (`#[cfg(test)]`) in each crate:
 
-Tests live under `apps/api/pi_dash/tests/` and per-module `tests/` (e.g. `pi_dash/runner/tests/`).
+```bash
+cd rust-api
+cargo test -p <affected-crate>   # add a module/test filter when you can
+```
 
-### Test settings
-
-`apple_pi_dash.settings.test` is the test settings module — it tweaks middleware and disables some prod-only services so tests don't need RabbitMQ etc.
+The Django test suite in `apps/api/` is frozen with the backend — no new tests go there.
 
 ## Rust runner (cargo test)
 
@@ -85,22 +62,21 @@ Per `runner/README.md`, every runner release is manually QA'd:
 
 ## Quality gates summary
 
-| Gate          | Command                        | When it runs                                                       |
-| ------------- | ------------------------------ | ------------------------------------------------------------------ |
-| TS format     | `oxfmt`                        | Pre-commit (lint-staged) + `pnpm check:format`                     |
-| TS lint       | `oxlint --fix --deny-warnings` | Pre-commit + `pnpm check:lint` (per-app `--max-warnings` ceilings) |
-| TS types      | `tsc --noEmit`                 | `pnpm check:types` (per-package)                                   |
-| TS unit       | `vitest`                       | `pnpm test` / per-package                                          |
-| Python format | `ruff format`                  | Manual (not wired to root)                                         |
-| Python lint   | `ruff check`                   | Manual                                                             |
-| Python tests  | `pytest`                       | `./run_tests.sh`                                                   |
-| Rust lint     | `cargo clippy -- -D warnings`  | Manual                                                             |
-| Rust tests    | `cargo test`                   | Manual                                                             |
+| Gate              | Command                                             | When it runs                                              |
+| ----------------- | --------------------------------------------------- | --------------------------------------------------------- |
+| TS format         | `oxfmt`                                             | Pre-commit (lint-staged) + `pnpm check:format`            |
+| TS lint           | `oxlint --fix --deny-warnings`                      | Pre-commit + `pnpm check:lint` (`web_new` gates in [05](./05-frontend-architecture.md)) |
+| TS types          | `tsc --noEmit`                                      | `pnpm check:types` (per-package)                          |
+| TS unit           | `vitest`                                            | `pnpm test` / per-package                                 |
+| Rust fmt/clippy   | `cargo fmt --all --check`, `cargo clippy -- -D warnings` | Manual, per affected crate                             |
+| Rust unit         | `cargo test -p <crate>`                             | Manual, narrowest filter                                  |
+| Contract (Rust)   | `pytest <domain>` (`BASE_URL` → Rust binary)        | Manual, cases covering the change                         |
+| Contract (oracle) | `pytest <domain>` (`BASE_URL` → Django)             | Manual, same cases — proves the pinned behaviour is real  |
 
 Everything is run in CI on PRs — the `--deny-warnings` and `-D warnings` settings make sure no warning slips through unreviewed.
 
 ## Where to read next
 
 - [13 — Development workflow](./13-development-workflow.md) — the full command reference
-- `apps/api/tests/` and `apps/api/run_tests.py` — Python test harness
+- `rust-api/contract-tests/README.md` — the contract harness env contract
 - `runner/tests/` — Rust integration tests

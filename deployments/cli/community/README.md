@@ -8,7 +8,7 @@ We will cover two main options for setting up your self-hosted environment: usin
 > If you're evaluating Pi Dash or running it on a homelab / small VPS, the
 > [All-in-One Docker image](../aio/community/README.md) is a one-container
 > shortcut — single `docker run` command instead of docker-compose.
-> External Postgres / Redis / RabbitMQ / S3-compatible storage are still
+> External Postgres / Valkey / S3-compatible storage are still
 > required. Come back to this guide when you're ready for a full
 > production deployment with independent service scaling.
 
@@ -396,21 +396,21 @@ This will further open sub-menu with list of services
 
 ```bash
 Select a Service you want to view the logs for:
-   1) Web
-   2) Space
-   3) API
-   4) Worker
-   5) Beat-Worker
-   6) Migrator
-   7) Proxy
-   8) Redis
-   9) Postgres
-   10) Minio
-   11) RabbitMQ
+   1) Web (web_new)
+   2) API (Rust)
+   3) Worker (Rust)
+   4) Migrator
+   5) Live
+   6) Proxy
+   7) Redis
+   8) Postgres
+   9) Minio
    0) Back to Main Menu
 
-Service: 3
+Service: 2
 ```
+
+(The legacy `web`, `space`, `admin` frontends, the Django `api`/`worker`/`beat-worker` and RabbitMQ are frozen and not part of the active-system stack.)
 
 Select any of the service to view the logs e.g. `3`. Expect something similar to this
 
@@ -447,14 +447,7 @@ api-1  | Bucket 'uploads' does not exist. Creating bucket...
 api-1  | Bucket 'uploads' created successfully.
 api-1  | Public read access policy set for bucket 'uploads'.
 api-1  | Cache Cleared
-api-1  | [2024-05-02 03:56:01 +0000] [1] [INFO] Starting gunicorn 21.2.0
-api-1  | [2024-05-02 03:56:01 +0000] [1] [INFO] Listening at: http://0.0.0.0:8000 (1)
-api-1  | [2024-05-02 03:56:01 +0000] [1] [INFO] Using worker: uvicorn.workers.UvicornWorker
-api-1  | [2024-05-02 03:56:01 +0000] [25] [INFO] Booting worker with pid: 25
-api-1  | [2024-05-02 03:56:03 +0000] [25] [INFO] Started server process [25]
-api-1  | [2024-05-02 03:56:03 +0000] [25] [INFO] Waiting for application startup.
-api-1  | [2024-05-02 03:56:03 +0000] [25] [INFO] ASGI 'lifespan' protocol appears unsupported.
-api-1  | [2024-05-02 03:56:03 +0000] [25] [INFO] Application startup complete.
+api-1  | pidash-api serve --bind 0.0.0.0:8000
 
 ```
 

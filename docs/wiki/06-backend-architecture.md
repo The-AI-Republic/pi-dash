@@ -1,146 +1,82 @@
 # 06 — Backend Architecture
 
-The backend lives in `apps/api/` and is a **Django 4 / DRF / Channels** application. It is **not** in the pnpm workspace — separate venv, separate test runner, separate dependency manifest (`pyproject.toml` + `requirements.txt`).
+The backend is the **Rust API** in `rust-api/`: axum routers in `crates/api/`, per-domain logic in `crates/services/`, background jobs in `crates/jobs/`, served by the `pidash-api` binary — `serve` for HTTP (port 8000), `worker` for the Postgres job queue. Full runbook: [`rust-api/README.md`](../../rust-api/README.md).
 
 ## Top-level layout
 
 ```
-apps/api/
-├── manage.py
-├── pyproject.toml                ← Python package metadata + ruff config
-├── requirements.txt              ← pinned deps
-├── pytest.ini                    ← --reuse-db --nomigrations
-├── run_tests.py / run_tests.sh   ← test entrypoints (markers: unit | contract | smoke)
-├── apple_pi_dash/                ← legacy Django project name (settings module path)
-└── pi_dash/                      ← actual Django app modules (importable as `pi_dash.*`)
+rust-api/
+├── Cargo.toml                  ← own [workspace]; excluded from the root workspace
+├── crates/types/               ← ids, enums, DTOs, error type; no I/O
+├── crates/db/                  ← pools, sea-query builders, request context, tx wrapper, SeaORM entities
+├── crates/auth/                ← session reader, token validation, permission kernel
+├── crates/services/            ← per-domain logic; write side via pidash_services::domain
+├── crates/api/                 ← axum routers, extractor + serializer + paginator kernels, edge proxy
+├── crates/jobs/                ← Postgres queue, worker loop, scheduler, seed loader
+├── crates/storage/             ← server-side S3 PUT/DELETE + avatar mapping
+├── crates/sdk/                 ← pidash-sdk: the only surface the cloud overlay may use
+├── bin/pidash-api/             ← the binary: serve + worker + ops modes
+├── contract-tests/             ← pytest suites run against the Rust binary (Django is the oracle)
+└── fixtures/                   ← recorded Python behaviour
 ```
 
-> Note: the Python package is named `pi_dash`, but `DJANGO_SETTINGS_MODULE` historically references `apple_pi_dash.settings.*` and you'll still see `apple_pi_dash` referenced in some files. They co-exist — don't rename them in a single PR.
+Domain code lives at `crates/<layer>/src/<domain>/`, using the slug in each epic body. Dependencies point strictly downward: `types` → `db` → `auth` → `services` → `api`; `jobs` depends on `types` + `db`. Same URL paths, same JSON byte for byte, same schema, same SQL semantics as the old system. Every crate root has `#![forbid(unsafe_code)]`.
 
-## Django modules (`pi_dash/`)
+## Serve + worker
 
-```
-app/             ← main product API (workspaces, projects, work items, cycles, modules, …)
-api/             ← public v1 REST API (under /api/v1/)
-authentication/  ← login, sign-up, OIDC, sessions
-space/           ← published "spaces" — public/guest content (/api/public/)
-license/         ← instance license verification (/api/instances/)
-runner/          ← cloud side of the runner protocol — HTTP + WebSocket
-orchestration/   ← AI agent run scheduling, phases, workpad (see 08)
-prompting/       ← prompt composition, fragments, rendering (see 08)
-scheduler/       ← built-in run/scheduling signals
-analytics/       ← analytics endpoints, charts, exports
-bgtasks/         ← Celery tasks
-db/              ← shared DB utilities and mixins
-logs/            ← request/audit logging
-middleware/      ← throttling, CORS, auth, sentry hooks
-throttles/       ← DRF throttle classes
-seeds/           ← initial data, e.g. seed projects/labels
-settings/        ← env-split settings (see below)
-tests/           ← pytest test suite
-utils/           ← shared helpers
-web/             ← server-rendered/static catch-all
-```
+- **`serve`** connects the database at boot and refuses to start when it is missing, unreachable, or not current on migrations (fail fast — see [04 — Getting started](./04-getting-started.md)). `--bind` sets the listen address (`:8000` in containers, `:8080` bare default). `SECRET_KEY` from the environment validates sessions; unset, the server mints an ephemeral key (warned at boot).
+- **`worker`** drains the `rust_job_queue` Postgres tables — scheduler, seeds, issue transitions, mail. No broker, no AMQP path, no RabbitMQ.
+- **`ops`** subcommands (`ops wait_for_db`, `ops instance register-instance`, `ops create_bucket`, …) implement the container boot steps; `Dockerfile.api` + `bin/docker-entrypoint-*.sh` are the image layer.
 
-## URL tree
+## Edge proxy (Django fallback)
 
-`pi_dash/urls.py`:
+`crates/api/src/edge.rs` keeps a reverse proxy to the Django upstream (`PIDASH_DJANGO_UPSTREAM`, default `http://127.0.0.1:8000`). Each URL prefix has a `PIDASH_RUST_*` flip flag; a flagged prefix is served by its Rust handler, anything else proxies to Django. Production runs with all flags on — every request is served by Rust and Django stays only as the fallback. The shadow-read mode (`PIDASH_RUST_SHADOW`) compares Rust responses against Django byte for byte without serving them. See [Cutover edge](../../rust-api/README.md#cutover-edge-f-02) in the runbook.
 
-```
-api/                    → pi_dash.app.urls          ← internal app API (consumed by web/admin/space)
-api/public/             → pi_dash.space.urls        ← guest views of published content
-api/instances/          → pi_dash.license.urls
-api/runners/            → pi_dash.runner.web_urls   ← web UI calls for runner admin
-api/v1/                 → pi_dash.api.urls          ← public versioned REST API
-api/                    → pi_dash.prompting.urls    ← prompt templates
-api/v1/runner/          → pi_dash.runner.urls       ← runner HTTP + WS endpoints
-auth/                   → pi_dash.authentication.urls
-/                       → pi_dash.web.urls          ← static / catch-all
-```
+## Settings
 
-OpenAPI/Swagger is exposed at `/api/schema/swagger-ui/` and `/api/schema/redoc/` when `ENABLE_DRF_SPECTACULAR` is true. Use that as the live endpoint reference — this wiki intentionally does not duplicate it.
+`crates/db/src/config/` carries the config system: the per-key env-vs-DB catalog, the `ConfigStore` over `instance_configurations`, Fernet-compatible secrets, and boot-time `Settings` with `local` / `production` / `test` profiles. The cloud overlay composes them through `SettingsOverlay` — see [Composing the app builder](../../rust-api/README.md#composing-the-app-builder-private-overlay).
 
-## ASGI + Channels
+## Contract tests
 
-`pi_dash/asgi.py` wires a `ProtocolTypeRouter`:
+Backend behaviour is pinned by the pytest suites in `rust-api/contract-tests/<domain>/`. They run unmodified against live Django (the oracle: the old system's real behaviour) and against the Rust binary with every `PIDASH_RUST_*` flag on. A fix that changes pinned behaviour on purpose updates the case to expect the fixed behaviour on the new system and the old behaviour on the old one. Fixtures live in `rust-api/fixtures/<domain>/`.
 
-```python
-application = ProtocolTypeRouter({
-    "http": django_asgi_app,
-    "websocket": URLRouter(runner_ws_urls),
-})
-```
+## Schema
 
-- **HTTP** → standard Django view tree.
-- **WebSocket** → routed by `pi_dash/runner/routing.py` to the runner consumers in `pi_dash/runner/consumers.py`.
-
-The runner WebSocket path is the legacy v3 transport; the current wire protocol (v4) uses per-runner HTTPS long-poll — see [08 — Cloud ↔ runner protocol](./08-cloud-runner-protocol.md).
-
-## Settings layering
-
-`pi_dash/settings/`:
-
-| File                                                  | Used for                                                      |
-| ----------------------------------------------------- | ------------------------------------------------------------- |
-| `common.py`                                           | Shared base — installed apps, middleware, DRF/Channels config |
-| `local.py`                                            | Local dev overrides                                           |
-| `production.py`                                       | Production defaults — `manage.py` defaults to this            |
-| `test.py`                                             | Test-only overrides — referenced by `pytest.ini`              |
-| `mongo.py` / `redis.py` / `storage.py` / `openapi.py` | Subsystem-specific bundles imported by the env files          |
-
-`manage.py` sets `DJANGO_SETTINGS_MODULE=apple_pi_dash.settings.production` as the default. For local work, export `apple_pi_dash.settings.local`.
-
-## Runner backend module (`pi_dash/runner/`)
-
-This is the Django half of the runner integration — distinct from the Rust crate at the repo root. Highlights:
-
-```
-models.py              ← Runner, Run, Pod, Token models
-views/
-  register.py          ← runner enrollment (legacy token flow)
-  runners.py           ← runner CRUD
-  pods.py              ← pod (sub-resource) management
-  runs.py / run_endpoints.py  ← run lifecycle endpoints
-  approvals.py         ← approval router
-  chat.py              ← chat / message endpoints
-  sessions.py          ← session create / welcome frame
-  enrollment.py        ← device-code endpoints
-services/
-  session_service.py   ← welcome-frame generation, version advisory
-  run_lifecycle.py     ← state transitions
-  tokens.py            ← refresh ↔ access token pair
-  matcher.py           ← assign runs to runners
-  outbox.py            ← outbound message queue
-  pubsub.py            ← Redis pub/sub bridge for live updates
-consumers.py           ← Channels WS consumer (legacy v3 + still-live editor channels)
-routing.py             ← WS URL routes
-```
-
-The session service is responsible for the `welcome` frame the runner receives on connect — including `latest_runner_version` / `min_runner_version` advisories (see [15 — Releasing](./15-releasing.md)).
-
-## Background work (Celery)
-
-- Entry: `pi_dash/celery.py`.
-- Broker: **RabbitMQ** (per `.env.example`).
-- Tasks live in `pi_dash/bgtasks/` plus task modules under feature apps.
-
-## Database
-
-- **Postgres 15+** is the primary store.
-- `pytest.ini` configures `--reuse-db --nomigrations` — tests reuse the DB across runs and **skip migrations**. This makes the test suite fast but means schema-altering work has to be tested explicitly with `--create-db`.
+Django's migrations stay the single schema history so the frozen fallback can still run against the shared database. The Rust entities regenerate from the migrated schema (see the `entity` module docs in `crates/db/src/entity/`); the Rust code never runs its own DDL.
 
 ## Linting & formatting
 
-Ruff handles Python format + lint (line-length **120**, `known-first-party = ["apple_pi_dash"]`). Ruff is **not** wired into the root `pnpm fix` — run it explicitly:
-
 ```bash
-cd apps/api
-ruff format .
-ruff check . --fix
+cd rust-api
+cargo fmt --all --check
+cargo clippy --all-targets -- -D warnings
+cargo test -p <affected-crate>
+python3 scripts/write_guard.py --check
 ```
+
+## Frozen Django fallback (`apps/api/`)
+
+The Django 4 / DRF / Channels application in `apps/api/` is frozen and kept only as a fallback: no bug fixes, no new features, no behaviour change. What you need to orient in it:
+
+```
+apps/api/
+├── manage.py
+├── apple_pi_dash/   ← legacy Django project name (settings module path)
+└── pi_dash/         ← app modules: app/ api/ authentication/ space/ license/
+                        runner/ orchestration/ prompting/ scheduler/ analytics/
+                        bgtasks/ (Celery — frozen) db/ logs/ middleware/
+                        throttles/ seeds/ settings/ tests/ utils/ web/
+```
+
+> The Python package is named `pi_dash`, but `DJANGO_SETTINGS_MODULE` historically references `apple_pi_dash.settings.*`. They co-exist — don't rename them.
+
+- URL tree (`pi_dash/urls.py`): `api/` (internal app API) · `api/public/` (spaces) · `api/instances/` (license) · `api/runners/` + `api/v1/runner/` (runner HTTP + WS) · `api/v1/` (public REST) · `auth/` · `/` (static catch-all).
+- The runner WebSocket path is the legacy v3 transport; the current wire protocol (v4) uses per-runner HTTPS long-poll — see [08 — Cloud ↔ runner protocol](./08-cloud-runner-protocol.md).
+- Settings: `pi_dash/settings/{common,local,production,test}.py`; `manage.py` defaults to `production`.
+- Background work ran on Celery + RabbitMQ — frozen with the backend.
 
 ## Where to read next
 
-- [08 — Cloud ↔ runner protocol](./08-cloud-runner-protocol.md) — the wire contract `pi_dash/runner/` implements
-- [09 — Agent orchestration](./09-agent-orchestration.md) — how `orchestration/` + `prompting/` produce runs
-- [11 — Authentication](./11-authentication.md) — the `authentication/` module + runner token model
+- [08 — Cloud ↔ runner protocol](./08-cloud-runner-protocol.md) — the wire contract the Rust runner handlers implement
+- [09 — Agent orchestration](./09-agent-orchestration.md) — how services + jobs produce runs
+- [11 — Authentication](./11-authentication.md) — sessions, OIDC, and the runner token model

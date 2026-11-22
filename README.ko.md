@@ -61,57 +61,7 @@ Pi Dash는 에이전트에 구애받지 않습니다. 직접 사용하는 코딩
 
 ### 1. Pi Dash Platform (셀프 호스팅)
 
-#### 요구 사항
-
-- Docker Engine 설치 및 실행 중
-- Node.js 버전 22 이상 [LTS 버전](https://nodejs.org/en/about/previous-releases)
-- Python 버전 3.12 이상
-- Postgres 버전 v15 이상
-- Valkey v7 이상 (또는 Redis 7 이상, 드롭인 호환)
-- **메모리**: 최소 **12 GB RAM** 권장
-  > RAM이 8 GB뿐인 시스템에서 프로젝트를 실행하면 (특히 Docker 컨테이너 빌드/시작 또는 의존성 설치 중에) 설정 실패나 메모리 충돌이 발생할 수 있습니다. 가능하면 GitHub Codespaces와 같은 클라우드 환경을 사용하거나 로컬 RAM을 늘리세요.
-
-#### 설정
-
-1. 저장소 클론
-
-```bash
-git clone https://github.com/The-AI-Republic/pi-dash.git [folder-name]
-cd [folder-name]
-chmod +x setup.sh
-```
-
-2. setup.sh 실행
-
-```bash
-./setup.sh
-```
-
-`setup.sh`는 모든 `.env.example`을 해당 `.env` 파일로 복사하고(저장소 루트 외에 `apps/web`, `apps/api`, `apps/space`, `apps/admin`, `apps/live`), 고유한 Django `SECRET_KEY`를 생성하여 `apps/api/.env`에 추가한 다음, `pnpm install`을 실행합니다. 기본 루프백 개발 설정의 경우 어떤 `.env` 파일도 수동으로 편집할 필요가 없습니다. `.env.example` 기본값(localhost URL, `pi-dash` 데이터베이스 자격 증명, 로컬 MinIO 엔드포인트 등)이 별다른 설정 없이 작동합니다. 기본값이 아닌 호스트/포트에 바인딩하거나 외부 서비스를 연결하는 경우에만 편집하세요.
-
-3. 컨테이너 시작
-
-```bash
-docker compose -f docker-compose-local.yml up
-```
-
-4. 웹 앱 시작:
-
-```bash
-pnpm dev
-```
-
-5. 브라우저에서 http://localhost:3001/god-mode/ 를 열고 인스턴스 관리자로 자신을 등록합니다
-6. 브라우저에서 http://localhost:3000 을 열고 동일한 자격 증명으로 로그인합니다
-
-#### 프로덕션 배포
-
-(로컬 개발이 아닌) 실제 셀프 호스팅 배포의 경우, 직접 관리하고자 하는 범위에 맞는 방식을 선택하세요:
-
-- **[올인원 Docker 이미지](./deployments/aio/community/README.md)** — 모든 Pi Dash 서비스를 하나로 묶어 내부적으로 `supervisord`가 관리하는 단일 컨테이너입니다. 가장 간단한 방식으로, `docker run` 명령 하나면 됩니다. 데모, 홈랩 구성, 평가, 소규모 팀에 가장 적합합니다. 외부 Postgres / Redis / RabbitMQ / S3 호환 스토리지는 여전히 필요합니다.
-- **[Docker Compose / Swarm 셀프 호스팅](./deployments/cli/community/README.md)** — 전체 마이크로서비스 스택입니다(서비스 컨테이너 6개 + 데이터베이스 + 큐 + 스토리지). 구성은 더 복잡하지만 서비스별로 독립적인 스케일링과 롤링 업데이트가 가능합니다. 평가 이상의 용도에는 이 방식을 권장합니다.
-- **Kubernetes / Helm** — Helm 차트 배포는 계획되어 있으나 아직 제공되지 않습니다. [`deployments/kubernetes/community/README.md`](./deployments/kubernetes/community/README.md)를 참조하세요.
-
+현재 플랫폼은 Rust API(`rust-api/`)와 새 프론트엔드(`apps/web_new/`), 실시간 서버(`apps/live/`)입니다. [영어 설치 가이드](./README.md#-installation)를 참조하세요 — 이 섹션의 번역은 준비 중입니다.
 ### 2. Pi Dash CLI 및 Runner Daemon
 
 에이전트가 작업을 가져와 실행하도록 하려는 모든 머신에 CLI를 설치하세요. 현재 지원되는 플랫폼은 다음과 같습니다:
@@ -187,7 +137,7 @@ Codex 사용자는 Codex 세션 내부에서 기본 제공되는 `$skill-install
 ## ⚙️ 사용 기술
 
 [![React Router](https://img.shields.io/badge/-React%20Router-CA4245?logo=react-router&style=for-the-badge&logoColor=white)](https://reactrouter.com/)
-[![Django](https://img.shields.io/badge/Django-092E20?style=for-the-badge&logo=django&logoColor=green)](https://www.djangoproject.com/)
+[![Rust](https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Node JS](https://img.shields.io/badge/node.js-339933?style=for-the-badge&logo=Node.js&logoColor=white)](https://nodejs.org/en)
 
 ## 📝 문서

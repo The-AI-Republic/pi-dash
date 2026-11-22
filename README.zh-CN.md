@@ -61,57 +61,7 @@ Pi Dash 与智能体无关——你可以使用自己的编码智能体。目前
 
 ### 1. Pi Dash 平台（自托管）
 
-#### 环境要求
-
-- 已安装并正在运行的 Docker Engine
-- Node.js 22+ 版本（[LTS 版本](https://nodejs.org/en/about/previous-releases)）
-- Python 3.12+ 版本
-- Postgres v15+ 版本
-- Valkey v7+（或 Redis 7+，可直接替换兼容）
-- **内存**：建议至少 **12 GB RAM**
-  > 在仅有 8 GB RAM 的系统上运行本项目可能导致安装失败或内存崩溃（尤其是在 Docker 容器构建/启动或安装依赖期间）。如有可能，请使用 GitHub Codespaces 等云端环境，或升级本地内存。
-
-#### 配置步骤
-
-1. 克隆仓库
-
-```bash
-git clone https://github.com/The-AI-Republic/pi-dash.git [folder-name]
-cd [folder-name]
-chmod +x setup.sh
-```
-
-2. 运行 setup.sh
-
-```bash
-./setup.sh
-```
-
-`setup.sh` 会把每个 `.env.example` 复制为对应的 `.env`（包括仓库根目录以及 `apps/web`、`apps/api`、`apps/space`、`apps/admin`、`apps/live`），生成唯一的 Django `SECRET_KEY` 并追加到 `apps/api/.env`，然后运行 `pnpm install`。对于默认的本地回环开发配置，你无需手动编辑任何 `.env` 文件——`.env.example` 中的默认值（localhost URL、`pi-dash` 数据库凭据、本地 MinIO 端点等）开箱即用。只有在你需要绑定到非默认主机/端口或接入外部服务时，才需要修改它们。
-
-3. 启动容器
-
-```bash
-docker compose -f docker-compose-local.yml up
-```
-
-4. 启动 Web 应用：
-
-```bash
-pnpm dev
-```
-
-5. 在浏览器中打开 http://localhost:3001/god-mode/ ，将自己注册为实例管理员
-6. 在浏览器中打开 http://localhost:3000 ，使用相同的凭据登录
-
-#### 生产环境部署
-
-对于真正的自托管部署（而非本地开发），请根据你希望自行管理的程度选择对应方案：
-
-- **[All-in-One Docker 镜像](./deployments/aio/community/README.md)** —— 单个容器打包了所有 Pi Dash 服务，内部由 `supervisord` 管理。最简单的方式：一条 `docker run` 命令。适合演示、homelab 环境、评估以及小型团队。仍需外部的 Postgres / Redis / RabbitMQ / 兼容 S3 的存储。
-- **[Docker Compose / Swarm 自托管](./deployments/cli/community/README.md)** —— 完整的微服务栈（6 个服务容器 + 数据库 + 队列 + 存储）。配置更多，但能为每个服务提供独立扩缩容和滚动更新。除评估场景外，推荐使用此方案。
-- **Kubernetes / Helm** —— Helm chart 的发布已在计划中，但尚未推出；详见 [`deployments/kubernetes/community/README.md`](./deployments/kubernetes/community/README.md)。
-
+当前平台为 Rust API（`rust-api/`）搭配新版前端（`apps/web_new/`）与实时服务器（`apps/live/`）。请参阅[英文版安装指南](./README.md#-installation)——本节翻译即将更新。
 ### 2. Pi Dash CLI 与 Runner 守护进程
 
 在任何你希望智能体领取并执行任务的机器上安装 CLI。目前支持的平台：
@@ -187,7 +137,7 @@ Codex 用户也可以在 Codex 会话内通过内置的 `$skill-installer` 进�
 ## ⚙️ 技术栈
 
 [![React Router](https://img.shields.io/badge/-React%20Router-CA4245?logo=react-router&style=for-the-badge&logoColor=white)](https://reactrouter.com/)
-[![Django](https://img.shields.io/badge/Django-092E20?style=for-the-badge&logo=django&logoColor=green)](https://www.djangoproject.com/)
+[![Rust](https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Node JS](https://img.shields.io/badge/node.js-339933?style=for-the-badge&logo=Node.js&logoColor=white)](https://nodejs.org/en)
 
 ## 📝 文档
