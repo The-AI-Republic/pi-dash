@@ -93,14 +93,16 @@ async fn configure_instance() -> Result<(), InstanceFailure> {
     Ok(())
 }
 
-/// `open("package.json")` resolves against the process cwd, like
-/// Python (`register_instance.py:33`).
+/// The owned instance version (`rust-api/package.json`, a verbatim copy of
+/// the frozen `apps/api/package.json` at the split): parsed exactly like
+/// Python parses its cwd-relative `open("package.json")`
+/// (`register_instance.py:33`), but the value now ships in the binary, so
+/// `register-instance` reports the release version with no `apps/api` file
+/// on disk. `APP_VERSION` still wins (resolved by the caller).
+const OWN_PACKAGE_JSON: &str = include_str!("../../../package.json");
+
 fn read_package_json() -> license_commands::PackageJson {
-    let text = std::fs::read_to_string("package.json").unwrap_or_default();
-    if text.is_empty() {
-        return license_commands::PackageJson::Unreadable;
-    }
-    match serde_json::from_str::<serde_json::Value>(&text) {
+    match serde_json::from_str::<serde_json::Value>(OWN_PACKAGE_JSON) {
         Ok(serde_json::Value::Object(map)) => {
             license_commands::PackageJson::Parsed(map.get("version").map(|value| match value {
                 serde_json::Value::String(text) => text.clone(),
@@ -363,4 +365,28 @@ async fn dry_run_scheduler_migration(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The embedded owned copy parses to the release version: the binary
+    /// reports the current release with no `package.json` on disk.
+    #[test]
+    fn embedded_package_json_parses_to_release_version() {
+        let parsed: serde_json::Value =
+            serde_json::from_str(OWN_PACKAGE_JSON).expect("owned package.json parses");
+        let version = parsed
+            .get("version")
+            .and_then(|value| value.as_str())
+            .expect("owned package.json carries a version");
+        assert!(!version.is_empty());
+        match read_package_json() {
+            license_commands::PackageJson::Parsed(got) => {
+                assert_eq!(got.as_deref(), Some(version));
+            }
+            license_commands::PackageJson::Unreadable => panic!("embedded package.json unreadable"),
+        }
+    }
 }

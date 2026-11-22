@@ -130,9 +130,24 @@ pub const ORCHESTRATION_ORDER: [&str; 10] = [
 /// `read_seed_file :49-68`: `os.path.join(settings.SEED_DIR, "data",
 /// filename)` parsed as JSON. `None` for a missing file (`:63-65`) and for
 /// bad JSON (`:66-68`); the jobs layer logs before mapping to `None`.
-pub fn read_seed_file(seed_data_dir: &Path, filename: &str) -> Option<Vec<Value>> {
-    let bytes = std::fs::read(seed_data_dir.join(filename)).ok()?;
-    serde_json::from_slice(&bytes).ok()
+///
+/// `seed_data_dir` is `Some` exactly when `SEED_DIR` is set (the worker's
+/// override, joined flat without the `data/` segment — aligning that join
+/// is a follow-up, see the rust-api README). `None` serves the embedded
+/// catalog ([`crate::ops::seeds::embedded`], byte-identical to the 8 seed
+/// files), so a worker started without `SEED_DIR` seeds exactly what the
+/// files carry instead of an empty workspace.
+pub fn read_seed_file(seed_data_dir: Option<&Path>, filename: &str) -> Option<Vec<Value>> {
+    match seed_data_dir {
+        None => match crate::ops::seeds::embedded(filename) {
+            Some(text) => serde_json::from_slice(text.as_bytes()).ok(),
+            None => None,
+        },
+        Some(dir) => {
+            let bytes = std::fs::read(dir.join(filename)).ok()?;
+            serde_json::from_slice(&bytes).ok()
+        }
+    }
 }
 
 /// `create_project_and_member :84`: alnum-only chars of the workspace name,
@@ -808,6 +823,41 @@ mod tests {
         );
     }
 
+    /// `None` (`SEED_DIR` unset) serves the embedded catalog: every one of
+    /// the 8 files parses to the same rows [`crate::ops::seeds::embedded`]
+    /// carries, and unknown names miss.
+    #[test]
+    fn none_serves_embedded_catalog() {
+        for filename in SEED_READ_ORDER {
+            let from_loader = read_seed_file(None, filename).expect("embedded parses");
+            assert!(!from_loader.is_empty(), "{filename} has rows");
+            let embedded: Vec<Value> =
+                serde_json::from_str(crate::ops::seeds::embedded(filename).expect("catalog name"))
+                    .expect("embedded parses");
+            assert_eq!(from_loader, embedded, "{filename} matches embedded");
+        }
+        assert_eq!(read_seed_file(None, "nope.json"), None);
+    }
+
+    /// `Some` (`SEED_DIR` set) keeps the old flat disk read: happy path,
+    /// missing file and bad JSON.
+    #[test]
+    fn some_dir_reads_disk() {
+        let dir =
+            std::env::temp_dir().join(format!("pidash-services-seed-disk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+        std::fs::write(dir.join("custom.json"), b"[{\"overridden\": true}]").expect("write");
+        std::fs::write(dir.join("bad.json"), b"{nope").expect("write");
+        assert_eq!(
+            read_seed_file(Some(dir.as_path()), "custom.json"),
+            Some(vec![json!({"overridden": true})])
+        );
+        assert_eq!(read_seed_file(Some(dir.as_path()), "missing.json"), None);
+        assert_eq!(read_seed_file(Some(dir.as_path()), "bad.json"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn project_identifier_alnum_first_five() {
         // Golden from the interpreter: 'My Workspace! 42' -> 'MyWor'.
@@ -1119,15 +1169,17 @@ mod tests {
     #[test]
     fn read_seed_file_none_rules() {
         // Missing file → None (FileNotFoundError path).
-        assert!(read_seed_file(Path::new("/nonexistent-seed-dir"), "projects.json").is_none());
+        assert!(
+            read_seed_file(Some(Path::new("/nonexistent-seed-dir")), "projects.json").is_none()
+        );
         let dir = std::env::temp_dir().join("pidash-seed-probe");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("bad.json"), "{not json").unwrap();
         // Bad JSON → None (JSONDecodeError path).
-        assert!(read_seed_file(&dir, "bad.json").is_none());
+        assert!(read_seed_file(Some(dir.as_path()), "bad.json").is_none());
         std::fs::write(dir.join("ok.json"), r#"[{"id": 1}]"#).unwrap();
         assert_eq!(
-            read_seed_file(&dir, "ok.json"),
+            read_seed_file(Some(dir.as_path()), "ok.json"),
             Some(vec![json!({"id": 1})])
         );
         std::fs::remove_dir_all(&dir).unwrap();

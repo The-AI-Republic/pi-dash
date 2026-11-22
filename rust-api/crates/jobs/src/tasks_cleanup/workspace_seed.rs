@@ -518,12 +518,14 @@ pub trait SeedStore {
     ) -> impl std::future::Future<Output = Result<uuid::Uuid, String>> + Send;
 }
 
-/// Input for one [`run`]: the seed-data directory (`settings.SEED_DIR /
-/// "data"`), the target workspace, the run clock (`timezone.now()`), fresh
-/// bot secrets, and the resolved project-executor default.
+/// Input for one [`run`]: the seed-data directory (`Some` exactly when
+/// `SEED_DIR` is set — the worker override, joined flat; `None` serves the
+/// embedded catalog), the target workspace, the run clock
+/// (`timezone.now()`), fresh bot secrets, and the resolved
+/// project-executor default.
 #[derive(Debug, Clone)]
 pub struct RunInput {
-    pub seed_data_dir: PathBuf,
+    pub seed_data_dir: Option<PathBuf>,
     pub workspace_id: uuid::Uuid,
     pub now: DateTime<Utc>,
     /// `uuid.uuid4().hex` for `make_password` (`:530`).
@@ -538,9 +540,13 @@ pub struct RunInput {
 impl RunInput {
     /// Build the per-run input exactly like the task does: fresh secrets
     /// plus the executor default.
-    pub fn now_for(seed_data_dir: &Path, workspace_id: uuid::Uuid, now: DateTime<Utc>) -> Self {
+    pub fn now_for(
+        seed_data_dir: Option<&Path>,
+        workspace_id: uuid::Uuid,
+        now: DateTime<Utc>,
+    ) -> Self {
         Self {
-            seed_data_dir: seed_data_dir.to_owned(),
+            seed_data_dir: seed_data_dir.map(Path::to_owned),
             workspace_id,
             now,
             password_hex: uuid::Uuid::new_v4().simple().to_string(),
@@ -636,7 +642,7 @@ pub async fn run<S: SeedStore>(store: &S, input: &RunInput) -> Result<SeedReport
     // Projects + members (`:543`, `create_project_and_member :71-173`).
     let members = store.workspace_members(workspace_id).await?;
     let mut project_map: HashMap<i64, uuid::Uuid> = HashMap::new();
-    if let Some(rows) = logic::read_seed_file(&input.seed_data_dir, "projects.json") {
+    if let Some(rows) = logic::read_seed_file(input.seed_data_dir.as_deref(), "projects.json") {
         let identifier = logic::normalize_identifier(&logic::project_identifier(&workspace.name));
         for mut row in rows {
             let row = row
@@ -702,7 +708,7 @@ pub async fn run<S: SeedStore>(store: &S, input: &RunInput) -> Result<SeedReport
 
     // States (`:546`, `:176-208`).
     let mut state_map: HashMap<i64, uuid::Uuid> = HashMap::new();
-    if let Some(rows) = logic::read_seed_file(&input.seed_data_dir, "states.json") {
+    if let Some(rows) = logic::read_seed_file(input.seed_data_dir.as_deref(), "states.json") {
         for value in rows {
             let mut row = value.as_object().cloned().unwrap_or_default();
             let seed_id = row
@@ -739,7 +745,7 @@ pub async fn run<S: SeedStore>(store: &S, input: &RunInput) -> Result<SeedReport
 
     // Labels (`:549`, `:211-242`).
     let mut label_map: HashMap<i64, uuid::Uuid> = HashMap::new();
-    if let Some(rows) = logic::read_seed_file(&input.seed_data_dir, "labels.json") {
+    if let Some(rows) = logic::read_seed_file(input.seed_data_dir.as_deref(), "labels.json") {
         for value in rows {
             let mut row = value.as_object().cloned().unwrap_or_default();
             let seed_id = row
@@ -773,7 +779,7 @@ pub async fn run<S: SeedStore>(store: &S, input: &RunInput) -> Result<SeedReport
 
     // Cycles (`:552`, `:391-439`).
     let mut cycle_map: HashMap<i64, uuid::Uuid> = HashMap::new();
-    if let Some(rows) = logic::read_seed_file(&input.seed_data_dir, "cycles.json") {
+    if let Some(rows) = logic::read_seed_file(input.seed_data_dir.as_deref(), "cycles.json") {
         for value in rows {
             let mut row = value.as_object().cloned().unwrap_or_default();
             let seed_id = row
@@ -830,7 +836,7 @@ pub async fn run<S: SeedStore>(store: &S, input: &RunInput) -> Result<SeedReport
 
     // Modules (`:555`, `:442-474`).
     let mut module_map: HashMap<i64, uuid::Uuid> = HashMap::new();
-    if let Some(rows) = logic::read_seed_file(&input.seed_data_dir, "modules.json") {
+    if let Some(rows) = logic::read_seed_file(input.seed_data_dir.as_deref(), "modules.json") {
         for (index, value) in rows.into_iter().enumerate() {
             let mut row = value.as_object().cloned().unwrap_or_default();
             let seed_id = row
@@ -868,7 +874,7 @@ pub async fn run<S: SeedStore>(store: &S, input: &RunInput) -> Result<SeedReport
     }
 
     // Issues (`:558`, `:245-342`).
-    if let Some(rows) = logic::read_seed_file(&input.seed_data_dir, "issues.json") {
+    if let Some(rows) = logic::read_seed_file(input.seed_data_dir.as_deref(), "issues.json") {
         for value in rows {
             let row = value.as_object().cloned().unwrap_or_default();
             let (warnings, planned) = logic::plan_issue_seed(&row);
@@ -1007,7 +1013,7 @@ pub async fn run<S: SeedStore>(store: &S, input: &RunInput) -> Result<SeedReport
     }
 
     // Views (`:561`, `:477-500`).
-    if let Some(rows) = logic::read_seed_file(&input.seed_data_dir, "views.json") {
+    if let Some(rows) = logic::read_seed_file(input.seed_data_dir.as_deref(), "views.json") {
         for value in rows {
             let row = value.as_object().cloned().unwrap_or_default();
             let (project_seed_id, rest) = logic::plan_view_seed(&row);
@@ -1090,7 +1096,7 @@ pub async fn run<S: SeedStore>(store: &S, input: &RunInput) -> Result<SeedReport
     }
 
     // Pages (`:564`, `:345-388`).
-    if let Some(rows) = logic::read_seed_file(&input.seed_data_dir, "pages.json") {
+    if let Some(rows) = logic::read_seed_file(input.seed_data_dir.as_deref(), "pages.json") {
         for value in rows {
             let mut row = value.as_object().cloned().unwrap_or_default();
             let _seed_id = row
@@ -2505,10 +2511,12 @@ pub fn delay_message(workspace_id: uuid::Uuid) -> TaskMessage {
 /// (contract `test_task_options_parity` pins the empty option set).
 /// The dispatch inputs feed the per-issue post-save fire
 /// ([`SeedStore::drive_seed_transition`]).
+/// `seed_data_dir` is `Some` exactly when `SEED_DIR` is set (the disk
+/// override); `None` seeds from the embedded catalog.
 pub fn register_workspace_seed(
     registry: &mut Registry,
     pool: sqlx::PgPool,
-    seed_data_dir: PathBuf,
+    seed_data_dir: Option<PathBuf>,
     managed: pidash_db::config::PidashAgentSettings,
     assistant_seam: std::sync::Arc<dyn pidash_services::extensions::AssistantModelSeam>,
 ) {
@@ -2527,7 +2535,7 @@ pub fn register_workspace_seed(
                 .ok_or_else(|| "workspace_seed: args[0] must be a workspace uuid".to_owned())?;
             let now = Utc::now();
             let store = PgSeedStore::new(pool, now, managed, assistant_seam);
-            let input = RunInput::now_for(&seed_data_dir, workspace_id, now);
+            let input = RunInput::now_for(seed_data_dir.as_deref(), workspace_id, now);
             match run(&store, &input).await {
                 Ok(report) => {
                     tracing::info!(
@@ -2941,7 +2949,7 @@ mod tests {
 
     fn input_for(dir: &Path, ws: uuid::Uuid) -> RunInput {
         RunInput {
-            seed_data_dir: dir.to_owned(),
+            seed_data_dir: Some(dir.to_owned()),
             workspace_id: ws,
             now: chrono::DateTime::from_timestamp(1_789_000_000, 0).unwrap(),
             password_hex: "00".repeat(16),
@@ -3027,6 +3035,46 @@ mod tests {
         assert_eq!(minted[0], uuid::Uuid::from_u128(1)); // bot
         assert_eq!(minted[2], uuid::Uuid::from_u128(3)); // project
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `None` (`SEED_DIR` unset) seeds the full embedded catalog: every one
+    /// of the 8 files lands, with the row counts the embedded files carry —
+    /// so a worker started with no `./seeds` directory seeds exactly what
+    /// the files carry instead of an empty workspace.
+    #[tokio::test]
+    async fn none_seed_dir_runs_full_embedded_catalog() {
+        fn rows(filename: &str) -> Vec<Value> {
+            let text = pidash_services::ops::seeds::embedded(filename).expect("catalog name");
+            serde_json::from_slice(text.as_bytes()).expect("embedded parses")
+        }
+        let ws = uuid::Uuid::from_u128(902);
+        let store = FakeStore::with_workspace("Acme Workspace");
+        let input = RunInput {
+            seed_data_dir: None,
+            workspace_id: ws,
+            now: chrono::DateTime::from_timestamp(1_789_000_000, 0).unwrap(),
+            password_hex: "00".repeat(16),
+            password_salt: "s".repeat(22),
+            default_agent_executor: "local_runner".to_owned(),
+        };
+        let report = run(&store, &input).await.expect("embedded seed runs");
+        assert_eq!(report.projects, rows("projects.json").len());
+        assert_eq!(report.states, rows("states.json").len());
+        assert_eq!(report.labels, rows("labels.json").len());
+        assert_eq!(report.cycles, rows("cycles.json").len());
+        assert_eq!(report.modules, rows("modules.json").len());
+        assert_eq!(report.issues, rows("issues.json").len());
+        assert_eq!(report.views, rows("views.json").len());
+        assert_eq!(report.pages, rows("pages.json").len());
+        assert!(report.projects > 0, "embedded catalog seeds something");
+        let expected_links = rows("pages.json")
+            .iter()
+            .filter(|row| {
+                row.get("project_id").is_some_and(|id| !id.is_null())
+                    && row.get("type").and_then(Value::as_str) == Some("PROJECT")
+            })
+            .count();
+        assert_eq!(report.project_pages, expected_links);
     }
 
     #[tokio::test]

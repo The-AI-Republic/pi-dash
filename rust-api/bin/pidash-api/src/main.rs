@@ -413,7 +413,7 @@ mod tests {
         tasks_cleanup::register_workspace_seed(
             &mut registry,
             pool.clone(),
-            std::env::temp_dir(),
+            Some(std::env::temp_dir()),
             seed_settings.pidash_agent.clone(),
             std::sync::Arc::new(DefaultSeam),
         );
