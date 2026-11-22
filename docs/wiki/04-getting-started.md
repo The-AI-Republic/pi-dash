@@ -6,7 +6,7 @@ This is the from-zero contributor onboarding. For the production install paths s
 
 - **Docker Engine** running locally
 - **Node.js ≥ 22.18 LTS**
-- **Rust toolchain** (stable; `rust-toolchain.toml` pins the version — the Rust API and the runner both build with cargo)
+- **Rust toolchain** (stable; `runner/rust-toolchain.toml` pins the runner's channel — the Rust API builds with the installed stable toolchain; both build with cargo)
 - **Postgres 15+** (provided by docker-compose-local)
 - **Valkey 7+** (or Redis 7+, drop-in compatible — also provided)
 - **RAM ≥ 12 GB** — 8 GB will OOM during Docker build / pnpm install

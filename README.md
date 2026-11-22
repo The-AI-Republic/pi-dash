@@ -67,7 +67,7 @@ The platform is the Rust API (`rust-api/`, binary `pidash-api`) plus the new Rea
 
 - Docker Engine installed and running (for Postgres, Valkey and MinIO)
 - Node.js version 22+ [LTS version](https://nodejs.org/en/about/previous-releases)
-- Rust toolchain (stable; `rust-toolchain.toml` pins the version for `runner/`, `rust-api/` picks up the same toolchain)
+- Rust toolchain (stable; `runner/rust-toolchain.toml` pins channel 1.93 for the runner — `rust-api/` builds with the installed stable toolchain)
 - Postgres version v15+
 - Valkey v7+ (or Redis 7+, drop-in compatible)
 - **Memory**: Minimum **12 GB RAM** recommended
