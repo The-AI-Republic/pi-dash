@@ -69,17 +69,6 @@ impl Status {
         self.baseline_missing.is_empty() && self.pending.is_empty()
     }
 
-    fn require_baseline(&self) -> Result<(), DbErr> {
-        if self.baseline_missing.is_empty() {
-            Ok(())
-        } else {
-            Err(DbErr::Custom(format!(
-                "Unsupported database baseline; missing: {}. This migrator upgrades databases at the baseline leaf and bootstraps empty ones; finish a partially migrated database with Django first. No migrations were applied.",
-                self.baseline_missing.join(", ")
-            )))
-        }
-    }
-
     fn require_ready(&self) -> Result<(), DbErr> {
         if self.ready() {
             Ok(())
@@ -96,6 +85,45 @@ impl Status {
 
 fn sql(query: &str) -> Statement {
     Statement::from_string(DbBackend::Postgres, query)
+}
+
+/// The baseline's state on a database: fully migrated by Django (import
+/// path), untouched (fresh-install path), or neither (refuse: only an empty
+/// database is bootstrapped, and only a baseline database is upgraded).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BaselineState {
+    Current,
+    Fresh,
+    Partial(Vec<String>),
+}
+
+async fn baseline_state(db: &impl ConnectionTrait) -> Result<BaselineState, DbErr> {
+    if !table_exists(db, "django_migrations").await? {
+        return Ok(BaselineState::Fresh);
+    }
+    let mut applied = HashSet::new();
+    for row in db
+        .query_all(sql("SELECT app, name FROM django_migrations"))
+        .await?
+    {
+        applied.insert((
+            row.try_get::<String>("", "app")?,
+            row.try_get::<String>("", "name")?,
+        ));
+    }
+    let missing = BASELINE
+        .iter()
+        .filter(|(app, name)| !applied.contains(&(app.to_string(), name.to_string())))
+        .map(|(app, name)| format!("{app}/{name}"))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        Ok(BaselineState::Current)
+    } else {
+        // Empty-but-present django_migrations is also partial: the snapshot
+        // always stamps, so a stamp-less table is not one this migrator
+        // built. Refuse rather than snapshotting into existing tables.
+        Ok(BaselineState::Partial(missing))
+    }
 }
 
 async fn table_exists(db: &impl ConnectionTrait, name: &str) -> Result<bool, DbErr> {
@@ -134,10 +162,12 @@ pub async fn status(db: &impl ConnectionTrait) -> Result<Status, DbErr> {
         {
             native.insert(row.try_get::<String>("", "version")?);
         }
-        let known: HashSet<_> = (0..FORWARDS.len())
+        let mut known: HashSet<_> = (0..FORWARDS.len())
             .map(version)
             .chain((0..NATIVE.len()).map(native_version))
             .collect();
+        // The baseline's own history row is written by this binary too.
+        known.insert(BASELINE_VERSION.to_string());
         if !native.is_subset(&known) {
             return Err(DbErr::Custom(
                 "Database has migrations newer than this binary; use the matching release".into(),
@@ -227,11 +257,17 @@ async fn set_timeouts(db: &impl ConnectionTrait) -> Result<(), DbErr> {
 }
 
 async fn up_locked(db: &DatabaseConnection) -> Result<Status, DbErr> {
-    // Baseline first: `up` refuses databases that are neither empty (fresh
-    // install, handled by the baseline migration in Part 2) nor at the leaf.
+    // Baseline first: `up` boots empty databases (the baseline migration's
+    // fresh-install path) and upgrades baseline ones; partially migrated
+    // databases are refused so Django can finish them first.
     let tx = db.begin().await?;
     set_timeouts(&tx).await?;
-    status(&tx).await?.require_baseline()?;
+    if let BaselineState::Partial(missing) = baseline_state(&tx).await? {
+        return Err(DbErr::Custom(format!(
+            "Partially migrated database; missing: {}. Finish with `manage.py migrate` first, then re-run. No migrations were applied.",
+            missing.join(", ")
+        )));
+    }
     // One transaction per migration; each failure names its migration.
     // (Part 1 registers no migrations yet: this creates the history table
     // and verifies the plan is complete.)
@@ -264,18 +300,59 @@ fn native_version(index: usize) -> String {
     format!("m000001_native_{index:06}_{app}_{name}")
 }
 
+/// Stable history name for the snapshot. Never re-cut under a new name:
+/// later schema changes arrive as forward ports, so one name covers every
+/// database the migrator ever bootstrapped.
+const BASELINE_VERSION: &str = "m380_baseline_db0183_runner0043";
+
+struct Baseline;
+
+impl MigrationName for Baseline {
+    fn name(&self) -> &str {
+        BASELINE_VERSION
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for Baseline {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let db = manager.get_connection();
+        match baseline_state(db).await? {
+            // Import path: Django already applied everything at the leaf.
+            // Record history only; never rerun DDL.
+            BaselineState::Current => Ok(()),
+            // Fresh-install path: the full snapshot plus history stamps.
+            BaselineState::Fresh => {
+                db.execute_unprepared(include_str!("../sql/baseline.sql"))
+                    .await?;
+                Ok(())
+            }
+            BaselineState::Partial(missing) => Err(DbErr::Custom(format!(
+                "Partially migrated database; missing: {}. Finish with `manage.py migrate` first, then re-run.",
+                missing.join(", ")
+            ))),
+        }
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        Err(DbErr::Custom(
+            "Forward-only migration: applied migrations are never reversed".into(),
+        ))
+    }
+}
+
 struct Migrator;
 
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        (0..FORWARDS.len())
-            .map(|index| {
+        std::iter::once(Box::new(Baseline) as Box<dyn MigrationTrait>)
+            .chain((0..FORWARDS.len()).map(|index| {
                 Box::new(Port {
                     index,
                     name: version(index),
                 }) as Box<dyn MigrationTrait>
-            })
+            }))
             .chain((0..NATIVE.len()).map(|index| {
                 Box::new(PortNative {
                     index,
@@ -533,22 +610,18 @@ mod tests {
     }
 
     #[test]
-    fn baseline_gate_names_what_is_missing() {
+    fn ready_gate_names_what_is_missing() {
         let current = Status {
             baseline_missing: vec![],
             pending: vec![],
             imported_from_django: vec![],
         };
-        assert!(current.require_baseline().is_ok());
         assert!(current.require_ready().is_ok());
         let old = Status {
             baseline_missing: vec!["db/0183_example".into()],
             pending: vec![],
             imported_from_django: vec![],
         };
-        let err = old.require_baseline().unwrap_err().to_string();
-        assert!(err.contains("db/0183_example"), "must name it: {err}");
-        assert!(err.contains("No migrations were applied"), "{err}");
         let err = old.require_ready().unwrap_err().to_string();
         assert!(err.contains("db/0183_example"), "must name it: {err}");
     }
@@ -610,12 +683,24 @@ mod tests {
         // SeaORM history rows are versioned `m…` names under our own table;
         // the Django rows are written by the ports, never by the framework.
         // (`down` is never implemented: applied migrations are never
-        // reversed. Live-DB tests in Part 2 call it and assert the error.)
+        // reversed. Live-DB tests call it and assert the error.)
         let table = format!("{:?}", Migrator::migration_table_name());
         assert!(table.contains(HISTORY_TABLE), "unexpected table: {table}");
-        // Part 1 registers nothing yet: forwards and natives land in Part 2.
-        assert!(Migrator::migrations().is_empty());
+        let names = Migrator::migrations()
+            .iter()
+            .map(|m| m.name().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(names, [BASELINE_VERSION]);
+        // Forwards and natives land next: 0044 once NEWPIDASH-372 merges,
+        // then the ensure_schema upgrades.
         assert!(FORWARDS.is_empty());
         assert!(NATIVE.is_empty());
+    }
+
+    #[test]
+    fn baseline_version_is_stable() {
+        // The snapshot is cut once; later changes arrive as forwards, so
+        // every bootstrapped database shares one history name forever.
+        assert_eq!(BASELINE_VERSION, "m380_baseline_db0183_runner0043");
     }
 }
