@@ -2286,7 +2286,7 @@ mod tests {
             db, "postgres",
             "never test against the shared postgres database"
         );
-        crate::queue::ensure_schema(&pool)
+        crate::queue::ensure_schema(&pidash_db::sea_orm_connection(&pool))
             .await
             .expect("queue schema");
         pool

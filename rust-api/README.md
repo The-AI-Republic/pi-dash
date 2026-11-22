@@ -267,12 +267,12 @@ surprise overlay breakage. Add an export by editing `src/lib.rs`,
 The four `ee/` stubs are traits with CE defaults; the private crate
 replaces the implementation, never the callers:
 
-| Trait                    | Module                              | CE default                                                                                                                      | Python source                      |
-| ------------------------ | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
-| `AssistantModelSeam`     | `pidash-services::extensions`       | `CeAssistantSeam` (`pidash-api::assistant::model_seam`; carried on `AppState`, install an alternate with `with_assistant_seam`) | `ee/assistant/model_provider.py`   |
-| `SttSeam`                | `pidash-services::extensions`       | `ByoSttSeam`                                                                                                                    | `ee/assistant/stt_provider.py`     |
-| `DesktopGate`            | `pidash-auth::permissions::desktop` | `SessionDesktopGate`                                                                                                            | `ee/authentication/desktop.py`     |
-| `UserSettingsSchema`     | `pidash-services::user_settings`    | `CeUserSettings`                                                                                                                | `ee/settings/user_settings.py`     |
+| Trait                | Module                              | CE default                                                                                                                      | Python source                    |
+| -------------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
+| `AssistantModelSeam` | `pidash-services::extensions`       | `CeAssistantSeam` (`pidash-api::assistant::model_seam`; carried on `AppState`, install an alternate with `with_assistant_seam`) | `ee/assistant/model_provider.py` |
+| `SttSeam`            | `pidash-services::extensions`       | `ByoSttSeam`                                                                                                                    | `ee/assistant/stt_provider.py`   |
+| `DesktopGate`        | `pidash-auth::permissions::desktop` | `SessionDesktopGate`                                                                                                            | `ee/authentication/desktop.py`   |
+| `UserSettingsSchema` | `pidash-services::user_settings`    | `CeUserSettings`                                                                                                                | `ee/settings/user_settings.py`   |
 
 Named route-group replacement (`crates/api/src/overlay.rs`, one group per
 §0 prefix): `Overlay::new().replace(RouteGroup::Auth, cloud_auth())` swaps
@@ -407,8 +407,11 @@ pidash_services::domain::run(&ctx, &db, |txn| {
 SeaORM 1.1 (`~1.1.20`, design `.ai_design/rust_orm/design.md` D1) has an
 entity for every OSS table (all but `django_*`, `auth_*` and the overlay's
 `cloud_*`); reads and writes migrate onto them
-(`.ai_design/rust_orm/reads.md`). The entities live at `crates/db/src/entity/`; Django
-stays the schema owner — there are no SeaORM migrations.
+(`.ai_design/rust_orm/reads.md`). The entities live at `crates/db/src/entity/`; the
+Rust migrator owns the schema — `pidash-api migrate` (`crates/migration/`)
+applies the baseline snapshot plus forward ports, and records every
+Django-equivalent migration in `django_migrations` while the Django
+fallback is kept.
 
 One pool, two handles (D5): the `DatabaseConnection` wraps the existing
 primary sqlx pool and opens no connections of its own. The binary builds
@@ -501,26 +504,26 @@ Python fleet). Every `python manage.py <cmd>` became
 `pidash-api ops <cmd>` (`ops instance <cmd>` for the nested group);
 `gunicorn`/`celery` exec lines became `serve` / `worker`:
 
-| Entrypoint                          | Boot steps                                                                                                                                                          |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `docker-entrypoint-api.sh`          | wait_for_db → wait_for_migrations → machine signature → register-instance → configure-instance → create_bucket → clear_cache → `serve --bind 0.0.0.0:${PORT:-8000}` |
-| `docker-entrypoint-api-local.sh`    | same boot + `DJANGO_SETTINGS_MODULE` default → `serve --bind 0.0.0.0:8000`                                                                                          |
-| `docker-entrypoint-worker.sh`       | waits → min(nproc,8) concurrency → `worker "${worker_args[@]}"` (--concurrency, --queue)                                                                            |
-| `docker-entrypoint-worker-local.sh` | waits → `worker`                                                                                                                                                    |
-| `docker-entrypoint-beat.sh`         | waits → `worker` (no `exec`, like Python)                                                                                                                           |
-| `docker-entrypoint-beat-local.sh`   | waits → `worker`                                                                                                                                                    |
-| `docker-entrypoint-migrator.sh`     | wait_for_db → `python manage.py migrate $1` (stays Django)                                                                                                          |
+| Entrypoint                          | Boot steps                                                                                                                                                    |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `docker-entrypoint-api.sh`          | wait_for_db → migrate check → machine signature → register-instance → configure-instance → create_bucket → clear_cache → `serve --bind 0.0.0.0:${PORT:-8000}` |
+| `docker-entrypoint-api-local.sh`    | same boot + `DJANGO_SETTINGS_MODULE` default → `serve --bind 0.0.0.0:8000`                                                                                    |
+| `docker-entrypoint-worker.sh`       | waits → min(nproc,8) concurrency → `worker "${worker_args[@]}"` (--concurrency, --queue)                                                                      |
+| `docker-entrypoint-worker-local.sh` | waits → `worker`                                                                                                                                              |
+| `docker-entrypoint-beat.sh`         | waits → `worker` (no `exec`, like Python)                                                                                                                     |
+| `docker-entrypoint-beat-local.sh`   | waits → `worker`                                                                                                                                              |
+| `docker-entrypoint-migrator.sh`     | wait_for_db → `pidash-api migrate up` (native Rust, no Python)                                                                                                |
 
 Deltas from the Python boot (each documented at the script line):
 collectstatic dropped (API-only container; the Django upstream serves
-static); migrate stays `python` (schema owner until switchover) and the
-migrator stays pinned to the Python image until the deployments
-follow-up; GUNICORN_WORKERS and max-requests have no `serve` equivalent
+static); the migrator is the native Rust command (the schema owner since
+NEWPIDASH-380) and runs in the Rust image with no Python;
+GUNICORN_WORKERS and max-requests have no `serve` equivalent
 (scale with replicas); watchmedo / uvicorn --reload dropped in -local
 scripts (`cargo watch` outside the image); beat roles run the full worker
 (no scheduler-only mode — the scheduler lock keeps worker + beat from
-double-scheduling); the migrator's `wait_for_db $1` drops `$1` (Django
-ignores it, clap rejects it).
+double-scheduling); entrypoints gate startup on `migrate check` instead
+of waiting for migrations, and the migrator drops `$1` (no arguments).
 
 ### Environment
 
@@ -575,7 +578,8 @@ setting on this image today.
 ### Follow-ups (out of scope, quarantine)
 
 - `deployments/{aio,cli,kubernetes,swarm}/`: point roles at this image
-  (migrator stays on the Python image until migrate is ported).
+  (the migrator is native since NEWPIDASH-380; the Rust image runs it
+  with no Python).
 - `requirements/*.txt`: drop the 3 unused deps plus croniter
   (post-switchover).
 - Worker seed join: `services::tasks_cleanup::workspace_seed` joins

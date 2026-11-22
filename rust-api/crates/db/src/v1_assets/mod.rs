@@ -4,8 +4,8 @@
 //!
 //! Ports the column lists, defaults, constraints, manager scopes, and
 //! save-rule helpers for the four tables the D-21 views touch, adopting
-//! the Django-owned schema column-for-column. Migrations are not ported;
-//! Django stays schema owner until switchover.
+//! the shared schema column-for-column. Migrations are not ported here;
+//! the Rust migrator owns the schema (NEWPIDASH-380).
 //!
 //! * [`model`] — `FileAsset` / `Sticky` / `Intake` / `IntakeIssue` columns,
 //!   enums, row structs, and the `Sticky.save` helpers (PIDASHCONV-404).
@@ -35,7 +35,7 @@
 //! plane (`file_assets` in [`crate::app_assets`], `intakes` /
 //! `intake_issues` in [`crate::app_intake`]). The `app` modules serve the
 //! Plane-fork views; this module serves the api-v1 views. Both describe
-//! the same Django-owned schema; if the schema drifts, both need the same
+//! the same shared schema; if the schema drifts, both need the same
 //! update (the D-21 domain gate owns drift).
 //!
 //! Wiring note: the crate root declares `pub mod v1_assets;` (seam added

@@ -506,18 +506,18 @@ impl<S: TurnSeam + 'static> WorkerBuilder<S> {
         let queue = self.queue.clone();
         let scheduler_enabled = self.scheduler_enabled;
         let shutdown_grace_secs = self.shutdown_grace_secs;
-        pidash_jobs::queue::ensure_schema(queue_schema_pool(
+        // Rust-owned queue/catalog tables are created by the
+        // `m000002_ensure_schema` native migration (NEWPIDASH-380): the
+        // worker never runs DDL, it runs only the read-only `migrate
+        // check` and refuses to start when the schema is not current.
+        pidash_migration::check(&pidash_db::sea_orm_connection(queue_schema_pool(
             self.queue_schema_owner.as_ref(),
             self.pools.primary(),
-        ))
-        .await?;
-        // The runner LLM model catalog table (NEWPIDASH-169) is
-        // Rust-owned like the queue tables.
-        crate::runner_models::schema::ensure_schema(queue_schema_pool(
-            self.queue_schema_owner.as_ref(),
-            self.pools.primary(),
-        ))
-        .await?;
+        )))
+        .await
+        .map_err(|e| {
+            format!("database schema is not current; run `pidash-api migrate up` first: {e}")
+        })?;
         let built = self.build()?;
         // Apply the PIDASH_BEAT_ONLY allowlist to the schedule. Unset
         // means all entries; set (even empty) means only the listed

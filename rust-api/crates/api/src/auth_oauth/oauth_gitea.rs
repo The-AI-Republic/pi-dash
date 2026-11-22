@@ -2716,7 +2716,7 @@ mod tests {
                     .await
                     .expect("connect to scratch DATABASE_URL");
                 let _guard = SCHEMA_LOCK.lock().await;
-                pidash_jobs::queue::ensure_schema(&pool)
+                pidash_jobs::queue::ensure_schema(&pidash_db::sea_orm_connection(&pool))
                     .await
                     .expect("queue schema");
                 Some(pool)

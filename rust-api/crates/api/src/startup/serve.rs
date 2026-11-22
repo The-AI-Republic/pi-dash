@@ -271,23 +271,21 @@ impl ServeBuilder {
         let pools = connect_serve_pools().await?;
         // Enqueue paths (magic-link mail, password mail, …) INSERT into the
         // Rust-owned queue tables; without them every such handler 500s.
-        // `worker` runs the same DDL at its own boot, but `serve` also runs
-        // workerless (the V-02 matrix starts no worker for the Rust run), so
-        // `serve` must ensure the schema too (PIDASHCONV-854). Fail-fast like
-        // `worker`: refusing to start beats per-request 500s.
-        pidash_jobs::queue::ensure_schema(queue_schema_pool(
+        // Those tables are created by the `m000002_ensure_schema` native
+        // migration (NEWPIDASH-380): services never run DDL, they run only
+        // the read-only `migrate check` and refuse to start when the schema
+        // is not current. `worker` runs the same gate at its own boot, but
+        // `serve` also runs workerless (the V-02 matrix starts no worker
+        // for the Rust run), so `serve` must gate too (PIDASHCONV-854).
+        // Fail-fast like `worker`: refusing to start beats per-request 500s.
+        pidash_migration::check(&pidash_db::sea_orm_connection(queue_schema_pool(
             queue_schema_owner.as_ref(),
             pools.primary(),
-        ))
-        .await?;
-        // The runner LLM model catalog table (NEWPIDASH-169) is
-        // Rust-owned like the queue tables; serve must ensure it too
-        // (workerless matrix runs have no worker to do it).
-        crate::runner_models::schema::ensure_schema(queue_schema_pool(
-            queue_schema_owner.as_ref(),
-            pools.primary(),
-        ))
-        .await?;
+        )))
+        .await
+        .map_err(|e| {
+            format!("database schema is not current; run `pidash-api migrate up` first: {e}")
+        })?;
         tracing::info!(
             %addr,
             upstream = edge.upstream(),

@@ -5,8 +5,7 @@
 //! Ports `apps/api/pi_dash/db/models/workspace.py:19,114-320,348-369`
 //! (`Workspace`, `WorkspaceMember`, `WorkspaceMemberInvite`,
 //! `WorkspaceJoinRequest` + `Status`, `WorkspaceTheme`), adopting the
-//! Django-owned schema column-for-column; migrations are not ported —
-//! Django stays schema owner until switchover. Inherited audit columns
+//! shared schema column-for-column; migrations are not ported here — the Rust migrator owns the schema (NEWPIDASH-380). Inherited audit columns
 //! come from `BaseModel` (`db/models/base.py:17-18`) and `AuditModel`
 //! (`TimeAuditModel` / `UserAuditModel` / `SoftDeleteModel` at
 //! `db/mixins.py:16-82`).

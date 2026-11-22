@@ -493,7 +493,7 @@ mod tests {
             .connect(&url)
             .await
             .expect("connect scratch database");
-        crate::queue::ensure_schema(&pool)
+        crate::queue::ensure_schema(&pidash_db::sea_orm_connection(&pool))
             .await
             .expect("ensure queue schema");
         pool
@@ -637,7 +637,7 @@ mod tests {
             .connect(&url)
             .await
             .expect("connect scratch database");
-        crate::queue::ensure_schema(&pool)
+        crate::queue::ensure_schema(&pidash_db::sea_orm_connection(&pool))
             .await
             .expect("ensure queue schema");
         // A unique queue: no other worker or leftover row can interfere.

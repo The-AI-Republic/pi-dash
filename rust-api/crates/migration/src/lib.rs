@@ -22,6 +22,7 @@
 //! design (`.ai_design/schema_ownership/design.md`).
 
 mod baseline;
+pub mod ensure;
 
 pub use baseline::BASELINE;
 
@@ -54,8 +55,10 @@ pub const LOCK_ID: i64 = 0x5049_4441_5348_4D4F;
 pub const FORWARDS: &[(&str, &str)] = &[];
 
 /// Native-only migrations: no Django `(app, name)` history entry is stamped.
-/// Ordered after the forward ports. Empty until Part 2.
-pub const NATIVE: &[(&str, &str)] = &[];
+/// Ordered after the forward ports. The `ensure_schema` upgrade (boot-time
+/// DDL moved into the migration set) is first; runner/0044 follows once
+/// NEWPIDASH-372 merges.
+pub const NATIVE: &[(&str, &str)] = &[("rust", "0002_ensure_schema_tables")];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Status {
@@ -260,26 +263,29 @@ async fn up_locked(db: &DatabaseConnection) -> Result<Status, DbErr> {
     // Baseline first: `up` boots empty databases (the baseline migration's
     // fresh-install path) and upgrades baseline ones; partially migrated
     // databases are refused so Django can finish them first.
-    let tx = db.begin().await?;
-    set_timeouts(&tx).await?;
-    if let BaselineState::Partial(missing) = baseline_state(&tx).await? {
+    if let BaselineState::Partial(missing) = baseline_state(db).await? {
         return Err(DbErr::Custom(format!(
             "Partially migrated database; missing: {}. Finish with `manage.py migrate` first, then re-run. No migrations were applied.",
             missing.join(", ")
         )));
     }
-    // One transaction per migration; each failure names its migration.
-    // (Part 1 registers no migrations yet: this creates the history table
-    // and verifies the plan is complete.)
-    let pending = Migrator::get_pending_migrations(&tx).await?;
-    for migration in &pending {
-        let name = migration.name().to_string();
+    // One transaction per migration; a partial failure leaves the database
+    // at the last fully applied migration, and each failure names its
+    // migration.
+    loop {
+        let pending = Migrator::get_pending_migrations(db).await?;
+        let Some(next) = pending.first() else {
+            break;
+        };
+        let name = next.name().to_string();
+        let tx = db.begin().await?;
+        set_timeouts(&tx).await?;
         if let Err(source) = Migrator::up(&tx, Some(1)).await {
-            tx.rollback().await?;
+            let _ = tx.rollback().await;
             return Err(DbErr::Custom(format!("Migration {name} failed: {source}")));
         }
+        tx.commit().await?;
     }
-    tx.commit().await?;
     let result = status(db).await?;
     if !result.ready() {
         return Err(DbErr::Custom(format!(
@@ -410,11 +416,21 @@ impl MigrationName for PortNative {
 
 #[async_trait::async_trait]
 impl MigrationTrait for PortNative {
-    async fn up(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
-        // Part 2 registers the native-only upgrades here (the `ensure_schema`
-        // tables): additive, idempotent DDL with no Django history row.
-        let _ = self.index;
-        Err(DbErr::Custom("No native migrations registered yet".into()))
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // Native-only upgrades: additive, idempotent DDL with no Django
+        // history row. Existing databases adopt what boot-time `ensure_schema`
+        // already created; fresh installs get the tables from the migration.
+        // The manager connection works in any context (pooled connection or
+        // open transaction): the ensure fns are generic over it.
+        match self.index {
+            0 => {
+                crate::ensure::ensure_rust_tables(manager.get_connection())
+                    .await
+                    .map_err(|source| DbErr::Custom(format!("rust-owned tables: {source}")))?;
+                Ok(())
+            }
+            _ => Err(DbErr::Custom("No native migrations registered yet".into())),
+        }
     }
 
     async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
@@ -690,11 +706,10 @@ mod tests {
             .iter()
             .map(|m| m.name().to_string())
             .collect::<Vec<_>>();
-        assert_eq!(names, [BASELINE_VERSION]);
-        // Forwards and natives land next: 0044 once NEWPIDASH-372 merges,
-        // then the ensure_schema upgrades.
+        assert_eq!(names, [BASELINE_VERSION.to_string(), native_version(0)]);
+        // Forwards land next: runner/0044 once NEWPIDASH-372 merges.
         assert!(FORWARDS.is_empty());
-        assert!(NATIVE.is_empty());
+        assert_eq!(NATIVE, &[("rust", "0002_ensure_schema_tables")]);
     }
 
     #[test]

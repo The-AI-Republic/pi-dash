@@ -3,7 +3,7 @@
 //! Ports `apps/api/pi_dash/db/models/webhook.py:34-89` (`Webhook`,
 //! `WebhookLog`, `ProjectWebhook`) and
 //! `apps/api/pi_dash/db/models/integration/base.py:16-60` (`Integration`,
-//! `WorkspaceIntegration`), adopting the Django-owned schema
+//! `WorkspaceIntegration`), adopting the shared schema
 //! column-for-column. Read models / row mappings only; no migrations.
 //!
 //! # Ported quirks (translate, don't redesign)

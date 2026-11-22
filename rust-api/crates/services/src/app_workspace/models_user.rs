@@ -3,8 +3,8 @@
 //! Ports `apps/api/pi_dash/db/models/user.py:25-304` (`User`, `Profile`,
 //! `Account`, the onboarding/tour default factories), `db/models/api.py:16-60`
 //! (`APIToken`, the token/label generators) and `db/models/favorite.py:14-69`
-//! (`UserFavorite`), adopting the Django-owned schema column-for-column;
-//! migrations are not ported — Django stays schema owner until switchover.
+//! (`UserFavorite`), adopting the shared schema column-for-column;
+//! migrations are not ported here — the Rust migrator owns the schema (NEWPIDASH-380).
 //! Fixture source of truth: `rust-api/fixtures/app_workspace/models/`
 //! `user_token.columns.json` (F-W24-08, recorded by PIDASHCONV-599) for the
 //! first four units and `workspace_prefs.columns.json` (F-W24-07) for

@@ -3,8 +3,7 @@
 //! Ports `apps/api/pi_dash/db/models/issue.py:550-667` (`IssueComment`),
 //! `:700-724` (`IssueSubscriber`), `:726-751` (`IssueReaction`),
 //! `:753-778` (`CommentReaction`) and `:780-801` (`IssueVote`), adopting
-//! the Django-owned schema column-for-column; migrations are not ported —
-//! Django stays schema owner until switchover. Fixture source of truth:
+//! the shared schema column-for-column; migrations are not ported here — the Rust migrator owns the schema (NEWPIDASH-380). Fixture source of truth:
 //! `rust-api/fixtures/app_issues/models/FX-ISS-08.engage.json` (recorded by
 //! PIDASHCONV-637); the `#[cfg(test)]` suite replays it section by
 //! section.

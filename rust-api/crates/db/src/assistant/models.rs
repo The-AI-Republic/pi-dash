@@ -4,8 +4,8 @@
 //! `AssistantThread`, `TurnStatus`, `AssistantTurn`, `MessageKind`,
 //! `MessageStatus`, `AssistantMessage`, `AssistantEvent`, `ProviderKind`,
 //! `AssistantMCPServer`, `UserLLMConfig`, `UserSTTConfig`), adopting the
-//! Django-owned schema column-for-column. Migrations are not ported;
-//! Django stays schema owner until switchover. Queries stay in the
+//! shared schema column-for-column. Migrations are not ported here;
+//! the Rust migrator owns the schema (NEWPIDASH-380). Queries stay in the
 //! queries layer; this module records column lists, defaults,
 //! constraints, indexes, and the `__str__`/property derivations.
 //!

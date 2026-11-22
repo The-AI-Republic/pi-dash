@@ -5,8 +5,8 @@
 //! * [`models`] — `Session` + `SessionStore` (`db/models/session.py`) and
 //!   the `User` auth columns (`db/models/user.py:56-137`), as pure
 //!   functions over row/JSON types. No tables are created here and no
-//!   database handle is held: Django stays the schema owner (no
-//!   migrations), and the SQL read/write half lives with the queries
+//!   database handle is held: the Rust migrator owns the schema (NEWPIDASH-380) (no
+//!   migrations here), and the SQL read/write half lives with the queries
 //!   layer (PIDASHCONV-382).
 //!
 //! Plus the error/shape kernel named by PIDASHCONV-340:

@@ -1,8 +1,8 @@
 //! Integrations-library table models (D-05, stage 5).
 //!
 //! Ports `apps/api/pi_dash/db/models/integration/git.py:11-344` for the db
-//! layer, adopting the Django-owned schema column-for-column. Migrations
-//! are not ported; Django stays schema owner until switchover.
+//! layer, adopting the shared schema column-for-column. Migrations
+//! are not ported here; the Rust migrator owns the schema (NEWPIDASH-380).
 //!
 //! * [`git_models`] — the `Git*` tables (PIDASHCONV-144, git half). The
 //!   legacy `Github*` half (`github_models`, PIDASHCONV-144 github half)

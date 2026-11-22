@@ -4,7 +4,7 @@
 //! (`GitProviderAccount`, `GitRepository`, `GitRepositoryBinding`,
 //! `GitIssueSync`, `GitCommentSync`, `GitCodeReviewLink`,
 //! `GitWebhookDelivery`, `GitWebhookRegistration`), adopting the
-//! Django-owned schema column-for-column. Read models / row mappings only;
+//! shared schema column-for-column. Read models / row mappings only;
 //! no migrations.
 //!
 //! # Ported quirks (translate, don't redesign)

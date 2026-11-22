@@ -4,7 +4,7 @@
 //! table name, column names, types and nullability, `unique` flags both ways
 //! against full single-column unique indexes, every `has_one` edge's target
 //! column, and that every OSS table has an entity. All drift is listed in
-//! one failure. Django stays the schema owner: after
+//! one failure. The Rust migrator owns the schema (NEWPIDASH-380): after
 //! a Django sync the entities are regenerated (see `super`'s module doc and
 //! `rust-api/README.md`) and this test proves the regen matches.
 //!

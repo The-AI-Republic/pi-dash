@@ -3007,6 +3007,7 @@ dependencies = [
  "pidash-compat",
  "pidash-db",
  "pidash-jobs",
+ "pidash-migration",
  "pidash-services",
  "pidash-storage",
  "pidash-types",
@@ -3158,6 +3159,7 @@ dependencies = [
  "minijinja",
  "pidash-compat",
  "pidash-db",
+ "pidash-migration",
  "pidash-services",
  "pidash-storage",
  "pidash-types",
@@ -3187,12 +3189,16 @@ dependencies = [
 name = "pidash-migration"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "pidash-db",
  "sea-orm",
  "sea-orm-migration",
  "serde",
  "serde_json",
+ "sqlx",
  "tokio",
  "url",
+ "uuid",
 ]
 
 [[package]]

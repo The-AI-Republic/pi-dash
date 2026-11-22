@@ -471,13 +471,10 @@ pub fn due_entries<'a>(
         .collect()
 }
 
-/// DDL for the schedule-state table. Idempotent.
-pub fn ensure_schedule_schema_sql() -> &'static str {
-    "CREATE TABLE IF NOT EXISTS rust_job_schedule (\
-        name TEXT PRIMARY KEY,\
-        last_run_at TIMESTAMPTZ NOT NULL DEFAULT now()\
-    )"
-}
+/// Schedule-state DDL now lives in the migrator (NEWPIDASH-380):
+/// `pidash-migration::ensure` owns it. Re-exported here so existing
+/// callers keep compiling.
+pub use pidash_migration::ensure::ensure_schedule_schema_sql;
 
 fn fetch_last_runs_sql_inner() -> &'static str {
     "SELECT name, last_run_at FROM rust_job_schedule"

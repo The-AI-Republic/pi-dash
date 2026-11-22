@@ -3,9 +3,8 @@
 //! Module + ModuleMember table models (D-28, stage 5).
 //!
 //! Ports `apps/api/pi_dash/db/models/module.py:58-151` (`ModuleStatus`,
-//! `Module`, `ModuleMember`), adopting the Django-owned schema
-//! column-for-column; migrations are not ported — Django stays schema
-//! owner. Sibling issue PIDASHCONV-363 ports `:152-217`
+//! `Module`, `ModuleMember`), adopting the shared schema
+//! column-for-column; migrations are not ported here — the Rust migrator owns the schema (NEWPIDASH-380). Sibling issue PIDASHCONV-363 ports `:152-217`
 //! (`ModuleIssue`, `ModuleLink`, `ModuleUserProperties`) into this same
 //! file's style, in its own sections; nothing below moves or renames.
 //!

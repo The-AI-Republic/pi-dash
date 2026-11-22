@@ -6,8 +6,8 @@
 //! `:52-64` save), plus the `Issue` (`db/models/issue.py:95-199`,
 //! `:255-266`) and `IssueComment` (`:550-666`) columns this domain reads
 //! with their FTS index expression text. Recorded in
-//! `rust-api/fixtures/app_views_search/FX-MODEL.json`; Django stays schema
-//! owner until switchover, so no DDL is emitted here.
+//! `rust-api/fixtures/app_views_search/FX-MODEL.json`; the Rust migrator owns the schema (NEWPIDASH-380)
+//! (Django stays runnable as a fallback), so no DDL is emitted here.
 //!
 //! Column order in each `*_COLUMNS` const follows the Django `_meta` field
 //! order (base `id`, audit columns, workspace/project FKs, then the

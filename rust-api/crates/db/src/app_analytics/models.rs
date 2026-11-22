@@ -4,8 +4,7 @@
 //! (`AnalyticView`), `db/models/exporter.py:20-67`
 //! (`ExporterHistory` plus `generate_token`) and
 //! `db/models/importer.py:13-40` (`Importer`), adopting the
-//! Django-owned schema column-for-column; migrations are not ported —
-//! Django stays schema owner until switchover.
+//! shared schema column-for-column; migrations are not ported here — the Rust migrator owns the schema (NEWPIDASH-380).
 //!
 //! Column order in each `*_COLUMNS` const follows the Django `_meta`
 //! field order: the 6 inherited audit columns first (`id` from
@@ -441,7 +440,7 @@ pub mod exporter_history {
     /// (`exporter.py:56`); `rich_filters` is `Option` at the DB level
     /// but Django defaults it to `{}` (see [`default_rich_filters`]).
     /// `token` is `unique=True` (`exporter.py:50`) — uniqueness is a
-    /// DB constraint owned by Django until switchover, not modeled
+    /// DB constraint applied by the migrator (NEWPIDASH-380), not modeled
     /// here beyond the column. The `type` field keeps its Django name
     /// via a raw identifier so serialized rows carry `"type"`.
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

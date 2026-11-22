@@ -3,8 +3,7 @@
 //! Ports `apps/api/pi_dash/license/models/instance.py:1-100`
 //! (`Instance`, `InstanceAdmin`, `InstanceConfiguration`, `ChangeLog`) plus
 //! `InstanceEdition` (`:18-19`) and `ROLE_CHOICES` (`:15`), adopting the
-//! Django-owned schema column-for-column. Migrations are not ported; Django
-//! stays schema owner until switchover.
+//! shared schema column-for-column. Migrations are not ported here; the Rust migrator owns the schema (NEWPIDASH-380).
 //!
 //! Column order in each `*_COLUMNS` const follows Django `_meta` field order
 //! (the order recorded in

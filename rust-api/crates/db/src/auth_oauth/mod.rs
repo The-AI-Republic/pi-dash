@@ -4,8 +4,8 @@
 //! (`SocialLoginConnection`) and the device-flow slice of
 //! `apps/api/pi_dash/db/models/api.py:24-32` (the `generate_device_code` /
 //! `generate_user_code` generators) + `:63-94` (`CLIDeviceCode`), adopting
-//! the Django-owned schema column-for-column. Migrations are not ported;
-//! Django stays schema owner until switchover.
+//! the shared schema column-for-column. Migrations are not ported here;
+//! the Rust migrator owns the schema (NEWPIDASH-380).
 //!
 //! * [`models`] — the two tables (PIDASHCONV-326): `TABLE`, `ORDERING`, and
 //!   `COLUMNS` consts in Django `_meta` field order with attnames

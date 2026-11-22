@@ -4,9 +4,8 @@
 //!
 //! Ports the column lists, defaults, indexes, constraints, manager scopes,
 //! and save-rule helpers for `file_assets`, `stickies`, `intakes`, and
-//! `intake_issues` as the api-v1 views see them, adopting the Django-owned
-//! schema column-for-column. Migrations are not ported; Django stays
-//! schema owner until switchover.
+//! `intake_issues` as the api-v1 views see them, adopting the shared
+//! schema column-for-column. Migrations are not ported here; the Rust migrator owns the schema (NEWPIDASH-380).
 //!
 //! Sources (`apps/api/`): `pi_dash/db/models/asset.py:28-110`
 //! (`FileAsset` L45-62, `Meta` L64-74, `asset_url` L79-100,

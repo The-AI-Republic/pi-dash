@@ -6,8 +6,8 @@
 //! `JITTER_FRACTION`) and `apps/api/pi_dash/db/models/scheduler.py:1-251`
 //! (`Scheduler`, `SchedulerBinding`, `SchedulerSource`, `OutcomeMode`,
 //! `OUTCOME_MODE_DIRECTIVES`, `outcome_mode_directive`,
-//! `LAST_ERROR_MAX_LEN`). Adopts the Django-owned schema column-for-column;
-//! migrations are not ported — Django stays schema owner until switchover.
+//! `LAST_ERROR_MAX_LEN`). Adopts the shared schema column-for-column;
+//! migrations are not ported here — the Rust migrator owns the schema (NEWPIDASH-380).
 //!
 //! Column order in each `*_COLUMNS` const follows the Django `_meta` field
 //! order recorded in `rust-api/fixtures/tasks_ticker/models/*.columns.json`

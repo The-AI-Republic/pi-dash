@@ -7,8 +7,8 @@
 //! `apps/api/pi_dash/db/models/module.py:1-217` (`Module` `:67-127`,
 //! `ModuleMember` `:130-149`, `ModuleIssue` `:152-171`, `ModuleLink`
 //! `:174-187`, `ModuleUserProperties` `:190-217`, `ModuleStatus` `:58-64`),
-//! adopting the Django-owned schema column-for-column. Migrations are not
-//! ported; Django stays schema owner until switchover.
+//! adopting the shared schema column-for-column. Migrations are not
+//! ported here; the Rust migrator owns the schema (NEWPIDASH-380).
 //!
 //! Fixture (FX-CYCMOD-01):
 //! `rust-api/fixtures/v1_cycles_modules/models/module.columns.json`.

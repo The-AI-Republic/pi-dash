@@ -2,8 +2,7 @@
 //!
 //! Ports `apps/api/pi_dash/db/models/loop.py:1-183` (`SkipReason`,
 //! `LoopJob`, `LoopTarget`, `LoopUserPreference`), adopting the
-//! Django-owned schema column-for-column; migrations are not ported —
-//! Django stays schema owner until switchover.
+//! shared schema column-for-column; migrations are not ported here — the Rust migrator owns the schema (NEWPIDASH-380).
 //!
 //! Column order in each `*_COLUMNS` const follows the Django `_meta` field
 //! order recorded in `rust-api/fixtures/loop/models/*.columns.json`

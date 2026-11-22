@@ -687,10 +687,19 @@ mod tests {
     /// creating `rust_job_queue` at once collide on the catalog entry
     /// (23505), so the loser retries into the winner's finished table.
     async fn ensure_queue_schema(pool: &sqlx::PgPool) {
+        let db = pidash_db::sea_orm_connection(pool);
         for _ in 0..5 {
-            match pidash_jobs::queue::ensure_schema(pool).await {
+            match pidash_jobs::queue::ensure_schema(&db).await {
                 Ok(()) => return,
-                Err(sqlx::Error::Database(db)) if db.code().as_deref() == Some("23505") => continue,
+                // DbErr carries no SQLSTATE accessor: match the message the
+                // way the catalog CHECK-tolerance does. 23505 (catalog race)
+                // and 42P07 (duplicate table) both contain these.
+                Err(other)
+                    if other.to_string().contains("duplicate")
+                        || other.to_string().contains("already exists") =>
+                {
+                    continue
+                }
                 Err(other) => panic!("queue schema: {other}"),
             }
         }

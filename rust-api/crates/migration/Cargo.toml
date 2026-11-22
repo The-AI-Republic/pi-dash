@@ -15,3 +15,9 @@ serde_json = "1"
 # migrator: same host, port, database and options; credentials may differ).
 url = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"] }
+# The moved ensure_schema DDL + seed (NEWPIDASH-380): same locked pins as
+# pidash-jobs / pidash-api, so no lock churn.
+chrono = { version = "0.4", features = ["serde"] }
+pidash-db = { path = "../db" }
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio"] }
+uuid = { version = "1", features = ["v4"] }
