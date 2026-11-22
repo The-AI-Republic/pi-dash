@@ -1,0 +1,17 @@
+[package]
+name = "pidash-migration"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# SeaORM migration framework (NEWPIDASH-380): same locked 1.1.x line as the
+# rest of the workspace, same feature shape as pidash-db (sqlx-postgres over
+# the locked sqlx 0.8), so no lock churn beyond the new crate entry.
+sea-orm = { version = "~1.1.20", default-features = false, features = ["sqlx-postgres", "runtime-tokio", "macros", "with-uuid", "with-chrono", "with-json"] }
+sea-orm-migration = { version = "~1.1.20", default-features = false, features = ["sqlx-postgres", "runtime-tokio"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Owner/app URL comparison for the up-command guard (same rule as the cloud
+# migrator: same host, port, database and options; credentials may differ).
+url = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"] }

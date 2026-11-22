@@ -11,6 +11,7 @@ members = [
     "crates/storage",
     "crates/ops",
     "crates/sdk",
+    "crates/migration",
     "bin/pidash-api",
 ]
 

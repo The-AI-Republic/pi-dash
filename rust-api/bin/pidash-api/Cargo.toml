@@ -17,6 +17,10 @@ pidash-jobs = { path = "../../crates/jobs" }
 # D-37 ops CLI (PIDASHCONV-919): the ops command set lives in the shared
 # library crate so the cloud binary embeds the same argv/dispatch.
 pidash-ops = { path = "../../crates/ops" }
+# Native schema migrator (NEWPIDASH-380): `pidash-api migrate` owns the
+# schema. Top-level command, not under `ops` (it replaces `ops
+# wait_for_migrations` in the entrypoints and the Django migrator step).
+pidash-migration = { path = "../../crates/migration" }
 axum = "0.8"
 # Model runtime (PIDASHCONV-866): GitHub contents payloads are base64.
 # Same locked base64 0.22.x as the workspace (no lock churn).

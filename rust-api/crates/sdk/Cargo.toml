@@ -13,4 +13,5 @@ pidash-compat = { path = "../compat" }
 pidash-services = { path = "../services" }
 pidash-api = { path = "../api" }
 pidash-jobs = { path = "../jobs" }
+pidash-migration = { path = "../migration" }
 pidash-ops = { path = "../ops" }
