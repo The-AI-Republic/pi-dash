@@ -218,7 +218,7 @@ services:
       # is global configuration, and if used, it must be first".
       SITE_ADDRESS: ${SITE_ADDRESS:-:80}
       CERT_EMAIL: ${CERT_EMAIL:-}
-      CERT_ACME_CA: ${CERT_ACME_CA:-https://acme-v02.letsencrypt.org/directory}
+      CERT_ACME_CA: ${CERT_ACME_CA:-https://acme-v02.api.letsencrypt.org/directory}
       CERT_ACME_DNS: ${CERT_ACME_DNS:-}
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-0.0.0.0/0}
     depends_on:
