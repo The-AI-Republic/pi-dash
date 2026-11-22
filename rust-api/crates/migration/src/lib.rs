@@ -480,7 +480,7 @@ mod tests {
     fn baseline_covers_the_leaf() {
         // The snapshot is cut at db/0183 + runner/0043 (rebased for
         // runner/0044 once NEWPIDASH-372 merges); every app present.
-        assert!(BASELINE.len() >= 290);
+        assert_eq!(BASELINE.len(), 290);
         for leaf in [
             ("db", "0183_merge_ai_completed_and_project_settings"),
             ("runner", "0043_desktop_handoff"),
@@ -491,13 +491,19 @@ mod tests {
             ("contenttypes", "0002_remove_content_type_name"),
             ("sessions", "0001_initial"),
             ("django_celery_beat", "0018_improve_crontab_helptext"),
-            ("authtoken", "0004_alter_tokenproxy_options"),
         ] {
             assert!(
                 BASELINE.contains(&leaf),
                 "baseline must contain {leaf:?} (regenerate if the leaf moved)"
             );
         }
+        // `rest_framework.authtoken` ships migrations but is not in
+        // INSTALLED_APPS, so Django never records them: they must stay out
+        // (verified against a live migrate).
+        assert!(
+            !BASELINE.iter().any(|(app, _)| *app == "authtoken"),
+            "authtoken is not migrated by Django; drop it from the generator"
+        );
         let mut seen = HashSet::new();
         for entry in BASELINE {
             assert!(seen.insert(entry), "duplicate baseline entry {entry:?}");

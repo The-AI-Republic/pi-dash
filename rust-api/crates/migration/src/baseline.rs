@@ -8,7 +8,7 @@
 //! `manage.py migrate` (`SELECT app, name FROM django_migrations`)
 //! before cutting a new baseline.
 
-// 294 Django migrations at leaf.
+// 290 Django migrations at leaf.
 pub const BASELINE: &[(&str, &str)] = &[
     ("db", "0001_initial"),
     ("db", "0002_auto_20221104_2239"),
@@ -352,10 +352,6 @@ pub const BASELINE: &[(&str, &str)] = &[
     ("contenttypes", "0001_initial"),
     ("contenttypes", "0002_remove_content_type_name"),
     ("sessions", "0001_initial"),
-    ("authtoken", "0001_initial"),
-    ("authtoken", "0002_auto_20160226_1747"),
-    ("authtoken", "0003_tokenproxy"),
-    ("authtoken", "0004_alter_tokenproxy_options"),
     ("django_celery_beat", "0001_initial"),
     ("django_celery_beat", "0002_auto_20161118_0346"),
     ("django_celery_beat", "0003_auto_20161209_0049"),

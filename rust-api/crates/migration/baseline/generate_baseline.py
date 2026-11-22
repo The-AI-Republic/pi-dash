@@ -2,9 +2,16 @@
 """Emit the BASELINE const for rust-api/crates/migration/src/baseline.rs.
 
 Walks the migration files on disk for every INSTALLED_APPS app that ships
-migrations (first-party pi_dash apps plus Django contrib, DRF authtoken and
+migrations (first-party pi_dash apps plus Django contrib and
 django_celery_beat) and prints the Rust const in dependency-neutral order
 (grouped by app; the migrator treats the baseline as one set, not a chain).
+
+NOTE: `rest_framework.authtoken` is deliberately excluded: the `authtoken`
+migrations ship inside the installed `rest_framework` package, but only
+`rest_framework` itself is in INSTALLED_APPS (`pi_dash/settings/common.py`),
+so Django never applies or records them. Walking the package directory would
+add four phantom rows the live `django_migrations` table does not have
+(NEWPIDASH-380, verified against a live migrate).
 
 Usage (from the repo root):
     python3 rust-api/crates/migration/baseline/generate_baseline.py \\
@@ -44,19 +51,16 @@ def main():
         walk(os.path.join("apps/api/pi_dash", app, "migrations"), app, entries)
     for pkg, label in CONTRIB:
         walk(os.path.join(DROOT, pkg, "migrations"), label, entries)
-    import rest_framework
+    # django_celery_beat is in INSTALLED_APPS; rest_framework.authtoken is
+    # not (see module docstring), so only the former is walked.
     import django_celery_beat
 
-    for mod, label in [
-        (rest_framework, "authtoken"),
-        (django_celery_beat, "django_celery_beat"),
-    ]:
-        base = os.path.dirname(mod.__file__)
-        for dirpath, _dirnames, filenames in os.walk(base):
-            if os.path.basename(dirpath) == "migrations":
-                for name in sorted(filenames):
-                    if name.endswith(".py") and name != "__init__.py":
-                        entries.append((label, name[:-3]))
+    base = os.path.dirname(django_celery_beat.__file__)
+    for dirpath, _dirnames, filenames in os.walk(base):
+        if os.path.basename(dirpath) == "migrations":
+            for name in sorted(filenames):
+                if name.endswith(".py") and name != "__init__.py":
+                    entries.append(("django_celery_beat", name[:-3]))
     print("//! Baseline migration set: every Django migration at the leaf the")
     print("//! snapshot was cut at (`db/0183`, `runner/0043`; rebased for")
     print("//! `runner/0044` once NEWPIDASH-372 merges).")
