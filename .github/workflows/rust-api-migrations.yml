@@ -129,7 +129,9 @@ jobs:
           DATABASE_URL: postgresql://postgres:migration-test@localhost:5432/pidash_migration_broken
           MIGRATOR_DATABASE_URL: postgresql://postgres:migration-test@localhost:5432/pidash_migration_broken
         run: |
-          psql "$DATABASE_URL" -c "CREATE DATABASE pidash_migration_broken;"
+          # CREATE DATABASE cannot run from inside the database being created,
+          # so connect to the service (maintenance) database instead.
+          psql "postgresql://postgres:migration-test@localhost:5432/pidash_migration_ci" -c "CREATE DATABASE pidash_migration_broken;"
           # A table the snapshot also creates, with a conflicting shape.
           psql "$MIGRATOR_DATABASE_URL" -c "CREATE TABLE public.accounts (id integer PRIMARY KEY);"
           if ./rust-api/target/debug/pidash-api migrate up; then

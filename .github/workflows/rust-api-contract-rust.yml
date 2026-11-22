@@ -450,6 +450,19 @@ jobs:
             sleep 2
           done
 
+      - name: Apply Rust migrations (release migrator)
+        if: env.DJANGO_EXIT == '0'
+        working-directory: rust-api
+        run: |
+          # NEWPIDASH-380: Rust services gate startup on the read-only
+          # `migrate check` and never run DDL, so the release migrator
+          # runs first: `up` imports the Django baseline without
+          # rerunning it, then applies the Rust-only migrations on the
+          # same database the service below uses (the owner URL may
+          # carry different credentials but must target the same DB).
+          export MIGRATOR_DATABASE_URL="$DATABASE_URL"
+          ./target/debug/pidash-api migrate up
+
       - name: Start Rust server (all flags on)
         if: env.DJANGO_EXIT == '0'
         working-directory: rust-api
@@ -479,6 +492,15 @@ jobs:
       # Python-owned queue rows forward there with no consumer instead of
       # requeueing in Postgres. WEB_URL stays the Django :8000 default so
       # worker-rendered URLs match the Django run.
+      - name: Apply Rust migrations for worker suites (release migrator)
+        if: env.DJANGO_EXIT == '0'
+        working-directory: rust-api
+        run: |
+          # NEWPIDASH-380: same release-migrator gate as the serve step
+          # above; the worker below only runs the read-only check.
+          export MIGRATOR_DATABASE_URL="$DATABASE_URL"
+          ./target/debug/pidash-api migrate up
+
       - name: Start Rust worker for worker suites
         if: env.DJANGO_EXIT == '0'
         working-directory: rust-api

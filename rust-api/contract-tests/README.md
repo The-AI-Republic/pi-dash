@@ -211,6 +211,26 @@ CONTRACT_WEB_URL=http://127.0.0.1:8123 \
 .venv/bin/pytest v1_cli_auth -q
 ```
 
+## Run against Rust (DB-backed domains)
+
+NEWPIDASH-380: the Rust migrator owns the schema. `pidash-api serve`
+and `pidash-api worker` gate startup on the read-only `migrate check`
+and never run DDL, so after `manage.py migrate` above, run the release
+migrator once on the same database before starting the Rust service:
+
+```sh
+cd ../../rust-api
+export MIGRATOR_DATABASE_URL="postgresql://<user>@/pidash_contract_80?host=/tmp"
+./target/debug/pidash-api migrate up
+```
+
+`MIGRATOR_DATABASE_URL` is the owner URL (DDL credentials); it must
+target the same database as `DATABASE_URL`. On a Django-migrated
+database `up` imports the baseline from `django_migrations` without
+rerunning it, then applies the Rust-only migrations — the same step
+every `rust-api-*` contract workflow runs between its build and start
+steps.
+
 Env contract:
 
 | var                       | meaning                                                                                                                                                                                                                       |
