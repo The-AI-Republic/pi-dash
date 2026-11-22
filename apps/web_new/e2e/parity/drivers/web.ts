@@ -24800,6 +24800,67 @@ export class WebDriver implements ParityDriver {
     await expect.poll(() => this.archivesPeekParam(), { timeout: WebDriver.WAIT_MS }).toBeNull();
   }
 
+  /** The peek header `…` trigger on the archived issues tab. */
+  private archivesIssuePeekMenuTrigger() {
+    const portalTrigger = this.page
+      .locator("#full-screen-portal")
+      .locator('button:has(svg.lucide-ellipsis), button[aria-haspopup="menu"]')
+      .first();
+    const dockedTrigger = this.archivesIssuePeekDockedPanel()
+      .locator('button:has(svg.lucide-ellipsis), button[aria-haspopup="menu"]')
+      .first();
+    return { portalTrigger, dockedTrigger };
+  }
+
+  async archivesPeekQuickActionNames(): Promise<string[]> {
+    const { portalTrigger, dockedTrigger } = this.archivesIssuePeekMenuTrigger();
+    const trigger = (await portalTrigger.count()) > 0 ? portalTrigger : dockedTrigger;
+    await trigger.click({ timeout: WebDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebDriver.WAIT_MS });
+    const entries = await this.archivesRowMenuEntries();
+    await this.page.keyboard.press("Escape").catch(() => undefined);
+    return entries;
+  }
+
+  async archivesPeekChoose(entry: string): Promise<void> {
+    const { portalTrigger, dockedTrigger } = this.archivesIssuePeekMenuTrigger();
+    const trigger = (await portalTrigger.count()) > 0 ? portalTrigger : dockedTrigger;
+    await trigger.click({ timeout: WebDriver.WAIT_MS });
+    const item = this.page.getByRole("menuitem").filter({ hasText: entry }).first();
+    await item.waitFor({ timeout: WebDriver.WAIT_MS });
+    await item.click({ timeout: WebDriver.WAIT_MS });
+  }
+
+  async archivesPeekCopyLink(): Promise<void> {
+    // The archived peek header copy control is the same unnamed icon
+    // button as the live peek (header.tsx serves both; the archived
+    // header only hides subscribe and retargets the link to the archived
+    // address). Scope to whichever container holds the peek header — the
+    // portal, else the docked panel — the same split the peek menu
+    // trigger uses. The layout toggle nests an inner plain button holding
+    // the mode icon, which matches the same shape, so skip any candidate
+    // inside the listbox toggle.
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    const { portalTrigger } = this.archivesIssuePeekMenuTrigger();
+    const header =
+      (await portalTrigger.count()) > 0
+        ? this.page.locator("#full-screen-portal")
+        : this.archivesIssuePeekDockedPanel();
+    const candidates = header.locator("button:not([aria-haspopup]):has(svg:not([class*='lucide']))");
+    const count = await candidates.count();
+    for (let i = 0; i < count; i++) {
+      const candidate = candidates.nth(i);
+      const nested = await candidate
+        .evaluate((node) => node.closest('[aria-haspopup="listbox"]') !== null)
+        .catch(() => true);
+      if (!nested) {
+        await candidate.click({ timeout: WebDriver.WAIT_MS });
+        return;
+      }
+    }
+    throw new Error("[parity] no archived peek copy-link control.");
+  }
+
   async archivesDetailBannerText(): Promise<string | null> {
     // Page-wide: the detail page carries no tab strip, so the content
     // helper does not resolve there; the banner text is distinctive.

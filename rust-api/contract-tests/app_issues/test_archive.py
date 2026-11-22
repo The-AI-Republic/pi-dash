@@ -7,6 +7,7 @@ throwaways so the seed is untouched.
 
 import json
 import os
+import time
 
 from _harness.diffs import expect, is_rust
 
@@ -329,6 +330,105 @@ def test_archived_list_state_id_in_filter(clients, seed):
     assert i5 not in {row["id"] for row in resp.json()["results"]}
 
 
+def test_completed_at_preserved_without_state_change(clients, seed, db_conn):
+    """NEWPIDASH-351 (DIFF-62, PB-0306, PB-0286): archiving, unarchiving,
+    PATCHing an unrelated field of, and soft-deleting a completed issue
+    must not rewrite its ``completed_at`` stamp.
+
+    Django's ``Issue.save()`` restamps ``completed_at`` from the state
+    group on every save, so each leg below visibly moves the stamp; the
+    Rust save stamps only on transitions into ``completed`` and preserves
+    the original stamp here.
+    """
+    admin = clients["admin"]
+    ws, pid, done = seed["ws_slug"], seed["project"], seed["state_done"]
+    made = []
+    try:
+        for name in ("DIFF-62 archive probe", "DIFF-62 patch probe",
+                     "DIFF-62 delete probe"):
+            row = admin.post(
+                f"{_base(ws, pid)}/issues/", json={"name": name}).json()
+            assert admin.patch(
+                f"{_base(ws, pid)}/issues/{row['id']}/",
+                json={"state_id": done}).status_code == 204
+            made.append(row["id"])
+        aid, bid, did = made
+        before_a = admin.get(
+            f"{_base(ws, pid)}/issues/{aid}/").json()["completed_at"]
+        before_b = admin.get(
+            f"{_base(ws, pid)}/issues/{bid}/").json()["completed_at"]
+        assert before_a is not None and before_b is not None
+        time.sleep(1.2)
+        # Archive leg (PB-0306).
+        assert admin.post(
+            f"{_base(ws, pid)}/issues/{aid}/archive/").status_code == 200
+        after_archive = admin.get(
+            f"{_base(ws, pid)}/issues/{aid}/archive/").json()["completed_at"]
+        assert (after_archive != before_a) == expect(
+            "DIFF-62", django=True, rust=False)
+        # Unarchive leg (PB-0306).
+        assert admin.request(
+            "DELETE",
+            f"{_base(ws, pid)}/issues/{aid}/archive/").status_code == 204
+        after_unarchive = admin.get(
+            f"{_base(ws, pid)}/issues/{aid}/").json()["completed_at"]
+        assert (after_unarchive != before_a) == expect(
+            "DIFF-62", django=True, rust=False)
+        # Unrelated PATCH leg (PB-0286).
+        assert admin.patch(
+            f"{_base(ws, pid)}/issues/{bid}/",
+            json={"priority": "high"}).status_code == 204
+        after_patch = admin.get(
+            f"{_base(ws, pid)}/issues/{bid}/").json()["completed_at"]
+        assert (after_patch != before_b) == expect(
+            "DIFF-62", django=True, rust=False)
+        # Soft-delete leg: the destroy save preserves the stamp too.
+        from datetime import datetime
+        before_d = admin.get(
+            f"{_base(ws, pid)}/issues/{did}/").json()["completed_at"]
+        assert admin.delete(
+            f"{_base(ws, pid)}/issues/{did}/").status_code == 204
+        with db_conn.cursor() as cur:
+            cur.execute("SELECT completed_at FROM issues WHERE id = %s",
+                        (did,))
+            after_delete = cur.fetchone()[0]
+        assert (after_delete != datetime.fromisoformat(before_d)) == expect(
+            "DIFF-62", django=True, rust=False)
+    finally:
+        for iid in made:
+            admin.request("DELETE", f"{_base(ws, pid)}/issues/{iid}/archive/")
+            admin.delete(f"{_base(ws, pid)}/issues/{iid}/")
+
+
+def test_completed_at_transitions_with_state_group(clients, seed):
+    """NEWPIDASH-351 (DIFF-62): moving into a completed-group state stamps
+    ``completed_at`` and moving back out clears it — on both backends.
+    """
+    admin = clients["admin"]
+    ws, pid = seed["ws_slug"], seed["project"]
+    backlog, done = seed["state_backlog"], seed["state_done"]
+    made = admin.post(
+        f"{_base(ws, pid)}/issues/",
+        json={"name": "DIFF-62 transition probe"}).json()
+    iid = made["id"]
+    try:
+        assert admin.get(
+            f"{_base(ws, pid)}/issues/{iid}/").json()["completed_at"] is None
+        assert admin.patch(
+            f"{_base(ws, pid)}/issues/{iid}/",
+            json={"state_id": done}).status_code == 204
+        stamped = admin.get(
+            f"{_base(ws, pid)}/issues/{iid}/").json()["completed_at"]
+        assert stamped is not None
+        assert admin.patch(
+            f"{_base(ws, pid)}/issues/{iid}/",
+            json={"state_id": backlog}).status_code == 204
+        assert admin.get(
+            f"{_base(ws, pid)}/issues/{iid}/").json()["completed_at"] is None
+    finally:
+        admin.delete(f"{_base(ws, pid)}/issues/{iid}/")
+
+
 def test_archived_grouped_rows_match_ungrouped_shape(clients, seed):
     # PIDASHCONV-1510: Django renders grouped rows through the same
     # issue_on_results dicts as the flat list: sort_order is a JSON
@@ -500,7 +600,7 @@ def test_archived_grouped_state_totals_count_archived_rows(clients, seed):
 
 
 def test_bulk_archive_rejected_enqueues_no_archive_activity(clients, seed, db_conn):
-    # NEWPIDASH-352 (DIFF-59, old bug fix, PB-0302): bulk-archive used to
+    # NEWPIDASH-352 (DIFF-64, old bug fix, PB-0302): bulk-archive used to
     # enqueue the "archived" activity per valid issue and only then hit
     # the 400 on the first open-state row, leaving false archive history
     # with nothing archived. The fix validates every row first, then
@@ -514,11 +614,11 @@ def test_bulk_archive_rejected_enqueues_no_archive_activity(clients, seed, db_co
     admin = clients["admin"]
     ws, pid, done = seed["ws_slug"], seed["project"], seed["state_done"]
     first = admin.post(
-        f"{_base(ws, pid)}/issues/", json={"name": "DIFF-59 open issue"})
+        f"{_base(ws, pid)}/issues/", json={"name": "DIFF-64 open issue"})
     assert first.status_code == 201, first.text
     open_id = first.json()["id"]
     second = admin.post(
-        f"{_base(ws, pid)}/issues/", json={"name": "DIFF-59 done issue"})
+        f"{_base(ws, pid)}/issues/", json={"name": "DIFF-64 done issue"})
     assert second.status_code == 201, second.text
     done_id = second.json()["id"]
     try:
@@ -545,7 +645,7 @@ def test_bulk_archive_rejected_enqueues_no_archive_activity(clients, seed, db_co
             assert {str(row[0]) for row in cur.fetchall()} == {done_id, open_id}
         acts = _archived_activity_kwargs(db_conn, baseline, seed["admin"])
         assert [act["issue_id"] for act in acts] == expect(
-            "DIFF-59", django=[done_id], rust=[])
+            "DIFF-64", django=[done_id], rust=[])
     finally:
         _drain_broker()
         admin.delete(f"{_base(ws, pid)}/issues/{done_id}/")

@@ -73,14 +73,15 @@
         "work_kind_coding": "coding"
       },
       "local_recipe_lengths": {
-        "coding-task": 13,
-        "review": 8,
-        "test": 8,
-        "scheduler": 6
+        "coding-task": 14,
+        "review": 10,
+        "test": 10,
+        "scheduler": 7
       },
       "local_recipes": {
         "coding-task": [
-          "intro",
+          "this-run",
+                    "intro",
           {
             "slot": "context"
           },
@@ -99,13 +100,15 @@
           "blocking"
         ],
         "review": [
-          "review-intro",
+          "this-run",
+                    "review-intro",
           {
             "slot": "context"
           },
           "run-framing",
           "pidash-cli",
           "lifecycle",
+          "workpad",
           "review",
           {
             "slot": "review"
@@ -113,13 +116,15 @@
           "blocking"
         ],
         "test": [
-          "test-intro",
+          "this-run",
+                    "test-intro",
           {
             "slot": "context"
           },
           "run-framing",
           "pidash-cli",
           "lifecycle",
+          "workpad",
           "test",
           {
             "slot": "test"
@@ -127,7 +132,8 @@
           "blocking"
         ],
         "scheduler": [
-          "scheduler-intro",
+          "this-run",
+                    "scheduler-intro",
           "session-framing",
           "pidash-cli",
           "scheduler-task",
@@ -150,6 +156,7 @@
         "expanded": {
           "coding-task": {
             "general": [
+              "this-run",
               "intro",
               "relationships",
               "run-framing",
@@ -164,6 +171,7 @@
               "blocking"
             ],
             "software": [
+              "this-run",
               "intro",
               "software.context",
               "relationships",
@@ -181,20 +189,24 @@
           },
           "review": {
             "general": [
+              "this-run",
               "review-intro",
               "run-framing",
               "pidash-cli",
               "lifecycle",
+              "workpad",
               "review",
               "general.review",
               "blocking"
             ],
             "software": [
+              "this-run",
               "review-intro",
               "software.context",
               "run-framing",
               "pidash-cli",
               "lifecycle",
+              "workpad",
               "review",
               "software.review",
               "blocking"
@@ -202,6 +214,7 @@
           },
           "scheduler": {
             "general": [
+              "this-run",
               "scheduler-intro",
               "session-framing",
               "pidash-cli",
@@ -210,6 +223,7 @@
               "scheduler-ending"
             ],
             "software": [
+              "this-run",
               "scheduler-intro",
               "session-framing",
               "pidash-cli",
@@ -220,20 +234,24 @@
           },
           "test": {
             "general": [
+              "this-run",
               "test-intro",
               "run-framing",
               "pidash-cli",
               "lifecycle",
+              "workpad",
               "test",
               "general.test",
               "blocking"
             ],
             "software": [
+              "this-run",
               "test-intro",
               "software.context",
               "run-framing",
               "pidash-cli",
               "lifecycle",
+              "workpad",
               "test",
               "software.test",
               "blocking"

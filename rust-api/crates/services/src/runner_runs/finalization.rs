@@ -60,20 +60,6 @@ pub const TERMINAL_EFFECTS_TASK: &str = "runner.apply_agent_run_terminal_effects
 /// (`agent_run_finalization.py:27`, `3869a226`), in tuple order.
 pub const YIELD_KEYS: [&str; 4] = ["status", "note", "yielded_at", "stop_ticking"];
 
-/// `done_payload` keys `pidash run finish` stores (Rust-only, no Django
-/// counterpart): the In Progress hand-off. The runner's COMPLETED frame
-/// replaces `done_payload` wholesale, and the pause frame merges over
-/// it — both go through [`merge_done_payload`] — so without this list
-/// the stored hand-off is lost when the run ends and the review/test
-/// entry run finds nothing (NEWPIDASH-338 item 1). Kept as a separate
-/// Rust-only list: `YIELD_KEYS` is pinned by the Django parity fixture
-/// and keeps its ported meaning. Since item 6 the finish retry guard
-/// lives in the comment operation's external id, so no comment keys are
-/// stored anymore — only the hand-off needs keeping. The literal must
-/// match the api crate's `STAGE_HANDOFF_KEY` — services cannot import
-/// the api crate, so the pin test below holds the coupling.
-pub const FINISH_KEPT_KEYS: [&str; 1] = ["stage_handoff"];
-
 /// `runner` columns in Django `_meta` order (captured from
 /// `Runner._meta.concrete_fields`, plus the `09738d222` pause pair):
 /// the capacity re-read joins the full row. Canonical home is the
@@ -124,11 +110,10 @@ pub enum FinalizeError {
 /// incoming payload wins wholesale unless the stored one yielded
 /// (`yielded_at` set) and the incoming one carries no `status` of its
 /// own — then the stored yield keys survive onto a copy of the
-/// incoming payload (or onto `{}` for a non-dict incoming), along with
-/// the Rust-only [`FINISH_KEPT_KEYS`] a `finish` stored (the hand-off).
-/// A present `status`, even null, suppresses
-/// the merge. Django never writes the finish keys, so parity is
-/// unaffected.
+/// incoming payload (or onto `{}` for a non-dict incoming). A present
+/// `status`, even null, suppresses the merge. `finish` stores no keys of
+/// its own since the unified workpad (`.ai_design/unified_workpad/
+/// design.md` U2), so nothing beyond the yield keys is kept.
 pub fn merge_done_payload(existing: &Value, incoming: &Value) -> Value {
     let yielded = existing
         .as_object()
@@ -141,7 +126,7 @@ pub fn merge_done_payload(existing: &Value, incoming: &Value) -> Value {
     let mut merged = incoming.as_object().cloned().unwrap_or_default();
     if !merged.contains_key("status") {
         if let Some(stored) = existing.as_object() {
-            for key in YIELD_KEYS.iter().chain(FINISH_KEPT_KEYS.iter()) {
+            for key in YIELD_KEYS.iter() {
                 if let Some(value) = stored.get(*key) {
                     merged.insert((*key).to_owned(), value.clone());
                 }
@@ -1187,12 +1172,11 @@ mod tests {
     }
 
     #[test]
-    fn merge_done_payload_keeps_finish_keys_through_completion() {
-        // NEWPIDASH-338 item 1: `finish` stores the hand-off and its
-        // retry-guard keys, then the runner's COMPLETED frame (no
-        // `status` of its own) replaces `done_payload`. The finish keys
-        // must survive the merge, or the review/test entry run finds no
-        // hand-off.
+    fn merge_done_payload_keeps_no_hand_off_through_completion() {
+        // `finish` writes the yield keys; the runner's COMPLETED frame (no
+        // `status` of its own) then replaces `done_payload`. The yield keys
+        // survive; an old row's `stage_handoff` does not, since nothing
+        // reads it since the unified workpad.
         let stored = json!({
             "status": "done",
             "yielded_at": "2026-11-19T00:00:00Z",
@@ -1200,24 +1184,12 @@ mod tests {
             "stage_handoff": "### Hand-off\n**Produced:** the PR.",
         });
         let merged = merge_done_payload(&stored, &json!({}));
-        for key in FINISH_KEPT_KEYS {
-            assert_eq!(merged.get(key), stored.get(key), "keeps {key}");
-        }
         assert_eq!(merged["status"], json!("done"));
+        assert_eq!(merged["note"], json!("moved to review"));
+        assert!(merged.get("stage_handoff").is_none(), "{merged}");
         // An incoming `status` still suppresses the merge wholesale.
         let suppressed = merge_done_payload(&stored, &json!({"status": "x"}));
         assert_eq!(suppressed, json!({"status": "x"}));
-    }
-
-    #[test]
-    fn finish_kept_keys_match_the_finish_endpoint() {
-        // The literal must stay identical to the api crate's
-        // `STAGE_HANDOFF_KEY` in `v1_work_items/handlers_finish.rs`;
-        // services cannot import the api crate, so this pins the
-        // coupling. (Since item 6 the retry guard lives in the comment
-        // operation's external id, so the hand-off is the only kept
-        // finish key.)
-        assert_eq!(FINISH_KEPT_KEYS, ["stage_handoff"]);
     }
 
     // ------------------------------------------------------------------

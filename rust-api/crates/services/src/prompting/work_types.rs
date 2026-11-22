@@ -350,7 +350,10 @@ mod tests {
     fn expand_fills_slots_per_work_type() {
         let recipe = recipes::recipe_for(recipes::KIND_CODING_TASK, None).expect("recipe");
         let software = expand(recipe, "software").expect("expands");
-        assert_eq!(software[1], "software.context");
+        // `this-run` opens every recipe (NEWPIDASH-325), so the context
+        // slot fill moved from index 1 to index 2.
+        assert_eq!(software[0], "this-run");
+        assert_eq!(software[2], "software.context");
         assert!(software.contains(&"software.execute"));
         let general = expand(recipe, "general").expect("expands");
         // No context slot for general: the entry is dropped, not left empty.

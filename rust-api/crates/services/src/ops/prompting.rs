@@ -340,7 +340,8 @@ mod tests {
 
     /// A section key the embedded registry really carries that is also
     /// usable in a recipe (unlocked, and referenced by at least one kind
-    /// so validation does not fail closed on the no-recipe rule).
+    /// so validation does not fail closed on the no-recipe rule), and
+    /// whose override is not flagged for dropping a required step.
     fn known_key() -> String {
         use crate::prompting::{registry, validation};
         let sections = registry::all_sections();
@@ -349,7 +350,9 @@ mod tests {
             .find(|s| {
                 !s.is_locked()
                     && !validation::kinds_for_section(s.key).is_empty()
-                    && !seed::LEAN_WORKFLOW_REWRITTEN_KEYS.contains(&s.key)
+                    && !seed::LEAN_WORKFLOW_REQUIRED_STEPS
+                        .iter()
+                        .any(|(key, _)| *key == s.key)
             })
             .expect("registry carries a usable section");
         section.key.to_owned()
@@ -410,9 +413,9 @@ mod tests {
     #[test]
     fn rewritten_section_overrides_flag_for_review() {
         let old = "When done, run `pidash run yield --outcome done --stop-ticking`.";
-        // Up to date: no retired wording, and keeps the hand-off step that
+        // Up to date: no retired wording, and keeps the workpad step that
         // only `implementation` carries.
-        let rewritten = "Plain text with no Jinja. Write the hand-off.";
+        let rewritten = "Plain text with no Jinja. Note it in the workpad's Keep in mind.";
         for key in seed::LEAN_WORKFLOW_REWRITTEN_KEYS {
             let plan = plan_revalidate(&[active_override(key, old)], false);
             assert_eq!(plan.steps[0].action, seed::RevalidateAction::Flag, "{key}");
@@ -442,12 +445,16 @@ mod tests {
         }
         let plan = plan_revalidate(&[active_override("review", rewritten)], false);
         assert_eq!(plan.steps[0].action, seed::RevalidateAction::Keep);
+        // An override still teaching the removed hand-off is flagged.
+        let handoff = "Write the hand-off and pass it with --handoff-file.";
+        let plan = plan_revalidate(&[active_override("review", handoff)], false);
+        assert_eq!(plan.steps[0].action, seed::RevalidateAction::Flag);
     }
 
     /// An `implementation` override with its own guidelines and none of
-    /// the retired wording still drops the hand-off step, so it is flagged.
+    /// the retired wording still drops the workpad step, so it is flagged.
     #[test]
-    fn implementation_override_without_the_hand_off_is_flagged() {
+    fn implementation_override_without_the_workpad_note_is_flagged() {
         let custom = "Follow our team guidelines: small steps, checks first.";
         let plan = plan_revalidate(&[active_override("implementation", custom)], false);
         assert_eq!(plan.steps[0].action, seed::RevalidateAction::Flag);

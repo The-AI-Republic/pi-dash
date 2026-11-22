@@ -1703,6 +1703,11 @@ pub fn workpad_select(issue_id: Uuid, project_id: Uuid, slug: &str) -> SelectSta
         .column((issues::Entity, issues::Column::DescriptionHtml))
         .column((issues::Entity, issues::Column::StateId))
         .column((issues::Entity, issues::Column::CompletedAt))
+        // The current workpad body for the stale-write guard: read under
+        // the same `FOR UPDATE` lock as the write below (NEWPIDASH-320
+        // §6.1). `updated_at` is the issue row's stamp — the agent's own
+        // state moves change it — so the guard hashes the body instead.
+        .column((issues::Entity, issues::Column::Workpad))
         .expr_as(state_group.clone(), Alias::new("state_group"))
         .from(issues::Entity)
         .left_join(
@@ -1748,6 +1753,25 @@ pub struct SetWorkpad {
     pub slug: String,
     pub workpad: String,
     pub updated_at: DateTime<Utc>,
+    /// Stale-write guard (NEWPIDASH-320 §6.1): when `Some`, the locked
+    /// read's body hash must match, else the write declines with
+    /// [`STALE_WORKPAD_PREFIX`] + the current hash. `None` (old CLI)
+    /// writes unconditionally, as today.
+    pub if_body_sha256: Option<String>,
+}
+
+/// [`DomainError::Work`] payload prefix for a declined stale workpad
+/// write: the remainder is the locked row's current body SHA-256 hex, so
+/// the driver can echo it in the 412 without re-reading.
+pub const STALE_WORKPAD_PREFIX: &str = "stale_workpad:";
+
+/// The current body hash from a [`STALE_WORKPAD_PREFIX`] decline, if
+/// `error` is one.
+pub fn stale_workpad_sha(error: &DomainError) -> Option<&str> {
+    match error {
+        DomainError::Work(message) => message.strip_prefix(STALE_WORKPAD_PREFIX),
+        _ => None,
+    }
 }
 
 /// `PATCH .../issues/<pk>/workpad/` (`api/views/issue.py:3287-3320`): the
@@ -1774,15 +1798,28 @@ pub async fn set_workpad(
         )))
         .await?
         .ok_or_else(|| DomainError::Db(DbErr::RecordNotFound("workpad issue".to_owned())))?;
+    // Stale-write guard (NEWPIDASH-320 §6.1): the row is locked, so this
+    // read is the write's own snapshot — no re-read, no race.
+    if let Some(expected) = input.if_body_sha256.as_deref() {
+        let current_body: String = row.try_get("", "workpad")?;
+        let current = crate::orchestration::creation::workpad_sha256(&current_body);
+        if current != expected {
+            return Err(DomainError::Work(format!(
+                "{STALE_WORKPAD_PREFIX}{current}"
+            )));
+        }
+    }
     let description_html: String = row.try_get("", "description_html")?;
     let prev_state: Option<Uuid> = row.try_get("", "state_id")?;
     let completed_at: Option<sea_orm::prelude::DateTimeWithTimeZone> =
         row.try_get("", "completed_at")?;
     // The sparse save: only the workpad, audit and hook recomputes move —
     // current values ride `Unchanged` for the hook reads (the archive
-    // shape). Hook-`Set` fields join the `UPDATE`, so `completed_at` /
+    // shape). Hook-`Set` fields join the `UPDATE`, so
     // `description_stripped` (and the default state on the NULL leg) land
-    // exactly the ported columns.
+    // exactly the ported columns; `completed_at` stays `Unchanged`
+    // (DIFF-62: a workpad write never changes state, so the stamp is
+    // preserved).
     let model = issues::ActiveModel {
         id: sea_orm::Unchanged(input.issue_id),
         project_id: sea_orm::Unchanged(input.project_id),
@@ -3170,9 +3207,10 @@ async fn archive_driver(
         .await;
     // The sparse save: only the archived flag, audit and hook recomputes
     // are `Set` — current values ride `Unchanged` for the hook reads.
-    // Hook-`Set` fields join the `UPDATE`, so `completed_at` /
-    // `description_stripped` (and the default state on the NULL leg) land
-    // exactly the ported columns.
+    // Hook-`Set` fields join the `UPDATE`, so `description_stripped`
+    // (and the default state on the NULL leg) land exactly the ported
+    // columns; `completed_at` stays `Unchanged` (DIFF-62: archiving never
+    // changes state, so the stamp is preserved).
     let am = issues::ActiveModel {
         id: sea_orm::Unchanged(issue_id),
         project_id: sea_orm::Unchanged(project_id),
@@ -3232,7 +3270,7 @@ pub struct BulkArchiveRow {
 /// validates every row's state group first, runs the single
 /// `bulk_update(["archived_at"])`, and only then enqueues each row's
 /// `issue_activity` — no `save()`, no recomputes, no fire.
-/// Pool-based (autocommit), like the port. DIFF-59 (old bug fix,
+/// Pool-based (autocommit), like the port. DIFF-64 (old bug fix,
 /// NEWPIDASH-352, PB-0302): the old system enqueues inside the
 /// per-row loop, so a later row's gate failure 400s with the earlier
 /// rows' tasks already enqueued; the port no longer does that.
@@ -3865,7 +3903,7 @@ mod tests {
         assert_eq!(
             render(DbBackend::Postgres.build(&workpad_select(uid(1), uid(2), "ws"))),
             format!(
-                r#"SELECT "issues"."description_html", "issues"."state_id", "issues"."completed_at", "states"."group" AS "state_group" FROM "issues" LEFT JOIN "states" ON "issues"."state_id" = "states"."id" INNER JOIN "projects" ON "issues"."project_id" = "projects"."id" INNER JOIN "workspaces" ON "issues"."workspace_id" = "workspaces"."id" WHERE "issues"."deleted_at" IS NULL AND (NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL)) AND "issues"."archived_at" IS NULL AND "projects"."archived_at" IS NULL AND (NOT "issues"."is_draft") AND "issues"."id" = '{}' AND "issues"."project_id" = '{}' AND "workspaces"."slug" = 'ws' LIMIT 21 FOR UPDATE OF "issues""#,
+                r#"SELECT "issues"."description_html", "issues"."state_id", "issues"."completed_at", "issues"."workpad", "states"."group" AS "state_group" FROM "issues" LEFT JOIN "states" ON "issues"."state_id" = "states"."id" INNER JOIN "projects" ON "issues"."project_id" = "projects"."id" INNER JOIN "workspaces" ON "issues"."workspace_id" = "workspaces"."id" WHERE "issues"."deleted_at" IS NULL AND (NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL)) AND "issues"."archived_at" IS NULL AND "projects"."archived_at" IS NULL AND (NOT "issues"."is_draft") AND "issues"."id" = '{}' AND "issues"."project_id" = '{}' AND "workspaces"."slug" = 'ws' LIMIT 21 FOR UPDATE OF "issues""#,
                 uid(1),
                 uid(2)
             )
@@ -5175,6 +5213,7 @@ mod tests {
                                 slug,
                                 workpad,
                                 updated_at: stamp,
+                                if_body_sha256: None,
                             },
                         )
                         .await

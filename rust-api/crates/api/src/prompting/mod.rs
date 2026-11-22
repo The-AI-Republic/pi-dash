@@ -2180,15 +2180,10 @@ async fn load_issue_context(
     // `_FakeRun` (`views.py:65-72`): a fresh id, so the stage history
     // excludes nothing.
     let preview_run_id = uuid::Uuid::new_v4();
-    let stages = creation::load_stage_inputs(
-        &orm(pool),
-        issue.project_id,
-        issue.id,
-        preview_run_id,
-        &template_name_for(state.as_ref()),
-    )
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let stages =
+        creation::load_stage_inputs(&orm(pool), issue.project_id, issue.id, preview_run_id)
+            .await
+            .map_err(|_| Denial::ServerError)?;
 
     let input = context::IssueContextInput {
         issue_id: issue.id.to_string(),
@@ -2220,6 +2215,7 @@ async fn load_issue_context(
         // `_FakeRun` (`views.py:65-72`): a fresh id with no trigger,
         // `local_runner` executor, and an empty tool plan.
         run_id: preview_run_id.to_string(),
+        rendered_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         run_template_name: template_name_for(state.as_ref()),
         attempt: context::compute_attempt(prior_runs),
         trigger: None,
@@ -2230,14 +2226,10 @@ async fn load_issue_context(
         extra_toolsets_schema_tool: String::new(),
         limits: Value::Null,
         tick,
-        comments_section: context::comments_section(
-            &comments,
-            stages.handoff.as_deref().unwrap_or_default(),
-        ),
+        comments_section: context::comments_section(&comments),
         parent_done_payload,
         workpad_body: issue.workpad.clone().unwrap_or_default(),
         agent_stages: stages.agent_stages,
-        handoff: stages.handoff.unwrap_or_default(),
         stage_history: context::stage_history(&stages.stage_history),
     };
     let mut context_value = context::build_context(&input);
@@ -3227,6 +3219,7 @@ async fn load_scheduler_context(
         scheduler_description,
         // `_FakeRun`: fresh id, `local_runner` executor, empty tool plan.
         run_id: uuid::Uuid::new_v4().to_string(),
+        rendered_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         executor_kind: "local_runner".to_owned(),
         available_tools: Value::Null,
         unavailable_capabilities: Value::Null,

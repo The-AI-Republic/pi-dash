@@ -4828,6 +4828,12 @@ export interface ParityDriver {
   archivesPeekVisible(): Promise<boolean>;
   /** Close the open peek panel. */
   archivesPeekClose(): Promise<void>;
+  /** Names of the open peek `…` menu entries on the archived issues tab. */
+  archivesPeekQuickActionNames(): Promise<string[]>;
+  /** Click the archived peek menu entry whose label contains `entry`. */
+  archivesPeekChoose(entry: string): Promise<void>;
+  /** Click the archived peek header copy control (both editions copy the archived address). */
+  archivesPeekCopyLink(): Promise<void>;
   /** Archived-detail banner text, or null when no banner shows. */
   archivesDetailBannerText(): Promise<string | null>;
   /** Whether a loading skeleton shows in the archives content. */

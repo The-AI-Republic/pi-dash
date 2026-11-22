@@ -546,25 +546,11 @@ pub struct CommentView {
 /// plus body, blank-line separated. Empty-after-strip bodies are skipped
 /// without consuming a number.
 ///
-/// When the stored hand-off is inlined above the section (review/test
-/// prompts), the hand-off comment itself is dropped from the section so
-/// the text renders once (NEWPIDASH-338 item 9): a comment whose stripped
-/// body equals the stripped hand-off — the same strip pipeline the write
-/// path stores (`strip_comment_html` over `to_safe_html`) — is skipped
-/// without consuming a number. An empty hand-off disables the filter.
-pub fn comments_section(comments: &[CommentView], handoff: &str) -> String {
-    let handoff_stripped = if python_strip(handoff).is_empty() {
-        String::new()
-    } else {
-        strip_handoff(handoff)
-    };
+pub fn comments_section(comments: &[CommentView]) -> String {
     let mut parts = Vec::new();
     for comment in comments {
         let body = python_strip(&comment.body);
         if body.is_empty() {
-            continue;
-        }
-        if !handoff_stripped.is_empty() && body == handoff_stripped {
             continue;
         }
         let author = comment_author_label(
@@ -586,23 +572,6 @@ pub fn comments_section(comments: &[CommentView], handoff: &str) -> String {
         return NO_COMMENTS_TEXT.to_owned();
     }
     parts.join("\n\n")
-}
-
-/// The hand-off markdown as its posted comment reads in the section: the
-/// same strip pipeline the write path stores (`strip_comment_html` over
-/// `to_safe_html`), plus the section's own edge trim — the section
-/// compares against the comment body after `python_strip`, so the
-/// hand-off side is trimmed the same way. Without this, edge whitespace
-/// the strip leaves (e.g. a trailing no-break space surviving the
-/// markdown round-trip) silently disables the match and the hand-off
-/// renders twice.
-pub(crate) fn strip_handoff(handoff: &str) -> String {
-    let html = crate::assistant::markdown::to_safe_html(Some(handoff));
-    if html.is_empty() {
-        String::new()
-    } else {
-        python_strip(&pidash_db::app_pages::strip::ml_strip_tags(&html)).to_owned()
-    }
 }
 
 /// Render an interval for prose (`context.py:332-338`): whole hours stay
@@ -997,6 +966,10 @@ pub struct IssueContextInput {
     /// The five keys of [`relations_context`] (spread into the top level).
     pub relations: Value,
     pub run_id: String,
+    /// UTC RFC 3339 instant the prompt is built (NEWPIDASH-325 §6.2): the
+    /// freshness anchor the prompt quotes back as `run.rendered_at`, so the
+    /// agent's `comment list --since` re-check costs a few lines.
+    pub rendered_at: String,
     /// Phase template name; mapped via [`issue_run_kind`].
     pub run_template_name: String,
     pub attempt: i64,
@@ -1018,9 +991,6 @@ pub struct IssueContextInput {
     /// The project's `settings.agent_stages`, resolved (missing key =
     /// Auto). Feeds the `stages` context value ([`stages_context`]).
     pub agent_stages: AgentStages,
-    /// `done_payload.stage_handoff` of the latest `coding-task` run on the
-    /// issue that stored one; empty when none.
-    pub handoff: String,
     /// The pre-rendered run history ([`stage_history`]); empty when none.
     pub stage_history: String,
 }
@@ -1125,6 +1095,7 @@ pub fn build_context(input: &IssueContextInput) -> Value {
             "turn_number": 1,
             "trigger": input.trigger.clone().map(Value::String).unwrap_or(Value::Null),
             "executor_kind": input.executor_kind,
+            "rendered_at": input.rendered_at,
         },
         "available_tools": null_or(&input.available_tools, Value::Array(vec![])),
         "unavailable_capabilities": null_or(&input.unavailable_capabilities, Value::Array(vec![])),
@@ -1139,7 +1110,11 @@ pub fn build_context(input: &IssueContextInput) -> Value {
             input.state_name.as_deref(),
             input.state_group.as_deref(),
         ),
-        "handoff": input.handoff,
+        // The stage hand-off was removed (`.ai_design/unified_workpad/
+        // design.md` U2). The key stays, always empty, until the cleanup
+        // step: rendering is strict-undefined, so an override that still
+        // names `handoff` must keep rendering.
+        "handoff": "",
         "stage_history": input.stage_history,
     });
     for (key, value) in [
@@ -1361,6 +1336,9 @@ pub struct SchedulerContextInput {
     pub scheduler_name: String,
     pub scheduler_description: Option<String>,
     pub run_id: String,
+    /// UTC RFC 3339 instant the prompt is built (NEWPIDASH-325 §6.2); see
+    /// [`IssueContextInput::rendered_at`].
+    pub rendered_at: String,
     pub executor_kind: String,
     pub available_tools: Value,
     pub unavailable_capabilities: Value,
@@ -1403,6 +1381,7 @@ pub fn build_scheduler_context(input: &SchedulerContextInput) -> Value {
             "attempt": 1,
             "turn_number": 1,
             "executor_kind": input.executor_kind,
+            "rendered_at": input.rendered_at,
         },
         "available_tools": null_or(&input.available_tools, Value::Array(vec![])),
         "unavailable_capabilities": null_or(&input.unavailable_capabilities, Value::Array(vec![])),
@@ -1914,6 +1893,7 @@ mod tests {
             related: Value::Array(vec![]),
             relations: relations_context(&by_type),
             run_id: "run-1".to_owned(),
+            rendered_at: "2026-01-01T00:00:00Z".to_owned(),
             run_template_name: "coding-task".to_owned(),
             attempt: 1,
             trigger: Some("tick".to_owned()),
@@ -1928,7 +1908,6 @@ mod tests {
             parent_done_payload: NO_PARENT_PAYLOAD_TEXT.to_owned(),
             workpad_body: String::new(),
             agent_stages: AgentStages::default(),
-            handoff: String::new(),
             stage_history: String::new(),
         }
     }
@@ -2224,7 +2203,7 @@ mod tests {
 
     #[test]
     fn comments_section_numbers_visible_only() {
-        assert_eq!(comments_section(&[], ""), NO_COMMENTS_TEXT.to_owned());
+        assert_eq!(comments_section(&[]), NO_COMMENTS_TEXT.to_owned());
         let comments = vec![
             CommentView {
                 body: "   ".to_owned(),
@@ -2243,58 +2222,10 @@ mod tests {
                 run_id: Some("run-9".to_owned()),
             },
         ];
-        let section = comments_section(&comments, "");
+        let section = comments_section(&comments);
         // The blank body is skipped without consuming a number.
         assert!(section.starts_with("### Comment 1 — Human: a@b.c at "));
         assert!(section.contains("\nAgent run: run-9\n\nhello"));
-    }
-
-    #[test]
-    fn comments_section_drops_the_inlined_hand_off_comment() {
-        // NEWPIDASH-338 item 9: the stored hand-off is inlined above the
-        // section, so its posted comment renders once. The match runs
-        // through the write path's strip pipeline, so an unchanged
-        // hand-off comment matches exactly.
-        let handoff = "### Hand-off\n\n**Produced:** the sample.";
-        let stripped = strip_handoff(handoff);
-        assert!(!stripped.is_empty());
-        let comment = |body: &str| CommentView {
-            body: body.to_owned(),
-            speaker_type: "agent".to_owned(),
-            speaker_label: Some("AI Agent".to_owned()),
-            actor: None,
-            created_at_iso: Some("2026-01-01T00:00:00+00:00".to_owned()),
-            run_id: Some("run-1".to_owned()),
-        };
-        let section = comments_section(
-            &[comment(&stripped), comment("unrelated findings")],
-            handoff,
-        );
-        // The hand-off comment is skipped without consuming a number;
-        // the other comment keeps number 1.
-        assert!(section.starts_with("### Comment 1 — "));
-        assert!(section.contains("unrelated findings"));
-        assert!(!section.contains("Comment 2"), "{section}");
-        // No hand-off: nothing is filtered.
-        let section = comments_section(&[comment(&stripped)], "");
-        assert!(section.contains("### Comment 1 — "));
-        // A hand-off that matches no comment changes nothing.
-        let section = comments_section(&[comment("other work")], handoff);
-        assert!(section.contains("other work"));
-        // Edge whitespace the strip leaves must not silently disable
-        // the match: a trailing no-break space survives the markdown
-        // round-trip into the stored stripped text, while the section
-        // compares after its own trim — so the hand-off side is trimmed
-        // the same way.
-        let padded = "### Hand-off\n\n**Produced:** the sample.\u{a0}";
-        let trimmed = strip_handoff(padded);
-        assert!(trimmed.ends_with("sample."), "{trimmed:?}");
-        // The write path stores the strip raw (edge whitespace kept);
-        // the section compares after its own trim.
-        let stored = format!("{trimmed}\u{a0}");
-        let section = comments_section(&[comment(&stored), comment("unrelated")], padded);
-        assert!(!section.contains("Comment 2"), "{section}");
-        assert!(section.contains("unrelated"));
     }
 
     // -- scheduler ---------------------------------------------------------
@@ -2311,6 +2242,7 @@ mod tests {
             scheduler_name: "Security Audit".to_owned(),
             scheduler_description: Some("Scans.".to_owned()),
             run_id: "run-1".to_owned(),
+            rendered_at: "2026-01-01T00:00:00Z".to_owned(),
             executor_kind: "local_runner".to_owned(),
             available_tools: Value::Array(vec![]),
             unavailable_capabilities: Value::Array(vec![]),

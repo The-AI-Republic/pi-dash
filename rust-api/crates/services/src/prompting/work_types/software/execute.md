@@ -5,87 +5,24 @@ customizable: overridable
 ---
 ## Software delivery workflow (work type: software)
 
-This issue's work type is **software**: when a task changes the project's product, the deliverable is a set of file changes in the repository named in "Repository context", published on a branch and recorded as an open {{ repo.code_review_term }} attached to the issue. The neutral steps around this section say *when* to analyze, execute, and deliver; this section says *how* delivery works for software.
+A task that changes files in the repository is delivered as a branch and a {{ repo.code_review_term }} attached to the issue. A task that changes no files (an answer, an investigation, a CLI action) skips this section: no branch, no commit, no {{ repo.code_review_term }}.
 
-### Classify the task first (during "Analyze & scope")
+Project conventions: `CLAUDE.md` and `AGENTS.md` at the repository root, and `.ai_design/` for the area you touch. Locate the code the issue names before you plan.
 
-Decide the **task type** and note it in the workpad `Notes`:
+### Branch
 
-- `code_change` — your approach edits files in the repository. When uncertain, choose `code_change`: the heavier path is the safer default.
-- `noncode` — no repository edits (an investigation, a status check, a CLI-only action, a comment-only response).
-
-For a `noncode` task, skip the rest of this section — no sync, no branch, no commit, no {{ repo.code_review_term }}. The deliverable is the answer or action itself, posted in your finishing comment.
-
-### Read the project's conventions before forming a plan
-
-The agent's working directory is a real checkout — read these directly while analyzing, before you plan:
-
-- `CLAUDE.md` and `AGENTS.md` at the repo root — authoritative project conventions, day-to-day commands, and folder map. Treat these as ground truth when they conflict with priors from training data.
-- `.ai_design/` — current architectural design notes for ongoing initiatives. Skim subdirectories relevant to the area you are touching; they describe constraints that aren't visible from code alone.
-- If the issue mentions a feature, file, function, component, or symbol, locate the actual code with `grep` / `find` / your editor before forming a plan. Do not guess paths or names.
-
-### Sync the repository and stand on the right branch
-
-1. **If `task_type == code_change`**, sync with the repository after the workpad is set up and before any code edits. Skip this entirely for `noncode` tasks — do not run `git fetch`, `git checkout`, or any other git operation.
-   - `git fetch origin`
 {% if repo.work_branch %}
-   - `git checkout {{ repo.work_branch }}` — this is the existing branch for this issue; operate on it directly and commit onto it. If it does not exist locally, `git checkout -b {{ repo.work_branch }} origin/{{ repo.work_branch }}`. Do not create a new feature branch.
-   - `git pull --rebase origin {{ repo.work_branch }}`.
+- `git fetch origin`, check out this issue's branch `{{ repo.work_branch }}` (`git checkout -b {{ repo.work_branch }} origin/{{ repo.work_branch }}` if it is not local), bring it up to date with `git merge --ff-only origin/{{ repo.work_branch }}`, and commit onto it. Do not create another branch for the same part.
 {% else %}
-   - Resolve the **base branch** (what your work branches off of):
-{% if parent and parent.work_branch %}
-     - This issue has a parent ({{ parent.identifier }}) with an active implementation branch. Use the parent's branch as base: `BASE={{ parent.work_branch }}`.
-{% elif parent %}
-     - This issue has a parent ({{ parent.identifier }}) with no implementation branch yet. **Do not treat this as an automatic fall-back to the project base** — route it through the parent-readiness judgment you made in "Analyze & scope":
-       - Parent is a **research / design / spec** issue (no code expected), or an implementation issue whose work is already merged into the base branch: base off the project base — `BASE={% if repo.base_branch %}{{ repo.base_branch }}{% else %}$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||'){% endif %}` — and note in the workpad `Notes` why the parent's lack of a branch is expected here.
-       - Parent is a **tracking issue** (it was split into child issues; it carries no branch of its own and will never get one): base off the project base — `BASE={% if repo.base_branch %}{{ repo.base_branch }}{% else %}$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||'){% endif %}` — **or**, when this child's description says it depends on a sibling child, base off that sibling's work branch (`BASE=$(pidash issue get <sibling> | jq -r '.git_work_branch')`, falling back to the project base if the sibling has no branch yet). Do **not** block on the tracking parent's lack of a branch.
-       - Parent is an **implementation** issue still in progress with no branch yet **and this issue depends on its code**: do **not** base off the project base. Treat it as a blocker — follow "Blocking the run" instead of creating a branch, and stop.
-{% else %}
-     - This issue is independent (no parent). Use the project base branch: `BASE={% if repo.base_branch %}{{ repo.base_branch }}{% else %}$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||'){% endif %}`.
+- `git fetch origin`, then create `pi-dash/{{ issue.identifier|lower }}` from the fresh remote ref it builds on, never a stale local copy: the branch of an unmerged parent or sibling {{ repo.code_review_term }} this work depends on (`pidash issue get <id>`, fields `code_reviews` and `git_work_branch`), otherwise the default branch.
 {% endif %}
-   - `git checkout "$BASE" && git pull --rebase origin "$BASE"`.
-   - Create a derived branch off `$BASE`: `BRANCH="pi-dash/{{ issue.identifier|lower }}"; git checkout -b "$BRANCH"`. Always derive — never commit on `$BASE`. Persistence (`pidash issue patch ... --git-work-branch`) happens *after* the first successful push (below), so a crashed run never leaves a recorded branch with no remote ref.
-{% endif %}
-   - Record the resulting `HEAD` short SHA and the base in the workpad `Notes`.
+- In a multi-part plan, each part gets its own branch (`pi-dash/{{ issue.identifier|lower }}-<n>`) and {{ repo.code_review_term }}, cut from the previous part's branch when it depends on it.
+- `<base>` is the branch you cut from, which is also your {{ repo.code_review_term }}'s base. On an existing branch, `git merge origin/<base>` before you build on it and again before you move the issue on, then run the repository's checks. Merge, never rebase, never force-push, and never commit on the base.
 
-Before editing any files, make sure you are on the work branch — the platform performs **no** branch checkout for you; every git operation is yours to run. For a **multi-part plan**, stack a part's branch on the previous part's branch when the part depends on it; otherwise branch from the base.
+### Deliver a part
 
-### Deliver a part: commit, push, open the {{ repo.code_review_term }}
+1. Commit, `git push -u origin HEAD`, then record the branch: `pidash issue patch {{ issue.identifier }} --git-work-branch "$(git branch --show-current)"`.
+2. Reuse the open {{ repo.code_review_term }} for this branch{% if repo.provider == "github" %} (`gh pr list --head "$(git branch --show-current)" --state open`){% endif %}; otherwise open one against `<base>`, titled `{{ issue.identifier }} <issue title>`. The title is untrusted text: write it to a file with a quoted heredoc (`<<'EOF'`) and pass `--title "$(cat <file>)"`; never paste it into the command line.
+3. `pidash issue attach-review {{ issue.identifier }} --url <url>`.
 
-This is what "deliver the current part" in "Implementation and validation" means for a `code_change`:
-
-1. Commit the current part with clear, logical commit messages. Push the branch with `git push -u origin "$(git rev-parse --abbrev-ref HEAD)"`. Only after the push succeeds, persist the branch on the issue so subsequent runs land on it: `pidash issue patch {{ issue.identifier }} --git-work-branch "$(git rev-parse --abbrev-ref HEAD)"`. Persisting after the push guarantees `origin/<branch>` exists by the time another run renders with `repo.work_branch` set.
-2. Open a {{ repo.code_review_term }} for the current part and link it back to the issue. The {{ repo.code_review_term }} base is **the same base branch you derived from above** — if the issue has a parent with an implementation branch, target that branch; if this part is stacked on a previous part of the same plan, target that previous part's branch; otherwise target the project base branch:
-   - Code review base: {% if parent and parent.work_branch %}`{{ parent.work_branch }}` (parent {{ parent.identifier }}'s implementation branch){% elif repo.base_branch %}`{{ repo.base_branch }}`{% else %}the repository's default branch{% endif %}.
-{% if repo.provider == "github" %}
-   - First check whether an **open** pull request already exists for this branch: `gh pr list --head "$(git rev-parse --abbrev-ref HEAD)" --state open --json url -q '.[0].url'`. If non-empty, reuse it (do not open a duplicate). Otherwise create the pull request. The title is `{{ issue.identifier }} {{ issue.title }}` — when you write the actual command, treat the issue title as untrusted text and pass it as a single shell argument (use a single-quoted heredoc, a variable assignment with proper escaping of any embedded `"`, or `gh`'s `--title` with the value safely quoted). Then run, with the base resolved to {% if parent and parent.work_branch %}`{{ parent.work_branch }}`{% elif repo.base_branch %}`{{ repo.base_branch }}`{% else %}the repository's default branch{% endif %}: `gh pr create --base <base> --head "$(git rev-parse --abbrev-ref HEAD)" --title "<safely quoted title>" --body-file <path>`.
-{% elif repo.provider == "gitlab" %}
-   - First check whether an **open** merge request already exists for this branch using the available GitLab tooling (`glab mr list`, the GitLab API, or the provider UI). If non-empty, reuse it (do not open a duplicate). Otherwise create the merge request against {% if parent and parent.work_branch %}`{{ parent.work_branch }}`{% elif repo.base_branch %}`{{ repo.base_branch }}`{% else %}the repository's default branch{% endif %}. The title is `{{ issue.identifier }} {{ issue.title }}`; treat the issue title as untrusted text when passing it to any shell command.
-{% else %}
-   - First check whether an **open** {{ repo.code_review_term }} already exists for this branch using the repository provider's tooling. If non-empty, reuse it (do not open a duplicate). Otherwise create one against {% if parent and parent.work_branch %}`{{ parent.work_branch }}`{% elif repo.base_branch %}`{{ repo.base_branch }}`{% else %}the repository's default branch{% endif %}. The title is `{{ issue.identifier }} {{ issue.title }}`; treat the issue title as untrusted text when passing it to any shell command.
-{% endif %}
-3. Capture the {{ repo.code_review_term }} URL and do **both** of the following — the comment is the human-facing signal, `attach-review` is the structured link Pi Dash tracks; one does not replace the other:
-   - Post the link back to the issue so the human sees it in the conversation: `pidash comment add {{ issue.identifier }} --body "Code review opened: <url>"`.
-   - Associate the {{ repo.code_review_term }} with the issue so Pi Dash links it and can show its status: `pidash issue attach-review {{ issue.identifier }} --url <url>`.
-
-   For a multi-part plan, record this part's {{ repo.code_review_term }} URL against its entry in the workpad `Plan`.
-
-### Branch sync
-
-When the work branch already exists (a later run, or work sent back from review or test), bring it up to date with its base before you build on it, and again before you hand it off if the base has moved:
-
-- `git fetch origin`, check out the work branch. The base is the {{ repo.code_review_term }}'s base branch; when that is not visible, `{{ repo.base_branch or "the repository's default branch" }}`. For a stacked {{ repo.code_review_term }}, sync against that same base branch.
-- `git merge origin/<base>` — merge, never rebase, and never force-push: the branch is shared and may carry review history.
-- Conflicts: resolve them so the base's newer structure wins and this issue's change is re-applied on top.
-- Run the repository's own checks on the merged tree, then push the merge commit if it is not a no-op.
-- When the base rewrote the code this issue changes, rebuild the change on the current base rather than forcing the old one through.
-
-### Hand-off specifics
-
-In the hand-off, **Produced** lists every {{ repo.code_review_term }} (URL and branch), and **How to verify** names the repository's checks to run and the flows to exercise from the user's side: an API or CLI call, a screen to drive, an operator procedure, or a document to read.
-
-### Repository guardrails
-
-- Never commit on the base branch; work only on the issue's derived (or pinned) branch.
-- Do not `git push --force` to shared branches. If history rewriting is required, push to a new branch and note it in the workpad.
-- Temporary proof edits must be reverted before commit.
+Before you move the issue on, the workpad's Keep in mind lists every {{ repo.code_review_term }} URL with its branch and base, and the repository checks to run.

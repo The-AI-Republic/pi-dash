@@ -39,7 +39,7 @@
 //!   `target_date`, `start_date` or `created_by` always 500d (archive
 //!   passes no `queryset` to `issue_group_values`, so `None.values_list`
 //!   raises); the port no longer 500s and buckets over the archived set.
-//! * (fixed by NEWPIDASH-352, DIFF-59) Bulk-archive used to enqueue
+//! * (fixed by NEWPIDASH-352, DIFF-64) Bulk-archive used to enqueue
 //!   for the issues *before* the first bad one, then answer 400
 //!   (partial side effects on failure); the port now validates every
 //!   row's state group first and enqueues only after the archive
@@ -47,9 +47,11 @@
 //! * Re-archiving answers 404 (`issue_objects` excludes archived rows).
 //! * Archiving a NULL-state issue 500s (`None.group`); unarchiving one
 //!   assigns the default state instead.
-//! * `save()` recomputes `completed_at` from the state group on every
-//!   archive/unarchive (clobbering it on completed issues) and always
-//!   rewrites `updated_at` + `description_stripped`; `bulk_update`
+//! * (fixed by NEWPIDASH-351, DIFF-62) `save()` recomputed `completed_at`
+//!   from the state group on every archive/unarchive (clobbering it on
+//!   completed issues); archive/unarchive never change state, so the
+//!   stamp is now left untouched, while `updated_at` +
+//!   `description_stripped` are still always rewritten; `bulk_update`
 //!   touches `archived_at` only.
 //! * The bulk response date is recomputed after the loop (this port
 //!   stamps one date; the two differ only across a midnight rollover).
@@ -62,8 +64,9 @@
 //! * FX-ISS-19 says `current_instance` is the 31-key shape; the enqueue
 //!   serializes a bare instance, so DRF omits the 7 annotation keys (24
 //!   keys — the pilot-2 `SERIALIZER_FIELDS` rule, verified live).
-//! * FX-ISS-19 omits the `save()` recomputes (`completed_at`,
-//!   `updated_at`, `description_stripped`, NULL-state default).
+//! * FX-ISS-19 omits the `save()` recomputes (`updated_at`,
+//!   `description_stripped`, NULL-state default; `completed_at` was a
+//!   recompute too before DIFF-62 and is now preserved).
 //!
 //! # Known gaps (precedent: pilot-2 records the same)
 //!
@@ -911,7 +914,8 @@ async fn fetch_blockers(
 // ---------------------------------------------------------------------------
 
 /// One issue row for the write paths: the base scalars plus the state
-/// group for the gate and the save() recomputes.
+/// group for the gate (the save() hooks, not the archive write, own the
+/// DIFF-62 `completed_at` transition rule).
 struct WriteRow {
     id: uuid::Uuid,
     name: String,
@@ -1308,7 +1312,7 @@ fn archive_denial(error: domain::DomainError) -> Denial {
 /// the literal gate over every issue (model `-created_at` order) — a
 /// bad issue answers 400 before anything is written or enqueued — then
 /// one `archived_at`-only `bulk_update`, then one enqueue per issue
-/// (DIFF-59: the old system enqueues per issue *before* the gate, so a
+/// (DIFF-64: the old system enqueues per issue *before* the gate, so a
 /// 400 leaves false "archived" history for the valid prefix).
 pub async fn bulk_archive(
     State(state): State<AppState>,
@@ -1363,7 +1367,7 @@ pub async fn bulk_archive(
     let today = chrono::Utc::now().date_naive();
     let origin = activity_origin(&state)?;
     let rows = fetch_bulk_issues(&context.pool, &slug, &context.gate.project_id, &ids).await?;
-    // DIFF-59 (old bug fix): validate every row's state group *before*
+    // DIFF-64 (old bug fix): validate every row's state group *before*
     // any side effect. The old system enqueues the activity per row and
     // only then hits the 400 on the first open-state row, leaving false
     // "archived" history for the valid prefix with nothing archived

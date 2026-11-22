@@ -834,6 +834,7 @@ const READ_FIELD_ORDER: &[&str] = &[
     "agent_ticking_enabled",
     "default_agent_executor",
     "dedicated_runner_lost_action",
+    "default_work_type",
     "settings",
     "created_by",
     "updated_by",
@@ -1171,6 +1172,14 @@ pub async fn render_project(
         &mut map,
         "dedicated_runner_lost_action",
         Value::String(row_string(row, "dedicated_runner_lost_action")?),
+    );
+    // PDASHOSS01-234: the resolved work-type key (`ProjectSerializer`
+    // `fields="__all__"` renders the model column verbatim, right after
+    // `dedicated_runner_lost_action` in model definition order).
+    put(
+        &mut map,
+        "default_work_type",
+        Value::String(row_string(row, "default_work_type")?),
     );
     // NEWPIDASH-278: validated settings with defaults filled in.
     let settings_raw: Value = row
@@ -1860,6 +1869,7 @@ pub const CREATE_FIELD_ORDER: &[&str] = &[
     "base_branch",
     "default_agent_executor",
     "dedicated_runner_lost_action",
+    "default_work_type",
 ];
 
 /// `ProjectUpdateSerializer` extra writable fields
@@ -1937,6 +1947,10 @@ async fn coerce_field(
         "dedicated_runner_lost_action" => {
             FieldValue::Str(coerce_choice(value, &["fail_to_backlog", "fall_back"])?)
         }
+        // PDASHOSS01-234: blank passes (`Project.save` resolves it on
+        // create); overlong answers the field `max_length` message before
+        // `validate()` runs the registry check, exactly like DRF.
+        "default_work_type" => FieldValue::Str(coerce_char(value, true, Some(32))?),
         _ => return Ok(None),
     }))
 }
@@ -4423,16 +4437,22 @@ mod tests {
             ]
         );
         // `settings` (NEWPIDASH-278): Django renders it after
-        // `default_work_type` (which the Rust render does not carry);
-        // here it follows `dedicated_runner_lost_action`.
+        // `default_work_type`, which follows `dedicated_runner_lost_action`
+        // (NEWPIDASH-313: model definition order).
+        let dedicated_at = READ_FIELD_ORDER
+            .iter()
+            .position(|key| *key == "dedicated_runner_lost_action")
+            .expect("dedicated_runner_lost_action");
+        let work_type_at = READ_FIELD_ORDER
+            .iter()
+            .position(|key| *key == "default_work_type")
+            .expect("default_work_type");
+        assert_eq!(work_type_at, dedicated_at + 1);
         let settings_at = READ_FIELD_ORDER
             .iter()
             .position(|key| *key == "settings")
             .expect("settings");
-        assert_eq!(
-            READ_FIELD_ORDER[settings_at - 1],
-            "dedicated_runner_lost_action"
-        );
+        assert_eq!(READ_FIELD_ORDER[settings_at - 1], "default_work_type");
         assert_eq!(ALLOWED_SUMMARY_FIELDS.len(), 8);
     }
 
@@ -4571,6 +4591,7 @@ mod live_tests {
             Expr::value("fail_to_backlog"),
             Alias::new("dedicated_runner_lost_action"),
         );
+        sel.expr_as(Expr::value("general"), Alias::new("default_work_type"));
         sel.expr_as(Expr::value(None::<uuid::Uuid>), Alias::new("created_by_id"));
         sel.expr_as(Expr::value(None::<uuid::Uuid>), Alias::new("updated_by_id"));
         sel.expr_as(Expr::value(ws_id), Alias::new("workspace_id"));

@@ -40,6 +40,11 @@ pub async fn run(config: Config, creds: Credentials, paths: Paths, opts: Options
             config.engine.clone(),
         ));
     }
+    // Every agent run's `pidash` resolves to this daemon binary
+    // (NEWPIDASH-363): `<data_dir>/runtime/bin/pidash` symlinks here and is
+    // recreated on every start so it follows self-updates. Runs re-ensure it
+    // too (see `Supervisor::handle_assign`), so a deleted pin heals itself.
+    crate::util::shell::ensure_daemon_pidash_link(&paths.data_dir);
     // Desktop/package-manager installs have no cargo-dist receipt. They
     // still need discovery when the engine is installed after service start.
     let discovery = tokio::spawn(crate::pidash_agent::locate::discover_missing());

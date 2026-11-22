@@ -21,9 +21,9 @@ This is what "deliver the current part" in "Implementation and validation" means
 
 1. Produce or update the artifact on its surface (write the page, save the file, perform the action).
 2. Record it on the issue so a person can find it from the thread: link or name the deliverable (page title/URL, file path, or the summary of the action and its evidence) in a comment.
-3. For a multi-part plan, record the deliverable's link against this part in the workpad `Plan`.
+3. For a multi-part plan, note the deliverable's link against the part in the workpad's Keep in mind (`Part 1 of 3: done, <link>`).
 
-In the hand-off, **Produced** names where each deliverable lives and how to open it, and **How to verify** says how its reader or user checks it.
+Before you move on, the workpad's Keep in mind says where each deliverable lives, how to open it, and how its reader or user checks it.
 
 ### Guardrails
 

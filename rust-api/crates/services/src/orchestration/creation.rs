@@ -565,17 +565,6 @@ pub const BUNDLE_OVERRIDES_SQL: &str = "SELECT section_key, body, version, user_
 /// workspace id.
 pub const BUNDLE_WORKSPACE_SQL: &str = "SELECT slug, name FROM workspaces WHERE id = $1";
 
-/// The hand-off review and test read (lean workflow design §8.2): the
-/// `stage_handoff` of the most recent `coding-task` run on the issue that
-/// stored one. Read directly rather than through the parent-payload pick,
-/// which follows the run's parent and can miss the latest In Progress run
-/// after a hand-back. `IS NOT NULL` stands in for the design's `?` key
-/// test (it also skips a stored JSON null) so no raw `?` reaches a
-/// placeholder-rewriting driver. `$1` is the issue id.
-pub const BUNDLE_HANDOFF_SQL: &str = "SELECT done_payload->>'stage_handoff' AS handoff \
-    FROM agent_run WHERE work_item_id = $1 AND phase_kind = 'coding-task' \
-    AND done_payload->>'stage_handoff' IS NOT NULL ORDER BY created_at DESC LIMIT 1";
-
 /// The issue's last runs for `stage_history` (lean workflow design §8.3),
 /// newest first; the context renders them oldest first. `$1` is the issue
 /// id, `$2` the new run id (excluded).
@@ -584,12 +573,10 @@ pub const BUNDLE_STAGE_HISTORY_SQL: &str = "SELECT phase_kind, \
     FROM agent_run WHERE work_item_id = $1 AND id != $2 ORDER BY created_at DESC LIMIT 10";
 
 /// The lean-workflow prompt inputs the creation bundle carries on top of
-/// the Django-era ones: the project's stage setting, the latest hand-off
-/// and the run history. Loaded by [`load_stage_inputs`].
+/// the Django-era ones: the project's stage setting and the run history. Loaded by [`load_stage_inputs`].
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct StageInputs {
     pub agent_stages: AgentStages,
-    pub handoff: Option<String>,
     pub stage_history: Vec<context::StageHistoryRow>,
 }
 
@@ -598,31 +585,17 @@ pub struct StageInputs {
 /// shares this one loader. The settings come from the one stage-switch
 /// read ([`crate::domain::project_settings::stage_switches_for_project`]);
 /// a bag that fails to parse reads as the default (Auto), like
-/// `ProjectClockPolicy::with_stages`. The hand-off query is skipped
-/// unless the run is review or test (NEWPIDASH-338 item 8): the
-/// coding-task recipe never renders it.
+/// `ProjectClockPolicy::with_stages`.
 pub async fn load_stage_inputs(
     conn: &impl sea_orm::ConnectionTrait,
     project_id: Uuid,
     issue_id: Uuid,
     run_id: Uuid,
-    phase_kind: &str,
 ) -> Result<StageInputs, sea_orm::DbErr> {
     use sea_orm::DbBackend;
     let backend = DbBackend::Postgres;
     let agent_stages =
         crate::domain::project_settings::agent_stages_for_project(conn, project_id).await?;
-    let handoff = if phase_kind == recipes::KIND_REVIEW || phase_kind == recipes::KIND_TEST {
-        match conn
-            .query_one(backend.build(&orm::bundle_handoff_select(issue_id)))
-            .await?
-        {
-            Some(row) => row.try_get::<Option<String>>("", "handoff")?,
-            None => None,
-        }
-    } else {
-        None
-    };
     let rows = conn
         .query_all(backend.build(&orm::bundle_stage_history_select(issue_id, run_id)))
         .await?;
@@ -638,7 +611,6 @@ pub async fn load_stage_inputs(
     }
     Ok(StageInputs {
         agent_stages,
-        handoff,
         stage_history,
     })
 }
@@ -1439,19 +1411,6 @@ pub mod orm {
         Expr::col((run::Entity, run::Column::DonePayload)).cast_json_field(key)
     }
 
-    /// [`super::BUNDLE_HANDOFF_SQL`]: output name `handoff`.
-    pub fn bundle_handoff_select(issue_id: Uuid) -> SelectStatement {
-        Query::select()
-            .expr_as(done_payload_text("stage_handoff"), alias("handoff"))
-            .from(run::Entity)
-            .and_where(run_col(run::Column::WorkItemId).eq(issue_id))
-            .and_where(run_col(run::Column::PhaseKind).eq(super::recipes::KIND_CODING_TASK))
-            .and_where(Expr::expr(done_payload_text("stage_handoff")).is_not_null())
-            .order_by((run::Entity, run::Column::CreatedAt), Order::Desc)
-            .limit(1)
-            .to_owned()
-    }
-
     /// [`super::BUNDLE_STAGE_HISTORY_SQL`]: output names `phase_kind`,
     /// `result`, `note`, `created_at`.
     pub fn bundle_stage_history_select(issue_id: Uuid, run_id: Uuid) -> SelectStatement {
@@ -1990,17 +1949,6 @@ pub fn work_type_for_issue(issue: &IssueView, project: &ProjectView) -> &'static
     )
 }
 
-/// The template (== phase kind) a state renders, from its registry name
-/// and group: the render-bundle loader takes it so it can skip the
-/// hand-off query for runs whose recipe never renders one
-/// (NEWPIDASH-338 item 8). `None` (no state) renders the coding-task
-/// recipe, exactly like [`template_name_for`](pidash_types::orchestration::template_name_for).
-pub fn template_kind_for_state(
-    state: Option<pidash_types::orchestration::StateRef<'_>>,
-) -> &'static str {
-    pidash_types::orchestration::template_name_for(state.as_ref())
-}
-
 /// The prompt kind a run created for the issue *now* will render
 /// (`_phase_kind_for_issue`, `service.py:157-167`): stamped on
 /// `AgentRun.phase_kind`.
@@ -2034,6 +1982,88 @@ pub fn run_config_for_issue(
     config.insert("repo_ref".to_owned(), or_null(repo_ref));
     config.insert("git_work_branch".to_owned(), or_null(git_work_branch));
     Value::Object(config)
+}
+
+/// Hex SHA-256 of a workpad body (NEWPIDASH-320 §6.1). The endpoint's
+/// `updated_at` is the issue row's stamp — the agent's own state moves
+/// change it — so the stale-write guard hashes the body instead, which
+/// needs no migration.
+pub fn workpad_sha256(body: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(body.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The `run_config` key holding the workpad hash when the In Progress pass
+/// started, which the `finish` workpad gate compares against
+/// (`.ai_design/unified_workpad/design.md` §8.2). Only a continuation stamps
+/// it, copied from its In Progress parent, so a note written by an earlier
+/// run of the same pass counts. Server-only: the runner envelope never
+/// copies it, and `workpad_sha256` stays the snapshot's own hash (the
+/// update guard).
+pub const STAGE_START_WORKPAD_SHA256: &str = "stage_start_workpad_sha256";
+
+/// The [`STAGE_START_WORKPAD_SHA256`] a continuation of `parent` carries:
+/// the parent's own start hash, else its snapshot hash, when both runs are
+/// In Progress runs. `None` starts a new pass.
+pub fn continued_stage_start_sha(parent: &RunView, kind: &str) -> Option<String> {
+    if kind != recipes::KIND_CODING_TASK || parent.phase_kind != recipes::KIND_CODING_TASK {
+        return None;
+    }
+    parent
+        .run_config
+        .get(STAGE_START_WORKPAD_SHA256)
+        .or_else(|| parent.run_config.get("workpad_sha256"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// Whether a run of this phase kind carries the workpad snapshot: every
+/// issue run (In Progress, review and test) reads and writes the workpad
+/// (`.ai_design/unified_workpad/design.md` U1). Scheduler runs have no
+/// issue and no workpad.
+pub fn carries_workpad(kind: &str) -> bool {
+    matches!(
+        kind,
+        recipes::KIND_CODING_TASK | recipes::KIND_REVIEW | recipes::KIND_TEST
+    )
+}
+
+/// Stamp the runner-context fields onto a run config (NEWPIDASH-320 §6.3,
+/// §6.1): `issue_identifier` for issue runs, `project_identifier` for
+/// issue and scheduler runs, and the workpad snapshot (`workpad_body` +
+/// `workpad_sha256`) for issue runs ([`carries_workpad`]). `None` leaves the
+/// config untouched, so old runners and old servers keep working: the envelope
+/// copies only keys that are present.
+pub fn stamp_run_context(
+    config: Value,
+    issue_identifier: Option<&str>,
+    project_identifier: Option<&str>,
+    workpad_body: Option<&str>,
+) -> Value {
+    let mut map = config.as_object().cloned().unwrap_or_default();
+    if let Some(identifier) = issue_identifier {
+        map.insert(
+            "issue_identifier".to_owned(),
+            Value::String(identifier.to_owned()),
+        );
+    }
+    if let Some(identifier) = project_identifier {
+        map.insert(
+            "project_identifier".to_owned(),
+            Value::String(identifier.to_owned()),
+        );
+    }
+    if let Some(body) = workpad_body {
+        map.insert("workpad_body".to_owned(), Value::String(body.to_owned()));
+        map.insert(
+            "workpad_sha256".to_owned(),
+            Value::String(workpad_sha256(body)),
+        );
+    }
+    Value::Object(map)
 }
 
 /// The runner to pin a follow-up to (`_pinned_runner_for`,
@@ -2307,6 +2337,7 @@ pub fn render_first_turn(
         related: Value::Array(related),
         relations,
         run_id: run.run_id.to_string(),
+        rendered_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         run_template_name: kind.to_owned(),
         attempt: context::compute_attempt(bundle.prior_run_count),
         trigger: Some(run.trigger.clone()),
@@ -2330,10 +2361,7 @@ pub fn render_first_turn(
             project.interval_test,
             bundle.state.as_ref(),
         ),
-        comments_section: context::comments_section(
-            &bundle.comments,
-            bundle.stages.handoff.as_deref().unwrap_or_default(),
-        ),
+        comments_section: context::comments_section(&bundle.comments),
         parent_done_payload: parent_done_payload(
             bundle.direct_parent_payload.as_ref(),
             bundle.has_parent_run,
@@ -2341,7 +2369,6 @@ pub fn render_first_turn(
         ),
         workpad_body: issue.workpad.clone().unwrap_or_default(),
         agent_stages: bundle.stages.agent_stages,
-        handoff: bundle.stages.handoff.clone().unwrap_or_default(),
         stage_history: context::stage_history(&bundle.stages.stage_history),
     };
     let context_value = context::build_context(&input);
@@ -2716,6 +2743,24 @@ pub async fn create_and_dispatch_run<S: CreationSeam + FinalizeAgentRunSeam>(
     let state = seam.state(issue.state_id).await?;
     let kind = phase_kind_for_issue(state);
     let run_id = Uuid::new_v4();
+    // Runner context (NEWPIDASH-320 §6.1, §6.3): the workpad snapshot
+    // rides along for every issue run (`.ai_design/unified_workpad/`).
+    let workpad_snapshot =
+        carries_workpad(&kind).then(|| issue.workpad.clone().unwrap_or_default());
+    let run_config = stamp_run_context(
+        run_config_for_issue(
+            project.repo_url.as_deref(),
+            project.base_branch.as_deref(),
+            issue.git_work_branch.as_deref(),
+            None,
+        ),
+        Some(&context::issue_identifier(
+            &project.identifier,
+            i64::from(issue.sequence_id),
+        )),
+        Some(&project.identifier),
+        workpad_snapshot.as_deref(),
+    );
     let run = seam
         .insert_run(&NewAgentRun {
             id: run_id,
@@ -2733,12 +2778,7 @@ pub async fn create_and_dispatch_run<S: CreationSeam + FinalizeAgentRunSeam>(
             trigger: req.trigger.clone(),
             phase_kind: kind.clone(),
             work_type: work_type_for_issue(&issue, &project).to_owned(),
-            run_config: run_config_for_issue(
-                project.repo_url.as_deref(),
-                project.base_branch.as_deref(),
-                issue.git_work_branch.as_deref(),
-                None,
-            ),
+            run_config,
             now: req.now,
             pin_kind: pin_kind.clone(),
         })
@@ -2861,17 +2901,36 @@ pub async fn create_continuation_run<S: CreationSeam + FinalizeAgentRunSeam>(
     } else {
         String::new()
     };
-    // Continuation inserts the literal repo snapshot, not the
-    // `_run_config_for_issue` refresh (`service.py:489-493`): same
-    // three keys, no base to strip.
-    let run_config = run_config_for_issue(
-        project.repo_url.as_deref(),
-        project.base_branch.as_deref(),
-        issue.git_work_branch.as_deref(),
-        None,
-    );
     let state = seam.state(issue.state_id).await?;
     let kind = phase_kind_for_issue(state);
+    // Continuation inserts the literal repo snapshot, not the
+    // `_run_config_for_issue` refresh (`service.py:489-493`): same
+    // three keys, no base to strip — plus the runner context
+    // (NEWPIDASH-320 §6.1, §6.3).
+    let workpad_snapshot =
+        carries_workpad(&kind).then(|| issue.workpad.clone().unwrap_or_default());
+    let mut run_config = stamp_run_context(
+        run_config_for_issue(
+            project.repo_url.as_deref(),
+            project.base_branch.as_deref(),
+            issue.git_work_branch.as_deref(),
+            None,
+        ),
+        Some(&context::issue_identifier(
+            &project.identifier,
+            i64::from(issue.sequence_id),
+        )),
+        Some(&project.identifier),
+        workpad_snapshot.as_deref(),
+    );
+    // The workpad gate measures from the start of the In Progress pass,
+    // not from this continuation (design §8.2).
+    if let (Some(start), Some(map)) = (
+        continued_stage_start_sha(&req.parent, &kind),
+        run_config.as_object_mut(),
+    ) {
+        map.insert(STAGE_START_WORKPAD_SHA256.to_owned(), Value::String(start));
+    }
     let run_id = Uuid::new_v4();
     let run = seam
         .insert_run(&NewAgentRun {
@@ -2988,11 +3047,34 @@ pub async fn create_project_move_handoff_run<S: CreationSeam + FinalizeAgentRunS
     if let Some(existing) = seam.active_run_for(issue.id).await? {
         return Ok(existing);
     }
-    let run_config = run_config_for_issue(
+    // The render kind still comes from the issue's current state even
+    // though the row stamps no `phase_kind` (see below; `finish` reads the
+    // kind from the state for such a run): it snapshots the current
+    // workpad exactly like the other builders (NEWPIDASH-320
+    // §6.1, §6.3). The parent's snapshot never rides along — it is
+    // stale by construction.
+    let render_kind = phase_kind_for_issue(seam.state(issue.state_id).await?);
+    let workpad_snapshot =
+        carries_workpad(&render_kind).then(|| issue.workpad.clone().unwrap_or_default());
+    let mut run_config = run_config_for_issue(
         project.repo_url.as_deref(),
         project.base_branch.as_deref(),
         issue.git_work_branch.as_deref(),
         Some(&req.parent.run_config),
+    );
+    if let Some(map) = run_config.as_object_mut() {
+        map.remove("workpad_body");
+        map.remove("workpad_sha256");
+        map.remove(STAGE_START_WORKPAD_SHA256);
+    }
+    let run_config = stamp_run_context(
+        run_config,
+        Some(&context::issue_identifier(
+            &project.identifier,
+            i64::from(issue.sequence_id),
+        )),
+        Some(&project.identifier),
+        workpad_snapshot.as_deref(),
     );
     let run_id = Uuid::new_v4();
     // The dedicated pin (§9.2) survives a project move — the issue
@@ -3043,9 +3125,9 @@ pub async fn create_project_move_handoff_run<S: CreationSeam + FinalizeAgentRunS
             .await;
     }
     // The render kind still comes from the issue's current state even
-    // though the row stamps no `phase_kind`.
-    let state = seam.state(issue.state_id).await?;
-    let kind = phase_kind_for_issue(state);
+    // though the row stamps no `phase_kind` (read once above for the
+    // workpad snapshot).
+    let kind = render_kind;
     let turn = match render_new_run(
         seam,
         issue.id,
@@ -3299,16 +3381,17 @@ pub async fn resolve_pod_for_issue<C: CreationSeam>(
     Ok(resolve_pod_select(None, default.as_ref()))
 }
 
-/// Section count of the lean-workflow `coding-task` recipe for `software`
-/// (§9.2): 11 core sections plus the `software.context` and
-/// `software.execute` slots. Diverges from the Django-captured FX6
-/// manifests on purpose (D13).
+/// Section count of the `coding-task` recipe for `software`: 12 core
+/// sections (the `this-run` block first, NEWPIDASH-325) plus the
+/// `software.context` and `software.execute` slots. Diverges from the
+/// Django-captured FX6 manifests on purpose (D13).
 #[cfg(test)]
-const LEAN_CODING_SECTIONS: usize = 13;
-/// The lean `review` recipe for `software`: 6 core sections plus the
+const LEAN_CODING_SECTIONS: usize = 14;
+/// The `review` recipe for `software`: 8 core sections (likewise
+/// `this-run` first; `workpad` since the unified workpad) plus the
 /// `software.context` and `software.review` slots.
 #[cfg(test)]
-const LEAN_REVIEW_SECTIONS: usize = 8;
+const LEAN_REVIEW_SECTIONS: usize = 10;
 
 #[cfg(test)]
 mod tests {
@@ -3318,15 +3401,6 @@ mod tests {
     fn stage_queries_read_done_payload_keys_with_the_builder() {
         use sea_orm::sea_query::PostgresQueryBuilder;
         let issue = Uuid::nil();
-        let handoff = orm::bundle_handoff_select(issue).to_string(PostgresQueryBuilder);
-        assert_eq!(
-            handoff,
-            "SELECT \"agent_run\".\"done_payload\" ->> 'stage_handoff' AS \"handoff\" \
-             FROM \"agent_run\" WHERE \"agent_run\".\"work_item_id\" = '00000000-0000-0000-0000-000000000000' \
-             AND \"agent_run\".\"phase_kind\" = 'coding-task' \
-             AND (\"agent_run\".\"done_payload\" ->> 'stage_handoff') IS NOT NULL \
-             ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1"
-        );
         let history =
             orm::bundle_stage_history_select(issue, issue).to_string(PostgresQueryBuilder);
         assert!(history.contains("\"agent_run\".\"done_payload\" ->> 'status' AS \"result\""));
@@ -4186,6 +4260,118 @@ mod tests {
         );
     }
 
+    /// NEWPIDASH-320 §6.1, §6.3: the runner-context stamp — identifiers
+    /// for issue and scheduler runs, the workpad snapshot for
+    /// Unified workpad §8.2: a continuation inside the In Progress pass
+    /// carries the pass's start hash, so a note an earlier run of the pass
+    /// wrote still counts; any other pairing starts a new pass.
+    #[test]
+    fn continuation_carries_the_pass_start_workpad_hash() {
+        let mut parent = run_view(uid(0x60));
+        parent.run_config = json!({"workpad_sha256": "first"});
+        assert_eq!(
+            continued_stage_start_sha(&parent, recipes::KIND_CODING_TASK).as_deref(),
+            Some("first")
+        );
+        // A continuation of a continuation keeps the original start.
+        parent.run_config = json!({"workpad_sha256": "later", STAGE_START_WORKPAD_SHA256: "first"});
+        assert_eq!(
+            continued_stage_start_sha(&parent, recipes::KIND_CODING_TASK).as_deref(),
+            Some("first")
+        );
+        // Not an In Progress continuation: a new pass.
+        assert_eq!(
+            continued_stage_start_sha(&parent, recipes::KIND_REVIEW),
+            None
+        );
+        parent.phase_kind = recipes::KIND_REVIEW.to_owned();
+        assert_eq!(
+            continued_stage_start_sha(&parent, recipes::KIND_CODING_TASK),
+            None
+        );
+        // A parent from before NEWPIDASH-320 has no hash: not gated.
+        parent.phase_kind = recipes::KIND_CODING_TASK.to_owned();
+        parent.run_config = json!({});
+        assert_eq!(
+            continued_stage_start_sha(&parent, recipes::KIND_CODING_TASK),
+            None
+        );
+    }
+
+    /// every issue run. `None` leaves the config untouched.
+    #[test]
+    fn stamp_run_context_covers_kinds() {
+        let base = json!({
+            "repo_url": null,
+            "repo_ref": null,
+            "git_work_branch": null,
+        });
+        // Issue coding-task run: identifiers plus the workpad snapshot.
+        let coding = stamp_run_context(base.clone(), Some("FX6-1"), Some("FX6"), Some("# plan"));
+        assert_eq!(
+            coding,
+            json!({
+                "repo_url": null,
+                "repo_ref": null,
+                "git_work_branch": null,
+                "issue_identifier": "FX6-1",
+                "project_identifier": "FX6",
+                "workpad_body": "# plan",
+                "workpad_sha256": workpad_sha256("# plan"),
+            })
+        );
+        // Every issue run carries the workpad; scheduler runs never do.
+        assert!(carries_workpad(recipes::KIND_CODING_TASK));
+        assert!(carries_workpad(recipes::KIND_REVIEW));
+        assert!(carries_workpad(recipes::KIND_TEST));
+        assert!(!carries_workpad(recipes::KIND_SCHEDULER));
+        // No snapshot passed: identifiers only, no workpad keys.
+        let review = stamp_run_context(base.clone(), Some("FX6-1"), Some("FX6"), None);
+        assert_eq!(
+            review,
+            json!({
+                "repo_url": null,
+                "repo_ref": null,
+                "git_work_branch": null,
+                "issue_identifier": "FX6-1",
+                "project_identifier": "FX6",
+            })
+        );
+        // Scheduler run: project only.
+        let sched = stamp_run_context(base.clone(), None, Some("FX6"), None);
+        assert_eq!(
+            sched,
+            json!({
+                "repo_url": null,
+                "repo_ref": null,
+                "git_work_branch": null,
+                "project_identifier": "FX6",
+            })
+        );
+        // Empty workpad still snapshots (the runner writes an empty file).
+        let empty = stamp_run_context(base.clone(), Some("FX6-1"), Some("FX6"), Some(""));
+        assert_eq!(empty["workpad_body"], json!(""));
+        assert_eq!(
+            empty["workpad_sha256"],
+            json!("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        );
+        // The base value is never mutated.
+        assert_eq!(
+            base,
+            json!({"repo_url": null, "repo_ref": null, "git_work_branch": null})
+        );
+    }
+
+    #[test]
+    fn workpad_sha256_is_hex_of_body() {
+        assert_eq!(
+            workpad_sha256(""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(workpad_sha256("# plan").len(), 64);
+        assert_ne!(workpad_sha256("# plan"), workpad_sha256("# plan\n"));
+    }
+
     #[test]
     fn pin_matrix_matches_m1_m10() {
         let clock = now();
@@ -4618,6 +4804,10 @@ mod tests {
                 "repo_url": "https://example.com/fx6.git",
                 "repo_ref": "main",
                 "git_work_branch": null,
+                "issue_identifier": "FX6-1",
+                "project_identifier": "FX6",
+                "workpad_body": "",
+                "workpad_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             })
         );
         let (prompt, manifest) = seam.saved_prompts.borrow()[&created].clone();
@@ -5036,13 +5226,19 @@ mod tests {
         );
         assert_eq!(seam.dispatched, vec![replacement.id]);
         // The replacement's config refreshed the repo snapshot (the
-        // marker never reaches the new row).
+        // marker never reaches the new row), stamped with the runner
+        // context (NEWPIDASH-320 §6.1, §6.3): H2 renders the coding-task
+        // prompt, so the current (empty) workpad rides along.
         assert_eq!(
             replacement.run_config,
             json!({
                 "repo_url": "https://example.com/fx6.git",
                 "repo_ref": "main",
                 "git_work_branch": null,
+                "issue_identifier": "FX6-1",
+                "project_identifier": "FX6",
+                "workpad_body": "",
+                "workpad_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             })
         );
     }

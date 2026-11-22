@@ -12,7 +12,7 @@ import base64
 
 import pytest
 
-from _harness.diffs import expect
+from _harness.diffs import expect, is_rust
 
 from .conftest import page_url
 
@@ -345,3 +345,39 @@ def test_description_changed_patch_stamps_caller(member_client, world, seeder, d
     after = _attribution(db, page["id"])
     assert after[0] == str(member_user["id"])
     assert after[1] > before[1]
+
+
+# DIFF-63 (NEWPIDASH-341): the description GET used to skip the
+# restricted-guest rule — a guest who gets 400 "You are not allowed to view
+# this page" on retrieve got 200 with the full body here. Rust now applies
+# retrieve's guest rule to the project-scoped, owner-or-public fetch and
+# answers what retrieve answers; Django keeps the old behaviour. The
+# project scoping itself already matched on both backends (pinned below).
+
+
+def test_description_retrieve_restricted_guest_refused(guest_client, world):
+    # Control: retrieve refuses the same page for the same guest.
+    denied = guest_client.get(page_url(world, world["page"]["id"]))
+    assert denied.status_code == 400
+    assert denied.json() == {"error": "You are not allowed to view this page"}
+    response = guest_client.get(_desc_url(world, world["page"]["id"]))
+    assert response.status_code == expect("DIFF-63", django=200, rust=400)
+    if is_rust():
+        assert response.json() == {"error": "You are not allowed to view this page"}
+    else:
+        assert response.content == b""
+
+
+def test_description_retrieve_cross_project_page_isolated(member_client, world, seeder):
+    # The description fetch was already project-scoped on both backends: a
+    # page linked only to another project 404s here (unlike versions/).
+    # Regression guard for the DIFF-63 change, which must not widen this.
+    other = seeder.create_project(world["workspace"]["id"], name="Other project")
+    page = seeder.create_page(
+        world["workspace"]["id"], world["owner"]["id"], name="Q", description_html="<p>SECRET-Q body</p>"
+    )
+    seeder.link_page_project(world["workspace"]["id"], other["id"], page["id"])
+    assert member_client.get(page_url(world, page["id"])).status_code == 404
+    response = member_client.get(_desc_url(world, page["id"]))
+    assert response.status_code == 404
+    assert response.json() == {"error": "The required object does not exist."}
