@@ -33,11 +33,28 @@ import psycopg
 
 # Tables owned by the migrator run itself, not the schema.
 SKIP_TABLES = {"pidash_schema_migrations"}
-# Columns whose values depend on the run wall-clock, not the schema.
+# Rust-only tables from the native `ensure_schema` migration (m000002):
+# boot-time DDL folded into the migration set (NEWPIDASH-380). Django never
+# creates them, and a fallback Django runs fine with them present, so the
+# Django-leaf comparison excludes them; their shape is pinned by the
+# migration crate's own tests instead.
+RUST_ONLY_TABLES = {"rust_job_queue", "rust_job_schedule", "rust_runner_model_catalog"}
+# Columns whose values depend on the run wall-clock or are generated fresh
+# on every install. The payloads are still compared exactly:
+# - `django_migrations.applied` (run time); (app, name) pairs compared.
+# - `loop_jobs`: `update_or_create` mints a fresh id and `dtstart = now()`
+#   on every migrate (db/0149_loop_mvp); slug + payload compared.
+# - `prompt_template`: reseed migrations mint fresh ids on every migrate;
+#   name + body + version + flags compared.
 SKIP_COLUMNS = {
     ("django_migrations", "applied"),
+    ("loop_jobs", "id"),
+    ("loop_jobs", "dtstart"),
     ("loop_jobs", "created_at"),
     ("loop_jobs", "updated_at"),
+    ("prompt_template", "id"),
+    ("prompt_template", "created_at"),
+    ("prompt_template", "updated_at"),
 }
 # Tables compared by row count only (large; content is run-derived).
 COUNT_ONLY = {"auth_permission", "django_content_type"}
@@ -53,7 +70,11 @@ def snapshot(dsn):
                 WHERE schemaname = 'public' ORDER BY 1
                 """
             )
-            tables = [r[0] for r in cur.fetchall() if r[0] not in SKIP_TABLES]
+            tables = [
+                r[0]
+                for r in cur.fetchall()
+                if r[0] not in SKIP_TABLES and r[0] not in RUST_ONLY_TABLES
+            ]
             out.append(f"# tables: {len(tables)}")
             for table in tables:
                 cur.execute(
@@ -117,6 +138,7 @@ def main():
         return 0
     print(f"DIFFER: {label_a} vs {label_b}")
     print("Rules: skip tables", sorted(SKIP_TABLES))
+    print("Rules: rust-only tables", sorted(RUST_ONLY_TABLES))
     print("Rules: volatile columns", sorted(f"{t}.{c}" for t, c in SKIP_COLUMNS))
     print("Rules: count-only tables", sorted(COUNT_ONLY))
     diff = difflib.unified_diff(
