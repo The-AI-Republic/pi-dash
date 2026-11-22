@@ -117,6 +117,19 @@ services:
     depends_on:
       - pi-dash-db
       - pi-dash-redis
+    # No curl/wget/Python in the Rust image (rust-api/Dockerfile.api), so
+    # the probe is bash's /dev/tcp against /healthz (serve answers
+    # {"status":"ok",...} there).
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8000 && printf \"GET /healthz HTTP/1.0\\r\\n\\r\\n\" >&3 && head -c 64 <&3 | grep -q \" 200 \"'",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
 
   worker:
     # The scheduler runs inside the worker; there is no beat service.

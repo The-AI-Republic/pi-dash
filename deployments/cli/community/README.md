@@ -421,9 +421,6 @@ progress while starting:
    Data Migration completed successfully ✅
    Waiting for API Service to be ready...
    API Service started successfully ✅
-api-1  | [2024-05-02 03:56:03 +0000] [25] [INFO] ASGI 'lifespan' protocol appears unsupported.
-api-1  | [2024-05-02 03:56:03 +0000] [25] [INFO] Application startup complete.
-
 ```
 
 To exit this, use `CTRL+C` and then you will land on to the main-menu with the list of actions.
