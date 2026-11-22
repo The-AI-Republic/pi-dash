@@ -186,12 +186,55 @@ function ensureGeneratedSecret() {
     fi
 }
 
+# Fernet keys are urlsafe-base64 32-byte secrets (the `cryptography` format
+# the Rust api reads), NOT hex: reuse setup.sh's generation (prefer python3
+# cryptography, else openssl base64 translated to the urlsafe alphabet).
+function generateFernetKey() {
+    if python3 -c "import cryptography.fernet" 2>/dev/null; then
+        python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    else
+        # openssl emits standard base64; Fernet needs the urlsafe alphabet.
+        openssl rand -base64 32 2>/dev/null | tr '+/' '-_'
+    fi
+}
+
+function ensureFernetSecret() {
+    local key=$1
+    local file=$2
+
+    if [ -z "$key" ] || [ -z "$file" ]; then
+        echo "ensureFernetSecret: invalid arguments" >&2
+        exit 1
+    fi
+
+    local current
+    current=$(getEnvValue "$key" "$file")
+
+    if [ -z "$current" ]; then
+        local generated
+        generated=$(generateFernetKey)
+        if [ -z "$generated" ]; then
+            echo "Failed to auto-generate a Fernet value for $key (install python3-cryptography or openssl)." >&2
+            echo "Set $key manually in $file and re-run." >&2
+            exit 1
+        fi
+        updateEnvFile "$key" "$generated" "$file"
+        echo "Generated a unique $key and stored it in $file" >&2
+    fi
+}
+
 function updateCustomVariables(){
     echo "Updating custom variables..." >&2
     updateEnvFile "DOCKERHUB_USER" "$DOCKERHUB_USER" "$DOCKER_ENV_PATH"
     updateEnvFile "APP_RELEASE" "$APP_RELEASE" "$DOCKER_ENV_PATH"
     updateEnvFile "PULL_POLICY" "$PULL_POLICY" "$DOCKER_ENV_PATH"
     updateEnvFile "CUSTOM_BUILD" "$CUSTOM_BUILD" "$DOCKER_ENV_PATH"
+    if [ "$CUSTOM_BUILD" == "true" ]; then
+        # A local build produces pi-dash-backend:$APP_RELEASE from build.yml,
+        # so the interim Django migrator (NEWPIDASH-380) uses it instead of
+        # the pinned last-published tag.
+        updateEnvFile "MIGRATOR_RELEASE" "$APP_RELEASE" "$DOCKER_ENV_PATH"
+    fi
     echo "Custom variables updated successfully" >&2
 }
 
@@ -342,6 +385,7 @@ function download() {
     # so this only fires on the initial install.
     ensureGeneratedSecret "SECRET_KEY" "$DOCKER_ENV_PATH"
     ensureGeneratedSecret "LIVE_SERVER_SECRET_KEY" "$DOCKER_ENV_PATH"
+    ensureFernetSecret "ASSISTANT_ENCRYPTION_KEY" "$DOCKER_ENV_PATH"
 
     if [ "$LOCAL_BUILD" == "true" ]; then
         export DOCKERHUB_USER="mypidash"
@@ -420,7 +464,10 @@ function startServices() {
     local start_time=$(date +%s)
 
     echo "   Waiting for API Service to be ready..."
-    while ! docker exec "$api_container_id" python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/', timeout=3)" > /dev/null 2>&1; do
+    # The Rust image has no Python (and no curl/wget), but it has bash, so
+    # probe /healthz over bash's /dev/tcp — the same probe as the compose
+    # healthcheck. (serve answers {"status":"ok",...} there.)
+    while ! docker exec "$api_container_id" bash -c 'exec 3<>/dev/tcp/127.0.0.1/8000 && printf "GET /healthz HTTP/1.0\r\n\r\n" >&3 && head -c 64 <&3 | grep -q " 200 "' > /dev/null 2>&1; do
         local current_time=$(date +%s)
         local elapsed_time=$((current_time - start_time))
 
@@ -521,23 +568,21 @@ function viewLogs(){
     then
         echo
         echo "Select a Service you want to view the logs for:"
-        echo "   1) Web"
-        echo "   2) Space"
-        echo "   3) API"
-        echo "   4) Worker"
-        echo "   5) Beat-Worker"
-        echo "   6) Migrator"
-        echo "   7) Proxy"
-        echo "   8) Redis"
-        echo "   9) Postgres"
-        echo "   10) Minio"
-        echo "   11) RabbitMQ"
+        echo "   1) Web-New"
+        echo "   2) API"
+        echo "   3) Worker"
+        echo "   4) Migrator"
+        echo "   5) Live"
+        echo "   6) Proxy"
+        echo "   7) Redis"
+        echo "   8) Postgres"
+        echo "   9) Minio"
         echo "   0) Back to Main Menu"
-        echo 
+        echo
         read -p "Service: " DOCKER_SERVICE_NAME
 
-        until (( DOCKER_SERVICE_NAME >= 0 && DOCKER_SERVICE_NAME <= 11 )); do
-            echo "Invalid selection. Please enter a number between 0 and 11."
+        until (( DOCKER_SERVICE_NAME >= 0 && DOCKER_SERVICE_NAME <= 9 )); do
+            echo "Invalid selection. Please enter a number between 0 and 9."
             read -p "Service: " DOCKER_SERVICE_NAME
         done
 
@@ -546,17 +591,15 @@ function viewLogs(){
             echo "INVALID SERVICE NAME SUPPLIED"
         else
             case $DOCKER_SERVICE_NAME in
-                1) viewSpecificLogs "web";;
-                2) viewSpecificLogs "space";;
-                3) viewSpecificLogs "api";;
-                4) viewSpecificLogs "worker";;
-                5) viewSpecificLogs "beat-worker";;
-                6) viewSpecificLogs "migrator";;
-                7) viewSpecificLogs "proxy";;
-                8) viewSpecificLogs "pi-dash-redis";;
-                9) viewSpecificLogs "pi-dash-db";;
-                10) viewSpecificLogs "pi-dash-minio";;
-                11) viewSpecificLogs "pi-dash-mq";;
+                1) viewSpecificLogs "web_new";;
+                2) viewSpecificLogs "api";;
+                3) viewSpecificLogs "worker";;
+                4) viewSpecificLogs "migrator";;
+                5) viewSpecificLogs "live";;
+                6) viewSpecificLogs "proxy";;
+                7) viewSpecificLogs "pi-dash-redis";;
+                8) viewSpecificLogs "pi-dash-db";;
+                9) viewSpecificLogs "pi-dash-minio";;
                 0) askForAction;;
                 *) echo "INVALID SERVICE NAME SUPPLIED";;
             esac
@@ -565,17 +608,15 @@ function viewLogs(){
     then
         ARG_SERVICE_NAME=$(echo "$ARG_SERVICE_NAME" | tr '[:upper:]' '[:lower:]')
         case $ARG_SERVICE_NAME in
-            web) viewSpecificLogs "web";;
-            space) viewSpecificLogs "space";;
+            web-new|web_new) viewSpecificLogs "web_new";;
             api) viewSpecificLogs "api";;
             worker) viewSpecificLogs "worker";;
-            beat-worker) viewSpecificLogs "beat-worker";;
             migrator) viewSpecificLogs "migrator";;
+            live) viewSpecificLogs "live";;
             proxy) viewSpecificLogs "proxy";;
             redis) viewSpecificLogs "pi-dash-redis";;
             postgres) viewSpecificLogs "pi-dash-db";;
             minio) viewSpecificLogs "pi-dash-minio";;
-            rabbitmq) viewSpecificLogs "pi-dash-mq";;
             *) echo "INVALID SERVICE NAME SUPPLIED";;
         esac
     else
@@ -639,7 +680,8 @@ function backupData() {
 
     backup_container_dir "$BACKUP_FOLDER" "pi-dash-db" "/var/lib/postgresql/data" "pgdata" || exit 1
     backup_container_dir "$BACKUP_FOLDER" "pi-dash-minio" "/export" "uploads" || exit 1
-    backup_container_dir "$BACKUP_FOLDER" "pi-dash-mq" "/var/lib/rabbitmq" "rabbitmq_data" || exit 1
+    # (No RabbitMQ: the Rust worker queues in Postgres, so there is no
+    # rabbitmq_data volume to back up.)
     backup_container_dir "$BACKUP_FOLDER" "pi-dash-redis" "/data" "redisdata" || exit 1
 
     echo ""

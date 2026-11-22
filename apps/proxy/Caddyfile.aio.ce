@@ -6,9 +6,8 @@
     handle /live/* {
         reverse_proxy localhost:3005
     }
-	handle /ws/runner/* {
-        reverse_proxy localhost:3004
-    }
+	# No /ws/runner/* route: it was Django Channels-only, and the Rust API
+	# serves no such path (matches apps/proxy/Caddyfile.ce, NEWPIDASH-382).
 	handle /api/* {
         reverse_proxy localhost:3004
     }
@@ -468,7 +467,7 @@
         reverse_proxy localhost:3004
     }
     handle_path /* {
-        root * /app/web
+        root * /app/web_new
         try_files {path} {path}/ /index.html
         file_server
     }
