@@ -4,15 +4,15 @@ The Pi Dash Community All-In-One Docker image packages all Pi Dash services into
 
 ## What's Included
 
-The AIO image contains the following services:
+The AIO image contains the following services (the active system only —
+no old web/space/admin frontends, no beat worker, no RabbitMQ):
 
-- **Web App** (Port 3001): Main Pi Dash web interface
-- **Space** (Port 3002): Public project spaces
-- **Admin** (Port 3003): Administrative interface
-- **API Server** (Port 3004): Backend API
+- **Web-New**: Main Pi Dash web interface (files at `/app/web_new`, served by the proxy)
+- **API Server** (Port 3004): Rust backend API (`pidash-api serve`)
+- **Worker**: Background task processing (the scheduler runs inside the worker)
+- **Migrator**: One-shot database migration at container start (exits afterwards)
 - **Live Server** (Port 3005): Real-time collaboration
 - **Proxy** (Port 80, 443): Caddy reverse proxy
-- **Worker & Beat**: Background task processing
 
 ## Prerequisites
 
@@ -22,7 +22,6 @@ The AIO image requires these external services to be running:
 
 - **PostgreSQL Database**: For data storage
 - **Redis**: For caching and session management
-- **RabbitMQ**: For message queuing
 - **S3-Compatible Storage**: For file uploads (AWS S3 or MinIO)
 
 ### Required Environment Variables
@@ -34,7 +33,6 @@ You must provide these environment variables:
 - `DOMAIN_NAME`: Your domain name or IP address
 - `DATABASE_URL`: PostgreSQL connection string
 - `REDIS_URL`: Redis connection string
-- `AMQP_URL`: RabbitMQ connection string
 
 #### Storage Configuration
 
@@ -46,10 +44,14 @@ You must provide these environment variables:
 
 #### Security & Secrets
 
-Generate each with `openssl rand -hex 32`:
+Generate the hex secrets with `openssl rand -hex 32`:
 
-- `SECRET_KEY`: Django signing key
+- `SECRET_KEY`: API session signing key (shared by the API and the interim migrator)
 - `LIVE_SERVER_SECRET_KEY`: Live server signing key
+
+Generate the Fernet key with python3 (the `cryptography` format the API reads):
+
+- `ASSISTANT_ENCRYPTION_KEY`: AI Assistant BYOK encryption key (`python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`)
 
 ## Quick Start
 
@@ -61,13 +63,13 @@ docker run --name pi-dash-aio --rm -it \
     -e DOMAIN_NAME=your-domain.com \
     -e DATABASE_URL=postgresql://user:pass@host:port/database \
     -e REDIS_URL=redis://host:port \
-    -e AMQP_URL=amqp://user:pass@host:port/vhost \
     -e AWS_REGION=us-east-1 \
     -e AWS_ACCESS_KEY_ID=your-access-key \
     -e AWS_SECRET_ACCESS_KEY=your-secret-key \
     -e AWS_S3_BUCKET_NAME=your-bucket \
     -e SECRET_KEY=$(openssl rand -hex 32) \
     -e LIVE_SERVER_SECRET_KEY=$(openssl rand -hex 32) \
+    -e ASSISTANT_ENCRYPTION_KEY=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())") \
     airepublic/pi-dash-aio-community:latest
 ```
 
@@ -80,7 +82,6 @@ docker run --name myaio --rm -it \
     -e DOMAIN_NAME=${MYIP} \
     -e DATABASE_URL=postgresql://pi-dash:pi-dash@${MYIP}:15432/pi-dash \
     -e REDIS_URL=redis://${MYIP}:16379 \
-    -e AMQP_URL=amqp://pi-dash:pi-dash@${MYIP}:15673/pi-dash \
     -e AWS_REGION=us-east-1 \
     -e AWS_ACCESS_KEY_ID=YOUR_ACCESS_KEY \
     -e AWS_SECRET_ACCESS_KEY=YOUR_SECRET_KEY \
@@ -89,6 +90,7 @@ docker run --name myaio --rm -it \
     -e FILE_SIZE_LIMIT=10485760 \
     -e SECRET_KEY=$(openssl rand -hex 32) \
     -e LIVE_SERVER_SECRET_KEY=$(openssl rand -hex 32) \
+    -e ASSISTANT_ENCRYPTION_KEY=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())") \
     airepublic/pi-dash-aio-community:latest
 ```
 

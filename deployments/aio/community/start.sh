@@ -7,10 +7,11 @@ print_header(){
     echo "------------------------------------------------"
     echo ""
     echo "You are required to pass below environment variables to the script"
-    echo "    DOMAIN_NAME, DATABASE_URL, REDIS_URL, AMQP_URL"
+    echo "    DOMAIN_NAME, DATABASE_URL, REDIS_URL"
     echo "    AWS_REGION, AWS_ACCESS_KEY_ID"
     echo "    AWS_SECRET_ACCESS_KEY, AWS_S3_BUCKET_NAME"
     echo "    SECRET_KEY, LIVE_SERVER_SECRET_KEY  (generate with: openssl rand -hex 32)"
+    echo "    ASSISTANT_ENCRYPTION_KEY  (generate with: python3 -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\")"
     echo ""
     echo "Other optional environment variables: "
     echo "    SITE_ADDRESS (default: ':80')"
@@ -22,9 +23,9 @@ print_header(){
 
 check_required_env(){
     echo "Checking required environment variables..."
-    local keys=("DOMAIN_NAME" "DATABASE_URL" "REDIS_URL" "AMQP_URL"
+    local keys=("DOMAIN_NAME" "DATABASE_URL" "REDIS_URL"
                 "AWS_REGION" "AWS_ACCESS_KEY_ID" "AWS_SECRET_ACCESS_KEY" "AWS_S3_BUCKET_NAME"
-                "SECRET_KEY" "LIVE_SERVER_SECRET_KEY")
+                "SECRET_KEY" "LIVE_SERVER_SECRET_KEY" "ASSISTANT_ENCRYPTION_KEY")
     
     local missing_keys=()
     # Check if the environment variable is set and not empty
@@ -133,8 +134,7 @@ update_env_file(){
     # update database url
     update_env_value "DATABASE_URL" "$DATABASE_URL"
     update_env_value "REDIS_URL" "$REDIS_URL"
-    update_env_value "AMQP_URL" "$AMQP_URL"
-    
+
     # update aws credentials
     update_env_value "AWS_REGION" "$AWS_REGION"
     update_env_value "AWS_ACCESS_KEY_ID" "$AWS_ACCESS_KEY_ID"
@@ -146,6 +146,7 @@ update_env_file(){
 
     update_env_value "SECRET_KEY" "$SECRET_KEY"
     update_env_value "LIVE_SERVER_SECRET_KEY" "$LIVE_SERVER_SECRET_KEY"
+    update_env_value "ASSISTANT_ENCRYPTION_KEY" "$ASSISTANT_ENCRYPTION_KEY"
 
     # Optional environment variables
     update_env_value "FILE_SIZE_LIMIT" "${FILE_SIZE_LIMIT:-5242880}"
@@ -156,15 +157,33 @@ update_env_file(){
     echo ""
 }
 
+# Migration is an install/upgrade step that runs once, before any service
+# starts: if it fails, the container exits nonzero and starts nothing.
+# Interim (NEWPIDASH-380): this shells to Django `manage.py migrate`.
+# TODO(NEWPIDASH-380): swap for the native `pidash-api migrate up`.
+run_migrations(){
+    echo "Running database migrations..."
+    if python /app/backend/manage.py migrate; then
+        echo "✅ Migrations completed"
+    else
+        echo ""
+        echo "❌ Migration failed — fix the error above and restart. Nothing was started."
+        exit 1
+    fi
+    echo ""
+}
+
 main(){
     print_header
     check_pre_requisites
     update_env_file
 
+    run_migrations
+
     # load pi_dash.env as exported variables
     export $(grep -v '^#' pi_dash.env | xargs)
 
-    /usr/local/bin/supervisord -c /etc/supervisor/conf.d/supervisor.conf
+    /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisor.conf
 }
 
 main "$@"

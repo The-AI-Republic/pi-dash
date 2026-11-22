@@ -106,7 +106,7 @@ build_dist_files(){
     update_env_file $DIST_DIR/pi_dash.env "APP_VERSION" "$APP_RELEASE_VERSION"
     
     update_env_file $DIST_DIR/pi_dash.env "API_BASE_URL" "http://localhost:3004"
-    update_env_file $DIST_DIR/pi-dash.env "SITE_ADDRESS" ":80"
+    update_env_file $DIST_DIR/pi_dash.env "SITE_ADDRESS" ":80"
 
 
     # print docker build command

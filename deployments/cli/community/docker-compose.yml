@@ -34,13 +34,8 @@ x-proxy-env: &proxy-env
   BUCKET_NAME: ${AWS_S3_BUCKET_NAME:-uploads}
   SITE_ADDRESS: ${SITE_ADDRESS:-:80}
 
-x-mq-env: &mq-env # RabbitMQ Settings
-  RABBITMQ_HOST: ${RABBITMQ_HOST:-pi-dash-mq}
-  RABBITMQ_PORT: ${RABBITMQ_PORT:-5672}
-  RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-pi-dash}
-  RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-pi-dash}
-  RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-pi-dash}
-  RABBITMQ_VHOST: ${RABBITMQ_VHOST:-pi-dash}
+# (No RabbitMQ: the Rust worker queues in Postgres. The old pi-dash-mq
+# service is gone with the frozen Django/Celery stack.)
 
 x-live-env: &live-env
   API_BASE_URL: ${API_BASE_URL:-http://api:8000}
@@ -50,11 +45,12 @@ x-app-env: &app-env
   WEB_URL: ${WEB_URL:-http://localhost}
   DEBUG: ${DEBUG:-0}
   CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
-  GUNICORN_WORKERS: 1
   USE_MINIO: ${USE_MINIO:-1}
   DATABASE_URL: ${DATABASE_URL:-postgresql://pi-dash:pi-dash@pi-dash-db/pi-dash}
   SECRET_KEY: "${SECRET_KEY:?SECRET_KEY must be set in pi_dash.env; generate with openssl rand -hex 32}"
-  AMQP_URL: ${AMQP_URL:-amqp://pi-dash:pi-dash@pi-dash-mq:5672/pi-dash}
+  # Fernet key(s) for AI Assistant BYOK encryption. Blank on a fresh
+  # variables.env; install.sh generates one (as Fernet, not hex).
+  ASSISTANT_ENCRYPTION_KEY: ${ASSISTANT_ENCRYPTION_KEY:-}
   API_KEY_RATE_LIMIT: ${API_KEY_RATE_LIMIT:-120/minute}
   MINIO_ENDPOINT_SSL: ${MINIO_ENDPOINT_SSL:-0}
   LIVE_SERVER_SECRET_KEY: "${LIVE_SERVER_SECRET_KEY:?LIVE_SERVER_SECRET_KEY must be set in pi_dash.env; generate with openssl rand -hex 32}"
@@ -63,17 +59,28 @@ x-app-env: &app-env
   # write fails with 503 "LIVE_URL is not configured".
   LIVE_BASE_URL: ${LIVE_BASE_URL:-http://live:3000}
 
-services:
-  web:
-    image: airepublic/pi-dash-frontend:${APP_RELEASE:-stable}
-    deploy:
-      replicas: ${WEB_REPLICAS:-1}
-      restart_policy:
-        condition: any
-    depends_on:
-      - api
-      - worker
+x-rust-cutover-flags: &rust-cutover-flags
+  # Rust-only edge interim (NEWPIDASH-381): explicit 1s plus a dead upstream.
+  # Redundant under 381's defaults but harmless, so a rollback needs no
+  # compose change. The upstream is the discard port on loopback: nothing
+  # listens there, and it is never contacted while every flag below is 1.
+  # (Copied from the root docker-compose.yml; keep the two in step.)
+  PIDASH_RUST_WEB: "1"
+  PIDASH_RUST_APP: "1"
+  PIDASH_RUST_ASSISTANT: "1"
+  PIDASH_RUST_LOOP: "1"
+  PIDASH_RUST_PROMPTING: "1"
+  PIDASH_RUST_SPACE: "1"
+  PIDASH_RUST_LICENSE: "1"
+  PIDASH_RUST_RUNNER_WEB: "1"
+  PIDASH_RUST_API_V1: "1"
+  PIDASH_RUST_RUNNER: "1"
+  PIDASH_RUST_AUTH: "1"
+  PIDASH_DJANGO_UPSTREAM: http://127.0.0.1:9
 
+services:
+  # (No web, space or admin: the old frontends are frozen and unserved.
+  # web_new below is the only frontend.)
   web_new:
     image: airepublic/pi-dash-web-new:${APP_RELEASE:-stable}
     deploy:
@@ -83,27 +90,6 @@ services:
     depends_on:
       - api
       - worker
-
-  space:
-    image: airepublic/pi-dash-space:${APP_RELEASE:-stable}
-    deploy:
-      replicas: ${SPACE_REPLICAS:-1}
-      restart_policy:
-        condition: any
-    depends_on:
-      - api
-      - worker
-      - web
-
-  admin:
-    image: airepublic/pi-dash-admin:${APP_RELEASE:-stable}
-    deploy:
-      replicas: ${ADMIN_REPLICAS:-1}
-      restart_policy:
-        condition: any
-    depends_on:
-      - api
-      - web
 
   live:
     image: airepublic/pi-dash-live:${APP_RELEASE:-stable}
@@ -115,67 +101,51 @@ services:
         condition: any
     depends_on:
       - api
-      - web
 
   api:
-    image: airepublic/pi-dash-backend:${APP_RELEASE:-stable}
+    image: airepublic/pi-dash-api:${APP_RELEASE:-stable}
     command: ./bin/docker-entrypoint-api.sh
     deploy:
       replicas: ${API_REPLICAS:-1}
       restart_policy:
         condition: any
-    volumes:
-      - logs_api:/code/pi_dash/logs
     environment:
-      <<: [*app-env, *db-env, *redis-env, *minio-env, *aws-s3-env, *proxy-env]
+      <<: [*app-env, *db-env, *redis-env, *minio-env, *aws-s3-env, *proxy-env, *rust-cutover-flags]
+      # `serve` is single-process async: no gunicorn, scale with replicas.
+      # PORT 8000 is what the proxy dials (apps/proxy/Caddyfile.ce).
+      PORT: "8000"
     depends_on:
       - pi-dash-db
       - pi-dash-redis
-      - pi-dash-mq
 
   worker:
-    image: airepublic/pi-dash-backend:${APP_RELEASE:-stable}
+    # The scheduler runs inside the worker; there is no beat service.
+    image: airepublic/pi-dash-api:${APP_RELEASE:-stable}
     command: ./bin/docker-entrypoint-worker.sh
     deploy:
       replicas: ${WORKER_REPLICAS:-1}
       restart_policy:
         condition: any
-    volumes:
-      - logs_worker:/code/pi_dash/logs
     environment:
-      <<: [*app-env, *db-env, *redis-env, *minio-env, *aws-s3-env, *proxy-env]
+      <<: [*app-env, *db-env, *redis-env, *minio-env, *aws-s3-env, *proxy-env, *rust-cutover-flags]
     depends_on:
       - api
       - pi-dash-db
       - pi-dash-redis
-      - pi-dash-mq
-
-  beat-worker:
-    image: airepublic/pi-dash-backend:${APP_RELEASE:-stable}
-    command: ./bin/docker-entrypoint-beat.sh
-    deploy:
-      replicas: ${BEAT_WORKER_REPLICAS:-1}
-      restart_policy:
-        condition: any
-    volumes:
-      - logs_beat-worker:/code/pi_dash/logs
-    environment:
-      <<: [*app-env, *db-env, *redis-env, *minio-env, *aws-s3-env, *proxy-env]
-    depends_on:
-      - api
-      - pi-dash-db
-      - pi-dash-redis
-      - pi-dash-mq
 
   migrator:
-    image: airepublic/pi-dash-backend:${APP_RELEASE:-stable}
+    # Interim (NEWPIDASH-380): the exiting migrator runs Django
+    # `manage.py migrate`. The backend image is no longer published
+    # per-release (NEWPIDASH-382), so this pins the last Django build via
+    # MIGRATOR_RELEASE (default `stable`); a custom local build sets it to
+    # the local release in install.sh. TODO(NEWPIDASH-380): swap this for
+    # the native `pidash-api migrate up` image and entrypoint.
+    image: ${DOCKERHUB_USER:-airepublic}/pi-dash-backend:${MIGRATOR_RELEASE:-stable}
     command: ./bin/docker-entrypoint-migrator.sh
     deploy:
       replicas: 1
       restart_policy:
         condition: on-failure
-    volumes:
-      - logs_migrator:/code/pi_dash/logs
     environment:
       <<: [*app-env, *db-env, *redis-env, *minio-env, *aws-s3-env, *proxy-env]
     depends_on:
@@ -203,17 +173,6 @@ services:
         condition: any
     volumes:
       - redisdata:/data
-
-  pi-dash-mq:
-    image: rabbitmq:3.13.6-management-alpine
-    deploy:
-      replicas: 1
-      restart_policy:
-        condition: any
-    environment:
-      <<: *mq-env
-    volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
 
   # Comment this if you using any external s3 compatible storage
   pi-dash-minio:
@@ -250,21 +209,13 @@ services:
       - proxy_config:/config
       - proxy_data:/data
     depends_on:
-      - web
       - web_new
       - api
-      - space
-      - admin
       - live
 
 volumes:
   pgdata:
   redisdata:
   uploads:
-  logs_api:
-  logs_worker:
-  logs_beat-worker:
-  logs_migrator:
-  rabbitmq_data:
   proxy_config:
   proxy_data:
