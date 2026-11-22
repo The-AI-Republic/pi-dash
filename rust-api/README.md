@@ -1,9 +1,7 @@
 # Pi Dash Rust backend (`rust-api/`)
 
-The current Pi Dash backend: an axum API server plus a Postgres-queue
-worker, ported from the Django backend (`apps/api`) domain by domain.
-Production serves only Rust. The Django app is frozen and kept only as a
-fallback (behavioural reference + edge-proxy upstream); nothing is deleted.
+Rust port of the Django backend (`apps/api`), taking over traffic behind a
+proxy one domain at a time. Python stays in place; nothing is deleted.
 
 Quarantine: code lives only under `rust-api/`. The only files allowed outside
 it are `.github/workflows/rust-api*.yml` and the one-line `exclude` in the
@@ -79,7 +77,8 @@ one name; sqlx resolves a duplicated name to the last column.
 
 ## Run the contract suite
 
-Contract suites run unmodified against live Django (the oracle: the old system's real behaviour) and against the Rust binary with every `PIDASH_RUST_*` flag on. They need a live backend plus Postgres:
+Contract suites run unmodified against live Django today and against Rust
+through the proxy tomorrow. They need a live backend plus Postgres:
 
 ```sh
 cd rust-api/contract-tests
@@ -116,14 +115,10 @@ the same `SECRET_KEY` the sessions were forged with.
 
 ## Cutover edge (F-02)
 
-`serve` is the backend; the edge in `crates/api/src/edge.rs` keeps a
-reverse proxy to the Django upstream (`PIDASH_DJANGO_UPSTREAM`, default
-`http://127.0.0.1:8000`) as the fallback path. Each URL prefix has a
-`PIDASH_RUST_*` flip flag: a flagged prefix is served by its Rust handler,
-anything else proxies to Django. Production runs with all flags on — every
-request is served by Rust. The routing table encodes the inventory §0
-prefix map; each row has a flag, all default off (an unconfigured `serve`
-proxies rather than 404ing what Rust doesn't handle yet):
+`serve` sits in front of Django: every request is reverse-proxied to
+`PIDASH_DJANGO_UPSTREAM` (default `http://127.0.0.1:8000`) unless its URL
+prefix is flipped to Rust. The routing table in `crates/api/src/edge.rs`
+encodes the inventory §0 prefix map; each row has a flag, all default off:
 
 | Env var                                                | Prefix                         | Django module                             |
 | ------------------------------------------------------ | ------------------------------ | ----------------------------------------- |
@@ -501,10 +496,10 @@ so local builds send the whole checkout as context.
 
 ### Boot order
 
-One image, seven entrypoints (role = container `command`). Every
-`python manage.py <cmd>` became `pidash-api ops <cmd>`
-(`ops instance <cmd>` for the nested group); the old `gunicorn`/`celery`
-exec lines became `serve` / `worker`:
+One image, seven entrypoints (role = container `command`, as in the
+Python fleet). Every `python manage.py <cmd>` became
+`pidash-api ops <cmd>` (`ops instance <cmd>` for the nested group);
+`gunicorn`/`celery` exec lines became `serve` / `worker`:
 
 | Entrypoint                          | Boot steps                                                                                                                                                          |
 | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -516,18 +511,16 @@ exec lines became `serve` / `worker`:
 | `docker-entrypoint-beat-local.sh`   | waits → `worker`                                                                                                                                                    |
 | `docker-entrypoint-migrator.sh`     | wait_for_db → `python manage.py migrate $1` (stays Django)                                                                                                          |
 
-Deltas from the old Python boot (each documented at the script line):
-collectstatic dropped (API-only container); database migration is an
-install step that runs once before any service starts — the migrator runs
-`python manage.py migrate` from the Django image, is the only Python
-container, and exits after migrating (temporary until NEWPIDASH-380 lands
-the native Rust migrator; TODO in the compose files points at it);
-`serve` is single-process async with no worker-class or max-requests
-equivalent (scale with replicas); watchmedo / uvicorn --reload dropped in
--local scripts (`cargo watch` outside the image); beat roles run the full
-worker (no scheduler-only mode — the scheduler lock keeps worker + beat
-from double-scheduling); the migrator's `wait_for_db $1` drops `$1`
-(Django ignores it, clap rejects it).
+Deltas from the Python boot (each documented at the script line):
+collectstatic dropped (API-only container; the Django upstream serves
+static); migrate stays `python` (schema owner until switchover) and the
+migrator stays pinned to the Python image until the deployments
+follow-up; GUNICORN_WORKERS and max-requests have no `serve` equivalent
+(scale with replicas); watchmedo / uvicorn --reload dropped in -local
+scripts (`cargo watch` outside the image); beat roles run the full worker
+(no scheduler-only mode — the scheduler lock keeps worker + beat from
+double-scheduling); the migrator's `wait_for_db $1` drops `$1` (Django
+ignores it, clap rejects it).
 
 ### Environment
 
@@ -539,7 +532,7 @@ Every variable the image sets or the scripts and boot path consume:
 | `CELERY_WORKER_CONCURRENCY`     | min(nproc, 8)                          | worker entrypoint             | job budget; Rust multiplexes over a shared 10-conn pool      |
 | `WORKER_QUEUE`                  | `celery`                               | worker entrypoint             | queue label; agent worker sets `cloud_agent`                 |
 | `WORKER_NO_SCHEDULER`           | (unset)                                | worker entrypoint             | set `1`/`true` to disable scheduler (agent worker pool)      |
-| `DJANGO_SETTINGS_MODULE`        | `pi_dash.settings.local`               | api-local entrypoint          | legacy; no Rust effect; kept for shape parity                |
+| `DJANGO_SETTINGS_MODULE`        | `pi_dash.settings.local`               | api-local entrypoint          | no Rust effect; kept for shape parity                        |
 | `MACHINE_SIGNATURE`             | (set by api entrypoints)               | register-instance             | sha256 of hostname, mac, cpu, mem, disk                      |
 | `DATABASE_URL`                  | (required)                             | serve, worker, ops            | TCP postgres URL; replica: see below                         |
 | `DATABASE_READ_REPLICA_URL`     | (unset)                                | settings key only             | read by Settings; pool wiring not yet connected              |
@@ -559,10 +552,9 @@ Every variable the image sets or the scripts and boot path consume:
 | `PIP_DISABLE_PIP_VERSION_CHECK` | `1`                                    | (none)                        | preserved key; no interpreter in this image                  |
 
 Cutover flags (`PIDASH_DJANGO_UPSTREAM`, `PIDASH_RUST_*`) live in
-[Cutover edge](#cutover-edge-f-02) — production sets every `PIDASH_RUST_*`
-flag on. The old Django-side deploy vars (`CELERY_BROKER_URL`,
-`GUNICORN_WORKERS`) are frozen with the old stack and not part of this
-image. The Rust worker holds no broker config:
+[Cutover edge](#cutover-edge-f-02); Django-side deploy vars
+(`CELERY_BROKER_URL`, `GUNICORN_WORKERS`) stay in `deployments/`
+(quarantine — see follow-ups). The Rust worker holds no broker config:
 the job queue is Postgres (`rust_job_queue`) and there is no AMQP path
 (PIDASHCONV-1108).
 
@@ -583,8 +575,7 @@ setting on this image today.
 ### Follow-ups (out of scope, quarantine)
 
 - `deployments/{aio,cli,kubernetes,swarm}/`: point roles at this image
-  (NEWPIDASH-382/383 own the compose/installer shape; the migrator keeps
-  the exited Django container until NEWPIDASH-380 ports migrate).
+  (migrator stays on the Python image until migrate is ported).
 - `requirements/*.txt`: drop the 3 unused deps plus croniter
   (post-switchover).
 - Worker seed join: `services::tasks_cleanup::workspace_seed` joins

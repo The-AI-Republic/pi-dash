@@ -89,7 +89,7 @@ chmod +x setup.sh
 ./setup.sh
 ```
 
-`setup.sh` copies every `.env.example` to its `.env` counterpart, generates a unique `SECRET_KEY` for session validation, then runs `pnpm install`. For the default loopback-dev setup you do not need to edit any `.env` file manually — the `.env.example` defaults (localhost URLs, `pi-dash` database credentials, a local MinIO endpoint, etc.) work out of the box. Edit them only if you're binding to a non-default host/port or wiring in external services.
+`setup.sh` copies every `.env.example` to its `.env` counterpart, provisions a Django `SECRET_KEY` into `apps/api/.env` for the frozen backend, then runs `pnpm install`. (The Rust API reads `SECRET_KEY` from the environment and mints an ephemeral one when unset.) For the default loopback-dev setup you do not need to edit any `.env` file manually — the `.env.example` defaults (localhost URLs, `pi-dash` database credentials, a local MinIO endpoint, etc.) work out of the box. Edit them only if you're binding to a non-default host/port or wiring in external services.
 
 3. Start the shared infrastructure
 
@@ -105,7 +105,7 @@ This brings up just the dependencies — Postgres, Valkey and MinIO. The app pro
 docker compose -f docker-compose-local.yml up migrator
 ```
 
-The migrator applies Django's migration history to the shared database and then exits — it is the only Python container, and it never stays running. (Temporary until [NEWPIDASH-380](https://pidash.airepublic.com) lands the native Rust migrator; services never run migrations themselves.)
+The migrator applies Django's migration history to the shared database and then exits — it is the only Python container, and it never stays running. (Temporary until [NEWPIDASH-380](https://pidash.airepublic.com/ai-republic/browse/NEWPIDASH-380) lands the native Rust migrator; services never run migrations themselves.)
 
 5. Start the Rust API and worker (one terminal each)
 

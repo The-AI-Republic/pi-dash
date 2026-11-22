@@ -25,7 +25,7 @@ chmod +x setup.sh
 `setup.sh` does three things:
 
 1. **Copies every `.env.example` to `.env`**. The defaults work out of the box for loopback dev (localhost URLs, `pi-dash` Postgres creds, local MinIO endpoint). Only edit `.env` files if you're binding to a non-default host or wiring in external services.
-2. **Generates a unique `SECRET_KEY`** for session validation.
+2. **Provisions a Django `SECRET_KEY`** into `apps/api/.env` (frozen backend; the Rust API mints an ephemeral one when `SECRET_KEY` is unset).
 3. **Runs `pnpm install`** for the TS workspace.
 
 ## Start the infra
