@@ -1,3 +1,35 @@
+# Local dev: Rust services + web_new dev server (NEWPIDASH-382).
+#
+# Up: `docker compose -f docker-compose-local.yml up -d` (after ./setup.sh).
+# Only infra (db/redis/minio), the interim Django migrator, the Rust api +
+# worker and the web_new vite dev server run here. There is no Django dev
+# server, no beat-worker and no RabbitMQ: the old stack is frozen.
+#
+# Rust iteration: the api/worker services run the baked release image, so a
+# Rust change needs `docker compose -f docker-compose-local.yml build api
+# worker`. For a tight loop, run the binary on the host instead
+# (`cargo run -p pidash-api-bin -- serve`, `... worker`) against this
+# file's db/redis, and stop the compose api/worker services.
+# web_new iteration is live: the dev container mounts the repo, so edits
+# hot-reload on http://localhost:3010. If web dependencies change, reset
+# the container install: `docker volume rm pi-dash_web_new_node_modules`
+# (plus the _pkg_ volumes) and restart the service.
+
+x-rust-cutover-flags: &rust-cutover-flags
+  # Same interim block as docker-compose.yml (NEWPIDASH-381 owns the shape).
+  PIDASH_RUST_WEB: "1"
+  PIDASH_RUST_APP: "1"
+  PIDASH_RUST_ASSISTANT: "1"
+  PIDASH_RUST_LOOP: "1"
+  PIDASH_RUST_PROMPTING: "1"
+  PIDASH_RUST_SPACE: "1"
+  PIDASH_RUST_LICENSE: "1"
+  PIDASH_RUST_RUNNER_WEB: "1"
+  PIDASH_RUST_API_V1: "1"
+  PIDASH_RUST_RUNNER: "1"
+  PIDASH_RUST_AUTH: "1"
+  PIDASH_DJANGO_UPSTREAM: http://127.0.0.1:9
+
 services:
   pi-dash-redis:
     image: valkey/valkey:7.2.11-alpine
@@ -9,20 +41,6 @@ services:
     ports:
       - "6379:6379"
 
-  pi-dash-mq:
-    image: rabbitmq:3.13.6-management-alpine
-    restart: unless-stopped
-    networks:
-      - dev_env
-    volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
-    env_file:
-      - .env
-    environment:
-      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
-      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST}
-
   pi-dash-minio:
     image: minio/minio
     restart: unless-stopped
@@ -31,7 +49,7 @@ services:
     entrypoint: >
       /bin/sh -c "
       mkdir -p /export/${AWS_S3_BUCKET_NAME} &&
-      minio server /export --console-address ':9090' &
+      minio server /export --console-address ':9000' &
       sleep 5 &&
       mc alias set myminio http://localhost:9000 ${AWS_ACCESS_KEY_ID} ${AWS_SECRET_ACCESS_KEY} &&
       mc mb myminio/${AWS_S3_BUCKET_NAME} -p || true
@@ -63,66 +81,10 @@ services:
     ports:
       - "5432:5432"
 
-  api:
-    build:
-      context: ./apps/api
-      dockerfile: Dockerfile.dev
-      args:
-        DOCKER_BUILDKIT: 1
-    restart: unless-stopped
-    networks:
-      - dev_env
-    volumes:
-      - ./apps/api:/code
-    command: ./bin/docker-entrypoint-api-local.sh
-    env_file:
-      - ./apps/api/.env
-    depends_on:
-      - pi-dash-db
-      - pi-dash-redis
-      - pi-dash-mq
-    ports:
-      - "8000:8000"
-
-  worker:
-    build:
-      context: ./apps/api
-      dockerfile: Dockerfile.dev
-      args:
-        DOCKER_BUILDKIT: 1
-    restart: unless-stopped
-    networks:
-      - dev_env
-    volumes:
-      - ./apps/api:/code
-    command: ./bin/docker-entrypoint-worker-local.sh
-    env_file:
-      - ./apps/api/.env
-    depends_on:
-      - api
-      - pi-dash-db
-      - pi-dash-redis
-
-  beat-worker:
-    build:
-      context: ./apps/api
-      dockerfile: Dockerfile.dev
-      args:
-        DOCKER_BUILDKIT: 1
-    restart: unless-stopped
-    networks:
-      - dev_env
-    volumes:
-      - ./apps/api:/code
-    command: ./bin/docker-entrypoint-beat-local.sh
-    env_file:
-      - ./apps/api/.env
-    depends_on:
-      - api
-      - pi-dash-db
-      - pi-dash-redis
-
   migrator:
+    # Interim (NEWPIDASH-380): Django `manage.py migrate`, the only Python
+    # container; exits after migrating. TODO(NEWPIDASH-380): swap for the
+    # native `pidash-api migrate up` image and entrypoint.
     build:
       context: ./apps/api
       dockerfile: Dockerfile.dev
@@ -140,11 +102,93 @@ services:
       - pi-dash-db
       - pi-dash-redis
 
+  api:
+    build:
+      context: .
+      dockerfile: ./rust-api/Dockerfile.api
+      args:
+        DOCKER_BUILDKIT: 1
+    restart: unless-stopped
+    networks:
+      - dev_env
+    command: ./bin/docker-entrypoint-api-local.sh
+    env_file:
+      - ./rust-api/.env
+    environment:
+      <<: *rust-cutover-flags
+      PORT: "8000"
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+      pi-dash-db:
+        condition: service_started
+      pi-dash-redis:
+        condition: service_started
+    ports:
+      - "8000:8000"
+
+  worker:
+    build:
+      context: .
+      dockerfile: ./rust-api/Dockerfile.api
+      args:
+        DOCKER_BUILDKIT: 1
+    restart: unless-stopped
+    networks:
+      - dev_env
+    # The scheduler runs inside the worker; there is no beat service.
+    command: ./bin/docker-entrypoint-worker-local.sh
+    env_file:
+      - ./rust-api/.env
+    environment:
+      <<: *rust-cutover-flags
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+      api:
+        condition: service_started
+      pi-dash-db:
+        condition: service_started
+      pi-dash-redis:
+        condition: service_started
+
+  web_new:
+    # Vite dev server on 3010 (apps/web_new/vite.config.ts). Installed and
+    # run inside the container (linux binaries) with the repo mounted, so
+    # edits hot-reload; served at http://localhost:3010, proxying /api to
+    # the compose api service below.
+    image: node:22-alpine
+    working_dir: /app
+    command: >
+      sh -c "
+        apk add --no-cache libc6-compat > /dev/null &&
+        corepack enable > /dev/null 2>&1 &&
+        (test -x node_modules/.bin/vite || pnpm install --frozen-lockfile --prefer-offline) &&
+        exec pnpm --filter web_new dev --host 0.0.0.0 --port 3010
+      "
+    volumes:
+      - .:/app
+      - web_new_node_modules:/app/node_modules
+      - web_new_pkg_modules:/app/apps/web_new/node_modules
+      - kit_pkg_modules:/app/packages/kit/node_modules
+      - api_client_pkg_modules:/app/packages/api-client/node_modules
+    ports:
+      - "3010:3010"
+    environment:
+      PIDASH_API_ORIGIN: http://api:8000
+    networks:
+      - dev_env
+    depends_on:
+      - api
+
 volumes:
   redisdata:
   uploads:
   pgdata:
-  rabbitmq_data:
+  web_new_node_modules:
+  web_new_pkg_modules:
+  kit_pkg_modules:
+  api_client_pkg_modules:
 
 networks:
   dev_env:

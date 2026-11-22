@@ -28,7 +28,7 @@ import {
   validateList,
 } from "./coexistence-routes.mjs";
 
-const CE_ANCHOR = "\treverse_proxy /* web:3000";
+const CE_ANCHOR = "\treverse_proxy /* web_new:3000";
 const AIO_ANCHOR = "    handle_path /* {";
 
 const ceFixture = ["\treverse_proxy /api/* api:8000", "", CE_ANCHOR, ""].join("\n");
@@ -101,7 +101,7 @@ describe("reservedTopLevelOf", () => {
 
 describe("buildCeLines", () => {
   it("emits an empty note for an empty list", () => {
-    assert.deepEqual(buildCeLines([]), ["\t# (none — the list is empty, so every path routes to the old app)"]);
+    assert.deepEqual(buildCeLines([]), ["\t# (none — the list is empty, so every path routes to web_new via the catch-all)"]);
   });
 
   it("routes a literal entry to web_new with an exact-path redir, unchanged", () => {
@@ -111,7 +111,7 @@ describe("buildCeLines", () => {
     ]);
   });
 
-  it("shadows the old catch-all when everything has migrated", () => {
+  it("routes the catch-all to web_new when everything has migrated", () => {
     assert.deepEqual(buildCeLines(["/"]), ["\treverse_proxy /* web_new:3000"]);
   });
 
