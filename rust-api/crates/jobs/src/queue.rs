@@ -21,9 +21,10 @@
 //! [`STALE_CLAIM_LEASE_SECS`] by [`reclaim_stale_running`] (worker boot
 //! plus the scheduler loop), so no row sits `running` forever.
 //!
-//! The tables are owned by the Rust backend and created at worker boot by
-//! [`ensure_schema`]. Django stays schema owner for its own tables until
-//! switchover — no Django migration is touched.
+//! The tables are owned by the Rust backend and created by the Rust
+//! migrator (`pidash-migration::ensure`, native migration
+//! `m000002_ensure_schema`) — never at worker boot. The Rust migrator
+//! owns the schema; no Django migration is touched.
 //!
 //! Everything but the DDL and the notify-carrying enqueue goes through
 //! sea-query builders (`DbBackend::Postgres.build` over

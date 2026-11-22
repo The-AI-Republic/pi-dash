@@ -458,6 +458,7 @@ where
     // constraint name — the same name is dropped and re-added every boot,
     // so tolerate that error and continue.
     if let Err(err) = db
+        // raw-sql: ALTER TABLE ADD CONSTRAINT has no SeaORM form; DROP above keeps it idempotent.
         .execute(Statement::from_string(
             DbBackend::Postgres,
             ensure_check_sql(),
@@ -569,4 +570,90 @@ where
     ensure_schema(db).await?;
     ensure_catalog_schema(db).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seed_has_30_rows_with_claude_opus_and_openhub_preselected() {
+        assert_eq!(SEED.len(), SEED_COUNT);
+        // Two preselected: one per agent group (runner + openhub).
+        let preselected: Vec<_> = SEED.iter().filter(|row| row.5).collect();
+        assert_eq!(preselected.len(), 2);
+        let claude: Vec<_> = preselected
+            .iter()
+            .filter(|row| row.0 == "claude-code")
+            .collect();
+        assert_eq!(claude.len(), 1);
+        assert_eq!(
+            (claude[0].0, claude[0].1),
+            ("claude-code", "claude-opus-4-8")
+        );
+        let openhub: Vec<_> = preselected
+            .iter()
+            .filter(|row| row.0 == "openhub")
+            .collect();
+        assert_eq!(openhub.len(), 1);
+        assert_eq!(
+            (openhub[0].0, openhub[0].1),
+            ("openhub", "openhub_free_llm")
+        );
+    }
+
+    #[test]
+    fn seed_covers_codex_cursor_grok_and_openhub() {
+        let count = |agent: &str| SEED.iter().filter(|row| row.0 == agent).count();
+        assert_eq!(count("claude-code"), 6);
+        assert_eq!(count("codex"), 7);
+        assert_eq!(count("cursor-agent"), 12);
+        assert_eq!(count("grok"), 2);
+        assert_eq!(count("open-claw"), 0);
+        assert_eq!(count("muse-code"), 0);
+        assert_eq!(count("openhub"), 3);
+    }
+
+    #[test]
+    fn seed_openhub_rows_mirror_env_defaults_in_order() {
+        let openhub: Vec<_> = SEED.iter().filter(|row| row.0 == "openhub").collect();
+        assert_eq!(openhub.len(), 3);
+        // Order matches OPENHUB_ASSISTANT_MODELS default.
+        assert_eq!(openhub[0].1, "moonshotai/kimi-k3");
+        assert_eq!(openhub[1].1, "deepseek/deepseek-v4-pro");
+        assert_eq!(openhub[2].1, "openhub_free_llm");
+        assert!(openhub[2].5, "free model is the openhub default");
+        assert!(!openhub[0].5 && !openhub[1].5);
+        for row in &openhub {
+            assert!(row.3.is_empty(), "openhub rows carry no efforts");
+            assert_eq!(
+                row.4,
+                openhub.iter().position(|r| r.1 == row.1).unwrap() as i32
+            );
+        }
+        assert_eq!(OPENHUB_SEED.len(), 3);
+    }
+
+    #[test]
+    fn seed_codex_rows_offer_all_four_efforts() {
+        for row in SEED.iter().filter(|row| row.0 == "codex") {
+            assert_eq!(row.3, &["low", "medium", "high", "xhigh"]);
+        }
+        for row in SEED.iter().filter(|row| row.0 != "codex") {
+            assert!(row.3.is_empty(), "non-codex rows offer no effort flag");
+        }
+    }
+
+    #[test]
+    fn seed_sort_order_is_dense_per_agent() {
+        for agent in ["claude-code", "codex", "cursor-agent", "grok", "openhub"] {
+            let mut orders: Vec<i32> = SEED
+                .iter()
+                .filter(|row| row.0 == agent)
+                .map(|row| row.4)
+                .collect();
+            orders.sort_unstable();
+            assert_eq!(orders, (0..orders.len() as i32).collect::<Vec<_>>());
+        }
+    }
 }

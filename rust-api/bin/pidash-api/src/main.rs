@@ -138,6 +138,9 @@ async fn migrate(command: MigrateCommand) -> MainResult {
         MigrateCommand::Check => {
             let url =
                 pidash_migration::select_read_url(runtime_url.as_deref(), migrator_url.as_deref())?;
+            // Gated here rather than via run_check so the JSON status is
+            // still printed before failing; the message mirrors
+            // Status::require_ready verbatim (kept in sync by hand).
             let status = pidash_migration::run_status(&url).await?;
             println!("{}", serde_json::to_string_pretty(&status)?);
             if !status.ready() {

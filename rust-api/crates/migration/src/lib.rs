@@ -87,6 +87,7 @@ impl Status {
 }
 
 fn sql(query: &str) -> Statement {
+    // raw-sql: migrator-only helper for catalog/history probes SeaORM has no entity form for.
     Statement::from_string(DbBackend::Postgres, query)
 }
 
@@ -131,6 +132,7 @@ async fn baseline_state(db: &impl ConnectionTrait) -> Result<BaselineState, DbEr
 
 async fn table_exists(db: &impl ConnectionTrait, name: &str) -> Result<bool, DbErr> {
     let row = db
+        // raw-sql: to_regclass catalog probe has no SeaORM form.
         .query_one(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT to_regclass($1) IS NOT NULL AS present",
@@ -235,6 +237,7 @@ pub async fn up(db: &DatabaseConnection) -> Result<Status, DbErr> {
     }
     let lock = db.begin().await?;
     let locked: bool = lock
+        // raw-sql: pg_try_advisory_xact_lock has no SeaORM expression.
         .query_one(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT pg_try_advisory_xact_lock($1) AS locked",
@@ -254,7 +257,7 @@ pub async fn up(db: &DatabaseConnection) -> Result<Status, DbErr> {
 }
 
 async fn set_timeouts(db: &impl ConnectionTrait) -> Result<(), DbErr> {
-    db.execute_unprepared("SET LOCAL lock_timeout = '30s'; SET LOCAL statement_timeout = '10min'")
+    db.execute_unprepared("SET LOCAL lock_timeout = '30s'; SET LOCAL statement_timeout = '10min'") // raw-sql: SET LOCAL has no SeaORM form.
         .await?;
     Ok(())
 }
@@ -329,7 +332,8 @@ impl MigrationTrait for Baseline {
             BaselineState::Current => Ok(()),
             // Fresh-install path: the full snapshot plus history stamps.
             BaselineState::Fresh => {
-                db.execute_unprepared(include_str!("../sql/baseline.sql"))
+                db.execute_unprepared(include_str!("../sql/baseline.sql")) // raw-sql: baseline snapshot applies the whole-schema SQL file; no builder form.
+
                     .await?;
                 Ok(())
             }
