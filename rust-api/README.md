@@ -267,12 +267,12 @@ surprise overlay breakage. Add an export by editing `src/lib.rs`,
 The four `ee/` stubs are traits with CE defaults; the private crate
 replaces the implementation, never the callers:
 
-| Trait                    | Module                              | CE default                                                                                                                      | Python source                      |
-| ------------------------ | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
-| `AssistantModelSeam`     | `pidash-services::extensions`       | `CeAssistantSeam` (`pidash-api::assistant::model_seam`; carried on `AppState`, install an alternate with `with_assistant_seam`) | `ee/assistant/model_provider.py`   |
-| `SttSeam`                | `pidash-services::extensions`       | `ByoSttSeam`                                                                                                                    | `ee/assistant/stt_provider.py`     |
-| `DesktopGate`            | `pidash-auth::permissions::desktop` | `SessionDesktopGate`                                                                                                            | `ee/authentication/desktop.py`     |
-| `UserSettingsSchema`     | `pidash-services::user_settings`    | `CeUserSettings`                                                                                                                | `ee/settings/user_settings.py`     |
+| Trait                | Module                              | CE default                                                                                                                      | Python source                    |
+| -------------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
+| `AssistantModelSeam` | `pidash-services::extensions`       | `CeAssistantSeam` (`pidash-api::assistant::model_seam`; carried on `AppState`, install an alternate with `with_assistant_seam`) | `ee/assistant/model_provider.py` |
+| `SttSeam`            | `pidash-services::extensions`       | `ByoSttSeam`                                                                                                                    | `ee/assistant/stt_provider.py`   |
+| `DesktopGate`        | `pidash-auth::permissions::desktop` | `SessionDesktopGate`                                                                                                            | `ee/authentication/desktop.py`   |
+| `UserSettingsSchema` | `pidash-services::user_settings`    | `CeUserSettings`                                                                                                                | `ee/settings/user_settings.py`   |
 
 Named route-group replacement (`crates/api/src/overlay.rs`, one group per
 §0 prefix): `Overlay::new().replace(RouteGroup::Auth, cloud_auth())` swaps
@@ -501,26 +501,29 @@ Python fleet). Every `python manage.py <cmd>` became
 `pidash-api ops <cmd>` (`ops instance <cmd>` for the nested group);
 `gunicorn`/`celery` exec lines became `serve` / `worker`:
 
-| Entrypoint                          | Boot steps                                                                                                                                                          |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `docker-entrypoint-api.sh`          | wait_for_db → wait_for_migrations → machine signature → register-instance → configure-instance → create_bucket → clear_cache → `serve --bind 0.0.0.0:${PORT:-8000}` |
-| `docker-entrypoint-api-local.sh`    | same boot + `DJANGO_SETTINGS_MODULE` default → `serve --bind 0.0.0.0:8000`                                                                                          |
-| `docker-entrypoint-worker.sh`       | waits → min(nproc,8) concurrency → `worker "${worker_args[@]}"` (--concurrency, --queue)                                                                            |
-| `docker-entrypoint-worker-local.sh` | waits → `worker`                                                                                                                                                    |
-| `docker-entrypoint-beat.sh`         | waits → `worker` (no `exec`, like Python)                                                                                                                           |
-| `docker-entrypoint-beat-local.sh`   | waits → `worker`                                                                                                                                                    |
-| `docker-entrypoint-migrator.sh`     | wait_for_db → `python manage.py migrate $1` (stays Django)                                                                                                          |
+| Entrypoint                          | Boot steps                                                                                                                                                       |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `docker-entrypoint-api.sh`          | wait_for_db → check_migrations → machine signature → register-instance → configure-instance → create_bucket → clear_cache → `serve --bind 0.0.0.0:${PORT:-8000}` |
+| `docker-entrypoint-api-local.sh`    | same boot + `DJANGO_SETTINGS_MODULE` default → `serve --bind 0.0.0.0:8000`                                                                                       |
+| `docker-entrypoint-worker.sh`       | check → min(nproc,8) concurrency → `worker "${worker_args[@]}"` (--concurrency, --queue)                                                                         |
+| `docker-entrypoint-worker-local.sh` | check → `worker`                                                                                                                                                 |
+| `docker-entrypoint-beat.sh`         | check → `worker` (no `exec`, like Python)                                                                                                                        |
+| `docker-entrypoint-beat-local.sh`   | check → `worker`                                                                                                                                                 |
+| `docker-entrypoint-migrator.sh`     | wait_for_db → `python manage.py migrate $1` (stays Django)                                                                                                       |
 
 Deltas from the Python boot (each documented at the script line):
 collectstatic dropped (API-only container; the Django upstream serves
-static); migrate stays `python` (schema owner until switchover) and the
-migrator stays pinned to the Python image until the deployments
-follow-up; GUNICORN_WORKERS and max-requests have no `serve` equivalent
-(scale with replicas); watchmedo / uvicorn --reload dropped in -local
-scripts (`cargo watch` outside the image); beat roles run the full worker
-(no scheduler-only mode — the scheduler lock keeps worker + beat from
-double-scheduling); the migrator's `wait_for_db $1` drops `$1` (Django
-ignores it, clap rejects it).
+static); entrypoints run the fail-fast `check_migrations` where Python
+waited on `wait_for_migrations` (NEWPIDASH-378: a pending schema fails the
+container under `set -e` instead of hanging it; the wait command stays
+ported but no entrypoint calls it); migrate stays `python` (schema owner
+until switchover) and the migrator stays pinned to the Python image until
+the deployments follow-up; GUNICORN_WORKERS and max-requests have no
+`serve` equivalent (scale with replicas); watchmedo / uvicorn --reload
+dropped in -local scripts (`cargo watch` outside the image); beat roles
+run the full worker (no scheduler-only mode — the scheduler lock keeps
+worker + beat from double-scheduling); the migrator's `wait_for_db $1`
+drops `$1` (Django ignores it, clap rejects it).
 
 ### Environment
 

@@ -51,7 +51,10 @@ SCRIPTS = [
 ]
 
 WAIT = "pidash-api ops wait_for_db"
-WAIT_MIG = "pidash-api ops wait_for_migrations"
+# NEWPIDASH-378: entrypoints run the fail-fast `check_migrations` where the
+# Python fleet waited. The golden steps below still name the wait (they pin
+# the Python boot); each replay maps its wait step to this check evidence.
+CHECK_MIG = "pidash-api ops check_migrations"
 REGISTER = 'pidash-api ops instance register-instance "$MACHINE_SIGNATURE"'
 CONFIGURE = "pidash-api ops instance configure-instance"
 BUCKET = "pidash-api ops create_bucket"
@@ -61,7 +64,7 @@ CACHE = "pidash-api ops clear_cache"
 EXPECTED_COMMANDS = {
     "api": [
         WAIT,
-        WAIT_MIG,
+        CHECK_MIG,
         REGISTER,
         CONFIGURE,
         BUCKET,
@@ -70,7 +73,7 @@ EXPECTED_COMMANDS = {
     ],
     "api-local": [
         WAIT,
-        WAIT_MIG,
+        CHECK_MIG,
         REGISTER,
         CONFIGURE,
         BUCKET,
@@ -79,12 +82,12 @@ EXPECTED_COMMANDS = {
     ],
     "worker": [
         WAIT,
-        WAIT_MIG,
+        CHECK_MIG,
         'exec pidash-api worker "${worker_args[@]}"',
     ],
-    "worker-local": [WAIT, WAIT_MIG, "exec pidash-api worker"],
-    "beat": [WAIT, WAIT_MIG, "pidash-api worker"],
-    "beat-local": [WAIT, WAIT_MIG, "exec pidash-api worker"],
+    "worker-local": [WAIT, CHECK_MIG, "exec pidash-api worker"],
+    "beat": [WAIT, CHECK_MIG, "pidash-api worker"],
+    "beat-local": [WAIT, CHECK_MIG, "exec pidash-api worker"],
     "migrator": [WAIT, "python manage.py migrate $1"],
 }
 
@@ -94,6 +97,7 @@ EXPECTED_COMMANDS = {
 HELP_PREFIXES = [
     ("ops", "wait_for_db"),
     ("ops", "wait_for_migrations"),
+    ("ops", "check_migrations"),
     ("ops", "instance", "register-instance"),
     ("ops", "instance", "configure-instance"),
     ("ops", "create_bucket"),
@@ -310,7 +314,7 @@ def test_replay_api():
         "api",
         [
             ("wait_for_db (:3)", [("cmd", WAIT)]),
-            ("wait_for_migrations (:5)", [("cmd", WAIT_MIG)]),
+            ("wait_for_migrations (:5)", [("cmd", CHECK_MIG)]),
             ("machine signature", [("verbatim_py", _signature_span())]),
             ('register_instance "$MACHINE_SIGNATURE"', [("cmd", REGISTER)]),
             ("configure_instance (:27)", [("cmd", CONFIGURE)]),
@@ -330,7 +334,7 @@ def test_replay_api_local():
                 "same wait/signature/register/configure/bucket/cache steps",
                 [
                     ("cmd", WAIT),
-                    ("cmd", WAIT_MIG),
+                    ("cmd", CHECK_MIG),
                     ("verbatim_py", _signature_span()),
                     ("cmd", REGISTER),
                     ("cmd", CONFIGURE),
@@ -364,7 +368,7 @@ def test_replay_worker():
         "worker",
         [
             ("wait_for_db (:4)", [("cmd", WAIT)]),
-            ("wait_for_migrations (:6)", [("cmd", WAIT_MIG)]),
+            ("wait_for_migrations (:6)", [("cmd", CHECK_MIG)]),
             ("concurrency resolution", [("verbatim_py", _worker_math())]),
             ("exec celery", [("cmd", EXPECTED_COMMANDS["worker"][-1])]),
         ],
@@ -382,7 +386,7 @@ def test_replay_worker_local():
         "worker-local",
         [
             ("wait_for_db (:4)", [("cmd", WAIT)]),
-            ("wait_for_migrations (:5)", [("cmd", WAIT_MIG)]),
+            ("wait_for_migrations (:5)", [("cmd", CHECK_MIG)]),
             (
                 "exec watchmedo auto-restart",
                 [
@@ -399,7 +403,7 @@ def test_replay_beat():
         "beat",
         [
             ("wait_for_db (:4)", [("cmd", WAIT)]),
-            ("wait_for_migrations (:6)", [("cmd", WAIT_MIG)]),
+            ("wait_for_migrations (:6)", [("cmd", CHECK_MIG)]),
             ("celery -A pi_dash beat -l info (:8", [("cmd", "pidash-api worker")]),
         ],
     )
@@ -410,7 +414,7 @@ def test_replay_beat_local():
         "beat-local",
         [
             ("wait_for_db (:4)", [("cmd", WAIT)]),
-            ("wait_for_migrations (:5)", [("cmd", WAIT_MIG)]),
+            ("wait_for_migrations (:5)", [("cmd", CHECK_MIG)]),
             (
                 "exec watchmedo auto-restart",
                 [
