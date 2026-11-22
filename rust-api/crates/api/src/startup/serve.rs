@@ -290,7 +290,7 @@ impl ServeBuilder {
         .await?;
         tracing::info!(
             %addr,
-            upstream = edge.upstream(),
+            upstream = ?edge.upstream().unwrap_or("(none: Rust-only, no Django proxy)"),
             flags = ?edge.flags(),
             "serving HTTP"
         );

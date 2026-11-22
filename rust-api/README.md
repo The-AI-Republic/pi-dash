@@ -115,10 +115,10 @@ the same `SECRET_KEY` the sessions were forged with.
 
 ## Cutover edge (F-02)
 
-`serve` sits in front of Django: every request is reverse-proxied to
-`PIDASH_DJANGO_UPSTREAM` (default `http://127.0.0.1:8000`) unless its URL
-prefix is flipped to Rust. The routing table in `crates/api/src/edge.rs`
-encodes the inventory §0 prefix map; each row has a flag, all default off:
+`serve` is Rust-only by default: it serves every request itself and never
+contacts Django unless the fallback is explicitly opted into. The routing
+table in `crates/api/src/edge.rs` encodes the inventory §0 prefix map;
+each row has an opt-out flag, all default on:
 
 | Env var                                                | Prefix                         | Django module                             |
 | ------------------------------------------------------ | ------------------------------ | ----------------------------------------- |
@@ -131,29 +131,40 @@ encodes the inventory §0 prefix map; each row has a flag, all default off:
 | `PIDASH_RUST_RUNNER`                                   | `api/v1/runner/`               | `runner.urls`                             |
 | `PIDASH_RUST_AUTH`                                     | `auth/`                        | `authentication.urls`                     |
 
-Values `1/true/yes/on` flip a prefix; anything else (or absent) proxies.
-Longest prefix wins (`api/v1/runner/` beats `api/v1/`). Today only `WEB`
-has Rust handlers (`GET /` → `{"status": "OK"}`, `GET /robots.txt`,
-byte-identical to Django); every other method on those paths still proxies
-so Django's CSRF-failure page is preserved exactly. Upstream outages answer
-`502 {"error": {"code": "bad_gateway", ...}}`.
+An explicit `0`/`false`/`no`/`off` (case-insensitive) opts a prefix back
+out to Django; anything else — including absent and misspelled values —
+keeps Rust serving it. The proxy itself is active only when
+`PIDASH_DJANGO_UPSTREAM` is set (empty counts as unset): with no upstream,
+every unowned route answers `502 {"error": {"code": "bad_gateway", ...}}`
+locally without opening a connection. Longest prefix wins
+(`api/v1/runner/` beats `api/v1/`). Every ported path has a Rust handler
+(all 11 prefixes: web, app, assistant, loop, prompting, space, license,
+runner-web, api-v1, runner, auth); unsafe methods on the web edge still
+proxy when the fallback is on so Django's CSRF-failure page is preserved
+exactly.
 
-Rollback drill (recorded in the F-02 PR): with Django on `:8000`,
+Fallback drill: with Django on `:8000`,
 
 ```sh
+cargo run -p pidash-api-bin -- serve --bind 127.0.0.1:8080 &  # Rust-only
+curl localhost:8080/                # {"status": "OK"}, served by Rust
 export PIDASH_DJANGO_UPSTREAM=http://127.0.0.1:8000
-cargo run -p pidash-api-bin -- serve --bind 127.0.0.1:8080 &  # all flags off
+export PIDASH_RUST_WEB=0            # + restart: traffic returns to Django
 curl localhost:8080/                # Django's bytes, via proxy
-export PIDASH_RUST_WEB=1            # + restart: Rust serves / and /robots.txt
-curl localhost:8080/                # {"status": "OK"}, identical bytes
-unset PIDASH_RUST_WEB               # + restart: traffic returns to Django
-curl localhost:8080/                # Django's bytes again
+unset PIDASH_DJANGO_UPSTREAM PIDASH_RUST_WEB  # + restart: Rust-only again
+curl localhost:8080/                # {"status": "OK"}, served by Rust
 ```
+
+Cloud note: `docker-compose.rust.ecr.yaml`'s `x-rust-cutover-flags`
+(explicit `1`s plus a dead `PIDASH_DJANGO_UPSTREAM`) is redundant under
+this default but harmless — leave it in place so a rollback needs no
+compose change. Dropping it is a follow-up, not this change.
 
 ## Shadow reads (PIDASHCONV-822)
 
 Stage-8 validation: with `PIDASH_RUST_SHADOW=1` (default off), a `GET` or
-`HEAD` on a prefix whose flag is OFF still returns Django's response to the
+`HEAD` on a prefix opted out to Django (`PIDASH_RUST_<PREFIX>=0` plus
+`PIDASH_DJANGO_UPSTREAM`) still returns Django's response to the
 client byte-identically, and additionally computes the Rust handler's
 response for the same request in the background and compares the two. The
 client never waits on the shadow call. Code:
@@ -267,12 +278,12 @@ surprise overlay breakage. Add an export by editing `src/lib.rs`,
 The four `ee/` stubs are traits with CE defaults; the private crate
 replaces the implementation, never the callers:
 
-| Trait                    | Module                              | CE default                                                                                                                      | Python source                      |
-| ------------------------ | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
-| `AssistantModelSeam`     | `pidash-services::extensions`       | `CeAssistantSeam` (`pidash-api::assistant::model_seam`; carried on `AppState`, install an alternate with `with_assistant_seam`) | `ee/assistant/model_provider.py`   |
-| `SttSeam`                | `pidash-services::extensions`       | `ByoSttSeam`                                                                                                                    | `ee/assistant/stt_provider.py`     |
-| `DesktopGate`            | `pidash-auth::permissions::desktop` | `SessionDesktopGate`                                                                                                            | `ee/authentication/desktop.py`     |
-| `UserSettingsSchema`     | `pidash-services::user_settings`    | `CeUserSettings`                                                                                                                | `ee/settings/user_settings.py`     |
+| Trait                | Module                              | CE default                                                                                                                      | Python source                    |
+| -------------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
+| `AssistantModelSeam` | `pidash-services::extensions`       | `CeAssistantSeam` (`pidash-api::assistant::model_seam`; carried on `AppState`, install an alternate with `with_assistant_seam`) | `ee/assistant/model_provider.py` |
+| `SttSeam`            | `pidash-services::extensions`       | `ByoSttSeam`                                                                                                                    | `ee/assistant/stt_provider.py`   |
+| `DesktopGate`        | `pidash-auth::permissions::desktop` | `SessionDesktopGate`                                                                                                            | `ee/authentication/desktop.py`   |
+| `UserSettingsSchema` | `pidash-services::user_settings`    | `CeUserSettings`                                                                                                                | `ee/settings/user_settings.py`   |
 
 Named route-group replacement (`crates/api/src/overlay.rs`, one group per
 §0 prefix): `Overlay::new().replace(RouteGroup::Auth, cloud_auth())` swaps

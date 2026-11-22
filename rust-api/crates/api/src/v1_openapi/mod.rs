@@ -11,12 +11,14 @@
 //!
 //! Cutover mapping (the `ENABLE_DRF_SPECTACULAR` decision, recorded here
 //! per the issue): no Django-settings flag is read. Rust serves the trio
-//! iff any tied `api/` prefix row is flipped ([`rust_serves`] — the
-//! shared-prefix rule from `edge.rs`: all four of App/Assistant/Loop/
-//! Prompting must be off for the prefix to stay on Django). Unflipped
-//! requests proxy to Django, which serves (flag on) or 404s (flag off),
-//! so Rust never invents the flag-off verdict. Operator flip:
-//! `PIDASH_RUST_APP=1` (the trio is registered on the App group).
+//! iff any tied `api/` prefix row is on ([`rust_serves`] — the
+//! shared-prefix rule from `edge.rs`, now default-on; all four of
+//! App/Assistant/Loop/Prompting must be explicitly opted out for the
+//! prefix to fall back to Django). Opted-out requests proxy to Django,
+//! which serves (flag on) or 404s (flag off), so Rust never invents the
+//! flag-off verdict; without an upstream they fail closed with 502.
+//! Operator opt-out: `PIDASH_RUST_APP=0` (the trio is registered on the
+//! App group).
 //!
 //! Throttle store: the DRF loop runs over a process-local history map
 //! ([`check_throttle`]), mirroring the assistant [`governor`](crate::assistant::governor)

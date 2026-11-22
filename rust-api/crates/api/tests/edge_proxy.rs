@@ -10,7 +10,7 @@ use axum::extract::Request;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
-use pidash_api::{with_routes, AppState, EdgeHandle, Prefix};
+use pidash_api::{with_routes, AppState, EdgeFlags, EdgeHandle, Prefix};
 
 const HEALTH_BODY: &[u8] = b"{\"status\": \"OK\"}";
 const ROBOTS_BODY: &[u8] = b"User-agent: *\nDisallow: /";
@@ -456,4 +456,110 @@ async fn rollback_drill() {
         .await
         .expect("get robots");
     assert_eq!(robots.bytes().await.expect("body").as_ref(), ROBOTS_BODY);
+}
+
+/// The Rust-only default (NEWPIDASH-381): with every prefix flag on — what
+/// `EdgeHandle::from_env` builds when no `PIDASH_*` env is set — the edge
+/// serves its owned routes itself and never contacts the upstream. The stub
+/// counts every hit and fails the test if it is contacted for an owned
+/// route (it answers 599, a status no Rust handler emits, so any 599 is a
+/// proxy leak too).
+#[tokio::test]
+async fn rust_only_default_never_contacts_upstream_for_owned_routes() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    const PROXY_MARKER: u16 = 599;
+
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counter = hits.clone();
+    let stub = axum::Router::new().fallback(move || {
+        let counter = counter.clone();
+        async move {
+            counter.fetch_add(1, Ordering::SeqCst);
+            (
+                axum::http::StatusCode::from_u16(PROXY_MARKER).expect("marker status"),
+                "proxied",
+            )
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("stub bind");
+    let stub_port = listener.local_addr().expect("stub addr").port();
+    tokio::spawn(async move {
+        axum::serve(listener, stub.into_make_service())
+            .await
+            .expect("stub serve");
+    });
+    let stub_base = format!("http://127.0.0.1:{stub_port}");
+
+    // The from_env default with a clean env, made explicit: all flags on.
+    let handle = EdgeHandle::new(stub_base, EdgeFlags::all_on()).expect("edge handle");
+    assert!(handle.flags() == EdgeFlags::all_on());
+    let app = with_routes(AppState::with_edge("test", handle), axum::Router::new());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("edge bind");
+    let edge_port = listener.local_addr().expect("edge addr").port();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("edge serve");
+    });
+    let base = format!("http://127.0.0.1:{edge_port}");
+    let client = client();
+
+    // Web edge: exact bytes, served by Rust.
+    for (path, body) in [("/", HEALTH_BODY), ("/robots.txt", ROBOTS_BODY)] {
+        let response = client
+            .get(format!("{base}{path}"))
+            .send()
+            .await
+            .expect("get owned");
+        assert_eq!(response.status(), 200, "path {path}");
+        assert_eq!(response.bytes().await.expect("body").as_ref(), body);
+    }
+
+    // DB-backed owned routes: pool-less they answer Rust denials/errors,
+    // never the stub's 599 — proving the request never proxied.
+    for path in [
+        "/api/instances/",
+        "/api/users/me/",
+        "/api/public/anchor/test-anchor/meta/",
+    ] {
+        let response = client
+            .get(format!("{base}{path}"))
+            .send()
+            .await
+            .expect("get owned");
+        assert_ne!(
+            response.status(),
+            axum::http::StatusCode::from_u16(PROXY_MARKER).expect("marker"),
+            "owned route {path} must not proxy"
+        );
+    }
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "owned routes must never contact the upstream"
+    );
+
+    // Unowned routes still proxy when an upstream is configured (the
+    // explicit opt-in): the stub answers and the hit lands.
+    let response = client
+        .get(format!("{base}/no-such-route-xyz"))
+        .send()
+        .await
+        .expect("get unowned");
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::from_u16(PROXY_MARKER).expect("marker")
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
 }
