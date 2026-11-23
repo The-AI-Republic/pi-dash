@@ -56,6 +56,7 @@ pidash_sdk::assistant::LiveTurnSeam
 pidash_sdk::assistant::LlmConfigFullRow
 pidash_sdk::assistant::LlmConfigRow
 pidash_sdk::assistant::MARK_CUT_OFF_SQL
+pidash_sdk::assistant::MAX_MODELS_PER_KEY
 pidash_sdk::assistant::MAX_RETRIES
 pidash_sdk::assistant::MAX_RETRY_DELAY_SECS
 pidash_sdk::assistant::MSG_CANCELLED
@@ -70,6 +71,9 @@ pidash_sdk::assistant::MessageParts
 pidash_sdk::assistant::ModelChoice
 pidash_sdk::assistant::ModelError
 pidash_sdk::assistant::ModelRef
+pidash_sdk::assistant::ModelTestResult
+pidash_sdk::assistant::ModelTestStatus
+pidash_sdk::assistant::ModelsListError
 pidash_sdk::assistant::NewEvent
 pidash_sdk::assistant::PROVIDER_ANTHROPIC
 pidash_sdk::assistant::PROVIDER_OPENAI_COMPATIBLE
@@ -126,6 +130,7 @@ pidash_sdk::assistant::cancel_key
 pidash_sdk::assistant::cancel_turn_update
 pidash_sdk::assistant::classify_probe
 pidash_sdk::assistant::classify_provider_error
+pidash_sdk::assistant::classify_test
 pidash_sdk::assistant::clean_title
 pidash_sdk::assistant::clear_active_turn_update
 pidash_sdk::assistant::complete_turn
@@ -165,6 +170,7 @@ pidash_sdk::assistant::mark_running_update
 pidash_sdk::assistant::mcp
 pidash_sdk::assistant::mcp_max_servers
 pidash_sdk::assistant::mcp_timeouts
+pidash_sdk::assistant::merge_verified_map
 pidash_sdk::assistant::message_envelope_json
 pidash_sdk::assistant::next_event_seq_sql
 pidash_sdk::assistant::next_message_seq_sql
@@ -196,6 +202,7 @@ pidash_sdk::assistant::serializers
 pidash_sdk::assistant::should_retry_status
 pidash_sdk::assistant::skipped_payload
 pidash_sdk::assistant::sleep_for_retry
+pidash_sdk::assistant::smoke_test_blocks
 pidash_sdk::assistant::spec_for
 pidash_sdk::assistant::strip_reasoning_blocks
 pidash_sdk::assistant::thread_lock_select
@@ -207,6 +214,7 @@ pidash_sdk::assistant::truncate_kind
 pidash_sdk::assistant::user_llm_config
 pidash_sdk::assistant::validate_choice
 pidash_sdk::assistant::validate_django_url
+pidash_sdk::assistant::validate_models_list
 pidash_sdk::assistant::validate_put
 pidash_sdk::cloud_agent::ANTHROPIC_BASE_URL
 pidash_sdk::cloud_agent::ANTHROPIC_VERSION

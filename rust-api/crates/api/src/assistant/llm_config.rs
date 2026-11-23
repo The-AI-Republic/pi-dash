@@ -145,6 +145,8 @@ fn owned_title(
 /// Render `_serialize` (`llm_config.py:23-38`): `Meta.fields` order minus
 /// the write-only `api_key`; `last_verified_at` is `isoformat()` or
 /// `None`. The unset shape carries the model default provider kind.
+/// The NEWPIDASH-392 `models` list and `model_verified_at` map ride
+/// along as additive fields.
 fn serialize_row(row: Option<&LlmConfigRow>) -> Value {
     match row {
         None => serde_json::json!({
@@ -153,6 +155,8 @@ fn serialize_row(row: Option<&LlmConfigRow>) -> Value {
             "model_name": "",
             "has_api_key": false,
             "last_verified_at": null,
+            "models": [],
+            "model_verified_at": {},
         }),
         Some(row) => serde_json::json!({
             "provider_kind": row.provider_kind,
@@ -160,6 +164,8 @@ fn serialize_row(row: Option<&LlmConfigRow>) -> Value {
             "model_name": row.model_name,
             "has_api_key": has_secret(&row.api_key_encrypted),
             "last_verified_at": row.last_verified_at.as_ref().map(isoformat),
+            "models": row.models,
+            "model_verified_at": row.model_verified_at,
         }),
     }
 }
@@ -261,6 +267,45 @@ pub fn validate_put(
             },
         }
     }
+    // Multi-model BYOK (NEWPIDASH-392 §6.3): `models` is a JSON list of
+    // ID strings when present (a `model_name`-only body still works).
+    // Multipart forms cannot express a list, so they take the field
+    // error below. List rules (trim, duplicates, caps, emptiness) run
+    // in the row service, which owns the `models_required` code.
+    if let Some(field) = body_get(body, "models") {
+        match field {
+            BodyField::Json(Value::Array(items)) => {
+                let mut ids = Vec::with_capacity(items.len());
+                let mut bad = false;
+                for item in items {
+                    match item {
+                        Value::String(id) => ids.push(id.clone()),
+                        _ => {
+                            bad = true;
+                            break;
+                        }
+                    }
+                }
+                if bad {
+                    errors.push((
+                        "models".to_owned(),
+                        vec!["Expected a list of model ID strings.".to_owned()],
+                    ));
+                } else {
+                    out.models = Some(ids);
+                }
+            }
+            _ => errors.push((
+                "models".to_owned(),
+                vec!["Expected a list of model ID strings.".to_owned()],
+            )),
+        }
+    }
+    if let Some(field) = body_get(body, "save_unverified") {
+        if matches!(field, BodyField::Json(Value::Bool(true))) {
+            out.save_unverified = true;
+        }
+    }
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -342,8 +387,8 @@ async fn put_config(
         block_private_urls: state.settings().assistant.block_private_urls,
         ssrf_resolver: &SystemResolver,
     };
-    let saved = match config::put_config(&deps, actor.id, row.as_ref(), validated).await {
-        Ok(saved) => saved,
+    let tested = match config::put_config(&deps, actor.id, row.as_ref(), validated).await {
+        Ok(tested) => tested,
         Err(ConfigError::BaseUrlBlocked) => {
             return Failure::error_body(
                 StatusCode::BAD_REQUEST,
@@ -360,8 +405,32 @@ async fn put_config(
         Err(ConfigError::SaveFailed) => {
             return Failure::bare_error(StatusCode::BAD_REQUEST, "invalid").into_response()
         }
+        Err(ConfigError::ModelsRequired) => {
+            return Failure::error_body(
+                StatusCode::BAD_REQUEST,
+                "models_required",
+                "A key must hold at least one model.",
+            )
+            .into_response()
+        }
+        Err(ConfigError::ModelsInvalid(detail)) => {
+            return Failure::field_errors(vec![("models".to_owned(), vec![detail])]).into_response()
+        }
+        Err(ConfigError::ModelTestFailed(results)) => {
+            return pidash_compat::response::json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::to_string(&serde_json::json!({
+                    "error": "model_test_failed",
+                    "detail": "One or more models failed the connection test; nothing was saved.",
+                    "models": results.iter().map(|result| result.to_json()).collect::<Vec<_>>(),
+                }))
+                .expect("error body serializes"),
+            );
+        }
     };
-    crate::license::json_response(serialize_row(Some(&saved)))
+    crate::license::json_response(serde_json::json!({
+        "models": tested.iter().map(|result| result.to_json()).collect::<Vec<_>>(),
+    }))
 }
 
 /// `DELETE users/me/ai-assistant/config/` (`llm_config.py:76-78`).
@@ -394,10 +463,16 @@ async fn delete_config(
 // The probe lives in [`pidash_services::assistant::probe`] (OVL-07
 // moved `classify_probe` / `probe_provider` there verbatim).
 
-/// `POST users/me/ai-assistant/config/test/` (`llm_config.py:88-108`).
+/// `POST users/me/ai-assistant/config/test/` (`llm_config.py:88-108`),
+/// plus the NEWPIDASH-392 per-model form: a `{"model": "<id>"}` body
+/// tests one stored ID, updates `model_verified_at` and returns one
+/// §6.3 result object. A body without `model` keeps the legacy shape
+/// (probes `models[0]`, answers `{ok}`) for older clients.
 async fn post_test(
     State(state): State<AppState>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
 ) -> Response {
     let pool = match pool_of(&state) {
         Ok(pool) => pool,
@@ -431,15 +506,110 @@ async fn post_test(
                 return super::common::crypto_failure(err, |assistant| ok_false(assistant.code()));
             }
         };
-    match probe::probe_provider(&row.provider_kind, &row.base_url, &row.model_name, &api_key).await
+    // Per-model form (NEWPIDASH-392 §6.4): `{ "model": "<id>" }` tests
+    // one stored ID. Anything else (including no body) is the legacy
+    // whole-row test.
+    let single = match parse_body(&body, request_content_type(&headers)) {
+        Ok(ParsedBody::Object(data)) => match body_get(&data, "model") {
+            Some(BodyField::Json(Value::String(model))) => Some(model.clone()),
+            None => None,
+            _ => {
+                return Failure::error_body(
+                    StatusCode::BAD_REQUEST,
+                    "model_not_available",
+                    "A stored model ID is required.",
+                )
+                .into_response();
+            }
+        },
+        // A non-object body has no `.get`: like `generate-title/`, the
+        // legacy path runs (an empty body is the legacy client).
+        Ok(_) => None,
+        Err(failure) => return failure.into_response(),
+    };
+    let Some(model) = single else {
+        return legacy_probe(actor.id, &pool, &row, &api_key).await;
+    };
+    if !row.models.iter().any(|stored| stored == &model) {
+        return Failure::error_body(
+            StatusCode::BAD_REQUEST,
+            "model_not_available",
+            "That model is not available.",
+        )
+        .into_response();
+    }
+    let outcome = probe::probe_provider(&row.provider_kind, &row.base_url, &model, &api_key).await;
+    let result = pidash_services::assistant::model_selection::classify_test(&model, &outcome);
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let mut verified = row
+        .model_verified_at
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    let now = chrono::Utc::now();
+    verified = pidash_services::assistant::model_selection::merge_verified_map(
+        verified,
+        std::slice::from_ref(&result),
+        &now,
+    );
+    let verified_value = Value::Object(verified);
+    let last_verified_at = row
+        .models
+        .first()
+        .and_then(|first| verified_value.get(first).and_then(|value| value.as_str()))
+        .and_then(|text| text.parse::<chrono::DateTime<chrono::Utc>>().ok());
+    if domain_save_verified(&db, actor.id, &row, &verified_value, last_verified_at)
+        .await
+        .is_err()
     {
+        return Failure::server_error().into_response();
+    }
+    crate::license::json_response(result.to_json())
+}
+
+/// Persist one per-model test's verification state: the merged map and
+/// the `models[0]` legacy stamp.
+async fn domain_save_verified(
+    db: &impl sea_orm::ConnectionTrait,
+    user_id: uuid::Uuid,
+    row: &LlmConfigRow,
+    verified: &Value,
+    last_verified_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<(), sqlx::Error> {
+    use pidash_services::domain::assistant as domain;
+    domain::save_llm_config(
+        db,
+        &domain::LlmConfigSave {
+            user_id,
+            provider_kind: &row.provider_kind,
+            base_url: &row.base_url,
+            model_name: &row.model_name,
+            api_key_encrypted: &row.api_key_encrypted,
+            models: &row.models,
+            model_verified_at: verified,
+            last_verified_at,
+            existed: true,
+        },
+    )
+    .await
+}
+
+/// Legacy whole-row probe: tests the stored model name, stamps
+/// `last_verified_at`, answers `{ok}`.
+async fn legacy_probe(
+    user_id: uuid::Uuid,
+    pool: &sqlx::PgPool,
+    row: &LlmConfigRow,
+    api_key: &str,
+) -> Response {
+    match probe::probe_provider(&row.provider_kind, &row.base_url, &row.model_name, api_key).await {
         ProbeOutcome::TransportFailure => ok_false("provider_unreachable"),
         ProbeOutcome::Classified(code, detail) => ok_false_detail(code, detail),
         ProbeOutcome::Ok => {
             let now = chrono::Utc::now();
             if let Err(failure) = pidash_services::domain::assistant::stamp_llm_config_verified(
-                &pidash_db::pool::sea_orm_connection(&pool),
-                actor.id,
+                &pidash_db::pool::sea_orm_connection(pool),
+                user_id,
                 now,
             )
             .await
@@ -605,6 +775,7 @@ mod tests {
             api_key_encrypted: Some(b"blob".to_vec()),
             last_verified_at: None,
             models: vec!["m".to_owned()],
+            model_verified_at: serde_json::json!({}),
         }
     }
 
@@ -629,8 +800,40 @@ mod tests {
                 "model_name": "",
                 "has_api_key": false,
                 "last_verified_at": null,
+                "models": [],
+                "model_verified_at": {},
             })
         );
+    }
+
+    #[test]
+    fn put_accepts_models_and_save_unverified() {
+        let existing = row();
+        let body = object(serde_json::json!({
+            "models": ["a", "b"],
+            "save_unverified": true,
+        }));
+        let validated = validate_put(&body, Some(&existing)).expect("valid");
+        assert_eq!(validated.models, Some(vec!["a".to_owned(), "b".to_owned()]));
+        assert!(validated.save_unverified);
+    }
+
+    #[test]
+    fn put_rejects_non_list_models() {
+        let existing = row();
+        for body in [
+            object(serde_json::json!({"models": "a"})),
+            object(serde_json::json!({"models": ["a", 7]})),
+            object(serde_json::json!({"models": ["a", null]})),
+        ] {
+            let errors = validate_put(&body, Some(&existing)).expect_err("invalid models");
+            assert_eq!(errors.len(), 1);
+            assert_eq!(errors[0].0, "models");
+        }
+        // save_unverified defaults off and ignores non-bools.
+        let body = object(serde_json::json!({"save_unverified": "yes"}));
+        let validated = validate_put(&body, Some(&row())).expect("valid");
+        assert!(!validated.save_unverified);
     }
 
     #[test]

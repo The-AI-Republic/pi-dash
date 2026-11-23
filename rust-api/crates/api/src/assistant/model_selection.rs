@@ -24,9 +24,7 @@ use pidash_services::assistant::model_selection::{
 use pidash_services::extensions::ChoiceOperational;
 use pidash_types::assistant::surface::Surface;
 
-use super::common::{
-    actor, body_get, pool_of, request_content_type, BodyField, BodyMap, Failure,
-};
+use super::common::{actor, body_get, pool_of, request_content_type, BodyField, BodyMap, Failure};
 use crate::state::AppState;
 
 /// `assistant/urls.py` style, under the `api/` include: the collection.
@@ -43,15 +41,10 @@ pub const MODEL_SELECTION_SURFACE_PATH: &str =
 pub fn routes() -> Router<AppState> {
     use axum::routing::get;
     Router::new()
-        .route(
-            MODEL_SELECTION_PATH,
-            owned_collection(get(get_selection)),
-        )
+        .route(MODEL_SELECTION_PATH, owned_collection(get(get_selection)))
         .route(
             MODEL_SELECTION_SURFACE_PATH,
-            owned_item(
-                axum::routing::put(put_selection).delete(delete_selection),
-            ),
+            owned_item(axum::routing::put(put_selection).delete(delete_selection)),
         )
 }
 
@@ -112,10 +105,9 @@ async fn saved_entry(
     surface: Surface,
 ) -> Result<Option<ModelChoice>, Response> {
     let db = pidash_db::pool::sea_orm_connection(pool);
-    let settings =
-        pidash_services::domain::assistant::read_settings_bag(&db, user_id)
-            .await
-            .map_err(|_| Failure::server_error().into_response())?;
+    let settings = pidash_services::domain::assistant::read_settings_bag(&db, user_id)
+        .await
+        .map_err(|_| Failure::server_error().into_response())?;
     Ok(settings
         .as_ref()
         .and_then(|settings| selection::read_entry(settings, surface)))
@@ -170,13 +162,8 @@ async fn get_selection(
 /// `model_not_available`, an unparseable connection id is
 /// `connection_not_found`.
 fn parse_entry(body: &BodyMap) -> Result<ModelChoice, (StatusCode, String, String)> {
-    let bad = |code: &str, detail: &str| {
-        (
-            StatusCode::BAD_REQUEST,
-            code.to_owned(),
-            detail.to_owned(),
-        )
-    };
+    let bad =
+        |code: &str, detail: &str| (StatusCode::BAD_REQUEST, code.to_owned(), detail.to_owned());
     let model = match body_get(body, "model") {
         Some(BodyField::Json(Value::String(model))) => model.trim().to_owned(),
         _ => {

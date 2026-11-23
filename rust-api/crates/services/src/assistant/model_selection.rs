@@ -28,6 +28,7 @@
 use serde_json::Value;
 use uuid::Uuid;
 
+use pidash_types::assistant::serializers;
 use pidash_types::assistant::surface::Surface;
 
 /// The `profiles.settings` namespace holding the per-surface choices.
@@ -320,6 +321,179 @@ pub enum ChoiceError {
     Operational(ChoiceOperational),
 }
 
+/// One smoke-tested model ID (NEWPIDASH-392 §6.3): the per-ID result
+/// every BYOK write returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelTestResult {
+    pub model: String,
+    pub status: ModelTestStatus,
+    /// Set for `failed` (the probe code) and `unverified` (always
+    /// `provider_unreachable`); unset for `verified`.
+    pub code: Option<&'static str>,
+    /// The probe detail for `failed` and `unverified`.
+    pub detail: Option<&'static str>,
+}
+
+/// Save-time status on the existing probe codes (NEWPIDASH-392 §7.2):
+/// `provider_auth_failed` and `model_invalid` block the save;
+/// `provider_unreachable` (and transport failures) allow "Save anyway".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelTestStatus {
+    Verified,
+    Failed,
+    Unverified,
+}
+
+impl ModelTestStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ModelTestStatus::Verified => "verified",
+            ModelTestStatus::Failed => "failed",
+            ModelTestStatus::Unverified => "unverified",
+        }
+    }
+}
+
+impl ModelTestResult {
+    /// Render the §6.3 per-ID object (`code`/`detail` omitted when unset).
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut entry = serde_json::Map::with_capacity(4);
+        entry.insert(
+            "model".to_owned(),
+            serde_json::Value::String(self.model.clone()),
+        );
+        entry.insert(
+            "status".to_owned(),
+            serde_json::Value::String(self.status.as_str().to_owned()),
+        );
+        if let Some(code) = self.code {
+            entry.insert(
+                "code".to_owned(),
+                serde_json::Value::String(code.to_owned()),
+            );
+        }
+        if let Some(detail) = self.detail {
+            entry.insert(
+                "detail".to_owned(),
+                serde_json::Value::String(detail.to_owned()),
+            );
+        }
+        serde_json::Value::Object(entry)
+    }
+}
+
+/// Map one probe outcome to its save-time status.
+pub fn classify_test(
+    model: &str,
+    outcome: &crate::assistant::probe::ProbeOutcome,
+) -> ModelTestResult {
+    use crate::assistant::probe::ProbeOutcome;
+    match outcome {
+        ProbeOutcome::Ok => ModelTestResult {
+            model: model.to_owned(),
+            status: ModelTestStatus::Verified,
+            code: None,
+            detail: None,
+        },
+        ProbeOutcome::Classified(code, detail)
+            if *code == "provider_auth_failed" || *code == "model_invalid" =>
+        {
+            ModelTestResult {
+                model: model.to_owned(),
+                status: ModelTestStatus::Failed,
+                code: Some(code),
+                detail: Some(detail),
+            }
+        }
+        ProbeOutcome::Classified(_, detail) => ModelTestResult {
+            model: model.to_owned(),
+            status: ModelTestStatus::Unverified,
+            code: Some("provider_unreachable"),
+            detail: Some(detail),
+        },
+        ProbeOutcome::TransportFailure => ModelTestResult {
+            model: model.to_owned(),
+            status: ModelTestStatus::Unverified,
+            code: Some("provider_unreachable"),
+            detail: Some("Could not reach the endpoint."),
+        },
+    }
+}
+
+/// Whether a save with these per-ID results proceeds: blocked when a
+/// new ID failed, or when an ID is unverified without `"save_unverified"`.
+pub fn smoke_test_blocks(results: &[ModelTestResult], save_unverified: bool) -> bool {
+    results.iter().any(|result| match result.status {
+        ModelTestStatus::Failed => true,
+        ModelTestStatus::Unverified => !save_unverified,
+        ModelTestStatus::Verified => false,
+    })
+}
+
+/// Merge fresh results into the stored verification map: verified IDs
+/// stamp `now`, failed IDs drop their entry, unverified IDs keep
+/// whatever the map held. `now` renders as ISO 8601.
+pub fn merge_verified_map(
+    mut stored: serde_json::Map<String, serde_json::Value>,
+    results: &[ModelTestResult],
+    now: &chrono::DateTime<chrono::Utc>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let stamp =
+        serde_json::Value::String(now.to_rfc3339_opts(chrono::SecondsFormat::Millis, false));
+    for result in results {
+        match result.status {
+            ModelTestStatus::Verified => {
+                stored.insert(result.model.clone(), stamp.clone());
+            }
+            ModelTestStatus::Failed => {
+                stored.remove(&result.model);
+            }
+            ModelTestStatus::Unverified => {}
+        }
+    }
+    stored
+}
+
+/// Validated `models` list: trimmed, empties dropped, duplicates
+/// removed (first occurrence wins), each ID at most 255 characters,
+/// at most 20 IDs. An empty result is `models_required`.
+pub fn validate_models_list(raw: &[String]) -> Result<Vec<String>, ModelsListError> {
+    let mut models = Vec::with_capacity(raw.len());
+    for id in raw {
+        let id = id.trim();
+        if id.is_empty() {
+            continue;
+        }
+        if id.chars().count() > serializers::MODEL_NAME_MAX_LENGTH {
+            return Err(ModelsListError::TooLong(id.to_owned()));
+        }
+        if !models.iter().any(|seen| seen == id) {
+            models.push(id.to_owned());
+        }
+    }
+    if models.is_empty() {
+        return Err(ModelsListError::Empty);
+    }
+    if models.len() > MAX_MODELS_PER_KEY {
+        return Err(ModelsListError::TooMany(models.len()));
+    }
+    Ok(models)
+}
+
+/// At most 20 model IDs per key (bounds the save-time smoke test).
+pub const MAX_MODELS_PER_KEY: usize = 20;
+
+/// `models` list validation failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelsListError {
+    /// The list is empty after trimming (update to zero IDs).
+    Empty,
+    /// One ID exceeds 255 characters.
+    TooLong(String),
+    /// More than [`MAX_MODELS_PER_KEY`] IDs.
+    TooMany(usize),
+}
+
 /// Failure codes for the model-selection PUT.
 pub mod choice_code {
     /// The path surface names nothing (`PUT .../{surface}/`).
@@ -541,6 +715,166 @@ mod resolution_tests {
         let err = validate_oss_choice(&choice(""), &models, key, Surface::WebAssistant)
             .expect_err("empty");
         assert_eq!(err.code, choice_code::MODEL_NOT_AVAILABLE);
+    }
+
+    #[test]
+    fn probe_codes_map_to_save_status() {
+        use crate::assistant::probe::ProbeOutcome;
+        let verified = classify_test("m", &ProbeOutcome::Ok);
+        assert_eq!(verified.status, ModelTestStatus::Verified);
+        assert_eq!(verified.code, None);
+        for (code, detail) in [
+            ("provider_auth_failed", "API key rejected."),
+            ("model_invalid", "Model not accepted by the provider."),
+        ] {
+            let failed = classify_test("m", &ProbeOutcome::Classified(code, detail));
+            assert_eq!(failed.status, ModelTestStatus::Failed);
+            assert_eq!(failed.code, Some(code));
+            assert_eq!(failed.detail, Some(detail));
+        }
+        for outcome in [
+            ProbeOutcome::TransportFailure,
+            ProbeOutcome::Classified("provider_unreachable", "Could not reach the endpoint."),
+            ProbeOutcome::Classified("429 rate limited", "slow down"),
+        ] {
+            let unverified = classify_test("m", &outcome);
+            assert_eq!(unverified.status, ModelTestStatus::Unverified);
+            assert_eq!(unverified.code, Some("provider_unreachable"));
+        }
+    }
+
+    #[test]
+    fn smoke_blocks_failed_or_unverified_without_flag() {
+        let failed = ModelTestResult {
+            model: "a".to_owned(),
+            status: ModelTestStatus::Failed,
+            code: Some("model_invalid"),
+            detail: Some("nope"),
+        };
+        let unverified = ModelTestResult {
+            model: "b".to_owned(),
+            status: ModelTestStatus::Unverified,
+            code: Some("provider_unreachable"),
+            detail: Some("down"),
+        };
+        let verified = ModelTestResult {
+            model: "c".to_owned(),
+            status: ModelTestStatus::Verified,
+            code: None,
+            detail: None,
+        };
+        assert!(smoke_test_blocks(&[failed.clone()], true));
+        assert!(smoke_test_blocks(&[unverified.clone()], false));
+        assert!(!smoke_test_blocks(&[unverified.clone()], true));
+        assert!(!smoke_test_blocks(&[verified.clone()], false));
+        assert!(!smoke_test_blocks(&[], false));
+        assert!(smoke_test_blocks(&[verified, unverified, failed], true));
+    }
+
+    #[test]
+    fn verified_map_stamps_verified_and_drops_failed() {
+        use serde_json::json;
+        let mut stored = serde_json::Map::new();
+        stored.insert("old".to_owned(), json!("2020-01-01T00:00:00+00:00"));
+        stored.insert("gone".to_owned(), json!("2020-01-01T00:00:00+00:00"));
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-23T00:00:00Z")
+            .expect("pin time")
+            .with_timezone(&chrono::Utc);
+        let results = [
+            ModelTestResult {
+                model: "new".to_owned(),
+                status: ModelTestStatus::Verified,
+                code: None,
+                detail: None,
+            },
+            ModelTestResult {
+                model: "gone".to_owned(),
+                status: ModelTestStatus::Failed,
+                code: Some("model_invalid"),
+                detail: Some("nope"),
+            },
+            ModelTestResult {
+                model: "old".to_owned(),
+                status: ModelTestStatus::Unverified,
+                code: Some("provider_unreachable"),
+                detail: Some("down"),
+            },
+        ];
+        let merged = merge_verified_map(stored, &results, &now);
+        assert_eq!(
+            merged["new"],
+            json!("2026-11-23T00:00:00.000+00:00"),
+            "verified stamps now"
+        );
+        assert!(!merged.contains_key("gone"), "failed drops the entry");
+        assert_eq!(
+            merged["old"],
+            json!("2020-01-01T00:00:00+00:00"),
+            "unverified keeps the entry"
+        );
+    }
+
+    #[test]
+    fn models_list_trims_dedupes_and_caps() {
+        assert_eq!(
+            validate_models_list(&[
+                "  a ".to_owned(),
+                "b".to_owned(),
+                "a".to_owned(),
+                "".to_owned()
+            ])
+            .expect("valid"),
+            vec!["a".to_owned(), "b".to_owned()]
+        );
+        assert_eq!(
+            validate_models_list(&[]).expect_err("empty"),
+            ModelsListError::Empty
+        );
+        assert_eq!(
+            validate_models_list(&["   ".to_owned()]).expect_err("blank"),
+            ModelsListError::Empty
+        );
+        let long = "x".repeat(256);
+        assert!(matches!(
+            validate_models_list(&[long]),
+            Err(ModelsListError::TooLong(_))
+        ));
+        let many: Vec<String> = (0..21).map(|i| format!("m{i}")).collect();
+        assert_eq!(
+            validate_models_list(&many).expect_err("too many"),
+            ModelsListError::TooMany(21)
+        );
+        let max: Vec<String> = (0..20).map(|i| format!("m{i}")).collect();
+        assert_eq!(validate_models_list(&max).expect("twenty").len(), 20);
+    }
+
+    #[test]
+    fn test_result_renders_section_63() {
+        let verified = ModelTestResult {
+            model: "gpt-6".to_owned(),
+            status: ModelTestStatus::Verified,
+            code: None,
+            detail: None,
+        };
+        assert_eq!(
+            verified.to_json(),
+            serde_json::json!({"model": "gpt-6", "status": "verified"})
+        );
+        let failed = ModelTestResult {
+            model: "gpt-6.3".to_owned(),
+            status: ModelTestStatus::Failed,
+            code: Some("model_invalid"),
+            detail: Some("Model not accepted by the provider."),
+        };
+        assert_eq!(
+            failed.to_json(),
+            serde_json::json!({
+                "model": "gpt-6.3",
+                "status": "failed",
+                "code": "model_invalid",
+                "detail": "Model not accepted by the provider.",
+            })
+        );
     }
 
     #[test]

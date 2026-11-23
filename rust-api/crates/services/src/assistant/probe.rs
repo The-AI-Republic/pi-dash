@@ -141,13 +141,34 @@ pub async fn probe_provider(
 }
 
 /// [`probe_provider`] with an explicit bundle path (the unit-test
-/// seam: no process env involved).
+/// seam: no process env involved). The 60 s timeout is the manual test
+/// button's; save-time tests pass the shorter [`SAVE_TEST_TIMEOUT`].
 pub async fn probe_provider_with_bundle(
     provider_kind: &str,
     base_url: &str,
     model_name: &str,
     api_key: &str,
     bundle: Option<&Path>,
+) -> ProbeOutcome {
+    probe_provider_with_timeout(
+        provider_kind,
+        base_url,
+        model_name,
+        api_key,
+        bundle,
+        std::time::Duration::from_secs(60),
+    )
+    .await
+}
+
+/// [`probe_provider_with_bundle`] with an explicit per-probe timeout.
+pub async fn probe_provider_with_timeout(
+    provider_kind: &str,
+    base_url: &str,
+    model_name: &str,
+    api_key: &str,
+    bundle: Option<&Path>,
+    timeout: std::time::Duration,
 ) -> ProbeOutcome {
     // No redirect following: pydantic-ai builds its SDK clients over its
     // own non-following httpx client (`create_async_http_client`), so a
@@ -173,7 +194,7 @@ pub async fn probe_provider_with_bundle(
                 }))
                 .expect("probe body serializes"),
             )
-            .timeout(std::time::Duration::from_secs(60))
+            .timeout(timeout)
             .send()
             .await
     } else {
@@ -191,7 +212,7 @@ pub async fn probe_provider_with_bundle(
                 }))
                 .expect("probe body serializes"),
             )
-            .timeout(std::time::Duration::from_secs(60))
+            .timeout(timeout)
             .send()
             .await
     };
@@ -205,6 +226,65 @@ pub async fn probe_provider_with_bundle(
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Save-time smoke test (NEWPIDASH-392 §7.2)
+// ---------------------------------------------------------------------------
+
+/// Per-probe timeout for save-time tests (the manual test button keeps
+/// the 60 s timeout above).
+pub const SAVE_TEST_TIMEOUT_SECS: u64 = 20;
+
+/// At most this many probes run at once per save request, so a 20-model
+/// save finishes in about 100 s at worst.
+pub const SAVE_TEST_PARALLELISM: usize = 4;
+
+/// Probe every model ID and return `(model, outcome)` pairs in input
+/// order. One chunk of at most [`SAVE_TEST_PARALLELISM`] runs at a
+/// time; each probe carries `timeout`.
+pub async fn probe_models(
+    provider_kind: &str,
+    base_url: &str,
+    models: &[String],
+    api_key: &str,
+    timeout: std::time::Duration,
+) -> Vec<(String, ProbeOutcome)> {
+    let mut ordered = Vec::with_capacity(models.len());
+    for (offset, chunk) in models.chunks(SAVE_TEST_PARALLELISM).enumerate() {
+        let mut running = tokio::task::JoinSet::new();
+        for (index, model) in chunk.iter().enumerate() {
+            let provider_kind = provider_kind.to_owned();
+            let base_url = base_url.to_owned();
+            let model = model.clone();
+            let api_key = api_key.to_owned();
+            running.spawn(async move {
+                let outcome = probe_provider_with_timeout(
+                    &provider_kind,
+                    &base_url,
+                    &model,
+                    &api_key,
+                    ca_bundle_path().as_deref(),
+                    timeout,
+                )
+                .await;
+                (offset * SAVE_TEST_PARALLELISM + index, model, outcome)
+            });
+        }
+        let mut chunked = Vec::with_capacity(chunk.len());
+        while let Some(joined) = running.join_next().await {
+            let (index, model, outcome) =
+                joined.expect("probe task never panics: no unwrap inside");
+            chunked.push((index, model, outcome));
+        }
+        chunked.sort_by_key(|(index, _, _)| *index);
+        ordered.extend(
+            chunked
+                .into_iter()
+                .map(|(_, model, outcome)| (model, outcome)),
+        );
+    }
+    ordered
 }
 
 #[cfg(test)]
@@ -341,6 +421,121 @@ mod tests {
         fn drop(&mut self) {
             self.task.abort();
         }
+    }
+
+    /// Minimal plaintext-HTTP fake for [`probe_models`]: answers per
+    /// model ID from the request body — `ok-model` probes `Ok`,
+    /// `auth-model` 401s, `missing-model` 404s, anything else 500s
+    /// (all fast; nothing hangs on a timeout).
+    struct HttpFake {
+        port: u16,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl HttpFake {
+        async fn start() -> Self {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("fake binds");
+            let port = listener.local_addr().expect("fake addr").port();
+            let task = tokio::spawn(async move {
+                loop {
+                    let Ok((stream, _)) = listener.accept().await else {
+                        break;
+                    };
+                    tokio::spawn(async move {
+                        let (mut reader, mut writer) = tokio::io::split(stream);
+                        let mut head = Vec::new();
+                        let mut byte = [0u8; 1];
+                        while !head.ends_with(b"\r\n\r\n") && head.len() <= 65536 {
+                            if reader.read_exact(&mut byte).await.is_err() {
+                                return;
+                            }
+                            head.push(byte[0]);
+                        }
+                        let mut content_length = 0usize;
+                        for line in String::from_utf8_lossy(&head).lines() {
+                            if let Some(value) = line
+                                .strip_prefix("content-length:")
+                                .or_else(|| line.strip_prefix("Content-Length:"))
+                            {
+                                content_length = value.trim().parse().unwrap_or(0);
+                            }
+                        }
+                        let mut body = vec![0u8; content_length];
+                        let _ = reader.read_exact(&mut body).await;
+                        let model = serde_json::from_slice::<serde_json::Value>(&body)
+                            .ok()
+                            .and_then(|json| json.get("model")?.as_str().map(str::to_owned))
+                            .unwrap_or_default();
+                        let (status, canned) = match model.as_str() {
+                            "ok-model" => ("200 OK", "{\"choices\":[]}"),
+                            "auth-model" => ("401 Unauthorized", "{\"error\":\"bad key\"}"),
+                            "missing-model" => ("404 Not Found", "{\"error\":\"model not found\"}"),
+                            _ => ("500 Boom", "boom"),
+                        };
+                        let response = format!(
+                            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{canned}",
+                            canned.len()
+                        );
+                        let _ = writer.write_all(response.as_bytes()).await;
+                        let _ = writer.shutdown().await;
+                    });
+                }
+            });
+            Self { port, task }
+        }
+
+        fn base_url(&self) -> String {
+            format!("http://127.0.0.1:{}", self.port)
+        }
+    }
+
+    impl Drop for HttpFake {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_many_preserves_order_across_chunks() {
+        let fake = HttpFake::start().await;
+        // Five models force two chunks (parallelism 4), proving order
+        // holds across chunk boundaries as well as within them.
+        let models = [
+            "missing-model",
+            "ok-model",
+            "down-model",
+            "auth-model",
+            "ok-model",
+        ];
+        let out = probe_models(
+            "openai_compatible",
+            &fake.base_url(),
+            &models.map(str::to_owned),
+            "key",
+            std::time::Duration::from_secs(30),
+        )
+        .await;
+        assert_eq!(out.len(), models.len(), "one outcome per model");
+        for ((model, _), expected) in out.iter().zip(models.iter()) {
+            assert_eq!(model, expected, "input order preserved");
+        }
+        let codes: Vec<ProbeOutcome> = out.into_iter().map(|(_, outcome)| outcome).collect();
+        assert_eq!(codes[0], classify_probe(404, "model not found"));
+        assert_eq!(codes[1], ProbeOutcome::Ok);
+        assert_eq!(
+            codes[2],
+            ProbeOutcome::Classified("provider_unreachable", "Could not reach the endpoint.")
+        );
+        assert!(matches!(
+            codes[3],
+            ProbeOutcome::Classified("provider_auth_failed", _)
+        ));
+        assert_eq!(codes[4], ProbeOutcome::Ok);
+        assert_eq!(SAVE_TEST_PARALLELISM, 4);
+        assert_eq!(SAVE_TEST_TIMEOUT_SECS, 20);
     }
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);

@@ -97,6 +97,10 @@ pub struct LlmConfigSave<'a> {
     /// The full model list (NEWPIDASH-392); writers keep
     /// `model_name = models[0]`.
     pub models: &'a [String],
+    /// The per-model verification map (NEWPIDASH-392).
+    pub model_verified_at: &'a Value,
+    /// The legacy stamp, kept on `models[0]` (NEWPIDASH-392 §4.5).
+    pub last_verified_at: Option<DateTime<Utc>>,
     pub existed: bool,
 }
 
@@ -113,6 +117,11 @@ fn config_save_update(
         .col_expr(C::BaseUrl, Expr::value(params.base_url))
         .col_expr(C::ModelName, Expr::value(params.model_name))
         .col_expr(C::Models, Expr::value(params.models.to_vec()))
+        .col_expr(
+            C::ModelVerifiedAt,
+            Expr::value(params.model_verified_at.clone()),
+        )
+        .col_expr(C::LastVerifiedAt, Expr::value(params.last_verified_at))
         .col_expr(
             C::ApiKeyEncrypted,
             Expr::value(params.api_key_encrypted.clone()),
@@ -133,9 +142,9 @@ fn config_insert_row(
         base_url: ActiveValue::Set(params.base_url.to_owned()),
         model_name: ActiveValue::Set(params.model_name.to_owned()),
         api_key_encrypted: ActiveValue::Set(params.api_key_encrypted.clone()),
-        last_verified_at: ActiveValue::Set(None),
+        last_verified_at: ActiveValue::Set(params.last_verified_at.map(Into::into)),
         models: ActiveValue::Set(params.models.to_vec()),
-        model_verified_at: ActiveValue::Set(serde_json::json!({})),
+        model_verified_at: ActiveValue::Set(params.model_verified_at.clone()),
         created_at: ActiveValue::Set(now.into()),
         updated_at: ActiveValue::Set(now.into()),
         ..Default::default()
@@ -959,6 +968,7 @@ mod tests {
     fn assistant_statement_shapes() {
         let key = Some(b"k".to_vec());
         let models = vec!["m".to_owned()];
+        let verified = serde_json::json!({"m": "2026-11-05T10:00:00.000000+00:00"});
         let save = LlmConfigSave {
             user_id: uid(1),
             provider_kind: "anthropic",
@@ -966,6 +976,8 @@ mod tests {
             model_name: "m",
             api_key_encrypted: &key,
             models: &models,
+            model_verified_at: &verified,
+            last_verified_at: Some(pin_time()),
             existed: true,
         };
         let full = LlmConfigFullSave {
@@ -1007,7 +1019,7 @@ mod tests {
             )),
         ];
         let want = [
-            r#"UPDATE "assistant_user_llm_config" SET "provider_kind" = 'anthropic', "base_url" = 'https://b', "model_name" = 'm', "models" = ARRAY ['m'], "api_key_encrypted" = '\x6B', "updated_at" = '2026-11-05 10:00:00.000000 +00:00' WHERE "assistant_user_llm_config"."user_id" = '00000000-0000-0000-0000-000000000001'"#,
+            r#"UPDATE "assistant_user_llm_config" SET "provider_kind" = 'anthropic', "base_url" = 'https://b', "model_name" = 'm', "models" = ARRAY ['m'], "model_verified_at" = E'{\"m\":\"2026-11-05T10:00:00.000000+00:00\"}', "last_verified_at" = '2026-11-05 10:00:00.000000 +00:00', "api_key_encrypted" = '\x6B', "updated_at" = '2026-11-05 10:00:00.000000 +00:00' WHERE "assistant_user_llm_config"."user_id" = '00000000-0000-0000-0000-000000000001'"#,
             r#"UPDATE "assistant_user_llm_config" SET "user_id" = '00000000-0000-0000-0000-000000000001', "provider_kind" = 'anthropic', "base_url" = 'https://b', "model_name" = 'm', "api_key_encrypted" = '\x6B', "last_verified_at" = NULL, "created_at" = '2026-11-05 10:00:00.000000 +00:00', "updated_at" = '2026-11-05 10:00:00.000000 +00:00' WHERE "assistant_user_llm_config"."id" = 7"#,
             r#"INSERT INTO "assistant_message" ("id", "thread_id", "turn_id", "seq", "kind", "display_content", "payload", "status", "created_at", "completed_at") VALUES (gen_random_uuid(), '00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000003', 4, 'user', 'hi', '{}', 'completed', CURRENT_TIMESTAMP, NULL) RETURNING "id", "kind", "display_content", "status", "seq", "turn_id", CAST("payload" AS text), "created_at", "completed_at""#,
             r#"INSERT INTO "assistant_message" ("id", "thread_id", "turn_id", "seq", "kind", "display_content", "payload", "status", "created_at") VALUES ('00000000-0000-0000-0000-000000000005', '00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000003', (SELECT COALESCE(MAX("seq"), 0) + 1 FROM "assistant_message" WHERE "thread_id" = '00000000-0000-0000-0000-000000000002'), 'tool_result', 'sum', E'{\"a\":1}', 'completed', '2026-11-05 10:00:00.000000 +00:00')"#,
@@ -1112,6 +1124,7 @@ mod tests {
         let user_id = Uuid::new_v4();
         let key = Some(b"live-key-blob".to_vec());
         let live_models = ["live-model".to_owned()];
+        let empty_verified = serde_json::json!({});
         save_llm_config(
             &pidash_db::orm_tx::TxConn::new(&mut tx),
             &LlmConfigSave {
@@ -1121,12 +1134,15 @@ mod tests {
                 model_name: "live-model",
                 api_key_encrypted: &key,
                 models: &live_models,
+                model_verified_at: &empty_verified,
+                last_verified_at: None,
                 existed: false,
             },
         )
         .await
         .expect("insert config");
         let live_models_2 = ["live-model-2".to_owned()];
+        let verified_2 = serde_json::json!({"live-model-2": "2026-01-02T03:04:05+00:00"});
         save_llm_config(
             &pidash_db::orm_tx::TxConn::new(&mut tx),
             &LlmConfigSave {
@@ -1136,6 +1152,12 @@ mod tests {
                 model_name: "live-model-2",
                 api_key_encrypted: &key,
                 models: &live_models_2,
+                model_verified_at: &verified_2,
+                last_verified_at: Some(
+                    DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
+                        .expect("pin time")
+                        .with_timezone(&Utc),
+                ),
                 existed: true,
             },
         )
@@ -1148,19 +1170,25 @@ mod tests {
         )
         .await
         .expect("stamp config");
-        let row: (String, Option<DateTime<Utc>>, Vec<String>) = sqlx::query_as(
-            "SELECT base_url, last_verified_at, models FROM assistant_user_llm_config WHERE user_id = $1",
-        )
-        .bind(user_id)
-        .fetch_one(&mut *tx)
-        .await
-        .expect("read config");
+        let row: (String, Option<DateTime<Utc>>, Vec<String>, serde_json::Value) =
+            sqlx::query_as(
+                "SELECT base_url, last_verified_at, models, model_verified_at FROM assistant_user_llm_config WHERE user_id = $1",
+            )
+            .bind(user_id)
+            .fetch_one(&mut *tx)
+            .await
+            .expect("read config");
         assert_eq!(row.0, "https://live.example.com/v2");
         assert!(row.1.is_some(), "verified stamp set");
         assert_eq!(
             row.2,
             vec!["live-model-2".to_owned()],
             "models follow model_name"
+        );
+        assert_eq!(
+            row.3,
+            serde_json::json!({"live-model-2": "2026-01-02T03:04:05+00:00"}),
+            "verified map round-trips"
         );
         delete_llm_config(&pidash_db::orm_tx::TxConn::new(&mut tx), user_id)
             .await
