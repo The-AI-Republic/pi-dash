@@ -337,6 +337,7 @@ pub async fn put_config(
         api_key_encrypted = Some(crypto::encrypt(deps.crypto, &api_key, deps.kms)?);
         plaintext_key = Some(api_key);
     }
+    let fresh_key_provided = plaintext_key.is_some();
     let stored_plaintext = match api_key_encrypted.as_deref() {
         Some(bytes) if plaintext_key.is_none() => {
             Some(crypto::decrypt(deps.crypto, bytes, deps.kms)?)
@@ -345,12 +346,17 @@ pub async fn put_config(
     };
     let probe_key = plaintext_key.or(stored_plaintext).unwrap_or_default();
 
-    // New IDs to smoke-test (NEWPIDASH-392 §7.2): a new key (all IDs),
-    // a new ID on an existing key (that ID only), a changed key, base
-    // URL or provider (all IDs). A create tests everything it saves.
+    // New IDs to smoke-test (NEWPIDASH-392 §7.2): a create tests
+    // everything it saves; otherwise a fresh key, a flipped key
+    // presence, or a changed base URL or provider retests all IDs,
+    // while a new ID on an unchanged lane tests that ID only.
     let lane_changed = provider_changed(row, &provider_kind)
         || base_changed(row, &base_url_stored)
-        || key_material_changed(&validated_key_presence(row), &api_key_encrypted);
+        || key_material_changed(
+            &validated_key_presence(row),
+            &api_key_encrypted,
+            fresh_key_provided,
+        );
     let new_ids: Vec<String> = if !existed || lane_changed {
         models.clone()
     } else {
@@ -428,16 +434,55 @@ fn validated_key_presence(row: Option<&LlmConfigRow>) -> bool {
         .is_some_and(|key| !key.is_empty())
 }
 
-/// True when the effective encrypted key differs in presence from the
-/// stored row's (a fresh key was provided, or presence flipped).
-fn key_material_changed(stored_has_key: &bool, effective: &Option<Vec<u8>>) -> bool {
+/// True when the request carries fresh key material or the effective
+/// encrypted key differs in presence from the stored row's: a fresh key
+/// in the body (rotation retests every ID even when presence is
+/// unchanged), or presence flipped (key added or removed).
+fn key_material_changed(
+    stored_has_key: &bool,
+    effective: &Option<Vec<u8>>,
+    fresh_key_provided: bool,
+) -> bool {
     let effective_has_key = effective.as_ref().is_some_and(|key| !key.is_empty());
-    *stored_has_key != effective_has_key
+    fresh_key_provided || *stored_has_key != effective_has_key
 }
 
 /// `DELETE users/me/ai-assistant/config/` (`llm_config.py:76-78`).
 pub async fn delete_config(pool: &PgPool, user_id: Uuid) -> Result<(), sqlx::Error> {
     domain::delete_llm_config(&pidash_db::pool::sea_orm_connection(pool), user_id).await
+}
+
+#[cfg(test)]
+mod tests_key_material {
+    use super::key_material_changed;
+
+    fn encrypted() -> Option<Vec<u8>> {
+        Some(vec![1, 2, 3])
+    }
+
+    #[test]
+    fn rotation_retests_even_when_presence_is_unchanged() {
+        // Same models + a fresh `api_key` on a row that already held
+        // one (true→true): the save must retest every ID.
+        assert!(key_material_changed(&true, &encrypted(), true));
+    }
+
+    #[test]
+    fn unchanged_lane_without_fresh_key_retests_nothing() {
+        assert!(!key_material_changed(&true, &encrypted(), false));
+        assert!(!key_material_changed(&false, &None, false));
+    }
+
+    #[test]
+    fn flipped_presence_retests_without_fresh_key() {
+        assert!(key_material_changed(&false, &encrypted(), false));
+        assert!(key_material_changed(&true, &None, false));
+    }
+
+    #[test]
+    fn fresh_key_on_keyless_row_retests() {
+        assert!(key_material_changed(&false, &encrypted(), true));
+    }
 }
 
 #[cfg(test)]

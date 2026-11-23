@@ -58,6 +58,9 @@ class _ModelStubProxy:
         }
         self._server = None
         self._thread = None
+        # When set, every probe answers 401 (a rotated key the
+        # provider rejects), whatever the model ID.
+        self.fail_all = False
 
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.0"
@@ -73,7 +76,10 @@ class _ModelStubProxy:
                 except ValueError:
                     body = {}
                 model = body.get("model", "") if isinstance(body, dict) else ""
-                status, payload = stub.responses.get(model, (500, {"error": "boom"}))
+                if stub.fail_all:
+                    status, payload = (401, {"error": {"message": "Incorrect API key"}})
+                else:
+                    status, payload = stub.responses.get(model, (500, {"error": "boom"}))
                 response = stub._json.dumps(payload).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
@@ -241,6 +247,44 @@ def test_byok_smoke_unverified_needs_save_unverified(world, member):
         assert saved["models"] == ["down-model"]
         assert saved["model_verified_at"] == {}
         assert saved["last_verified_at"] is None
+    finally:
+        stub.stop()
+
+
+def test_byok_key_rotation_retests_every_id(world, member):
+    """Rotating the key retests every stored ID: a rejected key fails
+    the save (nothing stored) instead of keeping the old stamps.
+    Django saves without probing."""
+    _require_proxy_env()
+    stub = _ModelStubProxy().start()
+    try:
+        res = _put_key(member, ["ok-a", "ok-b"])
+        assert res.status_code == 200, res.text
+        if not is_rust():
+            return
+        assert {entry["model"] for entry in res.json()["models"]} == {"ok-a", "ok-b"}
+
+        # Same models, fresh key, provider now rejects everything: the
+        # save must probe both IDs and reject without saving.
+        stub.fail_all = True
+        res = _put_key(member, ["ok-a", "ok-b"], api_key="rotated-key-456")
+        assert res.status_code == 400, res.text
+        body = res.json()
+        assert body["error"] == "model_test_failed"
+        assert [entry["model"] for entry in body["models"]] == ["ok-a", "ok-b"]
+        assert all(entry["status"] == "failed" for entry in body["models"])
+        # Nothing was saved: the old models and stamps survive.
+        saved = member.get(CONFIG_URL).json()
+        assert saved["models"] == ["ok-a", "ok-b"]
+        assert set(saved["model_verified_at"]) == {"ok-a", "ok-b"}
+
+        # Rotating back to a key the provider accepts saves with fresh
+        # stamps for every ID.
+        stub.fail_all = False
+        res = _put_key(member, ["ok-a", "ok-b"], api_key="rotated-key-789")
+        assert res.status_code == 200, res.text
+        assert all(entry["status"] == "verified" for entry in res.json()["models"])
+        assert set(member.get(CONFIG_URL).json()["model_verified_at"]) == {"ok-a", "ok-b"}
     finally:
         stub.stop()
 
