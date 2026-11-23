@@ -1,21 +1,21 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// OpenHub composer picker state (NEWPIDASH-303). Pure on purpose — the
-// visibility gate and the option labels are unit-testable without a DOM
-// or a server. The component reads the connections list (god-mode order
-// via openhub_model_options, NEWPIDASH-302) and the LLM config
-// (credential lane), so an admin-added model appears after reload with
-// no deploy.
+// OpenHub composer picker state (NEWPIDASH-303, rewritten NEWPIDASH-394).
+// Pure on purpose — the merged list and the option labels are
+// unit-testable without a DOM or a server. The component reads the
+// connections list (god-mode order via openhub_model_options,
+// NEWPIDASH-302) and the per-surface selection, so an admin-added model
+// appears after reload with no deploy.
 //
 // Merged picker (NEWPIDASH-394, design section 7.1): catalog models
 // first, then BYOK models grouped by key. The agent surface takes
 // catalog models only. Quota badges ride on top later (annotateChoices
 // in cloud-assistant); this builder stays quota-free.
 
-import { resolveCredentialLane, type AssistantConnectionList, type LlmConfig } from "@pidash/api-client";
+import type { AssistantConnectionList } from "@pidash/api-client";
 
-import { baseUrlHost, type ModelChoice } from "../../cloud-assistant/index.js";
+import { baseUrlHost, OPENHUB_MODEL_DESCRIPTIONS, type ModelChoice } from "../../cloud-assistant/index.js";
 
 /** The hosted lane's free/default model (god-mode preselected default). */
 export const OPENHUB_DEFAULT_MODEL = "openhub_free_llm";
@@ -24,26 +24,32 @@ export const OPENHUB_DEFAULT_MODEL = "openhub_free_llm";
 export const OPENHUB_DEFAULT_SUFFIX = " (default)";
 
 /**
- * The selected OpenHub connection, when the lane is OpenHub and usable.
- * Bring-your-own-key and Codex lanes hide the picker (their model controls
- * stay in Settings), as does a keyless or unloaded config.
+ * The catalog half of the merged list, read off the connections list:
+ * god-mode order with the server labels when the backend sends them
+ * (NEWPIDASH-393, design section 6.2).
  */
-export function selectedOpenHubConnection(
-  config: LlmConfig | null | undefined,
-  list: AssistantConnectionList | undefined
-): AssistantConnectionList["connections"][number] | null {
-  if (config === null || config === undefined || list === undefined) return null;
-  if (resolveCredentialLane(config) !== "openhub") return null;
-  if (config.has_openhub_access !== true) return null;
-  return list.connections.find((row) => row.kind === "openhub" && row.is_selected) ?? null;
+export function catalogFromList(list: AssistantConnectionList): MergedPickerCatalog {
+  return {
+    models: list.openhub_model_options,
+    labels: list.openhub_model_labels ?? {},
+    descriptions: OPENHUB_MODEL_DESCRIPTIONS,
+  };
 }
 
-/** True when the composer picker should render. */
-export function shouldShowOpenHubPicker(
-  config: LlmConfig | null | undefined,
-  list: AssistantConnectionList | undefined
-): boolean {
-  return selectedOpenHubConnection(config, list) !== null;
+/**
+ * Every BYOK key's contribution, in list order. A connection without a
+ * stored list still serves its legacy single model, so it contributes
+ * that one ID.
+ */
+export function byokKeysFromList(list: AssistantConnectionList): MergedPickerByokKey[] {
+  return list.connections
+    .filter((row) => row.kind === "byok")
+    .map((row) => ({
+      connectionId: row.id,
+      models: row.models ?? (row.model_name === "" ? [] : [row.model_name]),
+      baseUrl: row.base_url,
+      providerKind: row.provider_kind,
+    }));
 }
 
 /**
@@ -140,4 +146,13 @@ export function byokChoiceLabel(model: string, key: Pick<MergedPickerByokKey, "b
  */
 export function fallbackNotice(savedModel: string, effectiveLabel: string): string {
   return `${savedModel} is no longer available. Using ${effectiveLabel}.`;
+}
+
+/**
+ * One merged option's `<select>` value. The same model ID through two
+ * connections is two choices (design D-10), so a BYOK choice carries
+ * its connection ID; catalog choices carry none.
+ */
+export function mergedChoiceKey(choice: { value: string; connectionId?: string | undefined }): string {
+  return choice.connectionId === undefined ? `catalog:${choice.value}` : `byok:${choice.connectionId}:${choice.value}`;
 }

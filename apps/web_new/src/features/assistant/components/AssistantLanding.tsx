@@ -89,7 +89,7 @@ export function AssistantLanding({ workspaceSlug }: AssistantLandingProps): Reac
               starting={start.isPending}
               bordered={false}
               dictation={DICTATION_UI_ENABLED ? dictation : undefined}
-              modelPicker={<OpenHubModelPicker workspaceSlug={workspaceSlug} config={config.data} />}
+              modelPicker={<OpenHubModelPicker workspaceSlug={workspaceSlug} />}
             />
           </>
         )}

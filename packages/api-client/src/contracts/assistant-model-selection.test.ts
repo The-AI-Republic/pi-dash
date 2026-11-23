@@ -28,15 +28,13 @@ function stubClient(impl: {
 }
 
 const FULL_SELECTION = {
-  surfaces: {
-    web_assistant: {
-      saved: { model: "modelC", connection_id: "a93e4567-e89b-12d3-a456-426614174001" },
-      effective: { model: "openhub_free_llm", connection_id: null },
-      fallback_reason: "model_removed",
-    },
-    desktop_assistant: { saved: null, effective: { model: "openhub_free_llm" }, fallback_reason: "none_saved" },
-    agent: { saved: null, effective: null, fallback_reason: "lane_unavailable" },
+  web_assistant: {
+    saved: { model: "modelC", connection_id: "a93e4567-e89b-12d3-a456-426614174001" },
+    effective: { model: "openhub_free_llm", connection_id: null },
+    fallback_reason: "model_removed",
   },
+  desktop_assistant: { saved: null, effective: { model: "openhub_free_llm" }, fallback_reason: "none_saved" },
+  agent: { saved: null, effective: null, fallback_reason: "lane_unavailable" },
 };
 
 describe("getModelSelection", () => {
@@ -50,34 +48,32 @@ describe("getModelSelection", () => {
     });
     const selection = await getModelSelection(client);
     expect(calls).toEqual(["/api/users/me/ai-assistant/model-selection/"]);
-    expect(selection.surfaces.web_assistant.saved).toEqual({
+    expect(selection.web_assistant.saved).toEqual({
       model: "modelC",
       connection_id: "a93e4567-e89b-12d3-a456-426614174001",
     });
-    expect(selection.surfaces.web_assistant.fallback_reason).toBe("model_removed");
-    expect(selection.surfaces.agent.effective).toBeNull();
+    expect(selection.web_assistant.fallback_reason).toBe("model_removed");
+    expect(selection.agent.effective).toBeNull();
   });
 
   it("tolerates a missing fallback reason and connection id", async () => {
     const client = stubClient({
       getJson: (async () => ({
-        surfaces: {
-          web_assistant: { saved: { model: "openhub_free_llm" }, effective: { model: "openhub_free_llm" } },
-          desktop_assistant: { saved: null, effective: null },
-          agent: { saved: null, effective: null, fallback_reason: null },
-        },
+        web_assistant: { saved: { model: "openhub_free_llm" }, effective: { model: "openhub_free_llm" } },
+        desktop_assistant: { saved: null, effective: null },
+        agent: { saved: null, effective: null, fallback_reason: null },
       })) as ApiClient["getJson"],
     });
     const selection = await getModelSelection(client);
-    expect(selection.surfaces.web_assistant.fallback_reason).toBeUndefined();
-    expect(selection.surfaces.web_assistant.saved).toEqual({ model: "openhub_free_llm" });
+    expect(selection.web_assistant.fallback_reason).toBeUndefined();
+    expect(selection.web_assistant.saved).toEqual({ model: "openhub_free_llm" });
   });
 });
 
 describe("putModelSelection", () => {
   it("writes only its own surface and parses the answered state", async () => {
     const calls: { method?: string; url?: string; json?: unknown }[] = [];
-    const answered = FULL_SELECTION.surfaces.desktop_assistant;
+    const answered = FULL_SELECTION.desktop_assistant;
     const client = stubClient({
       sendJson: (async (method: string, url: string, options: { json?: unknown }) => {
         calls.push({ method, url, json: options.json });
@@ -103,7 +99,7 @@ describe("putModelSelection", () => {
       sendJson: (async (_method: string, url: string, options: { json?: unknown }) => {
         calls.push({ json: options.json });
         return {
-          data: FULL_SELECTION.surfaces.web_assistant,
+          data: FULL_SELECTION.web_assistant,
           status: 200,
           url,
         };

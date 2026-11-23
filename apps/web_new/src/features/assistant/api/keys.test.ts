@@ -10,5 +10,6 @@ describe("assistantKeys", () => {
     expect(assistantKeys.all("acme")).toEqual(["ws", "acme", "assistant"]);
     expect(assistantKeys.threads("acme")).toEqual(["ws", "acme", "assistant", "threads"]);
     expect(assistantKeys.config("acme")).toEqual(["ws", "acme", "assistant", "config"]);
+    expect(assistantKeys.selection("acme")).toEqual(["ws", "acme", "assistant", "model-selection"]);
   });
 });

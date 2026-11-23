@@ -54,8 +54,24 @@ export type { PendingMessageState } from "./lib/navigation.js";
 export { OpenHubModelPicker } from "./components/OpenHubModelPicker.js";
 export type { OpenHubModelPickerProps } from "./components/OpenHubModelPicker.js";
 export {
+  SELECTION_FAILED_FALLBACK,
+  composerSurface,
+  modelSelectionActions,
+  modelSelectionQueryOptions,
+  selectionFailureDetail,
+  useModelSelection,
+  useModelSelectionActions,
+} from "./api/selection.js";
+export type { ModelSelectionWrites } from "./api/selection.js";
+export {
   OPENHUB_DEFAULT_MODEL,
+  OPENHUB_DEFAULT_SUFFIX,
+  buildMergedModelChoices,
+  byokChoiceLabel,
+  byokKeysFromList,
+  catalogFromList,
+  fallbackNotice,
+  mergedChoiceKey,
   pickerOptionLabel,
-  selectedOpenHubConnection,
-  shouldShowOpenHubPicker,
 } from "./lib/openhubPicker.js";
+export type { MergedPickerByokKey, MergedPickerCatalog, MergedPickerChoice } from "./lib/openhubPicker.js";

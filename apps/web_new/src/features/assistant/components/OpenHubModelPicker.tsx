@@ -1,124 +1,158 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// OpenHub model picker (NEWPIDASH-303). A compact dropdown that lives in
-// the composer's bottom bar next to send, ChatGPT/Claude style, instead
-// of only in Settings. It lists the enabled OpenHub models in admin
-// order (the god-mode list via openhub_model_options, NEWPIDASH-302) with
-// the current model selected and the free model marked as the default.
-// Choosing a model writes through the same PATCH connection-detail
-// endpoint Settings uses, then refreshes the connections and both
-// config reads so Settings shows the same value. It renders only for an
-// OpenHub lane with access; BYOK/Codex controls stay in Settings. A
-// native <select> never submits the composer form.
-//
-// The LLM config arrives as a prop from the composer host (which already
-// reads it), never as a second observer of the same query: the host
-// gates its pending branch on that read, so a mount-time refetch here
-// would flip the host back to its spinner, unmount the picker, and loop.
+// Merged model picker (NEWPIDASH-394, design sections 7.1 and 7.5). A
+// compact dropdown in the composer's bottom bar, ChatGPT/Claude style:
+// catalog models first (god-mode order with server labels), then BYOK
+// models grouped by key. Choosing a model writes that surface's saved
+// choice through PUT model-selection/{surface} — the desktop build
+// writes desktop_assistant, the browser writes web_assistant — then
+// refreshes the selection so Settings shows the same value. It renders
+// whenever the surface has a choice, on every lane; a saved choice the
+// server no longer honors shows the fallback notice. A native <select>
+// never submits the composer form.
 
 import { cn } from "@pidash/kit";
-import { useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 
-import type { LlmConfig } from "@pidash/api-client";
+import type { AssistantSurface } from "@pidash/api-client";
 
 import {
-  actionFailureDetail,
   annotateChoices,
   connectionModelFlags,
   isBlockedCommit,
-  modelChoices,
-  OPENHUB_MODEL_DESCRIPTIONS,
-  useCloudAssistantActions,
   useCloudConnections,
   useCloudQuota,
 } from "../../cloud-assistant/index.js";
 import { notifyError } from "../../../shared/shell/index.js";
 
-import { assistantKeys } from "../api/keys.js";
+import {
+  composerSurface,
+  selectionFailureDetail,
+  useModelSelection,
+  useModelSelectionActions,
+} from "../api/selection.js";
 import {
   ASSISTANT_MODEL_PICKER_LABEL,
   MODEL_PICKER_BLOCKED_BODY,
   MODEL_PICKER_BLOCKED_TITLE,
-  MODEL_PICKER_FAILED_FALLBACK,
   MODEL_PICKER_FAILED_TITLE,
 } from "../lib/copy.js";
-import { OPENHUB_DEFAULT_MODEL, pickerOptionLabel, selectedOpenHubConnection } from "../lib/openhubPicker.js";
+import {
+  buildMergedModelChoices,
+  byokKeysFromList,
+  catalogFromList,
+  fallbackNotice,
+  mergedChoiceKey,
+  OPENHUB_DEFAULT_MODEL,
+  pickerOptionLabel,
+  type MergedPickerChoice,
+} from "../lib/openhubPicker.js";
 
 export interface OpenHubModelPickerProps {
-  /** Workspace whose assistant config read gates the lane. */
+  /** Workspace scoping the selection read the picker refreshes. */
   workspaceSlug: string;
-  /** The host's config read; absent disables the picker. */
-  config: LlmConfig | undefined;
+  /** The surface this composer writes; defaults to the build's surface. */
+  surface?: AssistantSurface | undefined;
   className?: string;
 }
 
 export function OpenHubModelPicker({
   workspaceSlug,
-  config,
+  surface: surfaceProp,
   className,
 }: OpenHubModelPickerProps): React.ReactElement | null {
-  const queryClient = useQueryClient();
+  const surface = surfaceProp ?? composerSurface();
   const connections = useCloudConnections();
   const quota = useCloudQuota();
-  const actions = useCloudAssistantActions();
+  const selection = useModelSelection(workspaceSlug);
+  const actions = useModelSelectionActions();
   const [busy, setBusy] = React.useState(false);
 
-  const row = selectedOpenHubConnection(config, connections.data);
-  if (row === null || connections.data === undefined) return null;
+  const list = connections.data;
+  const state = selection.data?.[surface] ?? null;
+  if (list === undefined || state === null) return null;
 
-  const flags = connectionModelFlags(connections.data, quota.data ?? null);
-  const choices = annotateChoices(
-    modelChoices(flags.openhubModels, {}, OPENHUB_MODEL_DESCRIPTIONS, row.model_name),
-    flags
+  const flags = connectionModelFlags(list, quota.data ?? null);
+  const merged = buildMergedModelChoices(catalogFromList(list), byokKeysFromList(list));
+  if (merged.length === 0 || state.effective === null) return null;
+
+  // The free-plan credit badges stamp the catalog half only; BYOK models
+  // draw on the user's own key, so they stay selectable with no badge.
+  // The stamp keeps the merged choice (annotateChoices returns the base
+  // shape) and only carries the credit fields across.
+  const annotated = new Map(
+    annotateChoices(
+      merged.filter((choice) => choice.origin === "catalog"),
+      flags
+    ).map((choice) => [choice.value, choice] as const)
   );
-  if (choices.length === 0) return null;
+  const choices: MergedPickerChoice[] = merged.map((choice) => {
+    if (choice.origin !== "catalog") return choice;
+    const stamped = annotated.get(choice.value);
+    if (stamped === undefined) return choice;
+    return { ...choice, credit: stamped.credit, badge: stamped.badge, selectable: stamped.selectable };
+  });
+  const effective =
+    choices.find(
+      (choice) =>
+        choice.value === state.effective?.model &&
+        (choice.connectionId ?? null) === (state.effective?.connection_id ?? null)
+    ) ?? null;
+  if (effective === null) return null;
+  const effectiveKey = mergedChoiceKey(effective);
 
-  const commit = async (model: string): Promise<void> => {
-    if (model === row.model_name) return;
-    if (isBlockedCommit(model, flags)) {
+  const notice =
+    state.saved !== null && state.fallback_reason ? fallbackNotice(state.saved.model, effective.label) : null;
+
+  const commit = async (key: string): Promise<void> => {
+    const choice = choices.find((row) => mergedChoiceKey(row) === key);
+    if (choice === undefined || key === effectiveKey) return;
+    if (choice.origin === "catalog" && isBlockedCommit(choice.value, flags)) {
       notifyError(MODEL_PICKER_BLOCKED_TITLE, MODEL_PICKER_BLOCKED_BODY);
       return;
     }
     setBusy(true);
     try {
-      await actions.setModel(row.id, model);
-      // actions.invalidate clears the connections list and the cloud
-      // config read; the composer's own config read is cleared here so
-      // Settings and the composer agree on the new value.
-      await Promise.all([
-        actions.invalidate(),
-        queryClient.invalidateQueries({ queryKey: assistantKeys.config(workspaceSlug) }),
-      ]);
+      await actions.save(surface, { model: choice.value, connectionId: choice.connectionId ?? null });
+      // The selection read is the picker's value and notice; refresh it
+      // and the composer's config read so Settings agrees, too.
+      await actions.invalidate(workspaceSlug);
     } catch (error) {
-      // A slug the server rejects (removed since the list loaded) refetches
-      // the list and keeps the old selection: the controlled value stays
-      // row.model_name until the refetch answers.
-      await actions.invalidate();
-      notifyError(MODEL_PICKER_FAILED_TITLE, actionFailureDetail(error, MODEL_PICKER_FAILED_FALLBACK));
+      // A slug the server rejects (removed since the list loaded)
+      // refetches the selection and keeps the old value: the controlled
+      // value stays effectiveKey until the refetch answers.
+      await actions.invalidate(workspaceSlug);
+      notifyError(MODEL_PICKER_FAILED_TITLE, selectionFailureDetail(error));
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <select
-      data-testid="assistant-model-picker"
-      aria-label={ASSISTANT_MODEL_PICKER_LABEL}
-      value={row.model_name}
-      disabled={busy}
-      onChange={(event) => void commit(event.target.value)}
-      className={cn(
-        "text-body max-w-56 truncate rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-2) py-(--space-1) text-(--text)",
-        className
+    <div className="flex min-w-0 flex-col gap-(--space-1)">
+      <select
+        data-testid="assistant-model-picker"
+        aria-label={ASSISTANT_MODEL_PICKER_LABEL}
+        value={effectiveKey}
+        disabled={busy}
+        onChange={(event) => void commit(event.target.value)}
+        className={cn(
+          "text-body max-w-56 truncate rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-2) py-(--space-1) text-(--text)",
+          className
+        )}
+      >
+        {choices.map((choice) => (
+          <option key={mergedChoiceKey(choice)} value={mergedChoiceKey(choice)} disabled={!choice.selectable}>
+            {pickerOptionLabel(choice, choice.value === OPENHUB_DEFAULT_MODEL)}
+          </option>
+        ))}
+      </select>
+      {notice === null ? null : (
+        <p data-testid="assistant-model-fallback" className="text-meta text-(--text-muted)">
+          {notice}
+        </p>
       )}
-    >
-      {choices.map((choice) => (
-        <option key={choice.value} value={choice.value} disabled={!choice.selectable}>
-          {pickerOptionLabel(choice, choice.value === OPENHUB_DEFAULT_MODEL)}
-        </option>
-      ))}
-    </select>
+    </div>
   );
 }

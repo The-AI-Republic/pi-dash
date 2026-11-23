@@ -13,7 +13,7 @@
 // delivered here, then the state is cleared so a refresh never resends it.
 
 import { Spinner } from "@pidash/kit";
-import type { AssistantMessage, LlmConfig } from "@pidash/api-client";
+import type { AssistantMessage } from "@pidash/api-client";
 import { useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
@@ -38,8 +38,6 @@ export interface ThreadViewProps {
   state: unknown;
   /** False only when no provider key is stored; then the setup card fills the thread. */
   configured: boolean;
-  /** The gate's config read, handed to the composer model picker gate. */
-  config: LlmConfig | undefined;
 }
 
 /**
@@ -49,13 +47,7 @@ export interface ThreadViewProps {
  */
 const ERROR_TEXT_CLASS = "text-(--danger)";
 
-export function ThreadView({
-  workspaceSlug,
-  threadId,
-  state,
-  configured,
-  config,
-}: ThreadViewProps): React.ReactElement {
+export function ThreadView({ workspaceSlug, threadId, state, configured }: ThreadViewProps): React.ReactElement {
   const chat = useAssistantChat(workspaceSlug, threadId);
   const navigate = useNavigate();
   const [draft, setDraft] = React.useState("");
@@ -161,7 +153,7 @@ export function ThreadView({
           onStop={chat.stop}
           configured={configured}
           dictation={DICTATION_UI_ENABLED ? dictation : undefined}
-          modelPicker={<OpenHubModelPicker workspaceSlug={workspaceSlug} config={config} />}
+          modelPicker={<OpenHubModelPicker workspaceSlug={workspaceSlug} />}
           // The composer is its own bordered box; a divider above it would double the line.
           bordered={false}
         />

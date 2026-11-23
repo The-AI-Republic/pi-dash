@@ -166,7 +166,7 @@ export function HomeAssistantCard({ workspaceSlug }: HomeAssistantCardProps): Re
             className="min-h-12 px-(--space-2)"
           />
           <div className="flex items-center justify-between gap-(--space-2)">
-            <OpenHubModelPicker workspaceSlug={workspaceSlug} config={config.data} />
+            <OpenHubModelPicker workspaceSlug={workspaceSlug} />
             <Button
               variant="primary"
               onClick={ask}

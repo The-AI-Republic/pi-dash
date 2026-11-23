@@ -43,13 +43,16 @@ export const ModelSelectionSurfaceState = z.object({
 });
 export type ModelSelectionSurfaceState = z.infer<typeof ModelSelectionSurfaceState>;
 
-/** The whole selection answer: one state per surface. */
+/**
+ * The whole selection answer: one state per surface, at the top level.
+ * NEWPIDASH-392 implements GET without the `surfaces` wrapper design
+ * section 6.1 drew (its `get_selection` answers the three surfaces
+ * directly); the client follows the published server code.
+ */
 export const ModelSelection = z.object({
-  surfaces: z.object({
-    web_assistant: ModelSelectionSurfaceState,
-    desktop_assistant: ModelSelectionSurfaceState,
-    agent: ModelSelectionSurfaceState,
-  }),
+  web_assistant: ModelSelectionSurfaceState,
+  desktop_assistant: ModelSelectionSurfaceState,
+  agent: ModelSelectionSurfaceState,
 });
 export type ModelSelection = z.infer<typeof ModelSelection>;
 

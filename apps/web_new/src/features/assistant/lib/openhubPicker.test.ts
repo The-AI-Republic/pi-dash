@@ -1,37 +1,39 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// OpenHub composer picker state (NEWPIDASH-303): the visibility gate
-// (OpenHub lane with access and a selected OpenHub row only) and the
-// option labels (credit badge plus the default mark that points a
-// credit-blocked turn back at the free model). Plus the merged picker
-// list (NEWPIDASH-394): catalog models first, then BYOK models grouped
-// by key, with the shared fallback notice.
+// OpenHub composer picker state (NEWPIDASH-303, rewritten NEWPIDASH-394):
+// the option labels (credit badge plus the default mark that points a
+// credit-blocked turn back at the free model), the merged picker list
+// (catalog models first, then BYOK models grouped by key, with the
+// shared fallback notice), and the list-derived builder inputs.
 import { describe, expect, it } from "vitest";
 
-import type { AssistantConnectionList, LlmConfig } from "@pidash/api-client";
+import type { AssistantConnectionList } from "@pidash/api-client";
 
-import type { ModelChoice } from "../../cloud-assistant/index.js";
+import { OPENHUB_MODEL_DESCRIPTIONS, type ModelChoice } from "../../cloud-assistant/index.js";
 import {
   buildMergedModelChoices,
   byokChoiceLabel,
+  byokKeysFromList,
+  catalogFromList,
   fallbackNotice,
+  mergedChoiceKey,
   OPENHUB_DEFAULT_MODEL,
   OPENHUB_DEFAULT_SUFFIX,
   pickerOptionLabel,
-  selectedOpenHubConnection,
-  shouldShowOpenHubPicker,
   type MergedPickerCatalog,
 } from "./openhubPicker.js";
 
-const ROW = {
+const BYOK_ROW = {
   id: "123e4567-e89b-12d3-a456-426614174001",
-  kind: "openhub" as const,
-  provider_kind: "openhub",
-  base_url: "",
-  model_name: "moonshotai/kimi-k3",
+  kind: "byok" as const,
+  provider_kind: "openai_compatible",
+  base_url: "https://llm.example.com/v1",
+  model_name: "gpt-6",
+  models: ["gpt-6", "gpt-6.2"],
+  model_verified_at: {},
   has_api_key: true,
-  is_selected: true,
+  is_selected: false,
   last_verified_at: null,
   created_at: null,
   connected: true,
@@ -39,58 +41,63 @@ const ROW = {
 };
 
 const LIST: AssistantConnectionList = {
-  connections: [ROW],
+  connections: [BYOK_ROW],
   codex_model_options: [],
   has_codex_credential: false,
   openai_login_available: false,
   openhub_model_options: ["moonshotai/kimi-k3", "openhub_free_llm"],
+  openhub_model_labels: { "moonshotai/kimi-k3": "Kimi K3" },
   openhub_wallet_url: "",
 };
 
-const OPENHUB: LlmConfig = {
-  provider_kind: "openhub",
-  base_url: "",
-  model_name: "moonshotai/kimi-k3",
-  has_api_key: true,
-  last_verified_at: null,
-  credential_mode: "openhub",
-  has_openhub_access: true,
-};
-
-describe("selectedOpenHubConnection", () => {
-  it("returns the selected OpenHub row for an OpenHub lane with access", () => {
-    expect(selectedOpenHubConnection(OPENHUB, LIST)).toEqual(ROW);
+describe("catalogFromList", () => {
+  it("reads god-mode order with the server labels when present", () => {
+    expect(catalogFromList(LIST)).toEqual({
+      models: ["moonshotai/kimi-k3", "openhub_free_llm"],
+      labels: { "moonshotai/kimi-k3": "Kimi K3" },
+      descriptions: OPENHUB_MODEL_DESCRIPTIONS,
+    });
   });
 
-  it("hides the picker for a self-supplied lane", () => {
-    expect(selectedOpenHubConnection({ ...OPENHUB, credential_mode: "byok", has_byok_api_key: true }, LIST)).toBeNull();
-  });
-
-  it("hides the picker for a Codex lane", () => {
-    expect(selectedOpenHubConnection({ ...OPENHUB, credential_mode: "codex", has_codex_token: true }, LIST)).toBeNull();
-  });
-
-  it("hides the picker without OpenHub access", () => {
-    expect(selectedOpenHubConnection({ ...OPENHUB, has_openhub_access: false }, LIST)).toBeNull();
-    expect(selectedOpenHubConnection({ ...OPENHUB, has_openhub_access: undefined }, LIST)).toBeNull();
-  });
-
-  it("hides the picker when no OpenHub row is selected", () => {
-    const unselected = { ...LIST, connections: [{ ...ROW, is_selected: false }] };
-    expect(selectedOpenHubConnection(OPENHUB, unselected)).toBeNull();
-  });
-
-  it("hides the picker while the config or the list is unloaded", () => {
-    expect(selectedOpenHubConnection(undefined, LIST)).toBeNull();
-    expect(selectedOpenHubConnection(null, LIST)).toBeNull();
-    expect(selectedOpenHubConnection(OPENHUB, undefined)).toBeNull();
+  it("defaults a missing labels map to empty", () => {
+    const { openhub_model_labels: _dropped, ...rest } = LIST;
+    expect(catalogFromList(rest).labels).toEqual({});
   });
 });
 
-describe("shouldShowOpenHubPicker", () => {
-  it("mirrors the gate", () => {
-    expect(shouldShowOpenHubPicker(OPENHUB, LIST)).toBe(true);
-    expect(shouldShowOpenHubPicker({ ...OPENHUB, credential_mode: "byok" }, LIST)).toBe(false);
+describe("byokKeysFromList", () => {
+  it("contributes every BYOK key in list order and skips other lanes", () => {
+    expect(byokKeysFromList(LIST)).toEqual([
+      {
+        connectionId: "123e4567-e89b-12d3-a456-426614174001",
+        models: ["gpt-6", "gpt-6.2"],
+        baseUrl: "https://llm.example.com/v1",
+        providerKind: "openai_compatible",
+      },
+    ]);
+  });
+
+  it("falls back to the legacy single model without a stored list", () => {
+    const { models: _dropped, ...legacy } = BYOK_ROW;
+    expect(byokKeysFromList({ ...LIST, connections: [{ ...legacy, models: undefined }] })[0]?.models).toEqual([
+      "gpt-6",
+    ]);
+  });
+
+  it("contributes no IDs for a blank legacy model", () => {
+    const { models: _dropped, ...legacy } = BYOK_ROW;
+    expect(
+      byokKeysFromList({ ...LIST, connections: [{ ...legacy, models: undefined, model_name: "" }] })[0]?.models
+    ).toEqual([]);
+  });
+});
+
+describe("mergedChoiceKey", () => {
+  it("namespaces catalog and BYOK choices apart", () => {
+    expect(mergedChoiceKey({ value: "gpt-6", connectionId: undefined })).toBe("catalog:gpt-6");
+    expect(mergedChoiceKey({ value: "gpt-6", connectionId: "123e4567-e89b-12d3-a456-426614174001" })).toBe(
+      "byok:123e4567-e89b-12d3-a456-426614174001:gpt-6"
+    );
   });
 });
 
