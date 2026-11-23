@@ -767,6 +767,7 @@ pub mod assistant {
     pub use pidash_types::assistant::serializers;
     pub use pidash_types::assistant::serializers::PROVIDER_ANTHROPIC;
     pub use pidash_types::assistant::serializers::PROVIDER_OPENAI_COMPATIBLE;
+    pub use pidash_types::assistant::surface::Surface;
 }
 
 /// Cloud agent: the chat engine (model loop, provider streaming,

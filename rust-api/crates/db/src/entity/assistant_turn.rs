@@ -21,6 +21,10 @@ pub struct Model {
     pub completed_at: Option<DateTimeWithTimeZone>,
     pub thread_id: Uuid,
     pub user_message_id: Option<Uuid>,
+    /// Where the turn ran (NEWPIDASH-392): the server stamps
+    /// `web_assistant` or `desktop_assistant` at insert; the client never
+    /// sends it.
+    pub surface: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -140,6 +140,7 @@ surface_snapshot! {
     assistant::SeamError,
     assistant::SkippedServer,
     assistant::StreamItem,
+    assistant::Surface,
     assistant::SystemResolver,
     assistant::TABLE_EVENT,
     assistant::TABLE_MESSAGE,

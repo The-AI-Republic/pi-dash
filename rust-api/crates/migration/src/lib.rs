@@ -56,9 +56,13 @@ pub const FORWARDS: &[(&str, &str)] = &[];
 
 /// Native-only migrations: no Django `(app, name)` history entry is stamped.
 /// Ordered after the forward ports. The `ensure_schema` upgrade (boot-time
-/// DDL moved into the migration set) is first; runner/0044 follows once
-/// NEWPIDASH-372 merges.
-pub const NATIVE: &[(&str, &str)] = &[("rust", "0002_ensure_schema_tables")];
+/// DDL moved into the migration set) is first; runner/0044 follows as a
+/// forward port once NEWPIDASH-372 merges; the assistant surface +
+/// multi-model BYOK columns (NEWPIDASH-392) are the second native entry.
+pub const NATIVE: &[(&str, &str)] = &[
+    ("rust", "0002_ensure_schema_tables"),
+    ("rust", "0003_assistant_surface_models"),
+];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Status {
@@ -433,6 +437,12 @@ impl MigrationTrait for PortNative {
                     .map_err(|source| DbErr::Custom(format!("rust-owned tables: {source}")))?;
                 Ok(())
             }
+            1 => {
+                crate::ensure::ensure_assistant_surface_columns(manager.get_connection())
+                    .await
+                    .map_err(|source| DbErr::Custom(format!("assistant columns: {source}")))?;
+                Ok(())
+            }
             _ => Err(DbErr::Custom("No native migrations registered yet".into())),
         }
     }
@@ -710,10 +720,23 @@ mod tests {
             .iter()
             .map(|m| m.name().to_string())
             .collect::<Vec<_>>();
-        assert_eq!(names, [BASELINE_VERSION.to_string(), native_version(0)]);
+        assert_eq!(
+            names,
+            [
+                BASELINE_VERSION.to_string(),
+                native_version(0),
+                native_version(1)
+            ]
+        );
         // Forwards land next: runner/0044 once NEWPIDASH-372 merges.
         assert!(FORWARDS.is_empty());
-        assert_eq!(NATIVE, &[("rust", "0002_ensure_schema_tables")]);
+        assert_eq!(
+            NATIVE,
+            &[
+                ("rust", "0002_ensure_schema_tables"),
+                ("rust", "0003_assistant_surface_models"),
+            ]
+        );
     }
 
     #[test]

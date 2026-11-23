@@ -60,6 +60,7 @@ use pidash_services::assistant::llm::{self as llm_service, KeyCache};
 use pidash_services::assistant::mcp as mcp_service;
 use pidash_services::assistant::ssrf;
 use pidash_services::assistant::tools_results::wrap_untrusted;
+use pidash_types::assistant::surface::Surface;
 use sea_orm::sea_query::Expr;
 use sea_orm::{
     ColumnTrait, DbErr, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder,
@@ -109,6 +110,7 @@ struct LoadContextRow {
     id: Uuid,
     user_message_id: Option<Uuid>,
     status: String,
+    surface: String,
     thread_id: Uuid,
     thread_workspace_id: Uuid,
     thread_user_id: Uuid,
@@ -1201,6 +1203,7 @@ impl TurnSeam for LiveTurnSeam {
                 assistant_turn::Column::Id,
                 assistant_turn::Column::UserMessageId,
                 assistant_turn::Column::Status,
+                assistant_turn::Column::Surface,
             ])
             .column_as(assistant_thread::Column::Id, "thread_id")
             .column_as(assistant_thread::Column::WorkspaceId, "thread_workspace_id")
@@ -1289,6 +1292,7 @@ impl TurnSeam for LiveTurnSeam {
         Ok(Some(TurnContext {
             turn_id,
             turn_status: status,
+            surface: Surface::parse(&row.surface).unwrap_or(Surface::WebAssistant),
             thread_id,
             thread_kind,
             workspace_id,
@@ -2944,6 +2948,7 @@ mod tests {
         let ctx = TurnContext {
             turn_id,
             turn_status: "running".to_owned(),
+            surface: Surface::WebAssistant,
             thread_id: Uuid::new_v4(),
             thread_kind: "chat".to_owned(),
             workspace_id: Uuid::new_v4(),
@@ -3005,7 +3010,7 @@ mod tests {
     const LIVE_WORKSPACES_DDL: &str = "CREATE TEMPORARY TABLE workspaces (id UUID PRIMARY KEY, name VARCHAR(80) NOT NULL, slug VARCHAR(48) NOT NULL)";
     const LIVE_MEMBERS_DDL: &str = "CREATE TEMPORARY TABLE workspace_members (id UUID PRIMARY KEY, workspace_id UUID NOT NULL, member_id UUID NOT NULL, role SMALLINT NOT NULL, is_active BOOLEAN NOT NULL, deleted_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL)";
     const LIVE_THREAD_DDL: &str = "CREATE TEMPORARY TABLE assistant_thread (id UUID PRIMARY KEY, workspace_id UUID NOT NULL, user_id UUID NOT NULL, title VARCHAR(255) NOT NULL, kind VARCHAR(16) NOT NULL, is_archived BOOLEAN NOT NULL, active_turn_id UUID, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)";
-    const LIVE_TURN_DDL: &str = "CREATE TEMPORARY TABLE assistant_turn (id UUID PRIMARY KEY, thread_id UUID NOT NULL, user_message_id UUID, status VARCHAR(16) NOT NULL, model_messages JSONB, usage JSONB, model_used VARCHAR(255) NOT NULL, error_code VARCHAR(64) NOT NULL, error_detail TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, started_at TIMESTAMPTZ, completed_at TIMESTAMPTZ)";
+    const LIVE_TURN_DDL: &str = "CREATE TEMPORARY TABLE assistant_turn (id UUID PRIMARY KEY, thread_id UUID NOT NULL, user_message_id UUID, status VARCHAR(16) NOT NULL, surface VARCHAR(32) NOT NULL DEFAULT 'web_assistant', model_messages JSONB, usage JSONB, model_used VARCHAR(255) NOT NULL, error_code VARCHAR(64) NOT NULL, error_detail TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, started_at TIMESTAMPTZ, completed_at TIMESTAMPTZ)";
     const LIVE_MESSAGE_DDL: &str = "CREATE TEMPORARY TABLE assistant_message (id UUID PRIMARY KEY, thread_id UUID NOT NULL, turn_id UUID, seq BIGINT NOT NULL, kind VARCHAR(16) NOT NULL, display_content TEXT NOT NULL, payload JSONB NOT NULL, status VARCHAR(16) NOT NULL, created_at TIMESTAMPTZ NOT NULL, completed_at TIMESTAMPTZ)";
     const LIVE_EVENT_DDL: &str = "CREATE TEMPORARY TABLE assistant_event (id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, thread_id UUID NOT NULL, turn_id UUID, seq BIGINT NOT NULL, kind VARCHAR(64) NOT NULL, message_id UUID, payload JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL)";
 
@@ -3123,6 +3128,7 @@ mod tests {
         TurnContext {
             turn_id,
             turn_status: "running".to_owned(),
+            surface: Surface::WebAssistant,
             thread_id,
             thread_kind: "chat".to_owned(),
             workspace_id,

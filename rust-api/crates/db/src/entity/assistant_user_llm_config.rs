@@ -13,6 +13,14 @@ pub struct Model {
     #[sea_orm(column_type = "VarBinary(StringLen::None)", nullable)]
     pub api_key_encrypted: Option<Vec<u8>>,
     pub last_verified_at: Option<DateTimeWithTimeZone>,
+    /// All model IDs held under this key (NEWPIDASH-392); writers keep
+    /// `model_name = models[0]` so older readers keep working.
+    #[sea_orm(column_type = "Array(ColumnType::Text.into())")]
+    pub models: Vec<String>,
+    /// Model ID → ISO timestamp of the last passing test (NEWPIDASH-392);
+    /// no entry means "not verified".
+    #[sea_orm(column_type = "JsonBinary")]
+    pub model_verified_at: Json,
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,
     #[sea_orm(unique)]

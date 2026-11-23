@@ -25,9 +25,10 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use pidash_db::entity::{
-    assistant_event, assistant_message, assistant_turn, assistant_user_llm_config,
+    assistant_event, assistant_message, assistant_turn, assistant_user_llm_config, profiles,
 };
 use pidash_db::orm_tx::into_sqlx;
+use pidash_types::assistant::surface::Surface;
 
 /// Run one bare-column `UPDATE`/`DELETE`-shaped statement for its row
 /// count.
@@ -181,6 +182,85 @@ pub async fn stamp_llm_config_verified(
         .filter(assistant_user_llm_config::Column::UserId.eq(user_id));
     exec_update(db, update).await?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// profiles.settings assistant_models (NEWPIDASH-392)
+// ---------------------------------------------------------------------------
+
+/// The atomic single-surface write for
+/// [`save_assistant_model_entry`]: `UPDATE "profiles" SET "settings" =
+/// jsonb_set(COALESCE("settings", '{}'), '{assistant_models,<surface>}',
+/// $1::jsonb, true), "updated_at" = $2 WHERE "user_id" = $3`. One
+/// surface only — a concurrent profile PATCH of another namespace, or a
+/// concurrent write of another surface, never drops this entry (the
+/// read-modify-write race the design accepts is limited to the generic
+/// PATCH path, section 4.1).
+pub(crate) fn assistant_model_entry_stmt(
+    surface: Surface,
+    entry: &Value,
+    now: DateTime<Utc>,
+    user_id: Uuid,
+) -> UpdateMany<profiles::Entity> {
+    // SeaORM cannot express the jsonb_set path write itself, so
+    // `cust_with_values` binds the validated entry as one `$N` (the path
+    // embeds only the fixed enum spelling, never caller input).
+    let path = format!("{{assistant_models,{}}}", surface.as_str());
+    // raw-sql: no SeaORM jsonb_set path-write builder.
+    let settings = Expr::cust_with_values(
+        format!("jsonb_set(COALESCE(\"settings\", '{{}}'), '{path}', $1::jsonb, true)"),
+        [entry.clone()],
+    );
+    profiles::Entity::update_many()
+        .col_expr(profiles::Column::Settings, settings)
+        .col_expr(profiles::Column::UpdatedAt, Expr::value(now))
+        .filter(profiles::Column::UserId.eq(user_id))
+}
+
+/// Save one surface's model choice (`entry` is the validated
+/// `{model, connection_id?}` object) without touching other surfaces or
+/// namespaces. Returns the rows matched (profiles are created at
+/// signup, so a miss is corruption the endpoint reports).
+pub async fn save_assistant_model_entry(
+    db: &impl ConnectionTrait,
+    user_id: Uuid,
+    surface: Surface,
+    entry: &Value,
+    now: DateTime<Utc>,
+) -> Result<u64, sqlx::Error> {
+    exec_update(db, assistant_model_entry_stmt(surface, entry, now, user_id)).await
+}
+
+/// The atomic single-surface clear for [`clear_assistant_model_entry`]:
+/// `UPDATE "profiles" SET "settings" = "settings" #-
+/// '{assistant_models,<surface>}', "updated_at" = $1 WHERE "user_id" =
+/// $2` (clearing the entry restores the default; the saved row is kept
+/// nowhere else).
+pub(crate) fn assistant_model_clear_stmt(
+    surface: Surface,
+    now: DateTime<Utc>,
+    user_id: Uuid,
+) -> UpdateMany<profiles::Entity> {
+    // SeaORM cannot express the jsonb `#-` delete itself (the path embeds
+    // only the fixed enum spelling, never caller input).
+    let path = format!("{{assistant_models,{}}}", surface.as_str());
+    // raw-sql: no SeaORM jsonb delete-path builder.
+    let settings = Expr::cust(format!("\"settings\" #- '{path}'"));
+    profiles::Entity::update_many()
+        .col_expr(profiles::Column::Settings, settings)
+        .col_expr(profiles::Column::UpdatedAt, Expr::value(now))
+        .filter(profiles::Column::UserId.eq(user_id))
+}
+
+/// Clear one surface's model choice without touching other surfaces or
+/// namespaces. Returns the rows matched.
+pub async fn clear_assistant_model_entry(
+    db: &impl ConnectionTrait,
+    user_id: Uuid,
+    surface: Surface,
+    now: DateTime<Utc>,
+) -> Result<u64, sqlx::Error> {
+    exec_update(db, assistant_model_clear_stmt(surface, now, user_id)).await
 }
 
 /// Resolved inputs for [`insert_llm_config`]: the full non-pk row.
@@ -917,6 +997,74 @@ mod tests {
         for (got, want) in got.iter().zip(want) {
             assert_eq!(got, want);
         }
+    }
+
+    /// Statement-shape pins for the per-surface model-choice writes: one
+    /// surface in, the rest of the bag untouched (the atomicity the
+    /// model-selection endpoint depends on).
+    #[test]
+    fn assistant_model_choice_statement_shapes() {
+        let entry = serde_json::json!({"model": "gpt-6"});
+        let save = render_update(assistant_model_entry_stmt(
+            Surface::WebAssistant,
+            &entry,
+            pin_time(),
+            uid(1),
+        ));
+        assert_eq!(
+            save,
+            r#"UPDATE "profiles" SET "settings" = jsonb_set(COALESCE("settings", '{}'), '{assistant_models,web_assistant}', E'{\"model\":\"gpt-6\"}'::jsonb, true), "updated_at" = '2026-11-05 10:00:00.000000 +00:00' WHERE "profiles"."user_id" = '00000000-0000-0000-0000-000000000001'"#
+        );
+        let clear = render_update(assistant_model_clear_stmt(
+            Surface::Agent,
+            pin_time(),
+            uid(1),
+        ));
+        assert_eq!(
+            clear,
+            r#"UPDATE "profiles" SET "settings" = "settings" #- '{assistant_models,agent}', "updated_at" = '2026-11-05 10:00:00.000000 +00:00' WHERE "profiles"."user_id" = '00000000-0000-0000-0000-000000000001'"#
+        );
+    }
+
+    /// Live-db half for the per-surface model-choice writes: save + clear
+    /// against a random user (no profiles row, so 0 rows — the point is
+    /// the statements parse, plan and execute, catching wrong arity or
+    /// bad path syntax the shape pins cannot see). A full roundtrip runs
+    /// in the model-selection endpoint tests, where the harness seeds
+    /// users with profiles.
+    #[tokio::test]
+    async fn assistant_model_choice_writes_parse_live() {
+        let url = match std::env::var("DATABASE_URL") {
+            Ok(url) => url,
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                return;
+            }
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        let mut tx = pool.begin().await.expect("begin");
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        let user_id = Uuid::new_v4();
+        let entry = serde_json::json!({"model": "gpt-6"});
+        for surface in [
+            Surface::WebAssistant,
+            Surface::DesktopAssistant,
+            Surface::Agent,
+        ] {
+            let saved = save_assistant_model_entry(&conn, user_id, surface, &entry, pin_time())
+                .await
+                .expect("save parses");
+            assert_eq!(saved, 0, "no profiles row for a random user");
+            let cleared = clear_assistant_model_entry(&conn, user_id, surface, pin_time())
+                .await
+                .expect("clear parses");
+            assert_eq!(cleared, 0, "no profiles row for a random user");
+        }
+        tx.rollback().await.expect("rollback");
     }
 
     /// Live-db half: config save/delete/stamp plus message

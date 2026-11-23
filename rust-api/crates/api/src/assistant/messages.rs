@@ -33,6 +33,7 @@ use axum::Router;
 use chrono::{DateTime, Utc};
 use pidash_db::assistant::event_queries::{message_envelope_json, MessageParts};
 use pidash_db::config::AssistantSettings;
+use pidash_types::assistant::surface::Surface;
 use uuid::Uuid;
 
 use super::common::{
@@ -197,6 +198,13 @@ async fn post_message(
     body: Bytes,
 ) -> HandlerResult<Response> {
     let pool = pool_ref(&state)?;
+    // Borrow the desktop signal before `extension` moves into auth, and
+    // reuse it for the turn's surface stamp below (NEWPIDASH-392).
+    let surface = if super::agent_profile::is_desktop_from_extension(&extension, &headers, &state) {
+        Surface::DesktopAssistant
+    } else {
+        Surface::WebAssistant
+    };
     let Some(actor) = request_actor(&state, pool, extension).await? else {
         return Err(unauthenticated());
     };
@@ -293,6 +301,9 @@ async fn post_message(
     // model defaults (`model_used=""`, `error_code=""`, `error_detail=""`,
     // `models.py:88-94`) — the columns are `NOT NULL` with no database
     // default, so the insert must carry the defaults explicitly.
+    // `surface` has a database default, but the server stamps it from the
+    // request session (computed above) so the turn resolves its model on
+    // the surface it ran on. The client never sends it.
     let turn_row = {
         use sea_orm::{ActiveModelTrait, Set};
         let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
@@ -301,6 +312,7 @@ async fn post_message(
             id: Set(uuid::Uuid::new_v4()),
             thread_id: Set(thread_id),
             status: Set("queued".to_owned()),
+            surface: Set(surface.as_str().to_owned()),
             model_used: Set(String::new()),
             error_code: Set(String::new()),
             error_detail: Set(String::new()),

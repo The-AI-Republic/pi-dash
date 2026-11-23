@@ -82,6 +82,7 @@ pidash_sdk::assistant::SWEEP_TASK
 pidash_sdk::assistant::SeamError
 pidash_sdk::assistant::SkippedServer
 pidash_sdk::assistant::StreamItem
+pidash_sdk::assistant::Surface
 pidash_sdk::assistant::SystemResolver
 pidash_sdk::assistant::TABLE_EVENT
 pidash_sdk::assistant::TABLE_MESSAGE
