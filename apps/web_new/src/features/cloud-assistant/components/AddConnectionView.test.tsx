@@ -125,6 +125,7 @@ describe("AddConnectionView", () => {
       />
     );
     expect(screen.getByTestId("byok-model-detail")).toHaveTextContent("Timed out.");
+    expect(screen.getByTestId("byok-model-status")).toHaveTextContent("Not verified");
     await user.click(screen.getByRole("button", { name: "Save anyway" }));
     expect(onSave).toHaveBeenCalled();
     expect(onSave.mock.calls[0]?.[1]).toBe(true);

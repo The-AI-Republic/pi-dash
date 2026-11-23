@@ -13,7 +13,7 @@ import type { ModelTestResults } from "@pidash/api-client";
 import { Button, Input } from "@pidash/kit";
 import * as React from "react";
 
-import { ModelIdEditor, modelFailureDetails, saveAnywayModels } from "../../assistant/index.js";
+import { ModelIdEditor, modelFailedIds, modelFailureDetails, saveAnywayModels } from "../../assistant/index.js";
 import {
   ADD_ACTION,
   ADD_FAILED_FALLBACK,
@@ -49,6 +49,7 @@ export function AddConnectionView({ saving, error, results, onSave }: AddConnect
   const baseVisible = needsBaseUrl(draft.provider);
   const enabled = !saving && byokDraftValid(draft);
   const failures = React.useMemo(() => (results === null ? {} : modelFailureDetails(results)), [results]);
+  const failedIds = React.useMemo(() => (results === null ? [] : modelFailedIds(results)), [results]);
 
   const update = (patch: Partial<ByokDraft>): void => {
     setDraft((current) => ({ ...current, ...patch }));
@@ -94,6 +95,7 @@ export function AddConnectionView({ saving, error, results, onSave }: AddConnect
         ids={draft.models}
         verifiedAt={{}}
         failures={failures}
+        failedIds={failedIds}
         pendingIds={[]}
         disabled={saving}
         testable={false}

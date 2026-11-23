@@ -7,7 +7,13 @@ import { describe, expect, it } from "vitest";
 
 import type { ModelTestResults } from "@pidash/api-client";
 
-import { modelFailureDetails, modelIdStatus, normalizeModelIds, saveAnywayModels } from "./byokModels.js";
+import {
+  modelFailedIds,
+  modelFailureDetails,
+  modelIdStatus,
+  normalizeModelIds,
+  saveAnywayModels,
+} from "./byokModels.js";
 
 function results(models: ModelTestResults["models"]): ModelTestResults {
   return { models };
@@ -34,6 +40,36 @@ describe("modelIdStatus", () => {
 
   it("reads an untested ID as unverified", () => {
     expect(modelIdStatus("m", { other: "2026-11-23T00:00:00Z" }, {})).toBe("unverified");
+  });
+
+  it("reads a message-carrying ID outside the failed set as not verified", () => {
+    const failures = { flaky: "Timed out.", bad: "Model not accepted." };
+    expect(modelIdStatus("flaky", {}, failures, ["bad"])).toBe("unverified");
+    expect(modelIdStatus("bad", {}, failures, ["bad"])).toBe("failed");
+  });
+
+  it("keeps a passing stamp ahead of the failed set", () => {
+    expect(modelIdStatus("m", { m: "2026-11-23T00:00:00Z" }, { m: "gone" }, ["m"])).toBe("verified");
+  });
+});
+
+describe("modelFailedIds", () => {
+  it("keeps only the rejected entries, skipping unverified and verified ones", () => {
+    expect(
+      modelFailedIds(
+        results([
+          { model: "good", status: "verified" },
+          { model: "bad", status: "failed", code: "model_invalid" },
+          { model: "flaky", status: "unverified", code: "provider_unreachable" },
+        ])
+      )
+    ).toEqual(["bad"]);
+  });
+
+  it("reads an all-unverified refusal as no failed IDs", () => {
+    expect(modelFailedIds(results([{ model: "flaky", status: "unverified", code: "provider_unreachable" }]))).toEqual(
+      []
+    );
   });
 });
 

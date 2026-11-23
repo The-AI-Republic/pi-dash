@@ -28,17 +28,24 @@ export function normalizeModelIds(ids: readonly string[]): string[] {
 
 /**
  * One ID's display status: a passing stamp wins, then a message from the
- * last refused write or test, otherwise the ID is simply unverified.
+ * last refused write or test, otherwise the ID is simply unverified. A
+ * message alone does not mean failure — refused writes also carry
+ * unverified entries (design section 7.2, e.g. `provider_unreachable`) —
+ * so a message reads as "failed" only for an ID in `failedIds`. Callers
+ * that do not track the distinction omit it and keep the legacy
+ * message-means-failed reading.
  */
 export function modelIdStatus(
   model: string,
   verifiedAt: Readonly<Record<string, string | null | undefined>>,
-  failures: Readonly<Record<string, string>>
+  failures: Readonly<Record<string, string>>,
+  failedIds?: readonly string[] | undefined
 ): ModelIdStatus {
   const stamp = verifiedAt[model];
   if (stamp !== undefined && stamp !== null) return "verified";
-  if (failures[model] !== undefined) return "failed";
-  return "unverified";
+  if (failures[model] === undefined) return "unverified";
+  if (failedIds === undefined) return "failed";
+  return failedIds.includes(model) ? "failed" : "unverified";
 }
 
 /**
@@ -53,6 +60,17 @@ export function modelFailureDetails(results: ModelTestResults): Record<string, s
     out[entry.model] = entry.detail ?? entry.code ?? "";
   }
   return out;
+}
+
+/**
+ * The refused write's failed IDs: entries the provider rejected
+ * (`status: "failed"`), as opposed to entries it could not verify
+ * (`status: "unverified"`, e.g. `provider_unreachable`, design section
+ * 7.2). The editor marks only these "Failed"; message-carrying
+ * unverified IDs stay "Not verified".
+ */
+export function modelFailedIds(results: ModelTestResults): string[] {
+  return results.models.filter((entry) => entry.status === "failed").map((entry) => entry.model);
 }
 
 /**

@@ -174,6 +174,31 @@ describe("ConnectionsList", () => {
     expect(within(editorRow("meta-llama/llama-3.3-70b-instruct")).getByTestId("byok-model-detail")).toHaveTextContent(
       "Model not accepted by the provider."
     );
+    expect(within(editorRow("meta-llama/llama-3.3-70b-instruct")).getByTestId("byok-model-status")).toHaveTextContent(
+      "Failed"
+    );
+  });
+
+  it("marks a tested-but-unverified ID as not verified", async () => {
+    const user = userEvent.setup();
+    const props = setup([row()]);
+    vi.mocked(props.onTestModel).mockResolvedValueOnce({
+      model: "meta-llama/llama-3.3-70b-instruct",
+      status: "unverified",
+      code: "provider_unreachable",
+      detail: "Timed out.",
+    });
+    await user.click(
+      within(editorRow("meta-llama/llama-3.3-70b-instruct")).getByRole("button", {
+        name: "Test meta-llama/llama-3.3-70b-instruct",
+      })
+    );
+    expect(within(editorRow("meta-llama/llama-3.3-70b-instruct")).getByTestId("byok-model-detail")).toHaveTextContent(
+      "Timed out."
+    );
+    expect(within(editorRow("meta-llama/llama-3.3-70b-instruct")).getByTestId("byok-model-status")).toHaveTextContent(
+      "Not verified"
+    );
   });
 
   it("shows refused-write results per ID and retries with Save anyway for unverified-only refusals", async () => {
@@ -185,6 +210,7 @@ describe("ConnectionsList", () => {
     );
     await user.type(screen.getByLabelText("Add a model ID this key serves"), "fresh{Enter}");
     expect(within(editorRow("flaky")).getByTestId("byok-model-detail")).toHaveTextContent("Timed out.");
+    expect(within(editorRow("flaky")).getByTestId("byok-model-status")).toHaveTextContent("Not verified");
     onSaveModels.mockClear();
     await user.click(screen.getByRole("button", { name: "Save anyway" }));
     expect(onSaveModels).toHaveBeenCalledWith(
@@ -202,6 +228,7 @@ describe("ConnectionsList", () => {
     );
     await user.type(screen.getByLabelText("Add a model ID this key serves"), "fresh{Enter}");
     expect(within(editorRow("bad")).getByTestId("byok-model-detail")).toHaveTextContent("No such model.");
+    expect(within(editorRow("bad")).getByTestId("byok-model-status")).toHaveTextContent("Failed");
     expect(screen.queryByRole("button", { name: "Save anyway" })).toBeNull();
   });
 

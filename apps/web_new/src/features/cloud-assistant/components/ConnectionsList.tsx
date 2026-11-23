@@ -14,7 +14,7 @@ import { modelTestResultsFrom } from "@pidash/api-client";
 import { Button, Spinner } from "@pidash/kit";
 import * as React from "react";
 
-import { ModelIdEditor, modelFailureDetails, saveAnywayModels } from "../../assistant/index.js";
+import { ModelIdEditor, modelFailedIds, modelFailureDetails, saveAnywayModels } from "../../assistant/index.js";
 import { notifyError } from "../../../shared/shell/index.js";
 import { actionFailureDetail } from "../api/mutations.js";
 import {
@@ -89,6 +89,8 @@ function ConnectionCard(props: ConnectionsListProps & { row: ConnectionRow }): R
   // last list a write tried: a refused write saves nothing, so the
   // editor renders the attempted IDs too, giving each failure a row.
   const [failures, setFailures] = React.useState<Record<string, string>>({});
+  /** Refused/tested IDs the provider rejected (`status: "failed"`); the rest of `failures` is unverified. */
+  const [failedIds, setFailedIds] = React.useState<readonly string[]>([]);
   const [pendingIds, setPendingIds] = React.useState<readonly string[]>([]);
   const [saveAnyway, setSaveAnyway] = React.useState(false);
   const [attempted, setAttempted] = React.useState<readonly string[] | null>(null);
@@ -105,6 +107,7 @@ function ConnectionCard(props: ConnectionsListProps & { row: ConnectionRow }): R
       await props.onSaveModels(row, models, saveUnverified);
       setAttempted(null);
       setFailures({});
+      setFailedIds([]);
       setSaveAnyway(false);
     } catch (error) {
       const results = modelTestResultsFrom(error);
@@ -113,6 +116,7 @@ function ConnectionCard(props: ConnectionsListProps & { row: ConnectionRow }): R
         notifyError(MODEL_FAILED_TITLE, actionFailureDetail(error, MODEL_FAILED_TITLE));
       } else {
         setFailures(modelFailureDetails(results));
+        setFailedIds(modelFailedIds(results));
         setSaveAnyway(saveAnywayModels(results) !== null);
       }
     } finally {
@@ -139,8 +143,13 @@ function ConnectionCard(props: ConnectionsListProps & { row: ConnectionRow }): R
           delete next[model];
           return next;
         });
+        setFailedIds((current) => current.filter((kept) => kept !== model));
+      } else if (result.status === "failed") {
+        setFailures((current) => ({ ...current, [model]: result.detail ?? result.code ?? "" }));
+        setFailedIds((current) => (current.includes(model) ? current : [...current, model]));
       } else {
         setFailures((current) => ({ ...current, [model]: result.detail ?? result.code ?? "" }));
+        setFailedIds((current) => current.filter((kept) => kept !== model));
       }
     } catch (error) {
       notifyError(TEST_FAILED_TITLE, actionFailureDetail(error, TEST_FAILED_FALLBACK));
@@ -218,6 +227,7 @@ function ConnectionCard(props: ConnectionsListProps & { row: ConnectionRow }): R
             ids={displayed}
             verifiedAt={row.modelVerifiedAt}
             failures={failures}
+            failedIds={failedIds}
             pendingIds={pendingIds}
             disabled={busy}
             testable

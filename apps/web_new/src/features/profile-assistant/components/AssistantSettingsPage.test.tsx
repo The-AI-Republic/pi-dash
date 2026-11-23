@@ -330,6 +330,7 @@ describe("AssistantSettingsPage", () => {
       );
     });
     expect(screen.getByTestId("byok-model-detail")).toHaveTextContent("Timed out.");
+    expect(screen.getByTestId("byok-model-status")).toHaveTextContent("Not verified");
     await user.click(screen.getByRole("button", { name: "Save anyway" }));
     expect(harness.saveLlm.mutate.mock.calls[1]![0]).toEqual({
       provider_kind: "openai_compatible",

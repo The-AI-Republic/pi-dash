@@ -135,11 +135,26 @@ describe("ProviderForm", () => {
       { provider: "openai_compatible", baseUrl: "", models: ["model-a", "model-b"], key: "" },
       {
         failures: { "model-b": "Model not accepted by the provider." },
+        failedIds: ["model-b"],
         saveAnyway: true,
       }
     );
     expect(screen.getByTestId("byok-model-detail")).toHaveTextContent("Model not accepted by the provider.");
+    const rows = screen.getAllByTestId("byok-model-row");
+    expect(within(rows[1]!).getByTestId("byok-model-status")).toHaveTextContent("Failed");
     expect(screen.getByRole("button", { name: "Save anyway" })).toBeInTheDocument();
+  });
+
+  it("marks a refused-but-unverified ID as not verified", () => {
+    renderForm(
+      { provider: "openai_compatible", baseUrl: "", models: ["model-a"], key: "" },
+      {
+        failures: { "model-a": "Timed out." },
+        failedIds: [],
+        saveAnyway: true,
+      }
+    );
+    expect(screen.getByTestId("byok-model-status")).toHaveTextContent("Not verified");
   });
 
   it("keeps save live over a stored key and offers remove only for one", () => {

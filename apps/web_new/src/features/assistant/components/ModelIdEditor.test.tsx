@@ -55,6 +55,18 @@ describe("ModelIdEditor", () => {
     expect(within(row("fresh")).getByTestId("byok-model-status")).toHaveTextContent("Not verified");
   });
 
+  it("marks a message-carrying ID outside the failed set as not verified", () => {
+    setup({
+      ids: ["bad", "flaky"],
+      verifiedAt: {},
+      failures: { bad: "Model not accepted.", flaky: "Timed out." },
+      failedIds: ["bad"],
+    });
+    expect(within(row("bad")).getByTestId("byok-model-status")).toHaveTextContent("Failed");
+    expect(within(row("flaky")).getByTestId("byok-model-status")).toHaveTextContent("Not verified");
+    expect(within(row("flaky")).getByTestId("byok-model-detail")).toHaveTextContent("Timed out.");
+  });
+
   it("shows test progress on the probing row instead of its status", () => {
     setup({ pendingIds: ["gpt-6.2"] });
     expect(within(row("gpt-6.2")).queryByTestId("byok-model-status")).toBeNull();

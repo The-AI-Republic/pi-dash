@@ -13,7 +13,7 @@ import { modelTestResultsFrom } from "@pidash/api-client";
 import { useParams } from "@tanstack/react-router";
 import * as React from "react";
 
-import { modelFailureDetails, saveAnywayModels } from "../../assistant/index.js";
+import { modelFailedIds, modelFailureDetails, saveAnywayModels } from "../../assistant/index.js";
 import {
   useRemoveAssistantLlm,
   useRemoveAssistantVoice,
@@ -48,6 +48,8 @@ export function AssistantSettingsPage(): React.ReactElement {
   // last refused save or test, the IDs with a probe in flight, and
   // whether a "Save anyway" retry is on offer.
   const [llmFailures, setLlmFailures] = React.useState<Record<string, string>>({});
+  /** Refused/tested IDs the provider rejected (`status: "failed"`); the rest of `llmFailures` is unverified. */
+  const [llmFailedIds, setLlmFailedIds] = React.useState<readonly string[]>([]);
   const [llmPendingIds, setLlmPendingIds] = React.useState<readonly string[]>([]);
   const [llmSaveAnyway, setLlmSaveAnyway] = React.useState(false);
 
@@ -95,6 +97,7 @@ export function AssistantSettingsPage(): React.ReactElement {
         onSuccess: (config) => {
           setProviderForm((previous) => ({ ...previous, key: "", models: config.models ?? previous.models }));
           setLlmFailures({});
+          setLlmFailedIds([]);
           setLlmSaveAnyway(false);
         },
         onError: (error) => {
@@ -103,6 +106,7 @@ export function AssistantSettingsPage(): React.ReactElement {
           const results = modelTestResultsFrom(error);
           if (results === null) return;
           setLlmFailures(modelFailureDetails(results));
+          setLlmFailedIds(modelFailedIds(results));
           setLlmSaveAnyway(saveAnywayModels(results) !== null);
         },
       }
@@ -120,8 +124,13 @@ export function AssistantSettingsPage(): React.ReactElement {
             delete next[model];
             return next;
           });
+          setLlmFailedIds((current) => current.filter((kept) => kept !== model));
+        } else if (result.status === "failed") {
+          setLlmFailures((current) => ({ ...current, [model]: result.detail ?? result.code ?? "" }));
+          setLlmFailedIds((current) => (current.includes(model) ? current : [...current, model]));
         } else {
           setLlmFailures((current) => ({ ...current, [model]: result.detail ?? result.code ?? "" }));
+          setLlmFailedIds((current) => current.filter((kept) => kept !== model));
         }
       },
       onSettled: () => setLlmPendingIds([]),
@@ -141,6 +150,7 @@ export function AssistantSettingsPage(): React.ReactElement {
       delete next[model];
       return next;
     });
+    setLlmFailedIds((current) => current.filter((kept) => kept !== model));
   };
 
   const saveVoiceConfig = (): void => {
@@ -164,6 +174,7 @@ export function AssistantSettingsPage(): React.ReactElement {
         config={llm.data}
         values={providerForm}
         failures={llmFailures}
+        failedIds={llmFailedIds}
         pendingIds={llmPendingIds}
         saveAnyway={llmSaveAnyway}
         onChange={setProviderForm}

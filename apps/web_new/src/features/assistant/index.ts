@@ -76,7 +76,13 @@ export { SurfaceModelPickers, surfacePickerLabel } from "./components/SurfaceMod
 export type { SurfaceModelPickersProps, SurfacePickerSpec } from "./components/SurfaceModelPickers.js";
 export { ModelIdEditor } from "./components/ModelIdEditor.js";
 export type { ModelIdEditorProps } from "./components/ModelIdEditor.js";
-export { modelFailureDetails, modelIdStatus, normalizeModelIds, saveAnywayModels } from "./lib/byokModels.js";
+export {
+  modelFailedIds,
+  modelFailureDetails,
+  modelIdStatus,
+  normalizeModelIds,
+  saveAnywayModels,
+} from "./lib/byokModels.js";
 export type { ModelIdStatus } from "./lib/byokModels.js";
 export {
   SELECTION_FAILED_FALLBACK,

@@ -63,6 +63,8 @@ export interface ProviderFormProps {
   values: ProviderFormValues;
   /** The provider message by model ID from the last refused save or test. */
   failures: Record<string, string>;
+  /** Refused/tested IDs the provider rejected (`status: "failed"`); the rest of `failures` is unverified. */
+  failedIds?: readonly string[] | undefined;
   /** IDs with a probe in flight; their rows show progress. */
   pendingIds: readonly string[];
   /** Offered while the last refused save left only unverified IDs. */
@@ -80,6 +82,7 @@ export function ProviderForm({
   config,
   values,
   failures,
+  failedIds,
   pendingIds,
   saveAnyway,
   onChange,
@@ -133,6 +136,7 @@ export function ProviderForm({
           ids={values.models}
           verifiedAt={config?.model_verified_at ?? {}}
           failures={failures}
+          failedIds={failedIds}
           pendingIds={pendingIds}
           disabled={saving}
           testable={hasKey}

@@ -98,6 +98,24 @@ describe("byokKeysFromList", () => {
       byokKeysFromList({ ...LIST, connections: [{ ...legacy, models: undefined, model_name: "" }] })[0]?.models
     ).toEqual([]);
   });
+
+  it("leaves Codex connections out of the merged picker", () => {
+    const codex = {
+      ...BYOK_ROW,
+      id: "123e4567-e89b-12d3-a456-426614174000",
+      kind: "codex" as const,
+      provider_kind: "codex",
+      model_name: "gpt-5.6-sol",
+    };
+    expect(byokKeysFromList({ ...LIST, connections: [BYOK_ROW, codex] })).toEqual([
+      {
+        connectionId: "123e4567-e89b-12d3-a456-426614174001",
+        models: ["gpt-6", "gpt-6.2"],
+        baseUrl: "https://llm.example.com/v1",
+        providerKind: "openai_compatible",
+      },
+    ]);
+  });
 });
 
 describe("byokKeyFromConfig", () => {

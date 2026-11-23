@@ -38,6 +38,12 @@ export interface ModelIdEditorProps {
   verifiedAt: Readonly<Record<string, string | null | undefined>>;
   /** The provider message by model ID from the last refused write or test. */
   failures: Readonly<Record<string, string>>;
+  /**
+   * The refused/tested IDs the provider rejected (`status: "failed"`).
+   * Message-carrying IDs absent here render "Not verified" (design
+   * section 7.2). Omitted keeps the legacy message-means-failed reading.
+   */
+  failedIds?: readonly string[] | undefined;
   /** IDs with a probe or save in flight; their rows show progress. */
   pendingIds: readonly string[];
   /** Disables every control while a save runs. */
@@ -60,7 +66,7 @@ export interface ModelIdEditorProps {
 }
 
 export function ModelIdEditor(props: ModelIdEditorProps): React.ReactElement {
-  const { ids, verifiedAt, failures, pendingIds, disabled, testable, keyLabel } = props;
+  const { ids, verifiedAt, failures, failedIds, pendingIds, disabled, testable, keyLabel } = props;
   const [draft, setDraft] = React.useState("");
   const [confirming, setConfirming] = React.useState<string | null>(null);
   const pending = React.useMemo(() => new Set(pendingIds), [pendingIds]);
@@ -93,7 +99,7 @@ export function ModelIdEditor(props: ModelIdEditorProps): React.ReactElement {
       {ids.length === 0 ? null : (
         <ul className="flex flex-col gap-(--space-2)">
           {ids.map((model) => {
-            const status = modelIdStatus(model, verifiedAt, failures);
+            const status = modelIdStatus(model, verifiedAt, failures, failedIds);
             const detail = failures[model] ?? null;
             const testing = pending.has(model);
             const rowBusy = disabled || testing;
