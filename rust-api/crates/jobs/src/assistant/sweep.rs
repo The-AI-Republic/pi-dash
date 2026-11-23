@@ -31,6 +31,7 @@ use crate::queue::JobRow;
 use crate::worker::{HandlerError, Registry, Verdict};
 use pidash_db::assistant::event_queries::{publish_frame, serialize_event_json, EventParts};
 use pidash_services::runner_runs::chat::dumps_value;
+use pidash_types::assistant::surface::Surface;
 
 /// Celery task name (`tasks.py:511`, `@shared_task(name=...)`).
 pub const SWEEP_TASK: &str = "assistant.sweep_stale_turns";
@@ -93,6 +94,10 @@ pub fn sweep_context_select() -> String {
             pidash_db::entity::assistant_turn::Column::Status,
             "t_status",
         )
+        .column_as(
+            pidash_db::entity::assistant_turn::Column::Surface,
+            "t_surface",
+        )
         .column_as(pidash_db::entity::assistant_thread::Column::Id, "th_id")
         .column_as(pidash_db::entity::assistant_thread::Column::Kind, "th_kind")
         .column_as(
@@ -132,6 +137,7 @@ pub fn stale_turns_query(
 struct SweepContextRow {
     t_id: Uuid,
     t_status: String,
+    t_surface: String,
     th_id: Uuid,
     th_kind: String,
     th_workspace_id: Uuid,
@@ -361,6 +367,7 @@ impl SweepStore for LiveSweepStore {
             Some(TurnContext {
                 turn_id: row.t_id,
                 turn_status: row.t_status,
+                surface: Surface::parse(&row.t_surface).unwrap_or(Surface::WebAssistant),
                 thread_id: row.th_id,
                 thread_kind: row.th_kind,
                 workspace_id: row.th_workspace_id,
@@ -547,6 +554,7 @@ mod tests {
         TurnContext {
             turn_id: id,
             turn_status: super::super::run_turn::TURN_RUNNING.to_owned(),
+            surface: Surface::WebAssistant,
             thread_id: Uuid::new_v4(),
             thread_kind: "chat".to_owned(),
             workspace_id: Uuid::new_v4(),

@@ -90,6 +90,7 @@ use uuid::Uuid;
 use crate::cloud_agent::errors::{classify_provider_error, BYOK};
 use crate::queue::JobRow;
 use crate::worker::{HandlerError, Registry, Verdict};
+use pidash_types::assistant::surface::Surface;
 
 /// The engine's boundary types, re-exported so existing paths
 /// (`assistant::run_turn::AgentError`) keep compiling after the P2
@@ -484,6 +485,10 @@ impl StreamSink {
 pub struct TurnContext {
     pub turn_id: Uuid,
     pub turn_status: String,
+    /// Where the turn runs (NEWPIDASH-392): stamped by `post_message`
+    /// from the request session; the turn resolves its model on this
+    /// surface. Unknown stored spellings load as the default.
+    pub surface: Surface,
     pub thread_id: Uuid,
     pub thread_kind: String,
     pub workspace_id: Uuid,
@@ -531,6 +536,7 @@ pub fn load_context_sql() -> String {
             ("t", "thread_id"),
             ("t", "user_message_id"),
             ("t", "status"),
+            ("t", "surface"),
             ("t", "model_messages"),
             ("t", "usage"),
             ("t", "model_used"),
@@ -1641,6 +1647,7 @@ mod tests {
         TurnContext {
             turn_id: Uuid::new_v4(),
             turn_status: TURN_QUEUED.to_owned(),
+            surface: Surface::WebAssistant,
             thread_id: Uuid::new_v4(),
             thread_kind: "chat".to_owned(),
             workspace_id: Uuid::new_v4(),
@@ -2643,7 +2650,7 @@ mod tests {
     }
 
     const LIVE_DDL: &[&str] = &[
-        "CREATE TEMPORARY TABLE assistant_turn (id UUID PRIMARY KEY, thread_id UUID NOT NULL, user_message_id UUID NULL, status VARCHAR(16) NOT NULL, model_messages JSONB NULL, usage JSONB NULL, model_used VARCHAR(255) NOT NULL, error_code VARCHAR(64) NOT NULL, error_detail TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, started_at TIMESTAMPTZ NULL, completed_at TIMESTAMPTZ NULL)",
+        "CREATE TEMPORARY TABLE assistant_turn (id UUID PRIMARY KEY, thread_id UUID NOT NULL, user_message_id UUID NULL, status VARCHAR(16) NOT NULL, surface VARCHAR(32) NOT NULL DEFAULT 'web_assistant', model_messages JSONB NULL, usage JSONB NULL, model_used VARCHAR(255) NOT NULL, error_code VARCHAR(64) NOT NULL, error_detail TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, started_at TIMESTAMPTZ NULL, completed_at TIMESTAMPTZ NULL)",
         "CREATE TEMPORARY TABLE assistant_thread (id UUID PRIMARY KEY, workspace_id UUID NOT NULL, user_id UUID NOT NULL, title VARCHAR(255) NOT NULL, kind VARCHAR(16) NOT NULL, is_archived BOOLEAN NOT NULL, active_turn_id UUID NULL, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)",
         "CREATE TEMPORARY TABLE workspaces (id UUID PRIMARY KEY, slug VARCHAR(48) NOT NULL, name VARCHAR(80) NOT NULL)",
         "CREATE TEMPORARY TABLE assistant_message (id UUID PRIMARY KEY, thread_id UUID NOT NULL, display_content TEXT NOT NULL)",
@@ -2716,7 +2723,7 @@ mod tests {
             .await
             .expect("seed turn");
         }
-        // Select order is 12 turn + 9 thread + 3 workspace + 2 message
+        // Select order is 13 turn + 9 thread + 3 workspace + 2 message
         // columns; several names repeat (`id`), so read by index.
         use sqlx::Row;
         let row = sqlx::query(&load_context_sql())
@@ -2726,12 +2733,17 @@ mod tests {
             .expect("context select runs");
         assert_eq!(row.try_get::<Uuid, _>(0).expect("t.id"), turn);
         assert_eq!(row.try_get::<Uuid, _>(1).expect("t.thread_id"), thread);
+        // The seed insert names no surface: the column default stamps it.
         assert_eq!(
-            row.try_get::<String, _>(22).expect("w.slug"),
+            row.try_get::<String, _>(4).expect("t.surface"),
+            "web_assistant".to_owned()
+        );
+        assert_eq!(
+            row.try_get::<String, _>(23).expect("w.slug"),
             "acme".to_owned()
         );
         assert_eq!(
-            row.try_get::<Option<String>, _>(25)
+            row.try_get::<Option<String>, _>(26)
                 .expect("m.display_content"),
             Some("hello".to_owned())
         );
@@ -2743,7 +2755,7 @@ mod tests {
             .expect("context select runs without a user message");
         assert_eq!(row.try_get::<Uuid, _>(0).expect("t.id"), orphan);
         assert_eq!(
-            row.try_get::<Option<String>, _>(25)
+            row.try_get::<Option<String>, _>(26)
                 .expect("m.display_content"),
             None
         );

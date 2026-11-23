@@ -44,13 +44,13 @@ use pidash_db::assistant::models::has_secret;
 use pidash_db::entity::{assistant_user_llm_config, issues, projects};
 use pidash_db::orm_tx::into_sqlx;
 use pidash_db::pool::sea_orm_connection;
-use pidash_services::assistant::seams::pidash_agent_profile_for_user;
 use pidash_services::extensions::AssistantModelSeam;
 use pidash_services::orchestration::dispatch::{
     DispatchError, PodRunnerMatcher, LIVE_ASSIGNEE_CANDIDATES_SQL,
 };
 use pidash_services::run_creation::LlmProfile;
 use pidash_services::runner_sessions;
+use pidash_types::assistant::surface::Surface;
 
 // ---------------------------------------------------------------------------
 // Jobs matcher
@@ -228,7 +228,11 @@ pub(crate) async fn gate_verdicts(
 ) -> HashMap<Uuid, bool> {
     let mut verdicts = HashMap::with_capacity(presence.len());
     for (uid, has_key) in presence {
-        verdicts.insert(*uid, seam.has_usable_llm_config(*uid, *has_key).await);
+        verdicts.insert(
+            *uid,
+            seam.has_usable_llm_config(*uid, *has_key, Surface::Agent)
+                .await,
+        );
     }
     verdicts
 }
@@ -243,19 +247,39 @@ pub(crate) fn gate_fn(
     move |uid: Uuid| -> bool { verdicts.get(&uid).copied().unwrap_or(false) }
 }
 
-/// The `managed_llm_profile` closure over pre-fetched presence.
+/// The `managed_llm_profile` verdicts for one driver call: one
+/// installed-seam profile consult per user over the pre-fetched key
+/// bits, like [`gate_verdicts`]. Resolves on the agent surface.
+pub(crate) async fn profile_verdicts(
+    seam: &Arc<dyn AssistantModelSeam>,
+    presence: &HashMap<Uuid, bool>,
+) -> HashMap<Uuid, LlmProfile> {
+    let mut verdicts = HashMap::with_capacity(presence.len());
+    for (uid, has_key) in presence {
+        let profile = seam.pidash_agent_profile(*uid, *has_key).await;
+        verdicts.insert(
+            *uid,
+            LlmProfile {
+                available: profile.available,
+                reason_code: profile.reason_code,
+            },
+        );
+    }
+    verdicts
+}
+
+/// The `managed_llm_profile` closure over pre-fetched verdicts. A user
+/// outside the pre-fetched universe — and a missing user — answer
+/// closed with `llm_config_missing`, matching the keyless CE matrix row.
 pub(crate) fn profile_fn(
-    presence: Arc<HashMap<Uuid, bool>>,
+    verdicts: Arc<HashMap<Uuid, LlmProfile>>,
 ) -> impl Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync {
     move |uid: Option<Uuid>| -> LlmProfile {
-        let key = uid
-            .and_then(|uid| presence.get(&uid).copied())
-            .unwrap_or(false);
-        let profile = pidash_agent_profile_for_user(key);
-        LlmProfile {
-            available: profile.available,
-            reason_code: profile.reason_code,
-        }
+        uid.and_then(|uid| verdicts.get(&uid).cloned())
+            .unwrap_or(LlmProfile {
+                available: false,
+                reason_code: pidash_services::extensions::reason::LLM_CONFIG_MISSING.to_owned(),
+            })
     }
 }
 
@@ -281,16 +305,25 @@ mod tests {
         assert!(empty.is_empty());
     }
 
-    #[test]
-    fn profile_closure_answers_keyless_outside_map() {
+    #[tokio::test]
+    async fn profile_closure_answers_keyless_outside_map() {
         let present = Uuid::from_u128(7);
         let presence: Arc<HashMap<Uuid, bool>> = Arc::new([(present, true)].into_iter().collect());
-        let profile = profile_fn(presence);
+        // The verdicts resolve through the installed seam; the
+        // overlay-shaped double uses the CE profile matrix, so a keyed
+        // user still answers unavailable here.
+        let seam: Arc<dyn AssistantModelSeam> = Arc::new(GatewaySeam);
+        let verdicts = Arc::new(profile_verdicts(&seam, &presence).await);
+        let profile = profile_fn(verdicts);
         let keyed = profile(Some(present));
         assert!(!keyed.available);
         assert!(!keyed.reason_code.is_empty());
         let keyless = profile(None);
         assert!(!keyless.available);
+        assert_eq!(
+            keyless.reason_code,
+            pidash_services::extensions::reason::LLM_CONFIG_MISSING
+        );
     }
 
     /// Overlay-shaped seam: a keyless user still counts as configured
@@ -303,8 +336,9 @@ mod tests {
             &self,
             user_id: Uuid,
             has_api_key: bool,
+            surface: Surface,
         ) -> pidash_services::extensions::SeamFuture<'_, bool> {
-            let _ = (user_id, has_api_key);
+            let _ = (user_id, has_api_key, surface);
             Box::pin(async move { true })
         }
 

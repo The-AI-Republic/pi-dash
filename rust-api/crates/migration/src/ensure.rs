@@ -7,8 +7,9 @@
 //! `pidash-jobs::queue` / `pidash-jobs::schedule` (queue + schedule tables)
 //! and `pidash-api::runner_models::schema` (model catalog + seed); those
 //! paths re-export these items so existing callers and tests keep working.
-//! The only writer is the `m000002_ensure_schema` native migration: services
-//! never run DDL, they run only `migrate check`.
+//! The only writers are the native migrations (`m000002_ensure_schema`,
+//! `rust/0003_assistant_surface_models`): services never run DDL, they run
+//! only `migrate check`.
 
 use chrono::Utc;
 use sea_orm::{
@@ -569,6 +570,39 @@ where
 {
     ensure_schema(db).await?;
     ensure_catalog_schema(db).await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Assistant surface + multi-model BYOK columns (NEWPIDASH-392).
+// ---------------------------------------------------------------------------
+
+/// DDL for [`ensure_assistant_surface_columns`], in application order:
+/// additive columns with database defaults (so inserts that do not name
+/// them keep working and Django keeps reading the tables), then
+/// backfills guarded to empty targets so a re-run never overwrites a
+/// user's multi-model edits.
+pub const ASSISTANT_SURFACE_COLUMNS_SQL: &[&str] = &[
+    "ALTER TABLE public.assistant_turn ADD COLUMN IF NOT EXISTS surface character varying(32) NOT NULL DEFAULT 'web_assistant'",
+    "ALTER TABLE public.assistant_user_llm_config ADD COLUMN IF NOT EXISTS models text[] NOT NULL DEFAULT '{}'",
+    "ALTER TABLE public.assistant_user_llm_config ADD COLUMN IF NOT EXISTS model_verified_at jsonb NOT NULL DEFAULT '{}'",
+    "UPDATE public.assistant_user_llm_config SET models = ARRAY[model_name] WHERE model_name <> '' AND models = '{}'",
+    "UPDATE public.assistant_user_llm_config SET model_verified_at = jsonb_build_object(model_name, last_verified_at) WHERE last_verified_at IS NOT NULL AND model_verified_at = '{}'",
+];
+
+/// Add `assistant_turn.surface` and the `assistant_user_llm_config`
+/// `models` / `model_verified_at` columns with the single-model
+/// backfill. Runs from the `rust/0003_assistant_surface_models` native
+/// migration only — never from the serve/worker path.
+pub async fn ensure_assistant_surface_columns<C>(db: &C) -> Result<(), DbErr>
+where
+    C: ConnectionTrait + TransactionTrait,
+{
+    for sql in ASSISTANT_SURFACE_COLUMNS_SQL {
+        // raw-sql: Rust-owned DDL/backfill has no SeaORM form; ADD COLUMN IF NOT EXISTS plus empty-target backfills make re-runs safe.
+        db.execute(Statement::from_string(DbBackend::Postgres, sql.to_string()))
+            .await?;
+    }
     Ok(())
 }
 

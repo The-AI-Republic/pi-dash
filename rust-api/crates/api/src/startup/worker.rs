@@ -157,7 +157,9 @@ impl WorkerBuilder<LiveTurnSeam> {
         // app state, so worker-side runs-creation gates answer exactly as
         // the serve-side gates do (PIDASHCONV-1054). The cloud binary
         // installs its overlay implementation here instead.
-        let assistant_seam = Arc::new(CeAssistantSeam::new(Arc::new(settings.clone())));
+        let assistant_seam: Arc<dyn AssistantModelSeam> = Arc::new(
+            CeAssistantSeam::new(Arc::new(settings.clone())).with_pool(pools.primary().clone()),
+        );
         // The live assistant turn seam (PIDASHCONV-863): the multiplexed Redis
         // client for the cancel key and the SSE publishes, the worker
         // pool, and settings. Construction does no I/O.
@@ -166,6 +168,7 @@ impl WorkerBuilder<LiveTurnSeam> {
                 pools.primary().clone(),
                 Arc::new(settings.clone()),
                 turn_redis_client(&settings),
+                Arc::clone(&assistant_seam),
             )
             .map_err(|error| format!("assistant turn seam: {error}"))?,
         );
@@ -221,9 +224,20 @@ impl WorkerBuilder<LiveTurnSeam> {
     /// precedent — the client only parses, it never dials).
     pub fn for_tests(pools: pidash_db::Pools, mut settings: Settings) -> Result<Self, String> {
         settings.redis.url = Some("redis://localhost:1/".to_owned());
+        // The run-creation gates consult the installed assistant seam;
+        // the default CE seam carries the pool so the agent-surface
+        // verdicts resolve per surface (the overlay installs its own).
+        let assistant_seam: Arc<dyn AssistantModelSeam> = Arc::new(
+            CeAssistantSeam::new(Arc::new(settings.clone())).with_pool(pools.primary().clone()),
+        );
         let turn_seam = Arc::new(
-            LiveTurnSeam::new(pools.primary().clone(), Arc::new(settings.clone()), None)
-                .map_err(|error| format!("assistant turn seam: {error}"))?,
+            LiveTurnSeam::new(
+                pools.primary().clone(),
+                Arc::new(settings.clone()),
+                None,
+                Arc::clone(&assistant_seam),
+            )
+            .map_err(|error| format!("assistant turn seam: {error}"))?,
         );
         let turn_soft_limit = settings.assistant.turn_soft_limit;
         Ok(Self {
@@ -231,7 +245,7 @@ impl WorkerBuilder<LiveTurnSeam> {
             pools,
             mongo: None,
             seed_dir: std::env::temp_dir(),
-            assistant_seam: Arc::new(CeAssistantSeam::new(Arc::new(settings))),
+            assistant_seam,
             assistant_seam_is_default: true,
             turn_seam,
             turn_seam_is_default: true,
@@ -266,7 +280,10 @@ impl WorkerBuilder<LiveTurnSeam> {
         f(&mut self.settings);
         self.turn_soft_limit = self.settings.assistant.turn_soft_limit;
         if self.assistant_seam_is_default {
-            self.assistant_seam = Arc::new(CeAssistantSeam::new(Arc::new(self.settings.clone())));
+            self.assistant_seam = Arc::new(
+                CeAssistantSeam::new(Arc::new(self.settings.clone()))
+                    .with_pool(self.pools.primary().clone()),
+            );
         }
         if self.turn_seam_is_default {
             self.turn_seam = Arc::new(
@@ -274,6 +291,7 @@ impl WorkerBuilder<LiveTurnSeam> {
                     self.pools.primary().clone(),
                     Arc::new(self.settings.clone()),
                     turn_redis_client(&self.settings),
+                    self.assistant_seam.clone(),
                 )
                 .map_err(|error| format!("assistant turn seam: {error}"))?,
             );
@@ -1034,6 +1052,7 @@ mod tests {
                 pools.primary().clone(),
                 Arc::new(Settings::test_defaults()),
                 None,
+                Arc::new(CeAssistantSeam::new(Arc::new(Settings::test_defaults()))),
             )
             .expect("prebuilt seam"),
         );
@@ -1086,6 +1105,7 @@ mod tests {
                 builder.pools().primary().clone(),
                 Arc::new(Settings::test_defaults()),
                 None,
+                Arc::new(CeAssistantSeam::new(Arc::new(Settings::test_defaults()))),
             )
             .expect("prebuilt seam"),
         );

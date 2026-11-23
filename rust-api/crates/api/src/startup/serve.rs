@@ -335,7 +335,18 @@ impl ServeBuilder {
     ) -> AppState {
         let mut state = AppState::with_settings_and_edge(version, settings, edge);
         if let Some((pools, orm, redis)) = pools {
-            state = state.with_pools(pools).with_orm(orm);
+            // The model-selection resolver reads through the installed
+            // seam, so the default CE seam carries the primary pool from
+            // here (state mods applied below may still replace it, for
+            // the overlay and for tests).
+            let pooled_seam = Arc::new(
+                crate::assistant::model_seam::CeAssistantSeam::new(state.settings_arc().clone())
+                    .with_pool(pools.primary().clone()),
+            );
+            state = state
+                .with_pools(pools)
+                .with_orm(orm)
+                .with_assistant_seam(pooled_seam);
             if let Some(handle) = redis {
                 state = state.with_redis(handle);
             }
@@ -485,6 +496,7 @@ mod tests {
             .generate_title(pidash_services::extensions::TitleRequest {
                 user_id: uuid::Uuid::nil(),
                 description: "Fix the thing".to_owned(),
+                surface: pidash_types::assistant::surface::Surface::WebAssistant,
                 byok: None,
             })
             .await
@@ -516,6 +528,7 @@ mod tests {
             .generate_title(pidash_services::extensions::TitleRequest {
                 user_id: uuid::Uuid::nil(),
                 description: "Fix the thing".to_owned(),
+                surface: pidash_types::assistant::surface::Surface::WebAssistant,
                 byok: None,
             })
             .await

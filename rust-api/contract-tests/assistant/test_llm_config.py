@@ -17,6 +17,8 @@ import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from _harness.diffs import expect, is_rust
+
 from .conftest import PUBLIC_BASE, threads_url
 
 CONFIG_URL = "/api/users/me/ai-assistant/config/"
@@ -35,6 +37,9 @@ def _unset_shape(body):
     }
     assert body["has_api_key"] is False
     assert body["last_verified_at"] is None
+    if is_rust():
+        assert body["models"] == []
+        assert body["model_verified_at"] == {}
 
 
 def test_llm_config_lifecycle(world, member):
@@ -50,6 +55,61 @@ def test_llm_config_lifecycle(world, member):
             "api_key": "test-key-123",
         },
     )
+    if is_rust():
+        # DIFF-64: the save-time smoke test rejects the unreachable
+        # base (nothing saved).
+        assert res.status_code == 400, res.text
+        body = res.json()
+        assert body["error"] == "model_test_failed"
+        assert body["models"] == [
+            {
+                "model": "m",
+                "status": "unverified",
+                "code": "provider_unreachable",
+                "detail": "Could not reach the endpoint.",
+            }
+        ]
+        assert member.get(CONFIG_URL).json()["has_api_key"] is False
+
+        # The same write with the opt-in flag saves.
+        res = member.put(
+            CONFIG_URL,
+            json={
+                "provider_kind": "openai_compatible",
+                "base_url": PUBLIC_BASE,
+                "model_name": "m",
+                "api_key": "test-key-123",
+                "save_unverified": True,
+            },
+        )
+        assert res.status_code == 200, res.text
+        assert res.json()["models"][0] == {
+            "model": "m",
+            "status": "unverified",
+            "code": "provider_unreachable",
+            "detail": "Could not reach the endpoint.",
+        }
+        saved = member.get(CONFIG_URL).json()
+        assert saved["has_api_key"] is True
+        assert saved["models"] == ["m"]
+        assert saved["model_name"] == "m"
+        assert saved["model_verified_at"] == {}
+        assert "api_key" not in saved
+
+        # Updating the model re-tests the new ID; the key is kept.
+        res = member.put(CONFIG_URL, json={"model_name": "m2"})
+        assert res.status_code == 400, res.text
+        assert res.json()["error"] == "model_test_failed"
+        res = member.put(
+            CONFIG_URL, json={"model_name": "m2", "save_unverified": True}
+        )
+        assert res.status_code == 200, res.text
+        assert res.json()["models"][0]["model"] == "m2"
+
+        assert member.delete(CONFIG_URL).status_code == 204
+        assert member.get(CONFIG_URL).json()["has_api_key"] is False
+        return
+
     assert res.status_code == 200
     body = res.json()
     assert body["has_api_key"] is True
@@ -157,7 +217,8 @@ def test_generate_title_requires_description(world, member):
     member.put(
         CONFIG_URL,
         json={"provider_kind": "openai_compatible", "base_url": PUBLIC_BASE,
-              "model_name": "m", "api_key": "test-key-123"},
+              "model_name": "m", "api_key": "test-key-123",
+              "save_unverified": True},
     )
     res = member.post(f"{threads_url(world)}/generate-title/", json={"description": "   "})
     assert res.status_code == 400
@@ -269,8 +330,20 @@ def test_generate_title_deepseek_body_flattens_extra_body(world, member):
         assert res.status_code == 200, res.text
         assert res.json() == {"title": "DeepSeek stub title"}
 
-        assert len(proxy.requests) == 1
-        request = proxy.requests[0]
+        if is_rust():
+            # DIFF-64: the config PUT above runs the save-time smoke
+            # test first, so the proxy sees two requests: the probe,
+            # then the title call. The title wire shape is unchanged.
+            assert len(proxy.requests) == 2, proxy.requests
+            smoke, title = proxy.requests
+            assert smoke["path"] == f"{DEEPSEEK_BASE}/chat/completions"
+            assert smoke["body"]["messages"] == [
+                {"role": "user", "content": "Reply with the single word: ok"}
+            ]
+            request = title
+        else:
+            assert len(proxy.requests) == 1
+            request = proxy.requests[0]
         assert request["path"] == f"{DEEPSEEK_BASE}/chat/completions"
         body = request["body"]
         assert body.get("thinking") == {"type": "disabled"}, body

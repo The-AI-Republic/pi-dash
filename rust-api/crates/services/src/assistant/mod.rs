@@ -38,6 +38,7 @@ pub mod crypto;
 pub mod llm;
 pub mod markdown;
 pub mod mcp;
+pub mod model_selection;
 pub mod probe;
 pub mod retry;
 pub mod seams;

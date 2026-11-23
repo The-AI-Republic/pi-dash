@@ -58,8 +58,10 @@ use pidash_services::assistant::agent::AssistantDeps;
 use pidash_services::assistant::crypto::CryptoError;
 use pidash_services::assistant::llm::{self as llm_service, KeyCache};
 use pidash_services::assistant::mcp as mcp_service;
+use pidash_services::assistant::model_selection;
 use pidash_services::assistant::ssrf;
 use pidash_services::assistant::tools_results::wrap_untrusted;
+use pidash_types::assistant::surface::Surface;
 use sea_orm::sea_query::Expr;
 use sea_orm::{
     ColumnTrait, DbErr, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder,
@@ -109,6 +111,7 @@ struct LoadContextRow {
     id: Uuid,
     user_message_id: Option<Uuid>,
     status: String,
+    surface: String,
     thread_id: Uuid,
     thread_workspace_id: Uuid,
     thread_user_id: Uuid,
@@ -125,6 +128,7 @@ struct LlmConfigRow {
     base_url: String,
     model_name: String,
     api_key_encrypted: Option<Vec<u8>>,
+    models: Vec<String>,
 }
 
 /// Read back one message row for the `message_completed` envelope
@@ -866,6 +870,7 @@ impl LiveTurnSeam {
         pool: PgPool,
         settings: Arc<Settings>,
         redis: Option<RedisClient>,
+        assistant_seam: Arc<dyn pidash_services::extensions::AssistantModelSeam>,
     ) -> Result<Self, SeamError> {
         let usage_document = usage_table::load().map_err(|error| SeamError(error.to_string()))?;
         let extract =
@@ -875,8 +880,13 @@ impl LiveTurnSeam {
             .build()
             .map_err(|error| SeamError(error.to_string()))?;
         let tool_store = Arc::new(
-            PgToolStore::new(pool.clone(), redis.clone(), settings.pidash_agent.clone())
-                .map_err(|error| SeamError(error.message()))?,
+            PgToolStore::new(
+                pool.clone(),
+                redis.clone(),
+                settings.pidash_agent.clone(),
+                assistant_seam,
+            )
+            .map_err(|error| SeamError(error.message()))?,
         );
         let key_cache = KeyCache::new(
             settings.assistant.key_cache_ttl_secs,
@@ -1201,6 +1211,7 @@ impl TurnSeam for LiveTurnSeam {
                 assistant_turn::Column::Id,
                 assistant_turn::Column::UserMessageId,
                 assistant_turn::Column::Status,
+                assistant_turn::Column::Surface,
             ])
             .column_as(assistant_thread::Column::Id, "thread_id")
             .column_as(assistant_thread::Column::WorkspaceId, "thread_workspace_id")
@@ -1289,6 +1300,7 @@ impl TurnSeam for LiveTurnSeam {
         Ok(Some(TurnContext {
             turn_id,
             turn_status: status,
+            surface: Surface::parse(&row.surface).unwrap_or(Surface::WebAssistant),
             thread_id,
             thread_kind,
             workspace_id,
@@ -1368,6 +1380,7 @@ impl TurnSeam for LiveTurnSeam {
                 assistant_user_llm_config::Column::BaseUrl,
                 assistant_user_llm_config::Column::ModelName,
                 assistant_user_llm_config::Column::ApiKeyEncrypted,
+                assistant_user_llm_config::Column::Models,
             ])
             .filter(assistant_user_llm_config::Column::UserId.eq(ctx.user_id))
             .order_by_asc(assistant_user_llm_config::Column::CreatedAt)
@@ -1375,18 +1388,36 @@ impl TurnSeam for LiveTurnSeam {
             .one(&db)
             .await
             .map_err(internal_model_error)?;
-        let (provider_kind, base_url, model_name, token) = row
+        let (provider_kind, base_url, stored_model, models, token) = row
             .map(|row| {
                 (
                     row.provider_kind,
                     row.base_url,
                     row.model_name,
+                    row.models,
                     row.api_key_encrypted,
                 )
             })
             .unwrap_or_default();
         let token = token.unwrap_or_default();
         let has_api_key = !token.is_empty();
+        // The turn runs on its stamped surface (NEWPIDASH-392): resolve
+        // the surface's choice against the key's list. With no saved
+        // entry the legacy selection (`models[0]`, kept equal to the
+        // stored model name by the writers) answers, so behaviour is
+        // unchanged; a missing lane falls through to the stored model
+        // name so the gates below fail exactly as before.
+        let settings = pidash_services::domain::assistant::read_settings_bag(&db, ctx.user_id)
+            .await
+            .map_err(internal_model_error)?;
+        let saved = settings
+            .as_ref()
+            .and_then(|settings| model_selection::read_entry(settings, ctx.surface));
+        let model_name =
+            model_selection::resolve_oss(saved.as_ref(), &models, has_api_key, ctx.surface)
+                .effective
+                .map(|choice| choice.model)
+                .unwrap_or(stored_model);
         let base_url_blocked = !base_url.is_empty()
             && ssrf::is_blocked(
                 &base_url,
@@ -2675,8 +2706,15 @@ mod tests {
     /// store — following the soft-limit test's precedent.
     async fn entered_mcp_toolset(url: &str) -> LiveToolset {
         let pool = PgPool::connect_lazy("postgres://127.0.0.1:1/unused").expect("lazy pool builds");
-        let seam = LiveTurnSeam::new(pool, Arc::new(Settings::test_defaults()), None)
-            .expect("seam builds");
+        let seam = LiveTurnSeam::new(
+            pool,
+            Arc::new(Settings::test_defaults()),
+            None,
+            Arc::new(crate::assistant::model_seam::CeAssistantSeam::new(
+                Arc::new(Settings::test_defaults()),
+            )),
+        )
+        .expect("seam builds");
         let spec =
             mcp_service::build_toolset_spec(url, None, Some("demo"), false, 5.0, 5.0, "demo");
         let mut session = ResilientSession::new(spec).expect("session builds");
@@ -2901,8 +2939,15 @@ mod tests {
         });
 
         let pool = PgPool::connect_lazy("postgres://127.0.0.1:1/unused").expect("lazy pool builds");
-        let seam = LiveTurnSeam::new(pool, Arc::new(Settings::test_defaults()), None)
-            .expect("seam builds");
+        let seam = LiveTurnSeam::new(
+            pool,
+            Arc::new(Settings::test_defaults()),
+            None,
+            Arc::new(crate::assistant::model_seam::CeAssistantSeam::new(
+                Arc::new(Settings::test_defaults()),
+            )),
+        )
+        .expect("seam builds");
         let turn_id = Uuid::new_v4();
         let spec = mcp_service::build_toolset_spec(
             &format!("http://127.0.0.1:{port}/mcp"),
@@ -2944,6 +2989,7 @@ mod tests {
         let ctx = TurnContext {
             turn_id,
             turn_status: "running".to_owned(),
+            surface: Surface::WebAssistant,
             thread_id: Uuid::new_v4(),
             thread_kind: "chat".to_owned(),
             workspace_id: Uuid::new_v4(),
@@ -3005,7 +3051,7 @@ mod tests {
     const LIVE_WORKSPACES_DDL: &str = "CREATE TEMPORARY TABLE workspaces (id UUID PRIMARY KEY, name VARCHAR(80) NOT NULL, slug VARCHAR(48) NOT NULL)";
     const LIVE_MEMBERS_DDL: &str = "CREATE TEMPORARY TABLE workspace_members (id UUID PRIMARY KEY, workspace_id UUID NOT NULL, member_id UUID NOT NULL, role SMALLINT NOT NULL, is_active BOOLEAN NOT NULL, deleted_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL)";
     const LIVE_THREAD_DDL: &str = "CREATE TEMPORARY TABLE assistant_thread (id UUID PRIMARY KEY, workspace_id UUID NOT NULL, user_id UUID NOT NULL, title VARCHAR(255) NOT NULL, kind VARCHAR(16) NOT NULL, is_archived BOOLEAN NOT NULL, active_turn_id UUID, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)";
-    const LIVE_TURN_DDL: &str = "CREATE TEMPORARY TABLE assistant_turn (id UUID PRIMARY KEY, thread_id UUID NOT NULL, user_message_id UUID, status VARCHAR(16) NOT NULL, model_messages JSONB, usage JSONB, model_used VARCHAR(255) NOT NULL, error_code VARCHAR(64) NOT NULL, error_detail TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, started_at TIMESTAMPTZ, completed_at TIMESTAMPTZ)";
+    const LIVE_TURN_DDL: &str = "CREATE TEMPORARY TABLE assistant_turn (id UUID PRIMARY KEY, thread_id UUID NOT NULL, user_message_id UUID, status VARCHAR(16) NOT NULL, surface VARCHAR(32) NOT NULL DEFAULT 'web_assistant', model_messages JSONB, usage JSONB, model_used VARCHAR(255) NOT NULL, error_code VARCHAR(64) NOT NULL, error_detail TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, started_at TIMESTAMPTZ, completed_at TIMESTAMPTZ)";
     const LIVE_MESSAGE_DDL: &str = "CREATE TEMPORARY TABLE assistant_message (id UUID PRIMARY KEY, thread_id UUID NOT NULL, turn_id UUID, seq BIGINT NOT NULL, kind VARCHAR(16) NOT NULL, display_content TEXT NOT NULL, payload JSONB NOT NULL, status VARCHAR(16) NOT NULL, created_at TIMESTAMPTZ NOT NULL, completed_at TIMESTAMPTZ)";
     const LIVE_EVENT_DDL: &str = "CREATE TEMPORARY TABLE assistant_event (id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, thread_id UUID NOT NULL, turn_id UUID, seq BIGINT NOT NULL, kind VARCHAR(64) NOT NULL, message_id UUID, payload JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL)";
 
@@ -3115,14 +3161,22 @@ mod tests {
     }
 
     fn live_seam(pool: &PgPool) -> LiveTurnSeam {
-        LiveTurnSeam::new(pool.clone(), Arc::new(Settings::test_defaults()), None)
-            .expect("seam builds")
+        LiveTurnSeam::new(
+            pool.clone(),
+            Arc::new(Settings::test_defaults()),
+            None,
+            Arc::new(crate::assistant::model_seam::CeAssistantSeam::new(
+                Arc::new(Settings::test_defaults()),
+            )),
+        )
+        .expect("seam builds")
     }
 
     fn live_ctx(turn_id: Uuid, thread_id: Uuid, user_id: Uuid, workspace_id: Uuid) -> TurnContext {
         TurnContext {
             turn_id,
             turn_status: "running".to_owned(),
+            surface: Surface::WebAssistant,
             thread_id,
             thread_kind: "chat".to_owned(),
             workspace_id,

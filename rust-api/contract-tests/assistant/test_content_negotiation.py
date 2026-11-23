@@ -46,6 +46,10 @@ def _configure_llm(client):
             "base_url": PUBLIC_BASE,
             "model_name": "m",
             "api_key": "test-key-123",
+            # The Rust save-time smoke test would reject this
+            # unreachable base; the flag saves it unverified. Django
+            # ignores the unknown field.
+            "save_unverified": True,
         },
     )
     assert res.status_code == 200, res.text

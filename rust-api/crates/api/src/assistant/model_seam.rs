@@ -24,23 +24,89 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use pidash_db::assistant::models::has_secret;
 use pidash_db::config::Settings;
+use pidash_services::assistant::config as config_service;
 use pidash_services::assistant::llm as llm_service;
+use pidash_services::assistant::model_selection::{
+    self as selection, ChoiceError, ChoiceOperational, ModelChoice,
+};
 use pidash_services::assistant::title as title_service;
-use pidash_services::extensions::{AssistantModelSeam, SeamFuture, TitleError, TitleRequest};
+use pidash_services::extensions::{
+    AssistantModelSeam, Resolution, SeamFuture, TitleError, TitleRequest,
+};
 use pidash_types::assistant::errors::AssistantError;
+use pidash_types::assistant::surface::Surface;
 
 /// CE assistant seam: BYOK only. Holds the resolved settings so title
-/// decrypt reads the same effective crypto config as every handler.
+/// decrypt reads the same effective crypto config as every handler,
+/// plus the pool the model-selection resolver reads through.
 #[derive(Debug, Clone)]
 pub struct CeAssistantSeam {
     settings: Arc<Settings>,
+    pool: Option<sqlx::PgPool>,
 }
 
 impl CeAssistantSeam {
     pub fn new(settings: Arc<Settings>) -> Self {
-        Self { settings }
+        Self {
+            settings,
+            pool: None,
+        }
     }
+
+    /// Attach the pool [`resolve_choice`](AssistantModelSeam::resolve_choice)
+    /// and [`validate_choice`](AssistantModelSeam::validate_choice) read
+    /// through. The serve and worker builders call this where the pools
+    /// are connected; without it those methods refuse loudly.
+    pub fn with_pool(mut self, pool: sqlx::PgPool) -> Self {
+        self.pool = Some(pool);
+        self
+    }
+
+    fn pool(&self) -> Result<sqlx::PgPool, ChoiceOperational> {
+        self.pool
+            .clone()
+            .ok_or_else(|| ChoiceOperational("no database wired for model resolution".to_owned()))
+    }
+}
+
+/// Resolution inputs for one user: the saved entry plus the key's model
+/// list and presence bit. Missing rows read as empty (no entry, no
+/// lane), never as an error.
+struct ResolutionInputs {
+    saved: Option<ModelChoice>,
+    models: Vec<String>,
+    has_key: bool,
+}
+
+/// Load [`ResolutionInputs`] for the OSS resolver: the
+/// `assistant_models` entry for `surface` plus the config row's models
+/// and key bit.
+async fn resolution_inputs(
+    pool: &sqlx::PgPool,
+    user_id: uuid::Uuid,
+    surface: Surface,
+) -> Result<ResolutionInputs, ChoiceOperational> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let settings = pidash_services::domain::assistant::read_settings_bag(&db, user_id)
+        .await
+        .map_err(|error| ChoiceOperational(error.to_string()))?;
+    let row = config_service::get_config(pool, user_id)
+        .await
+        .map_err(|error| ChoiceOperational(error.to_string()))?;
+    let saved = settings
+        .as_ref()
+        .and_then(|settings| selection::read_entry(settings, surface));
+    let (models, has_key) = row.map_or_else(
+        || (Vec::new(), false),
+        |row| (row.models, has_secret(&row.api_key_encrypted)),
+    );
+    Ok(ResolutionInputs {
+        saved,
+        models,
+        has_key,
+    })
 }
 
 /// Map a decrypt failure the way the views' `try/except AssistantError`
@@ -56,6 +122,40 @@ fn map_crypto_error(err: pidash_services::assistant::crypto::CryptoError) -> Tit
 }
 
 impl AssistantModelSeam for CeAssistantSeam {
+    fn resolve_choice(
+        &self,
+        user_id: uuid::Uuid,
+        surface: Surface,
+    ) -> SeamFuture<'_, Result<Resolution, ChoiceOperational>> {
+        Box::pin(async move {
+            let pool = self.pool()?;
+            let inputs = resolution_inputs(&pool, user_id, surface).await?;
+            Ok(selection::resolve_oss(
+                inputs.saved.as_ref(),
+                &inputs.models,
+                inputs.has_key,
+                surface,
+            ))
+        })
+    }
+
+    fn validate_choice(
+        &self,
+        user_id: uuid::Uuid,
+        surface: Surface,
+        entry: &ModelChoice,
+    ) -> SeamFuture<'_, Result<ModelChoice, ChoiceError>> {
+        let entry = entry.clone();
+        Box::pin(async move {
+            let pool = self.pool().map_err(ChoiceError::Operational)?;
+            let inputs = resolution_inputs(&pool, user_id, surface)
+                .await
+                .map_err(ChoiceError::Operational)?;
+            selection::validate_oss_choice(&entry, &inputs.models, inputs.has_key, surface)
+                .map_err(ChoiceError::Invalid)
+        })
+    }
+
     fn generate_title(&self, request: TitleRequest) -> SeamFuture<'_, Result<String, TitleError>> {
         Box::pin(async move {
             let Some(byok) = request.byok else {
@@ -219,15 +319,49 @@ mod tests {
         TitleRequest {
             user_id: user(),
             description: "Fix the thing".to_owned(),
+            surface: Surface::WebAssistant,
             byok,
         }
     }
 
     #[tokio::test]
+    async fn resolve_without_pool_refuses_loud() {
+        // No database wired (the unit seam carries no pool): the seam
+        // answers the operational error, never a wrong choice.
+        let err = seam()
+            .resolve_choice(user(), Surface::WebAssistant)
+            .await
+            .expect_err("no pool");
+        assert_eq!(
+            err,
+            ChoiceOperational("no database wired for model resolution".to_owned())
+        );
+        let entry = ModelChoice {
+            model: "m".to_owned(),
+            connection_id: None,
+        };
+        let err = seam()
+            .validate_choice(user(), Surface::WebAssistant, &entry)
+            .await
+            .expect_err("no pool");
+        assert!(
+            matches!(err, ChoiceError::Operational(_)),
+            "validation refuses loud too, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn ce_gate_matches_the_ported_seam() {
         let seam = seam();
-        assert!(seam.has_usable_llm_config(user(), true).await);
-        assert!(!seam.has_usable_llm_config(user(), false).await);
+        assert!(
+            seam.has_usable_llm_config(user(), true, Surface::WebAssistant)
+                .await
+        );
+        assert!(
+            !seam
+                .has_usable_llm_config(user(), false, Surface::Agent)
+                .await
+        );
     }
 
     #[tokio::test]

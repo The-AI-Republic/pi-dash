@@ -107,6 +107,7 @@ use pidash_db::entity::{
     workspaces as ws_entity,
 };
 use pidash_services::v1_work_items::python_number_str;
+use pidash_types::assistant::surface::Surface;
 use pidash_types::WorkspaceId;
 
 // ---------------------------------------------------------------------------
@@ -1899,7 +1900,7 @@ async fn executor_options(
         Some((user_id, user)) => {
             let llm_usable = state
                 .assistant_seam()
-                .has_usable_llm_config(*user_id, user.llm_has_key)
+                .has_usable_llm_config(*user_id, user.llm_has_key, Surface::Agent)
                 .await;
             let seam_profile = state
                 .assistant_seam()
@@ -7848,8 +7849,9 @@ mod live_tests {
             &self,
             user_id: uuid::Uuid,
             has_api_key: bool,
+            surface: Surface,
         ) -> SeamFuture<'_, bool> {
-            let _ = (user_id, has_api_key);
+            let _ = (user_id, has_api_key, surface);
             Box::pin(async move { true })
         }
 

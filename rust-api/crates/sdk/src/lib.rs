@@ -737,6 +737,14 @@ pub mod assistant {
     pub use pidash_services::assistant::mcp::EnabledMcpServerRow;
     pub use pidash_services::assistant::mcp::ResilientState;
     pub use pidash_services::assistant::mcp::ToolsetSpec;
+    pub use pidash_services::assistant::model_selection::classify_test;
+    pub use pidash_services::assistant::model_selection::merge_verified_map;
+    pub use pidash_services::assistant::model_selection::smoke_test_blocks;
+    pub use pidash_services::assistant::model_selection::validate_models_list;
+    pub use pidash_services::assistant::model_selection::ModelTestResult;
+    pub use pidash_services::assistant::model_selection::ModelTestStatus;
+    pub use pidash_services::assistant::model_selection::ModelsListError;
+    pub use pidash_services::assistant::model_selection::MAX_MODELS_PER_KEY;
     pub use pidash_services::assistant::probe::ca_bundle_path;
     pub use pidash_services::assistant::probe::classify_probe;
     pub use pidash_services::assistant::probe::probe_provider;
@@ -763,10 +771,17 @@ pub mod assistant {
     pub use pidash_services::domain::assistant::finalize_open_messages;
     pub use pidash_services::domain::assistant::prune_turn_deltas;
     pub use pidash_services::domain::assistant::NewEvent;
+    pub use pidash_services::extensions::ChoiceError;
+    pub use pidash_services::extensions::ChoiceOperational;
+    pub use pidash_services::extensions::ChoiceValidation;
+    pub use pidash_services::extensions::FallbackReason;
+    pub use pidash_services::extensions::ModelChoice;
+    pub use pidash_services::extensions::Resolution;
     pub use pidash_types::assistant::errors::AssistantError;
     pub use pidash_types::assistant::serializers;
     pub use pidash_types::assistant::serializers::PROVIDER_ANTHROPIC;
     pub use pidash_types::assistant::serializers::PROVIDER_OPENAI_COMPATIBLE;
+    pub use pidash_types::assistant::surface::Surface;
 }
 
 /// Cloud agent: the chat engine (model loop, provider streaming,

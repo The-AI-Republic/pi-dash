@@ -37,7 +37,8 @@ use super::fire_tick_seam::{
     shim_tick_interval_seconds, DispatchJobsError, StateView,
 };
 use super::live_inputs::{
-    creator_universe, fetch_presence, gate_fn, gate_verdicts, profile_fn, JobsMatcher,
+    creator_universe, fetch_presence, gate_fn, gate_verdicts, profile_fn, profile_verdicts,
+    JobsMatcher,
 };
 use crate::run_dispatch::DispatchDecision;
 use crate::tasks_ticker::fire_tick::{FireTickSeam, ProjectTickCols};
@@ -149,10 +150,11 @@ impl FireTickSeam for LiveFireTickSeam {
             let universe = creator_universe(&pool, actor, issue_id).await?;
             let presence = Arc::new(fetch_presence(&pool, &universe).await?);
             let verdicts = Arc::new(gate_verdicts(&assistant_seam, &presence).await);
+            let profiles = Arc::new(profile_verdicts(&assistant_seam, &presence).await);
             let deps = StoreDeps {
                 managed,
                 has_usable_llm_config: gate_fn(verdicts),
-                llm_profile: profile_fn(presence),
+                llm_profile: profile_fn(profiles),
             };
             let now = Utc::now();
             // Continuation never retimes a clock (a bounce only

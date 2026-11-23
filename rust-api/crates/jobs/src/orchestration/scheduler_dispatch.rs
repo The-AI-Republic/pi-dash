@@ -64,7 +64,8 @@ use pidash_types::agent_runs::AgentExecutorKind;
 use super::creation_jobs::{bundle_overrides, LiveCreationStore, StoreDeps};
 use super::fire_tick_seam::{drain_dispatch, DispatchJobsError, DispatchOutcome};
 use super::live_inputs::{
-    fetch_presence, gate_fn, gate_verdicts, order_universe, profile_fn, project_leads,
+    fetch_presence, gate_fn, gate_verdicts, order_universe, profile_fn, profile_verdicts,
+    project_leads,
 };
 use crate::run_dispatch::DispatchDecision;
 use crate::tasks_ticker::fire_binding::{
@@ -763,10 +764,11 @@ pub fn live_scheduler_dispatch(
                     .map_err(|error| error.to_string())?,
             );
             let verdicts = Arc::new(gate_verdicts(&assistant_seam, &presence).await);
+            let profiles = Arc::new(profile_verdicts(&assistant_seam, &presence).await);
             let deps = StoreDeps {
                 managed,
                 has_usable_llm_config: gate_fn(verdicts),
-                llm_profile: profile_fn(presence),
+                llm_profile: profile_fn(profiles),
             };
             let outcome = dispatch_scheduler_run(&pool, deps, binding.binding_id, now)
                 .await

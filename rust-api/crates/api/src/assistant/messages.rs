@@ -33,6 +33,7 @@ use axum::Router;
 use chrono::{DateTime, Utc};
 use pidash_db::assistant::event_queries::{message_envelope_json, MessageParts};
 use pidash_db::config::AssistantSettings;
+use pidash_types::assistant::surface::Surface;
 use uuid::Uuid;
 
 use super::common::{
@@ -197,6 +198,13 @@ async fn post_message(
     body: Bytes,
 ) -> HandlerResult<Response> {
     let pool = pool_ref(&state)?;
+    // Borrow the desktop signal before `extension` moves into auth, and
+    // reuse it for the turn's surface stamp below (NEWPIDASH-392).
+    let surface = if super::agent_profile::is_desktop_from_extension(&extension, &headers, &state) {
+        Surface::DesktopAssistant
+    } else {
+        Surface::WebAssistant
+    };
     let Some(actor) = request_actor(&state, pool, extension).await? else {
         return Err(unauthenticated());
     };
@@ -235,7 +243,7 @@ async fn post_message(
             MESSAGE_TOO_LONG_BODY.to_owned(),
         ));
     }
-    if !llm_gate_allows(&state, pool, &actor.id).await? {
+    if !llm_gate_allows(&state, pool, &actor.id, surface).await? {
         return Err(json_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             LLM_CONFIG_MISSING_BODY.to_owned(),
@@ -293,6 +301,9 @@ async fn post_message(
     // model defaults (`model_used=""`, `error_code=""`, `error_detail=""`,
     // `models.py:88-94`) — the columns are `NOT NULL` with no database
     // default, so the insert must carry the defaults explicitly.
+    // `surface` has a database default, but the server stamps it from the
+    // request session (computed above) so the turn resolves its model on
+    // the surface it ran on. The client never sends it.
     let turn_row = {
         use sea_orm::{ActiveModelTrait, Set};
         let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
@@ -301,6 +312,7 @@ async fn post_message(
             id: Set(uuid::Uuid::new_v4()),
             thread_id: Set(thread_id),
             status: Set("queued".to_owned()),
+            surface: Set(surface.as_str().to_owned()),
             model_used: Set(String::new()),
             error_code: Set(String::new()),
             error_detail: Set(String::new()),
@@ -439,11 +451,12 @@ async fn llm_gate_allows(
     state: &AppState,
     pool: &sqlx::PgPool,
     user_id: &Uuid,
+    surface: Surface,
 ) -> HandlerResult<bool> {
     let has_key = has_oss_api_key(pool, user_id).await?;
     Ok(state
         .assistant_seam()
-        .has_usable_llm_config(*user_id, has_key)
+        .has_usable_llm_config(*user_id, has_key, surface)
         .await)
 }
 
@@ -541,8 +554,9 @@ mod tests {
             &self,
             user_id: uuid::Uuid,
             has_api_key: bool,
+            surface: Surface,
         ) -> SeamFuture<'_, bool> {
-            let _ = (user_id, has_api_key);
+            let _ = (user_id, has_api_key, surface);
             Box::pin(async move { true })
         }
 
@@ -636,7 +650,7 @@ mod tests {
         let user_id = seed_user(&pool).await;
         let state = live_state(Some(Arc::new(GatewaySeam)));
         assert!(
-            llm_gate_allows(&state, &pool, &user_id)
+            llm_gate_allows(&state, &pool, &user_id, Surface::WebAssistant)
                 .await
                 .expect("gate reads"),
             "a seam that accepts the user must open the gate without an OSS key"
@@ -653,7 +667,7 @@ mod tests {
         let state = live_state(None);
         let keyless = seed_user(&pool).await;
         assert!(
-            !llm_gate_allows(&state, &pool, &keyless)
+            !llm_gate_allows(&state, &pool, &keyless, Surface::WebAssistant)
                 .await
                 .expect("gate reads"),
             "CE still denies a keyless user (the 422 path)"
@@ -661,7 +675,7 @@ mod tests {
         let keyed = seed_user(&pool).await;
         seed_llm_key(&pool, &keyed).await;
         assert!(
-            llm_gate_allows(&state, &pool, &keyed)
+            llm_gate_allows(&state, &pool, &keyed, Surface::WebAssistant)
                 .await
                 .expect("gate reads"),
             "CE still allows a user with a stored key"

@@ -1872,7 +1872,8 @@ impl SeedStore for PgSeedStore {
         now: DateTime<Utc>,
     ) -> Result<(), String> {
         use crate::orchestration::live_inputs::{
-            creator_universe, fetch_presence, gate_fn, gate_verdicts, profile_fn, JobsMatcher,
+            creator_universe, fetch_presence, gate_fn, gate_verdicts, profile_fn, profile_verdicts,
+            JobsMatcher,
         };
         use crate::orchestration::{LiveCreationStore, StoreDeps};
         use pidash_db::agent_runs::status::AgentRunTrigger;
@@ -1896,12 +1897,13 @@ impl SeedStore for PgSeedStore {
                 .map_err(Self::db_err)?,
         );
         let verdicts = std::sync::Arc::new(gate_verdicts(&self.assistant_seam, &presence).await);
+        let profiles = std::sync::Arc::new(profile_verdicts(&self.assistant_seam, &presence).await);
         // Built fresh per store (probe, drive and bounce take owned
         // deps; the driver consults preflight at most once per drive).
         let make_deps = || StoreDeps {
             managed: self.managed.clone(),
             has_usable_llm_config: gate_fn(verdicts.clone()),
-            llm_profile: profile_fn(presence.clone()),
+            llm_profile: profile_fn(profiles.clone()),
         };
         // `fire_state_transition` (`signals.py:74-107`): prior state
         // None (a create has no pre-save row), the seeded state, the

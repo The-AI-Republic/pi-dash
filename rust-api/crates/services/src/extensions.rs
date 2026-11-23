@@ -35,7 +35,12 @@ use std::future::Future;
 use std::pin::Pin;
 
 use pidash_types::assistant::errors::AssistantError;
+use pidash_types::assistant::surface::Surface;
 use uuid::Uuid;
+
+pub use crate::assistant::model_selection::{
+    ChoiceError, ChoiceOperational, ChoiceValidation, FallbackReason, ModelChoice, Resolution,
+};
 
 /// A seam future: boxed so the trait stays object-safe behind the
 /// `Arc<dyn AssistantModelSeam>` the serving state carries (the jobs
@@ -129,6 +134,9 @@ pub struct ByokTitleInputs {
 pub struct TitleRequest {
     pub user_id: Uuid,
     pub description: String,
+    /// The surface being titled (NEWPIDASH-392): the session surface for
+    /// the title button; the turn's surface on turn-time paths.
+    pub surface: Surface,
     /// `None` when the user holds no BYOK config row. CE answers
     /// `llm_config_missing` then; the overlay may route elsewhere.
     pub byok: Option<ByokTitleInputs>,
@@ -173,9 +181,17 @@ pub enum TitleError {
 pub trait AssistantModelSeam: Send + Sync + std::fmt::Debug {
     /// Cheap presence check for request-time gating. Must not build a
     /// model or decrypt anything; `has_api_key` is the caller's read of
-    /// the user's config.
-    fn has_usable_llm_config(&self, user_id: Uuid, has_api_key: bool) -> SeamFuture<'_, bool> {
-        let _ = user_id;
+    /// the user's config. `surface` selects the lane the answer is for
+    /// (run-creation and agent gates pass [`Surface::Agent`], chat gates
+    /// the request's surface); the CE default answers the key bit on
+    /// every surface.
+    fn has_usable_llm_config(
+        &self,
+        user_id: Uuid,
+        has_api_key: bool,
+        surface: Surface,
+    ) -> SeamFuture<'_, bool> {
+        let _ = (user_id, surface);
         Box::pin(async move { crate::assistant::seams::has_usable_llm_config(has_api_key) })
     }
 
@@ -225,12 +241,48 @@ pub trait AssistantModelSeam: Send + Sync + std::fmt::Debug {
 
     /// Human-readable label for the model a turn will use, recorded on the
     /// turn as `model_used`. Empty when the user has no configuration.
-    fn model_label(&self, configured: bool, byok_label: &str) -> String {
+    /// `surface` selects the lane the label is for; the CE default
+    /// answers the BYOK label on every surface.
+    fn model_label(&self, configured: bool, byok_label: &str, surface: Surface) -> String {
+        let _ = surface;
         if configured {
             byok_label.to_string()
         } else {
             String::new()
         }
+    }
+
+    /// One surface's model resolution (NEWPIDASH-392 §5): the effective
+    /// choice plus the fallback reason. The CE default has no database
+    /// wired, so it refuses loudly; the serving seam (`CeAssistantSeam`)
+    /// and the overlay override with their resolvers.
+    fn resolve_choice(
+        &self,
+        user_id: Uuid,
+        surface: Surface,
+    ) -> SeamFuture<'_, Result<Resolution, ChoiceOperational>> {
+        let _ = (user_id, surface);
+        Box::pin(async move {
+            Err(ChoiceOperational(
+                "no database wired for model resolution".to_owned(),
+            ))
+        })
+    }
+
+    /// Validate one model-selection entry without saving it
+    /// (NEWPIDASH-392 §6.1). Same default rule as [`Self::resolve_choice`].
+    fn validate_choice(
+        &self,
+        user_id: Uuid,
+        surface: Surface,
+        entry: &ModelChoice,
+    ) -> SeamFuture<'_, Result<ModelChoice, ChoiceError>> {
+        let _ = (user_id, surface, entry);
+        Box::pin(async move {
+            Err(ChoiceError::Operational(ChoiceOperational(
+                "no database wired for model validation".to_owned(),
+            )))
+        })
     }
 
     /// Single-prompt title for `request.description`, from the same
@@ -349,8 +401,21 @@ mod tests {
     #[tokio::test]
     async fn byok_presence_is_a_passthrough() {
         let seam = TestSeam;
-        assert!(seam.has_usable_llm_config(user(), true).await);
-        assert!(!seam.has_usable_llm_config(user(), false).await);
+        // The CE default answers the key bit on every surface.
+        for surface in [
+            Surface::WebAssistant,
+            Surface::DesktopAssistant,
+            Surface::Agent,
+        ] {
+            assert!(
+                seam.has_usable_llm_config(user(), true, surface).await,
+                "{surface} with key"
+            );
+            assert!(
+                !seam.has_usable_llm_config(user(), false, surface).await,
+                "{surface} without key"
+            );
+        }
     }
 
     #[tokio::test]
@@ -391,8 +456,13 @@ mod tests {
     #[test]
     fn model_label_is_empty_without_config() {
         let seam = TestSeam;
-        assert_eq!(seam.model_label(true, "gpt-x"), "gpt-x");
-        assert!(seam.model_label(false, "gpt-x").is_empty());
+        assert_eq!(
+            seam.model_label(true, "gpt-x", Surface::WebAssistant),
+            "gpt-x"
+        );
+        assert!(seam
+            .model_label(false, "gpt-x", Surface::WebAssistant)
+            .is_empty());
     }
 
     fn stt_input() -> SttResolution {
@@ -456,8 +526,13 @@ mod tests {
     struct OpenHubLikeSeam;
 
     impl AssistantModelSeam for OpenHubLikeSeam {
-        fn has_usable_llm_config(&self, user_id: Uuid, has_api_key: bool) -> SeamFuture<'_, bool> {
-            let _ = (user_id, has_api_key);
+        fn has_usable_llm_config(
+            &self,
+            user_id: Uuid,
+            has_api_key: bool,
+            surface: Surface,
+        ) -> SeamFuture<'_, bool> {
+            let _ = (user_id, has_api_key, surface);
             // The gateway lane counts as configured without a BYOK key.
             Box::pin(async move { true })
         }
@@ -507,7 +582,10 @@ mod tests {
     async fn replacement_seam_wins_behind_the_traits() {
         let seam = OpenHubLikeSeam;
         // Keyless yet usable: the gateway lane, not BYOK.
-        assert!(seam.has_usable_llm_config(user(), false).await);
+        assert!(
+            seam.has_usable_llm_config(user(), false, Surface::Agent)
+                .await
+        );
         let profile = seam.pidash_agent_profile(user(), false).await;
         assert!(profile.available);
         assert_eq!(profile.lane, "openhub");
@@ -528,6 +606,7 @@ mod tests {
             TitleRequest {
                 user_id: user(),
                 description: "Fix the thing".to_string(),
+                surface: Surface::WebAssistant,
                 byok: None,
             }
         }

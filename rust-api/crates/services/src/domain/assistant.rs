@@ -25,9 +25,10 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use pidash_db::entity::{
-    assistant_event, assistant_message, assistant_turn, assistant_user_llm_config,
+    assistant_event, assistant_message, assistant_turn, assistant_user_llm_config, profiles,
 };
 use pidash_db::orm_tx::into_sqlx;
+use pidash_types::assistant::surface::Surface;
 
 /// Run one bare-column `UPDATE`/`DELETE`-shaped statement for its row
 /// count.
@@ -93,6 +94,13 @@ pub struct LlmConfigSave<'a> {
     pub base_url: &'a str,
     pub model_name: &'a str,
     pub api_key_encrypted: &'a Option<Vec<u8>>,
+    /// The full model list (NEWPIDASH-392); writers keep
+    /// `model_name = models[0]`.
+    pub models: &'a [String],
+    /// The per-model verification map (NEWPIDASH-392).
+    pub model_verified_at: &'a Value,
+    /// The legacy stamp, kept on `models[0]` (NEWPIDASH-392 §4.5).
+    pub last_verified_at: Option<DateTime<Utc>>,
     pub existed: bool,
 }
 
@@ -108,6 +116,12 @@ fn config_save_update(
         .col_expr(C::ProviderKind, Expr::value(params.provider_kind))
         .col_expr(C::BaseUrl, Expr::value(params.base_url))
         .col_expr(C::ModelName, Expr::value(params.model_name))
+        .col_expr(C::Models, Expr::value(params.models.to_vec()))
+        .col_expr(
+            C::ModelVerifiedAt,
+            Expr::value(params.model_verified_at.clone()),
+        )
+        .col_expr(C::LastVerifiedAt, Expr::value(params.last_verified_at))
         .col_expr(
             C::ApiKeyEncrypted,
             Expr::value(params.api_key_encrypted.clone()),
@@ -128,7 +142,9 @@ fn config_insert_row(
         base_url: ActiveValue::Set(params.base_url.to_owned()),
         model_name: ActiveValue::Set(params.model_name.to_owned()),
         api_key_encrypted: ActiveValue::Set(params.api_key_encrypted.clone()),
-        last_verified_at: ActiveValue::Set(None),
+        last_verified_at: ActiveValue::Set(params.last_verified_at.map(Into::into)),
+        models: ActiveValue::Set(params.models.to_vec()),
+        model_verified_at: ActiveValue::Set(params.model_verified_at.clone()),
         created_at: ActiveValue::Set(now.into()),
         updated_at: ActiveValue::Set(now.into()),
         ..Default::default()
@@ -181,6 +197,181 @@ pub async fn stamp_llm_config_verified(
         .filter(assistant_user_llm_config::Column::UserId.eq(user_id));
     exec_update(db, update).await?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// profiles.settings assistant_models (NEWPIDASH-392)
+// ---------------------------------------------------------------------------
+
+/// The atomic single-surface write for
+/// [`save_assistant_model_entry`]: `UPDATE "profiles" SET "settings" =
+/// jsonb_set(COALESCE("settings", '{}'), '{assistant_models,<surface>}',
+/// $1::jsonb, true), "updated_at" = $2 WHERE "user_id" = $3`. One
+/// surface only — a concurrent profile PATCH of another namespace, or a
+/// concurrent write of another surface, never drops this entry (the
+/// read-modify-write race the design accepts is limited to the generic
+/// PATCH path, section 4.1).
+pub(crate) fn assistant_model_entry_stmt(
+    surface: Surface,
+    entry: &Value,
+    now: DateTime<Utc>,
+    user_id: Uuid,
+) -> UpdateMany<profiles::Entity> {
+    // SeaORM cannot express the jsonb_set path write itself, so
+    // `cust_with_values` binds the validated entry as one `$N` (the path
+    // embeds only the fixed enum spelling, never caller input).
+    let path = format!("{{assistant_models,{}}}", surface.as_str());
+    // raw-sql: no SeaORM jsonb_set path-write builder.
+    let settings = Expr::cust_with_values(
+        format!("jsonb_set(COALESCE(\"settings\", '{{}}'), '{path}', $1::jsonb, true)"),
+        [entry.clone()],
+    );
+    profiles::Entity::update_many()
+        .col_expr(profiles::Column::Settings, settings)
+        .col_expr(profiles::Column::UpdatedAt, Expr::value(now))
+        .filter(profiles::Column::UserId.eq(user_id))
+}
+
+/// Save one surface's model choice (`entry` is the validated
+/// `{model, connection_id?}` object) without touching other surfaces or
+/// namespaces. Returns the rows matched.
+pub async fn save_assistant_model_entry(
+    db: &impl ConnectionTrait,
+    user_id: Uuid,
+    surface: Surface,
+    entry: &Value,
+    now: DateTime<Utc>,
+) -> Result<u64, sqlx::Error> {
+    exec_update(db, assistant_model_entry_stmt(surface, entry, now, user_id)).await
+}
+
+/// Save one surface's model choice, creating the profile row when the
+/// user has none (harness-seeded and pre-profile users): the atomic
+/// update first, else an insert carrying the Django model defaults
+/// (`db/models/user.py::Profile`, except the random theme color, which
+/// is fixed white) with the entry already in the settings bag, else —
+/// on a lost create race — the update once more.
+pub async fn upsert_assistant_model_entry(
+    db: &impl ConnectionTrait,
+    user_id: Uuid,
+    surface: Surface,
+    entry: &Value,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    if save_assistant_model_entry(db, user_id, surface, entry, now).await? > 0 {
+        return Ok(());
+    }
+    let mut bag = serde_json::Map::with_capacity(1);
+    let mut surface_map = serde_json::Map::with_capacity(1);
+    surface_map.insert(surface.as_str().to_owned(), entry.clone());
+    bag.insert(
+        crate::assistant::model_selection::ASSISTANT_MODELS_NAMESPACE.to_owned(),
+        Value::Object(surface_map),
+    );
+    let insert = profiles::ActiveModel {
+        id: ActiveValue::Set(Uuid::new_v4()),
+        user_id: ActiveValue::Set(user_id),
+        theme: ActiveValue::Set(serde_json::json!({})),
+        is_app_rail_docked: ActiveValue::Set(true),
+        is_tour_completed: ActiveValue::Set(false),
+        onboarding_step: ActiveValue::Set(serde_json::json!({
+            "profile_complete": false,
+            "workspace_create": false,
+            "workspace_invite": false,
+            "workspace_join": false,
+        })),
+        use_case: ActiveValue::Set(None),
+        role: ActiveValue::Set(None),
+        is_onboarded: ActiveValue::Set(false),
+        last_workspace_id: ActiveValue::Set(None),
+        billing_address_country: ActiveValue::Set("INDIA".to_owned()),
+        billing_address: ActiveValue::Set(None),
+        has_billing_address: ActiveValue::Set(false),
+        company_name: ActiveValue::Set(String::new()),
+        notification_view_mode: ActiveValue::Set("full".to_owned()),
+        is_smooth_cursor_enabled: ActiveValue::Set(false),
+        is_mobile_onboarded: ActiveValue::Set(false),
+        mobile_onboarding_step: ActiveValue::Set(serde_json::json!({
+            "profile_complete": false,
+            "workspace_create": false,
+            "workspace_join": false,
+        })),
+        mobile_timezone_auto_set: ActiveValue::Set(false),
+        language: ActiveValue::Set("en".to_owned()),
+        start_of_the_week: ActiveValue::Set(0i16),
+        goals: ActiveValue::Set(serde_json::json!({})),
+        background_color: ActiveValue::Set("#FFFFFF".to_owned()),
+        is_navigation_tour_completed: ActiveValue::Set(false),
+        has_marketing_email_consent: ActiveValue::Set(false),
+        is_subscribed_to_changelog: ActiveValue::Set(false),
+        product_tour: ActiveValue::Set(serde_json::json!({
+            "work_items": false,
+            "cycles": false,
+            "modules": false,
+            "intake": false,
+            "pages": false,
+        })),
+        settings: ActiveValue::Set(Value::Object(bag)),
+        created_at: ActiveValue::Set(now.into()),
+        updated_at: ActiveValue::Set(now.into()),
+    };
+    match profiles::Entity::insert(insert).exec(db).await {
+        Ok(_) => Ok(()),
+        Err(insert_err) => {
+            if save_assistant_model_entry(db, user_id, surface, entry, now).await? > 0 {
+                Ok(())
+            } else {
+                Err(into_sqlx(insert_err))
+            }
+        }
+    }
+}
+
+/// The atomic single-surface clear for [`clear_assistant_model_entry`]:
+/// `UPDATE "profiles" SET "settings" = "settings" #-
+/// '{assistant_models,<surface>}', "updated_at" = $1 WHERE "user_id" =
+/// $2` (clearing the entry restores the default; the saved row is kept
+/// nowhere else).
+pub(crate) fn assistant_model_clear_stmt(
+    surface: Surface,
+    now: DateTime<Utc>,
+    user_id: Uuid,
+) -> UpdateMany<profiles::Entity> {
+    // SeaORM cannot express the jsonb `#-` delete itself (the path embeds
+    // only the fixed enum spelling, never caller input).
+    let path = format!("{{assistant_models,{}}}", surface.as_str());
+    // raw-sql: no SeaORM jsonb delete-path builder.
+    let settings = Expr::cust(format!("\"settings\" #- '{path}'"));
+    profiles::Entity::update_many()
+        .col_expr(profiles::Column::Settings, settings)
+        .col_expr(profiles::Column::UpdatedAt, Expr::value(now))
+        .filter(profiles::Column::UserId.eq(user_id))
+}
+
+/// Clear one surface's model choice without touching other surfaces or
+/// namespaces. Returns the rows matched.
+pub async fn clear_assistant_model_entry(
+    db: &impl ConnectionTrait,
+    user_id: Uuid,
+    surface: Surface,
+    now: DateTime<Utc>,
+) -> Result<u64, sqlx::Error> {
+    exec_update(db, assistant_model_clear_stmt(surface, now, user_id)).await
+}
+
+/// Read one user's stored `profiles.settings` bag (`None` when the user
+/// has no profile row). The model-selection resolver parses its
+/// `assistant_models` namespace from this.
+pub async fn read_settings_bag(
+    db: &impl ConnectionTrait,
+    user_id: Uuid,
+) -> Result<Option<Value>, sqlx::Error> {
+    let row = profiles::Entity::find()
+        .filter(profiles::Column::UserId.eq(user_id))
+        .one(db)
+        .await
+        .map_err(into_sqlx)?;
+    Ok(row.map(|row| row.settings))
 }
 
 /// Resolved inputs for [`insert_llm_config`]: the full non-pk row.
@@ -857,12 +1048,17 @@ mod tests {
     #[test]
     fn assistant_statement_shapes() {
         let key = Some(b"k".to_vec());
+        let models = vec!["m".to_owned()];
+        let verified = serde_json::json!({"m": "2026-11-05T10:00:00.000000+00:00"});
         let save = LlmConfigSave {
             user_id: uid(1),
             provider_kind: "anthropic",
             base_url: "https://b",
             model_name: "m",
             api_key_encrypted: &key,
+            models: &models,
+            model_verified_at: &verified,
+            last_verified_at: Some(pin_time()),
             existed: true,
         };
         let full = LlmConfigFullSave {
@@ -904,7 +1100,7 @@ mod tests {
             )),
         ];
         let want = [
-            r#"UPDATE "assistant_user_llm_config" SET "provider_kind" = 'anthropic', "base_url" = 'https://b', "model_name" = 'm', "api_key_encrypted" = '\x6B', "updated_at" = '2026-11-05 10:00:00.000000 +00:00' WHERE "assistant_user_llm_config"."user_id" = '00000000-0000-0000-0000-000000000001'"#,
+            r#"UPDATE "assistant_user_llm_config" SET "provider_kind" = 'anthropic', "base_url" = 'https://b', "model_name" = 'm', "models" = ARRAY ['m'], "model_verified_at" = E'{\"m\":\"2026-11-05T10:00:00.000000+00:00\"}', "last_verified_at" = '2026-11-05 10:00:00.000000 +00:00', "api_key_encrypted" = '\x6B', "updated_at" = '2026-11-05 10:00:00.000000 +00:00' WHERE "assistant_user_llm_config"."user_id" = '00000000-0000-0000-0000-000000000001'"#,
             r#"UPDATE "assistant_user_llm_config" SET "user_id" = '00000000-0000-0000-0000-000000000001', "provider_kind" = 'anthropic', "base_url" = 'https://b', "model_name" = 'm', "api_key_encrypted" = '\x6B', "last_verified_at" = NULL, "created_at" = '2026-11-05 10:00:00.000000 +00:00', "updated_at" = '2026-11-05 10:00:00.000000 +00:00' WHERE "assistant_user_llm_config"."id" = 7"#,
             r#"INSERT INTO "assistant_message" ("id", "thread_id", "turn_id", "seq", "kind", "display_content", "payload", "status", "created_at", "completed_at") VALUES (gen_random_uuid(), '00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000003', 4, 'user', 'hi', '{}', 'completed', CURRENT_TIMESTAMP, NULL) RETURNING "id", "kind", "display_content", "status", "seq", "turn_id", CAST("payload" AS text), "created_at", "completed_at""#,
             r#"INSERT INTO "assistant_message" ("id", "thread_id", "turn_id", "seq", "kind", "display_content", "payload", "status", "created_at") VALUES ('00000000-0000-0000-0000-000000000005', '00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000003', (SELECT COALESCE(MAX("seq"), 0) + 1 FROM "assistant_message" WHERE "thread_id" = '00000000-0000-0000-0000-000000000002'), 'tool_result', 'sum', E'{\"a\":1}', 'completed', '2026-11-05 10:00:00.000000 +00:00')"#,
@@ -917,6 +1113,74 @@ mod tests {
         for (got, want) in got.iter().zip(want) {
             assert_eq!(got, want);
         }
+    }
+
+    /// Statement-shape pins for the per-surface model-choice writes: one
+    /// surface in, the rest of the bag untouched (the atomicity the
+    /// model-selection endpoint depends on).
+    #[test]
+    fn assistant_model_choice_statement_shapes() {
+        let entry = serde_json::json!({"model": "gpt-6"});
+        let save = render_update(assistant_model_entry_stmt(
+            Surface::WebAssistant,
+            &entry,
+            pin_time(),
+            uid(1),
+        ));
+        assert_eq!(
+            save,
+            r#"UPDATE "profiles" SET "settings" = jsonb_set(COALESCE("settings", '{}'), '{assistant_models,web_assistant}', E'{\"model\":\"gpt-6\"}'::jsonb, true), "updated_at" = '2026-11-05 10:00:00.000000 +00:00' WHERE "profiles"."user_id" = '00000000-0000-0000-0000-000000000001'"#
+        );
+        let clear = render_update(assistant_model_clear_stmt(
+            Surface::Agent,
+            pin_time(),
+            uid(1),
+        ));
+        assert_eq!(
+            clear,
+            r#"UPDATE "profiles" SET "settings" = "settings" #- '{assistant_models,agent}', "updated_at" = '2026-11-05 10:00:00.000000 +00:00' WHERE "profiles"."user_id" = '00000000-0000-0000-0000-000000000001'"#
+        );
+    }
+
+    /// Live-db half for the per-surface model-choice writes: save + clear
+    /// against a random user (no profiles row, so 0 rows — the point is
+    /// the statements parse, plan and execute, catching wrong arity or
+    /// bad path syntax the shape pins cannot see). A full roundtrip runs
+    /// in the model-selection endpoint tests, where the harness seeds
+    /// users with profiles.
+    #[tokio::test]
+    async fn assistant_model_choice_writes_parse_live() {
+        let url = match std::env::var("DATABASE_URL") {
+            Ok(url) => url,
+            Err(_) => {
+                eprintln!("skipping live-db test: DATABASE_URL is not set");
+                return;
+            }
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        let mut tx = pool.begin().await.expect("begin");
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        let user_id = Uuid::new_v4();
+        let entry = serde_json::json!({"model": "gpt-6"});
+        for surface in [
+            Surface::WebAssistant,
+            Surface::DesktopAssistant,
+            Surface::Agent,
+        ] {
+            let saved = save_assistant_model_entry(&conn, user_id, surface, &entry, pin_time())
+                .await
+                .expect("save parses");
+            assert_eq!(saved, 0, "no profiles row for a random user");
+            let cleared = clear_assistant_model_entry(&conn, user_id, surface, pin_time())
+                .await
+                .expect("clear parses");
+            assert_eq!(cleared, 0, "no profiles row for a random user");
+        }
+        tx.rollback().await.expect("rollback");
     }
 
     /// Live-db half: config save/delete/stamp plus message
@@ -940,6 +1204,8 @@ mod tests {
         let mut tx = pool.begin().await.expect("begin");
         let user_id = Uuid::new_v4();
         let key = Some(b"live-key-blob".to_vec());
+        let live_models = ["live-model".to_owned()];
+        let empty_verified = serde_json::json!({});
         save_llm_config(
             &pidash_db::orm_tx::TxConn::new(&mut tx),
             &LlmConfigSave {
@@ -948,11 +1214,16 @@ mod tests {
                 base_url: "https://live.example.com/v1",
                 model_name: "live-model",
                 api_key_encrypted: &key,
+                models: &live_models,
+                model_verified_at: &empty_verified,
+                last_verified_at: None,
                 existed: false,
             },
         )
         .await
         .expect("insert config");
+        let live_models_2 = ["live-model-2".to_owned()];
+        let verified_2 = serde_json::json!({"live-model-2": "2026-01-02T03:04:05+00:00"});
         save_llm_config(
             &pidash_db::orm_tx::TxConn::new(&mut tx),
             &LlmConfigSave {
@@ -961,6 +1232,13 @@ mod tests {
                 base_url: "https://live.example.com/v2",
                 model_name: "live-model-2",
                 api_key_encrypted: &key,
+                models: &live_models_2,
+                model_verified_at: &verified_2,
+                last_verified_at: Some(
+                    DateTime::parse_from_rfc3339("2026-01-02T03:04:05Z")
+                        .expect("pin time")
+                        .with_timezone(&Utc),
+                ),
                 existed: true,
             },
         )
@@ -973,15 +1251,26 @@ mod tests {
         )
         .await
         .expect("stamp config");
-        let row: (String, Option<DateTime<Utc>>) = sqlx::query_as(
-            "SELECT base_url, last_verified_at FROM assistant_user_llm_config WHERE user_id = $1",
-        )
-        .bind(user_id)
-        .fetch_one(&mut *tx)
-        .await
-        .expect("read config");
+        let row: (String, Option<DateTime<Utc>>, Vec<String>, serde_json::Value) =
+            sqlx::query_as(
+                "SELECT base_url, last_verified_at, models, model_verified_at FROM assistant_user_llm_config WHERE user_id = $1",
+            )
+            .bind(user_id)
+            .fetch_one(&mut *tx)
+            .await
+            .expect("read config");
         assert_eq!(row.0, "https://live.example.com/v2");
         assert!(row.1.is_some(), "verified stamp set");
+        assert_eq!(
+            row.2,
+            vec!["live-model-2".to_owned()],
+            "models follow model_name"
+        );
+        assert_eq!(
+            row.3,
+            serde_json::json!({"live-model-2": "2026-01-02T03:04:05+00:00"}),
+            "verified map round-trips"
+        );
         delete_llm_config(&pidash_db::orm_tx::TxConn::new(&mut tx), user_id)
             .await
             .expect("delete");

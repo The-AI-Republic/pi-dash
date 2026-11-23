@@ -85,7 +85,8 @@ use uuid::Uuid;
 
 use crate::issue_transition::{fire_transition, PodDrain, PublishEffectsDrain};
 use crate::orchestration::live_inputs::{
-    creator_universe, fetch_presence, gate_fn, gate_verdicts, profile_fn, JobsMatcher,
+    creator_universe, fetch_presence, gate_fn, gate_verdicts, profile_fn, profile_verdicts,
+    JobsMatcher,
 };
 use crate::orchestration::StoreDeps;
 use crate::queue::{self, NewJob};
@@ -432,10 +433,11 @@ impl IssueTransitionHook for TransitionHook {
                 },
             )?);
             let verdicts = Arc::new(gate_verdicts(&deps.assistant_seam, &presence).await);
+            let profiles = Arc::new(profile_verdicts(&deps.assistant_seam, &presence).await);
             let build_deps = || StoreDeps {
                 managed: deps.managed.clone(),
                 has_usable_llm_config: gate_fn(Arc::clone(&verdicts)),
-                llm_profile: profile_fn(Arc::clone(&presence)),
+                llm_profile: profile_fn(Arc::clone(&profiles)),
             };
             let matcher = JobsMatcher::new(deps.pool.clone());
             fire_transition(
