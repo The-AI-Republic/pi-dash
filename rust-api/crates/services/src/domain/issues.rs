@@ -3266,11 +3266,14 @@ pub struct BulkArchiveRow {
     pub origin: String,
 }
 
-/// `POST .../bulk-archive-issues/` (`archive.py:306-344`): each row's
-/// `issue_activity` runs inside the driver's per-row loop (a later row's
-/// gate failure 400s with the earlier rows' tasks already enqueued), and
-/// the single `bulk_update(["archived_at"])` runs after — no `save()`,
-/// no recomputes, no fire. Pool-based (autocommit), like the port.
+/// `POST .../bulk-archive-issues/` (`archive.py:306-344`): the driver
+/// validates every row's state group first, runs the single
+/// `bulk_update(["archived_at"])`, and only then enqueues each row's
+/// `issue_activity` — no `save()`, no recomputes, no fire.
+/// Pool-based (autocommit), like the port. DIFF-64 (old bug fix,
+/// NEWPIDASH-352, PB-0302): the old system enqueues inside the
+/// per-row loop, so a later row's gate failure 400s with the earlier
+/// rows' tasks already enqueued; the port no longer does that.
 pub async fn bulk_archive_activity(
     enqueue: &Arc<dyn TaskEnqueueHook>,
     row: &BulkArchiveRow,

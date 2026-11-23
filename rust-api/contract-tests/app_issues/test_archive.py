@@ -6,6 +6,7 @@ throwaways so the seed is untouched.
 """
 
 import json
+import os
 import time
 
 from _harness.diffs import expect, is_rust
@@ -23,9 +24,77 @@ ARCHIVE_DETAIL_KEYS = {
 
 FORBIDDEN = {"error": "You don't have the required permissions."}
 
+ISSUE_TASK = "pi_dash.bgtasks.issue_activities_task.issue_activity"
+
 
 def _base(ws, pid):
     return f"/api/workspaces/{ws}/projects/{pid}"
+
+
+def _drain_broker():
+    """Pending Celery-protocol messages (Django's transport; [] without one)."""
+    if not os.environ.get("CELERY_BROKER_URL"):
+        return []
+    from _harness import broker_probe
+
+    # Drain to empty: the matrix runs workerless, so every earlier test's
+    # .delay() piles up on the broker and the default 100-message cap
+    # would stop short of this test's job (oldest first).
+    return broker_probe.drain_queue(limit=10000)
+
+
+def _rust_rows(db_conn, task, after_id):
+    """Rows Rust serve left in ``rust_job_queue`` ([], table may be absent)."""
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.rust_job_queue')")
+        if cur.fetchone()[0] is None:
+            return []
+        cur.execute(
+            "SELECT task, args, kwargs FROM rust_job_queue"
+            " WHERE id > %s AND task = %s",
+            (after_id, task),
+        )
+        out = []
+        for found_task, args, kwargs in cur.fetchall():
+            out.append({
+                "task": found_task,
+                "args": args if isinstance(args, list) else json.loads(args),
+                "kwargs": kwargs if isinstance(kwargs, dict) else json.loads(kwargs),
+            })
+        return out
+
+
+def _queue_baseline(db_conn):
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.rust_job_queue')")
+        if cur.fetchone()[0] is None:
+            return 0
+        cur.execute("SELECT COALESCE(MAX(id), 0) FROM rust_job_queue")
+        return cur.fetchone()[0]
+
+
+def _reset_transports(db_conn):
+    """Discard pending broker messages; return the rust queue baseline."""
+    _drain_broker()
+    return _queue_baseline(db_conn)
+
+
+def _archived_activity_kwargs(db_conn, baseline, actor_id):
+    """New ``issue.activity.updated`` enqueues carrying ``archived_at``."""
+    out = []
+    for headers, payload in _drain_broker():
+        if (headers or {}).get("task") != ISSUE_TASK:
+            continue
+        kwargs = payload[1] if isinstance(payload, list) and len(payload) > 1 else {}
+        if isinstance(kwargs, dict) and str(kwargs.get("actor_id")) == str(actor_id):
+            out.append(kwargs)
+    for row in _rust_rows(db_conn, ISSUE_TASK, baseline):
+        if str(row["kwargs"].get("actor_id")) == str(actor_id):
+            out.append(row["kwargs"])
+    return [
+        kwargs for kwargs in out
+        if "archived_at" in json.loads(kwargs["requested_data"])
+    ]
 
 
 def test_archived_list_shape(clients, seed):
@@ -528,3 +597,56 @@ def test_archived_grouped_state_totals_count_archived_rows(clients, seed):
     finally:
         admin.request(
             "DELETE", f"{_base(ws, pid)}/issues/{seed['issue3']}/archive/")
+
+
+def test_bulk_archive_rejected_enqueues_no_archive_activity(clients, seed, db_conn):
+    # NEWPIDASH-352 (DIFF-64, old bug fix, PB-0302): bulk-archive used to
+    # enqueue the "archived" activity per valid issue and only then hit
+    # the 400 on the first open-state row, leaving false archive history
+    # with nothing archived. The fix validates every row first, then
+    # writes the UPDATE, then enqueues — so a 400 enqueues nothing and
+    # the 400 body stays byte-identical.
+    # The suite runs workerless on both halves (app_issues is not in
+    # WORKER_SUITES), so the test observes the enqueue itself: Django's
+    # .delay() on the Celery broker, Rust's INSERT into rust_job_queue
+    # (the NEWPIDASH-25 pattern from test_issue_bulk.py). That enqueue is
+    # what a worker turns into the issue_activities row.
+    admin = clients["admin"]
+    ws, pid, done = seed["ws_slug"], seed["project"], seed["state_done"]
+    first = admin.post(
+        f"{_base(ws, pid)}/issues/", json={"name": "DIFF-64 open issue"})
+    assert first.status_code == 201, first.text
+    open_id = first.json()["id"]
+    second = admin.post(
+        f"{_base(ws, pid)}/issues/", json={"name": "DIFF-64 done issue"})
+    assert second.status_code == 201, second.text
+    done_id = second.json()["id"]
+    try:
+        assert admin.patch(
+            f"{_base(ws, pid)}/issues/{done_id}/",
+            json={"state_id": done}).status_code == 204
+        # Both backends gate newest-first (Django Issue.Meta.ordering is
+        # -created_at; Rust orders by created_at desc), so the done issue
+        # created second is checked first: the old code enqueues for it,
+        # then 400s on the open one.
+        baseline = _reset_transports(db_conn)
+        resp = admin.post(
+            f"{_base(ws, pid)}/bulk-archive-issues/",
+            json={"issue_ids": [done_id, open_id]})
+        assert resp.status_code == 400, resp.text
+        assert resp.json() == {
+            "error_code": 4091, "error_message": "INVALID_ARCHIVE_STATE_GROUP"}
+        with db_conn.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM issues WHERE id = ANY(%s)"
+                " AND archived_at IS NULL",
+                ([done_id, open_id],),
+            )
+            assert {str(row[0]) for row in cur.fetchall()} == {done_id, open_id}
+        acts = _archived_activity_kwargs(db_conn, baseline, seed["admin"])
+        assert [act["issue_id"] for act in acts] == expect(
+            "DIFF-64", django=[done_id], rust=[])
+    finally:
+        _drain_broker()
+        admin.delete(f"{_base(ws, pid)}/issues/{done_id}/")
+        admin.delete(f"{_base(ws, pid)}/issues/{open_id}/")
