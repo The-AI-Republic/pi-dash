@@ -1,96 +1,108 @@
+# OSS self-host: the active system only (NEWPIDASH-382).
+#
+# Services: web_new (React SPA), api + worker (Rust image and entrypoints),
+# migrator, live, pi-dash-db, pi-dash-redis, pi-dash-minio and proxy (Caddy).
+# There is no web, admin, space, beat-worker or RabbitMQ service: the old
+# frontends and the Django/Celery stack are frozen and never run here.
+#
+# Migrator interim (NEWPIDASH-380): the migrator below runs Django
+# `python manage.py migrate` from the apps/api image. It is the only Python
+# container, and it exits after migrating. TODO(NEWPIDASH-380): swap it for
+# the native `pidash-api migrate up` image and entrypoint, and drop the
+# apps/api build. Until then, api and worker keep `wait_for_migrations`
+# (NEWPIDASH-378 swaps it for the fail-fast check); nothing else polls.
+#
+# Migration order: api and worker start only after the migrator completes
+# successfully, and setup.sh (plus the documented upgrade command) runs
+# `docker compose run --rm migrator` first and stops with a nonzero exit
+# when it fails.
+
+x-rust-cutover-flags: &rust-cutover-flags
+  # Rust-only edge interim (NEWPIDASH-381): explicit 1s plus a dead upstream.
+  # Redundant under 381's defaults but harmless, so a rollback needs no
+  # compose change. The upstream is the discard port on loopback: nothing
+  # listens there, and it is never contacted while every flag below is 1.
+  PIDASH_RUST_WEB: "1"
+  PIDASH_RUST_APP: "1"
+  PIDASH_RUST_ASSISTANT: "1"
+  PIDASH_RUST_LOOP: "1"
+  PIDASH_RUST_PROMPTING: "1"
+  PIDASH_RUST_SPACE: "1"
+  PIDASH_RUST_LICENSE: "1"
+  PIDASH_RUST_RUNNER_WEB: "1"
+  PIDASH_RUST_API_V1: "1"
+  PIDASH_RUST_RUNNER: "1"
+  PIDASH_RUST_AUTH: "1"
+  PIDASH_DJANGO_UPSTREAM: http://127.0.0.1:9
+
 services:
-  web:
-    container_name: web
+  web_new:
+    container_name: web_new
     build:
       context: .
-      dockerfile: ./apps/web/Dockerfile.web
+      dockerfile: ./apps/web_new/Dockerfile.web-new
       args:
         DOCKER_BUILDKIT: 1
     restart: always
-    depends_on:
-      - api
-
-  admin:
-    container_name: admin
-    build:
-      context: .
-      dockerfile: ./apps/admin/Dockerfile.admin
-      args:
-        DOCKER_BUILDKIT: 1
-    restart: always
-    depends_on:
-      - api
-      - web
-
-  space:
-    container_name: space
-    build:
-      context: .
-      dockerfile: ./apps/space/Dockerfile.space
-      args:
-        DOCKER_BUILDKIT: 1
-    restart: always
-    depends_on:
-      - api
-      - web
 
   api:
     container_name: api
     build:
-      context: ./apps/api
-      dockerfile: Dockerfile.api
+      context: .
+      dockerfile: ./rust-api/Dockerfile.api
       args:
         DOCKER_BUILDKIT: 1
     restart: always
     command: ./bin/docker-entrypoint-api.sh
     env_file:
-      - ./apps/api/.env
-    # apps/api/.env points the live server at localhost:3100 (works for
-    # `pnpm dev` on the host). Inside docker-compose the live service is
-    # reachable as `live` on the PORT from apps/live/.env; without this
-    # override every page write fails with 503 "LIVE_URL is not
-    # configured" / "the live server is unreachable".
+      - ./rust-api/.env
     environment:
-      LIVE_BASE_URL: http://live:3100
+      <<: *rust-cutover-flags
+      PORT: "8000"
     depends_on:
-      - pi-dash-db
-      - pi-dash-redis
+      migrator:
+        condition: service_completed_successfully
+      pi-dash-db:
+        condition: service_healthy
+      pi-dash-redis:
+        condition: service_healthy
+    expose:
+      - "8000"
+    # No curl/wget/Python in the Rust image (rust-api/Dockerfile.api), so
+    # the probe is bash's /dev/tcp against /healthz (serve answers
+    # {"status":"ok",...} there).
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8000 && printf \"GET /healthz HTTP/1.0\\r\\n\\r\\n\" >&3 && head -c 64 <&3 | grep -q \" 200 \"'",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
 
   worker:
     container_name: bgworker
     build:
-      context: ./apps/api
-      dockerfile: Dockerfile.api
+      context: .
+      dockerfile: ./rust-api/Dockerfile.api
       args:
         DOCKER_BUILDKIT: 1
     restart: always
     command: ./bin/docker-entrypoint-worker.sh
     env_file:
-      - ./apps/api/.env
-    # Same docker-aware live-server override as the api service; the
-    # worker also regenerates documents (bgtasks/copy_s3_object.py).
+      - ./rust-api/.env
     environment:
-      LIVE_BASE_URL: http://live:3100
+      <<: *rust-cutover-flags
+    # The scheduler runs inside the worker; there is no beat service.
     depends_on:
-      - api
-      - pi-dash-db
-      - pi-dash-redis
-
-  beat-worker:
-    container_name: beatworker
-    build:
-      context: ./apps/api
-      dockerfile: Dockerfile.api
-      args:
-        DOCKER_BUILDKIT: 1
-    restart: always
-    command: ./bin/docker-entrypoint-beat.sh
-    env_file:
-      - ./apps/api/.env
-    depends_on:
-      - api
-      - pi-dash-db
-      - pi-dash-redis
+      migrator:
+        condition: service_completed_successfully
+      pi-dash-db:
+        condition: service_healthy
+      pi-dash-redis:
+        condition: service_healthy
 
   migrator:
     container_name: pi-dash-migrator
@@ -99,13 +111,15 @@ services:
       dockerfile: Dockerfile.api
       args:
         DOCKER_BUILDKIT: 1
-    restart: no
     command: ./bin/docker-entrypoint-migrator.sh
     env_file:
       - ./apps/api/.env
     depends_on:
-      - pi-dash-db
-      - pi-dash-redis
+      pi-dash-db:
+        condition: service_healthy
+      pi-dash-redis:
+        condition: service_started
+    restart: "no"
 
   live:
     container_name: pi-dash-live
@@ -115,26 +129,30 @@ services:
       args:
         DOCKER_BUILDKIT: 1
     restart: always
-    # Live needs API_BASE_URL + LIVE_SERVER_SECRET_KEY at runtime;
-    # without env_file it crash-loops with "Invalid environment variables".
     env_file:
-      - ./apps/live/.env
-    # The .env at apps/live/.env points Redis at localhost (works for
-    # `pnpm dev` on the host). Inside docker-compose the actual host is
-    # pi-dash-redis; the explicit environment entries below shadow the
-    # .env values so the container connects to the compose-network
-    # service. API_BASE_URL gets the same docker-aware override so live
-    # talks to the api container, not the host.
+      - ./rust-api/.env
     environment:
-      REDIS_HOST: pi-dash-redis
-      REDIS_PORT: 6379
-      REDIS_URL: redis://pi-dash-redis:6379/
-      API_BASE_URL: http://api:8000
-    # pi-dash-redis lives on the dev_env network defined in
-    # docker-compose-local.yml; without joining it, live's getaddrinfo
-    # for pi-dash-redis fails (EAI_AGAIN).
-    networks:
-      - dev_env
+      # Live defaults to PORT 3000 in code (apps/live/src/env.ts); the 3100
+      # in apps/live/.env.example is host-dev only. Caddy proxies to
+      # live:3000, so the compose value must be 3000.
+      PORT: "3000"
+    depends_on:
+      api:
+        condition: service_healthy
+      pi-dash-redis:
+        condition: service_healthy
+    expose:
+      - "3000"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O /dev/null http://127.0.0.1:3000/live/health/",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
 
   pi-dash-db:
     container_name: pi-dash-db
@@ -150,6 +168,12 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       PGDATA: /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   pi-dash-redis:
     container_name: pi-dash-redis
@@ -157,19 +181,12 @@ services:
     restart: always
     volumes:
       - redisdata:/data
-
-  pi-dash-mq:
-    container_name: pi-dash-mq
-    image: rabbitmq:3.13.6-management-alpine
-    restart: always
-    env_file:
-      - .env
-    environment:
-      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
-      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST}
-    volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   pi-dash-minio:
     container_name: pi-dash-minio
@@ -205,13 +222,12 @@ services:
       CERT_ACME_DNS: ${CERT_ACME_DNS:-}
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-0.0.0.0/0}
     depends_on:
-      - web
+      - web_new
       - api
-      - space
-      - admin
+      - live
+      - pi-dash-minio
 
 volumes:
   pgdata:
   redisdata:
   uploads:
-  rabbitmq_data:

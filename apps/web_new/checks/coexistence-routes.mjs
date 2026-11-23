@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Coexistence routing (F-09/NEWFRONT-20, workspace-scoped form NEWFRONT-528).
-// The proxy serves listed routes from web_new and everything else from the
-// old app, on one origin (so the session cookie is shared — no origin or
-// cookie change is involved). The single source of truth is
-// apps/web_new/migrated-routes.json.
+// The proxy serves listed routes from web_new, and the CE catch-all sends
+// everything else to web_new too (NEWPIDASH-382 — the old app is frozen
+// and unserved), on one origin (so the session cookie is shared — no
+// origin or cookie change is involved). The single source of truth is
+// apps/web_new/migrated-routes.json. The AIO Caddyfile keeps its own
+// catch-all (it serves the old bundle from disk; NEWPIDASH-383 owns it).
 //
 // Entry grammar (one entry per route):
 //   /a/b           literal path; serves it and its subtree (unchanged)
@@ -46,10 +48,10 @@ const MARK_BEGIN =
   "BEGIN MIGRATED ROUTES (generated from apps/web_new/migrated-routes.json — do not edit; run `pnpm --filter web_new coexistence:generate`)";
 const MARK_END = "END MIGRATED ROUTES";
 
-const CE_ANCHOR = "\treverse_proxy /* web:3000";
+const CE_ANCHOR = "\treverse_proxy /* web_new:3000";
 const AIO_ANCHOR = "    handle_path /* {";
 
-const EMPTY_NOTE = "(none — the list is empty, so every path routes to the old app)";
+const EMPTY_NOTE = "(none — the list is empty, so every path routes to web_new via the catch-all)";
 
 const VARIABLE_SEGMENT = /^\{([A-Za-z][A-Za-z0-9]*)\}$/;
 const RESERVED_ENTRY = /^[a-z0-9][a-z0-9-]*$/;
@@ -212,7 +214,7 @@ function matcherBlock(route, indent) {
 
 /**
  * Route lines for the CE Caddyfile (tab-indented, matcher style). The block
- * sits above the old app's catch-all; earlier handlers win.
+ * sits above web_new's catch-all; earlier handlers win.
  */
 export function buildCeLines(entries, reservedTopLevel = []) {
   if (entries.length === 0) return [`\t# ${EMPTY_NOTE}`];

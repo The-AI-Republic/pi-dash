@@ -65,12 +65,9 @@ jobs:
       gh_buildx_platforms: ${{ steps.set_env_variables.outputs.BUILDX_PLATFORMS }}
       gh_buildx_endpoint: ${{ steps.set_env_variables.outputs.BUILDX_ENDPOINT }}
 
-      dh_img_web: ${{ steps.set_env_variables.outputs.DH_IMG_WEB }}
       dh_img_web_new: ${{ steps.set_env_variables.outputs.DH_IMG_WEB_NEW }}
-      dh_img_space: ${{ steps.set_env_variables.outputs.DH_IMG_SPACE }}
-      dh_img_admin: ${{ steps.set_env_variables.outputs.DH_IMG_ADMIN }}
       dh_img_live: ${{ steps.set_env_variables.outputs.DH_IMG_LIVE }}
-      dh_img_backend: ${{ steps.set_env_variables.outputs.DH_IMG_BACKEND }}
+      dh_img_api: ${{ steps.set_env_variables.outputs.DH_IMG_API }}
       dh_img_proxy: ${{ steps.set_env_variables.outputs.DH_IMG_PROXY }}
       dh_img_aio: ${{ steps.set_env_variables.outputs.DH_IMG_AIO }}
 
@@ -120,12 +117,13 @@ jobs:
           BR_NAME=$( echo "${{ env.TARGET_BRANCH }}" |sed 's/[^a-zA-Z0-9.-]//g')
           echo "TARGET_BRANCH=$BR_NAME" >> $GITHUB_OUTPUT
 
-          echo "DH_IMG_WEB=pi-dash-frontend" >> $GITHUB_OUTPUT
           echo "DH_IMG_WEB_NEW=pi-dash-web-new" >> $GITHUB_OUTPUT
-          echo "DH_IMG_SPACE=pi-dash-space" >> $GITHUB_OUTPUT
-          echo "DH_IMG_ADMIN=pi-dash-admin" >> $GITHUB_OUTPUT
           echo "DH_IMG_LIVE=pi-dash-live" >> $GITHUB_OUTPUT
-          echo "DH_IMG_BACKEND=pi-dash-backend" >> $GITHUB_OUTPUT
+          # Rust API image (NEWPIDASH-382): the active backend. The old
+          # frontend images (pi-dash-frontend, pi-dash-space,
+          # pi-dash-admin) and the Django backend (pi-dash-backend) are
+          # frozen and no longer built.
+          echo "DH_IMG_API=pi-dash-api" >> $GITHUB_OUTPUT
           echo "DH_IMG_PROXY=pi-dash-proxy" >> $GITHUB_OUTPUT
           echo "DH_IMG_AIO=pi-dash-aio-community" >> $GITHUB_OUTPUT
 
@@ -167,54 +165,6 @@ jobs:
         name: Checkout Files
         uses: actions/checkout@v6
 
-  branch_build_push_admin:
-    name: Build-Push Admin Docker Image
-    runs-on: ubuntu-22.04
-    needs: [branch_build_setup]
-    steps:
-      - name: Checkout Files
-        uses: actions/checkout@v6
-      - name: Admin Build and Push
-        uses: ./.github/actions/build-push
-        with:
-          build-release: ${{ needs.branch_build_setup.outputs.build_release }}
-          build-prerelease: ${{ needs.branch_build_setup.outputs.build_prerelease }}
-          release-version: ${{ needs.branch_build_setup.outputs.release_version }}
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
-          docker-image-owner: airepublic
-          docker-image-name: ${{ needs.branch_build_setup.outputs.dh_img_admin }}
-          build-context: .
-          dockerfile-path: ./apps/admin/Dockerfile.admin
-          buildx-driver: ${{ needs.branch_build_setup.outputs.gh_buildx_driver }}
-          buildx-version: ${{ needs.branch_build_setup.outputs.gh_buildx_version }}
-          buildx-platforms: ${{ needs.branch_build_setup.outputs.gh_buildx_platforms }}
-          buildx-endpoint: ${{ needs.branch_build_setup.outputs.gh_buildx_endpoint }}
-
-  branch_build_push_web:
-    name: Build-Push Web Docker Image
-    runs-on: ubuntu-22.04
-    needs: [branch_build_setup]
-    steps:
-      - name: Checkout Files
-        uses: actions/checkout@v6
-      - name: Web Build and Push
-        uses: ./.github/actions/build-push
-        with:
-          build-release: ${{ needs.branch_build_setup.outputs.build_release }}
-          build-prerelease: ${{ needs.branch_build_setup.outputs.build_prerelease }}
-          release-version: ${{ needs.branch_build_setup.outputs.release_version }}
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
-          docker-image-owner: airepublic
-          docker-image-name: ${{ needs.branch_build_setup.outputs.dh_img_web }}
-          build-context: .
-          dockerfile-path: ./apps/web/Dockerfile.web
-          buildx-driver: ${{ needs.branch_build_setup.outputs.gh_buildx_driver }}
-          buildx-version: ${{ needs.branch_build_setup.outputs.gh_buildx_version }}
-          buildx-platforms: ${{ needs.branch_build_setup.outputs.gh_buildx_platforms }}
-          buildx-endpoint: ${{ needs.branch_build_setup.outputs.gh_buildx_endpoint }}
-
   branch_build_push_web_new:
     name: Build-Push Web-New Docker Image
     runs-on: ubuntu-22.04
@@ -234,30 +184,6 @@ jobs:
           docker-image-name: ${{ needs.branch_build_setup.outputs.dh_img_web_new }}
           build-context: .
           dockerfile-path: ./apps/web_new/Dockerfile.web-new
-          buildx-driver: ${{ needs.branch_build_setup.outputs.gh_buildx_driver }}
-          buildx-version: ${{ needs.branch_build_setup.outputs.gh_buildx_version }}
-          buildx-platforms: ${{ needs.branch_build_setup.outputs.gh_buildx_platforms }}
-          buildx-endpoint: ${{ needs.branch_build_setup.outputs.gh_buildx_endpoint }}
-
-  branch_build_push_space:
-    name: Build-Push Space Docker Image
-    runs-on: ubuntu-22.04
-    needs: [branch_build_setup]
-    steps:
-      - name: Checkout Files
-        uses: actions/checkout@v6
-      - name: Space Build and Push
-        uses: ./.github/actions/build-push
-        with:
-          build-release: ${{ needs.branch_build_setup.outputs.build_release }}
-          build-prerelease: ${{ needs.branch_build_setup.outputs.build_prerelease }}
-          release-version: ${{ needs.branch_build_setup.outputs.release_version }}
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
-          docker-image-owner: airepublic
-          docker-image-name: ${{ needs.branch_build_setup.outputs.dh_img_space }}
-          build-context: .
-          dockerfile-path: ./apps/space/Dockerfile.space
           buildx-driver: ${{ needs.branch_build_setup.outputs.gh_buildx_driver }}
           buildx-version: ${{ needs.branch_build_setup.outputs.gh_buildx_version }}
           buildx-platforms: ${{ needs.branch_build_setup.outputs.gh_buildx_platforms }}
@@ -288,13 +214,13 @@ jobs:
           buildx-endpoint: ${{ needs.branch_build_setup.outputs.gh_buildx_endpoint }}
 
   branch_build_push_api:
-    name: Build-Push API Server Docker Image
+    name: Build-Push Rust API Server Docker Image
     runs-on: ubuntu-22.04
     needs: [branch_build_setup]
     steps:
       - name: Checkout Files
         uses: actions/checkout@v6
-      - name: Backend Build and Push
+      - name: Rust API Build and Push
         uses: ./.github/actions/build-push
         with:
           build-release: ${{ needs.branch_build_setup.outputs.build_release }}
@@ -303,9 +229,9 @@ jobs:
           dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
           dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
           docker-image-owner: airepublic
-          docker-image-name: ${{ needs.branch_build_setup.outputs.dh_img_backend }}
-          build-context: ./apps/api
-          dockerfile-path: ./apps/api/Dockerfile.api
+          docker-image-name: ${{ needs.branch_build_setup.outputs.dh_img_api }}
+          build-context: .
+          dockerfile-path: ./rust-api/Dockerfile.api
           buildx-driver: ${{ needs.branch_build_setup.outputs.gh_buildx_driver }}
           buildx-version: ${{ needs.branch_build_setup.outputs.gh_buildx_version }}
           buildx-platforms: ${{ needs.branch_build_setup.outputs.gh_buildx_platforms }}
@@ -341,10 +267,7 @@ jobs:
     runs-on: ubuntu-22.04
     needs:
       - branch_build_setup
-      - branch_build_push_admin
-      - branch_build_push_web
       - branch_build_push_web_new
-      - branch_build_push_space
       - branch_build_push_live
       - branch_build_push_api
       - branch_build_push_proxy
@@ -397,10 +320,7 @@ jobs:
     runs-on: ubuntu-22.04
     needs:
       - branch_build_setup
-      - branch_build_push_admin
-      - branch_build_push_web
       - branch_build_push_web_new
-      - branch_build_push_space
       - branch_build_push_live
       - branch_build_push_api
       - branch_build_push_proxy
@@ -439,10 +359,7 @@ jobs:
     needs:
       [
         branch_build_setup,
-        branch_build_push_admin,
-        branch_build_push_web,
         branch_build_push_web_new,
-        branch_build_push_space,
         branch_build_push_live,
         branch_build_push_api,
         branch_build_push_proxy,

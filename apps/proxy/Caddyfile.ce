@@ -16,12 +16,11 @@
 
 	reverse_proxy /live/* live:3000
 
-	# Runner WebSocket upgrade — served by Django ASGI (Channels).
-	reverse_proxy /ws/runner/* api:8000
-
 	reverse_proxy /api/* api:8000
 
-	reverse_proxy /static/* api:8000
+	# No /static/* route: the Rust API serves no static files, and the old
+	# Django static handler is frozen. TODO(NEWPIDASH-376): route
+	# /static/logos/* to web_new once 376 serves the email logos there.
 
 	reverse_proxy /{$BUCKET_NAME}/* pi-dash-minio:9000
 	reverse_proxy /{$BUCKET_NAME} pi-dash-minio:9000
@@ -265,7 +264,8 @@
 	# a migrated /auth/* subpath (today /auth/device) must win, and Caddy
 	# routes to the first matching reverse_proxy. (NEWFRONT-953)
 	reverse_proxy /auth/* api:8000
-	reverse_proxy /* web:3000
+	# Catch-all serves web_new: the old web app is frozen and unserved.
+	reverse_proxy /* web_new:3000
 }
 
 {$SITE_ADDRESS} {
