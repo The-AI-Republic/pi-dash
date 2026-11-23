@@ -38,11 +38,15 @@ pub struct LlmConfigRow {
     pub model_name: String,
     pub api_key_encrypted: Option<Vec<u8>>,
     pub last_verified_at: Option<DateTime<Utc>>,
+    /// Every model ID held under this key (NEWPIDASH-392); the resolver
+    /// matches saved per-surface choices against this list.
+    pub models: Vec<String>,
 }
 
-/// One `assistant_user_llm_config` row, all 9 columns
-/// (`models.py:238-262`): the narrow [`LlmConfigRow`] plus the pk, the
-/// owner and the stamps. The overlay's connection twin
+/// One `assistant_user_llm_config` row, all 11 columns
+/// (`models.py:238-262` plus the NEWPIDASH-392 `models` /
+/// `model_verified_at` pair): the narrow [`LlmConfigRow`] plus the pk,
+/// the owner and the stamps. The overlay's connection twin
 /// (`rust-cloud/.../assistant/connections.rs`, OVL-15) feeds this to
 /// [`domain::save_llm_config_full`], which needs the id and the stamps.
 #[derive(Debug, Clone)]
@@ -54,6 +58,11 @@ pub struct LlmConfigFullRow {
     pub model_name: String,
     pub api_key_encrypted: Option<Vec<u8>>,
     pub last_verified_at: Option<DateTime<Utc>>,
+    /// Every model ID held under this key (NEWPIDASH-392); writers keep
+    /// `model_name = models[0]`.
+    pub models: Vec<String>,
+    /// Model ID → ISO timestamp of the last passing test (NEWPIDASH-392).
+    pub model_verified_at: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -101,7 +110,8 @@ pub struct ConfigDeps<'a> {
 }
 
 /// Decoded full config-row tuple: id, owner, provider, base URL,
-/// model, encrypted key, verification timestamp, stamps.
+/// model, encrypted key, verification timestamp, model IDs,
+/// per-model verification map, stamps.
 type LlmFullRowTuple = (
     i64,
     Uuid,
@@ -110,6 +120,8 @@ type LlmFullRowTuple = (
     String,
     Option<Vec<u8>>,
     Option<DateTime<Utc>>,
+    Vec<String>,
+    serde_json::Value,
     DateTime<Utc>,
     DateTime<Utc>,
 );
@@ -136,6 +148,8 @@ pub async fn fetch_llm_config_full_conn(
         model_name: row.model_name,
         api_key_encrypted: row.api_key_encrypted,
         last_verified_at: row.last_verified_at.map(|v| v.with_timezone(&Utc)),
+        models: row.models,
+        model_verified_at: row.model_verified_at,
         created_at: row.created_at.with_timezone(&Utc),
         updated_at: row.updated_at.with_timezone(&Utc),
     }))
@@ -164,7 +178,7 @@ where
 {
     // raw-sql: generic sqlx Executor contract shared with the overlay's &mut PgConnection callers; a SeaORM read would need a ConnectionTrait wrapper at every call site.
     let row: Option<LlmFullRowTuple> = sqlx::query_as(
-        r#"SELECT id, user_id, provider_kind, base_url, model_name, api_key_encrypted, last_verified_at, created_at, updated_at
+        r#"SELECT id, user_id, provider_kind, base_url, model_name, api_key_encrypted, last_verified_at, models, model_verified_at, created_at, updated_at
            FROM assistant_user_llm_config WHERE user_id = $1 LIMIT 1"#,
     )
     .bind(user_id)
@@ -179,6 +193,8 @@ where
             model_name,
             api_key_encrypted,
             last_verified_at,
+            models,
+            model_verified_at,
             created_at,
             updated_at,
         )| LlmConfigFullRow {
@@ -189,6 +205,8 @@ where
             model_name,
             api_key_encrypted,
             last_verified_at,
+            models,
+            model_verified_at,
             created_at,
             updated_at,
         },
@@ -209,6 +227,7 @@ pub async fn get_config(pool: &PgPool, user_id: Uuid) -> Result<Option<LlmConfig
             model_name: full.model_name,
             api_key_encrypted: full.api_key_encrypted,
             last_verified_at: full.last_verified_at,
+            models: full.models,
         }))
 }
 
@@ -230,6 +249,10 @@ pub async fn put_config(
     let stored_base = row.as_ref().map(|row| row.base_url.clone());
     let stored_model = row.as_ref().map(|row| row.model_name.clone());
     let stored_verified = row.as_ref().and_then(|row| row.last_verified_at);
+    let stored_models = row
+        .as_ref()
+        .map(|row| row.models.clone())
+        .unwrap_or_default();
     let stored_key = row.as_ref().and_then(|row| row.api_key_encrypted.clone());
 
     let base_url_stored = validated
@@ -254,6 +277,14 @@ pub async fn put_config(
         .or(stored_provider)
         .unwrap_or_else(|| user_llm_config::DEFAULT_PROVIDER_KIND.as_str().to_owned());
     let model_name = validated.model_name.or(stored_model).unwrap_or_default();
+    // Writer invariant (NEWPIDASH-392 §4.5): `model_name = models[0]`.
+    // This PUT names one model only, so a stored list that no longer
+    // starts with the effective model is replaced by the single model
+    // (multi-model lists arrive with the `models` body in the follow-up).
+    let mut models = stored_models;
+    if !model_name.is_empty() && models.first().is_none_or(|first| first != &model_name) {
+        models = vec![model_name.clone()];
+    }
     domain::save_llm_config(
         &pidash_db::pool::sea_orm_connection(deps.pool),
         &domain::LlmConfigSave {
@@ -262,6 +293,7 @@ pub async fn put_config(
             base_url: &base_url_stored,
             model_name: &model_name,
             api_key_encrypted: &api_key_encrypted,
+            models: &models,
             existed,
         },
     )
@@ -273,6 +305,7 @@ pub async fn put_config(
         model_name,
         api_key_encrypted,
         last_verified_at: stored_verified,
+        models,
     })
 }
 

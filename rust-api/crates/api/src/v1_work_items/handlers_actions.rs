@@ -101,6 +101,7 @@ use pidash_db::entity::{
     workspaces,
 };
 use pidash_db::pool::sea_orm_connection;
+use pidash_types::assistant::surface::Surface;
 use pidash_types::orchestration::{normalize_outcome, RUN_OUTCOMES};
 
 use crate::state::AppState;
@@ -996,7 +997,9 @@ async fn fetch_presence(
 
 /// The `has_usable_llm_config` verdicts for the creator universe: one
 /// installed-seam consult per user over the pre-fetched key bits
-/// (`user_has_llm_config`, `agent_execution.py:69-80`). The CE default
+/// (`user_has_llm_config`, `agent_execution.py:69-80`). Run creation
+/// and issue transitions admit to the Pi Dash Agent, so every verdict
+/// resolves on the agent surface (NEWPIDASH-392). The CE default
 /// answers the key bit; the overlay routes OpenHub/Codex/BYOK through
 /// the same single switch point Pi Dash AI uses (PIDASHCONV-1051).
 async fn gate_verdicts(state: &AppState, presence: &HashMap<Uuid, bool>) -> HashMap<Uuid, bool> {
@@ -1006,7 +1009,7 @@ async fn gate_verdicts(state: &AppState, presence: &HashMap<Uuid, bool>) -> Hash
             *uid,
             state
                 .assistant_seam()
-                .has_usable_llm_config(*uid, *has_key)
+                .has_usable_llm_config(*uid, *has_key, Surface::Agent)
                 .await,
         );
     }
@@ -1021,19 +1024,49 @@ pub fn gate_fn(verdicts: Arc<HashMap<Uuid, bool>>) -> impl Fn(Uuid) -> bool + Cl
     move |uid: Uuid| -> bool { verdicts.get(&uid).copied().unwrap_or(false) }
 }
 
-/// The `managed_llm_profile` closure over pre-fetched presence.
+/// The `managed_llm_profile` verdicts for the creator universe: one
+/// installed-seam profile consult per user over the pre-fetched key
+/// bits, like [`gate_verdicts`]. Resolves on the agent surface
+/// (NEWPIDASH-392): the direct CE call this replaces ignored the
+/// OpenHub lane for cloud users, answering `llm_config_missing` for
+/// OpenHub-only users the seam accepts (cloud-only divergence; on CE
+/// the seam default answers the same matrix, so the verdicts match
+/// exactly).
+async fn profile_verdicts(
+    state: &AppState,
+    presence: &HashMap<Uuid, bool>,
+) -> HashMap<Uuid, pidash_services::run_creation::LlmProfile> {
+    let mut verdicts = HashMap::with_capacity(presence.len());
+    for (uid, has_key) in presence {
+        let profile = state
+            .assistant_seam()
+            .pidash_agent_profile(*uid, *has_key)
+            .await;
+        verdicts.insert(
+            *uid,
+            pidash_services::run_creation::LlmProfile {
+                available: profile.available,
+                reason_code: profile.reason_code,
+            },
+        );
+    }
+    verdicts
+}
+
+/// The `managed_llm_profile` closure over pre-fetched verdicts. A user
+/// outside the pre-fetched universe — and a missing user — answer
+/// closed with `llm_config_missing`, the same as the keyless CE matrix
+/// row the old closure produced for them.
 pub fn profile_fn(
-    presence: Arc<HashMap<Uuid, bool>>,
+    verdicts: Arc<HashMap<Uuid, pidash_services::run_creation::LlmProfile>>,
 ) -> impl Fn(Option<Uuid>) -> pidash_services::run_creation::LlmProfile + Clone + Send + Sync {
     move |uid: Option<Uuid>| -> pidash_services::run_creation::LlmProfile {
-        let key = uid
-            .and_then(|uid| presence.get(&uid).copied())
-            .unwrap_or(false);
-        let profile = pidash_services::assistant::seams::pidash_agent_profile_for_user(key);
-        pidash_services::run_creation::LlmProfile {
-            available: profile.available,
-            reason_code: profile.reason_code,
-        }
+        uid.and_then(|uid| verdicts.get(&uid).cloned()).unwrap_or(
+            pidash_services::run_creation::LlmProfile {
+                available: false,
+                reason_code: pidash_services::extensions::reason::LLM_CONFIG_MISSING.to_owned(),
+            },
+        )
     }
 }
 
@@ -1062,11 +1095,12 @@ pub async fn dispatch_deps(
 > {
     let presence = fetch_presence(pool, actor_id, issue, project).await?;
     let verdicts = Arc::new(gate_verdicts(state, &presence).await);
+    let profiles = Arc::new(profile_verdicts(state, &presence).await);
     Ok((
         pidash_jobs::orchestration::StoreDeps {
             managed: state.settings().pidash_agent.clone(),
             has_usable_llm_config: gate_fn(verdicts),
-            llm_profile: profile_fn(presence),
+            llm_profile: profile_fn(profiles),
         },
         LiveMatcher::new(pool.clone()),
     ))
@@ -1095,11 +1129,12 @@ pub async fn dispatch_deps_for_ids(
     let universe = creator_universe_for_ids(pool, actor_id, issue_id).await?;
     let presence = Arc::new(fetch_llm_presence(pool, &universe).await?);
     let verdicts = Arc::new(gate_verdicts(state, &presence).await);
+    let profiles = Arc::new(profile_verdicts(state, &presence).await);
     Ok((
         pidash_jobs::orchestration::StoreDeps {
             managed: state.settings().pidash_agent.clone(),
             has_usable_llm_config: gate_fn(verdicts),
-            llm_profile: profile_fn(presence),
+            llm_profile: profile_fn(profiles),
         },
         LiveMatcher::new(pool.clone()),
     ))
@@ -2379,8 +2414,9 @@ mod tests {
             &self,
             user_id: Uuid,
             has_api_key: bool,
+            surface: Surface,
         ) -> pidash_services::extensions::SeamFuture<'_, bool> {
-            let _ = (user_id, has_api_key);
+            let _ = (user_id, has_api_key, surface);
             Box::pin(async move { true })
         }
 

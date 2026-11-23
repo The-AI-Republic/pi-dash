@@ -58,6 +58,7 @@ use pidash_services::assistant::agent::AssistantDeps;
 use pidash_services::assistant::crypto::CryptoError;
 use pidash_services::assistant::llm::{self as llm_service, KeyCache};
 use pidash_services::assistant::mcp as mcp_service;
+use pidash_services::assistant::model_selection;
 use pidash_services::assistant::ssrf;
 use pidash_services::assistant::tools_results::wrap_untrusted;
 use pidash_types::assistant::surface::Surface;
@@ -127,6 +128,7 @@ struct LlmConfigRow {
     base_url: String,
     model_name: String,
     api_key_encrypted: Option<Vec<u8>>,
+    models: Vec<String>,
 }
 
 /// Read back one message row for the `message_completed` envelope
@@ -868,6 +870,7 @@ impl LiveTurnSeam {
         pool: PgPool,
         settings: Arc<Settings>,
         redis: Option<RedisClient>,
+        assistant_seam: Arc<dyn pidash_services::extensions::AssistantModelSeam>,
     ) -> Result<Self, SeamError> {
         let usage_document = usage_table::load().map_err(|error| SeamError(error.to_string()))?;
         let extract =
@@ -877,8 +880,13 @@ impl LiveTurnSeam {
             .build()
             .map_err(|error| SeamError(error.to_string()))?;
         let tool_store = Arc::new(
-            PgToolStore::new(pool.clone(), redis.clone(), settings.pidash_agent.clone())
-                .map_err(|error| SeamError(error.message()))?,
+            PgToolStore::new(
+                pool.clone(),
+                redis.clone(),
+                settings.pidash_agent.clone(),
+                assistant_seam,
+            )
+            .map_err(|error| SeamError(error.message()))?,
         );
         let key_cache = KeyCache::new(
             settings.assistant.key_cache_ttl_secs,
@@ -1372,6 +1380,7 @@ impl TurnSeam for LiveTurnSeam {
                 assistant_user_llm_config::Column::BaseUrl,
                 assistant_user_llm_config::Column::ModelName,
                 assistant_user_llm_config::Column::ApiKeyEncrypted,
+                assistant_user_llm_config::Column::Models,
             ])
             .filter(assistant_user_llm_config::Column::UserId.eq(ctx.user_id))
             .order_by_asc(assistant_user_llm_config::Column::CreatedAt)
@@ -1379,18 +1388,36 @@ impl TurnSeam for LiveTurnSeam {
             .one(&db)
             .await
             .map_err(internal_model_error)?;
-        let (provider_kind, base_url, model_name, token) = row
+        let (provider_kind, base_url, stored_model, models, token) = row
             .map(|row| {
                 (
                     row.provider_kind,
                     row.base_url,
                     row.model_name,
+                    row.models,
                     row.api_key_encrypted,
                 )
             })
             .unwrap_or_default();
         let token = token.unwrap_or_default();
         let has_api_key = !token.is_empty();
+        // The turn runs on its stamped surface (NEWPIDASH-392): resolve
+        // the surface's choice against the key's list. With no saved
+        // entry the legacy selection (`models[0]`, kept equal to the
+        // stored model name by the writers) answers, so behaviour is
+        // unchanged; a missing lane falls through to the stored model
+        // name so the gates below fail exactly as before.
+        let settings = pidash_services::domain::assistant::read_settings_bag(&db, ctx.user_id)
+            .await
+            .map_err(internal_model_error)?;
+        let saved = settings
+            .as_ref()
+            .and_then(|settings| model_selection::read_entry(settings, ctx.surface));
+        let model_name =
+            model_selection::resolve_oss(saved.as_ref(), &models, has_api_key, ctx.surface)
+                .effective
+                .map(|choice| choice.model)
+                .unwrap_or(stored_model);
         let base_url_blocked = !base_url.is_empty()
             && ssrf::is_blocked(
                 &base_url,
@@ -2679,8 +2706,15 @@ mod tests {
     /// store — following the soft-limit test's precedent.
     async fn entered_mcp_toolset(url: &str) -> LiveToolset {
         let pool = PgPool::connect_lazy("postgres://127.0.0.1:1/unused").expect("lazy pool builds");
-        let seam = LiveTurnSeam::new(pool, Arc::new(Settings::test_defaults()), None)
-            .expect("seam builds");
+        let seam = LiveTurnSeam::new(
+            pool,
+            Arc::new(Settings::test_defaults()),
+            None,
+            Arc::new(crate::assistant::model_seam::CeAssistantSeam::new(
+                Arc::new(Settings::test_defaults()),
+            )),
+        )
+        .expect("seam builds");
         let spec =
             mcp_service::build_toolset_spec(url, None, Some("demo"), false, 5.0, 5.0, "demo");
         let mut session = ResilientSession::new(spec).expect("session builds");
@@ -2905,8 +2939,15 @@ mod tests {
         });
 
         let pool = PgPool::connect_lazy("postgres://127.0.0.1:1/unused").expect("lazy pool builds");
-        let seam = LiveTurnSeam::new(pool, Arc::new(Settings::test_defaults()), None)
-            .expect("seam builds");
+        let seam = LiveTurnSeam::new(
+            pool,
+            Arc::new(Settings::test_defaults()),
+            None,
+            Arc::new(crate::assistant::model_seam::CeAssistantSeam::new(
+                Arc::new(Settings::test_defaults()),
+            )),
+        )
+        .expect("seam builds");
         let turn_id = Uuid::new_v4();
         let spec = mcp_service::build_toolset_spec(
             &format!("http://127.0.0.1:{port}/mcp"),
@@ -3120,8 +3161,15 @@ mod tests {
     }
 
     fn live_seam(pool: &PgPool) -> LiveTurnSeam {
-        LiveTurnSeam::new(pool.clone(), Arc::new(Settings::test_defaults()), None)
-            .expect("seam builds")
+        LiveTurnSeam::new(
+            pool.clone(),
+            Arc::new(Settings::test_defaults()),
+            None,
+            Arc::new(crate::assistant::model_seam::CeAssistantSeam::new(
+                Arc::new(Settings::test_defaults()),
+            )),
+        )
+        .expect("seam builds")
     }
 
     fn live_ctx(turn_id: Uuid, thread_id: Uuid, user_id: Uuid, workspace_id: Uuid) -> TurnContext {

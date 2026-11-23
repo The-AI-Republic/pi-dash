@@ -763,6 +763,12 @@ pub mod assistant {
     pub use pidash_services::domain::assistant::finalize_open_messages;
     pub use pidash_services::domain::assistant::prune_turn_deltas;
     pub use pidash_services::domain::assistant::NewEvent;
+    pub use pidash_services::extensions::ChoiceError;
+    pub use pidash_services::extensions::ChoiceOperational;
+    pub use pidash_services::extensions::ChoiceValidation;
+    pub use pidash_services::extensions::FallbackReason;
+    pub use pidash_services::extensions::ModelChoice;
+    pub use pidash_services::extensions::Resolution;
     pub use pidash_types::assistant::errors::AssistantError;
     pub use pidash_types::assistant::serializers;
     pub use pidash_types::assistant::serializers::PROVIDER_ANTHROPIC;

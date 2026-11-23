@@ -167,6 +167,12 @@ impl AppState {
         &self.assistant_seam
     }
 
+    /// The shared settings handle (for seams that need the `Arc`, like
+    /// the pooled [`CeAssistantSeam`](crate::assistant::model_seam::CeAssistantSeam)).
+    pub fn settings_arc(&self) -> &Arc<Settings> {
+        &self.settings
+    }
+
     /// Install the overlay's desktop-session gate (PIDASHCONV-917).
     /// Installed once by the overlay binary, whose gate answers from the
     /// verified client claim; OSS serves with the CE default (`None`).

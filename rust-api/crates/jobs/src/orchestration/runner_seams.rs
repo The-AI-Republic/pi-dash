@@ -50,12 +50,13 @@ use pidash_db::pool::sea_orm_connection;
 use pidash_db::tasks_ticker::jitter_seconds;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
-use pidash_services::assistant::seams::{has_usable_llm_config, pidash_agent_profile_for_user};
+use pidash_services::assistant::seams::has_usable_llm_config;
 use pidash_services::domain::clock::apply_clock_write;
 use pidash_services::extensions::AssistantModelSeam;
 use pidash_services::orchestration::clock::{self as clock, ClockIssue, ClockWrite, RunEndedRef};
 use pidash_services::run_creation::LlmProfile;
 use pidash_services::runner_sessions::live_drains::{drain_pod_by_id, DrainError};
+use pidash_types::assistant::surface::Surface;
 use pidash_types::orchestration::{StateRef, TickerEventKind};
 
 use super::creation_jobs::StoreDeps;
@@ -128,7 +129,11 @@ async fn gate_verdicts(
 ) -> HashMap<Uuid, bool> {
     let mut verdicts = HashMap::with_capacity(presence.len());
     for (uid, has_key) in presence {
-        verdicts.insert(*uid, seam.has_usable_llm_config(*uid, *has_key).await);
+        verdicts.insert(
+            *uid,
+            seam.has_usable_llm_config(*uid, *has_key, Surface::Agent)
+                .await,
+        );
     }
     verdicts
 }
@@ -140,19 +145,39 @@ fn gate_fn(verdicts: Arc<HashMap<Uuid, bool>>) -> impl Fn(Uuid) -> bool + Clone 
     move |uid: Uuid| -> bool { verdicts.get(&uid).copied().unwrap_or(false) }
 }
 
-/// The `managed_llm_profile` closure over pre-fetched presence.
+/// The `managed_llm_profile` verdicts for one driver call: one
+/// installed-seam profile consult per user over the pre-fetched key
+/// bits, like [`gate_verdicts`]. Resolves on the agent surface.
+async fn profile_verdicts(
+    seam: &Arc<dyn AssistantModelSeam>,
+    presence: &HashMap<Uuid, bool>,
+) -> HashMap<Uuid, LlmProfile> {
+    let mut verdicts = HashMap::with_capacity(presence.len());
+    for (uid, has_key) in presence {
+        let profile = seam.pidash_agent_profile(*uid, *has_key).await;
+        verdicts.insert(
+            *uid,
+            LlmProfile {
+                available: profile.available,
+                reason_code: profile.reason_code,
+            },
+        );
+    }
+    verdicts
+}
+
+/// The `managed_llm_profile` closure over pre-fetched verdicts. A user
+/// outside the pre-fetched universe — and a missing user — answer
+/// closed with `llm_config_missing`, matching the keyless CE matrix row.
 fn profile_fn(
-    presence: Arc<HashMap<Uuid, bool>>,
+    verdicts: Arc<HashMap<Uuid, LlmProfile>>,
 ) -> impl Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync {
     move |uid: Option<Uuid>| -> LlmProfile {
-        let key = uid
-            .and_then(|uid| presence.get(&uid).copied())
-            .unwrap_or(false);
-        let profile = pidash_agent_profile_for_user(key);
-        LlmProfile {
-            available: profile.available,
-            reason_code: profile.reason_code,
-        }
+        uid.and_then(|uid| verdicts.get(&uid).cloned())
+            .unwrap_or(LlmProfile {
+                available: false,
+                reason_code: pidash_services::extensions::reason::LLM_CONFIG_MISSING.to_owned(),
+            })
     }
 }
 
@@ -206,10 +231,11 @@ pub async fn complete_project_move_handoff_live(
     let universe = actor.into_iter().collect::<Vec<_>>();
     let presence = Arc::new(fetch_presence(pool, &universe).await?);
     let verdicts = Arc::new(gate_verdicts(&assistant_seam, &presence).await);
+    let profiles = Arc::new(profile_verdicts(&assistant_seam, &presence).await);
     let deps = StoreDeps {
         managed: managed.clone(),
         has_usable_llm_config: gate_fn(verdicts),
-        llm_profile: profile_fn(presence),
+        llm_profile: profile_fn(profiles),
     };
     let outcome = drive_handoff(pool, deps, run_id, Utc::now()).await?;
     // The driver's `dispatch_agent_run` only *returns* the decision
@@ -242,10 +268,14 @@ pub async fn maybe_apply_deferred_pause_live(
     run_id: Uuid,
 ) -> Result<bool, DispatchJobsError> {
     let presence: Arc<HashMap<Uuid, bool>> = Arc::new(HashMap::new());
+    // No seam on this path and no presence prefetched: the closures are
+    // unread, and an empty verdict map answers every user closed — the
+    // same keyless row the old presence closure produced.
+    let profiles: Arc<HashMap<Uuid, LlmProfile>> = Arc::new(HashMap::new());
     let deps = StoreDeps {
         managed: managed.clone(),
         has_usable_llm_config: has_key_fn(Arc::clone(&presence)),
-        llm_profile: profile_fn(presence),
+        llm_profile: profile_fn(profiles),
     };
     let outcome = drive_pause(pool, deps, Utc::now(), 0.0, run_id).await?;
     emit_logs(&outcome.outcome.logs);
@@ -744,19 +774,28 @@ pub async fn disarm_on_terminal_signal_deferred(
 mod tests {
     use super::*;
 
-    #[test]
-    fn key_and_profile_closures_answer_keyless_outside_map() {
+    #[tokio::test]
+    async fn key_and_profile_closures_answer_keyless_outside_map() {
         let present = Uuid::from_u128(7);
         let presence: Arc<HashMap<Uuid, bool>> = Arc::new([(present, true)].into_iter().collect());
         let has_key = has_key_fn(Arc::clone(&presence));
         assert!(has_key(present));
         assert!(!has_key(Uuid::from_u128(8)));
-        let profile = profile_fn(presence);
+        // The verdicts resolve through the installed seam (agent
+        // surface); the overlay-shaped double uses the CE profile
+        // matrix, so a keyed user still answers unavailable here.
+        let seam: Arc<dyn AssistantModelSeam> = Arc::new(GatewaySeam);
+        let verdicts = Arc::new(profile_verdicts(&seam, &presence).await);
+        let profile = profile_fn(verdicts);
         let keyed = profile(Some(present));
         assert!(!keyed.available);
         assert!(!keyed.reason_code.is_empty());
         let keyless = profile(None);
         assert!(!keyless.available);
+        assert_eq!(
+            keyless.reason_code,
+            pidash_services::extensions::reason::LLM_CONFIG_MISSING
+        );
     }
 
     /// Overlay-shaped seam: a keyless user still counts as configured
@@ -769,8 +808,9 @@ mod tests {
             &self,
             user_id: Uuid,
             has_api_key: bool,
+            surface: Surface,
         ) -> pidash_services::extensions::SeamFuture<'_, bool> {
-            let _ = (user_id, has_api_key);
+            let _ = (user_id, has_api_key, surface);
             Box::pin(async move { true })
         }
 

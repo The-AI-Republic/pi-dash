@@ -63,6 +63,7 @@ use pidash_services::assistant::probe::{self, ProbeOutcome};
 use pidash_services::assistant::ssrf::SystemResolver;
 use pidash_services::extensions::{ByokTitleInputs, TitleError, TitleRequest};
 use pidash_types::assistant::serializers;
+use pidash_types::assistant::surface::Surface;
 
 use super::common::{
     actor, base_url_blocked, body_get, crypto_config, decrypt_api_key, isoformat, ok_false,
@@ -491,6 +492,13 @@ async fn post_generate_title(
         Ok(pool) => pool,
         Err(failure) => return failure.into_response(),
     };
+    // Borrow the desktop signal before `extension` moves into auth: the
+    // title runs on the request's surface (NEWPIDASH-392).
+    let surface = if super::agent_profile::is_desktop_from_extension(&extension, &headers, &state) {
+        Surface::DesktopAssistant
+    } else {
+        Surface::WebAssistant
+    };
     let actor = match actor(&state, &pool, extension).await {
         Ok(actor) => actor,
         Err(failure) => return failure.into_response(),
@@ -565,6 +573,7 @@ async fn post_generate_title(
     let request = TitleRequest {
         user_id: actor.id,
         description,
+        surface,
         byok,
     };
     match state.assistant_seam().generate_title(request).await {
@@ -595,6 +604,7 @@ mod tests {
             model_name: "m".to_owned(),
             api_key_encrypted: Some(b"blob".to_vec()),
             last_verified_at: None,
+            models: vec!["m".to_owned()],
         }
     }
 

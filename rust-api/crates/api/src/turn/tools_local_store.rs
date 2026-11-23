@@ -29,6 +29,7 @@ use pidash_services::assistant::agent::AssistantDeps;
 use pidash_services::domain::comments as comment_domain;
 use pidash_services::domain::issues as issue_domain;
 use pidash_services::domain::relations as relation_domain;
+use pidash_types::assistant::surface::Surface;
 
 // ---------------------------------------------------------------------------
 // Environment (injected settings + clock)
@@ -723,6 +724,7 @@ pub struct PgToolStore {
     http: reqwest::Client,
     keyring: pidash_db::config::encryption::Keyring,
     managed: pidash_db::config::PidashAgentSettings,
+    assistant_seam: Arc<dyn pidash_services::extensions::AssistantModelSeam>,
 }
 
 impl PgToolStore {
@@ -828,6 +830,7 @@ impl PgToolStore {
         pool: PgPool,
         redis: Option<RedisClient>,
         managed: pidash_db::config::PidashAgentSettings,
+        assistant_seam: Arc<dyn pidash_services::extensions::AssistantModelSeam>,
     ) -> Result<Self, StoreError> {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(
@@ -842,7 +845,35 @@ impl PgToolStore {
             http,
             keyring: pidash_db::config::encryption::Keyring::from_env(),
             managed,
+            assistant_seam,
         })
+    }
+
+    /// Agent-surface verdicts for the tool-driven transition gates below:
+    /// one installed-seam consult each for the gate and the profile
+    /// (NEWPIDASH-392). The sync `StoreDeps` closures move these values;
+    /// the CE default answers the key bit and the never-available matrix,
+    /// so on CE the verdicts match the old direct calls exactly.
+    async fn agent_verdicts(
+        &self,
+        actor: Uuid,
+        has_key: bool,
+    ) -> (bool, pidash_services::run_creation::LlmProfile) {
+        let usable = self
+            .assistant_seam
+            .has_usable_llm_config(actor, has_key, Surface::Agent)
+            .await;
+        let profile = self
+            .assistant_seam
+            .pidash_agent_profile(actor, has_key)
+            .await;
+        (
+            usable,
+            pidash_services::run_creation::LlmProfile {
+                available: profile.available,
+                reason_code: profile.reason_code,
+            },
+        )
     }
 
     /// Post-commit completion comment-back for a state-changing save
@@ -2468,17 +2499,23 @@ impl ToolStore for PgToolStore {
         let has_key = key_row.flatten().is_some_and(|key| !key.is_empty());
         let actor = *actor_id;
         let managed = self.managed.clone();
+        let (usable, agent_profile) = self.agent_verdicts(actor, has_key).await;
+        let agent_profile = Arc::new(agent_profile);
         // Built up to three times (the probe, drive, and bounce stores
         // each take owned deps).
         let make_deps = || StoreDeps {
             managed: managed.clone(),
-            has_usable_llm_config: move |creator: Uuid| creator == actor && has_key,
-            llm_profile: move |user: Option<Uuid>| {
-                let key = user == Some(actor) && has_key;
-                let profile = pidash_services::assistant::seams::pidash_agent_profile_for_user(key);
-                pidash_services::run_creation::LlmProfile {
-                    available: profile.available,
-                    reason_code: profile.reason_code,
+            has_usable_llm_config: move |creator: Uuid| creator == actor && usable,
+            llm_profile: {
+                let agent_profile = Arc::clone(&agent_profile);
+                move |user: Option<Uuid>| {
+                    user.filter(|candidate| *candidate == actor)
+                        .map(|_| (*agent_profile).clone())
+                        .unwrap_or(pidash_services::run_creation::LlmProfile {
+                            available: false,
+                            reason_code: pidash_services::extensions::reason::LLM_CONFIG_MISSING
+                                .to_owned(),
+                        })
                 }
             },
         };
@@ -2841,17 +2878,23 @@ impl ToolStore for PgToolStore {
         let has_key = key_row.flatten().is_some_and(|key| !key.is_empty());
         let actor = *actor_id;
         let managed = self.managed.clone();
+        let (usable, agent_profile) = self.agent_verdicts(actor, has_key).await;
+        let agent_profile = Arc::new(agent_profile);
         // Built twice (store + preflight take owned deps; the driver
         // consults preflight at most once per drive).
         let make_deps = || StoreDeps {
             managed: managed.clone(),
-            has_usable_llm_config: move |creator: Uuid| creator == actor && has_key,
-            llm_profile: move |user: Option<Uuid>| {
-                let key = user == Some(actor) && has_key;
-                let profile = pidash_services::assistant::seams::pidash_agent_profile_for_user(key);
-                pidash_services::run_creation::LlmProfile {
-                    available: profile.available,
-                    reason_code: profile.reason_code,
+            has_usable_llm_config: move |creator: Uuid| creator == actor && usable,
+            llm_profile: {
+                let agent_profile = Arc::clone(&agent_profile);
+                move |user: Option<Uuid>| {
+                    user.filter(|candidate| *candidate == actor)
+                        .map(|_| (*agent_profile).clone())
+                        .unwrap_or(pidash_services::run_creation::LlmProfile {
+                            available: false,
+                            reason_code: pidash_services::extensions::reason::LLM_CONFIG_MISSING
+                                .to_owned(),
+                        })
                 }
             },
         };
@@ -2947,17 +2990,23 @@ impl ToolStore for PgToolStore {
         let has_key = key_row.flatten().is_some_and(|key| !key.is_empty());
         let actor = *actor_id;
         let managed = self.managed.clone();
+        let (usable, agent_profile) = self.agent_verdicts(actor, has_key).await;
+        let agent_profile = Arc::new(agent_profile);
         // Built twice (store + preflight take owned deps; the driver
         // consults preflight at most once per drive).
         let make_deps = || StoreDeps {
             managed: managed.clone(),
-            has_usable_llm_config: move |creator: Uuid| creator == actor && has_key,
-            llm_profile: move |user: Option<Uuid>| {
-                let key = user == Some(actor) && has_key;
-                let profile = pidash_services::assistant::seams::pidash_agent_profile_for_user(key);
-                pidash_services::run_creation::LlmProfile {
-                    available: profile.available,
-                    reason_code: profile.reason_code,
+            has_usable_llm_config: move |creator: Uuid| creator == actor && usable,
+            llm_profile: {
+                let agent_profile = Arc::clone(&agent_profile);
+                move |user: Option<Uuid>| {
+                    user.filter(|candidate| *candidate == actor)
+                        .map(|_| (*agent_profile).clone())
+                        .unwrap_or(pidash_services::run_creation::LlmProfile {
+                            available: false,
+                            reason_code: pidash_services::extensions::reason::LLM_CONFIG_MISSING
+                                .to_owned(),
+                        })
                 }
             },
         };
@@ -3693,6 +3742,14 @@ mod tests {
     use super::*;
     use sea_orm::{DbBackend, QueryTrait};
 
+    /// The installed seam for live store drives: the CE default (pool-free;
+    /// gate and profile verdicts answer the key bit and the matrix).
+    fn live_seam() -> Arc<dyn pidash_services::extensions::AssistantModelSeam> {
+        Arc::new(crate::assistant::model_seam::CeAssistantSeam::new(
+            Arc::new(pidash_db::config::Settings::test_defaults()),
+        ))
+    }
+
     /// The identifier sequence predicate keeps the DB-side `::int` cast
     /// (out-of-int4 tails raise; a Rust `as i32` would wrap 4294967297
     /// to 1 and look up the wrong issue).
@@ -3989,8 +4046,8 @@ mod tests {
     async fn live_fused_update_rolls_back_save_on_middrive_error() {
         let pool = live_pool().await;
         let graph = seed_live_graph(&pool).await;
-        let store =
-            PgToolStore::new(pool.clone(), None, live_managed_settings()).expect("build store");
+        let store = PgToolStore::new(pool.clone(), None, live_managed_settings(), live_seam())
+            .expect("build store");
         let now = DateTime::parse_from_rfc3339("2026-07-01T12:00:00Z")
             .expect("frozen clock")
             .with_timezone(&Utc);
@@ -4046,8 +4103,8 @@ mod tests {
     async fn live_create_comment_row_stores_empty_varchar_attachments() {
         let pool = live_pool().await;
         let graph = seed_live_graph(&pool).await;
-        let store =
-            PgToolStore::new(pool.clone(), None, live_managed_settings()).expect("build store");
+        let store = PgToolStore::new(pool.clone(), None, live_managed_settings(), live_seam())
+            .expect("build store");
         let now = DateTime::parse_from_rfc3339("2026-07-01T12:00:00Z")
             .expect("frozen clock")
             .with_timezone(&Utc);
@@ -4112,8 +4169,8 @@ mod tests {
     async fn live_fused_runner_apply_and_list() {
         let pool = live_pool().await;
         let graph = seed_live_graph(&pool).await;
-        let store =
-            PgToolStore::new(pool.clone(), None, live_managed_settings()).expect("build store");
+        let store = PgToolStore::new(pool.clone(), None, live_managed_settings(), live_seam())
+            .expect("build store");
         let now = DateTime::parse_from_rfc3339("2026-07-01T12:00:00Z")
             .expect("frozen clock")
             .with_timezone(&Utc);

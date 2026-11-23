@@ -243,7 +243,7 @@ async fn post_message(
             MESSAGE_TOO_LONG_BODY.to_owned(),
         ));
     }
-    if !llm_gate_allows(&state, pool, &actor.id).await? {
+    if !llm_gate_allows(&state, pool, &actor.id, surface).await? {
         return Err(json_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             LLM_CONFIG_MISSING_BODY.to_owned(),
@@ -451,11 +451,12 @@ async fn llm_gate_allows(
     state: &AppState,
     pool: &sqlx::PgPool,
     user_id: &Uuid,
+    surface: Surface,
 ) -> HandlerResult<bool> {
     let has_key = has_oss_api_key(pool, user_id).await?;
     Ok(state
         .assistant_seam()
-        .has_usable_llm_config(*user_id, has_key)
+        .has_usable_llm_config(*user_id, has_key, surface)
         .await)
 }
 
@@ -553,8 +554,9 @@ mod tests {
             &self,
             user_id: uuid::Uuid,
             has_api_key: bool,
+            surface: Surface,
         ) -> SeamFuture<'_, bool> {
-            let _ = (user_id, has_api_key);
+            let _ = (user_id, has_api_key, surface);
             Box::pin(async move { true })
         }
 
@@ -648,7 +650,7 @@ mod tests {
         let user_id = seed_user(&pool).await;
         let state = live_state(Some(Arc::new(GatewaySeam)));
         assert!(
-            llm_gate_allows(&state, &pool, &user_id)
+            llm_gate_allows(&state, &pool, &user_id, Surface::WebAssistant)
                 .await
                 .expect("gate reads"),
             "a seam that accepts the user must open the gate without an OSS key"
@@ -665,7 +667,7 @@ mod tests {
         let state = live_state(None);
         let keyless = seed_user(&pool).await;
         assert!(
-            !llm_gate_allows(&state, &pool, &keyless)
+            !llm_gate_allows(&state, &pool, &keyless, Surface::WebAssistant)
                 .await
                 .expect("gate reads"),
             "CE still denies a keyless user (the 422 path)"
@@ -673,7 +675,7 @@ mod tests {
         let keyed = seed_user(&pool).await;
         seed_llm_key(&pool, &keyed).await;
         assert!(
-            llm_gate_allows(&state, &pool, &keyed)
+            llm_gate_allows(&state, &pool, &keyed, Surface::WebAssistant)
                 .await
                 .expect("gate reads"),
             "CE still allows a user with a stored key"

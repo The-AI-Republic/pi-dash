@@ -13,6 +13,9 @@ pidash_sdk::assistant::CLIENT_USER_AGENT
 pidash_sdk::assistant::CallResult
 pidash_sdk::assistant::CeAssistantSeam
 pidash_sdk::assistant::CharFieldRules
+pidash_sdk::assistant::ChoiceError
+pidash_sdk::assistant::ChoiceOperational
+pidash_sdk::assistant::ChoiceValidation
 pidash_sdk::assistant::CodecError
 pidash_sdk::assistant::ConfigDeps
 pidash_sdk::assistant::ConfigError
@@ -30,6 +33,7 @@ pidash_sdk::assistant::EVENT_TURN_STARTED
 pidash_sdk::assistant::EnabledMcpServerRow
 pidash_sdk::assistant::EventParts
 pidash_sdk::assistant::Failure
+pidash_sdk::assistant::FallbackReason
 pidash_sdk::assistant::GithubAppContext
 pidash_sdk::assistant::GithubFailure
 pidash_sdk::assistant::GithubHeadersError
@@ -63,6 +67,7 @@ pidash_sdk::assistant::McpError
 pidash_sdk::assistant::McpToolDef
 pidash_sdk::assistant::McpValue
 pidash_sdk::assistant::MessageParts
+pidash_sdk::assistant::ModelChoice
 pidash_sdk::assistant::ModelError
 pidash_sdk::assistant::ModelRef
 pidash_sdk::assistant::NewEvent
@@ -75,6 +80,7 @@ pidash_sdk::assistant::RETRY_AFTER_MAX_SECS
 pidash_sdk::assistant::RUN_TURN_TASK
 pidash_sdk::assistant::ResilientSession
 pidash_sdk::assistant::ResilientState
+pidash_sdk::assistant::Resolution
 pidash_sdk::assistant::RetryErrorDetail
 pidash_sdk::assistant::RetryLocSeg
 pidash_sdk::assistant::RunIds

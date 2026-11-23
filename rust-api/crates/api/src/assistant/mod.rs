@@ -54,6 +54,7 @@ pub mod llm_config;
 pub mod mcp_servers;
 pub mod messages;
 pub mod model_seam;
+pub mod model_selection;
 pub mod multipart;
 pub mod perm;
 pub mod redis;
@@ -75,6 +76,7 @@ pub fn routes() -> Router<AppState> {
         .merge(messages::routes())
         .merge(events::routes())
         .merge(llm_config::routes())
+        .merge(model_selection::routes())
         .merge(stt_config::routes())
         .merge(transcribe::routes())
         .merge(agent_profile::routes())
