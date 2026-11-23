@@ -20,6 +20,8 @@ import { RunnerStatusDot } from "./RunnerStatusBadge.js";
 /** Rail header: the canonical area name (D27, RUN-004/RUN-005). */
 export const RAIL_HEADER = "AI Workers";
 export const PIDASH_AGENT_SECTION_HEADER = "Built-in";
+/** Action opening the Models section under the desktop agent's model (NEWPIDASH-394, design section 7.4). */
+export const PIDASH_AGENT_SETTINGS_ACTION = "Change";
 
 /** Chat address for one runner; plain string per the router's Link typing. */
 export function chatHref(base: string, runnerId: string): string {
@@ -72,16 +74,18 @@ export function RunnersRail({
             </div>
             {localContacts.map((contact) =>
               contact.unavailableReason === null ? (
-                <Link
-                  key={contact.id}
-                  to={chatHref(base, contact.id)}
-                  data-testid="runners-rail-local-contact"
-                  className="text-body flex min-h-11 items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) text-(--text-muted) hover:bg-(--subtle) hover:text-(--text)"
-                >
-                  <Bot size={16} strokeWidth={1.5} aria-hidden="true" className="shrink-0" />
-                  <span className="min-w-0 flex-1 truncate">{contact.name}</span>
-                  <span className="text-caption text-(--text-muted)">{contact.label}</span>
-                </Link>
+                <span key={contact.id} className="flex flex-col">
+                  <Link
+                    to={chatHref(base, contact.id)}
+                    data-testid="runners-rail-local-contact"
+                    className="text-body flex min-h-11 items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) text-(--text-muted) hover:bg-(--subtle) hover:text-(--text)"
+                  >
+                    <Bot size={16} strokeWidth={1.5} aria-hidden="true" className="shrink-0" />
+                    <span className="min-w-0 flex-1 truncate">{contact.name}</span>
+                    <span className="text-caption text-(--text-muted)">{contact.label}</span>
+                  </Link>
+                  <AgentModelLine model={contact.model} settingsHref={contact.settingsHref} />
+                </span>
               ) : (
                 <span
                   key={contact.id}
@@ -98,6 +102,7 @@ export function RunnersRail({
                   <span data-testid="runners-rail-local-reason" className="text-caption pl-6">
                     {contact.unavailableReason}
                   </span>
+                  <AgentModelLine model={contact.model} settingsHref={contact.settingsHref} />
                 </span>
               )
             )}
@@ -126,5 +131,33 @@ export function RunnersRail({
         )}
       </nav>
     </aside>
+  );
+}
+
+/**
+ * The desktop agent's model with a link to the Models section
+ * (NEWPIDASH-394, design section 7.4). Renders nothing while the profile
+ * named neither a model nor a settings address.
+ */
+function AgentModelLine({
+  model,
+  settingsHref,
+}: {
+  model: string | null;
+  settingsHref: string | null;
+}): React.ReactElement | null {
+  if ((model === null || model === "") && settingsHref === null) return null;
+  return (
+    <span
+      data-testid="runners-rail-local-model"
+      className="text-caption flex flex-wrap items-center gap-(--space-1) py-(--space-1) pr-(--space-2) pl-6 text-(--text-muted)"
+    >
+      {model === null || model === "" ? null : <span className="min-w-0 flex-1 truncate">{model}</span>}
+      {settingsHref === null ? null : (
+        <Link to={settingsHref} className="shrink-0 text-(--accent)">
+          {PIDASH_AGENT_SETTINGS_ACTION}
+        </Link>
+      )}
+    </span>
   );
 }

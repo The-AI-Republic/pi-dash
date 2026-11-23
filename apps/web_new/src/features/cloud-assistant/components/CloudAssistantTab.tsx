@@ -14,6 +14,7 @@ import * as React from "react";
 
 import { actionFailureDetail, useCloudAssistantActions } from "../api/mutations.js";
 import { useCloudConnections, useCloudQuota } from "../api/queries.js";
+import { modelTestResultsFrom, type ModelTestResult, type ModelTestResults } from "@pidash/api-client";
 import {
   ADD_ACTION,
   ADD_FAILED_FALLBACK,
@@ -64,6 +65,8 @@ export function CloudAssistantTab(): React.ReactElement {
   const [testing, setTesting] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
   const [addError, setAddError] = React.useState<string | null>(null);
+  /** Per-ID results of the last refused create; the add form renders them inline. */
+  const [addResults, setAddResults] = React.useState<ModelTestResults | null>(null);
 
   const signIn = useProviderSignIn();
 
@@ -74,6 +77,27 @@ export function CloudAssistantTab(): React.ReactElement {
   const signInAvailable = list?.openai_login_available ?? false;
   const rawWalletUrl = list?.openhub_wallet_url ?? "";
   const topUpHref = rawWalletUrl.trim() === "" ? null : rawWalletUrl;
+
+  const saveModels = async (row: ConnectionRow, models: string[], saveUnverified: boolean): Promise<void> => {
+    setBusyId(row.id);
+    try {
+      await actions.setModels(row.id, models, saveUnverified);
+      await actions.invalidate();
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const testModel = async (row: ConnectionRow, model: string): Promise<ModelTestResult> => {
+    setBusyId(row.id);
+    try {
+      const result = await actions.testModel(row.id, model);
+      await actions.invalidate();
+      return result;
+    } finally {
+      setBusyId(null);
+    }
+  };
 
   const commitModel = async (row: ConnectionRow, model: string): Promise<void> => {
     // The meter gate lives on the hosted (OpenHub) lane: the codex lane
@@ -137,7 +161,7 @@ export function CloudAssistantTab(): React.ReactElement {
     }
   };
 
-  const saveConnection = async (draft: ByokDraft): Promise<void> => {
+  const saveConnection = async (draft: ByokDraft, saveUnverified: boolean): Promise<void> => {
     setSaving(true);
     setAddError(null);
     try {
@@ -145,18 +169,34 @@ export function CloudAssistantTab(): React.ReactElement {
       await actions.create({
         providerKind: submission.providerKind,
         modelName: submission.modelName,
+        models: submission.models,
+        ...(saveUnverified ? { saveUnverified } : {}),
         apiKey: submission.apiKey,
         ...(submission.baseUrl === null ? {} : { baseUrl: submission.baseUrl }),
       });
       await actions.invalidate();
       notifySuccess(ADDED_TITLE);
+      setAddResults(null);
       setView("list");
     } catch (error) {
-      setAddError(actionFailureDetail(error, ADD_FAILED_FALLBACK));
-      notifyError(ADD_FAILED_TITLE, actionFailureDetail(error, ADD_FAILED_FALLBACK));
+      // A refused write (`400 model_test_failed`, nothing saved) stays in
+      // the form per ID; any other failure notifies with the form error.
+      const results = modelTestResultsFrom(error);
+      if (results === null) {
+        setAddError(actionFailureDetail(error, ADD_FAILED_FALLBACK));
+        notifyError(ADD_FAILED_TITLE, actionFailureDetail(error, ADD_FAILED_FALLBACK));
+      } else {
+        setAddResults(results);
+      }
     } finally {
       setSaving(false);
     }
+  };
+
+  const openAdd = (): void => {
+    setAddError(null);
+    setAddResults(null);
+    setView("add");
   };
 
   return (
@@ -164,7 +204,7 @@ export function CloudAssistantTab(): React.ReactElement {
       <header className="flex flex-wrap items-center justify-between gap-(--space-3)">
         <h1 className="text-h2 text-(--text)">AI Assistant</h1>
         {view === "list" ? (
-          <Button variant="primary" onClick={() => setView("add")}>
+          <Button variant="primary" onClick={openAdd}>
             {ADD_ACTION}
           </Button>
         ) : (
@@ -184,7 +224,12 @@ export function CloudAssistantTab(): React.ReactElement {
       ) : null}
 
       {view === "add" ? (
-        <AddConnectionView saving={saving} error={addError} onSave={saveConnection} />
+        <AddConnectionView
+          saving={saving}
+          error={addError}
+          results={addResults}
+          onSave={(draft, saveUnverified) => void saveConnection(draft, saveUnverified)}
+        />
       ) : connections.isPending ? (
         <Spinner label="Loading connections" />
       ) : connections.isError ? (
@@ -209,6 +254,8 @@ export function CloudAssistantTab(): React.ReactElement {
           busyId={busyId}
           topUpHref={topUpHref}
           onCommitModel={(row, model) => void commitModel(row, model)}
+          onSaveModels={(row, models, saveUnverified) => saveModels(row, models, saveUnverified)}
+          onTestModel={(row, model) => testModel(row, model)}
           onTest={() => void testActive()}
           onRemove={(row) => void removeRow(row.id, row.title)}
           onDisconnect={(row) => void disconnectRow(row.id)}

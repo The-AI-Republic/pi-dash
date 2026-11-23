@@ -16,12 +16,15 @@ import {
   isApiError,
   selectAssistantConnection,
   startOpenAILogin,
+  testAssistantConnectionModel,
   testLlmConfig,
   updateConnectionModel,
+  updateConnectionModels,
   type AssistantConnection,
   type AssistantConnectionCreateInput,
   type ApiClient,
   type LlmConfigTestResult,
+  type ModelTestResult,
   type OpenAILoginStatus,
   type OpenAILoginStart,
 } from "@pidash/api-client";
@@ -34,6 +37,14 @@ export interface CloudAssistantActions {
   create(input: AssistantConnectionCreateInput): Promise<AssistantConnection>;
   select(id: string): Promise<AssistantConnection>;
   setModel(id: string, model: string): Promise<AssistantConnection>;
+  /**
+   * Replace a connection's model-ID list (NEWPIDASH-394, design section
+   * 6.3). A refused write (`400 model_test_failed`, nothing saved)
+   * rejects; read its per-ID results with `modelTestResultsFrom`.
+   */
+  setModels(id: string, models: string[], saveUnverified?: boolean): Promise<AssistantConnection>;
+  /** Smoke-test one stored model ID (design section 6.4); throttled server-side. */
+  testModel(id: string, model: string): Promise<ModelTestResult>;
   remove(id: string): Promise<void>;
   disconnect(id: string): Promise<void>;
   test(): Promise<LlmConfigTestResult>;
@@ -47,6 +58,9 @@ export function cloudAssistantActions(client: ApiClient): CloudAssistantActions 
     create: (input) => createAssistantConnection(client, input),
     select: (id) => selectAssistantConnection(client, id),
     setModel: (id, model) => updateConnectionModel(client, id, model),
+    setModels: (id, models, saveUnverified) =>
+      updateConnectionModels(client, id, { models, ...(saveUnverified === undefined ? {} : { saveUnverified }) }),
+    testModel: (id, model) => testAssistantConnectionModel(client, id, model),
     remove: (id) => deleteAssistantConnection(client, id),
     disconnect: (id) => disconnectAssistantConnection(client, id),
     test: () => testLlmConfig(client),

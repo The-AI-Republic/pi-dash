@@ -3,17 +3,31 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Key form (CLOUD-033): save gating per field, the base field per provider,
-// the trimmed submit, and the server's refusal staying in the form.
+// the multi-model list for a new key (NEWPIDASH-394), the trimmed submit,
+// and the server's refusal staying in the form.
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
+import type { ModelTestResults } from "@pidash/api-client";
+
 import { AddConnectionView } from "./AddConnectionView.js";
 
-function setup(overrides: { saving?: boolean; error?: string | null } = {}) {
+function setup(overrides: { saving?: boolean; error?: string | null; results?: ModelTestResults | null } = {}) {
   const onSave = vi.fn();
-  render(<AddConnectionView saving={overrides.saving ?? false} error={overrides.error ?? null} onSave={onSave} />);
-  return { onSave };
+  const view = render(
+    <AddConnectionView
+      saving={overrides.saving ?? false}
+      error={overrides.error ?? null}
+      results={overrides.results ?? null}
+      onSave={onSave}
+    />
+  );
+  return { onSave, rerender: view.rerender };
+}
+
+async function addModel(user: ReturnType<typeof userEvent.setup>, model: string): Promise<void> {
+  await user.type(screen.getByLabelText("Add a model ID this key serves"), `${model}{Enter}`);
 }
 
 describe("AddConnectionView", () => {
@@ -24,14 +38,14 @@ describe("AddConnectionView", () => {
     expect(screen.getByRole("option", { name: "OpenAI-compatible" })).toHaveValue("openai_compatible");
     expect(screen.getByRole("option", { name: "Anthropic" })).toHaveValue("anthropic");
     expect(screen.getByRole("textbox", { name: "Base URL" })).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "Model" })).toHaveAttribute("list", "assistant-known-byok-models");
+    expect(screen.getByLabelText("Add a model ID this key serves")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add connection" })).toBeDisabled();
   });
 
-  it("enables save only when base, model and secret all exist", async () => {
+  it("enables save only when base, at least one model and secret all exist", async () => {
     const user = userEvent.setup();
     setup();
-    await user.type(screen.getByRole("combobox", { name: "Model" }), "m");
+    await addModel(user, "m");
     await user.type(screen.getByLabelText("API key"), "k");
     expect(screen.getByRole("button", { name: "Add connection" })).toBeDisabled();
     await user.type(screen.getByRole("textbox", { name: "Base URL" }), "https://openrouter.ai/api/v1");
@@ -41,38 +55,41 @@ describe("AddConnectionView", () => {
   it("hides the base field for the single-vendor provider and enables save without it", async () => {
     const user = userEvent.setup();
     setup();
-    await user.type(screen.getByRole("combobox", { name: "Model" }), "claude");
+    await addModel(user, "claude");
     await user.type(screen.getByLabelText("API key"), "k");
     await user.selectOptions(screen.getByRole("combobox", { name: "Provider" }), "anthropic");
     expect(screen.queryByRole("textbox", { name: "Base URL" })).toBeNull();
     expect(screen.getByRole("button", { name: "Add connection" })).toBeEnabled();
   });
 
-  it("submits the trimmed draft", async () => {
+  it("submits the draft with its model-ID list", async () => {
     const user = userEvent.setup();
     const { onSave } = setup();
     await user.type(screen.getByRole("textbox", { name: "Base URL" }), "https://openrouter.ai/api/v1");
-    await user.type(screen.getByRole("combobox", { name: "Model" }), "  meta-llama/llama-3.3-70b-instruct  ");
+    await addModel(user, "gpt-6");
+    await addModel(user, "gpt-6.2");
     await user.type(screen.getByLabelText("API key"), "  secret  ");
     await user.click(screen.getByRole("button", { name: "Add connection" }));
-    expect(onSave).toHaveBeenCalledWith({
-      provider: "openai_compatible",
-      baseUrl: "https://openrouter.ai/api/v1",
-      modelName: "  meta-llama/llama-3.3-70b-instruct  ",
-      apiKey: "  secret  ",
-    });
+    expect(onSave).toHaveBeenCalledWith(
+      {
+        provider: "openai_compatible",
+        baseUrl: "https://openrouter.ai/api/v1",
+        models: ["gpt-6", "gpt-6.2"],
+        apiKey: "  secret  ",
+      },
+      false
+    );
   });
 
-  it("keeps save disabled and submits nothing while a field is missing", async () => {
+  it("keeps save disabled and submits nothing while a model or the secret is missing", async () => {
     const user = userEvent.setup();
     const { onSave } = setup();
-    await user.type(screen.getByRole("combobox", { name: "Model" }), "model");
+    await user.type(screen.getByLabelText("API key"), "k");
     const save = screen.getByRole("button", { name: "Add connection" });
     expect(save).toBeDisabled();
     await user.click(save);
     expect(onSave).not.toHaveBeenCalled();
     expect(screen.getByRole("textbox", { name: "Base URL" })).toHaveValue("");
-    expect(screen.getByLabelText("API key")).toHaveValue("");
   });
 
   it("submits nothing when the form is fired while still incomplete", () => {
@@ -91,6 +108,26 @@ describe("AddConnectionView", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(
       "Could not add connection: The server rejected the configuration"
     );
+  });
+
+  it("shows per-ID results with a Save-anyway retry for unverified-only refusals", async () => {
+    const user = userEvent.setup();
+    const { onSave, rerender } = setup();
+    await addModel(user, "flaky");
+    rerender(
+      <AddConnectionView
+        saving={false}
+        error={null}
+        results={{
+          models: [{ model: "flaky", status: "unverified", code: "provider_unreachable", detail: "Timed out." }],
+        }}
+        onSave={onSave}
+      />
+    );
+    expect(screen.getByTestId("byok-model-detail")).toHaveTextContent("Timed out.");
+    await user.click(screen.getByRole("button", { name: "Save anyway" }));
+    expect(onSave).toHaveBeenCalled();
+    expect(onSave.mock.calls[0]?.[1]).toBe(true);
   });
 
   it("shows progress and blocks a second submit while saving", () => {

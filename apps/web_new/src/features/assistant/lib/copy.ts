@@ -57,6 +57,38 @@ export const DESKTOP_ASSISTANT_LABEL = "Desktop assistant";
 export const AGENT_LABEL = "Pi Dash Agent";
 /** Placeholder option while a surface has no usable choice. */
 export const SURFACE_MODEL_EMPTY_OPTION = "No model available";
+/** Heading of the per-key model-ID list in the BYOK editor (NEWPIDASH-394, design sections 7.2 and 7.3). */
+export const MODEL_IDS_HEADING = "Models";
+/** Placeholder of the new-model field in the BYOK editor. */
+export const MODEL_ID_ADD_PLACEHOLDER = "Add a model ID this key serves";
+/** Add action in the BYOK editor. */
+export const MODEL_ID_ADD_ACTION = "Add";
+/** Per-ID test action in the BYOK editor. */
+export const MODEL_ID_TEST_ACTION = "Test";
+/** Per-ID remove action; the model ID follows. */
+export const MODEL_ID_REMOVE_ACTION = "Remove";
+/** Status text of an ID the provider verified. */
+export const MODEL_ID_STATUS_VERIFIED = "Verified";
+/** Status text of an ID no passing test covers yet. */
+export const MODEL_ID_STATUS_UNVERIFIED = "Not verified";
+/** Status text of an ID the provider refused. */
+export const MODEL_ID_STATUS_FAILED = "Failed";
+/** Row progress while an ID is under test. */
+export const MODEL_ID_TESTING_LABEL = "Testing…";
+/** Retry action persisting IDs the smoke test could not verify (design section 7.2). */
+export const MODEL_IDS_SAVE_ANYWAY_ACTION = "Save anyway";
+/** Confirm action in the last-ID removal prompt. */
+export const MODEL_ID_CONFIRM_REMOVE_ACTION = "Remove both";
+/** Cancel action in the last-ID removal prompt. */
+export const MODEL_ID_CANCEL_REMOVE_ACTION = "Cancel";
+/** Last-ID removal prompt title; the model ID fills it (design section 7.3). */
+export function lastModelRemoveTitle(model: string): string {
+  return `Remove ${model}?`;
+}
+/** Last-ID removal prompt body; the key label fills it (design section 7.3). */
+export function lastModelRemoveBody(model: string, keyLabel: string): string {
+  return `Removing ${model} also removes this ${keyLabel} key. Remove both?`;
+}
 /** Mic label when dictation is ready, matched exactly by the AGT-050/051/052/057 scenarios. */
 export const MIC_READY_LABEL = "Hold to dictate";
 /** Mic label while a recording runs, matched exactly by the AGT-050 scenario. */

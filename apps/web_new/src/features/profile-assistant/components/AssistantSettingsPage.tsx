@@ -9,15 +9,17 @@
 // refetches on idle, listens for shortcuts or accepts a drop (PROF-027),
 // and every write targets the signed-in member's own record (PROF-028).
 
+import { modelTestResultsFrom } from "@pidash/api-client";
 import { useParams } from "@tanstack/react-router";
 import * as React from "react";
 
+import { modelFailureDetails, saveAnywayModels } from "../../assistant/index.js";
 import {
   useRemoveAssistantLlm,
   useRemoveAssistantVoice,
   useSaveAssistantLlm,
   useSaveAssistantVoice,
-  useTestAssistantLlm,
+  useTestAssistantLlmModel,
   useTestAssistantVoice,
 } from "../api/mutations.js";
 import { useAssistantLlm, useAssistantVoice } from "../api/queries.js";
@@ -35,11 +37,19 @@ export function AssistantSettingsPage(): React.ReactElement {
   const voice = useAssistantVoice();
 
   const saveLlm = useSaveAssistantLlm();
-  const testLlm = useTestAssistantLlm();
+  const testLlmModel = useTestAssistantLlmModel();
   const removeLlm = useRemoveAssistantLlm();
   const saveVoice = useSaveAssistantVoice();
   const testVoice = useTestAssistantVoice();
   const removeVoice = useRemoveAssistantVoice();
+
+  // Per-ID write/test state for the key's model editor (NEWPIDASH-394,
+  // design sections 7.2 and 7.3): the provider message by model from the
+  // last refused save or test, the IDs with a probe in flight, and
+  // whether a "Save anyway" retry is on offer.
+  const [llmFailures, setLlmFailures] = React.useState<Record<string, string>>({});
+  const [llmPendingIds, setLlmPendingIds] = React.useState<readonly string[]>([]);
+  const [llmSaveAnyway, setLlmSaveAnyway] = React.useState(false);
 
   const [providerForm, setProviderForm] = React.useState<ProviderFormValues>(emptyProviderForm);
   const [voiceForm, setVoiceForm] = React.useState<VoiceFormValues>(emptyVoiceForm);
@@ -68,20 +78,69 @@ export function AssistantSettingsPage(): React.ReactElement {
     return <AssistantSectionsSkeleton />;
   }
 
-  const saveProvider = (): void => {
+  const saveProvider = (saveUnverified: boolean): void => {
     const baseUrl = endpointForSave(providerForm.provider, providerForm.baseUrl);
     const apiKey = keyForSave(providerForm.key);
+    const models = providerForm.models;
     saveLlm.mutate(
       {
         provider_kind: providerForm.provider,
         ...(baseUrl === undefined ? {} : { base_url: baseUrl }),
-        model_name: providerForm.model.trim(),
+        model_name: models[0] ?? "",
+        models,
+        ...(saveUnverified ? { save_unverified: true } : {}),
         ...(apiKey === undefined ? {} : { api_key: apiKey }),
       },
       {
-        onSuccess: () => setProviderForm((previous) => ({ ...previous, key: "" })),
+        onSuccess: (config) => {
+          setProviderForm((previous) => ({ ...previous, key: "", models: config.models ?? previous.models }));
+          setLlmFailures({});
+          setLlmSaveAnyway(false);
+        },
+        onError: (error) => {
+          // The hook stays silent on refused writes; the provider's
+          // message lands per ID in the form instead.
+          const results = modelTestResultsFrom(error);
+          if (results === null) return;
+          setLlmFailures(modelFailureDetails(results));
+          setLlmSaveAnyway(saveAnywayModels(results) !== null);
+        },
       }
     );
+  };
+
+  const testProviderModel = (model: string): void => {
+    setLlmPendingIds([model]);
+    testLlmModel.mutate(model, {
+      onSuccess: (result) => {
+        if (result.status === "verified") {
+          setLlmFailures((current) => {
+            if (current[model] === undefined) return current;
+            const next = { ...current };
+            delete next[model];
+            return next;
+          });
+        } else {
+          setLlmFailures((current) => ({ ...current, [model]: result.detail ?? result.code ?? "" }));
+        }
+      },
+      onSettled: () => setLlmPendingIds([]),
+    });
+  };
+
+  const removeProviderModel = (model: string): void => {
+    // The editor confirms the last ID; removing it deletes the key.
+    if (providerForm.models.length <= 1) {
+      removeLlm.mutate();
+      return;
+    }
+    setProviderForm((previous) => ({ ...previous, models: previous.models.filter((kept) => kept !== model) }));
+    setLlmFailures((current) => {
+      if (current[model] === undefined) return current;
+      const next = { ...current };
+      delete next[model];
+      return next;
+    });
   };
 
   const saveVoiceConfig = (): void => {
@@ -104,12 +163,15 @@ export function AssistantSettingsPage(): React.ReactElement {
       <ProviderForm
         config={llm.data}
         values={providerForm}
+        failures={llmFailures}
+        pendingIds={llmPendingIds}
+        saveAnyway={llmSaveAnyway}
         onChange={setProviderForm}
-        onSave={saveProvider}
-        onTest={() => testLlm.mutate()}
-        onRemove={() => removeLlm.mutate()}
+        onSave={(saveUnverified) => saveProvider(saveUnverified)}
+        onTestModel={(model) => testProviderModel(model)}
+        onRemoveModel={(model) => removeProviderModel(model)}
+        onRemoveKey={() => removeLlm.mutate()}
         saving={saveLlm.isPending}
-        testing={testLlm.isPending}
         removing={removeLlm.isPending}
       />
 

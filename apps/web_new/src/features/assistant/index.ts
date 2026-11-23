@@ -34,6 +34,20 @@ export {
   EMPTY_CONVERSATION_HINT,
   DESKTOP_ASSISTANT_LABEL,
   HANDOFF_FAILED_TITLE,
+  lastModelRemoveBody,
+  lastModelRemoveTitle,
+  MODEL_ID_ADD_ACTION,
+  MODEL_ID_ADD_PLACEHOLDER,
+  MODEL_ID_CANCEL_REMOVE_ACTION,
+  MODEL_ID_CONFIRM_REMOVE_ACTION,
+  MODEL_ID_REMOVE_ACTION,
+  MODEL_ID_STATUS_FAILED,
+  MODEL_ID_STATUS_UNVERIFIED,
+  MODEL_ID_STATUS_VERIFIED,
+  MODEL_ID_TEST_ACTION,
+  MODEL_ID_TESTING_LABEL,
+  MODEL_IDS_HEADING,
+  MODEL_IDS_SAVE_ANYWAY_ACTION,
   MODEL_PICKER_BLOCKED_BODY,
   MODEL_PICKER_BLOCKED_TITLE,
   MODEL_PICKER_FAILED_FALLBACK,
@@ -60,6 +74,10 @@ export { OpenHubModelPicker } from "./components/OpenHubModelPicker.js";
 export type { OpenHubModelPickerProps } from "./components/OpenHubModelPicker.js";
 export { SurfaceModelPickers, surfacePickerLabel } from "./components/SurfaceModelPickers.js";
 export type { SurfaceModelPickersProps, SurfacePickerSpec } from "./components/SurfaceModelPickers.js";
+export { ModelIdEditor } from "./components/ModelIdEditor.js";
+export type { ModelIdEditorProps } from "./components/ModelIdEditor.js";
+export { modelFailureDetails, modelIdStatus, normalizeModelIds, saveAnywayModels } from "./lib/byokModels.js";
+export type { ModelIdStatus } from "./lib/byokModels.js";
 export {
   SELECTION_FAILED_FALLBACK,
   composerSurface,

@@ -13,17 +13,18 @@ import {
   deleteMcpServer,
   deleteSttConfig,
   dictationDisabledFrom,
+  modelTestResultsFrom,
   patchMcpServer,
   putLlmConfig,
   putSttConfig,
-  testLlmConfig,
+  testLlmModel,
   testSttConfig,
   type LlmConfig,
   type LlmConfigInput,
-  type LlmConfigTestResult,
   type McpServer,
   type McpServerInput,
   type McpServerPatch,
+  type ModelTestResult,
   type SttConfig,
   type SttConfigInput,
   type SttConfigTestResult,
@@ -35,7 +36,6 @@ import { notifyError, notifyInfo, notifySuccess } from "../../../shared/shell/to
 import {
   CONNECTION_FAILED_TITLE,
   CONNECTION_OK_TITLE,
-  LLM_CONNECTION_OK_MESSAGE,
   LLM_REMOVED_MESSAGE,
   LLM_REMOVED_TITLE,
   LLM_SAVED_MESSAGE,
@@ -67,22 +67,25 @@ export function useSaveAssistantLlm() {
       notifySuccess(LLM_SAVED_TITLE, LLM_SAVED_MESSAGE);
     },
     onError: (error) => {
+      // A refused write (`400 model_test_failed`) renders per ID in the
+      // form; the caller surfaces it, so only other failures notify here.
+      if (modelTestResultsFrom(error) !== null) return;
       notifyError(SAVE_FAILED_TITLE, saveFailureMessage(error));
     },
   });
 }
 
-/** Probe the saved model endpoint; a failure stamps nothing and reports its code. */
-export function useTestAssistantLlm() {
+/**
+ * Smoke-test one model ID (NEWPIDASH-394, design section 6.4). A passing
+ * test stamps the ID server-side and re-reads the config; a failed test
+ * answers 200 with the provider message for the caller to show inline.
+ * Only a request that never reached the server notifies here.
+ */
+export function useTestAssistantLlmModel() {
   const queryClient = useQueryClient();
-  return useMutation<LlmConfigTestResult, Error, void>({
-    mutationFn: () => testLlmConfig(getAppClient()),
-    onSuccess: (result) => {
-      if (result.ok) {
-        notifySuccess(CONNECTION_OK_TITLE, LLM_CONNECTION_OK_MESSAGE);
-      } else {
-        notifyError(CONNECTION_FAILED_TITLE, testFailureCode(result));
-      }
+  return useMutation<ModelTestResult, Error, string>({
+    mutationFn: (model) => testLlmModel(getAppClient(), model),
+    onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: assistantSettingsKeys.llm });
     },
     onError: (error) => {

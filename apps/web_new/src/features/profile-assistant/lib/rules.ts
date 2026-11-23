@@ -36,12 +36,13 @@ export function endpointForSave(provider: string, baseUrl: string): string | und
 }
 
 /**
- * The language-model save needs a model and a credential to land: a typed
- * key, or the one already stored (an omitted key keeps it). It never
- * creates a config without a secret.
+ * The language-model save needs at least one model ID and a credential
+ * to land (NEWPIDASH-394, design section 7.2): a typed key, or the one
+ * already stored (an omitted key keeps it). It never creates a config
+ * without a secret.
  */
-export function llmCanSave(state: { model: string; key: string; hasKey: boolean }): boolean {
-  return state.model.trim() !== "" && (state.key.trim() !== "" || state.hasKey);
+export function llmCanSave(state: { models: readonly string[]; key: string; hasKey: boolean }): boolean {
+  return state.models.length > 0 && (state.key.trim() !== "" || state.hasKey);
 }
 
 /** The voice save mirrors that gate over its endpoint and model. */

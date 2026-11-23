@@ -203,6 +203,37 @@ describe("toConnectionRow", () => {
     expect(target.modelSuggestions.length).toBeGreaterThan(0);
   });
 
+  it("threads the stored model-ID list and per-ID stamps into BYOK rows", () => {
+    const answer = list({
+      connections: [
+        row({
+          models: ["gpt-6", "gpt-6.2"],
+          model_verified_at: { "gpt-6": "2026-11-23T00:00:00Z" },
+        }),
+      ],
+    });
+    const target = toConnectionRow(answer.connections[0]!, answer, connectionModelFlags(answer));
+    expect(target.models).toEqual(["gpt-6", "gpt-6.2"]);
+    expect(target.modelVerifiedAt).toEqual({ "gpt-6": "2026-11-23T00:00:00Z" });
+  });
+
+  it("falls back to the legacy single model when the backend predates multi-model BYOK", () => {
+    const answer = list({ connections: [row()] });
+    const target = toConnectionRow(answer.connections[0]!, answer, connectionModelFlags(answer));
+    expect(target.models).toEqual(["meta-llama/llama-3.3-70b-instruct"]);
+    expect(target.modelVerifiedAt).toEqual({});
+  });
+
+  it("leaves managed rows with no model list", () => {
+    const answer = list({
+      connections: [row({ kind: "openhub", base_url: "", model_name: "moonshotai/kimi-k3" })],
+      openhub_model_options: ["moonshotai/kimi-k3"],
+    });
+    const target = toConnectionRow(answer.connections[0]!, answer, connectionModelFlags(answer));
+    expect(target.models).toEqual([]);
+    expect(target.modelVerifiedAt).toEqual({});
+  });
+
   it("uses the built-in managed picker when the server sends no options", () => {
     const answer = list({
       connections: [row({ kind: "codex", base_url: "", model_name: "gpt-5.5" })],

@@ -128,6 +128,25 @@ describe("cloudAssistantActions", () => {
     ]);
   });
 
+  it("replaces a connection's model-ID list and tests one stored ID", async () => {
+    const calls = stubTransport((call) => {
+      if (call.method === "PATCH") return { status: 200, body: CONNECTION };
+      if (call.method === "POST" && call.url.endsWith("/test/"))
+        return { status: 200, body: { model: "gpt-6", status: "verified" } };
+      return undefined;
+    });
+    const actions = cloudAssistantActions(getAppClient());
+    await actions.setModels(ID, ["gpt-6", "gpt-6.2"]);
+    await actions.setModels(ID, ["flaky"], true);
+    await expect(actions.testModel(ID, "gpt-6")).resolves.toEqual({ model: "gpt-6", status: "verified" });
+    const patches = calls.filter((call) => call.method === "PATCH");
+    expect(patches.map((call) => call.body)).toEqual([
+      { models: ["gpt-6", "gpt-6.2"] },
+      { models: ["flaky"], save_unverified: true },
+    ]);
+    expect(calls.find((call) => call.url.endsWith("/test/"))?.body).toEqual({ model: "gpt-6" });
+  });
+
   it("polls the login status with its state", async () => {
     stubTransport((call) =>
       call.url.includes("/api/users/me/ai-assistant/openai-login/status/")

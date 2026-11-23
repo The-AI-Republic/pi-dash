@@ -101,6 +101,18 @@ export interface ConnectionRow {
   modelChoices: ModelChoice[];
   modelSuggestions: readonly string[];
   verifiedAt: string | null;
+  /**
+   * The key's stored model-ID list for BYOK rows (NEWPIDASH-394, design
+   * section 4.4): the multi-model list when the backend sends it, else
+   * the legacy single model. Empty on managed rows.
+   */
+  models: string[];
+  /**
+   * Per-ID verification stamps for BYOK rows (`model_verified_at`); an
+   * absent entry means the ID has no passing test. Empty when the
+   * backend predates multi-model BYOK.
+   */
+  modelVerifiedAt: Record<string, string | null>;
   /** The provider account has been disconnected; the row stays. */
   disconnected: boolean;
   /** The row cannot be removed (managed lanes are permanent). */
@@ -245,6 +257,8 @@ export function toConnectionRow(
     modelChoices: control === "select" ? choicesFor(row, flags, modelName) : [],
     modelSuggestions: control === "input" ? BYOK_MODEL_SUGGESTIONS : [],
     verifiedAt: row.last_verified_at,
+    models: row.kind === "byok" ? (row.models ?? (row.model_name === "" ? [] : [row.model_name])) : [],
+    modelVerifiedAt: row.kind === "byok" ? (row.model_verified_at ?? {}) : {},
     disconnected,
     removable: row.kind === "byok",
     disconnectable: row.kind === "codex" && !disconnected,

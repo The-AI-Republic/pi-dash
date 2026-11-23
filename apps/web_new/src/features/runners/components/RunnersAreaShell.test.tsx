@@ -75,7 +75,16 @@ describe("RunnersAreaShell", () => {
         access="allowed"
         runners={[runner]}
         pathname="/acme/runners"
-        localContacts={[{ id: "pidash-builtin", name: "Pi Dash Agent", label: "Local", unavailableReason: null }]}
+        localContacts={[
+          {
+            id: "pidash-builtin",
+            name: "Pi Dash Agent",
+            label: "Local",
+            unavailableReason: null,
+            model: null,
+            settingsHref: null,
+          },
+        ]}
       >
         <p>child</p>
       </RunnersAreaShell>

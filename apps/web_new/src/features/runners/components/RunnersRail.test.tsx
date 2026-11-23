@@ -81,7 +81,16 @@ describe("RunnersRail", () => {
         scope={{ workspaceSlug: "acme" }}
         runners={[runner("r-1", "alpha")]}
         isProjectScope={false}
-        localContacts={[{ id: "pidash-builtin", name: "Pi Dash Agent", label: "Local", unavailableReason: null }]}
+        localContacts={[
+          {
+            id: "pidash-builtin",
+            name: "Pi Dash Agent",
+            label: "Local",
+            unavailableReason: null,
+            model: null,
+            settingsHref: null,
+          },
+        ]}
       />
     );
     expect(screen.getAllByText(PIDASH_AGENT_SECTION_HEADER)[0]).toBeInTheDocument();
@@ -106,7 +115,14 @@ describe("RunnersRail", () => {
         runners={[]}
         isProjectScope
         localContacts={[
-          { id: "pidash-builtin", name: "Pi Dash Agent", label: "Local", unavailableReason: "Turned off here." },
+          {
+            id: "pidash-builtin",
+            name: "Pi Dash Agent",
+            label: "Local",
+            unavailableReason: "Turned off here.",
+            model: null,
+            settingsHref: null,
+          },
         ]}
       />
     );
@@ -123,6 +139,53 @@ describe("RunnersRail", () => {
     render(<RunnersRail scope={{ workspaceSlug: "acme" }} runners={[runner("r-1", "alpha")]} isProjectScope={false} />);
     expect(screen.queryByText(PIDASH_AGENT_SECTION_HEADER)).toBeNull();
     expect(screen.queryByTestId("runners-rail-local-contact")).toBeNull();
+  });
+
+  it("shows the agent model with a link to the Models section", () => {
+    render(
+      <RunnersRail
+        scope={{ workspaceSlug: "acme" }}
+        runners={[]}
+        isProjectScope={false}
+        localContacts={[
+          {
+            id: "pidash-builtin",
+            name: "Pi Dash Agent",
+            label: "Local",
+            unavailableReason: null,
+            model: "moonshotai/kimi-k3",
+            settingsHref: "/acme/settings/account/ai-assistant/#assistant-models",
+          },
+        ]}
+      />
+    );
+    const line = screen.getByTestId("runners-rail-local-model");
+    expect(line).toHaveTextContent("moonshotai/kimi-k3");
+    expect(screen.getByRole("link", { name: "Change" })).toHaveAttribute(
+      "href",
+      "/acme/settings/account/ai-assistant/#assistant-models"
+    );
+  });
+
+  it("omits the model line while the profile named neither a model nor settings", () => {
+    render(
+      <RunnersRail
+        scope={{ workspaceSlug: "acme" }}
+        runners={[]}
+        isProjectScope={false}
+        localContacts={[
+          {
+            id: "pidash-builtin",
+            name: "Pi Dash Agent",
+            label: "Local",
+            unavailableReason: null,
+            model: null,
+            settingsHref: null,
+          },
+        ]}
+      />
+    );
+    expect(screen.queryByTestId("runners-rail-local-model")).toBeNull();
   });
 
   // NEWPIDASH-3: the rail is a column that stretches to its row; a long

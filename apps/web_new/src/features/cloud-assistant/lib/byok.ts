@@ -16,14 +16,15 @@ export type ByokProvider = (typeof BYOK_PROVIDERS)[number];
 export interface ByokDraft {
   provider: ByokProvider;
   baseUrl: string;
-  modelName: string;
+  /** The key's typed model IDs (NEWPIDASH-394, design section 7.2); a new key needs at least one. */
+  models: string[];
   apiKey: string;
 }
 
 export const EMPTY_BYOK_DRAFT: ByokDraft = {
   provider: "openai_compatible",
   baseUrl: "",
-  modelName: "",
+  models: [],
   apiKey: "",
 };
 
@@ -34,14 +35,14 @@ export function needsBaseUrl(provider: ByokProvider): boolean {
 
 export interface ByokProblems {
   baseUrl: string | null;
-  modelName: string | null;
+  models: string | null;
   apiKey: string | null;
 }
 
 export function validateByokDraft(draft: ByokDraft): ByokProblems {
   return {
     baseUrl: needsBaseUrl(draft.provider) && draft.baseUrl.trim() === "" ? BYOK_MISSING_BASE : null,
-    modelName: draft.modelName.trim() === "" ? BYOK_MISSING_MODEL : null,
+    models: draft.models.length === 0 ? BYOK_MISSING_MODEL : null,
     apiKey: draft.apiKey.trim() === "" ? BYOK_MISSING_KEY : null,
   };
 }
@@ -53,7 +54,10 @@ export function byokDraftValid(draft: ByokDraft): boolean {
 export interface ByokSubmission {
   providerKind: ByokProvider;
   baseUrl: string | null;
+  /** First ID; older servers read the key's single model from it. */
   modelName: string;
+  /** The key's full model-ID list (design section 6.3). */
+  models: string[];
   apiKey: string;
 }
 
@@ -62,7 +66,8 @@ export function byokSubmission(draft: ByokDraft): ByokSubmission {
   return {
     providerKind: draft.provider,
     baseUrl: needsBaseUrl(draft.provider) ? draft.baseUrl.trim() : null,
-    modelName: draft.modelName.trim(),
+    modelName: draft.models[0] ?? "",
+    models: draft.models,
     apiKey: draft.apiKey.trim(),
   };
 }

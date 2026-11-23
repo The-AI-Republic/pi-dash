@@ -33,7 +33,6 @@ import {
   SERVER_REMOVED_TITLE,
   STT_REMOVED_MESSAGE,
   STT_SAVED_MESSAGE,
-  UNKNOWN_ERROR_FALLBACK,
 } from "../lib/copy.js";
 import { assistantSettingsKeys } from "./keys.js";
 import {
@@ -43,7 +42,7 @@ import {
   useRemoveToolServer,
   useSaveAssistantLlm,
   useSaveAssistantVoice,
-  useTestAssistantLlm,
+  useTestAssistantLlmModel,
   useTestAssistantVoice,
   useToggleToolServer,
 } from "./mutations.js";
@@ -138,51 +137,66 @@ describe("language-model hooks", () => {
     expect(notifyError).toHaveBeenCalledWith("Save failed", "probe_boom");
   });
 
-  it("toasts a passing probe and refreshes the config read", async () => {
-    const { transport } = stubTransport(() => ({ status: 200, body: { ok: true } }));
-    createAppClient("https://api.test", transport);
-    const Wrapper = wrapper();
-    const client = (Wrapper as unknown as { client?: QueryClient }).client;
-    void client;
-    const { result } = renderHook(() => useTestAssistantLlm(), { wrapper: Wrapper });
-    act(() => {
-      result.current.mutate();
-    });
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(notifySuccess).toHaveBeenCalledWith(CONNECTION_OK_TITLE, "Your provider responded.");
-  });
-
-  it("toasts the probe's failure code", async () => {
+  it("leaves a refused write's per-ID results silent for the form to show", async () => {
     const { transport } = stubTransport(() => ({
-      status: 200,
-      body: { ok: false, error_code: "provider_unreachable" },
+      status: 400,
+      body: { error: "model_test_failed", models: [{ model: "m", status: "failed", detail: "No such model." }] },
     }));
     createAppClient("https://api.test", transport);
-    const { result } = renderHook(() => useTestAssistantLlm(), { wrapper: wrapper() });
+    const { result } = renderHook(() => useSaveAssistantLlm(), { wrapper: wrapper() });
     act(() => {
-      result.current.mutate();
+      result.current.mutate({ model_name: "m", models: ["m"], api_key: "key" });
     });
-    await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(notifyError).toHaveBeenCalledWith(CONNECTION_FAILED_TITLE, "provider_unreachable");
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(notifyError).not.toHaveBeenCalled();
   });
 
-  it("falls back when the probe answers without a code", async () => {
-    const { transport } = stubTransport(() => ({ status: 200, body: { ok: false } }));
+  it("tests one stored model ID through the per-model endpoint and re-reads the config", async () => {
+    const { transport, calls } = stubTransport(() => ({
+      status: 200,
+      body: { model: "m", status: "verified" },
+    }));
     createAppClient("https://api.test", transport);
-    const { result } = renderHook(() => useTestAssistantLlm(), { wrapper: wrapper() });
+    const { result } = renderHook(() => useTestAssistantLlmModel(), { wrapper: wrapper() });
     act(() => {
-      result.current.mutate();
+      result.current.mutate("m");
     });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(notifyError).toHaveBeenCalledWith(CONNECTION_FAILED_TITLE, UNKNOWN_ERROR_FALLBACK);
+    expect(result.current.data).toEqual({ model: "m", status: "verified" });
+    expect(calls[0]).toMatchObject({
+      method: "POST",
+      url: "https://api.test/api/users/me/ai-assistant/config/test/",
+    });
+    expect(calls[0]?.body).toEqual({ model: "m" });
+    expect(notifyError).not.toHaveBeenCalled();
   });
 
-  it("reports a probe request that fails outright", async () => {
+  it("answers a failed per-ID test without notifying; the caller shows it inline", async () => {
+    const { transport } = stubTransport(() => ({
+      status: 200,
+      body: { model: "m", status: "failed", code: "model_invalid", detail: "No such model." },
+    }));
+    createAppClient("https://api.test", transport);
+    const { result } = renderHook(() => useTestAssistantLlmModel(), { wrapper: wrapper() });
+    act(() => {
+      result.current.mutate("m");
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual({
+      model: "m",
+      status: "failed",
+      code: "model_invalid",
+      detail: "No such model.",
+    });
+    expect(notifyError).not.toHaveBeenCalled();
+  });
+
+  it("reports a per-ID test request that fails outright", async () => {
     const { transport } = stubTransport(() => ({ status: 429, body: { error: "throttled" } }));
     createAppClient("https://api.test", transport);
-    const { result } = renderHook(() => useTestAssistantLlm(), { wrapper: wrapper() });
+    const { result } = renderHook(() => useTestAssistantLlmModel(), { wrapper: wrapper() });
     act(() => {
-      result.current.mutate();
+      result.current.mutate("m");
     });
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(notifyError).toHaveBeenCalledWith(CONNECTION_FAILED_TITLE, "throttled");
