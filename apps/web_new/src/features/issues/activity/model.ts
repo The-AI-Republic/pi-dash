@@ -230,7 +230,7 @@ export function activitySentence(
     case "archived_at":
       return value === "restore" ? "restored the work item." : "archived the work item.";
     case "agent_wait":
-      return `started waiting on ${value} (${previous}).`;
+      return `chose to wait on a blocker (${value} of ${previous}).`;
     case "agent_wake":
       return `resumed after ${value} was ${previous}.`;
     case "intake":
