@@ -5,12 +5,21 @@
 // plus the connectivity check. The read lives in assistant.ts; the
 // key itself is write-only — the API only ever reports its presence.
 import { ApiClient } from "../client.js";
+import { ModelTestResult, testAssistantModel } from "./assistant-model-selection.js";
 import { LlmConfig } from "./assistant.js";
 
 export interface LlmConfigInput {
   provider_kind?: string;
   base_url?: string;
   model_name?: string;
+  /**
+   * The key's typed model IDs (NEWPIDASH-394, design section 6.3). A
+   * `model_name`-only body is treated as `models: [model_name]` for
+   * older clients.
+   */
+  models?: string[];
+  /** "Save anyway": persist IDs the smoke test could not verify. */
+  save_unverified?: boolean;
   /** Write-only: omit to keep the saved key. */
   api_key?: string;
 }
@@ -18,7 +27,10 @@ export interface LlmConfigInput {
 /**
  * Save the provider key (create or partial update). The server trims
  * the model name, strips the base address's trailing slash, and
- * answers the stored config — the key never echoes back.
+ * answers the stored config — the key never echoes back. New IDs are
+ * smoke-tested; a rejected write (`400 model_test_failed`, nothing
+ * saved) carries the per-ID results — read them with
+ * `modelTestResultsFrom`.
  */
 export async function putLlmConfig(client: ApiClient, input: LlmConfigInput): Promise<LlmConfig> {
   const path = "/api/users/me/ai-assistant/config/";
@@ -27,10 +39,21 @@ export async function putLlmConfig(client: ApiClient, input: LlmConfigInput): Pr
       provider_kind: input.provider_kind,
       base_url: input.base_url,
       model_name: input.model_name,
+      models: input.models,
+      save_unverified: input.save_unverified,
       api_key: input.api_key,
     },
   });
   return client.parse(LlmConfig, envelope.data, `PUT ${path}`);
+}
+
+/**
+ * Smoke-test one stored model ID (NEWPIDASH-394, design section 6.4).
+ * Updates the ID's `model_verified_at` server-side and answers one
+ * result object.
+ */
+export async function testLlmModel(client: ApiClient, model: string): Promise<ModelTestResult> {
+  return testAssistantModel(client, "/api/users/me/ai-assistant/config/test/", model);
 }
 
 /** Remove the provider key; resolves on the 204. */

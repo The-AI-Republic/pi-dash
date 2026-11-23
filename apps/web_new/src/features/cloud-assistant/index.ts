@@ -34,6 +34,7 @@ export {
 export type { ByokDraft, ByokProblems, ByokProvider, ByokSubmission } from "./lib/byok.js";
 export {
   annotateChoices,
+  baseUrlHost,
   BUILTIN_CODEX_MODELS,
   BYOK_MODEL_SUGGESTIONS,
   connectionModelFlags,

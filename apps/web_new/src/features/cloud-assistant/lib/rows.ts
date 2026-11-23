@@ -137,12 +137,16 @@ export function isDisconnected(row: AssistantConnectionListItem): boolean {
 export function connectionTitle(row: Pick<AssistantConnectionListItem, "kind" | "provider_kind" | "base_url">): string {
   if (row.kind === "openhub") return "OpenHub";
   if (row.kind === "codex") return "OpenAI account";
-  const host = hostOf(row.base_url);
+  const host = baseUrlHost(row.base_url);
   if (host !== null) return `BYOK:${host}`;
   return row.provider_kind === "anthropic" ? "BYOK:Anthropic" : "BYOK";
 }
 
-function hostOf(raw: string): string | null {
+/**
+ * The host of a base URL, or null when it is blank or unparseable.
+ * Shared with the merged picker, whose BYOK labels name the same host.
+ */
+export function baseUrlHost(raw: string): string | null {
   const value = raw.trim();
   if (value === "") return null;
   try {
