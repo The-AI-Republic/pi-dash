@@ -188,7 +188,7 @@ mod tests {
         let settings = settings();
         assert!(saved_entry_json(&settings, Surface::DesktopAssistant).is_some());
         assert!(saved_entry_json(&settings, Surface::WebAssistant).is_some());
-        assert_eq!(saved_entry_json(&settings, Surface::Agent).is_some(), true);
+        assert!(saved_entry_json(&settings, Surface::Agent).is_some());
         assert_eq!(saved_entry_json(&json!({}), Surface::Agent), None);
     }
 }
@@ -763,10 +763,10 @@ mod resolution_tests {
             code: None,
             detail: None,
         };
-        assert!(smoke_test_blocks(&[failed.clone()], true));
-        assert!(smoke_test_blocks(&[unverified.clone()], false));
-        assert!(!smoke_test_blocks(&[unverified.clone()], true));
-        assert!(!smoke_test_blocks(&[verified.clone()], false));
+        assert!(smoke_test_blocks(std::slice::from_ref(&failed), true));
+        assert!(smoke_test_blocks(std::slice::from_ref(&unverified), false));
+        assert!(!smoke_test_blocks(std::slice::from_ref(&unverified), true));
+        assert!(!smoke_test_blocks(std::slice::from_ref(&verified), false));
         assert!(!smoke_test_blocks(&[], false));
         assert!(smoke_test_blocks(&[verified, unverified, failed], true));
     }

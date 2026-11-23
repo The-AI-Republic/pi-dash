@@ -314,7 +314,6 @@ pub async fn upsert_assistant_model_entry(
         settings: ActiveValue::Set(Value::Object(bag)),
         created_at: ActiveValue::Set(now.into()),
         updated_at: ActiveValue::Set(now.into()),
-        ..Default::default()
     };
     match profiles::Entity::insert(insert).exec(db).await {
         Ok(_) => Ok(()),
