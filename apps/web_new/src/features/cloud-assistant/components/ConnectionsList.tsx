@@ -1,12 +1,13 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Saved connections (parity/specs/cloud.md §7, CLOUD-032–034). One card per
-// connection: a radio chooses the active row, a kind-appropriate model
-// control edits it, and the row's actions test, remove (self-supplied) or
-// disconnect (provider account). Removing asks inline first; the managed
-// rows are permanent. A hosted row a stale session cannot reach keeps its
-// place but says how to fix the session (CLOUD-034).
+// Saved connections (parity/specs/cloud.md §7, CLOUD-032–034, NEWPIDASH-394).
+// One card per connection: its title and markers, a kind-appropriate model
+// control, and the row's actions test, remove (self-supplied) or disconnect
+// (provider account). Which model answers is chosen per surface in the
+// Models section above, never per row. Removing asks inline first; the
+// managed rows are permanent. A hosted row a stale session cannot reach
+// keeps its place but says how to fix the session (CLOUD-034).
 
 import { Button, Spinner } from "@pidash/kit";
 import * as React from "react";
@@ -31,8 +32,6 @@ import {
 } from "../lib/copy.js";
 import type { ConnectionRow } from "../lib/rows.js";
 
-export const CONNECTION_RADIO_NAME = "assistant-active-connection";
-
 export interface ConnectionsListProps {
   rows: readonly ConnectionRow[];
   /** Provider sign-in is offered by this deployment. */
@@ -42,7 +41,6 @@ export interface ConnectionsListProps {
   busyId: string | null;
   /** Wallet address for the "Needs credit" top-up link; null hides it. */
   topUpHref: string | null;
-  onSelect(row: ConnectionRow): void;
   onCommitModel(row: ConnectionRow, model: string): void;
   onTest(): void;
   onRemove(row: ConnectionRow): void;
@@ -73,15 +71,7 @@ function ConnectionCard(props: ConnectionsListProps & { row: ConnectionRow }): R
     <li>
       <div data-testid={`assistant-connection-${row.id}`} className={CARD}>
         <div className="flex flex-wrap items-center justify-between gap-(--space-3)">
-          <label className="flex cursor-pointer flex-wrap items-center gap-(--space-2)">
-            <input
-              type="radio"
-              name={CONNECTION_RADIO_NAME}
-              checked={row.selected}
-              disabled={!row.selectable || busy}
-              aria-label={row.title}
-              onChange={() => props.onSelect(row)}
-            />
+          <div className="flex flex-wrap items-center gap-(--space-2)">
             <span className="text-body font-medium text-(--text)">{row.title}</span>
             {row.markers.map((marker) => (
               <span
@@ -91,7 +81,7 @@ function ConnectionCard(props: ConnectionsListProps & { row: ConnectionRow }): R
                 {marker}
               </span>
             ))}
-          </label>
+          </div>
           <div className="flex flex-wrap items-center gap-(--space-2)">
             {row.usesChatgptPlan ? (
               <a

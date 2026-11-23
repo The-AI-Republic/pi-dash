@@ -59,6 +59,16 @@ vi.mock("../../../shared/dictation/index.js", async (importOriginal) => {
   };
 });
 
+vi.mock("@tanstack/react-router", () => ({
+  useParams: () => ({ ws: "acme" }),
+}));
+
+vi.mock("./AssistantModelsSection.js", () => ({
+  AssistantModelsSection: ({ workspaceSlug }: { workspaceSlug: string }) => (
+    <div data-testid="assistant-models-section-stub">{workspaceSlug}</div>
+  ),
+}));
+
 import { AssistantSettingsPage } from "./AssistantSettingsPage.js";
 
 const SERVER_ID = "3f7c1d1e-0d1a-4c59-9f0b-6a2f3e4d5c6b";
@@ -112,6 +122,14 @@ beforeEach(() => {
 });
 
 describe("AssistantSettingsPage", () => {
+  it("renders the Models section first with the workspace slug", () => {
+    render(<AssistantSettingsPage />);
+    const section = screen.getByTestId("assistant-models-section-stub");
+    expect(section).toHaveTextContent("acme");
+    const page = screen.getByTestId("assistant-settings-page");
+    expect(page.firstElementChild).toBe(section);
+  });
+
   it("holds a quiet frame until both configs arrive", () => {
     harness.llm = { data: undefined };
     render(<AssistantSettingsPage />);

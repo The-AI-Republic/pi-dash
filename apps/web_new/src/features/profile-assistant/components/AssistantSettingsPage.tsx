@@ -9,6 +9,7 @@
 // refetches on idle, listens for shortcuts or accepts a drop (PROF-027),
 // and every write targets the signed-in member's own record (PROF-028).
 
+import { useParams } from "@tanstack/react-router";
 import * as React from "react";
 
 import {
@@ -22,12 +23,14 @@ import {
 import { useAssistantLlm, useAssistantVoice } from "../api/queries.js";
 import { endpointForSave, keyForSave } from "../lib/rules.js";
 import { DICTATION_UI_ENABLED } from "../../../shared/dictation/index.js";
+import { AssistantModelsSection } from "./AssistantModelsSection.js";
 import { AssistantSectionsSkeleton } from "./AssistantSectionsSkeleton.js";
 import { emptyProviderForm, providerFormFrom, ProviderForm, type ProviderFormValues } from "./ProviderForm.js";
 import { ToolServersSection } from "./ToolServersSection.js";
 import { emptyVoiceForm, voiceFormFrom, VoiceForm, type VoiceFormValues } from "./VoiceForm.js";
 
 export function AssistantSettingsPage(): React.ReactElement {
+  const { ws } = useParams({ strict: false }) as { ws?: string };
   const llm = useAssistantLlm();
   const voice = useAssistantVoice();
 
@@ -97,6 +100,7 @@ export function AssistantSettingsPage(): React.ReactElement {
 
   return (
     <div data-testid="assistant-settings-page" className="flex max-w-2xl flex-col gap-(--space-8)">
+      {ws === undefined ? null : <AssistantModelsSection workspaceSlug={ws} config={llm.data} />}
       <ProviderForm
         config={llm.data}
         values={providerForm}

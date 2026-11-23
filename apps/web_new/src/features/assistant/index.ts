@@ -19,6 +19,7 @@ export {
   useAssistantThreads,
 } from "./api/queries.js";
 export {
+  AGENT_LABEL,
   API_KEY_REMINDER,
   API_KEY_REQUIRED_TITLE,
   ASSISTANT_CAPTION,
@@ -31,11 +32,13 @@ export {
   ASSISTANT_STOP_LABEL,
   CHAT_HISTORY_TITLE,
   EMPTY_CONVERSATION_HINT,
+  DESKTOP_ASSISTANT_LABEL,
   HANDOFF_FAILED_TITLE,
   MODEL_PICKER_BLOCKED_BODY,
   MODEL_PICKER_BLOCKED_TITLE,
   MODEL_PICKER_FAILED_FALLBACK,
   MODEL_PICKER_FAILED_TITLE,
+  MODELS_SECTION_HASH,
   NEW_CONVERSATION_LABEL,
   NO_CONVERSATIONS,
   providerSettingsHref,
@@ -43,7 +46,9 @@ export {
   SETUP_CARD_BODY,
   SETUP_CARD_TITLE,
   START_FAILED_TITLE,
+  SURFACE_MODEL_EMPTY_OPTION,
   UNTITLED_CONVERSATION,
+  WEB_ASSISTANT_LABEL,
 } from "./lib/copy.js";
 export { isAssistantConfigured, needsLaneSetup } from "./lib/gate.js";
 export { laneHasCredential, resolveLaneState } from "./lib/lane.js";
@@ -53,6 +58,8 @@ export { assistantLandingHref, assistantThreadHref, readPendingMessage } from ".
 export type { PendingMessageState } from "./lib/navigation.js";
 export { OpenHubModelPicker } from "./components/OpenHubModelPicker.js";
 export type { OpenHubModelPickerProps } from "./components/OpenHubModelPicker.js";
+export { SurfaceModelPickers, surfacePickerLabel } from "./components/SurfaceModelPickers.js";
+export type { SurfaceModelPickersProps, SurfacePickerSpec } from "./components/SurfaceModelPickers.js";
 export {
   SELECTION_FAILED_FALLBACK,
   composerSurface,
@@ -66,10 +73,13 @@ export type { ModelSelectionWrites } from "./api/selection.js";
 export {
   OPENHUB_DEFAULT_MODEL,
   OPENHUB_DEFAULT_SUFFIX,
+  applyCreditBadges,
   buildMergedModelChoices,
   byokChoiceLabel,
+  byokKeyFromConfig,
   byokKeysFromList,
   catalogFromList,
+  effectiveChoiceFor,
   fallbackNotice,
   mergedChoiceKey,
   pickerOptionLabel,

@@ -117,6 +117,8 @@ export interface ConnectionModelFlags {
   codexModels: string[];
   codexModelLabels: Record<string, string>;
   openhubModels: string[];
+  /** Server catalog labels (`openhub_model_labels`, NEWPIDASH-393); empty until the backend sends them. */
+  openhubModelLabels: Record<string, string>;
   /** Server-declared free catalog; empty when quota is unavailable. */
   freeModels: readonly string[];
   /** Normalized quota plan; null when quota is unavailable. */
@@ -259,7 +261,10 @@ function modelControlFor(row: AssistantConnectionListItem, disconnected: boolean
 
 function choicesFor(row: AssistantConnectionListItem, flags: ConnectionModelFlags, current: string): ModelChoice[] {
   if (row.kind === "openhub") {
-    return annotateChoices(modelChoices(flags.openhubModels, {}, OPENHUB_MODEL_DESCRIPTIONS, current), flags);
+    return annotateChoices(
+      modelChoices(flags.openhubModels, flags.openhubModelLabels, OPENHUB_MODEL_DESCRIPTIONS, current),
+      flags
+    );
   }
   const models = flags.codexModels.length > 0 ? flags.codexModels : [...BUILTIN_CODEX_MODELS];
   return modelChoices(models, flags.codexModelLabels, BUILTIN_CODEX_MODEL_DESCRIPTIONS, current);
@@ -278,6 +283,7 @@ export function connectionModelFlags(
     codexModels: list.codex_model_options,
     codexModelLabels: list.codex_model_labels ?? {},
     openhubModels: list.openhub_model_options,
+    openhubModelLabels: list.openhub_model_labels ?? {},
     freeModels: quota?.freeModels ?? [],
     quotaPlan: quota?.plan ?? null,
   };

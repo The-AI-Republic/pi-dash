@@ -45,7 +45,6 @@ function setup(rows: ConnectionRow[], overrides: Partial<React.ComponentProps<ty
     testing: false,
     busyId: null,
     topUpHref: null,
-    onSelect: vi.fn(),
     onCommitModel: vi.fn(),
     onTest: vi.fn(),
     onRemove: vi.fn(),
@@ -66,9 +65,7 @@ describe("ConnectionsList", () => {
     setup([row()]);
     expect(screen.getByText("BYOK:openrouter.ai")).toBeInTheDocument();
     expect(screen.getByText("In use")).toBeInTheDocument();
-    const radio = screen.getByRole("radio", { name: "BYOK:openrouter.ai" });
-    expect(radio).toBeChecked();
-    expect(radio).toBeEnabled();
+    expect(screen.queryByRole("radio")).toBeNull();
     expect(screen.getByRole("combobox", { name: "Model for BYOK:openrouter.ai" })).toHaveValue(
       "meta-llama/llama-3.3-70b-instruct"
     );
@@ -181,7 +178,8 @@ describe("ConnectionsList", () => {
         markers: ["Not connected"],
       }),
     ]);
-    expect(screen.getByRole("radio", { name: "OpenAI account" })).toBeDisabled();
+    expect(screen.getByText("OpenAI account")).toBeInTheDocument();
+    expect(screen.getByText("Not connected")).toBeInTheDocument();
     expect(screen.getByText(/Connecting an OpenAI account/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Continue with ChatGPT" })).toBeInTheDocument();
     expect(screen.queryByRole("combobox")).toBeNull();
@@ -242,7 +240,7 @@ describe("ConnectionsList", () => {
       }),
     ]);
     expect(screen.getByRole("status")).toHaveTextContent("Sign out and back in");
-    expect(screen.getByRole("radio", { name: "OpenHub" })).toBeDisabled();
+    expect(screen.getByText("OpenHub")).toBeInTheDocument();
   });
 
   it("links plan-backed rows to the usage page and shows the verified stamp", () => {
@@ -253,17 +251,15 @@ describe("ConnectionsList", () => {
     expect(screen.getByText("Verified", { exact: false }).closest("p")).toHaveTextContent("2026-02-03T04:05:06Z");
   });
 
-  it("reports a selection and disables the row while it is busy", async () => {
-    const user = userEvent.setup();
-    const props = setup([row({ selected: false, markers: [] })]);
-    await user.click(screen.getByRole("radio", { name: "BYOK:openrouter.ai" }));
-    expect(props.onSelect).toHaveBeenCalledWith(expect.objectContaining({ id: "row-1" }));
+  it("offers no per-row selection control; the surface pickers choose the model", () => {
+    setup([row({ selected: false, markers: [] })]);
+    expect(screen.queryByRole("radio")).toBeNull();
+    expect(screen.getByText("BYOK:openrouter.ai")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Test" })).toBeNull();
   });
 
   it("locks the row's controls while a write is in flight", () => {
     setup([row()], { busyId: "row-1" });
-    expect(screen.getByRole("radio", { name: "BYOK:openrouter.ai" })).toBeDisabled();
     expect(screen.getByRole("combobox", { name: "Model for BYOK:openrouter.ai" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Remove" })).toBeDisabled();
     expect(screen.getByText("Saving connection")).toBeInTheDocument();

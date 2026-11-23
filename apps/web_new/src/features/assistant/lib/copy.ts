@@ -47,6 +47,16 @@ export function providerSettingsHref(workspaceSlug: string): string {
 }
 /** Deep-link anchor of the voice section inside the assistant settings page (AGT-051). */
 export const VOICE_DICTATION_HASH = "voice-dictation";
+/** Deep-link anchor of the Models section (NEWPIDASH-394, design section 7.4). */
+export const MODELS_SECTION_HASH = "assistant-models";
+/** Label of the web-assistant surface picker in Settings. */
+export const WEB_ASSISTANT_LABEL = "Web assistant";
+/** Label of the desktop-assistant surface picker in Settings. */
+export const DESKTOP_ASSISTANT_LABEL = "Desktop assistant";
+/** Label of the agent surface picker in Settings. */
+export const AGENT_LABEL = "Pi Dash Agent";
+/** Placeholder option while a surface has no usable choice. */
+export const SURFACE_MODEL_EMPTY_OPTION = "No model available";
 /** Mic label when dictation is ready, matched exactly by the AGT-050/051/052/057 scenarios. */
 export const MIC_READY_LABEL = "Hold to dictate";
 /** Mic label while a recording runs, matched exactly by the AGT-050 scenario. */

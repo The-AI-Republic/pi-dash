@@ -10,18 +10,26 @@ import { describe, expect, it } from "vitest";
 
 import type { AssistantConnectionList } from "@pidash/api-client";
 
-import { OPENHUB_MODEL_DESCRIPTIONS, type ModelChoice } from "../../cloud-assistant/index.js";
 import {
+  OPENHUB_MODEL_DESCRIPTIONS,
+  type ConnectionModelFlags,
+  type ModelChoice,
+} from "../../cloud-assistant/index.js";
+import {
+  applyCreditBadges,
   buildMergedModelChoices,
   byokChoiceLabel,
+  byokKeyFromConfig,
   byokKeysFromList,
   catalogFromList,
+  effectiveChoiceFor,
   fallbackNotice,
   mergedChoiceKey,
   OPENHUB_DEFAULT_MODEL,
   OPENHUB_DEFAULT_SUFFIX,
   pickerOptionLabel,
   type MergedPickerCatalog,
+  type MergedPickerChoice,
 } from "./openhubPicker.js";
 
 const BYOK_ROW = {
@@ -92,12 +100,48 @@ describe("byokKeysFromList", () => {
   });
 });
 
+describe("byokKeyFromConfig", () => {
+  it("reads the stored list with the key's address", () => {
+    expect(
+      byokKeyFromConfig({
+        models: ["gpt-6", "gpt-6.2"],
+        model_name: "gpt-6",
+        base_url: "https://llm.example.com/v1",
+        provider_kind: "openai_compatible",
+      })
+    ).toEqual({
+      connectionId: undefined,
+      models: ["gpt-6", "gpt-6.2"],
+      baseUrl: "https://llm.example.com/v1",
+      providerKind: "openai_compatible",
+    });
+  });
+
+  it("falls back to the legacy single model without a stored list", () => {
+    expect(byokKeyFromConfig({ model_name: "gpt-6", base_url: "", provider_kind: "anthropic" }).models).toEqual([
+      "gpt-6",
+    ]);
+  });
+
+  it("contributes no IDs for a blank legacy model", () => {
+    expect(byokKeyFromConfig({ model_name: "", base_url: "", provider_kind: "x" }).models).toEqual([]);
+  });
+});
+
 describe("mergedChoiceKey", () => {
   it("namespaces catalog and BYOK choices apart", () => {
-    expect(mergedChoiceKey({ value: "gpt-6", connectionId: undefined })).toBe("catalog:gpt-6");
-    expect(mergedChoiceKey({ value: "gpt-6", connectionId: "123e4567-e89b-12d3-a456-426614174001" })).toBe(
-      "byok:123e4567-e89b-12d3-a456-426614174001:gpt-6"
-    );
+    expect(mergedChoiceKey({ origin: "catalog", value: "gpt-6", connectionId: undefined })).toBe("catalog:gpt-6");
+    expect(
+      mergedChoiceKey({
+        origin: "byok",
+        value: "gpt-6",
+        connectionId: "123e4567-e89b-12d3-a456-426614174001",
+      })
+    ).toBe("byok:123e4567-e89b-12d3-a456-426614174001:gpt-6");
+  });
+
+  it("keys an OSS BYOK choice without a connection row apart from the catalog", () => {
+    expect(mergedChoiceKey({ origin: "byok", value: "gpt-6", connectionId: undefined })).toBe("byok:local:gpt-6");
   });
 });
 
@@ -234,5 +278,102 @@ describe("fallbackNotice", () => {
     expect(fallbackNotice("modelC", "OpenHub free model")).toBe(
       "modelC is no longer available. Using OpenHub free model."
     );
+  });
+});
+
+describe("effectiveChoiceFor", () => {
+  const catalog: MergedPickerCatalog = {
+    models: ["openhub_free_llm", "moonshotai/kimi-k3"],
+    labels: {},
+    descriptions: {},
+  };
+  const keys = [
+    {
+      connectionId: "123e4567-e89b-12d3-a456-426614174001",
+      models: ["gpt-6"],
+      baseUrl: "https://llm.example.com/v1",
+      providerKind: "openai_compatible",
+    },
+  ];
+  const choices: MergedPickerChoice[] = buildMergedModelChoices(catalog, keys);
+
+  it("matches a catalog default by model with no connection", () => {
+    expect(
+      effectiveChoiceFor(choices, {
+        saved: null,
+        effective: { model: "openhub_free_llm", connection_id: null },
+        fallback_reason: "none_saved",
+      })?.value
+    ).toBe("openhub_free_llm");
+  });
+
+  it("matches a BYOK choice by model and connection", () => {
+    expect(
+      effectiveChoiceFor(choices, {
+        saved: { model: "gpt-6", connection_id: "123e4567-e89b-12d3-a456-426614174001" },
+        effective: { model: "gpt-6", connection_id: "123e4567-e89b-12d3-a456-426614174001" },
+        fallback_reason: null,
+      })?.origin
+    ).toBe("byok");
+  });
+
+  it("returns null when the server honors nothing in the list", () => {
+    expect(
+      effectiveChoiceFor(choices, { saved: null, effective: null, fallback_reason: "lane_unavailable" })
+    ).toBeNull();
+    expect(
+      effectiveChoiceFor(choices, {
+        saved: { model: "retired", connection_id: null },
+        effective: { model: "removed", connection_id: null },
+        fallback_reason: "model_removed",
+      })
+    ).toBeNull();
+  });
+});
+
+describe("applyCreditBadges", () => {
+  const catalog: MergedPickerCatalog = {
+    models: ["openhub_free_llm", "moonshotai/kimi-k3"],
+    labels: {},
+    descriptions: {},
+  };
+  const keys = [
+    {
+      connectionId: "123e4567-e89b-12d3-a456-426614174001",
+      models: ["gpt-6"],
+      baseUrl: "https://llm.example.com/v1",
+      providerKind: "openai_compatible",
+    },
+  ];
+  const flags = (overrides: Partial<ConnectionModelFlags> = {}): ConnectionModelFlags => ({
+    codexModels: [],
+    codexModelLabels: {},
+    openhubModels: ["openhub_free_llm", "moonshotai/kimi-k3"],
+    openhubModelLabels: {},
+    freeModels: ["openhub_free_llm"],
+    quotaPlan: "free",
+    ...overrides,
+  });
+
+  it("blocks a paid catalog model on the free plan and leaves BYOK selectable", () => {
+    const stamped = applyCreditBadges(buildMergedModelChoices(catalog, keys), flags());
+    expect(stamped.find((choice) => choice.value === "moonshotai/kimi-k3")).toMatchObject({
+      credit: "blocked",
+      selectable: false,
+    });
+    expect(stamped.find((choice) => choice.value === "openhub_free_llm")).toMatchObject({
+      credit: "free",
+      selectable: true,
+    });
+    expect(stamped.find((choice) => choice.value === "gpt-6")).toMatchObject({
+      credit: null,
+      badge: null,
+      selectable: true,
+    });
+  });
+
+  it("keeps every catalog model selectable on a paying plan", () => {
+    const stamped = applyCreditBadges(buildMergedModelChoices(catalog, keys), flags({ quotaPlan: "team" }));
+    for (const choice of stamped) expect(choice.selectable).toBe(true);
   });
 });

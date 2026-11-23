@@ -9,7 +9,15 @@
 // shortcut, so the walks below never press an app-specific chord.
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("@tanstack/react-router", () => ({
+  useParams: () => ({ ws: "acme" }),
+}));
+
+vi.mock("./AssistantModelsSection.js", () => ({
+  AssistantModelsSection: () => null,
+}));
 
 import { CloudAssistantTab } from "./CloudAssistantTab.js";
 

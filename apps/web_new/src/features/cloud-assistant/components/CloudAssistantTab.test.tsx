@@ -22,6 +22,16 @@ vi.mock("../../../shared/shell/toaster.js", async (importOriginal) => {
   return { ...original, notifySuccess, notifyInfo, notifyError };
 });
 
+vi.mock("@tanstack/react-router", () => ({
+  useParams: () => ({ ws: "acme" }),
+}));
+
+vi.mock("./AssistantModelsSection.js", () => ({
+  AssistantModelsSection: ({ workspaceSlug }: { workspaceSlug: string }) => (
+    <div data-testid="assistant-models-section-stub">{workspaceSlug}</div>
+  ),
+}));
+
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { CloudAssistantTab } from "./CloudAssistantTab.js";
 
@@ -114,11 +124,24 @@ describe("CloudAssistantTab", () => {
       return undefined;
     });
     renderTab();
-    expect(await screen.findByRole("radio", { name: "BYOK:openrouter.ai" })).toBeChecked();
-    expect(screen.getByRole("radio", { name: "OpenAI account" })).toBeDisabled();
+    expect(await screen.findByText("BYOK:openrouter.ai")).toBeInTheDocument();
+    expect(screen.getByText("In use")).toBeInTheDocument();
+    expect(screen.getByText("OpenAI account")).toBeInTheDocument();
+    expect(screen.queryByRole("radio")).toBeNull();
     expect(screen.getAllByText("2026-02-03T04:05:06Z")[0]?.closest("p")).toHaveTextContent("Verified");
     expect(await screen.findByRole("heading", { name: "Tool servers (MCP)" })).toBeInTheDocument();
     expect(screen.getByTestId("cloud-assistant-apps-pointer")).toHaveTextContent("Looking for apps?");
+  });
+
+  it("renders the Models section above the connections with the workspace slug", async () => {
+    stubTransport((method, url) => {
+      if (method === "GET" && url.endsWith(SERVERS)) return { status: 200, body: [] };
+      if (method === "GET") return { status: 200, body: list() };
+      return undefined;
+    });
+    renderTab();
+    expect(await screen.findByTestId("assistant-models-section-stub")).toHaveTextContent("acme");
+    expect(screen.getByText("BYOK:openrouter.ai")).toBeInTheDocument();
   });
 
   it("explains an empty list and points at adding a connection", async () => {
@@ -159,39 +182,12 @@ describe("CloudAssistantTab", () => {
       return undefined;
     });
     renderTab();
-    await screen.findByRole("radio", { name: "BYOK:openrouter.ai" });
+    await screen.findByText("BYOK:openrouter.ai");
     await user.click(screen.getByRole("button", { name: "Add connection" }));
     expect(screen.queryByRole("heading", { name: "Tool servers (MCP)" })).toBeNull();
     expect(screen.queryByTestId("cloud-assistant-apps-pointer")).toBeNull();
     await user.click(screen.getByRole("button", { name: "Back to connections" }));
     expect(await screen.findByRole("heading", { name: "Tool servers (MCP)" })).toBeInTheDocument();
-  });
-
-  it("switches the active row and confirms", async () => {
-    const user = userEvent.setup();
-    const calls = stubTransport((method, url) => {
-      if (method === "GET" && url.endsWith(SERVERS)) return { status: 200, body: [] };
-      if (method === "GET") return { status: 200, body: list({ connections: [BYOK, { ...CODEX, connected: true }] }) };
-      if (method === "POST" && url.includes("/select/")) return { status: 200, body: BYOK };
-      return undefined;
-    });
-    renderTab();
-    await user.click(await screen.findByRole("radio", { name: "OpenAI account" }));
-    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Switched"));
-    expect(calls.some((call) => call.url.includes(`/${CODEX.id}/select/`))).toBe(true);
-  });
-
-  it("reports a rejected switch with the server detail", async () => {
-    const user = userEvent.setup();
-    stubTransport((method, url) => {
-      if (method === "GET" && url.endsWith(SERVERS)) return { status: 200, body: [] };
-      if (method === "GET") return { status: 200, body: list({ connections: [BYOK, { ...CODEX, connected: true }] }) };
-      if (method === "POST" && url.includes("/select/")) return { status: 400, body: { detail: "Not connected" } };
-      return undefined;
-    });
-    renderTab();
-    await user.click(await screen.findByRole("radio", { name: "OpenAI account" }));
-    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Switch failed", "Not connected"));
   });
 
   it("saves a renamed self-supplied model silently and reports a refusal", async () => {
@@ -283,12 +279,12 @@ describe("CloudAssistantTab", () => {
       return undefined;
     });
     renderTab();
-    await screen.findByRole("radio", { name: "BYOK:openrouter.ai" });
+    await screen.findByText("BYOK:openrouter.ai");
     await user.click(screen.getByRole("button", { name: "Remove" }));
     await user.click(screen.getByRole("button", { name: "Confirm remove" }));
     await waitFor(() => expect(notifyInfo).toHaveBeenCalledWith("Removed", "BYOK:openrouter.ai removed."));
     expect(calls.some((call) => call.method === "DELETE")).toBe(true);
-    await waitFor(() => expect(screen.queryByRole("radio", { name: "BYOK:openrouter.ai" })).toBeNull());
+    await waitFor(() => expect(screen.queryByText("BYOK:openrouter.ai")).toBeNull());
   });
 
   it("reports a failed removal", async () => {
@@ -300,7 +296,7 @@ describe("CloudAssistantTab", () => {
       return undefined;
     });
     renderTab();
-    await screen.findByRole("radio", { name: "BYOK:openrouter.ai" });
+    await screen.findByText("BYOK:openrouter.ai");
     await user.click(screen.getByRole("button", { name: "Remove" }));
     await user.click(screen.getByRole("button", { name: "Confirm remove" }));
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Could not remove", "Server error"));
@@ -356,7 +352,7 @@ describe("CloudAssistantTab", () => {
       model_name: "meta-llama/llama-3.3-70b-instruct",
       api_key: "secret",
     });
-    expect(await screen.findByRole("radio", { name: "BYOK:openrouter.ai" })).toBeChecked();
+    expect(await screen.findByText("BYOK:openrouter.ai")).toBeInTheDocument();
     expect(screen.queryByRole("form", { name: "Add connection" })).toBeNull();
   });
 
@@ -432,7 +428,7 @@ describe("CloudAssistantTab", () => {
     });
     renderTab();
     expect(await screen.findByText(/predates OpenHub access/)).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: "OpenHub" })).toBeDisabled();
+    expect(screen.getByText("OpenHub")).toBeInTheDocument();
     expect(screen.queryByRole("combobox", { name: "Model for OpenHub" })).toBeNull();
   });
 
@@ -453,7 +449,7 @@ describe("CloudAssistantTab", () => {
       return undefined;
     });
     renderTab();
-    expect(await screen.findByRole("radio", { name: "OpenHub" })).toBeInTheDocument();
+    expect(await screen.findByText("OpenHub")).toBeInTheDocument();
   });
 
   it("saves a single-vendor key without an address field", async () => {

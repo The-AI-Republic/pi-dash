@@ -124,15 +124,36 @@ describe("connection flags", () => {
 
   it("copies the managed options the list answered", () => {
     const flags = connectionModelFlags(
-      list({ codex_model_options: ["x"], codex_model_labels: { x: "X" }, openhub_model_options: ["y"] })
+      list({
+        codex_model_options: ["x"],
+        codex_model_labels: { x: "X" },
+        openhub_model_options: ["y"],
+        openhub_model_labels: { y: "Why" },
+      })
     );
     expect(flags).toEqual({
       codexModels: ["x"],
       codexModelLabels: { x: "X" },
       openhubModels: ["y"],
+      openhubModelLabels: { y: "Why" },
       freeModels: [],
       quotaPlan: null,
     });
+  });
+
+  it("defaults a missing catalog-labels map to empty", () => {
+    const flags = connectionModelFlags(list({ openhub_model_labels: undefined }));
+    expect(flags.openhubModelLabels).toEqual({});
+  });
+
+  it("labels hosted choices with the server catalog label first", () => {
+    const answer = list({
+      connections: [row({ id: IDS.openhub, kind: "openhub", model_name: "y" })],
+      openhub_model_options: ["y"],
+      openhub_model_labels: { y: "Why" },
+    });
+    const target = toConnectionRow(answer.connections[0]!, answer, connectionModelFlags(answer));
+    expect(target.modelChoices).toEqual([{ value: "y", label: "Why", credit: null, badge: null, selectable: true }]);
   });
 
   it("carries the free quota through when the meter has answered", () => {

@@ -9,6 +9,7 @@
 // so a control that unmounts mid-request cannot swallow it.
 
 import { Button, Spinner } from "@pidash/kit";
+import { useParams } from "@tanstack/react-router";
 import * as React from "react";
 
 import { actionFailureDetail, useCloudAssistantActions } from "../api/mutations.js";
@@ -29,8 +30,6 @@ import {
   MODEL_FAILED_TITLE,
   REMOVED_TITLE,
   REMOVE_FAILED_TITLE,
-  SWITCHED_TITLE,
-  SWITCH_FAILED_TITLE,
   TEST_FAILED_FALLBACK,
   TEST_FAILED_TITLE,
   TEST_OK_BODY,
@@ -47,6 +46,7 @@ import {
 import { notifyError, notifyInfo, notifySuccess } from "../../../shared/shell/index.js";
 import { AddConnectionView } from "./AddConnectionView.js";
 import { AppsPointer } from "./AppsPointer.js";
+import { AssistantModelsSection } from "./AssistantModelsSection.js";
 import { ConnectionsList } from "./ConnectionsList.js";
 import { FreeTokenMeter } from "./FreeTokenMeter.js";
 import { ToolServersSection } from "../../profile-assistant/index.js";
@@ -55,6 +55,7 @@ import { useProviderSignIn } from "./useProviderSignIn.js";
 type View = "list" | "add";
 
 export function CloudAssistantTab(): React.ReactElement {
+  const { ws } = useParams({ strict: false }) as { ws?: string };
   const connections = useCloudConnections();
   const quota = useCloudQuota();
   const actions = useCloudAssistantActions();
@@ -73,19 +74,6 @@ export function CloudAssistantTab(): React.ReactElement {
   const signInAvailable = list?.openai_login_available ?? false;
   const rawWalletUrl = list?.openhub_wallet_url ?? "";
   const topUpHref = rawWalletUrl.trim() === "" ? null : rawWalletUrl;
-
-  const selectRow = async (id: string): Promise<void> => {
-    setBusyId(id);
-    try {
-      await actions.select(id);
-      await actions.invalidate();
-      notifySuccess(SWITCHED_TITLE);
-    } catch (error) {
-      notifyError(SWITCH_FAILED_TITLE, actionFailureDetail(error, SWITCH_FAILED_TITLE));
-    } finally {
-      setBusyId(null);
-    }
-  };
 
   const commitModel = async (row: ConnectionRow, model: string): Promise<void> => {
     // The meter gate lives on the hosted (OpenHub) lane: the codex lane
@@ -186,7 +174,14 @@ export function CloudAssistantTab(): React.ReactElement {
         )}
       </header>
 
-      {view === "list" ? <FreeTokenMeter /> : null}
+      {view === "list" ? (
+        <>
+          {ws === undefined || list === undefined ? null : (
+            <AssistantModelsSection workspaceSlug={ws} list={list} quota={quota.data ?? null} />
+          )}
+          <FreeTokenMeter />
+        </>
+      ) : null}
 
       {view === "add" ? (
         <AddConnectionView saving={saving} error={addError} onSave={saveConnection} />
@@ -213,7 +208,6 @@ export function CloudAssistantTab(): React.ReactElement {
           testing={testing}
           busyId={busyId}
           topUpHref={topUpHref}
-          onSelect={(row) => void selectRow(row.id)}
           onCommitModel={(row, model) => void commitModel(row, model)}
           onTest={() => void testActive()}
           onRemove={(row) => void removeRow(row.id, row.title)}

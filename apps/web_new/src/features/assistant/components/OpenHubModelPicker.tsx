@@ -18,7 +18,6 @@ import * as React from "react";
 import type { AssistantSurface } from "@pidash/api-client";
 
 import {
-  annotateChoices,
   connectionModelFlags,
   isBlockedCommit,
   useCloudConnections,
@@ -39,14 +38,15 @@ import {
   MODEL_PICKER_FAILED_TITLE,
 } from "../lib/copy.js";
 import {
+  applyCreditBadges,
   buildMergedModelChoices,
   byokKeysFromList,
   catalogFromList,
+  effectiveChoiceFor,
   fallbackNotice,
   mergedChoiceKey,
   OPENHUB_DEFAULT_MODEL,
   pickerOptionLabel,
-  type MergedPickerChoice,
 } from "../lib/openhubPicker.js";
 
 export interface OpenHubModelPickerProps {
@@ -77,28 +77,8 @@ export function OpenHubModelPicker({
   const merged = buildMergedModelChoices(catalogFromList(list), byokKeysFromList(list));
   if (merged.length === 0 || state.effective === null) return null;
 
-  // The free-plan credit badges stamp the catalog half only; BYOK models
-  // draw on the user's own key, so they stay selectable with no badge.
-  // The stamp keeps the merged choice (annotateChoices returns the base
-  // shape) and only carries the credit fields across.
-  const annotated = new Map(
-    annotateChoices(
-      merged.filter((choice) => choice.origin === "catalog"),
-      flags
-    ).map((choice) => [choice.value, choice] as const)
-  );
-  const choices: MergedPickerChoice[] = merged.map((choice) => {
-    if (choice.origin !== "catalog") return choice;
-    const stamped = annotated.get(choice.value);
-    if (stamped === undefined) return choice;
-    return { ...choice, credit: stamped.credit, badge: stamped.badge, selectable: stamped.selectable };
-  });
-  const effective =
-    choices.find(
-      (choice) =>
-        choice.value === state.effective?.model &&
-        (choice.connectionId ?? null) === (state.effective?.connection_id ?? null)
-    ) ?? null;
+  const choices = applyCreditBadges(merged, flags);
+  const effective = effectiveChoiceFor(choices, state);
   if (effective === null) return null;
   const effectiveKey = mergedChoiceKey(effective);
 
