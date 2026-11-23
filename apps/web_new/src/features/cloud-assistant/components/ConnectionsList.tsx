@@ -154,7 +154,9 @@ function ConnectionCard(props: ConnectionsListProps & { row: ConnectionRow }): R
       <div data-testid={`assistant-connection-${row.id}`} className={CARD}>
         <div className="flex flex-wrap items-center justify-between gap-(--space-3)">
           <div className="flex flex-wrap items-center gap-(--space-2)">
-            <span className="text-body font-medium text-(--text)">{row.title}</span>
+            <span data-testid="assistant-connection-title" className="text-body font-medium text-(--text)">
+              {row.title}
+            </span>
             {row.markers.map((marker) => (
               <span
                 key={marker}

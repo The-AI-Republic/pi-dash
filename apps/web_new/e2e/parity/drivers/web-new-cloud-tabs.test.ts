@@ -69,42 +69,75 @@ function pageOf(overrides: Partial<Record<string, unknown>> = {}): Page {
 interface ConnFacts {
   title: string;
   markers?: string[];
-  checked?: boolean;
-  disabled?: boolean;
-  control?: "select" | "input" | "hidden";
+  control?: "select" | "models" | "hidden";
   modelValue?: string;
+  modelValues?: string[];
   modelOptions?: string[];
+  modelDetails?: Record<string, string>;
   verified?: boolean;
   actions?: string[];
-  onSelect?: () => void;
+  confirmRemove?: boolean;
   onAction?: (action: string) => void;
   filled?: Array<[string, string]>;
   staleNotice?: string | null;
 }
 
-function connCard(facts: ConnFacts): Locator {
-  const label = locator({
+function editorRow(model: string, detail: string | undefined): Locator {
+  return locator({
     locator: (selector: string) => {
-      if (selector === "span") return locator({ allInnerTexts: async () => [facts.title, ...(facts.markers ?? [])] });
-      if (selector === "xpath=parent::div")
+      if (selector === "span")
+        return locator({
+          first: () => locator({ innerText: async () => model }),
+        });
+      return locator();
+    },
+    getByTestId: (testId: string) => {
+      if (testId !== "byok-model-detail" || detail === undefined) return locator();
+      return locator({ count: async () => 1, isVisible: async () => true, innerText: async () => detail });
+    },
+  });
+}
+
+function connCard(facts: ConnFacts): Locator {
+  // The title span names the card; sibling spans in the same div are the
+  // markers; the header two levels up carries the row actions.
+  const title = locator({
+    innerText: async () => facts.title,
+    count: async () => 1,
+    locator: (selector: string) => {
+      if (selector === "xpath=parent::*")
+        return locator({
+          locator: (inner: string) =>
+            inner === "span"
+              ? locator({
+                  count: async () => 1 + (facts.markers ?? []).length,
+                  nth: (index: number) =>
+                    locator({
+                      innerText: async () => (index === 0 ? facts.title : ((facts.markers ?? [])[index - 1] ?? "")),
+                    }),
+                })
+              : locator(),
+        });
+      if (selector === "xpath=ancestor::div[2]")
         return locator({ getByRole: () => locator({ allInnerTexts: async () => facts.actions ?? [] }) });
       return locator();
     },
   });
-  const radioState = { checked: facts.checked ?? false };
+  const modelValues = facts.modelValues ?? (facts.modelValue === undefined ? [] : [facts.modelValue]);
+  const rows = modelValues.map((model) => editorRow(model, facts.modelDetails?.[model]));
   return locator({
     count: async () => 1,
+    getByTestId: (testId: string) => {
+      if (testId === "assistant-connection-title") return locator({ count: async () => 1, first: () => title });
+      if (testId !== "byok-model-row") return locator();
+      if (facts.control !== "models") return locator();
+      return locator({
+        count: async () => rows.length,
+        nth: (index: number) => rows[index] ?? locator(),
+      });
+    },
     locator: (selector: string) => {
-      if (selector === "label") return label;
-      if (selector === 'input[name="assistant-active-connection"]')
-        return locator({
-          isChecked: async () => radioState.checked,
-          isDisabled: async () => facts.disabled ?? false,
-          click: async () => {
-            radioState.checked = true;
-            facts.onSelect?.();
-          },
-        });
+      if (selector === "label") return locator({ count: async () => 0 });
       if (selector === "select") {
         if (facts.control !== "select") return locator();
         return locator({
@@ -122,17 +155,14 @@ function connCard(facts: ConnFacts): Locator {
           selectOption: async (value: unknown) => void facts.filled?.push(["select", String(value)]),
         });
       }
-      if (selector === 'input[list="assistant-known-byok-models"]') {
-        if (facts.control !== "input") return locator();
-        return locator({
-          count: async () => 1,
-          isVisible: async () => true,
-          inputValue: async () => facts.modelValue ?? "",
-          fill: async (value: string) => void facts.filled?.push(["input", value]),
-          press: async (key: string) => void facts.filled?.push(["press", key]),
-        });
-      }
       return locator();
+    },
+    getByLabel: (labelText: string) => {
+      if (labelText !== "Add a model ID this key serves" || facts.control !== "models") return locator();
+      return locator({
+        fill: async (value: string) => void facts.filled?.push(["editor-add", value]),
+        press: async (key: string) => void facts.filled?.push(["editor-press", key]),
+      });
     },
     getByText: (text: string) => {
       if (typeof text === "string" && text.includes("Verified"))
@@ -152,19 +182,32 @@ function connCard(facts: ConnFacts): Locator {
     },
     getByRole: (role: string, options?: { name?: string }) => {
       if (role !== "button") return locator();
+      const name = options?.name ?? "?";
+      if (name === "Remove both") {
+        const shown = facts.confirmRemove === true;
+        return locator({
+          count: async () => (shown ? 1 : 0),
+          isVisible: async () => shown,
+          click: async () => void facts.onAction?.(name),
+        });
+      }
       return locator({
-        click: async () => void facts.onAction?.(options?.name ?? "?"),
+        click: async () => void facts.onAction?.(name),
       });
     },
   });
 }
 
-function assistantPage(entries: Locator[]): Page {
+function assistantPage(entries: Locator[], seen: Array<[string, string]> = []): Page {
   return pageOf({
     locator: (selector: string) => {
       if (selector === '[data-testid^="assistant-connection-"]')
         return locator({ count: async () => entries.length, nth: (index: number) => entries[index] ?? locator() });
       return locator();
+    },
+    waitForResponse: () => {
+      seen.push(["waitForResponse", "connections"]);
+      return Promise.resolve(null);
     },
   });
 }
@@ -175,16 +218,21 @@ describe("cloud assistant connections", () => {
       assistantPage([
         connCard({
           title: "Hosted",
-          markers: ["Active"],
-          checked: true,
+          markers: ["In use"],
           control: "select",
           modelValue: "sonnet",
           modelOptions: ["sonnet", "opus"],
           verified: true,
           actions: ["Test"],
         }),
-        connCard({ title: "Custom endpoint", control: "input", modelValue: "llama", actions: ["Test", "Remove"] }),
-        connCard({ title: "ChatGPT account", control: "hidden", disabled: true }),
+        connCard({
+          title: "Custom endpoint",
+          markers: ["In use"],
+          control: "models",
+          modelValues: ["llama", "llama-2"],
+          actions: ["Remove"],
+        }),
+        connCard({ title: "ChatGPT account", markers: ["Not connected"], control: "hidden" }),
       ])
     );
     await expect(driver.cloudAssistantConnections()).resolves.toEqual([
@@ -192,31 +240,34 @@ describe("cloud assistant connections", () => {
         title: "Hosted",
         selected: true,
         selectDisabled: false,
-        markers: ["Active"],
+        markers: ["In use"],
         modelControl: "select",
         modelValue: "sonnet",
+        modelValues: ["sonnet"],
         modelOptions: ["sonnet", "opus"],
         verifiedVisible: true,
         actions: ["Test"],
       },
       {
         title: "Custom endpoint",
-        selected: false,
+        selected: true,
         selectDisabled: false,
-        markers: [],
-        modelControl: "input",
+        markers: ["In use"],
+        modelControl: "models",
         modelValue: "llama",
+        modelValues: ["llama", "llama-2"],
         modelOptions: [],
         verifiedVisible: false,
-        actions: ["Test", "Remove"],
+        actions: ["Remove"],
       },
       {
         title: "ChatGPT account",
         selected: false,
         selectDisabled: true,
-        markers: [],
+        markers: ["Not connected"],
         modelControl: "hidden",
         modelValue: "",
+        modelValues: [],
         modelOptions: [],
         verifiedVisible: false,
         actions: [],
@@ -224,29 +275,55 @@ describe("cloud assistant connections", () => {
     ]);
   });
 
-  it("selects by title and waits for the radio to check", async () => {
-    let selected = "";
-    const driver = new WebNewDriver(
-      assistantPage([connCard({ title: "One" }), connCard({ title: "Two", onSelect: () => void (selected = "Two") })])
-    );
-    await driver.cloudAssistantSelectConnection("Two");
-    expect(selected).toBe("Two");
+  it("rejects per-row selection: the Models section owns the choice", async () => {
+    const driver = new WebNewDriver(assistantPage([connCard({ title: "One" }), connCard({ title: "Two" })]));
+    await expect(driver.cloudAssistantSelectConnection("Two")).rejects.toThrow(/no per-row select control/);
   });
 
-  it("sets the model through the select or the free-text field", async () => {
+  it("sets the model through the select or the editor", async () => {
     const filled: Array<[string, string]> = [];
     const driver = new WebNewDriver(
       assistantPage([
         connCard({ title: "Hosted", control: "select", filled }),
-        connCard({ title: "Custom endpoint", control: "input", filled }),
+        connCard({ title: "Custom endpoint", control: "models", filled }),
       ])
     );
     await driver.cloudAssistantSetModel("Hosted", "opus");
     await driver.cloudAssistantSetModel("Custom endpoint", "llama-3");
     expect(filled).toEqual([
       ["select", "opus"],
-      ["input", "llama-3"],
-      ["press", "Enter"],
+      ["editor-add", "llama-3"],
+      ["editor-press", "Enter"],
+    ]);
+  });
+
+  it("reads, adds, removes, tests and saves-anyway through the editor", async () => {
+    const acted: string[] = [];
+    const filled: Array<[string, string]> = [];
+    const driver = new WebNewDriver(
+      assistantPage([
+        connCard({
+          title: "Custom endpoint",
+          control: "models",
+          modelValues: ["keep", "flaky"],
+          modelDetails: { flaky: "Timed out." },
+          confirmRemove: true,
+          onAction: (action) => void acted.push(action),
+          filled,
+        }),
+      ])
+    );
+    await expect(driver.cloudAssistantConnectionModels("Custom endpoint")).resolves.toEqual(["keep", "flaky"]);
+    await expect(driver.cloudAssistantConnectionModelDetail("Custom endpoint", "flaky")).resolves.toBe("Timed out.");
+    await expect(driver.cloudAssistantConnectionModelDetail("Custom endpoint", "keep")).resolves.toBeNull();
+    await driver.cloudAssistantConnectionTestModel("Custom endpoint", "keep");
+    await driver.cloudAssistantConnectionAddModel("Custom endpoint", "fresh");
+    await driver.cloudAssistantConnectionRemoveModel("Custom endpoint", "keep");
+    await driver.cloudAssistantConnectionSaveAnyway("Custom endpoint");
+    expect(acted).toEqual(["Test keep", "Remove keep", "Remove both", "Save anyway"]);
+    expect(filled).toEqual([
+      ["editor-add", "fresh"],
+      ["editor-press", "Enter"],
     ]);
   });
 
@@ -269,6 +346,112 @@ describe("cloud assistant connections", () => {
     );
     await expect(driver.cloudAssistantStaleNotice("OpenHub")).resolves.toContain("predates OpenHub access");
     await expect(driver.cloudAssistantStaleNotice("Hosted")).resolves.toBeNull();
+  });
+});
+
+describe("cloud assistant Models section", () => {
+  interface SectionPicker {
+    label: string;
+    value: string;
+    options: string[];
+    fallback?: string | null;
+  }
+
+  function sectionPage(pickers: SectionPicker[]): { page: Page; selected: Array<[string, string]> } {
+    const selected: Array<[string, string]> = [];
+    function pickerLocator(picker: SectionPicker): Locator {
+      return locator({
+        getAttribute: async (name: string) => (name === "aria-label" ? picker.label : null),
+        inputValue: async () => picker.value,
+        selectOption: async (option: unknown) =>
+          void selected.push([picker.label, (option as { label: string }).label]),
+        locator: (selector: string) => {
+          if (selector === "option:checked") return locator({ innerText: async () => picker.value });
+          if (selector === "option")
+            return locator({
+              count: async () => picker.options.length,
+              nth: (index: number) => locator({ innerText: async () => picker.options[index] ?? "" }),
+            });
+          if (selector === "xpath=ancestor::div[2]")
+            return locator({
+              getByTestId: () =>
+                picker.fallback == null
+                  ? locator()
+                  : locator({
+                      count: async () => 1,
+                      isVisible: async () => true,
+                      innerText: async () => picker.fallback ?? "",
+                    }),
+            });
+          return locator();
+        },
+      });
+    }
+    const section = locator({
+      getByRole: (role: string, options?: { name?: string }) => {
+        if (role !== "combobox") return locator();
+        if (options?.name !== undefined) {
+          const picker = pickers.find((entry) => entry.label === options.name);
+          return picker === undefined ? locator() : pickerLocator(picker);
+        }
+        return locator({
+          count: async () => pickers.length,
+          nth: (index: number) => (pickers[index] === undefined ? locator() : pickerLocator(pickers[index]!)),
+        });
+      },
+    });
+    const page = pageOf({
+      getByTestId: (testId: string) =>
+        testId === "assistant-models-section" ? section : locator({ count: async () => 0 }),
+      waitForResponse: async () => null,
+    });
+    return { page, selected };
+  }
+
+  const PICKERS: SectionPicker[] = [
+    {
+      label: "Web assistant",
+      value: "openhub_free_llm (default)",
+      options: ["openhub_free_llm (default)", "gpt-6 (BYOK · openrouter.ai)"],
+      fallback: null,
+    },
+    {
+      label: "Desktop assistant",
+      value: "openhub_free_llm (default)",
+      options: ["openhub_free_llm (default)"],
+      fallback: "modelC is no longer available. Using OpenHub free model.",
+    },
+    {
+      label: "Pi Dash Agent",
+      value: "openhub_free_llm (default)",
+      options: ["openhub_free_llm (default)", "deepseek/deepseek-v4-pro"],
+      fallback: null,
+    },
+  ];
+
+  it("reads per-surface pickers with values and fallback notices", async () => {
+    const { page } = sectionPage(PICKERS);
+    const driver = new WebNewDriver(page);
+    await expect(driver.cloudAssistantModelsSection()).resolves.toEqual([
+      { label: "Web assistant", value: "openhub_free_llm (default)", fallback: null },
+      {
+        label: "Desktop assistant",
+        value: "openhub_free_llm (default)",
+        fallback: "modelC is no longer available. Using OpenHub free model.",
+      },
+      { label: "Pi Dash Agent", value: "openhub_free_llm (default)", fallback: null },
+    ]);
+  });
+
+  it("reads merged options in order and selects by visible text", async () => {
+    const { page, selected } = sectionPage(PICKERS);
+    const driver = new WebNewDriver(page);
+    await expect(driver.cloudAssistantModelsOptions("Web assistant")).resolves.toEqual([
+      "openhub_free_llm (default)",
+      "gpt-6 (BYOK · openrouter.ai)",
+    ]);
+    await driver.cloudAssistantModelsSelect("Pi Dash Agent", "deepseek/deepseek-v4-pro");
+    expect(selected).toEqual([["Pi Dash Agent", "deepseek/deepseek-v4-pro"]]);
   });
 });
 
@@ -318,6 +501,41 @@ describe("cloud assistant views and add form", () => {
       baseVisible: true,
       saveEnabled: true,
     });
+  });
+
+  it("fills the add form with a model-ID list", async () => {
+    const filled: Array<[string, string]> = [];
+    const page = pageOf({
+      getByLabel: (label: string) => {
+        if (label === "Provider")
+          return locator({ selectOption: async (value: unknown) => void filled.push(["provider", String(value)]) });
+        if (label === "Base URL")
+          return locator({ fill: async (value: string) => void filled.push(["baseUrl", value]) });
+        if (label === "Add a model ID this key serves")
+          return locator({
+            fill: async (value: string) => void filled.push(["model", value]),
+            press: async (key: string) => void filled.push(["press", key]),
+          });
+        if (label === "API key") return locator({ fill: async (value: string) => void filled.push(["key", value]) });
+        return locator();
+      },
+    });
+    const driver = new WebNewDriver(page);
+    await driver.cloudAssistantAddFill({
+      provider: "openai_compatible",
+      baseUrl: "https://openrouter.ai/api/v1",
+      models: ["gpt-6", "gpt-6.2"],
+      key: "secret",
+    });
+    expect(filled).toEqual([
+      ["provider", "openai_compatible"],
+      ["baseUrl", "https://openrouter.ai/api/v1"],
+      ["model", "gpt-6"],
+      ["press", "Enter"],
+      ["model", "gpt-6.2"],
+      ["press", "Enter"],
+      ["key", "secret"],
+    ]);
   });
 
   it("reports the empty state with its add label", async () => {
@@ -472,6 +690,13 @@ describe("cloud assistant model budget", () => {
     });
     const card = locator({
       count: async () => 1,
+      getByTestId: (testId: string) =>
+        testId === "assistant-connection-title"
+          ? locator({
+              count: async () => 1,
+              first: () => locator({ count: async () => 1, innerText: async () => "OpenHub" }),
+            })
+          : locator(),
       locator: (selector: string) => {
         if (selector === "label")
           return locator({

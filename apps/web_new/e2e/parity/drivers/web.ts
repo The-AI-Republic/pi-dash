@@ -48960,6 +48960,7 @@ export class WebDriver implements ParityDriver {
     baseUrlVisible: boolean;
     baseUrl: string;
     model: string;
+    models: string[];
     keyValue: string;
     keyPlaceholder: string;
     saveDisabled: boolean;
@@ -48986,11 +48987,13 @@ export class WebDriver implements ParityDriver {
       return keys.findIndex((k) => (k.compareDocumentPosition(voice) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0);
     });
     const keyField = this.page.locator('input[type="password"]').nth(Math.max(keyBeforeVoice, 0));
+    const model = await modelInput.inputValue({ timeout: WebDriver.itemTimeout });
     return {
       provider: await select.inputValue({ timeout: WebDriver.itemTimeout }),
       baseUrlVisible: (await baseUrlInput.count()) > 0,
       baseUrl: (await baseUrlInput.count()) > 0 ? await baseUrlInput.inputValue() : "",
-      model: await modelInput.inputValue({ timeout: WebDriver.itemTimeout }),
+      model,
+      models: model === "" ? [] : [model],
       keyValue: await keyField.inputValue({ timeout: WebDriver.itemTimeout }),
       keyPlaceholder: (await keyField.getAttribute("placeholder", { timeout: WebDriver.itemTimeout })) ?? "",
       saveDisabled: await this.page.getByRole("button", { name: "Save", exact: true }).nth(saveIndex).isDisabled(),
@@ -49060,6 +49063,34 @@ export class WebDriver implements ParityDriver {
     const settled = this.settingsProfileWriteWait("/api/users/me/ai-assistant/config/", "DELETE");
     await this.page.getByRole("button", { name: "Remove", exact: true }).nth(index).click({ timeout: 15_000 });
     await settled;
+  }
+
+  async settingsProfileAssistantRemoveModel(_model: string): Promise<void> {
+    this.settingsProfileAssistantNewAppOnly("settingsProfileAssistantRemoveModel");
+  }
+
+  async settingsProfileAssistantAddModel(model: string): Promise<void> {
+    // The old form holds one free-text value; adding replaces it.
+    await this.page.getByPlaceholder("meta-llama/llama-3.3-70b-instruct").fill(model, { timeout: 15_000 });
+  }
+
+  private settingsProfileAssistantNewAppOnly(name: string): never {
+    throw new Error(
+      `[parity] the old app has a single-model form with no per-ID editor (${name}; new-system-only NEWPIDASH-394).`
+    );
+  }
+
+  async settingsProfileAssistantModels(): Promise<string[]> {
+    const facts = await this.settingsProfileAssistantFacts();
+    return facts.models;
+  }
+
+  async settingsProfileAssistantModelDetail(_model: string): Promise<string | null> {
+    this.settingsProfileAssistantNewAppOnly("settingsProfileAssistantModelDetail");
+  }
+
+  async settingsProfileAssistantSaveAnyway(): Promise<void> {
+    this.settingsProfileAssistantNewAppOnly("settingsProfileAssistantSaveAnyway");
   }
 
   async settingsProfileAssistantFailWrites(): Promise<void> {
@@ -58781,6 +58812,8 @@ export class WebDriver implements ParityDriver {
         markers,
         modelControl,
         modelValue,
+        // The old app holds a single free-text/selected value per row.
+        modelValues: modelValue === "" ? [] : [modelValue],
         modelOptions,
         verifiedVisible,
         actions,
@@ -58849,6 +58882,61 @@ export class WebDriver implements ParityDriver {
     await input.press("Enter");
   }
 
+  private cloudAssistantNewAppOnly(name: string): never {
+    throw new Error(
+      `[parity] the old app has no Models section or model-ID editor (${name}; new-system-only NEWPIDASH-394).`
+    );
+  }
+
+  async cloudAssistantModelsSection(): Promise<Array<{ label: string; value: string; fallback: string | null }>> {
+    this.cloudAssistantNewAppOnly("cloudAssistantModelsSection");
+  }
+
+  async cloudAssistantModelsOptions(_label: string): Promise<string[]> {
+    this.cloudAssistantNewAppOnly("cloudAssistantModelsOptions");
+  }
+
+  async cloudAssistantModelsSelect(_label: string, _option: string): Promise<void> {
+    this.cloudAssistantNewAppOnly("cloudAssistantModelsSelect");
+  }
+
+  async cloudAssistantConnectionModels(title: string): Promise<string[]> {
+    const card = await this.cloudAssistantCardByTitle(title);
+    const select = card.locator("select").first();
+    if ((await select.count()) > 0 && (await select.isVisible().catch(() => false))) {
+      const value = await select.inputValue();
+      return value === "" ? [] : [value];
+    }
+    const input = card.locator('input[list="assistant-known-byok-models"]').first();
+    if ((await input.count()) === 0) return [];
+    const value = await input.inputValue();
+    return value === "" ? [] : [value];
+  }
+
+  async cloudAssistantConnectionAddModel(title: string, model: string): Promise<void> {
+    // The old row holds one free-text value; adding replaces it.
+    const card = await this.cloudAssistantCardByTitle(title);
+    const input = card.locator('input[list="assistant-known-byok-models"]').first();
+    await input.fill(model);
+    await input.press("Enter");
+  }
+
+  async cloudAssistantConnectionRemoveModel(_title: string, _model: string): Promise<void> {
+    this.cloudAssistantNewAppOnly("cloudAssistantConnectionRemoveModel");
+  }
+
+  async cloudAssistantConnectionTestModel(_title: string, _model: string): Promise<void> {
+    this.cloudAssistantNewAppOnly("cloudAssistantConnectionTestModel");
+  }
+
+  async cloudAssistantConnectionSaveAnyway(_title: string): Promise<void> {
+    this.cloudAssistantNewAppOnly("cloudAssistantConnectionSaveAnyway");
+  }
+
+  async cloudAssistantConnectionModelDetail(_title: string, _model: string): Promise<string | null> {
+    this.cloudAssistantNewAppOnly("cloudAssistantConnectionModelDetail");
+  }
+
   async cloudAssistantClickRowAction(title: string, action: "Test" | "Remove" | "Disconnect"): Promise<void> {
     const card = await this.cloudAssistantCardByTitle(title);
     await card.getByRole("button", { name: action, exact: true }).click();
@@ -58884,7 +58972,9 @@ export class WebDriver implements ParityDriver {
   async cloudAssistantAddFill(fill: CloudAssistantAddFill): Promise<void> {
     if (fill.provider !== undefined) await this.cloudAssistantProviderSelect().selectOption(fill.provider);
     if (fill.baseUrl !== undefined) await this.page.getByLabel("Base URL").fill(fill.baseUrl);
-    if (fill.model !== undefined) await this.page.getByLabel("Model").fill(fill.model);
+    // The old form holds one model: prefer the single fill, else the first ID.
+    const single = fill.model ?? fill.models?.[0];
+    if (single !== undefined) await this.page.getByLabel("Model").fill(single);
     if (fill.key !== undefined) await this.page.getByLabel("API key").fill(fill.key);
   }
 

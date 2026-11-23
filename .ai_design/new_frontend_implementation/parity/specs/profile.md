@@ -426,6 +426,18 @@ keyless form. Endpoints: config read, write, delete and connection test
 (`GET`/`PUT`/`DELETE /api/users/me/ai-assistant/config/` plus `POST`
 `.../config/test/` with no body). Oracle: `assistant.spec.ts`.
 
+New-app differences (NEWPIDASH-394, DIFF-65): the language-model section
+edits a list of typed model IDs instead of one free-text model — add and
+remove per ID, with a per-ID status (verified / not verified / failed),
+test progress, the provider message on failure, a per-ID Test button, a
+"Save anyway" retry for unverified-only refusals, and a confirmation
+that deletes the key when the last ID is removed. The whole-config Test
+button is gone; the write sends `models` (plus `model_name` for older
+servers) and `save_unverified`. A per-surface Models section above the
+form (web/desktop pickers, fallback notice) writes `PUT`
+`model-selection/{surface}`. The parity file branches these legs on the
+driver target (`driver.target === "web_new"`).
+
 The voice-dictation section mirrors that lifecycle without a provider
 kind: endpoint, model and key save, test and removal with the same
 feedback and no key echo, over the parallel `stt-config` endpoints.

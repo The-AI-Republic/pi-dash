@@ -43,8 +43,14 @@ test(
 
     await tabTo(driver, "Base URL");
     await driver.page.keyboard.type("https://openrouter.ai/api/v1", { delay: 5 });
-    await tabTo(driver, "Model");
+    // NEWPIDASH-394 (DIFF-65): the new key form takes a list of model IDs
+    // through the editor's add field instead of a single Model field.
+    const modelField = driver.target === "web_new" ? "Add a model ID this key serves" : "Model";
+    await tabTo(driver, modelField);
     await driver.page.keyboard.type("meta-llama/llama-3.3-70b-instruct", { delay: 5 });
+    if (driver.target === "web_new") {
+      await driver.page.keyboard.press("Enter");
+    }
     await tabTo(driver, "API key");
     await driver.page.keyboard.type("parity-440-keys-key", { delay: 5 });
     await tabTo(driver, "Add connection");
@@ -78,6 +84,71 @@ test(
     await expect
       .poll(() => driver.cloudAssistantConnections(), { timeout: 60_000 })
       .toEqual(expect.arrayContaining([expect.objectContaining({ title: "BYOK:openrouter.ai" })]));
+    if (driver.target === "web_new") {
+      // NEWPIDASH-394 (DIFF-65): the editor commits the longer list on
+      // Enter. Stub the write at the browser boundary; the live Django
+      // backend predates multi-model BYOK (NEWPIDASH-393).
+      const live = await cloudAssistantConnectionsRaw(session.cookie);
+      const byokId = ((live.payload["connections"] as Record<string, unknown>[]).find(
+        (row) => row["kind"] === "byok"
+      )?.["id"] ?? "") as string;
+      let models = ["meta-llama/llama-3.3-70b-instruct"];
+      await driver.page.route("**/api/users/me/ai-assistant/connections/**", async (route) => {
+        const request = route.request();
+        const pathname = new URL(request.url()).pathname;
+        if (request.method() === "GET" && pathname === "/api/users/me/ai-assistant/connections/") {
+          const base = (await cloudAssistantConnectionsRaw(session.cookie)).payload as Record<string, unknown>;
+          const connections = (base["connections"] as Record<string, unknown>[]).map((row) =>
+            row["kind"] === "byok" ? { ...row, models, model_verified_at: {} } : row
+          );
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({ ...base, connections }),
+          });
+          return;
+        }
+        if (request.method() === "PATCH" && pathname === `/api/users/me/ai-assistant/connections/${byokId}/`) {
+          const body = (request.postDataJSON() ?? {}) as { models?: unknown };
+          models = Array.isArray(body.models) ? (body.models as string[]) : models;
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({ kind: "byok", models }),
+          });
+          return;
+        }
+        if (request.method() === "POST" && pathname === `/api/users/me/ai-assistant/connections/${byokId}/test/`) {
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({ model: "llama-keyboard", status: "failed", detail: "No such model." }),
+          });
+          return;
+        }
+        await route.fallback();
+      });
+      try {
+        await tabTo(driver, "Add a model ID this key serves");
+        await driver.page.keyboard.type("llama-keyboard", { delay: 5 });
+        await driver.page.keyboard.press("Enter");
+        await expect
+          .poll(() => driver.cloudAssistantConnectionModels("BYOK:openrouter.ai"), { timeout: 60_000 })
+          .toEqual(["meta-llama/llama-3.3-70b-instruct", "llama-keyboard"]);
+
+        // Row actions are ordinary buttons: Tab to the per-ID Test and fire it.
+        await tabTo(driver, "Test llama-keyboard");
+        await driver.page.keyboard.press("Enter");
+        await expect
+          .poll(() => driver.cloudAssistantConnectionModelDetail("BYOK:openrouter.ai", "llama-keyboard"), {
+            timeout: 60_000,
+          })
+          .toBe("No such model.");
+      } finally {
+        await driver.page.unroute("**/api/users/me/ai-assistant/connections/**");
+      }
+      return;
+    }
     await tabTo(driver, "Model");
     await driver.page.keyboard.press("ControlOrMeta+a");
     await driver.page.keyboard.type("llama-keyboard", { delay: 5 });

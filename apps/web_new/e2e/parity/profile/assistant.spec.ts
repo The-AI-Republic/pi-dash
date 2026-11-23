@@ -145,6 +145,42 @@ test(
     });
 
     await test.step("testing a dead endpoint toasts its failure code", async () => {
+      if (driver.target === "web_new") {
+        // NEWPIDASH-394 (DIFF-65): the new app tests one stored ID and
+        // reports the provider message beside it. Stub the per-model
+        // endpoint at the browser boundary so the leg proves the inline
+        // contract without depending on which backend serves the stack.
+        await driver.page.route("**/api/users/me/ai-assistant/config/test/", async (route) => {
+          if (route.request().method() !== "POST") {
+            await route.fallback();
+            return;
+          }
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+              model: "probe-model",
+              status: "failed",
+              code: "provider_unreachable",
+              detail: "The provider is unreachable.",
+            }),
+          });
+        });
+        try {
+          const beforeTest = await toastPoll(driver);
+          await driver.settingsProfileAssistantTest();
+          await expect
+            .poll(() => driver.settingsProfileAssistantModelDetail("probe-model"), { timeout: 30_000 })
+            .toBe("The provider is unreachable.");
+          // The failure renders inline; no new toast fires for it.
+          await driver.page.waitForTimeout(2000);
+          expect(await toastPoll(driver)).toEqual(beforeTest);
+        } finally {
+          await driver.page.unroute("**/api/users/me/ai-assistant/config/test/");
+        }
+        expect((await serverAssistantConfigGet(user.cookie)).last_verified_at).toBeNull();
+        return;
+      }
       await driver.settingsProfileAssistantTest();
       await expect
         .poll(() => toastPoll(driver), { timeout: 30_000 })
@@ -201,6 +237,114 @@ test(
       const raw = await serverRequestStatus("PUT", `${api}/api/users/me/ai-assistant/config/`, user.cookie, {});
       expect(raw.status).toBe(400);
     });
+  }
+);
+
+test(
+  specTitle(["PROF-021"], "unverified IDs offer Save anyway and the last ID deletes the key"),
+  { tag: specTags(["PROF-021"]) },
+  async ({ driver, seed }, testInfo) => {
+    test.skip(testInfo.project.name !== "new", "per-ID save results are new-app-only (NEWPIDASH-394, DIFF-65)");
+    const admin = await signInAuthedSession(seed.email, seed.password);
+    const { user, cookies } = await freshSettingsUser(admin, seed, "parity-prof21-editor");
+    const api = parityApiBase();
+    const seeded = await serverRequestStatus("PUT", `${api}/api/users/me/ai-assistant/config/`, user.cookie, {
+      provider_kind: "openai_compatible",
+      base_url: "http://127.0.0.1:9",
+      model_name: "seed-model",
+      api_key: "parity-dummy-key-21b",
+    });
+    expect(seeded.status).toBe(200);
+
+    await driver.settingsProfileOpenTab("ai-assistant", cookies);
+    await expect.poll(() => driver.settingsProfileAssistantModels(), { timeout: 15_000 }).toEqual(["seed-model"]);
+
+    // First save refuses the unverified ID; the detail renders inline and
+    // the retry persists with the flag.
+    const puts: unknown[] = [];
+    let attempt = 0;
+    await driver.page.route("**/api/users/me/ai-assistant/config/", async (route) => {
+      if (route.request().method() !== "PUT") {
+        await route.fallback();
+        return;
+      }
+      const body = (route.request().postDataJSON() ?? {}) as Record<string, unknown>;
+      puts.push(body);
+      attempt += 1;
+      if (attempt === 1) {
+        await route.fulfill({
+          status: 400,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: "model_test_failed",
+            models: [
+              { model: "flaky", status: "unverified", code: "provider_unreachable", detail: "The provider timed out." },
+            ],
+          }),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          provider_kind: "openai_compatible",
+          base_url: "http://127.0.0.1:9",
+          model_name: "seed-model",
+          models: ["seed-model", "flaky"],
+          model_verified_at: {},
+          has_api_key: true,
+          last_verified_at: null,
+        }),
+      });
+    });
+    try {
+      await driver.settingsProfileAssistantAddModel("flaky");
+      await driver.settingsProfileAssistantSave();
+      await expect
+        .poll(() => driver.settingsProfileAssistantModelDetail("flaky"), { timeout: 30_000 })
+        .toBe("The provider timed out.");
+      await driver.settingsProfileAssistantSaveAnyway();
+      await expect
+        .poll(() => toastPoll(driver), { timeout: 30_000 })
+        .toEqual({
+          title: "Saved",
+          message: "AI provider configuration updated.",
+        });
+      expect(puts).toEqual([
+        {
+          provider_kind: "openai_compatible",
+          base_url: "http://127.0.0.1:9",
+          model_name: "seed-model",
+          models: ["seed-model", "flaky"],
+        },
+        {
+          provider_kind: "openai_compatible",
+          base_url: "http://127.0.0.1:9",
+          model_name: "seed-model",
+          models: ["seed-model", "flaky"],
+          save_unverified: true,
+        },
+      ]);
+      expect(await driver.settingsProfileAssistantModels()).toEqual(["seed-model", "flaky"]);
+    } finally {
+      await driver.page.unroute("**/api/users/me/ai-assistant/config/");
+    }
+
+    // Removing every ID but the last stages a shorter draft; removing the
+    // last one confirms and deletes the key server-side.
+    await driver.settingsProfileAssistantRemoveModel("flaky");
+    expect(await driver.settingsProfileAssistantModels()).toEqual(["seed-model"]);
+    await driver.settingsProfileAssistantRemoveModel("seed-model");
+    await expect
+      .poll(() => toastPoll(driver), { timeout: 30_000 })
+      .toEqual({
+        title: "Removed",
+        message: "AI provider configuration deleted.",
+      });
+    const config = await serverAssistantConfigGet(user.cookie);
+    expect(config.has_api_key).toBe(false);
+    expect(config.model_name).toBe("");
   }
 );
 
