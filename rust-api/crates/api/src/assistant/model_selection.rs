@@ -150,7 +150,7 @@ async fn get_selection(
             render_surface(saved, &resolution),
         );
     }
-    crate::license::json_response(serde_json::Value::Object(surfaces))
+    crate::license::json_response(serde_json::json!({ "surfaces": surfaces }))
 }
 
 // ---------------------------------------------------------------------------
@@ -251,7 +251,7 @@ async fn put_selection(
     };
     let now = chrono::Utc::now();
     let db = pidash_db::pool::sea_orm_connection(&pool);
-    match pidash_services::domain::assistant::save_assistant_model_entry(
+    if pidash_services::domain::assistant::upsert_assistant_model_entry(
         &db,
         actor.id,
         surface,
@@ -259,10 +259,9 @@ async fn put_selection(
         now,
     )
     .await
+    .is_err()
     {
-        Ok(0) => return Failure::server_error().into_response(),
-        Ok(_) => {}
-        Err(_) => return Failure::server_error().into_response(),
+        return Failure::server_error().into_response();
     }
     let resolution = match state
         .assistant_seam()

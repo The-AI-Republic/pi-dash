@@ -234,8 +234,7 @@ pub(crate) fn assistant_model_entry_stmt(
 
 /// Save one surface's model choice (`entry` is the validated
 /// `{model, connection_id?}` object) without touching other surfaces or
-/// namespaces. Returns the rows matched (profiles are created at
-/// signup, so a miss is corruption the endpoint reports).
+/// namespaces. Returns the rows matched.
 pub async fn save_assistant_model_entry(
     db: &impl ConnectionTrait,
     user_id: Uuid,
@@ -244,6 +243,89 @@ pub async fn save_assistant_model_entry(
     now: DateTime<Utc>,
 ) -> Result<u64, sqlx::Error> {
     exec_update(db, assistant_model_entry_stmt(surface, entry, now, user_id)).await
+}
+
+/// Save one surface's model choice, creating the profile row when the
+/// user has none (harness-seeded and pre-profile users): the atomic
+/// update first, else an insert carrying the Django model defaults
+/// (`db/models/user.py::Profile`, except the random theme color, which
+/// is fixed white) with the entry already in the settings bag, else —
+/// on a lost create race — the update once more.
+pub async fn upsert_assistant_model_entry(
+    db: &impl ConnectionTrait,
+    user_id: Uuid,
+    surface: Surface,
+    entry: &Value,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    if save_assistant_model_entry(db, user_id, surface, entry, now).await? > 0 {
+        return Ok(());
+    }
+    let mut bag = serde_json::Map::with_capacity(1);
+    let mut surface_map = serde_json::Map::with_capacity(1);
+    surface_map.insert(surface.as_str().to_owned(), entry.clone());
+    bag.insert(
+        crate::assistant::model_selection::ASSISTANT_MODELS_NAMESPACE.to_owned(),
+        Value::Object(surface_map),
+    );
+    let insert = profiles::ActiveModel {
+        id: ActiveValue::Set(Uuid::new_v4()),
+        user_id: ActiveValue::Set(user_id),
+        theme: ActiveValue::Set(serde_json::json!({})),
+        is_app_rail_docked: ActiveValue::Set(true),
+        is_tour_completed: ActiveValue::Set(false),
+        onboarding_step: ActiveValue::Set(serde_json::json!({
+            "profile_complete": false,
+            "workspace_create": false,
+            "workspace_invite": false,
+            "workspace_join": false,
+        })),
+        use_case: ActiveValue::Set(None),
+        role: ActiveValue::Set(None),
+        is_onboarded: ActiveValue::Set(false),
+        last_workspace_id: ActiveValue::Set(None),
+        billing_address_country: ActiveValue::Set("INDIA".to_owned()),
+        billing_address: ActiveValue::Set(None),
+        has_billing_address: ActiveValue::Set(false),
+        company_name: ActiveValue::Set(String::new()),
+        notification_view_mode: ActiveValue::Set("full".to_owned()),
+        is_smooth_cursor_enabled: ActiveValue::Set(false),
+        is_mobile_onboarded: ActiveValue::Set(false),
+        mobile_onboarding_step: ActiveValue::Set(serde_json::json!({
+            "profile_complete": false,
+            "workspace_create": false,
+            "workspace_join": false,
+        })),
+        mobile_timezone_auto_set: ActiveValue::Set(false),
+        language: ActiveValue::Set("en".to_owned()),
+        start_of_the_week: ActiveValue::Set(0i16),
+        goals: ActiveValue::Set(serde_json::json!({})),
+        background_color: ActiveValue::Set("#FFFFFF".to_owned()),
+        is_navigation_tour_completed: ActiveValue::Set(false),
+        has_marketing_email_consent: ActiveValue::Set(false),
+        is_subscribed_to_changelog: ActiveValue::Set(false),
+        product_tour: ActiveValue::Set(serde_json::json!({
+            "work_items": false,
+            "cycles": false,
+            "modules": false,
+            "intake": false,
+            "pages": false,
+        })),
+        settings: ActiveValue::Set(Value::Object(bag)),
+        created_at: ActiveValue::Set(now.into()),
+        updated_at: ActiveValue::Set(now.into()),
+        ..Default::default()
+    };
+    match profiles::Entity::insert(insert).exec(db).await {
+        Ok(_) => Ok(()),
+        Err(insert_err) => {
+            if save_assistant_model_entry(db, user_id, surface, entry, now).await? > 0 {
+                Ok(())
+            } else {
+                Err(into_sqlx(insert_err))
+            }
+        }
+    }
 }
 
 /// The atomic single-surface clear for [`clear_assistant_model_entry`]:
