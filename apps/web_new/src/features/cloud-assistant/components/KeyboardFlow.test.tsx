@@ -9,7 +9,15 @@
 // shortcut, so the walks below never press an app-specific chord.
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("@tanstack/react-router", () => ({
+  useParams: () => ({ ws: "acme" }),
+}));
+
+vi.mock("./AssistantModelsSection.js", () => ({
+  AssistantModelsSection: () => null,
+}));
 
 import { CloudAssistantTab } from "./CloudAssistantTab.js";
 
@@ -98,11 +106,13 @@ describe("cloud assistant keyboard flow", () => {
     expect(await screen.findByRole("form", { name: "Add connection" })).toBeInTheDocument();
 
     // Each field is a labelled control in document order; type, then Enter
-    // on the submit button — no custom chord anywhere.
+    // on the submit button — no custom chord anywhere. The key's model
+    // is an editor: type the ID into its add field and confirm with
+    // Enter before moving on.
     screen.getByRole("textbox", { name: "Base URL" }).focus();
     await user.keyboard("https://openrouter.ai/api/v1");
-    screen.getByRole("combobox", { name: "Model" }).focus();
-    await user.keyboard("meta-llama/llama-3.3-70b-instruct");
+    screen.getByLabelText("Add a model ID this key serves").focus();
+    await user.keyboard("meta-llama/llama-3.3-70b-instruct{Enter}");
     screen.getByLabelText("API key").focus();
     await user.keyboard("parity-440-keys-key{TAB}");
     // Tab from the secret lands on the submit button, enabled by now.
@@ -119,6 +129,7 @@ describe("cloud assistant keyboard flow", () => {
           provider_kind: "openai_compatible",
           base_url: "https://openrouter.ai/api/v1",
           model_name: "meta-llama/llama-3.3-70b-instruct",
+          models: ["meta-llama/llama-3.3-70b-instruct"],
           api_key: "parity-440-keys-key",
         },
       },

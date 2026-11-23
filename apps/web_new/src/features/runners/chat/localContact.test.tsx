@@ -43,14 +43,18 @@ const Provider = QueryClientProvider as unknown as React.ComponentType<{
   children?: React.ReactNode;
 }>;
 
-function setup() {
+function setup(workspaceSlug?: string) {
   const client = testClient();
   const wrapper = ({ children }: { children: React.ReactNode }) => <Provider client={client}>{children}</Provider>;
-  return renderHook(() => usePidashAgentContact(), { wrapper });
+  return renderHook(() => usePidashAgentContact(workspaceSlug), { wrapper });
 }
 
-function profile(available: boolean, reason_code = ""): { available: boolean; reason_code: string } {
-  return { available, reason_code };
+function profile(
+  available: boolean,
+  reason_code = "",
+  model = "openhub_free_llm"
+): { available: boolean; reason_code: string; model: string } {
+  return { available, reason_code, model };
 }
 
 beforeEach(() => {
@@ -93,10 +97,41 @@ describe("usePidashAgentContact", () => {
     platformState.localChat = true;
     contracts.getPidashAgentProfile.mockResolvedValue(profile(true));
     const { result } = setup();
-    await waitFor(() => expect(result.current[0]?.unavailableReason).toBeNull());
+    await waitFor(() => expect(result.current[0]?.model).toBe("openhub_free_llm"));
     expect(result.current).toEqual([
-      { id: "pidash-builtin", name: PIDASH_AGENT_NAME, label: LOCAL_CONTACT_LABEL, unavailableReason: null },
+      {
+        id: "pidash-builtin",
+        name: PIDASH_AGENT_NAME,
+        label: LOCAL_CONTACT_LABEL,
+        unavailableReason: null,
+        model: "openhub_free_llm",
+        settingsHref: null,
+      },
     ]);
+  });
+
+  it("carries the agent model and the workspace Models section address", async () => {
+    platformState.localChat = true;
+    contracts.getPidashAgentProfile.mockResolvedValue(profile(true, "", "moonshotai/kimi-k3"));
+    const { result } = setup("acme");
+    await waitFor(() => expect(result.current[0]?.model).toBe("moonshotai/kimi-k3"));
+    expect(result.current[0]).toEqual(
+      expect.objectContaining({
+        model: "moonshotai/kimi-k3",
+        settingsHref: "/acme/settings/account/ai-assistant/#assistant-models",
+      })
+    );
+  });
+
+  it("reads the agent model as null before the profile answers", async () => {
+    platformState.localChat = true;
+    let answer: (value: { available: boolean; reason_code: string; model: string }) => void = () => undefined;
+    contracts.getPidashAgentProfile.mockReturnValue(new Promise((resolve) => (answer = resolve)));
+    const { result } = setup("acme");
+    expect(result.current[0]?.model).toBeNull();
+    expect(result.current[0]?.settingsHref).toBe("/acme/settings/account/ai-assistant/#assistant-models");
+    answer(profile(true));
+    await waitFor(() => expect(result.current[0]?.model).toBe("openhub_free_llm"));
   });
 
   it("offers the contact disabled with the server's reason while the check is out", async () => {

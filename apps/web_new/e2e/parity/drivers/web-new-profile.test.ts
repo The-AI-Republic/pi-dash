@@ -53,6 +53,8 @@ function locator(overrides: Partial<StubLocator> = {}): Locator {
     getByRole: () => node,
     getByTestId: () => node,
     getByText: () => node,
+    getByLabel: () => node,
+    getByPlaceholder: () => node,
     or: () => node,
     locator: () => node,
     filter: () => node,
@@ -1697,6 +1699,17 @@ describe("settings assistant (NEWFRONT-586, PROF-021..023)", () => {
     const clicks: string[] = [];
     const fills: Array<[string, string]> = [];
     const selected: string[] = [];
+    const row = (model: string) =>
+      locator({
+        locator: (selector: string) => {
+          if (selector === "span")
+            return locator({
+              first: () => locator({ innerText: async () => model }),
+            });
+          return locator();
+        },
+        getByTestId: () => locator(),
+      });
     const section = locator({
       locator: (selector: string) => {
         if (selector === "#assistant-llm-base-url") return locator({ inputValue: async () => "http://dead:9" });
@@ -1708,13 +1721,6 @@ describe("settings assistant (NEWFRONT-586, PROF-021..023)", () => {
             },
           });
         }
-        if (selector === "#assistant-llm-model")
-          return locator({
-            inputValue: async () => "probe-model",
-            fill: async (value: string) => {
-              fills.push([selector, value]);
-            },
-          });
         return locator({
           inputValue: async () => "",
           fill: async (value: string) => {
@@ -1723,12 +1729,38 @@ describe("settings assistant (NEWFRONT-586, PROF-021..023)", () => {
           getAttribute: async () => "Your provider API key",
         });
       },
-      getByRole: (_role: string, options?: Record<string, unknown>) => {
-        const name = options?.["name"] as string;
+      getByLabel: (label: string) => {
+        if (label !== "Add a model ID this key serves") return locator();
         return locator({
-          isDisabled: async () => name === "Save",
+          fill: async (value: string) => {
+            fills.push(["editor-add", value]);
+          },
+          press: async (key: string) => {
+            fills.push(["editor-press", key]);
+          },
+        });
+      },
+      getByTestId: (testId: string) => {
+        if (testId !== "byok-model-row") return locator();
+        return locator({
+          count: async () => 1,
+          nth: () => row("probe-model"),
+        });
+      },
+      getByRole: (_role: string, options?: Record<string, unknown>) => {
+        const name = options?.["name"];
+        const text = name instanceof RegExp ? "regexp" : String(name ?? "");
+        return locator({
+          isDisabled: async () => text === "Save",
+          count: async () => 1,
+          first: () =>
+            locator({
+              click: async () => {
+                clicks.push("Test probe-model");
+              },
+            }),
           click: async () => {
-            clicks.push(name);
+            clicks.push(text);
           },
         });
       },
@@ -1740,6 +1772,7 @@ describe("settings assistant (NEWFRONT-586, PROF-021..023)", () => {
       baseUrlVisible: true,
       baseUrl: "http://dead:9",
       model: "probe-model",
+      models: ["probe-model"],
       keyValue: "",
       keyPlaceholder: "Your provider API key",
       saveDisabled: true,
@@ -1753,8 +1786,84 @@ describe("settings assistant (NEWFRONT-586, PROF-021..023)", () => {
     await driver.settingsProfileAssistantTest();
     await driver.settingsProfileAssistantRemove();
     expect(selected).toEqual(["anthropic"]);
-    expect(fills).toEqual([["#assistant-llm-model", "m"]]);
-    expect(clicks).toEqual(["Save", "Test connection", "Remove"]);
+    expect(fills).toEqual([
+      ["editor-add", "m"],
+      ["editor-press", "Enter"],
+    ]);
+    expect(clicks).toEqual(["Remove probe-model", "Save", "Test probe-model", "Remove"]);
+  });
+
+  it("reads per-ID details and saves anyway through the editor", async () => {
+    const clicks: string[] = [];
+    const row = (model: string, detail?: string) =>
+      locator({
+        locator: (selector: string) => {
+          if (selector === "span")
+            return locator({
+              first: () => locator({ innerText: async () => model }),
+            });
+          return locator();
+        },
+        getByTestId: (testId: string) => {
+          if (testId !== "byok-model-detail" || detail === undefined) return locator();
+          return locator({ count: async () => 1, isVisible: async () => true, innerText: async () => detail });
+        },
+      });
+    const section = locator({
+      locator: () => locator(),
+      getByLabel: () => locator(),
+      getByTestId: (testId: string) => {
+        if (testId !== "byok-model-row") return locator();
+        return locator({
+          count: async () => 2,
+          nth: (index: number) => (index === 0 ? row("good") : row("flaky", "Timed out.")),
+        });
+      },
+      getByRole: (_role: string, options?: Record<string, unknown>) => {
+        const name = String(options?.["name"] ?? "");
+        return locator({
+          click: async () => {
+            clicks.push(name);
+          },
+        });
+      },
+      getByText: () => locator({ count: async () => 0 }),
+    });
+    const driver = new WebNewDriver(sectionPage(section));
+    expect(await driver.settingsProfileAssistantModels()).toEqual(["good", "flaky"]);
+    expect(await driver.settingsProfileAssistantModelDetail("flaky")).toBe("Timed out.");
+    expect(await driver.settingsProfileAssistantModelDetail("good")).toBeNull();
+    await driver.settingsProfileAssistantSaveAnyway();
+    expect(clicks).toEqual(["Save anyway"]);
+  });
+
+  it("removes one model ID and confirms the last-ID prompt when it appears", async () => {
+    const clicks: string[] = [];
+    const section = locator({
+      getByRole: (_role: string, options?: Record<string, unknown>) => {
+        const name = String(options?.["name"] ?? "");
+        if (name === "Remove both") {
+          return locator({
+            count: async () => 1,
+            isVisible: async () => true,
+            click: async () => void clicks.push(name),
+          });
+        }
+        return locator({ click: async () => void clicks.push(name) });
+      },
+    });
+    const driver = new WebNewDriver(sectionPage(section));
+    await driver.settingsProfileAssistantRemoveModel("flaky");
+    expect(clicks).toEqual(["Remove flaky", "Remove both"]);
+
+    const bare = new WebNewDriver(
+      sectionPage(
+        locator({
+          getByRole: () => locator({ count: async () => 0, isVisible: async () => false }),
+        })
+      )
+    );
+    await bare.settingsProfileAssistantRemoveModel("keep");
   });
 
   it("blanks the base URL when the endpoint hides", async () => {
@@ -1764,13 +1873,17 @@ describe("settings assistant (NEWFRONT-586, PROF-021..023)", () => {
           ? locator({ count: async () => 0 })
           : locator({ inputValue: async () => "", getAttribute: async () => "" }),
       getByRole: () => locator({ isDisabled: async () => false }),
-      getByText: () => locator({ innerText: async () => "Last verified: whenever" }),
+      getByTestId: () => locator({ count: async () => 0 }),
+      getByText: (text: string) =>
+        text.includes("Verified")
+          ? locator({ count: async () => 1, isVisible: async () => true, innerText: async () => "Verified" })
+          : locator({ count: async () => 0 }),
     });
     const driver = new WebNewDriver(sectionPage(section));
     expect(await driver.settingsProfileAssistantFacts()).toMatchObject({
       baseUrlVisible: false,
       baseUrl: "",
-      lastVerified: "Last verified: whenever",
+      lastVerified: "Verified",
     });
   });
 

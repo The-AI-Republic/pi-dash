@@ -548,12 +548,26 @@ a sign-in prompt (or a not-available-on-this-deployment note). An empty
 list points at adding the first connection. Oracle:
 `assistant-connections.spec.ts`.
 
+New-app differences (NEWPIDASH-394, DIFF-65): the per-row select control
+is removed — the saved choice moves per surface into the Models section
+(web/desktop/agent pickers over the merged catalog-plus-BYOK list, agent
+catalog-only), each writing `PUT model-selection/{surface}` with a
+fallback notice when the saved choice stops working. Self-supplied rows
+edit a list of typed model IDs instead of free text (add/remove per ID,
+per-ID status and Test button, provider message on failure, "Save
+anyway" for unverified-only refusals, last-ID confirmation calling the
+connection DELETE); the write PATCHes the full `models` list. The
+parity file branches these legs on the driver target
+(`driver.target === "web_new"`; new-app-only legs skip the oracle).
+
 CLOUD-033 — Adding a connection covers self-supplied keys and provider
 sign-in. The key form requires a provider kind (compatible-endpoint vs
 single-vendor), a reachable base address for the compatible kind, a model,
 and a secret before enabling save; saving posts the trimmed values to
 `POST /api/users/me/ai-assistant/connections/`, confirms, and returns to
-the list with the new row selected. Provider sign-in reserves a popup
+the list with the new row selected. New-app difference (NEWPIDASH-394,
+DIFF-65): a new key carries a list of typed model IDs (at least one),
+sent as `models` with the first ID also as `model_name`. Provider sign-in reserves a popup
 during the click (opener detached), starts the flow via
 `POST /api/users/me/ai-assistant/openai-login/`, navigates the popup to the
 returned authorization address, and polls

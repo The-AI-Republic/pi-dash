@@ -45,14 +45,14 @@ describe("provider form rules", () => {
   });
 
   it("gates the save on a model and a typed or stored key", () => {
-    expect(llmCanSave({ model: " m ", key: " k ", hasKey: false })).toBe(true);
-    expect(llmCanSave({ model: "m", key: "  ", hasKey: false })).toBe(false);
-    expect(llmCanSave({ model: "", key: "k", hasKey: true })).toBe(false);
+    expect(llmCanSave({ models: ["m"], key: " k ", hasKey: false })).toBe(true);
+    expect(llmCanSave({ models: ["m"], key: "  ", hasKey: false })).toBe(false);
+    expect(llmCanSave({ models: [], key: "k", hasKey: true })).toBe(false);
   });
 
   it("saves over a stored key with the field blank, keeping the secret", () => {
-    expect(llmCanSave({ model: "m", key: "", hasKey: true })).toBe(true);
-    expect(llmCanSave({ model: "m", key: "  ", hasKey: true })).toBe(true);
+    expect(llmCanSave({ models: ["m"], key: "", hasKey: true })).toBe(true);
+    expect(llmCanSave({ models: ["m"], key: "  ", hasKey: true })).toBe(true);
     expect(sttCanSave({ baseUrl: "u", model: "m", key: "", hasKey: true })).toBe(true);
   });
 

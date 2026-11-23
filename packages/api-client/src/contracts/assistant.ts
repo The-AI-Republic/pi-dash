@@ -6,6 +6,7 @@
 // run (unconfigured when no model name or key is set).
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
+import { ModelTestResult, modelVerifiedAtMap, testAssistantModel } from "./assistant-model-selection.js";
 import { dateTime, nullableDateTime, uuid } from "./fields.js";
 
 export const AssistantThread = z.object({
@@ -54,6 +55,13 @@ export const LlmConfig = z.object({
   model_name: z.string(),
   has_api_key: z.boolean(),
   last_verified_at: nullableDateTime(),
+  /**
+   * The key's typed model IDs (NEWPIDASH-394, design section 4.4).
+   * Absent on backends that predate multi-model BYOK; the legacy
+   * `model_name` still carries the first ID (`models[0]`).
+   */
+  models: z.optional(z.array(z.string())),
+  model_verified_at: modelVerifiedAtMap(),
   credential_mode: z.optional(z.enum(CREDENTIAL_LANES)),
   has_byok_api_key: z.optional(z.boolean()),
   has_codex_token: z.optional(z.boolean()),
@@ -119,6 +127,13 @@ export const AssistantConnection = z.object({
   is_selected: z.boolean(),
   last_verified_at: nullableDateTime(),
   created_at: nullableDateTime(),
+  /**
+   * The connection's typed model IDs (NEWPIDASH-394, design section
+   * 4.4). Absent on backends that predate multi-model BYOK; the
+   * legacy `model_name` still carries the first ID (`models[0]`).
+   */
+  models: z.optional(z.array(z.string())),
+  model_verified_at: modelVerifiedAtMap(),
 });
 export type AssistantConnection = z.infer<typeof AssistantConnection>;
 
@@ -138,8 +153,9 @@ export type AssistantConnectionListItem = z.infer<typeof AssistantConnectionList
  * provider sign-in availability, and the hosted-lane availability flag.
  * Older backends predate the lane flag; resolveOpenhubAvailable reads
  * a missing flag as available so they never banner every row. The
- * model-labels map is likewise optional: the cloud backend omits it
- * entirely, and connectionModelFlags defaults a missing map to {}.
+ * model-labels maps are likewise optional: backends that predate them
+ * omit them entirely, and connectionModelFlags defaults a missing map
+ * to {}.
  */
 export const AssistantConnectionList = z.object({
   connections: z.array(AssistantConnectionListItem),
@@ -148,6 +164,7 @@ export const AssistantConnectionList = z.object({
   has_codex_credential: z.boolean(),
   openai_login_available: z.boolean(),
   openhub_model_options: z.array(z.string()),
+  openhub_model_labels: z.optional(z.record(z.string(), z.string())),
   openhub_available: z.optional(z.boolean()),
   openhub_wallet_url: z.string(),
 });
@@ -172,6 +189,14 @@ export interface AssistantConnectionCreateInput {
   baseUrl?: string;
   modelName: string;
   apiKey: string;
+  /**
+   * The connection's typed model IDs (NEWPIDASH-394, design section
+   * 6.3). When omitted the server treats the body as a `model_name`-
+   * only write for older clients.
+   */
+  models?: string[];
+  /** "Save anyway": persist IDs the smoke test could not verify. */
+  saveUnverified?: boolean;
 }
 
 /**
@@ -187,10 +212,60 @@ export async function createAssistantConnection(
       provider_kind: input.providerKind,
       base_url: input.baseUrl,
       model_name: input.modelName,
+      models: input.models,
+      save_unverified: input.saveUnverified,
       api_key: input.apiKey,
     },
   });
   return client.parse(AssistantConnection, envelope.data, "POST /api/users/me/ai-assistant/connections/");
+}
+
+export interface AssistantConnectionModelsInput {
+  /** The connection's full model-ID list; empty is rejected as `models_required`. */
+  models: string[];
+  /** "Save anyway": persist IDs the smoke test could not verify. */
+  saveUnverified?: boolean;
+}
+
+/**
+ * Replace a connection's model-ID list (NEWPIDASH-394, design section
+ * 6.3). The server diffs the list against the stored one, smoke-tests
+ * the new IDs, and answers the stored row. A rejected write (`400
+ * model_test_failed`, nothing saved) carries the per-ID results — read
+ * them with `modelTestResultsFrom`.
+ */
+export async function updateConnectionModels(
+  client: ApiClient,
+  connectionId: string,
+  input: AssistantConnectionModelsInput
+): Promise<AssistantConnection> {
+  const envelope = await client.sendJson<unknown>(
+    "PATCH",
+    `/api/users/me/ai-assistant/connections/${encodeURIComponent(connectionId)}/`,
+    { json: { models: input.models, save_unverified: input.saveUnverified } }
+  );
+  return client.parse(
+    AssistantConnection,
+    envelope.data,
+    `PATCH /api/users/me/ai-assistant/connections/${connectionId}/`
+  );
+}
+
+/**
+ * Smoke-test one stored model ID (NEWPIDASH-394, design section 6.4).
+ * Updates the ID's `model_verified_at` server-side and answers one
+ * result object. Throttled (6/minute) like the other test endpoints.
+ */
+export async function testAssistantConnectionModel(
+  client: ApiClient,
+  connectionId: string,
+  model: string
+): Promise<ModelTestResult> {
+  return testAssistantModel(
+    client,
+    `/api/users/me/ai-assistant/connections/${encodeURIComponent(connectionId)}/test/`,
+    model
+  );
 }
 
 /**

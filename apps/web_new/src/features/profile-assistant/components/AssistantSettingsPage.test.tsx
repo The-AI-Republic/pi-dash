@@ -6,19 +6,19 @@
 // quiet loading frame, one-time seeding from each read, the exact payload
 // each save posts, the key clearing after a save, and the tool-server
 // actions carrying the row they touched.
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { LlmConfig, McpServer, SttConfig } from "@pidash/api-client";
+import { ApiError, type LlmConfig, type McpServer, type SttConfig } from "@pidash/api-client";
 
 const harness = vi.hoisted(() => ({
   llm: { data: undefined as LlmConfig | undefined },
   voice: { data: undefined as SttConfig | undefined },
   servers: { data: undefined as McpServer[] | undefined },
   saveLlm: { mutate: vi.fn(), isPending: false },
-  testLlm: { mutate: vi.fn(), isPending: false },
+  testLlmModel: { mutate: vi.fn(), isPending: false },
   removeLlm: { mutate: vi.fn(), isPending: false },
   saveVoice: { mutate: vi.fn(), isPending: false },
   testVoice: { mutate: vi.fn(), isPending: false },
@@ -36,7 +36,7 @@ vi.mock("../api/queries.js", () => ({
 
 vi.mock("../api/mutations.js", () => ({
   useSaveAssistantLlm: () => harness.saveLlm,
-  useTestAssistantLlm: () => harness.testLlm,
+  useTestAssistantLlmModel: () => harness.testLlmModel,
   useRemoveAssistantLlm: () => harness.removeLlm,
   useSaveAssistantVoice: () => harness.saveVoice,
   useTestAssistantVoice: () => harness.testVoice,
@@ -58,6 +58,16 @@ vi.mock("../../../shared/dictation/index.js", async (importOriginal) => {
     },
   };
 });
+
+vi.mock("@tanstack/react-router", () => ({
+  useParams: () => ({ ws: "acme" }),
+}));
+
+vi.mock("./AssistantModelsSection.js", () => ({
+  AssistantModelsSection: ({ workspaceSlug }: { workspaceSlug: string }) => (
+    <div data-testid="assistant-models-section-stub">{workspaceSlug}</div>
+  ),
+}));
 
 import { AssistantSettingsPage } from "./AssistantSettingsPage.js";
 
@@ -94,7 +104,7 @@ const SERVER: McpServer = {
 beforeEach(() => {
   for (const mutation of [
     harness.saveLlm,
-    harness.testLlm,
+    harness.testLlmModel,
     harness.removeLlm,
     harness.saveVoice,
     harness.testVoice,
@@ -112,6 +122,14 @@ beforeEach(() => {
 });
 
 describe("AssistantSettingsPage", () => {
+  it("renders the Models section first with the workspace slug", () => {
+    render(<AssistantSettingsPage />);
+    const section = screen.getByTestId("assistant-models-section-stub");
+    expect(section).toHaveTextContent("acme");
+    const page = screen.getByTestId("assistant-settings-page");
+    expect(page.firstElementChild).toBe(section);
+  });
+
   it("holds a quiet frame until both configs arrive", () => {
     harness.llm = { data: undefined };
     render(<AssistantSettingsPage />);
@@ -141,8 +159,8 @@ describe("AssistantSettingsPage", () => {
     expect(screen.getByTestId("assistant-settings-page")).toBeInTheDocument();
     expect(within(screen.getByTestId("assistant-llm")).getByLabelText("Base URL")).toHaveValue("https://llm.test/v1");
     expect(within(screen.getByTestId("assistant-voice")).getByLabelText("Base URL")).toHaveValue("https://stt.test/v1");
-    expect(screen.getAllByLabelText("Model")[0]).toHaveValue("model-a");
-    expect(screen.getAllByLabelText("Model")[1]).toHaveValue("whisper-1");
+    expect(within(screen.getByTestId("assistant-llm")).getByText("model-a")).toBeInTheDocument();
+    expect(screen.getByLabelText("Model")).toHaveValue("whisper-1");
     expect(screen.getByText("probe_*")).toBeInTheDocument();
   });
 
@@ -157,24 +175,26 @@ describe("AssistantSettingsPage", () => {
       provider_kind: "openai_compatible",
       base_url: "https://llm.test/v1",
       model_name: "model-a",
+      models: ["model-a"],
       api_key: "secret",
     });
     expect(key).toHaveValue("  secret  ");
-    options.onSuccess();
+    options.onSuccess({ ...LLM, models: ["model-a"] });
     await waitFor(() => expect(key).toHaveValue(""));
   });
 
   it("keeps the stored key when the field is blank, posting no api_key", async () => {
     const user = userEvent.setup();
     render(<AssistantSettingsPage />);
-    await user.clear(screen.getAllByLabelText("Model")[0]!);
-    await user.type(screen.getAllByLabelText("Model")[0]!, "model-b");
+    await user.type(screen.getByLabelText("Add a model ID this key serves"), "model-b{Enter}");
+    await user.click(screen.getByRole("button", { name: "Remove model-a" }));
     expect(screen.getAllByRole("button", { name: "Save" })[0]).toBeEnabled();
     await user.selectOptions(screen.getByLabelText("Provider"), "anthropic");
     await user.click(screen.getAllByRole("button", { name: "Save" })[0]!);
     expect(harness.saveLlm.mutate.mock.calls[0]![0]).toEqual({
       provider_kind: "anthropic",
       model_name: "model-b",
+      models: ["model-b"],
     });
     expect(screen.getAllByLabelText("API key")[0]).toHaveValue("");
   });
@@ -199,6 +219,7 @@ describe("AssistantSettingsPage", () => {
     expect(harness.saveLlm.mutate.mock.calls[0]![0]).toEqual({
       provider_kind: "anthropic",
       model_name: "model-a",
+      models: ["model-a"],
       api_key: "k",
     });
   });
@@ -218,12 +239,14 @@ describe("AssistantSettingsPage", () => {
   it("wires test and remove to their own hooks", async () => {
     const user = userEvent.setup();
     harness.voice = { data: { ...VOICE, has_api_key: true } };
+    harness.llm = { data: { ...LLM, has_api_key: true } };
     render(<AssistantSettingsPage />);
-    await user.click(screen.getAllByRole("button", { name: "Test connection" })[0]!);
+    await user.click(within(screen.getByTestId("assistant-llm")).getByRole("button", { name: "Test model-a" }));
     await user.click(within(screen.getByTestId("assistant-voice")).getByRole("button", { name: "Test connection" }));
     await user.click(within(screen.getByTestId("assistant-llm")).getByRole("button", { name: "Remove" }));
     await user.click(within(screen.getByTestId("assistant-voice")).getByRole("button", { name: "Remove" }));
-    expect(harness.testLlm.mutate).toHaveBeenCalledTimes(1);
+    expect(harness.testLlmModel.mutate).toHaveBeenCalledTimes(1);
+    expect(harness.testLlmModel.mutate.mock.calls[0]![0]).toBe("model-a");
     expect(harness.testVoice.mutate).toHaveBeenCalledTimes(1);
     expect(harness.removeLlm.mutate).toHaveBeenCalledTimes(1);
     expect(harness.removeVoice.mutate).toHaveBeenCalledTimes(1);
@@ -279,24 +302,64 @@ describe("AssistantSettingsPage", () => {
     );
   });
 
+  it("deletes the key after confirming the last model ID's removal", async () => {
+    const user = userEvent.setup();
+    render(<AssistantSettingsPage />);
+    await user.click(screen.getByRole("button", { name: "Remove model-a" }));
+    expect(harness.removeLlm.mutate).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Remove both" }));
+    expect(harness.removeLlm.mutate).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces a refused save per ID and retries with Save anyway", async () => {
+    const user = userEvent.setup();
+    render(<AssistantSettingsPage />);
+    await user.click(screen.getAllByRole("button", { name: "Save" })[0]!);
+    const [, options] = harness.saveLlm.mutate.mock.calls[0]!;
+    act(() => {
+      options.onError(
+        new ApiError({
+          message: "Model test failed",
+          status: 400,
+          code: "model_test_failed",
+          body: {
+            error: "model_test_failed",
+            models: [{ model: "model-a", status: "unverified", code: "provider_unreachable", detail: "Timed out." }],
+          },
+        })
+      );
+    });
+    expect(screen.getByTestId("byok-model-detail")).toHaveTextContent("Timed out.");
+    expect(screen.getByTestId("byok-model-status")).toHaveTextContent("Not verified");
+    await user.click(screen.getByRole("button", { name: "Save anyway" }));
+    expect(harness.saveLlm.mutate.mock.calls[1]![0]).toEqual({
+      provider_kind: "openai_compatible",
+      base_url: "https://llm.test/v1",
+      model_name: "model-a",
+      models: ["model-a"],
+      save_unverified: true,
+    });
+  });
+
   it("does not re-seed a form from a refetch with the same values, so typing survives", async () => {
     const user = userEvent.setup();
     const { rerender } = render(<AssistantSettingsPage />);
-    const model = screen.getAllByLabelText("Model")[0]!;
-    await user.clear(model);
-    await user.type(model, "typed");
+    const draft = screen.getByLabelText("Add a model ID this key serves");
+    await user.type(draft, "typed");
     harness.llm = { data: { ...LLM } };
     harness.voice = { data: { ...VOICE } };
     rerender(<AssistantSettingsPage />);
-    expect(screen.getAllByLabelText("Model")[0]).toHaveValue("typed");
-    expect(screen.getAllByLabelText("Model")[1]).toHaveValue("whisper-1");
+    expect(screen.getByLabelText("Add a model ID this key serves")).toHaveValue("typed");
+    expect(screen.getByLabelText("Model")).toHaveValue("whisper-1");
   });
 
-  it("re-seeds when the read itself changes", () => {
+  it("re-seeds the model-ID list when the read itself changes", () => {
     const { rerender } = render(<AssistantSettingsPage />);
+    expect(screen.getByText("model-a")).toBeInTheDocument();
     harness.llm = { data: { ...LLM, model_name: "model-b" } };
     rerender(<AssistantSettingsPage />);
-    expect(screen.getAllByLabelText("Model")[0]).toHaveValue("model-b");
+    expect(screen.queryByText("model-a")).toBeNull();
+    expect(screen.getByText("model-b")).toBeInTheDocument();
   });
 
   it("binds no shortcuts, drops or file inputs (PROF-027)", async () => {

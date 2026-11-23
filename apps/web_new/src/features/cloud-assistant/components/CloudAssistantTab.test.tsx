@@ -22,6 +22,16 @@ vi.mock("../../../shared/shell/toaster.js", async (importOriginal) => {
   return { ...original, notifySuccess, notifyInfo, notifyError };
 });
 
+vi.mock("@tanstack/react-router", () => ({
+  useParams: () => ({ ws: "acme" }),
+}));
+
+vi.mock("./AssistantModelsSection.js", () => ({
+  AssistantModelsSection: ({ workspaceSlug }: { workspaceSlug: string }) => (
+    <div data-testid="assistant-models-section-stub">{workspaceSlug}</div>
+  ),
+}));
+
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { CloudAssistantTab } from "./CloudAssistantTab.js";
 
@@ -52,7 +62,6 @@ const CODEX = {
 };
 
 const CONNECTIONS = "/api/users/me/ai-assistant/connections/";
-const CONFIG_TEST = "/api/users/me/ai-assistant/config/test/";
 const SERVERS = "/api/users/me/ai-assistant/mcp-servers/";
 
 function list(overrides: Record<string, unknown> = {}) {
@@ -114,11 +123,24 @@ describe("CloudAssistantTab", () => {
       return undefined;
     });
     renderTab();
-    expect(await screen.findByRole("radio", { name: "BYOK:openrouter.ai" })).toBeChecked();
-    expect(screen.getByRole("radio", { name: "OpenAI account" })).toBeDisabled();
+    expect(await screen.findByText("BYOK:openrouter.ai")).toBeInTheDocument();
+    expect(screen.getByText("In use")).toBeInTheDocument();
+    expect(screen.getByText("OpenAI account")).toBeInTheDocument();
+    expect(screen.queryByRole("radio")).toBeNull();
     expect(screen.getAllByText("2026-02-03T04:05:06Z")[0]?.closest("p")).toHaveTextContent("Verified");
     expect(await screen.findByRole("heading", { name: "Tool servers (MCP)" })).toBeInTheDocument();
     expect(screen.getByTestId("cloud-assistant-apps-pointer")).toHaveTextContent("Looking for apps?");
+  });
+
+  it("renders the Models section above the connections with the workspace slug", async () => {
+    stubTransport((method, url) => {
+      if (method === "GET" && url.endsWith(SERVERS)) return { status: 200, body: [] };
+      if (method === "GET") return { status: 200, body: list() };
+      return undefined;
+    });
+    renderTab();
+    expect(await screen.findByTestId("assistant-models-section-stub")).toHaveTextContent("acme");
+    expect(screen.getByText("BYOK:openrouter.ai")).toBeInTheDocument();
   });
 
   it("explains an empty list and points at adding a connection", async () => {
@@ -159,7 +181,7 @@ describe("CloudAssistantTab", () => {
       return undefined;
     });
     renderTab();
-    await screen.findByRole("radio", { name: "BYOK:openrouter.ai" });
+    await screen.findByText("BYOK:openrouter.ai");
     await user.click(screen.getByRole("button", { name: "Add connection" }));
     expect(screen.queryByRole("heading", { name: "Tool servers (MCP)" })).toBeNull();
     expect(screen.queryByTestId("cloud-assistant-apps-pointer")).toBeNull();
@@ -167,106 +189,85 @@ describe("CloudAssistantTab", () => {
     expect(await screen.findByRole("heading", { name: "Tool servers (MCP)" })).toBeInTheDocument();
   });
 
-  it("switches the active row and confirms", async () => {
+  it("saves an added model ID with the longer list, and shows a refused write per ID", async () => {
     const user = userEvent.setup();
-    const calls = stubTransport((method, url) => {
-      if (method === "GET" && url.endsWith(SERVERS)) return { status: 200, body: [] };
-      if (method === "GET") return { status: 200, body: list({ connections: [BYOK, { ...CODEX, connected: true }] }) };
-      if (method === "POST" && url.includes("/select/")) return { status: 200, body: BYOK };
-      return undefined;
-    });
-    renderTab();
-    await user.click(await screen.findByRole("radio", { name: "OpenAI account" }));
-    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Switched"));
-    expect(calls.some((call) => call.url.includes(`/${CODEX.id}/select/`))).toBe(true);
-  });
-
-  it("reports a rejected switch with the server detail", async () => {
-    const user = userEvent.setup();
-    stubTransport((method, url) => {
-      if (method === "GET" && url.endsWith(SERVERS)) return { status: 200, body: [] };
-      if (method === "GET") return { status: 200, body: list({ connections: [BYOK, { ...CODEX, connected: true }] }) };
-      if (method === "POST" && url.includes("/select/")) return { status: 400, body: { detail: "Not connected" } };
-      return undefined;
-    });
-    renderTab();
-    await user.click(await screen.findByRole("radio", { name: "OpenAI account" }));
-    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Switch failed", "Not connected"));
-  });
-
-  it("saves a renamed self-supplied model silently and reports a refusal", async () => {
-    const user = userEvent.setup();
-    let fail = false;
+    let fail: "per-id" | "transport" | null = null;
     const calls = stubTransport((method, url) => {
       if (method === "GET" && url.endsWith(SERVERS)) return { status: 200, body: [] };
       if (method === "GET") return { status: 200, body: list() };
       if (method === "PATCH") {
-        return fail ? { status: 400, body: { detail: "Unknown model" } } : { status: 200, body: BYOK };
+        if (fail === "per-id") {
+          return {
+            status: 400,
+            body: {
+              error: "model_test_failed",
+              models: [{ model: "broken-model", status: "failed", detail: "No such model." }],
+            },
+          };
+        }
+        if (fail === "transport") return { status: 500, body: { detail: "Server error" } };
+        return { status: 200, body: BYOK };
       }
       return undefined;
     });
     renderTab();
-    const field = await screen.findByRole("combobox", { name: "Model for BYOK:openrouter.ai" });
-    await user.clear(field);
+    const field = await screen.findByLabelText("Add a model ID this key serves");
     await user.type(field, "other-model{Enter}");
     await waitFor(() => expect(calls.some((call) => call.method === "PATCH")).toBe(true));
-    expect(calls.find((call) => call.method === "PATCH")?.body).toEqual({ model_name: "other-model" });
+    expect(calls.find((call) => call.method === "PATCH")?.body).toEqual({
+      models: ["meta-llama/llama-3.3-70b-instruct", "other-model"],
+      save_unverified: false,
+    });
     expect(notifyError).not.toHaveBeenCalled();
-    fail = true;
-    await user.clear(field);
+    fail = "per-id";
+    await waitFor(() => expect(field).toBeEnabled());
     await user.type(field, "broken-model{Enter}");
-    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Model change failed", "Unknown model"));
+    await waitFor(() => expect(screen.getByTestId("byok-model-detail")).toHaveTextContent("No such model."));
+    expect(notifyError).not.toHaveBeenCalled();
+    fail = "transport";
+    await waitFor(() => expect(field).toBeEnabled());
+    await user.type(field, "down-model{Enter}");
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Model change failed", "Server error"));
   });
 
-  it("tests the active connection and reports both outcomes", async () => {
+  it("tests one stored model ID and reports its failure inline", async () => {
     const user = userEvent.setup();
-    let answer: Record<string, unknown> = { ok: true };
-    stubTransport((method, url) => {
+    let answer: Record<string, unknown> = { model: "meta-llama/llama-3.3-70b-instruct", status: "verified" };
+    const calls = stubTransport((method, url) => {
       if (method === "GET" && url.endsWith(SERVERS)) return { status: 200, body: [] };
       if (method === "GET") return { status: 200, body: list() };
-      if (method === "POST" && url.endsWith(CONFIG_TEST)) return { status: 200, body: answer };
+      if (method === "POST" && url.endsWith(`/connections/${BYOK.id}/test/`)) return { status: 200, body: answer };
       return undefined;
     });
     renderTab();
-    await user.click(await screen.findByRole("button", { name: "Test" }));
+    await user.click(await screen.findByRole("button", { name: "Test meta-llama/llama-3.3-70b-instruct" }));
     await waitFor(() =>
-      expect(notifySuccess).toHaveBeenCalledWith(
-        "Connection works",
-        "The provider accepted a request with this connection."
+      expect(calls.some((call) => call.method === "POST" && call.url.endsWith(`/connections/${BYOK.id}/test/`))).toBe(
+        true
       )
     );
-    answer = { ok: false, detail: "401 from provider" };
-    await user.click(screen.getByRole("button", { name: "Test" }));
-    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Connection failed", "401 from provider"));
+    expect(notifyError).not.toHaveBeenCalled();
+    answer = {
+      model: "meta-llama/llama-3.3-70b-instruct",
+      status: "failed",
+      code: "model_invalid",
+      detail: "No such model.",
+    };
+    await user.click(screen.getByRole("button", { name: "Test meta-llama/llama-3.3-70b-instruct" }));
+    await waitFor(() => expect(screen.getByTestId("byok-model-detail")).toHaveTextContent("No such model."));
   });
 
-  it("falls back to the error code, then the default, when a failed test has no detail", async () => {
-    const user = userEvent.setup();
-    let answer: Record<string, unknown> = { ok: false, error_code: "provider_unreachable" };
-    stubTransport((method, url) => {
-      if (method === "GET" && url.endsWith(SERVERS)) return { status: 200, body: [] };
-      if (method === "GET") return { status: 200, body: list() };
-      if (method === "POST" && url.endsWith(CONFIG_TEST)) return { status: 200, body: answer };
-      return undefined;
-    });
-    renderTab();
-    await user.click(await screen.findByRole("button", { name: "Test" }));
-    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Connection failed", "provider_unreachable"));
-    answer = { ok: false };
-    await user.click(screen.getByRole("button", { name: "Test" }));
-    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Connection failed", "Unexpected response"));
-  });
-
-  it("reports a test request that never reached the server", async () => {
+  it("reports a per-ID test request that never reached the server", async () => {
     const user = userEvent.setup();
     stubTransport((method, url) => {
       if (method === "GET" && url.endsWith(SERVERS)) return { status: 200, body: [] };
       if (method === "GET") return { status: 200, body: list() };
-      if (method === "POST" && url.endsWith(CONFIG_TEST)) return { status: 500, body: { detail: "Server error" } };
+      if (method === "POST" && url.endsWith(`/connections/${BYOK.id}/test/`))
+        return { status: 500, body: { detail: "Server error" } };
       return undefined;
     });
     renderTab();
-    await user.click(await screen.findByRole("button", { name: "Test" }));
+    await user.click(await screen.findByRole("button", { name: "Test meta-llama/llama-3.3-70b-instruct" }));
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Connection failed", "Server error"));
   });
 
@@ -283,12 +284,34 @@ describe("CloudAssistantTab", () => {
       return undefined;
     });
     renderTab();
-    await screen.findByRole("radio", { name: "BYOK:openrouter.ai" });
+    await screen.findByText("BYOK:openrouter.ai");
     await user.click(screen.getByRole("button", { name: "Remove" }));
     await user.click(screen.getByRole("button", { name: "Confirm remove" }));
     await waitFor(() => expect(notifyInfo).toHaveBeenCalledWith("Removed", "BYOK:openrouter.ai removed."));
     expect(calls.some((call) => call.method === "DELETE")).toBe(true);
-    await waitFor(() => expect(screen.queryByRole("radio", { name: "BYOK:openrouter.ai" })).toBeNull());
+    await waitFor(() => expect(screen.queryByText("BYOK:openrouter.ai")).toBeNull());
+  });
+
+  it("deletes the connection after confirming the last model ID's removal", async () => {
+    const user = userEvent.setup();
+    let connections = [BYOK, CODEX];
+    const calls = stubTransport((method, url) => {
+      if (method === "GET" && url.endsWith(SERVERS)) return { status: 200, body: [] };
+      if (method === "GET") return { status: 200, body: list({ connections }) };
+      if (method === "DELETE" && url.includes(BYOK.id)) {
+        connections = [CODEX];
+        return { status: 204 };
+      }
+      return undefined;
+    });
+    renderTab();
+    await user.click(await screen.findByRole("button", { name: "Remove meta-llama/llama-3.3-70b-instruct" }));
+    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
+    expect(screen.getByText("also removes this BYOK:openrouter.ai key", { exact: false })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Remove both" }));
+    await waitFor(() => expect(notifyInfo).toHaveBeenCalledWith("Removed", "BYOK:openrouter.ai removed."));
+    expect(calls.some((call) => call.method === "DELETE")).toBe(true);
+    await waitFor(() => expect(screen.queryByText("BYOK:openrouter.ai")).toBeNull());
   });
 
   it("reports a failed removal", async () => {
@@ -300,7 +323,7 @@ describe("CloudAssistantTab", () => {
       return undefined;
     });
     renderTab();
-    await screen.findByRole("radio", { name: "BYOK:openrouter.ai" });
+    await screen.findByText("BYOK:openrouter.ai");
     await user.click(screen.getByRole("button", { name: "Remove" }));
     await user.click(screen.getByRole("button", { name: "Confirm remove" }));
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Could not remove", "Server error"));
@@ -346,7 +369,10 @@ describe("CloudAssistantTab", () => {
     renderTab();
     await user.click(await screen.findByRole("button", { name: "Add connection" }));
     await user.type(screen.getByRole("textbox", { name: "Base URL" }), " https://openrouter.ai/api/v1 ");
-    await user.type(screen.getByRole("combobox", { name: "Model" }), " meta-llama/llama-3.3-70b-instruct ");
+    await user.type(
+      screen.getByLabelText("Add a model ID this key serves"),
+      "meta-llama/llama-3.3-70b-instruct{Enter}"
+    );
     await user.type(screen.getByLabelText("API key"), " secret ");
     await user.click(screen.getByRole("button", { name: "Add connection" }));
     await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Connection added"));
@@ -354,9 +380,10 @@ describe("CloudAssistantTab", () => {
       provider_kind: "openai_compatible",
       base_url: "https://openrouter.ai/api/v1",
       model_name: "meta-llama/llama-3.3-70b-instruct",
+      models: ["meta-llama/llama-3.3-70b-instruct"],
       api_key: "secret",
     });
-    expect(await screen.findByRole("radio", { name: "BYOK:openrouter.ai" })).toBeChecked();
+    expect(await screen.findByText("BYOK:openrouter.ai")).toBeInTheDocument();
     expect(screen.queryByRole("form", { name: "Add connection" })).toBeNull();
   });
 
@@ -373,7 +400,7 @@ describe("CloudAssistantTab", () => {
     await screen.findByText("No AI provider connected yet.");
     await user.click(screen.getAllByRole("button", { name: "Add connection" })[0]!);
     await user.type(screen.getByRole("textbox", { name: "Base URL" }), "https://bad.test");
-    await user.type(screen.getByRole("combobox", { name: "Model" }), "m");
+    await user.type(screen.getByLabelText("Add a model ID this key serves"), "m{Enter}");
     await user.type(screen.getByLabelText("API key"), "k");
     await user.click(screen.getByRole("button", { name: "Add connection" }));
     await waitFor(() =>
@@ -432,7 +459,7 @@ describe("CloudAssistantTab", () => {
     });
     renderTab();
     expect(await screen.findByText(/predates OpenHub access/)).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: "OpenHub" })).toBeDisabled();
+    expect(screen.getByText("OpenHub")).toBeInTheDocument();
     expect(screen.queryByRole("combobox", { name: "Model for OpenHub" })).toBeNull();
   });
 
@@ -453,7 +480,7 @@ describe("CloudAssistantTab", () => {
       return undefined;
     });
     renderTab();
-    expect(await screen.findByRole("radio", { name: "OpenHub" })).toBeInTheDocument();
+    expect(await screen.findByText("OpenHub")).toBeInTheDocument();
   });
 
   it("saves a single-vendor key without an address field", async () => {
@@ -468,13 +495,14 @@ describe("CloudAssistantTab", () => {
     await screen.findByText("No AI provider connected yet.");
     await user.click(screen.getAllByRole("button", { name: "Add connection" })[0]!);
     await user.selectOptions(screen.getByRole("combobox", { name: "Provider" }), "anthropic");
-    await user.type(screen.getByRole("combobox", { name: "Model" }), "claude");
+    await user.type(screen.getByLabelText("Add a model ID this key serves"), "claude{Enter}");
     await user.type(screen.getByLabelText("API key"), "k");
     await user.click(screen.getByRole("button", { name: "Add connection" }));
     await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Connection added"));
     expect(calls.find((call) => call.method === "POST" && call.url.endsWith(CONNECTIONS))?.body).toEqual({
       provider_kind: "anthropic",
       model_name: "claude",
+      models: ["claude"],
       api_key: "k",
     });
   });
@@ -656,11 +684,13 @@ describe("CloudAssistantTab", () => {
     renderTab();
     // The hosted picker's badge proves the quota answer landed.
     await screen.findByRole("option", { name: "Balanced hosted model (Needs credit)" });
-    const field = screen.getByLabelText("Model for BYOK:openrouter.ai");
-    await user.clear(field);
+    const field = screen.getByLabelText("Add a model ID this key serves");
     await user.type(field, "other/provider-model{Enter}");
     await waitFor(() => expect(calls.some((call) => call.method === "PATCH")).toBe(true));
-    expect(calls.find((call) => call.method === "PATCH")?.body).toEqual({ model_name: "other/provider-model" });
+    expect(calls.find((call) => call.method === "PATCH")?.body).toEqual({
+      models: ["meta-llama/llama-3.3-70b-instruct", "other/provider-model"],
+      save_unverified: false,
+    });
     expect(notifyError).not.toHaveBeenCalledWith("Model needs credit", expect.anything());
   });
 

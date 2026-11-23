@@ -4,9 +4,11 @@
 // See the LICENSE file for details.
 // Language-model form (parity/specs/profile.md §10, PROF-021): the provider
 // switch hides the endpoint for a named provider, every control is
-// labelled, a stored key only shows its placeholder, and save/test/remove
-// gate on what the server already holds plus what was typed.
-import { render, screen } from "@testing-library/react";
+// labelled, a stored key only shows its placeholder, and the model-ID
+// editor (NEWPIDASH-394) lists each ID with its status, tests one ID,
+// and confirms removing the last one. Save and remove gate on what the
+// server already holds plus what was typed.
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -16,7 +18,6 @@ import type { LlmConfig } from "@pidash/api-client";
 import {
   LLM_BASE_URL_PLACEHOLDER,
   LLM_KEY_PLACEHOLDER_EMPTY,
-  LLM_MODEL_PLACEHOLDER,
   LLM_SECTION_HEADING,
   SAVED_KEY_PLACEHOLDER,
 } from "../lib/copy.js";
@@ -37,12 +38,15 @@ function renderForm(values: ProviderFormValues, overrides: Partial<React.Compone
   const props: React.ComponentProps<typeof ProviderForm> = {
     config: config(),
     values,
+    failures: {},
+    pendingIds: [],
+    saveAnyway: false,
     onChange: vi.fn(),
     onSave: vi.fn(),
-    onTest: vi.fn(),
-    onRemove: vi.fn(),
+    onTestModel: vi.fn(),
+    onRemoveModel: vi.fn(),
+    onRemoveKey: vi.fn(),
     saving: false,
-    testing: false,
     removing: false,
     ...overrides,
   };
@@ -56,19 +60,20 @@ describe("ProviderForm", () => {
     expect(providerFormFrom(config({ provider_kind: "anthropic", base_url: "" }))).toEqual({
       provider: "anthropic",
       baseUrl: "",
-      model: "model-a",
+      models: ["model-a"],
       key: "",
     });
+    expect(providerFormFrom(config({ models: ["m-1", "m-2"] })).models).toEqual(["m-1", "m-2"]);
     const values = providerFormFrom(config());
     renderForm(values, { values });
     expect(screen.getByRole("heading", { name: LLM_SECTION_HEADING })).toBeInTheDocument();
     expect(screen.getByLabelText("Provider")).toHaveValue("openai_compatible");
     expect(screen.getByLabelText("Base URL")).toHaveValue("https://llm.test/v1");
-    expect(screen.getByLabelText("Model")).toHaveValue("model-a");
+    expect(screen.getByText("model-a")).toBeInTheDocument();
     expect(screen.getByLabelText("API key")).toHaveValue("");
     expect(screen.getByPlaceholderText(LLM_KEY_PLACEHOLDER_EMPTY)).toBeInTheDocument();
     expect(screen.getByPlaceholderText(LLM_BASE_URL_PLACEHOLDER)).toBeInTheDocument();
-    expect(screen.getByPlaceholderText(LLM_MODEL_PLACEHOLDER)).toBeInTheDocument();
+    expect(screen.queryByLabelText("Model")).toBeNull();
   });
 
   it("hides the endpoint for the named provider and reports the switch", async () => {
@@ -77,19 +82,22 @@ describe("ProviderForm", () => {
       const [values, setValues] = React.useState<ProviderFormValues>({
         provider: "openai_compatible",
         baseUrl: "https://x.test",
-        model: "m",
+        models: ["m"],
         key: "",
       });
       return (
         <ProviderForm
           config={config()}
           values={values}
+          failures={{}}
+          pendingIds={[]}
+          saveAnyway={false}
           onChange={setValues}
           onSave={vi.fn()}
-          onTest={vi.fn()}
-          onRemove={vi.fn()}
+          onTestModel={vi.fn()}
+          onRemoveModel={vi.fn()}
+          onRemoveKey={vi.fn()}
           saving={false}
-          testing={false}
           removing={false}
         />
       );
@@ -102,66 +110,113 @@ describe("ProviderForm", () => {
     expect(screen.getByLabelText("Base URL")).toHaveValue("https://x.test");
   });
 
-  it("reports each typed field", async () => {
+  it("reports each typed field and grows the model-ID list", async () => {
     const user = userEvent.setup();
     const props = renderForm(emptyProviderForm());
     await user.type(screen.getByLabelText("Base URL"), "u");
     expect(props.onChange).toHaveBeenLastCalledWith(expect.objectContaining({ baseUrl: "u" }));
-    await user.type(screen.getByLabelText("Model"), "g");
-    expect(props.onChange).toHaveBeenLastCalledWith(expect.objectContaining({ model: "g" }));
+    await user.type(screen.getByLabelText("Add a model ID this key serves"), "g{Enter}");
+    expect(props.onChange).toHaveBeenLastCalledWith(expect.objectContaining({ models: ["g"] }));
     await user.type(screen.getByLabelText("API key"), "k");
     expect(props.onChange).toHaveBeenLastCalledWith(expect.objectContaining({ key: "k" }));
   });
 
+  it("marks each stored ID by its verification stamp", () => {
+    const stored = config({ models: ["model-a", "model-b"], model_verified_at: { "model-a": "2026-10-19T12:00:00Z" } });
+    renderForm(providerFormFrom(stored), { config: stored });
+    const rows = screen.getAllByTestId("byok-model-row");
+    expect(rows).toHaveLength(2);
+    expect(within(rows[0]!).getByTestId("byok-model-status")).toHaveTextContent("Verified");
+    expect(within(rows[1]!).getByTestId("byok-model-status")).toHaveTextContent("Not verified");
+  });
+
+  it("shows a refused save's message beside its ID and offers Save anyway", () => {
+    renderForm(
+      { provider: "openai_compatible", baseUrl: "", models: ["model-a", "model-b"], key: "" },
+      {
+        failures: { "model-b": "Model not accepted by the provider." },
+        failedIds: ["model-b"],
+        saveAnyway: true,
+      }
+    );
+    expect(screen.getByTestId("byok-model-detail")).toHaveTextContent("Model not accepted by the provider.");
+    const rows = screen.getAllByTestId("byok-model-row");
+    expect(within(rows[1]!).getByTestId("byok-model-status")).toHaveTextContent("Failed");
+    expect(screen.getByRole("button", { name: "Save anyway" })).toBeInTheDocument();
+  });
+
+  it("marks a refused-but-unverified ID as not verified", () => {
+    renderForm(
+      { provider: "openai_compatible", baseUrl: "", models: ["model-a"], key: "" },
+      {
+        failures: { "model-a": "Timed out." },
+        failedIds: [],
+        saveAnyway: true,
+      }
+    );
+    expect(screen.getByTestId("byok-model-status")).toHaveTextContent("Not verified");
+  });
+
   it("keeps save live over a stored key and offers remove only for one", () => {
     renderForm(
-      { provider: "openai_compatible", baseUrl: "", model: "m", key: "" },
+      { provider: "openai_compatible", baseUrl: "", models: ["m"], key: "" },
       { config: config({ has_api_key: true }) }
     );
     expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Test connection" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Test m" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Remove" })).toBeInTheDocument();
     expect(screen.getByLabelText("API key")).toHaveAttribute("placeholder", SAVED_KEY_PLACEHOLDER);
   });
 
-  it("refuses a first save without a typed key", () => {
-    renderForm({ provider: "openai_compatible", baseUrl: "u", model: "m", key: "  " });
+  it("refuses a first save without a model ID or a typed key", () => {
+    renderForm({ provider: "openai_compatible", baseUrl: "u", models: [], key: "k" });
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    renderForm({ provider: "openai_compatible", baseUrl: "u", models: ["m"], key: "  " });
+    expect(screen.getAllByRole("button", { name: "Save" })[1]).toBeDisabled();
   });
 
-  it("hides remove and disables test while nothing is stored", () => {
-    renderForm({ provider: "openai_compatible", baseUrl: "u", model: "m", key: "k" });
+  it("hides remove and the Test buttons while nothing is stored", () => {
+    renderForm({ provider: "openai_compatible", baseUrl: "u", models: ["m"], key: "k" });
     expect(screen.queryByRole("button", { name: "Remove" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Test connection" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Test m" })).toBeNull();
     expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
   });
 
-  it("fires save, test and remove", async () => {
+  it("fires save, per-ID test, model remove and key remove", async () => {
     const user = userEvent.setup();
     const props = renderForm(
-      { provider: "openai_compatible", baseUrl: "u", model: "m", key: "k" },
+      { provider: "openai_compatible", baseUrl: "u", models: ["m", "n"], key: "k" },
       { config: config({ has_api_key: true }) }
     );
     await user.click(screen.getByRole("button", { name: "Save" }));
-    await user.click(screen.getByRole("button", { name: "Test connection" }));
+    await user.click(screen.getByRole("button", { name: "Test m" }));
+    await user.click(screen.getByRole("button", { name: "Remove n" }));
     await user.click(screen.getByRole("button", { name: "Remove" }));
     expect(props.onSave).toHaveBeenCalledTimes(1);
-    expect(props.onTest).toHaveBeenCalledTimes(1);
-    expect(props.onRemove).toHaveBeenCalledTimes(1);
+    expect(props.onSave).toHaveBeenCalledWith(false);
+    expect(props.onTestModel).toHaveBeenCalledWith("m");
+    expect(props.onRemoveModel).toHaveBeenCalledWith("n");
+    expect(props.onRemoveKey).toHaveBeenCalledTimes(1);
   });
 
-  it("shows the verification stamp once verified", () => {
-    renderForm(emptyProviderForm(), { config: config({ last_verified_at: "2026-10-19T12:00:00Z" }) });
-    expect(screen.getByText(/Last verified:/)).toBeInTheDocument();
+  it("confirms removing the last model ID before the caller deletes the key", async () => {
+    const user = userEvent.setup();
+    const props = renderForm(
+      { provider: "openai_compatible", baseUrl: "u", models: ["m"], key: "" },
+      { config: config({ has_api_key: true }) }
+    );
+    await user.click(screen.getByRole("button", { name: "Remove m" }));
+    expect(props.onRemoveModel).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Remove both" }));
+    expect(props.onRemoveModel).toHaveBeenCalledWith("m");
   });
 
   it("marks in-flight controls busy", () => {
     renderForm(
-      { provider: "openai_compatible", baseUrl: "u", model: "m", key: "k" },
-      { config: config({ has_api_key: true }), saving: true, testing: true, removing: true }
+      { provider: "openai_compatible", baseUrl: "u", models: ["m"], key: "k" },
+      { config: config({ has_api_key: true }), saving: true, removing: true }
     );
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Test connection" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Remove" })).toBeDisabled();
   });
 });

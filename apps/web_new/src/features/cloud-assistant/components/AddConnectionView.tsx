@@ -2,15 +2,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Add a connection (parity/specs/cloud.md §7, CLOUD-033). The key form asks
-// for a provider, a base address for the compatible kind, a model and a
-// secret; save stays disabled until all four exist. The server is the
-// authority on reachability, so its refusal stays in the form under the
-// fields instead of clearing them. Provider sign-in lives on the row that
-// needs it, not here.
-
-import { Button, FieldScaffold, Input } from "@pidash/kit";
+// for a provider, a base address for the compatible kind, and a secret; a
+// new key needs at least one typed model ID (NEWPIDASH-394, design section
+// 7.2), listed with add and remove. The server is the authority on
+// reachability, so a refused save stays in the form under the fields: the
+// provider's message lands beside each ID, and unverified-only results
+// offer "Save anyway" instead of clearing them. Provider sign-in lives on
+// the row that needs it, not here.
+import type { ModelTestResults } from "@pidash/api-client";
+import { Button, Input } from "@pidash/kit";
 import * as React from "react";
 
+import { ModelIdEditor, modelFailedIds, modelFailureDetails, saveAnywayModels } from "../../assistant/index.js";
 import {
   ADD_ACTION,
   ADD_FAILED_FALLBACK,
@@ -22,31 +25,31 @@ import {
   BASE_URL_LABEL,
   BASE_URL_PLACEHOLDER,
   COMPATIBLE_PROVIDER_LABEL,
-  MODEL_LABEL,
-  MODEL_PLACEHOLDER,
   PROVIDER_LABEL,
 } from "../lib/copy.js";
 import {
   BYOK_PROVIDERS,
   EMPTY_BYOK_DRAFT,
+  byokDraftValid,
   needsBaseUrl,
-  validateByokDraft,
   type ByokDraft,
   type ByokProvider,
 } from "../lib/byok.js";
-import { BYOK_MODEL_SUGGESTIONS } from "../lib/rows.js";
 
 export interface AddConnectionViewProps {
   saving: boolean;
   error: string | null;
-  onSave(draft: ByokDraft): void;
+  /** Per-ID results of the last refused save; null while the last save passed. */
+  results: ModelTestResults | null;
+  onSave(draft: ByokDraft, saveUnverified: boolean): void;
 }
 
-export function AddConnectionView({ saving, error, onSave }: AddConnectionViewProps): React.ReactElement {
+export function AddConnectionView({ saving, error, results, onSave }: AddConnectionViewProps): React.ReactElement {
   const [draft, setDraft] = React.useState<ByokDraft>(EMPTY_BYOK_DRAFT);
-  const problems = validateByokDraft(draft);
   const baseVisible = needsBaseUrl(draft.provider);
-  const enabled = !saving && Object.values(problems).every((problem) => problem === null);
+  const enabled = !saving && byokDraftValid(draft);
+  const failures = React.useMemo(() => (results === null ? {} : modelFailureDetails(results)), [results]);
+  const failedIds = React.useMemo(() => (results === null ? [] : modelFailedIds(results)), [results]);
 
   const update = (patch: Partial<ByokDraft>): void => {
     setDraft((current) => ({ ...current, ...patch }));
@@ -60,7 +63,7 @@ export function AddConnectionView({ saving, error, onSave }: AddConnectionViewPr
       onSubmit={(event) => {
         event.preventDefault();
         if (!enabled) return;
-        onSave(draft);
+        onSave(draft, false);
       }}
     >
       <label className="text-body flex flex-col gap-(--space-1)">
@@ -88,26 +91,21 @@ export function AddConnectionView({ saving, error, onSave }: AddConnectionViewPr
         />
       ) : null}
 
-      <FieldScaffold label={MODEL_LABEL} fieldId="cloud-assistant-model">
-        {(describedBy) => (
-          <>
-            <input
-              id="cloud-assistant-model"
-              aria-describedby={describedBy}
-              list="assistant-known-byok-models"
-              placeholder={MODEL_PLACEHOLDER}
-              value={draft.modelName}
-              onChange={(event) => update({ modelName: event.target.value })}
-              className="text-body h-(--control-height) w-full rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-4) text-(--text) placeholder:text-(--text-muted) focus:border-(--accent) focus:outline-none"
-            />
-            <datalist id="assistant-known-byok-models">
-              {BYOK_MODEL_SUGGESTIONS.map((model) => (
-                <option key={model} value={model} />
-              ))}
-            </datalist>
-          </>
-        )}
-      </FieldScaffold>
+      <ModelIdEditor
+        ids={draft.models}
+        verifiedAt={{}}
+        failures={failures}
+        failedIds={failedIds}
+        pendingIds={[]}
+        disabled={saving}
+        testable={false}
+        confirmLastRemove={false}
+        keyLabel={draft.provider === "anthropic" ? ANTHROPIC_PROVIDER_LABEL : COMPATIBLE_PROVIDER_LABEL}
+        onAdd={(model) => update({ models: [...draft.models, model] })}
+        onRemove={(model) => update({ models: draft.models.filter((kept) => kept !== model) })}
+        onTest={() => undefined}
+        onSaveAnyway={results !== null && saveAnywayModels(results) !== null ? () => onSave(draft, true) : null}
+      />
 
       <Input
         label={API_KEY_LABEL}

@@ -1,22 +1,29 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Saved connections (parity/specs/cloud.md §7, CLOUD-032–034). One card per
-// connection: a radio chooses the active row, a kind-appropriate model
-// control edits it, and the row's actions test, remove (self-supplied) or
-// disconnect (provider account). Removing asks inline first; the managed
-// rows are permanent. A hosted row a stale session cannot reach keeps its
-// place but says how to fix the session (CLOUD-034).
+// Saved connections (parity/specs/cloud.md §7, CLOUD-032–034, NEWPIDASH-394).
+// One card per connection: its title and markers, a kind-appropriate model
+// control, and the row's actions test, remove (self-supplied) or disconnect
+// (provider account). Which model answers is chosen per surface in the
+// Models section above, never per row. Removing asks inline first; the
+// managed rows are permanent. A hosted row a stale session cannot reach
+// keeps its place but says how to fix the session (CLOUD-034).
 
+import type { ModelTestResult } from "@pidash/api-client";
+import { modelTestResultsFrom } from "@pidash/api-client";
 import { Button, Spinner } from "@pidash/kit";
 import * as React from "react";
 
+import { ModelIdEditor, modelFailedIds, modelFailureDetails, saveAnywayModels } from "../../assistant/index.js";
+import { notifyError } from "../../../shared/shell/index.js";
+import { actionFailureDetail } from "../api/mutations.js";
 import {
   CANCEL_ACTION,
   CONFIRM_REMOVE_ACTION,
   DISCONNECT_ACTION,
   MANAGE_USAGE_HREF,
   MANAGE_USAGE_LABEL,
+  MODEL_FAILED_TITLE,
   NEEDS_CREDIT_NOTICE,
   REMOVE_ACTION,
   REMOVE_CONFIRM_BODY,
@@ -27,11 +34,11 @@ import {
   SIGN_IN_BODY,
   STALE_NOTICE,
   TEST_ACTION,
+  TEST_FAILED_FALLBACK,
+  TEST_FAILED_TITLE,
   TOP_UP_LABEL,
 } from "../lib/copy.js";
 import type { ConnectionRow } from "../lib/rows.js";
-
-export const CONNECTION_RADIO_NAME = "assistant-active-connection";
 
 export interface ConnectionsListProps {
   rows: readonly ConnectionRow[];
@@ -42,8 +49,15 @@ export interface ConnectionsListProps {
   busyId: string | null;
   /** Wallet address for the "Needs credit" top-up link; null hides it. */
   topUpHref: string | null;
-  onSelect(row: ConnectionRow): void;
   onCommitModel(row: ConnectionRow, model: string): void;
+  /**
+   * Replace a key's model-ID list (NEWPIDASH-394, design section 6.3).
+   * Rejects on a refused write; the card reads the per-ID results off
+   * the error and shows them inline.
+   */
+  onSaveModels(row: ConnectionRow, models: string[], saveUnverified: boolean): Promise<void>;
+  /** Smoke-test one stored model ID (design section 6.4). */
+  onTestModel(row: ConnectionRow, model: string): Promise<ModelTestResult>;
   onTest(): void;
   onRemove(row: ConnectionRow): void;
   onDisconnect(row: ConnectionRow): void;
@@ -68,21 +82,90 @@ function ConnectionCard(props: ConnectionsListProps & { row: ConnectionRow }): R
   const { row, busyId, testing, signInAvailable, signInPending } = props;
   const [confirming, setConfirming] = React.useState(false);
   const busy = busyId === row.id;
+  // Per-ID write/test state for the key's model editor (NEWPIDASH-394,
+  // design sections 7.2 and 7.3): the provider message by model from
+  // the last refused write or test, the IDs with a probe in flight,
+  // and whether a "Save anyway" retry is on offer. `attempted` is the
+  // last list a write tried: a refused write saves nothing, so the
+  // editor renders the attempted IDs too, giving each failure a row.
+  const [failures, setFailures] = React.useState<Record<string, string>>({});
+  /** Refused/tested IDs the provider rejected (`status: "failed"`); the rest of `failures` is unverified. */
+  const [failedIds, setFailedIds] = React.useState<readonly string[]>([]);
+  const [pendingIds, setPendingIds] = React.useState<readonly string[]>([]);
+  const [saveAnyway, setSaveAnyway] = React.useState(false);
+  const [attempted, setAttempted] = React.useState<readonly string[] | null>(null);
+
+  // Persist a new model-ID list for the key. A refused write (`400
+  // model_test_failed`, nothing saved) lands inline per ID; any other
+  // failure notifies. A confirmed last-ID removal deletes the key, so
+  // it never reaches this write.
+  const persist = async (models: string[], saveUnverified: boolean): Promise<void> => {
+    const fresh = models.filter((model) => !row.models.includes(model));
+    setAttempted(models);
+    setPendingIds(fresh);
+    try {
+      await props.onSaveModels(row, models, saveUnverified);
+      setAttempted(null);
+      setFailures({});
+      setFailedIds([]);
+      setSaveAnyway(false);
+    } catch (error) {
+      const results = modelTestResultsFrom(error);
+      if (results === null) {
+        setAttempted(null);
+        notifyError(MODEL_FAILED_TITLE, actionFailureDetail(error, MODEL_FAILED_TITLE));
+      } else {
+        setFailures(modelFailureDetails(results));
+        setFailedIds(modelFailedIds(results));
+        setSaveAnyway(saveAnywayModels(results) !== null);
+      }
+    } finally {
+      setPendingIds([]);
+    }
+  };
+
+  // The editor's list: the stored IDs plus any attempted-but-unsaved
+  // extras, so a refused write's failures each keep their row.
+  const displayed = React.useMemo(() => {
+    if (attempted === null) return row.models;
+    const extra = attempted.filter((model) => !row.models.includes(model));
+    return [...row.models, ...extra];
+  }, [row.models, attempted]);
+
+  const testOne = async (model: string): Promise<void> => {
+    setPendingIds([model]);
+    try {
+      const result = await props.onTestModel(row, model);
+      if (result.status === "verified") {
+        setFailures((current) => {
+          if (current[model] === undefined) return current;
+          const next = { ...current };
+          delete next[model];
+          return next;
+        });
+        setFailedIds((current) => current.filter((kept) => kept !== model));
+      } else if (result.status === "failed") {
+        setFailures((current) => ({ ...current, [model]: result.detail ?? result.code ?? "" }));
+        setFailedIds((current) => (current.includes(model) ? current : [...current, model]));
+      } else {
+        setFailures((current) => ({ ...current, [model]: result.detail ?? result.code ?? "" }));
+        setFailedIds((current) => current.filter((kept) => kept !== model));
+      }
+    } catch (error) {
+      notifyError(TEST_FAILED_TITLE, actionFailureDetail(error, TEST_FAILED_FALLBACK));
+    } finally {
+      setPendingIds([]);
+    }
+  };
 
   return (
     <li>
       <div data-testid={`assistant-connection-${row.id}`} className={CARD}>
         <div className="flex flex-wrap items-center justify-between gap-(--space-3)">
-          <label className="flex cursor-pointer flex-wrap items-center gap-(--space-2)">
-            <input
-              type="radio"
-              name={CONNECTION_RADIO_NAME}
-              checked={row.selected}
-              disabled={!row.selectable || busy}
-              aria-label={row.title}
-              onChange={() => props.onSelect(row)}
-            />
-            <span className="text-body font-medium text-(--text)">{row.title}</span>
+          <div className="flex flex-wrap items-center gap-(--space-2)">
+            <span data-testid="assistant-connection-title" className="text-body font-medium text-(--text)">
+              {row.title}
+            </span>
             {row.markers.map((marker) => (
               <span
                 key={marker}
@@ -91,7 +174,7 @@ function ConnectionCard(props: ConnectionsListProps & { row: ConnectionRow }): R
                 {marker}
               </span>
             ))}
-          </label>
+          </div>
           <div className="flex flex-wrap items-center gap-(--space-2)">
             {row.usesChatgptPlan ? (
               <a
@@ -103,7 +186,7 @@ function ConnectionCard(props: ConnectionsListProps & { row: ConnectionRow }): R
                 {MANAGE_USAGE_LABEL}
               </a>
             ) : null}
-            {row.selected && row.modelControl !== "hidden" ? (
+            {row.selected && row.modelControl === "select" ? (
               <Button size="small" variant="secondary" loading={testing} onClick={props.onTest}>
                 {TEST_ACTION}
               </Button>
@@ -140,7 +223,28 @@ function ConnectionCard(props: ConnectionsListProps & { row: ConnectionRow }): R
           <ModelPicker row={row} disabled={busy} onCommit={props.onCommitModel} />
         ) : null}
         {row.modelControl === "input" ? (
-          <FreeModelField row={row} disabled={busy} onCommit={props.onCommitModel} />
+          <ModelIdEditor
+            ids={displayed}
+            verifiedAt={row.modelVerifiedAt}
+            failures={failures}
+            failedIds={failedIds}
+            pendingIds={pendingIds}
+            disabled={busy}
+            testable
+            confirmLastRemove
+            keyLabel={row.title}
+            onAdd={(model) => void persist([...displayed, model], false)}
+            onRemove={(model) => {
+              const next = displayed.filter((kept) => kept !== model);
+              if (next.length === 0) {
+                props.onRemove(row);
+              } else {
+                void persist(next, false);
+              }
+            }}
+            onTest={(model) => void testOne(model)}
+            onSaveAnyway={saveAnyway ? () => void persist(displayed, true) : null}
+          />
         ) : null}
 
         {row.modelCredit === "blocked" ? (
@@ -214,44 +318,6 @@ function ModelPicker(props: {
           </option>
         ))}
       </select>
-    </label>
-  );
-}
-
-function FreeModelField(props: {
-  row: ConnectionRow;
-  disabled: boolean;
-  onCommit(row: ConnectionRow, model: string): void;
-}): React.ReactElement {
-  const { row } = props;
-  const [value, setValue] = React.useState(row.modelName);
-  const listId = "assistant-known-byok-models";
-  return (
-    <label className="text-body flex flex-wrap items-center gap-(--space-2) text-(--text-muted)">
-      Model
-      <input
-        aria-label={`Model for ${row.title}`}
-        value={value}
-        list={listId}
-        disabled={props.disabled}
-        onChange={(event) => setValue(event.target.value)}
-        onBlur={() => {
-          const next = value.trim();
-          if (next !== "" && next !== row.modelName) props.onCommit(row, next);
-        }}
-        onKeyDown={(event) => {
-          if (event.key !== "Enter") return;
-          event.preventDefault();
-          const next = value.trim();
-          if (next !== "" && next !== row.modelName) props.onCommit(row, next);
-        }}
-        className="text-body h-(--control-height) min-w-0 flex-1 rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-2) text-(--text)"
-      />
-      <datalist id={listId}>
-        {row.modelSuggestions.map((model) => (
-          <option key={model} value={model} />
-        ))}
-      </datalist>
     </label>
   );
 }

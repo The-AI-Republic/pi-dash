@@ -3,45 +3,48 @@
 // See the LICENSE file for details.
 // The language-model form (parity/specs/profile.md §10, PROF-021). The
 // provider selector switches between a URL-kind endpoint and a named
-// provider that carries its own host, the model accepts any name, and the
-// key field never shows a stored secret — only a placeholder that says a
-// key exists. Save waits for a model plus a credential: a typed key, or a
-// stored one where a blank field simply keeps it, so a save can never
-// create a config without a secret.
+// provider that carries its own host. The key holds a list of typed model
+// IDs (NEWPIDASH-394, design section 7.2) with add and remove, a per-ID
+// status, a per-ID Test button, and the provider's message on failure;
+// "Save anyway" persists IDs the smoke test could not verify. Removing
+// the last ID asks for confirmation, then deletes the key (design
+// section 7.3). The key field never shows a stored secret — only a
+// placeholder that says a key exists. Save waits for a model plus a
+// credential: a typed key, or a stored one where a blank field simply
+// keeps it, so a save can never create a config without a secret.
 
 import type { LlmConfig } from "@pidash/api-client";
 import { Button } from "@pidash/kit";
 import * as React from "react";
 
+import { ModelIdEditor } from "../../assistant/index.js";
 import {
   API_KEY_LABEL,
   BASE_URL_LABEL,
   DEFAULT_PROVIDER_KIND,
   LLM_BASE_URL_PLACEHOLDER,
   LLM_KEY_PLACEHOLDER_EMPTY,
-  LLM_MODEL_PLACEHOLDER,
   LLM_SECTION_DESCRIPTION,
   LLM_SECTION_HEADING,
-  MODEL_LABEL,
   PROVIDER_CHOICES,
   PROVIDER_LABEL,
   REMOVE_LABEL,
   SAVE_LABEL,
-  TEST_LABEL,
 } from "../lib/copy.js";
-import { canTest, endpointVisible, keyPlaceholder, lastVerifiedLine, llmCanSave, providerOf } from "../lib/rules.js";
+import { endpointVisible, keyPlaceholder, llmCanSave, providerOf } from "../lib/rules.js";
 import { ActionRow, SectionFrame } from "./AssistantSections.js";
 import { ASSISTANT_FIELD_CLASSES, TextField } from "./TextField.js";
 
 export interface ProviderFormValues {
   provider: string;
   baseUrl: string;
-  model: string;
+  /** The key's typed model IDs (NEWPIDASH-394, design section 7.2); a key needs at least one. */
+  models: string[];
   key: string;
 }
 
 export function emptyProviderForm(): ProviderFormValues {
-  return { provider: DEFAULT_PROVIDER_KIND, baseUrl: "", model: "", key: "" };
+  return { provider: DEFAULT_PROVIDER_KIND, baseUrl: "", models: [], key: "" };
 }
 
 /** Seed the form from a stored config; the key always starts blank. */
@@ -50,7 +53,7 @@ export function providerFormFrom(config: LlmConfig | undefined): ProviderFormVal
   return {
     provider: providerOf(config),
     baseUrl: config.base_url,
-    model: config.model_name,
+    models: config.models ?? (config.model_name === "" ? [] : [config.model_name]),
     key: "",
   };
 }
@@ -58,32 +61,45 @@ export function providerFormFrom(config: LlmConfig | undefined): ProviderFormVal
 export interface ProviderFormProps {
   config: LlmConfig | undefined;
   values: ProviderFormValues;
+  /** The provider message by model ID from the last refused save or test. */
+  failures: Record<string, string>;
+  /** Refused/tested IDs the provider rejected (`status: "failed"`); the rest of `failures` is unverified. */
+  failedIds?: readonly string[] | undefined;
+  /** IDs with a probe in flight; their rows show progress. */
+  pendingIds: readonly string[];
+  /** Offered while the last refused save left only unverified IDs. */
+  saveAnyway: boolean;
   onChange: (values: ProviderFormValues) => void;
-  onSave: () => void;
-  onTest: () => void;
-  onRemove: () => void;
+  onSave: (saveUnverified: boolean) => void;
+  onTestModel: (model: string) => void;
+  onRemoveModel: (model: string) => void;
+  onRemoveKey: () => void;
   saving: boolean;
-  testing: boolean;
   removing: boolean;
 }
 
 export function ProviderForm({
   config,
   values,
+  failures,
+  failedIds,
+  pendingIds,
+  saveAnyway,
   onChange,
   onSave,
-  onTest,
-  onRemove,
+  onTestModel,
+  onRemoveModel,
+  onRemoveKey,
   saving,
-  testing,
   removing,
 }: ProviderFormProps): React.ReactElement {
   const idPrefix = "assistant-llm";
-  const verified = lastVerifiedLine(config?.last_verified_at);
   const showEndpoint = endpointVisible(values.provider);
   const hasKey = config?.has_api_key === true;
 
   const edit = (patch: Partial<ProviderFormValues>): void => onChange({ ...values, ...patch });
+
+  const providerLabel = PROVIDER_CHOICES.find((choice) => choice.value === values.provider)?.label ?? values.provider;
 
   return (
     <SectionFrame heading={LLM_SECTION_HEADING} description={LLM_SECTION_DESCRIPTION} testId="assistant-llm">
@@ -116,12 +132,20 @@ export function ProviderForm({
           />
         ) : null}
 
-        <TextField
-          id={`${idPrefix}-model`}
-          label={MODEL_LABEL}
-          value={values.model}
-          placeholder={LLM_MODEL_PLACEHOLDER}
-          onChange={(model) => edit({ model })}
+        <ModelIdEditor
+          ids={values.models}
+          verifiedAt={config?.model_verified_at ?? {}}
+          failures={failures}
+          failedIds={failedIds}
+          pendingIds={pendingIds}
+          disabled={saving}
+          testable={hasKey}
+          confirmLastRemove
+          keyLabel={providerLabel}
+          onAdd={(model) => edit({ models: [...values.models, model] })}
+          onRemove={onRemoveModel}
+          onTest={onTestModel}
+          onSaveAnyway={saveAnyway ? () => onSave(true) : null}
         />
 
         <TextField
@@ -138,22 +162,17 @@ export function ProviderForm({
           <Button
             variant="primary"
             loading={saving}
-            disabled={saving || !llmCanSave({ ...values, hasKey })}
-            onClick={onSave}
+            disabled={saving || !llmCanSave({ models: values.models, key: values.key, hasKey })}
+            onClick={() => onSave(false)}
           >
             {SAVE_LABEL}
           </Button>
-          <Button loading={testing} disabled={testing || !canTest(config)} onClick={onTest}>
-            {TEST_LABEL}
-          </Button>
           {hasKey ? (
-            <Button variant="danger" loading={removing} onClick={onRemove}>
+            <Button variant="danger" loading={removing} onClick={onRemoveKey}>
               {REMOVE_LABEL}
             </Button>
           ) : null}
         </ActionRow>
-
-        {verified === null ? null : <p className="text-meta text-(--text-muted)">{verified}</p>}
       </div>
     </SectionFrame>
   );

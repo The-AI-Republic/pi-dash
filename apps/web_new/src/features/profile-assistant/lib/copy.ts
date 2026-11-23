@@ -12,8 +12,12 @@ export const ASSISTANT_TAB_INTRO =
 
 /** Section headings; the parity driver locates sections by these exact lines. */
 export const LLM_SECTION_HEADING = "Language model";
+export const MODELS_SECTION_HEADING = "Models";
 export const VOICE_SECTION_HEADING = "Voice dictation";
 export const TOOLS_SECTION_HEADING = "Tool servers (MCP)";
+/** Lead of the per-surface Models section (NEWPIDASH-394, design section 7.4). */
+export const MODELS_SECTION_INTRO =
+  "Choose which model the web assistant and the desktop assistant answer with. A choice that stops working falls back to the default, and the notice says so.";
 /** Deep-link anchor on the voice section; the assistant mic links here (AGT-051). */
 export const VOICE_SECTION_ANCHOR = "voice-dictation";
 

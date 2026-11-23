@@ -47,7 +47,7 @@ export function RunnersProjectShell({
     projectId,
   });
   const { pathname } = useLocation();
-  const localContacts = usePidashAgentContact();
+  const localContacts = usePidashAgentContact(workspaceSlug);
   const rail = useRunnersRail(workspaceSlug, workspaceId, projectId, access === "allowed");
   const crumbHref = `${runnersBase({ workspaceSlug, projectId })}/`;
   // The project name is chrome, not a gate input: it renders when known and

@@ -10,6 +10,11 @@ export const TAB_HEADING = "AI Assistant";
 export const TAB_INTRO =
   "One credential answers at a time. A managed lane draws on your account; a key you supply points the assistant at a provider you run.";
 
+/** Heading and lead of the per-surface Models section (NEWPIDASH-394, design section 7.4). */
+export const MODELS_SECTION_HEADING = "Models";
+export const MODELS_SECTION_INTRO =
+  "Choose which model each surface answers with. A choice that stops working falls back to the default, and the notice says so.";
+
 export const ADD_ACTION = "Add connection";
 export const BACK_ACTION = "Back to connections";
 

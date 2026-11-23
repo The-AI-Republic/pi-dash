@@ -738,8 +738,28 @@ export {
   assistantEventsUrl,
   parseAssistantEventFrames,
 } from "./contracts/assistant-events.js";
-export { deleteLlmConfig, putLlmConfig } from "./contracts/assistant-config.js";
+export { deleteLlmConfig, putLlmConfig, testLlmModel } from "./contracts/assistant-config.js";
 export type { LlmConfigInput } from "./contracts/assistant-config.js";
+export {
+  ASSISTANT_SURFACES,
+  MODEL_TEST_STATUSES,
+  ModelSelection,
+  ModelSelectionChoice,
+  ModelSelectionSurfaceState,
+  ModelTestResult,
+  ModelTestResults,
+  deleteModelSelection,
+  getModelSelection,
+  modelTestResultsFrom,
+  putModelSelection,
+} from "./contracts/assistant-model-selection.js";
+export type {
+  AssistantSurface,
+  ModelSelectionPutInput,
+  ModelTestStatus,
+} from "./contracts/assistant-model-selection.js";
+export { testAssistantConnectionModel, updateConnectionModels } from "./contracts/assistant.js";
+export type { AssistantConnectionModelsInput } from "./contracts/assistant.js";
 export {
   DictationDisabledPayload,
   SttConfig,

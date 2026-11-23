@@ -1,16 +1,27 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// OpenHub composer picker state (NEWPIDASH-303). Pure on purpose — the
-// visibility gate and the option labels are unit-testable without a DOM
-// or a server. The component reads the connections list (god-mode order
-// via openhub_model_options, NEWPIDASH-302) and the LLM config
-// (credential lane), so an admin-added model appears after reload with
-// no deploy.
+// OpenHub composer picker state (NEWPIDASH-303, rewritten NEWPIDASH-394).
+// Pure on purpose — the merged list and the option labels are
+// unit-testable without a DOM or a server. The component reads the
+// connections list (god-mode order via openhub_model_options,
+// NEWPIDASH-302) and the per-surface selection, so an admin-added model
+// appears after reload with no deploy.
+//
+// Merged picker (NEWPIDASH-394, design section 7.1): catalog models
+// first, then BYOK models grouped by key. The agent surface takes
+// catalog models only. Quota badges ride on top later (annotateChoices
+// in cloud-assistant); this builder stays quota-free.
 
-import { resolveCredentialLane, type AssistantConnectionList, type LlmConfig } from "@pidash/api-client";
+import type { AssistantConnectionList, ModelSelectionSurfaceState } from "@pidash/api-client";
 
-import type { ModelChoice } from "../../cloud-assistant/index.js";
+import {
+  annotateChoices,
+  baseUrlHost,
+  OPENHUB_MODEL_DESCRIPTIONS,
+  type ConnectionModelFlags,
+  type ModelChoice,
+} from "../../cloud-assistant/index.js";
 
 /** The hosted lane's free/default model (god-mode preselected default). */
 export const OPENHUB_DEFAULT_MODEL = "openhub_free_llm";
@@ -19,26 +30,48 @@ export const OPENHUB_DEFAULT_MODEL = "openhub_free_llm";
 export const OPENHUB_DEFAULT_SUFFIX = " (default)";
 
 /**
- * The selected OpenHub connection, when the lane is OpenHub and usable.
- * Bring-your-own-key and Codex lanes hide the picker (their model controls
- * stay in Settings), as does a keyless or unloaded config.
+ * The single OSS key's contribution, read off the config: the stored
+ * list when the backend sends it (NEWPIDASH-392), else the legacy
+ * single model. No connection row exists in OSS, so the PUT sends a
+ * null connection.
  */
-export function selectedOpenHubConnection(
-  config: LlmConfig | null | undefined,
-  list: AssistantConnectionList | undefined
-): AssistantConnectionList["connections"][number] | null {
-  if (config === null || config === undefined || list === undefined) return null;
-  if (resolveCredentialLane(config) !== "openhub") return null;
-  if (config.has_openhub_access !== true) return null;
-  return list.connections.find((row) => row.kind === "openhub" && row.is_selected) ?? null;
+export function byokKeyFromConfig(config: {
+  models?: readonly string[] | undefined;
+  model_name: string;
+  base_url: string;
+  provider_kind: string;
+}): MergedPickerByokKey {
+  const models = config.models ?? (config.model_name === "" ? [] : [config.model_name]);
+  return { models, baseUrl: config.base_url, providerKind: config.provider_kind };
 }
 
-/** True when the composer picker should render. */
-export function shouldShowOpenHubPicker(
-  config: LlmConfig | null | undefined,
-  list: AssistantConnectionList | undefined
-): boolean {
-  return selectedOpenHubConnection(config, list) !== null;
+/**
+ * The catalog half of the merged list, read off the connections list:
+ * god-mode order with the server labels when the backend sends them
+ * (NEWPIDASH-393, design section 6.2).
+ */
+export function catalogFromList(list: AssistantConnectionList): MergedPickerCatalog {
+  return {
+    models: list.openhub_model_options,
+    labels: list.openhub_model_labels ?? {},
+    descriptions: OPENHUB_MODEL_DESCRIPTIONS,
+  };
+}
+
+/**
+ * Every BYOK key's contribution, in list order. A connection without a
+ * stored list still serves its legacy single model, so it contributes
+ * that one ID.
+ */
+export function byokKeysFromList(list: AssistantConnectionList): MergedPickerByokKey[] {
+  return list.connections
+    .filter((row) => row.kind === "byok")
+    .map((row) => ({
+      connectionId: row.id,
+      models: row.models ?? (row.model_name === "" ? [] : [row.model_name]),
+      baseUrl: row.base_url,
+      providerKind: row.provider_kind,
+    }));
 }
 
 /**
@@ -50,4 +83,154 @@ export function shouldShowOpenHubPicker(
 export function pickerOptionLabel(choice: ModelChoice, isDefault: boolean): string {
   const base = choice.badge === null ? choice.label : `${choice.label} (${choice.badge})`;
   return isDefault ? `${base}${OPENHUB_DEFAULT_SUFFIX}` : base;
+}
+
+/** The catalog half of the merged list: admin order plus label sources. */
+export interface MergedPickerCatalog {
+  /** Catalog models in catalog order. */
+  models: readonly string[];
+  /** Server catalog labels (`openhub_model_labels`), keyed by model ID. */
+  labels: Readonly<Record<string, string>>;
+  /** Built-in descriptions, keyed by model ID. */
+  descriptions: Readonly<Record<string, string>>;
+}
+
+/** One BYOK key's contribution to the merged list. */
+export interface MergedPickerByokKey {
+  /**
+   * The connection whose key runs these models. Absent in OSS, where the
+   * single key has no connection row and the PUT sends a null connection.
+   */
+  connectionId?: string | undefined;
+  /** The key's typed model IDs, in stored order. */
+  models: readonly string[];
+  baseUrl: string;
+  providerKind: string;
+}
+
+/**
+ * One merged option: the shared choice shape plus where it came from.
+ * The picker writes a BYOK choice with its `connectionId`; a catalog
+ * choice with none.
+ */
+export interface MergedPickerChoice extends ModelChoice {
+  origin: "catalog" | "byok";
+  connectionId?: string;
+}
+
+/**
+ * The merged list (design section 7.1): catalog models in catalog order
+ * (label, else description, else ID), then each BYOK key in order with
+ * its model IDs. Codex models never enter — the caller passes only the
+ * catalog and BYOK keys. `includeByok: false` renders the agent
+ * surface's catalog-only list. Every entry stays selectable here; the
+ * free-plan credit rule stamps later through `annotateChoices`.
+ */
+export function buildMergedModelChoices(
+  catalog: MergedPickerCatalog,
+  keys: readonly MergedPickerByokKey[],
+  options: { includeByok?: boolean } = {}
+): MergedPickerChoice[] {
+  const catalogChoices: MergedPickerChoice[] = catalog.models.map((model) => ({
+    value: model,
+    label: catalog.labels[model] ?? catalog.descriptions[model] ?? model,
+    credit: null,
+    badge: null,
+    selectable: true,
+    origin: "catalog" as const,
+  }));
+  if (options.includeByok === false) return catalogChoices;
+  return catalogChoices.concat(
+    keys.flatMap((key) =>
+      key.models.map((model) => ({
+        value: model,
+        label: byokChoiceLabel(model, key),
+        credit: null,
+        badge: null,
+        selectable: true,
+        origin: "byok" as const,
+        // Absent in OSS (no connection row); the PUT then sends null.
+        ...(key.connectionId === undefined ? {} : { connectionId: key.connectionId }),
+      }))
+    )
+  );
+}
+
+/**
+ * One BYOK option's text: `<id> (BYOK · <base-URL host>)`, or `<id>
+ * (BYOK · <provider>)` when the key has no base URL. An unparseable
+ * address falls back to the provider, never to raw input.
+ */
+export function byokChoiceLabel(model: string, key: Pick<MergedPickerByokKey, "baseUrl" | "providerKind">): string {
+  return `${model} (BYOK · ${baseUrlHost(key.baseUrl) ?? key.providerKind})`;
+}
+
+/**
+ * The one-line fallback notice the picker and Settings share: shown
+ * when `fallback_reason` is set and a saved choice exists, e.g.
+ * "modelC is no longer available. Using OpenHub free model."
+ */
+export function fallbackNotice(savedModel: string, effectiveLabel: string): string {
+  return `${savedModel} is no longer available. Using ${effectiveLabel}.`;
+}
+
+/**
+ * One merged option's `<select>` value. The same model ID through two
+ * connections is two choices (design D-10), so a BYOK choice carries
+ * its connection ID; catalog choices carry none. An OSS BYOK choice
+ * (no connection row) keys as `byok:local:<model>`, never colliding
+ * with the empty OSS catalog.
+ */
+export function mergedChoiceKey(choice: {
+  origin: MergedPickerChoice["origin"];
+  value: string;
+  connectionId?: string | undefined;
+}): string {
+  if (choice.origin === "catalog") return `catalog:${choice.value}`;
+  return choice.connectionId === undefined
+    ? `byok:local:${choice.value}`
+    : `byok:${choice.connectionId}:${choice.value}`;
+}
+
+/**
+ * The merged choice matching a surface's effective entry: the same
+ * model ID through the same connection (both null for a catalog
+ * default). Null when the server honors nothing in the list.
+ */
+export function effectiveChoiceFor(
+  choices: readonly MergedPickerChoice[],
+  state: ModelSelectionSurfaceState
+): MergedPickerChoice | null {
+  if (state.effective === null) return null;
+  return (
+    choices.find(
+      (choice) =>
+        choice.value === state.effective?.model &&
+        (choice.connectionId ?? null) === (state.effective?.connection_id ?? null)
+    ) ?? null
+  );
+}
+
+/**
+ * Stamp the free-plan credit badges onto the catalog half of a merged
+ * list. BYOK models draw on the user's own key, so they stay selectable
+ * with no badge. The stamp keeps the merged choice (annotateChoices
+ * returns the base shape) and only carries the credit fields across.
+ */
+export function applyCreditBadges(
+  merged: readonly MergedPickerChoice[],
+  flags: ConnectionModelFlags
+): MergedPickerChoice[] {
+  const annotated = new Map(
+    annotateChoices(
+      merged.filter((choice) => choice.origin === "catalog"),
+      flags
+    ).map((choice) => [choice.value, choice] as const)
+  );
+  return merged.map((choice) => {
+    if (choice.origin !== "catalog") return { ...choice };
+    const stamped = annotated.get(choice.value);
+    if (stamped === undefined) return { ...choice };
+    return { ...choice, credit: stamped.credit, badge: stamped.badge, selectable: stamped.selectable };
+  });
 }

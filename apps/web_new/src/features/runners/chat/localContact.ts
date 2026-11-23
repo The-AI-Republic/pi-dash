@@ -16,7 +16,13 @@ import { getAppClient } from "../../../core/api/client.js";
 import { hasLocalChat } from "../../../core/platform/local-chat.js";
 import { BUILTIN_CHAT_ID } from "./localTransport.js";
 import { agentReasonMessage } from "../../../shared/lib/agentReasons.js";
+import { MODELS_SECTION_HASH, providerSettingsHref } from "../../assistant/index.js";
 import { PIDASH_AGENT_NAME } from "../../../shared/lib/runnerIdentity.js";
+
+/** The workspace's Models section address for the agent status link (NEWPIDASH-394, design section 7.4). */
+export function modelsSettingsHref(workspaceSlug: string): string {
+  return `${providerSettingsHref(workspaceSlug)}#${MODELS_SECTION_HASH}`;
+}
 
 /** The availability answer changes only with the server flag or account. */
 export const LOCAL_AGENT_POLL_INTERVAL_MS = 5 * 60_000;
@@ -28,6 +34,16 @@ export interface PidashAgentContact {
   label: string;
   /** Why the contact cannot be opened, or null when it can. */
   unavailableReason: string | null;
+  /**
+   * The resolved agent model (NEWPIDASH-394, design section 7.4), from
+   * the engine profile. Null while the profile has not answered.
+   */
+  model: string | null;
+  /**
+   * Where the Models section lives for this workspace, or null when the
+   * caller did not scope the contact to one.
+   */
+  settingsHref: string | null;
 }
 
 export const LOCAL_CONTACT_LABEL = "Local";
@@ -51,9 +67,12 @@ export const LOCAL_AGENT_UNAVAILABLE_FALLBACK = "Pi Dash Agent is unavailable.";
 /**
  * The built-in contact, or an empty list when this build has no local
  * engine. Availability is read once per mount and re-checked slowly; a
- * failure reads as unavailable with the error's own words.
+ * failure reads as unavailable with the error's own words. The contact
+ * also carries the resolved agent model and the workspace's Models
+ * section address (NEWPIDASH-394, design section 7.4), so the desktop
+ * agent status shows what answers and where to change it.
  */
-export function usePidashAgentContact(): PidashAgentContact[] {
+export function usePidashAgentContact(workspaceSlug?: string): PidashAgentContact[] {
   const enabled = hasLocalChat();
   const availability = useQuery({
     queryKey: localChatQueryKey(),
@@ -79,6 +98,8 @@ export function usePidashAgentContact(): PidashAgentContact[] {
       name: PIDASH_AGENT_NAME,
       label: LOCAL_CONTACT_LABEL,
       unavailableReason,
+      model: availability.data?.model ?? null,
+      settingsHref: workspaceSlug === undefined ? null : modelsSettingsHref(workspaceSlug),
     },
   ];
 }

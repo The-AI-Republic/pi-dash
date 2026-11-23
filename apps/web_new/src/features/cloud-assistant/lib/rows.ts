@@ -101,6 +101,18 @@ export interface ConnectionRow {
   modelChoices: ModelChoice[];
   modelSuggestions: readonly string[];
   verifiedAt: string | null;
+  /**
+   * The key's stored model-ID list for BYOK rows (NEWPIDASH-394, design
+   * section 4.4): the multi-model list when the backend sends it, else
+   * the legacy single model. Empty on managed rows.
+   */
+  models: string[];
+  /**
+   * Per-ID verification stamps for BYOK rows (`model_verified_at`); an
+   * absent entry means the ID has no passing test. Empty when the
+   * backend predates multi-model BYOK.
+   */
+  modelVerifiedAt: Record<string, string | null>;
   /** The provider account has been disconnected; the row stays. */
   disconnected: boolean;
   /** The row cannot be removed (managed lanes are permanent). */
@@ -117,6 +129,8 @@ export interface ConnectionModelFlags {
   codexModels: string[];
   codexModelLabels: Record<string, string>;
   openhubModels: string[];
+  /** Server catalog labels (`openhub_model_labels`, NEWPIDASH-393); empty until the backend sends them. */
+  openhubModelLabels: Record<string, string>;
   /** Server-declared free catalog; empty when quota is unavailable. */
   freeModels: readonly string[];
   /** Normalized quota plan; null when quota is unavailable. */
@@ -137,12 +151,16 @@ export function isDisconnected(row: AssistantConnectionListItem): boolean {
 export function connectionTitle(row: Pick<AssistantConnectionListItem, "kind" | "provider_kind" | "base_url">): string {
   if (row.kind === "openhub") return "OpenHub";
   if (row.kind === "codex") return "OpenAI account";
-  const host = hostOf(row.base_url);
+  const host = baseUrlHost(row.base_url);
   if (host !== null) return `BYOK:${host}`;
   return row.provider_kind === "anthropic" ? "BYOK:Anthropic" : "BYOK";
 }
 
-function hostOf(raw: string): string | null {
+/**
+ * The host of a base URL, or null when it is blank or unparseable.
+ * Shared with the merged picker, whose BYOK labels name the same host.
+ */
+export function baseUrlHost(raw: string): string | null {
   const value = raw.trim();
   if (value === "") return null;
   try {
@@ -239,6 +257,8 @@ export function toConnectionRow(
     modelChoices: control === "select" ? choicesFor(row, flags, modelName) : [],
     modelSuggestions: control === "input" ? BYOK_MODEL_SUGGESTIONS : [],
     verifiedAt: row.last_verified_at,
+    models: row.kind === "byok" ? (row.models ?? (row.model_name === "" ? [] : [row.model_name])) : [],
+    modelVerifiedAt: row.kind === "byok" ? (row.model_verified_at ?? {}) : {},
     disconnected,
     removable: row.kind === "byok",
     disconnectable: row.kind === "codex" && !disconnected,
@@ -255,7 +275,10 @@ function modelControlFor(row: AssistantConnectionListItem, disconnected: boolean
 
 function choicesFor(row: AssistantConnectionListItem, flags: ConnectionModelFlags, current: string): ModelChoice[] {
   if (row.kind === "openhub") {
-    return annotateChoices(modelChoices(flags.openhubModels, {}, OPENHUB_MODEL_DESCRIPTIONS, current), flags);
+    return annotateChoices(
+      modelChoices(flags.openhubModels, flags.openhubModelLabels, OPENHUB_MODEL_DESCRIPTIONS, current),
+      flags
+    );
   }
   const models = flags.codexModels.length > 0 ? flags.codexModels : [...BUILTIN_CODEX_MODELS];
   return modelChoices(models, flags.codexModelLabels, BUILTIN_CODEX_MODEL_DESCRIPTIONS, current);
@@ -274,6 +297,7 @@ export function connectionModelFlags(
     codexModels: list.codex_model_options,
     codexModelLabels: list.codex_model_labels ?? {},
     openhubModels: list.openhub_model_options,
+    openhubModelLabels: list.openhub_model_labels ?? {},
     freeModels: quota?.freeModels ?? [],
     quotaPlan: quota?.plan ?? null,
   };

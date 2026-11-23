@@ -42862,6 +42862,7 @@ export class WebNewDriver implements ParityDriver {
     baseUrlVisible: boolean;
     baseUrl: string;
     model: string;
+    models: string[];
     keyValue: string;
     keyPlaceholder: string;
     saveDisabled: boolean;
@@ -42870,26 +42871,30 @@ export class WebNewDriver implements ParityDriver {
     lastVerified: string | null;
   }> {
     const section = this.page.getByTestId("assistant-llm");
-    // The tab holds a skeleton until both config reads resolve; the model
-    // field landing proves the forms painted with their seeded values.
-    await section.locator("#assistant-llm-model").waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    // The tab holds a skeleton until both config reads resolve; the
+    // editor's add field landing proves the form painted with its seeded
+    // values (NEWPIDASH-394 replaced the single model field).
+    const addField = section.getByLabel("Add a model ID this key serves");
+    await addField.waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
     const baseUrlField = section.locator("#assistant-llm-base-url");
     const baseUrlVisible = (await baseUrlField.count()) > 0;
     const keyField = section.locator("#assistant-llm-key");
-    const verified = section.getByText("Last verified:");
-    const lastVerified =
-      (await verified.count()) === 0 ? null : ((await verified.first().innerText()) ?? "").trim() || null;
+    const models = await this.settingsProfileAssistantModels();
+    const testButtons = section.getByRole("button", { name: /^Test / });
+    const verified = section.getByText("Verified", { exact: true }).first();
+    const anyVerified = (await verified.count()) > 0 && (await verified.isVisible().catch(() => false));
     return {
       provider: await section.locator("#assistant-llm-provider").inputValue(),
       baseUrlVisible,
       baseUrl: baseUrlVisible ? await baseUrlField.inputValue() : "",
-      model: await section.locator("#assistant-llm-model").inputValue(),
+      model: models[0] ?? "",
+      models,
       keyValue: await keyField.inputValue(),
       keyPlaceholder: (await keyField.getAttribute("placeholder")) ?? "",
       saveDisabled: await section.getByRole("button", { name: "Save", exact: true }).isDisabled(),
-      testDisabled: await section.getByRole("button", { name: "Test connection", exact: true }).isDisabled(),
+      testDisabled: (await testButtons.count()) === 0,
       removeVisible: await this.isShown(section.getByRole("button", { name: "Remove", exact: true })),
-      lastVerified,
+      lastVerified: anyVerified ? "Verified" : null,
     };
   }
   async settingsProfileAssistantSetProvider(provider: "openai_compatible" | "anthropic"): Promise<void> {
@@ -42897,8 +42902,26 @@ export class WebNewDriver implements ParityDriver {
     await this.page.getByTestId("assistant-llm").locator("#assistant-llm-provider").selectOption(provider);
   }
   async settingsProfileAssistantFill(field: "baseUrl" | "model" | "key", value: string): Promise<void> {
-    const suffix = field === "baseUrl" ? "base-url" : field;
-    await this.page.getByTestId("assistant-llm").locator(`#assistant-llm-${suffix}`).fill(value);
+    const section = this.page.getByTestId("assistant-llm");
+    if (field === "baseUrl") {
+      await section.locator("#assistant-llm-base-url").fill(value);
+      return;
+    }
+    if (field === "model") {
+      // NEWPIDASH-394: the single model fill replaces the whole editor
+      // list — add the ID first, then drop every other one.
+      await this.settingsProfileAssistantAddModel(value);
+      for (const other of (await this.settingsProfileAssistantModels()).filter((model) => model !== value)) {
+        await section.getByRole("button", { name: `Remove ${other}`, exact: true }).click();
+      }
+      return;
+    }
+    await section.locator("#assistant-llm-key").fill(value);
+  }
+  async settingsProfileAssistantAddModel(model: string): Promise<void> {
+    const addField = this.page.getByTestId("assistant-llm").getByLabel("Add a model ID this key serves");
+    await addField.fill(model);
+    await addField.press("Enter");
   }
   async settingsProfileAssistantSave(): Promise<void> {
     // The spec polls the toast for the outcome; the click only fires it.
@@ -42908,9 +42931,57 @@ export class WebNewDriver implements ParityDriver {
       .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async settingsProfileAssistantTest(): Promise<void> {
+    // NEWPIDASH-394: the whole-config probe is gone; test the first
+    // listed ID instead.
+    const section = this.page.getByTestId("assistant-llm");
+    await section
+      .getByRole("button", { name: /^Test / })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+  }
+  async settingsProfileAssistantModels(): Promise<string[]> {
+    const section = this.page.getByTestId("assistant-llm");
+    const rows = section.getByTestId("byok-model-row");
+    const count = await rows.count();
+    const models: string[] = [];
+    for (let index = 0; index < count; index++) {
+      const name = (
+        await rows
+          .nth(index)
+          .locator("span")
+          .first()
+          .innerText()
+          .catch(() => "")
+      ).trim();
+      if (name !== "") models.push(name);
+    }
+    return models;
+  }
+  async settingsProfileAssistantModelDetail(model: string): Promise<string | null> {
+    const section = this.page.getByTestId("assistant-llm");
+    const rows = section.getByTestId("byok-model-row");
+    const count = await rows.count();
+    for (let index = 0; index < count; index++) {
+      const row = rows.nth(index);
+      const name = (
+        await row
+          .locator("span")
+          .first()
+          .innerText()
+          .catch(() => "")
+      ).trim();
+      if (name !== model) continue;
+      const detail = row.getByTestId("byok-model-detail");
+      if ((await detail.count()) === 0 || !(await detail.isVisible().catch(() => false))) return null;
+      const text = (await detail.innerText()).trim();
+      return text === "" ? null : text;
+    }
+    return null;
+  }
+  async settingsProfileAssistantSaveAnyway(): Promise<void> {
     await this.page
       .getByTestId("assistant-llm")
-      .getByRole("button", { name: "Test connection", exact: true })
+      .getByRole("button", { name: "Save anyway", exact: true })
       .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async settingsProfileAssistantRemove(): Promise<void> {
@@ -42918,6 +42989,16 @@ export class WebNewDriver implements ParityDriver {
       .getByTestId("assistant-llm")
       .getByRole("button", { name: "Remove", exact: true })
       .click({ timeout: WebNewDriver.WAIT_MS });
+  }
+  async settingsProfileAssistantRemoveModel(model: string): Promise<void> {
+    const section = this.page.getByTestId("assistant-llm");
+    await section
+      .getByRole("button", { name: `Remove ${model}`, exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    const confirm = section.getByRole("button", { name: "Remove both", exact: true });
+    if ((await confirm.count()) > 0 && (await confirm.isVisible().catch(() => false))) {
+      await confirm.click({ timeout: WebNewDriver.WAIT_MS });
+    }
   }
   async settingsProfileAssistantFailWrites(): Promise<void> {
     // Fail the config PUT saves only: reads, probes, and tool-server
@@ -42950,10 +43031,11 @@ export class WebNewDriver implements ParityDriver {
   }> {
     // Settle on the sibling form: the page renders every section only
     // after both config reads resolve, so past this wait the voice
-    // section is genuinely present or genuinely absent.
+    // section is genuinely present or genuinely absent. The editor's add
+    // field is the seeded-form anchor (NEWPIDASH-394).
     await this.page
       .getByTestId("assistant-llm")
-      .locator("#assistant-llm-model")
+      .getByLabel("Add a model ID this key serves")
       .waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
     const section = this.page.getByTestId("assistant-voice");
     if ((await section.count()) === 0) {
@@ -51064,9 +51146,8 @@ export class WebNewDriver implements ParityDriver {
     const count = await cards.count();
     for (let index = 0; index < count; index++) {
       const card = cards.nth(index);
-      const label = card.locator("label").first();
-      const spans = await label.locator("span").allInnerTexts();
-      if (this.cloudNorm(spans[0] ?? "") === title) return card;
+      const name = card.getByTestId("assistant-connection-title").first();
+      if ((await name.count()) > 0 && this.cloudNorm(await name.innerText()) === title) return card;
     }
     throw new Error(`[parity] no assistant connection card titled ${JSON.stringify(title)}.`);
   }
@@ -51077,45 +51158,69 @@ export class WebNewDriver implements ParityDriver {
     const out: CloudAssistantConnectionFacts[] = [];
     for (let index = 0; index < count; index++) {
       const card = cards.nth(index);
-      const label = card.locator("label").first();
-      const spans = await label.locator("span").allInnerTexts();
-      const title = this.cloudNorm(spans[0] ?? "");
+      // The title span names the card; its siblings in the same div are
+      // the markers (NEWPIDASH-394: editor rows carry no <label>).
+      const name = card.getByTestId("assistant-connection-title").first();
+      if ((await name.count()) === 0) continue;
+      const title = this.cloudNorm(await name.innerText());
       if (title === "") continue;
-      const markers = spans
-        .slice(1)
-        .map((text) => this.cloudNorm(text))
-        .filter((text) => text !== "");
-      const radio = card.locator('input[name="assistant-active-connection"]').first();
+      const siblings = name.locator("xpath=parent::*").locator("span");
+      const siblingCount = await siblings.count();
+      const siblingTexts: string[] = [];
+      for (let siblingIndex = 0; siblingIndex < siblingCount; siblingIndex++) {
+        siblingTexts.push(this.cloudNorm(await siblings.nth(siblingIndex).innerText()));
+      }
+      const markers = siblingTexts.slice(1).filter((text) => text !== "");
+      // NEWPIDASH-394 removed the per-row select radio: a card shows the
+      // active marker instead, and BYOK rows carry a multi-ID editor.
+      const editorRows = card.getByTestId("byok-model-row");
+      const editorCount = await editorRows.count();
       const select = card.locator("select").first();
-      const input = card.locator('input[list="assistant-known-byok-models"]').first();
       const selectVisible = (await select.count()) > 0 && (await select.isVisible().catch(() => false));
-      const inputVisible = (await input.count()) > 0 && (await input.isVisible().catch(() => false));
-      const modelControl = selectVisible ? "select" : inputVisible ? "input" : "hidden";
+      const modelControl = selectVisible ? "select" : editorCount > 0 ? "models" : "hidden";
       let modelValue = "";
+      let modelValues: string[] = [];
       let modelOptions: string[] = [];
       if (modelControl === "select") {
         modelValue = await select.inputValue();
+        modelValues = modelValue === "" ? [] : [modelValue];
         const options = select.locator("option");
         const optionCount = await options.count();
         for (let optionIndex = 0; optionIndex < optionCount; optionIndex++) {
           modelOptions.push((await options.nth(optionIndex).getAttribute("value")) ?? "");
         }
-      } else if (modelControl === "input") {
-        modelValue = await input.inputValue();
+      } else if (modelControl === "models") {
+        for (let rowIndex = 0; rowIndex < editorCount; rowIndex++) {
+          const row = editorRows.nth(rowIndex);
+          const name = this.cloudNorm(
+            await row
+              .locator("span")
+              .first()
+              .innerText()
+              .catch(() => "")
+          );
+          if (name !== "") modelValues.push(name);
+        }
+        modelValue = modelValues[0] ?? "";
       }
+      // Substring match on purpose: the legacy "Verified <time>" line
+      // and the per-ID "Verified"/"Not verified" statuses all contain it.
       const verified = card.getByText("Verified", { exact: false }).first();
       const verifiedVisible = (await verified.count()) > 0 && (await verified.isVisible().catch(() => false));
-      const header = label.locator("xpath=parent::div");
+      const header = name.locator("xpath=ancestor::div[2]");
       const actions = (await header.getByRole("button").allInnerTexts())
         .map((text) => this.cloudNorm(text))
         .filter((text) => text !== "");
       out.push({
         title,
-        selected: await radio.isChecked(),
-        selectDisabled: await radio.isDisabled(),
+        selected: markers.includes("In use"),
+        // No per-row control remains: a row without a usable model
+        // control cannot be chosen at all.
+        selectDisabled: modelControl === "hidden",
         markers,
         modelControl,
         modelValue,
+        modelValues,
         modelOptions,
         verifiedVisible,
         actions,
@@ -51158,19 +51263,12 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async cloudAssistantSelectConnection(title: string): Promise<void> {
-    // Click plus poll: the radio is server-driven, so its checked state
-    // flips only after the select roundtrip plus refetch lands.
-    const card = await this.cloudAssistantCardByTitle(title);
-    const radio = card.locator('input[name="assistant-active-connection"]');
-    await radio.click({ timeout: 60_000 });
-    const started = Date.now();
-    for (;;) {
-      if (await radio.isChecked().catch(() => false)) return;
-      if (Date.now() - started > 60_000) {
-        throw new Error(`[parity] selecting ${JSON.stringify(title)} never checked its radio.`);
-      }
-      await this.page.waitForTimeout(250);
-    }
+    // NEWPIDASH-394 removed the per-row select radio from the new app:
+    // choice moved per surface into the Models section. New legs use
+    // cloudAssistantModelsSelect; this method only serves the oracle.
+    throw new Error(
+      `[parity] no per-row select control on the new app; pick a surface model instead (card ${JSON.stringify(title)}).`
+    );
   }
 
   async cloudAssistantSetModel(title: string, model: string): Promise<void> {
@@ -51180,9 +51278,169 @@ export class WebNewDriver implements ParityDriver {
       await select.selectOption(model, { timeout: 60_000 });
       return;
     }
-    const input = card.locator('input[list="assistant-known-byok-models"]').first();
-    await input.fill(model, { timeout: 60_000 });
-    await input.press("Enter", { timeout: 60_000 });
+    // BYOK editor (NEWPIDASH-394): typing an ID and confirming with Enter
+    // commits the longer list at once.
+    await this.cloudAssistantConnectionAddModel(title, model);
+  }
+
+  /**
+   * One connection card's editor rows: each row's model ID, read from the
+   * row's name span.
+   */
+  async cloudAssistantConnectionModels(title: string): Promise<string[]> {
+    const card = await this.cloudAssistantCardByTitle(title);
+    const rows = card.getByTestId("byok-model-row");
+    const count = await rows.count();
+    const models: string[] = [];
+    for (let index = 0; index < count; index++) {
+      const name = this.cloudNorm(
+        await rows
+          .nth(index)
+          .locator("span")
+          .first()
+          .innerText()
+          .catch(() => "")
+      );
+      if (name !== "") models.push(name);
+    }
+    return models;
+  }
+
+  async cloudAssistantConnectionAddModel(title: string, model: string): Promise<void> {
+    const card = await this.cloudAssistantCardByTitle(title);
+    const posted = this.page
+      .waitForResponse(
+        (response) =>
+          response.url().includes("/api/users/me/ai-assistant/connections/") && response.request().method() === "PATCH",
+        { timeout: 60_000 }
+      )
+      .catch(() => null);
+    await card.getByLabel("Add a model ID this key serves").fill(model, { timeout: 60_000 });
+    await card.getByLabel("Add a model ID this key serves").press("Enter", { timeout: 60_000 });
+    await posted;
+  }
+
+  async cloudAssistantConnectionRemoveModel(title: string, model: string): Promise<void> {
+    const card = await this.cloudAssistantCardByTitle(title);
+    const posted = this.page
+      .waitForResponse(
+        (response) =>
+          (response.url().includes("/api/users/me/ai-assistant/connections/") &&
+            response.request().method() === "PATCH") ||
+          (response.url().includes("/api/users/me/ai-assistant/connections/") &&
+            response.request().method() === "DELETE"),
+        { timeout: 60_000 }
+      )
+      .catch(() => null);
+    await card.getByRole("button", { name: `Remove ${model}`, exact: true }).click({ timeout: 60_000 });
+    const confirm = card.getByRole("button", { name: "Remove both", exact: true });
+    if ((await confirm.count()) > 0 && (await confirm.isVisible().catch(() => false))) {
+      await confirm.click({ timeout: 60_000 });
+    }
+    await posted;
+  }
+
+  async cloudAssistantConnectionTestModel(title: string, model: string): Promise<void> {
+    const card = await this.cloudAssistantCardByTitle(title);
+    await card.getByRole("button", { name: `Test ${model}`, exact: true }).click({ timeout: 60_000 });
+  }
+
+  async cloudAssistantConnectionSaveAnyway(title: string): Promise<void> {
+    const card = await this.cloudAssistantCardByTitle(title);
+    const posted = this.page
+      .waitForResponse(
+        (response) =>
+          response.url().includes("/api/users/me/ai-assistant/connections/") && response.request().method() === "PATCH",
+        { timeout: 60_000 }
+      )
+      .catch(() => null);
+    await card.getByRole("button", { name: "Save anyway", exact: true }).click({ timeout: 60_000 });
+    await posted;
+  }
+
+  async cloudAssistantConnectionModelDetail(title: string, model: string): Promise<string | null> {
+    const card = await this.cloudAssistantCardByTitle(title);
+    const rows = card.getByTestId("byok-model-row");
+    const count = await rows.count();
+    for (let index = 0; index < count; index++) {
+      const row = rows.nth(index);
+      const name = this.cloudNorm(
+        await row
+          .locator("span")
+          .first()
+          .innerText()
+          .catch(() => "")
+      );
+      if (name !== model) continue;
+      const detail = row.getByTestId("byok-model-detail");
+      if ((await detail.count()) === 0 || !(await detail.isVisible().catch(() => false))) return null;
+      const text = this.cloudNorm(await detail.innerText());
+      return text === "" ? null : text;
+    }
+    return null;
+  }
+
+  private cloudAssistantModelsSectionRoot(): Locator {
+    return this.page.getByTestId("assistant-models-section");
+  }
+
+  private async cloudAssistantSurfacePicker(label: string): Promise<Locator> {
+    const section = this.cloudAssistantModelsSectionRoot();
+    await section.waitFor({ state: "visible", timeout: 60_000 });
+    const picker = section.getByRole("combobox", { name: label });
+    await picker.waitFor({ state: "visible", timeout: 60_000 });
+    return picker;
+  }
+
+  async cloudAssistantModelsSection(): Promise<Array<{ label: string; value: string; fallback: string | null }>> {
+    const section = this.cloudAssistantModelsSectionRoot();
+    await section.waitFor({ state: "visible", timeout: 60_000 });
+    const pickers = section.getByRole("combobox");
+    const count = await pickers.count();
+    const out: Array<{ label: string; value: string; fallback: string | null }> = [];
+    for (let index = 0; index < count; index++) {
+      const picker = pickers.nth(index);
+      const label = this.cloudNorm((await picker.getAttribute("aria-label")) ?? "");
+      const value = this.cloudNorm(
+        await picker
+          .locator("option:checked")
+          .innerText()
+          .catch(() => picker.inputValue().catch(() => ""))
+      );
+      const row = picker.locator("xpath=ancestor::div[2]");
+      const notice = row.getByTestId(/^surface-model-fallback-/);
+      let fallback: string | null = null;
+      if ((await notice.count()) > 0 && (await notice.isVisible().catch(() => false))) {
+        fallback = this.cloudNorm(await notice.innerText());
+      }
+      out.push({ label, value, fallback });
+    }
+    return out;
+  }
+
+  async cloudAssistantModelsOptions(label: string): Promise<string[]> {
+    const picker = await this.cloudAssistantSurfacePicker(label);
+    const options = picker.locator("option");
+    const count = await options.count();
+    const texts: string[] = [];
+    for (let index = 0; index < count; index++) {
+      texts.push(this.cloudNorm(await options.nth(index).innerText()));
+    }
+    return texts;
+  }
+
+  async cloudAssistantModelsSelect(label: string, option: string): Promise<void> {
+    const picker = await this.cloudAssistantSurfacePicker(label);
+    const posted = this.page
+      .waitForResponse(
+        (response) =>
+          response.url().includes("/api/users/me/ai-assistant/model-selection/") &&
+          response.request().method() === "PUT",
+        { timeout: 60_000 }
+      )
+      .catch(() => null);
+    await picker.selectOption({ label: option }, { timeout: 60_000 });
+    await posted;
   }
 
   async cloudAssistantClickRowAction(title: string, action: "Test" | "Remove" | "Disconnect"): Promise<void> {
@@ -51224,7 +51482,13 @@ export class WebNewDriver implements ParityDriver {
   async cloudAssistantAddFill(fill: CloudAssistantAddFill): Promise<void> {
     if (fill.provider !== undefined) await this.cloudAssistantProviderSelect().selectOption(fill.provider);
     if (fill.baseUrl !== undefined) await this.page.getByLabel("Base URL").fill(fill.baseUrl);
-    if (fill.model !== undefined) await this.page.getByLabel("Model").fill(fill.model);
+    // NEWPIDASH-394: a new key carries a list of typed IDs. The driver
+    // adds each one through the editor; `model` fills the single-ID case.
+    const models = fill.models ?? (fill.model === undefined ? [] : [fill.model]);
+    for (const model of models) {
+      await this.page.getByLabel("Add a model ID this key serves").fill(model);
+      await this.page.getByLabel("Add a model ID this key serves").press("Enter");
+    }
     if (fill.key !== undefined) await this.page.getByLabel("API key").fill(fill.key);
   }
 

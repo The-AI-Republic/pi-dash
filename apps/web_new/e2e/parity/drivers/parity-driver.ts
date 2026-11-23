@@ -9506,12 +9506,67 @@ export interface SpaceBoardStability {
   cloudAssistantClickAdd(): Promise<void>;
   /** Back to the connections list from the add view. */
   cloudAssistantClickBackToList(): Promise<void>;
-  /** Select the connection titled `title` via its radio. */
+  /**
+   * Select the connection titled `title` via its radio. Oracle only: the
+   * new app removed the per-row control (NEWPIDASH-394, DIFF-65) and
+   * chooses per surface in the Models section, so the new-app driver
+   * throws and new legs use the Models-section methods below.
+   */
   cloudAssistantSelectConnection(title: string): Promise<void>;
-  /** Set the model of the connection titled `title` (picker or text commit). */
+  /**
+   * Set the model of the connection titled `title`: the managed picker,
+   * or the BYOK editor — one ID appended on the new app (NEWPIDASH-394),
+   * where it commits the longer list at once.
+   */
   cloudAssistantSetModel(title: string, model: string): Promise<void>;
   /** Activate a row action (Test, Remove, Disconnect) on the titled connection. */
   cloudAssistantClickRowAction(title: string, action: "Test" | "Remove" | "Disconnect"): Promise<void>;
+  /**
+   * Per-surface pickers of the Models section, in display order. New-app
+   * only (NEWPIDASH-394, DIFF-65); the oracle driver throws.
+   */
+  cloudAssistantModelsSection(): Promise<Array<{ label: string; value: string; fallback: string | null }>>;
+  /**
+   * Merged option texts of one surface picker, in display order.
+   * New-app only; the oracle driver throws.
+   */
+  cloudAssistantModelsOptions(label: string): Promise<string[]>;
+  /**
+   * Pick one surface option by its visible text; resolves once the
+   * model-selection write settles. New-app only; the oracle throws.
+   */
+  cloudAssistantModelsSelect(label: string, option: string): Promise<void>;
+  /**
+   * Model IDs listed in one connection's editor. New-app only (the
+   * oracle row holds a single free-text value); the oracle driver
+   * answers the single value as a one-item list.
+   */
+  cloudAssistantConnectionModels(title: string): Promise<string[]>;
+  /**
+   * Add one model ID through a connection's editor. New-app only; the
+   * oracle driver fills the free-text field instead.
+   */
+  cloudAssistantConnectionAddModel(title: string, model: string): Promise<void>;
+  /**
+   * Remove one model ID through a connection's editor, confirming the
+   * last-ID prompt when it appears. New-app only; the oracle throws.
+   */
+  cloudAssistantConnectionRemoveModel(title: string, model: string): Promise<void>;
+  /**
+   * Click one stored ID's Test button. New-app only; the oracle throws
+   * (its row-level Test covers the whole config).
+   */
+  cloudAssistantConnectionTestModel(title: string, model: string): Promise<void>;
+  /**
+   * Click Save anyway on a connection card when offered. New-app only;
+   * the oracle throws.
+   */
+  cloudAssistantConnectionSaveAnyway(title: string): Promise<void>;
+  /**
+   * Failure detail shown beside one model ID, or null when none shows.
+   * New-app only; the oracle throws.
+   */
+  cloudAssistantConnectionModelDetail(title: string, model: string): Promise<string | null>;
   /** Add-form structure: provider options, base-field visibility, save state. */
   cloudAssistantAddFormFacts(): Promise<CloudAssistantAddFormFacts>;
   /** Fill the add form; resolves once the fields hold the values. */
@@ -9725,16 +9780,27 @@ export interface CloudProviderButtonFacts {
 export interface CloudAssistantConnectionFacts {
   /** Card title as rendered (kind-appropriate: host-derived or product name). */
   title: string;
-  /** Whether the card's select radio is checked. */
+  /** Whether the card shows the active marker (radio checked on the oracle; "In use" on the new app). */
   selected: boolean;
-  /** Whether the select radio is disabled. */
+  /** Whether the row can be chosen (radio disabled on the oracle; no usable model control on the new app). */
   selectDisabled: boolean;
   /** Status markers rendered on the card, as text. */
   markers: string[];
-  /** Model control kind: fixed picker, free text, or hidden (disconnected). */
-  modelControl: "select" | "input" | "hidden";
-  /** Current model value. */
+  /**
+   * Model control kind: fixed picker, oracle free text, the new-app
+   * multi-ID editor (`models`, NEWPIDASH-394), or hidden (disconnected).
+   */
+  modelControl: "select" | "input" | "models" | "hidden";
+  /**
+   * Current model value: the field value on the oracle, the first listed
+   * ID on a new-app editor row.
+   */
   modelValue: string;
+  /**
+   * Every model ID the row shows (the oracle's single value; the full
+   * editor list on the new app).
+   */
+  modelValues: string[];
   /** Picker options when the control is a select. */
   modelOptions: string[];
   /** Whether a last-verified timestamp renders. */
@@ -9783,7 +9849,10 @@ export interface CloudAssistantAddFormFacts {
 export interface CloudAssistantAddFill {
   provider?: string;
   baseUrl?: string;
+  /** Single model (oracle free text; the new-app driver adds it as the key's first ID). */
   model?: string;
+  /** Model-ID list for a new-app key (NEWPIDASH-394); the oracle uses `model`. */
+  models?: string[];
   key?: string;
 }
 
@@ -10429,24 +10498,60 @@ export interface WsSettingsMemberRowFacts {
     provider: string;
     baseUrlVisible: boolean;
     baseUrl: string;
+    /** Single model (oracle field; the first editor ID on the new app). */
     model: string;
+    /** Every model ID the form lists (oracle: the single value; new app: the full editor list). */
+    models: string[];
     keyValue: string;
     keyPlaceholder: string;
     saveDisabled: boolean;
+    /** Whole-form test disabled (oracle); no per-ID Test buttons (new app). */
     testDisabled: boolean;
     removeVisible: boolean;
+    /** Last-verified line (oracle); "Verified" while any new-app ID shows verified, else null. */
     lastVerified: string | null;
   }>;
   /** Pick the LLM provider kind. */
   settingsProfileAssistantSetProvider(provider: "openai_compatible" | "anthropic"): Promise<void>;
-  /** Fill one LLM form field. */
+  /**
+   * Fill one LLM form field. On the new app, `model` replaces the whole
+   * editor list with the single ID (NEWPIDASH-394); the oracle fills its
+   * free-text field.
+   */
   settingsProfileAssistantFill(field: "baseUrl" | "model" | "key", value: string): Promise<void>;
   /** Click Save; resolves once the write settles. */
   settingsProfileAssistantSave(): Promise<void>;
-  /** Click Test connection; resolves once the probe settles. */
+  /**
+   * Click Test connection (oracle, whole config) or the first per-ID
+   * Test button (new app); resolves once the probe settles.
+   */
   settingsProfileAssistantTest(): Promise<void>;
   /** Click Remove; resolves once the delete settles. */
   settingsProfileAssistantRemove(): Promise<void>;
+  /**
+   * Remove one model ID through the editor, confirming the last-ID
+   * prompt when it appears. New-app only; the oracle throws.
+   */
+  settingsProfileAssistantRemoveModel(model: string): Promise<void>;
+  /**
+   * Add one model ID through the editor. New-app only; the oracle fills
+   * its single free-text field instead.
+   */
+  settingsProfileAssistantAddModel(model: string): Promise<void>;
+  /**
+   * Model IDs listed in the new-app editor. The oracle answers its
+   * single field value as a one-item list.
+   */
+  settingsProfileAssistantModels(): Promise<string[]>;
+  /**
+   * Failure detail shown beside one model ID, or null. New-app only;
+   * the oracle throws.
+   */
+  settingsProfileAssistantModelDetail(model: string): Promise<string | null>;
+  /**
+   * Click Save anyway when offered. New-app only; the oracle throws.
+   */
+  settingsProfileAssistantSaveAnyway(): Promise<void>;
   /** Fail LLM/STT config PUT writes with HTTP 500 until cleared (save-failure hook). */
   settingsProfileAssistantFailWrites(): Promise<void>;
   /** Remove the assistant interception installed above. */

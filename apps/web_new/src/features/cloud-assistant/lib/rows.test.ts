@@ -124,15 +124,36 @@ describe("connection flags", () => {
 
   it("copies the managed options the list answered", () => {
     const flags = connectionModelFlags(
-      list({ codex_model_options: ["x"], codex_model_labels: { x: "X" }, openhub_model_options: ["y"] })
+      list({
+        codex_model_options: ["x"],
+        codex_model_labels: { x: "X" },
+        openhub_model_options: ["y"],
+        openhub_model_labels: { y: "Why" },
+      })
     );
     expect(flags).toEqual({
       codexModels: ["x"],
       codexModelLabels: { x: "X" },
       openhubModels: ["y"],
+      openhubModelLabels: { y: "Why" },
       freeModels: [],
       quotaPlan: null,
     });
+  });
+
+  it("defaults a missing catalog-labels map to empty", () => {
+    const flags = connectionModelFlags(list({ openhub_model_labels: undefined }));
+    expect(flags.openhubModelLabels).toEqual({});
+  });
+
+  it("labels hosted choices with the server catalog label first", () => {
+    const answer = list({
+      connections: [row({ id: IDS.openhub, kind: "openhub", model_name: "y" })],
+      openhub_model_options: ["y"],
+      openhub_model_labels: { y: "Why" },
+    });
+    const target = toConnectionRow(answer.connections[0]!, answer, connectionModelFlags(answer));
+    expect(target.modelChoices).toEqual([{ value: "y", label: "Why", credit: null, badge: null, selectable: true }]);
   });
 
   it("carries the free quota through when the meter has answered", () => {
@@ -180,6 +201,37 @@ describe("toConnectionRow", () => {
     expect(target.markers).toEqual(["In use"]);
     expect(target.modelChoices).toEqual([]);
     expect(target.modelSuggestions.length).toBeGreaterThan(0);
+  });
+
+  it("threads the stored model-ID list and per-ID stamps into BYOK rows", () => {
+    const answer = list({
+      connections: [
+        row({
+          models: ["gpt-6", "gpt-6.2"],
+          model_verified_at: { "gpt-6": "2026-11-23T00:00:00Z" },
+        }),
+      ],
+    });
+    const target = toConnectionRow(answer.connections[0]!, answer, connectionModelFlags(answer));
+    expect(target.models).toEqual(["gpt-6", "gpt-6.2"]);
+    expect(target.modelVerifiedAt).toEqual({ "gpt-6": "2026-11-23T00:00:00Z" });
+  });
+
+  it("falls back to the legacy single model when the backend predates multi-model BYOK", () => {
+    const answer = list({ connections: [row()] });
+    const target = toConnectionRow(answer.connections[0]!, answer, connectionModelFlags(answer));
+    expect(target.models).toEqual(["meta-llama/llama-3.3-70b-instruct"]);
+    expect(target.modelVerifiedAt).toEqual({});
+  });
+
+  it("leaves managed rows with no model list", () => {
+    const answer = list({
+      connections: [row({ kind: "openhub", base_url: "", model_name: "moonshotai/kimi-k3" })],
+      openhub_model_options: ["moonshotai/kimi-k3"],
+    });
+    const target = toConnectionRow(answer.connections[0]!, answer, connectionModelFlags(answer));
+    expect(target.models).toEqual([]);
+    expect(target.modelVerifiedAt).toEqual({});
   });
 
   it("uses the built-in managed picker when the server sends no options", () => {

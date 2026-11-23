@@ -11,4 +11,5 @@ export const assistantKeys = {
   all: (workspaceSlug: string) => [...workspaceScope(workspaceSlug), "assistant"] as const,
   threads: (workspaceSlug: string) => [...assistantKeys.all(workspaceSlug), "threads"] as const,
   config: (workspaceSlug: string) => [...assistantKeys.all(workspaceSlug), "config"] as const,
+  selection: (workspaceSlug: string) => [...assistantKeys.all(workspaceSlug), "model-selection"] as const,
 };
