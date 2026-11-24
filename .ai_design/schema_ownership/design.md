@@ -1,6 +1,7 @@
 # Schema ownership: Rust owns the schema, with a defined Django fallback window
 
-Status: design for maintainer decision. Implements the maintainer decisions of
+Status: decided (maintainer decisions of 2026-11-22 and 2026-11-23 on
+NEWPIDASH-379). Implements the maintainer decisions of
 2026-11-22 on NEWPIDASH-379 (Rust owns the schema; native OSS migrator) and the
 follow-up (OSS/cloud combine like the Django `INSTALLED_APPS` graph; full model
 in NEWPIDASH-380). This doc fills in the remaining details: fresh-install
@@ -23,15 +24,14 @@ options in the issue, that is (A): move `pidash-migrate`'s approach into OSS as
 a native `pidash-api migrate` under `rust-api/`, still writing
 `django_migrations` rows while the Django fallback is kept.
 
-- Not (B) (Rust migrations are the truth and Django only follows with
-  state-only or no-op migrations): during the fallback window Django must be
-  able to run `manage.py migrate` for real on a database the Rust migrator
-  built. State-only Django migrations would make Django's own history a fiction
-  and keep Django as the authoring bottleneck for every schema change, while
-  the proven mechanism — the cloud migrator writing `django_migrations` rows
-  after each port (`rust-cloud/crates/cloud-migration/lib.rs:539-544`) and
-  skipping migrations Django already applied — already delivers a truthful
-  shared history with no Django-side fakery.
+- Not (B) as the authoring model (Rust migrations are the truth and Django only
+  follows with state-only migrations): the migrator keeps writing truthful
+  `django_migrations` rows for the baseline, as the cloud migrator does today
+  (`rust-cloud/crates/cloud-migration/lib.rs:539-544`). After the baseline,
+  though, Django follows passively (section 3, maintainer decision of
+  2026-11-23): Rust migrations are written first and alone, and a Django
+  catch-up, if the maintainer wants one, is state-only. So (B) applies to
+  changes after the baseline, not to the history before it.
 - Not (C) (merge the gates first, then move): the gates are already being fixed
   in parallel without serializing on this design. NEWPIDASH-378 replaces the
   waiting gate with a fail-fast check (the six OSS entrypoints
@@ -89,39 +89,47 @@ one was used.
 
 ## 3. Fallback window: what every Rust schema change must satisfy, and when it ends
 
-While the Django fallback is kept, the shared database must stay usable by the
-old system, and a fallback Django must still `manage.py migrate` for real.
-So every Rust schema change, without exception, satisfies all of these:
+Maintainer decision (2026-11-23): Django follows passively. A schema change is
+written once, as a Rust migration. No Django model field or Django migration
+is required, and Django is not the spec for anything after the baseline.
+
+While the Django fallback is kept, every Rust schema change still satisfies
+two cheap rules, so catching Django up stays possible (adding model fields)
+and the old code keeps working on the shared database:
 
 - **Additive only.** New tables, columns, indexes and constraints may be
   added. Never drop, rename or retype a column or table the old system still
   uses; mark it unused instead and leave the cleanup to the switchover. (This
   carries over unchanged from today's rule.)
 - **A database-level default on every new NOT NULL column**, so inserts that
-  do not name it keep working — from either system.
-- **A matching schema-only Django model field plus Django migration, authored
-  in the same issue**: the Django model field and the migration only
-  (`apps/api/pi_dash/db/models` and `migrations`), no serializers, views or
-  behaviour. The Django migration is the portable spec of the change; the Rust
-  migration ports it (DDL-identical, as NEWPIDASH-372's `runner/0044` is to
-  cloud `native_runner_0040.sql`). Small changes may land both halves in one
-  PR; otherwise the Django half lands first.
-- **Entities regenerated** from the migrated schema as the backend README
-  describes (`rust-api/README.md:411,516` procedure, amended to say the Rust
-  migrator builds the reference database).
+  do not name it keep working from either system.
 
-This is exactly how NEWPIDASH-372 closed its gap (schema-only `runner/0044`
-plus model fields, no Python behaviour, allowed in the frozen tree under the
-Schema exception), and that is the template for every schema change during the
-window.
+Entities are regenerated from the Rust-migrated schema as the backend README
+describes (`rust-api/README.md:411,516` procedure, amended so that the Rust
+migrator builds the reference database).
 
-**End signal.** The requirement ends when the maintainer retires the Django
-fallback — the later switchover epic that NEWPIDASH-375 explicitly defers
-("Deprecating the old system … is a later epic, opened when this one is
-Done"). Until the maintainer declares the fallback retired, the constraints
-above hold on every schema change, no matter how long the window lasts. When
-the fallback retires, the migrator keeps its history and stops writing
-`django_migrations` rows; no migration is rewritten.
+**Passive Django check.** Mismatches are found when the old system is
+released, not on every schema change. The Django release (the fallback image
+build and release workflow) gets a failing gate: migrate an empty database
+with the Rust migrator, migrate a second one with Django, and compare the
+schemas the way `oracle.py compare` does today (tables, columns, types,
+nullability, defaults, indexes, constraints). Any difference fails the
+Django release and lists the differences. The maintainer then decides,
+change by change, whether to catch Django up or leave the fallback without
+that change. A Django catch-up is state-only (model field plus a migration
+whose database operations are no-ops, e.g. `SeparateDatabaseAndState`),
+because the Rust migrator already created the schema. The Rust migrator does
+not write `django_migrations` rows for Rust-first migrations.
+
+**End signal.** The two rules stay in force until the maintainer stops them
+by hand by retiring the Django fallback (the later switchover epic that
+NEWPIDASH-375 defers: "Deprecating the old system … is a later epic, opened
+when this one is Done"). There is no automatic trigger. When the fallback
+retires, the migrator keeps its history and the Django release gate goes
+away with the Django release; no migration is rewritten.
+
+NEWPIDASH-372's schema-only `runner/0044` landed under the old rule (Django
+half first). It stays as it is, and it is the last change authored that way.
 
 The amended NEWPIDASH "Schema" rule text is proposed in section 8.
 
@@ -242,33 +250,34 @@ The 380 run's recorded assumption stands: its baseline is cut at `db/0183` /
 backfill issue is needed; if 372 had failed, its gap would have become a 380
 blocker, but it is in Test with a review pass recorded.
 
-## 8. Proposed amended NEWPIDASH "Schema" rule text
+## 8. Amended NEWPIDASH "Schema" rule text
 
-For the maintainer to record as the decision comment on this issue (replacing
-the current "Schema" section, whose first sentence "Django's migrations stay
-the single schema history" is superseded):
+Decided by the maintainer on 2026-11-23 and recorded as the decision comment
+on NEWPIDASH-379. It replaces the current "Schema" section, whose first
+sentence "Django's migrations stay the single schema history" no longer
+holds.
 
 > **Schema.** Rust owns the schema. The native Rust migrator
 > (`rust-api/crates/migration`, `pidash-api migrate`) is the only thing that
 > applies schema changes in any deployment. It lives in OSS, needs no Python,
-> and handles both fresh installs (baseline snapshot at the current leaf,
-> stamped with the full `django_migrations` history) and upgrades (forward
-> ports, one transaction per migration, fail-fast with the migration named).
-> It runs once as a release/install step before any service starts; if it
-> fails or does not finish, the release fails. Services never migrate, never
-> wait, and issue no DDL; they run only the read-only `migrate check`, which
-> exits nonzero immediately when the schema is not current.
+> and handles both fresh installs (a baseline snapshot at the latest Django
+> migration, stamped with the full `django_migrations` history) and upgrades
+> (forward migrations, one transaction each, fail-fast with the migration
+> named). It runs once as a release/install step before any service starts; if
+> it fails, the release fails. Services never migrate, never wait, and issue no
+> DDL; they run only the read-only `migrate check`, which exits nonzero
+> immediately when the schema is not current.
 >
-> While the Django fallback is kept, every Rust schema change must keep Django
-> runnable: additive changes only (new tables, columns, indexes, constraints;
-> never drop, rename or retype anything the old system uses), a
-> database-level default on every new NOT NULL column, and a matching
-> schema-only Django model field plus migration (`apps/api/pi_dash/db/models`
-> and `migrations`; no other Django code) authored in the same issue, which may
-> land ahead of or with the Rust and frontend PR. Regenerate the Rust entities
-> from the migrated schema as the backend README describes. This fallback
-> requirement ends when the maintainer retires the Django fallback (a later
-> switchover epic); until then it binds every schema change.
+> Schema changes are written as Rust migrations only. No Django model or
+> migration change is required. While the Django fallback is kept, Rust schema
+> changes stay additive (never drop, rename or retype anything the old system
+> uses) and give every new NOT NULL column a database-level default. These two
+> rules hold until the maintainer retires the Django fallback by hand. Django
+> follows passively: the Django release runs a schema check that compares the
+> Rust-migrated schema with Django's models and migrations and fails the
+> release on any mismatch. The maintainer then decides whether to catch Django
+> up (state-only) or not. Regenerate the Rust entities from the migrated schema
+> as the backend README describes.
 >
 > Cloud builds the same migrator from the OSS migration set plus its own apps'
 > migrations (`cloud_assistant`, `platform_federation`); cloud migrations may
