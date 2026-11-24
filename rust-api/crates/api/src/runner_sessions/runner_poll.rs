@@ -444,6 +444,13 @@ struct ReapOutcome {
     drain_effects: Vec<session_kernel::SessionEffect>,
 }
 
+/// A machine-limit raise observed on a poll snapshot (NEWPIDASH-398):
+/// the persisted limit grew, so the machine's idle runners are
+/// drained again post-commit to pick up server-queued runs.
+struct LimitRaise {
+    pod_id: Uuid,
+}
+
 /// `reap_stale_busy_runs(runner, status_entry)` on the poll path
 /// (`session_service.py:150-290`, `exclude_redeliverable=False`),
 /// executed inside the caller's heartbeat transaction: the clamp and
@@ -451,14 +458,19 @@ struct ReapOutcome {
 /// stopped-cancel barrier, the candidate scan, one inline finalize
 /// per reaped run. Collects the `on_commit` registrations for the
 /// caller to fire after commit.
+///
 /// Apply poll's held-token/capacity snapshot (T2, NEWPIDASH-241).
 /// Validates token/session before persisting phase or letting in_flight suppress reaping.
 /// Returns the (possibly stripped) reap entry for the reaper.
+/// On a validated snapshot that raises the persisted machine limit,
+/// sets `limit_raise` so the caller drains this machine's idle
+/// runners again after commit.
 async fn apply_capacity_snapshot(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     runner_id: Uuid,
     sid: Uuid,
     status_entry: &Map<String, Value>,
+    limit_raise: &mut Option<LimitRaise>,
 ) -> Result<Map<String, Value>, Response> {
     use pidash_services::runner_runs::capacity as cap;
     use sea_orm::ColumnTrait;
@@ -607,6 +619,10 @@ async fn apply_capacity_snapshot(
     } else {
         stored.and_then(|v| v.get("active")).and_then(Value::as_u64)
     };
+    // NEWPIDASH-398: only a snapshot-provided limit is persisted to
+    // the machine row. The stored fallback below must never write:
+    // an older per-run report would regress a newer machine value.
+    let snapshot_provided_limit = snapshot_dict.get("limit").is_some_and(|v| !v.is_null());
     let limit: Option<u64> = if let Some(v) = snapshot_dict.get("limit") {
         if v.is_null() {
             None
@@ -675,6 +691,34 @@ async fn apply_capacity_snapshot(
         .filter(pidash_db::entity::agent_run::Column::Id.eq(run.id))
         .exec(&conn)
         .await;
+    // NEWPIDASH-398: persist the snapshot-provided machine limit for
+    // the matcher gate (Runner → Run → Machine order). On a raise,
+    // arm the post-commit drain of this machine's idle runners.
+    if snapshot_provided_limit {
+        if let Some(report) = limit {
+            let conn = TxConn::new(&mut *tx);
+            let runner_row = pidash_db::entity::runner::Entity::find_by_id(runner_id)
+                .one(&conn)
+                .await
+                .map_err(|_| server_error())?;
+            if let Some(row) = runner_row {
+                if let Some(machine_id) = row.dev_machine_id {
+                    let conn = TxConn::new(&mut *tx);
+                    match pidash_services::runner_sessions::persist_reported_limit(
+                        &conn, machine_id, report,
+                    )
+                    .await
+                    {
+                        Ok(Some(change)) if change.previous.is_none_or(|p| p < change.updated) => {
+                            *limit_raise = Some(LimitRaise { pod_id: row.pod_id });
+                        }
+                        Ok(_) => {}
+                        Err(_) => return Err(server_error()),
+                    }
+                }
+            }
+        }
+    }
     Ok(status_entry.clone())
 }
 
@@ -1665,8 +1709,13 @@ pub async fn runner_session_poll(
         drain_effects: Vec::new(),
     };
     // T2: apply poll capacity snapshot (holds Runner lock, then Run) before reaper
+    // NEWPIDASH-398: also arms the post-commit re-drain when the
+    // snapshot raises the machine's persisted limit.
+    let mut limit_raise: Option<LimitRaise> = None;
     let effective_status = if !status_entry.is_empty() {
-        match apply_capacity_snapshot(&mut tx, runner_id, sid, &status_entry).await {
+        match apply_capacity_snapshot(&mut tx, runner_id, sid, &status_entry, &mut limit_raise)
+            .await
+        {
             Ok(entry) => entry,
             Err(response) => return response,
         }
@@ -1706,6 +1755,36 @@ pub async fn runner_session_poll(
         if fire_session_effect(&pool, &state, effect, terminal_created_by)
             .await
             .is_err()
+        {
+            return server_error();
+        }
+    }
+    // NEWPIDASH-398: the snapshot raised the machine's limit — drain
+    // this runner and its pod again so server-queued runs are picked
+    // up without waiting for an unrelated trigger.
+    if let Some(raise) = limit_raise {
+        use session_kernel::SessionEffect;
+        if fire_session_effect(
+            &pool,
+            &state,
+            SessionEffect::DrainRunner { runner_id },
+            terminal_created_by,
+        )
+        .await
+        .is_err()
+        {
+            return server_error();
+        }
+        if fire_session_effect(
+            &pool,
+            &state,
+            SessionEffect::DrainPod {
+                pod_id: raise.pod_id,
+            },
+            terminal_created_by,
+        )
+        .await
+        .is_err()
         {
             return server_error();
         }

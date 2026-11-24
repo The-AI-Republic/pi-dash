@@ -27,6 +27,9 @@ pub struct Model {
     pub merged_into_id: Option<Uuid>,
     #[sea_orm(column_type = "JsonBinary")]
     pub merge_result: Json,
+    /// Last concurrent-issue-run limit the daemon reported (NEWPIDASH-398).
+    /// `None` means never reported; the matcher assigns as before.
+    pub run_concurrency_limit: Option<i32>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -208,8 +208,9 @@ pub mod dev_machine {
     pub const ORDERING: &[&str] = &["-last_seen_at", "-created_at"];
     /// Columns in Django field-definition order (`:338-364` plus the
     /// engine-pause trio, migration `0034_engine_dispatch_fields`, #2903,
-    /// and the #2910 machine-identity six, migration
-    /// `0036_engine_credential_machine_identity`).
+    /// the #2910 machine-identity six, migration
+    /// `0036_engine_credential_machine_identity`, and the NEWPIDASH-398
+    /// `run_concurrency_limit`, migration `0045_dev_machine_run_concurrency_limit`).
     pub const COLUMNS: &[&str] = &[
         "id",
         "owner_id",
@@ -226,6 +227,7 @@ pub mod dev_machine {
         "engine_state_reported_at",
         "merged_into_id",
         "merge_result",
+        "run_concurrency_limit",
         "last_seen_at",
         "revoked_at",
         "created_at",
@@ -248,6 +250,7 @@ pub mod dev_machine {
         None,           // engine_state_reported_at
         None,           // merged_into_id (SET_NULL)
         Some("{}"),     // merge_result (JSONField default=dict)
+        None,           // run_concurrency_limit (NEWPIDASH-398; NULL = never reported)
         None,           // last_seen_at
         None,           // revoked_at
         None,           // created_at (auto_now_add)

@@ -3120,6 +3120,7 @@ mod tests {
             engine_state_reported_at: None,
             merged_into_id: None,
             merge_result: serde_json::json!({}),
+            run_concurrency_limit: None,
         }
     }
 
