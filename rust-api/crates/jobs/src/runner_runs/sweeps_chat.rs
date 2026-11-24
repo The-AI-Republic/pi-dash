@@ -2266,6 +2266,35 @@ mod tests {
     }
 
     #[test]
+    fn assigned_never_started_reaps_timestamp_less_capacity_wait() {
+        // NEWPIDASH-399: both reap arms (assigned-never-started and
+        // pre-start-unconfirmed) gate on this wrapper. A waiting report
+        // with a matching token but no `reported_at` is not fresh, so a
+        // past-cutoff run carrying one is reclaimed like a run with a
+        // stale report; only a fresh timestamped report protects it.
+        let now = utc(2026, 11, 14, 12, 0, 0);
+        let tok = Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap();
+        let tok_str = tok.to_string();
+        let no_time = json!({
+            "phase": "waiting_for_capacity",
+            "assignment_token": tok_str,
+        });
+        assert!(!is_fresh_capacity_wait(&no_time, Some(tok), now));
+        let stale = json!({
+            "phase": "waiting_for_capacity",
+            "assignment_token": tok_str,
+            "reported_at": "2026-11-14T11:50:00+00:00",
+        });
+        assert!(!is_fresh_capacity_wait(&stale, Some(tok), now));
+        let fresh = json!({
+            "phase": "waiting_for_capacity",
+            "assignment_token": tok_str,
+            "reported_at": "2026-11-14T11:59:30+00:00",
+        });
+        assert!(is_fresh_capacity_wait(&fresh, Some(tok), now));
+    }
+
+    #[test]
     fn pre_start_unconfirmed_select_shape() {
         // NEWPIDASH-251: never-observed, runner-bound, per-status bound.
         let worktree = utc(2026, 11, 14, 12, 0, 0);
