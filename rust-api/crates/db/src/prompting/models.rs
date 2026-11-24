@@ -2,8 +2,8 @@
 //!
 //! Ports `apps/api/pi_dash/prompting/models.py:1-140` (`PromptTemplate`
 //! `:19-62`, `PromptSectionOverride` `:65-140`), adopting the
-//! Django-owned schema column-for-column. Migrations are not ported;
-//! Django stays schema owner until switchover. Queries stay in the
+//! shared schema column-for-column. Migrations are not ported here;
+//! the Rust migrator owns the schema (NEWPIDASH-380). Queries stay in the
 //! compose/seed layers; this module records column lists, defaults,
 //! constraints, and the `__str__`/property derivations.
 //!

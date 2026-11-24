@@ -241,6 +241,18 @@ jobs:
           done
           echo "Django upstream did not start:"; tail -n 50 /tmp/django-bind-redirect-upstream.log; exit 1
 
+      - name: Apply Rust migrations (release migrator)
+        working-directory: rust-api
+        run: |
+          # NEWPIDASH-380: Rust services gate startup on the read-only
+          # `migrate check` and never run DDL, so the release migrator
+          # runs first: `up` imports the Django baseline without
+          # rerunning it, then applies the Rust-only migrations on the
+          # same database the service below uses (the owner URL may
+          # carry different credentials but must target the same DB).
+          export MIGRATOR_DATABASE_URL="$DATABASE_URL"
+          ./target/debug/pidash-api migrate up
+
       - name: Start Rust serve (redirect-stub env)
         working-directory: rust-api
         run: |

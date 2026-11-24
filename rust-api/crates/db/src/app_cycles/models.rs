@@ -3,8 +3,8 @@
 //! Ports `apps/api/pi_dash/db/models/cycle.py:1-157` (`Cycle`,
 //! `CycleIssue`, `CycleUserProperties` plus `get_default_filters`,
 //! `get_default_display_filters`, `get_default_display_properties`),
-//! adopting the Django-owned schema column-for-column; migrations are not
-//! ported — Django stays schema owner until switchover.
+//! adopting the shared schema column-for-column; migrations are not
+//! ported here — the Rust migrator owns the schema (NEWPIDASH-380).
 //!
 //! Column order in each `*_COLUMNS` const follows the fixture F-C27-02
 //! (`rust-api/fixtures/app_cycles/models/columns.json`): the 8 inherited

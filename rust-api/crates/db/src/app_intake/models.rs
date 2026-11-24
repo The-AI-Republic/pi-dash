@@ -2,8 +2,7 @@
 //!
 //! Ports `apps/api/pi_dash/db/models/intake.py:1-84` (`Intake`,
 //! `SourceType`, `IntakeIssueStatus`, `IntakeIssue`), adopting the
-//! Django-owned schema column-for-column; migrations are not ported —
-//! Django stays schema owner until switchover.
+//! shared schema column-for-column; migrations are not ported here — the Rust migrator owns the schema (NEWPIDASH-380).
 //!
 //! Column order in each `*_COLUMNS` const follows the Django `_meta` field
 //! order recorded in `rust-api/fixtures/app_intake/models/*.columns.json`

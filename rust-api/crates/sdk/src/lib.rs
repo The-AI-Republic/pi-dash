@@ -957,6 +957,30 @@ pub mod db {
     pub use pidash_db::DbConfig;
 }
 
+/// Native OSS schema migrator (NEWPIDASH-380): the migration set and the
+/// migrator entry points the cloud binary builds its combined migrator from
+/// (OSS set plus the cloud apps' migrations, like INSTALLED_APPS). The
+/// combined-migrator builder itself is owned by the private follow-up; it
+/// composes these exports rather than copying them.
+pub mod migration {
+    pub use pidash_migration::check;
+    pub use pidash_migration::run_check;
+    pub use pidash_migration::run_status;
+    pub use pidash_migration::run_up;
+    pub use pidash_migration::same_database;
+    pub use pidash_migration::select_read_url;
+    pub use pidash_migration::select_up_url;
+    pub use pidash_migration::status;
+    pub use pidash_migration::up;
+    pub use pidash_migration::MigrationError;
+    pub use pidash_migration::Status;
+    pub use pidash_migration::BASELINE;
+    pub use pidash_migration::FORWARDS;
+    pub use pidash_migration::HISTORY_TABLE;
+    pub use pidash_migration::LOCK_ID;
+    pub use pidash_migration::NATIVE;
+}
+
 /// OpenHub assistant-model catalog (NEWPIDASH-302): the enabled
 /// `openhub` rows and the default, read from the OSS-owned
 /// `rust_runner_model_catalog` table. The overlay (cloud) calls these

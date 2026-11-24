@@ -2,15 +2,16 @@
 
 //! Private migration directory convention (F-10).
 //!
-//! Django stays schema owner for its own tables until switchover, and the
-//! OSS Rust backend owns only its `rust_*` runtime tables (created at
-//! worker boot by `pidash-jobs`, never through a Django migration). The
-//! private crate's tables follow the same rule one directory over:
+//! The Rust migrator owns the schema (NEWPIDASH-380): Django tables come
+//! from the baseline snapshot plus forward ports, and the `rust_*`
+//! runtime tables from the `m000002_ensure_schema` native migration —
+//! never from serve/worker boot, and never through a Django migration.
+//! The private crate's tables follow the same rule one directory over:
 //!
 //! - Private SQL migrations live in the private crate at
 //!   [`PRIVATE_MIGRATIONS_DIR`] (`rust-api/private/migrations/`), one
 //!   `NNN_name.sql` file per migration, applied in lexical order after the
-//!   OSS baseline (`ensure_schema`).
+//!   OSS baseline (the `pidash-migration` baseline).
 //! - Private tables are prefixed [`PRIVATE_TABLE_PREFIX`] (`private_`).
 //!   A private migration never creates, alters or drops a table outside
 //!   that prefix — Django-owned tables and OSS `rust_*` tables are out of

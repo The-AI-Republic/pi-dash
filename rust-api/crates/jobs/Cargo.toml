@@ -8,6 +8,9 @@ pidash-types = { path = "../types" }
 # OVL-04 (PIDASHCONV-1542): canonical parity plumbing. Leaf crate, no cycle.
 pidash-compat = { path = "../compat" }
 pidash-db = { path = "../db" }
+# NEWPIDASH-380: queue/schedule DDL moved to pidash-migration (re-exported
+# from queue.rs/schedule.rs, so no cycle: migration depends only on db).
+pidash-migration = { path = "../migration" }
 # Version-task flows call the D-09 decision layer (api-crate precedent).
 pidash-services = { path = "../services" }
 # Expiry-task S3 deletes (PIDASHCONV-858): the one shared SigV4 signer

@@ -2,8 +2,7 @@
 //!
 //! Ports `apps/api/pi_dash/db/models/view.py` (`IssueView`) and
 //! `apps/api/pi_dash/db/models/favorite.py` (`UserFavorite`), adopting the
-//! Django-owned schema column-for-column; migrations are not ported —
-//! Django stays schema owner until switchover.
+//! shared schema column-for-column; migrations are not ported here — the Rust migrator owns the schema (NEWPIDASH-380).
 //!
 //! * [`models`] — `IssueView`, `UserFavorite` (struct + column/constraint
 //!   mapping only) plus the `Issue` / `IssueComment` columns this domain

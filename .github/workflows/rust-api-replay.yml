@@ -211,6 +211,18 @@ jobs:
           done
           curl -sf http://127.0.0.1:8002/ > /dev/null
 
+      - name: Apply Rust migrations to the replay_rust database
+        working-directory: rust-api
+        run: |
+          # NEWPIDASH-380: the Rust server below gates startup on the
+          # read-only `migrate check` and never runs DDL, so the release
+          # migrator runs first against the replay_rust database (the
+          # same DB the server uses; Django already migrated it, so `up`
+          # imports the baseline without rerunning it, then applies the
+          # Rust-only migrations).
+          export MIGRATOR_DATABASE_URL="$REPLAY_RUST_DB"
+          ./target/debug/pidash-api migrate up
+
       - name: Start Rust (all flags on, :8080, replay_rust DB)
         working-directory: rust-api
         run: |

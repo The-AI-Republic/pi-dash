@@ -3,9 +3,8 @@
 //! Ports `apps/api/pi_dash/db/models/webhook.py:34-89` (`Webhook`,
 //! `WebhookLog`, `ProjectWebhook`) and
 //! `apps/api/pi_dash/db/models/integration/base.py:16-60` (`Integration`,
-//! `WorkspaceIntegration`) for the db layer, adopting the Django-owned
-//! schema column-for-column. Migrations are not ported; Django stays schema
-//! owner until switchover.
+//! `WorkspaceIntegration`) for the db layer, adopting the shared
+//! schema column-for-column. Migrations are not ported here; the Rust migrator owns the schema (NEWPIDASH-380).
 //!
 //! * [`models_webhook`] — the 5 tables (PIDASHCONV-380). `ProjectWebhook`
 //!   has no owning sub-issue (it is absent from FX-MDL-01's 15 models and

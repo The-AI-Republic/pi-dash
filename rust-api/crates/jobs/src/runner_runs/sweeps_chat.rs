@@ -2818,7 +2818,7 @@ mod tests {
             .connect(&url)
             .await
             .expect("connect scratch database");
-        crate::queue::ensure_schema(&pool)
+        crate::queue::ensure_schema(&pidash_db::sea_orm_connection(&pool))
             .await
             .expect("ensure queue schema");
         let seams = Arc::new(RecordingSeams {

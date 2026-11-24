@@ -21,9 +21,10 @@
 //! [`STALE_CLAIM_LEASE_SECS`] by [`reclaim_stale_running`] (worker boot
 //! plus the scheduler loop), so no row sits `running` forever.
 //!
-//! The tables are owned by the Rust backend and created at worker boot by
-//! [`ensure_schema`]. Django stays schema owner for its own tables until
-//! switchover — no Django migration is touched.
+//! The tables are owned by the Rust backend and created by the Rust
+//! migrator (`pidash-migration::ensure`, native migration
+//! `m000002_ensure_schema`) — never at worker boot. The Rust migrator
+//! owns the schema; no Django migration is touched.
 //!
 //! Everything but the DDL and the notify-carrying enqueue goes through
 //! sea-query builders (`DbBackend::Postgres.build` over
@@ -209,115 +210,14 @@ pub fn should_retry(attempts: i32, max_retries: i32) -> bool {
     attempts < max_retries
 }
 
-/// Advisory-lock key serializing the queue DDL at boot
-/// (NEWPIDASH-156). Distinct from
-/// [`crate::scheduler::BEAT_LOCK_KEY`] (the scheduler singleton) and
-/// from the per-project keys derived in
-/// `pidash_db::entity::issue_hooks`: the queue DDL lock is global to
-/// the database, not per project.
-pub const SCHEMA_LOCK_KEY: i64 = 474_002_156_156_156;
-
-/// Statement taking the transaction-scoped [`SCHEMA_LOCK_KEY`] lock.
-/// The lock is held until the DDL transaction commits, so concurrent
-/// first-boots run the `CREATE TABLE IF NOT EXISTS` statements one at
-/// a time (NEWPIDASH-156).
-pub fn schema_lock_sql() -> &'static str {
-    "SELECT pg_advisory_xact_lock($1)"
-}
-
-/// DDL for the queue table. Idempotent: safe to run on every worker boot.
-pub fn ensure_schema_sql() -> &'static str {
-    "CREATE TABLE IF NOT EXISTS rust_job_queue (\
-        id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,\
-        celery_id TEXT NOT NULL UNIQUE,\
-        task TEXT NOT NULL,\
-        args JSONB NOT NULL DEFAULT '[]',\
-        kwargs JSONB NOT NULL DEFAULT '{}',\
-        queue TEXT NOT NULL DEFAULT 'celery',\
-        status TEXT NOT NULL DEFAULT 'queued',\
-        attempts INTEGER NOT NULL DEFAULT 0,\
-        max_retries INTEGER NOT NULL DEFAULT 3,\
-        visible_at TIMESTAMPTZ NOT NULL DEFAULT now(),\
-        claimed_at TIMESTAMPTZ,\
-        claimed_by TEXT,\
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),\
-        last_error TEXT\
-    )"
-}
-
-/// DDL for the claim index. Separate statement from [`ensure_schema_sql`]:
-/// Postgres rejects multiple commands in one prepared statement, so
-/// [`ensure_schema`] executes each DDL on its own.
-/// Phase 2 (D3, 2.4): the claim filters on `(queue, status, visible_at)`, so
-/// the index leads with `queue` — the worker for `cloud_agent` claims only
-/// that label, and with the old `(status, visible_at, id)` index a
-/// `celery`-saturated table would scan every `celery` row for every
-/// `cloud_agent` claim.
-/// The name is `_queue_idx` so `CREATE INDEX IF NOT EXISTS` actually
-/// creates it on databases where the old `rust_job_queue_claim_idx`
-/// (`status,visible_at,id`) already exists — reusing the old name would
-/// be a no-op there (Finding 4 review).
-pub fn ensure_claim_index_sql() -> &'static str {
-    "CREATE INDEX IF NOT EXISTS rust_job_queue_claim_queue_idx \
-        ON rust_job_queue (queue, status, visible_at, id)"
-}
-
-/// Legacy queue-agnostic claim index (`status,visible_at,id`). New boots
-/// create the queue-leading index above under its new name; once that
-/// exists the old index is redundant (the new index leads with `queue`
-/// and serves all claim shapes), so `ensure_schema` drops it. Kept here
-/// for the contract-test harness which still creates only the legacy
-/// shape — the harness must be updated to create the queue-leading
-/// index instead (see `contract-tests/_harness/rust_queue.py`).
-pub fn ensure_claim_index_legacy_sql() -> &'static str {
-    "CREATE INDEX IF NOT EXISTS rust_job_queue_claim_idx \
-        ON rust_job_queue (status, visible_at, id)"
-}
-
-/// Drop the legacy queue-agnostic index once the queue-leading one exists.
-/// The new `(queue, status, visible_at, id)` index covers every claim
-/// shape, so the legacy index would otherwise be maintained on every
-/// write forever (Finding 7 review).
-pub fn drop_legacy_claim_index_sql() -> &'static str {
-    "DROP INDEX IF EXISTS rust_job_queue_claim_idx"
-}
-
-/// Create both queue tables. Runs at worker boot, never from requests.
-///
-/// The three DDL statements run inside one transaction under the
-/// [`SCHEMA_LOCK_KEY`] advisory lock (NEWPIDASH-156): Postgres does
-/// not make `CREATE TABLE IF NOT EXISTS` safe under concurrency — two
-/// sessions that both see no table race on the catalogue insert and
-/// the loser fails with 23505 (`pg_class_relname_nsp_index`) or 42P07
-/// (`duplicate_table`). The lock serializes concurrent first-boots
-/// (compose starting api + worker, several api replicas), so each
-/// later booter runs its `IF NOT EXISTS` statements only after the
-/// winner has committed and is a no-op. Covers the schedule table
-/// too: its DDL is the third statement below.
-pub async fn ensure_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    // raw-sql: advisory xact locks have no SeaORM/sea-query builder form (orm-migration.md §6); the key is bound, never interpolated.
-    sqlx::query(schema_lock_sql())
-        .bind(SCHEMA_LOCK_KEY)
-        .execute(&mut *tx)
-        .await?;
-    // raw-sql: Rust-owned DDL (CREATE TABLE/INDEX IF NOT EXISTS) is an allowed exception per orm-migration.md §6: sea-query cannot express DDL, and the queue table has no entity by design.
-    sqlx::query(ensure_schema_sql()).execute(&mut *tx).await?;
-    // raw-sql: Rust-owned DDL (CREATE TABLE/INDEX IF NOT EXISTS) is an allowed exception per orm-migration.md §6: sea-query cannot express DDL, and the queue table has no entity by design.
-    sqlx::query(ensure_claim_index_sql())
-        .execute(&mut *tx)
-        .await?;
-    // raw-sql: DROP INDEX has no SeaORM builder (orm-migration.md §6); legacy index is redundant once queue-leading index exists.
-    sqlx::query(drop_legacy_claim_index_sql())
-        .execute(&mut *tx)
-        .await?;
-    // raw-sql: Rust-owned DDL passthrough (schedule schema) is an allowed exception per orm-migration.md §6: sea-query cannot express DDL, and the queue table has no entity by design.
-    sqlx::query(crate::schedule::ensure_schedule_schema_sql())
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    Ok(())
-}
+/// Boot-time queue/schema DDL now lives in the migrator (NEWPIDASH-380):
+/// `pidash-migration::ensure` owns it, the `m000002_ensure_schema` native
+/// migration runs it, and services run only `migrate check`. Re-exported
+/// here so existing callers (tests, harness) keep compiling.
+pub use pidash_migration::ensure::{
+    drop_legacy_claim_index_sql, ensure_claim_index_legacy_sql, ensure_claim_index_sql,
+    ensure_schema, ensure_schema_sql, schema_lock_sql, SCHEMA_LOCK_KEY,
+};
 
 fn enqueue_sql() -> &'static str {
     // Push-wake (PIDASHCONV-476): the INSERT carries a `pg_notify` side
@@ -955,7 +855,9 @@ mod tests {
             .connect(&url)
             .await
             .expect("connect scratch database");
-        ensure_schema(&pool).await.expect("ensure queue schema");
+        ensure_schema(&pidash_db::sea_orm_connection(&pool))
+            .await
+            .expect("ensure queue schema");
         let tag = uuid::Uuid::new_v4();
         let queue = format!("test-reclaim-fn-{tag}");
         async fn seed(
@@ -1122,7 +1024,7 @@ mod tests {
                 let barrier = barrier.clone();
                 tasks.push(tokio::spawn(async move {
                     barrier.wait().await;
-                    ensure_schema(&pool).await
+                    ensure_schema(&pidash_db::sea_orm_connection(&pool)).await
                 }));
             }
             let mut failures = Vec::new();

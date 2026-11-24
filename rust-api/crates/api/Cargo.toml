@@ -10,6 +10,9 @@ pidash-types = { path = "../types" }
 pidash-compat = { path = "../compat" }
 pidash-db = { path = "../db" }
 pidash-auth = { path = "../auth" }
+# NEWPIDASH-380: the native migrator owns the schema; startup runs only the
+# read-only `migrate check`, and the catalog DDL lives in pidash-migration.
+pidash-migration = { path = "../migration" }
 pidash-services = { path = "../services" }
 # Space public-API handlers (D-02): transactional `issue_activity`
 # (+ `soft_delete_related_objects`) enqueue into `rust_job_queue`

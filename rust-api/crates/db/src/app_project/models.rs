@@ -4,8 +4,7 @@
 //!
 //! Ports the column lists, defaults, constraints, manager scopes, and
 //! save-rule helpers for every table the D-25 app views touch, adopting the
-//! Django-owned schema column-for-column. Migrations are not ported; Django
-//! stays schema owner until switchover.
+//! shared schema column-for-column. Migrations are not ported here; the Rust migrator owns the schema (NEWPIDASH-380).
 //!
 //! Sources (`apps/api/`): `pi_dash/db/models/project.py:25-495` (`ROLE`
 //! L28-31, `ProjectNetwork` L34-40, `Project` L72-301, `ProjectBaseModel`

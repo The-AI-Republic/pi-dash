@@ -6,8 +6,8 @@
 //! guards, and `CycleUserProperties` scoping for the three tables in
 //! `apps/api/pi_dash/db/models/cycle.py:1-157` (`Cycle` `:60-101`,
 //! `CycleIssue` `:104-127`, `CycleUserProperties` `:130-157`), adopting
-//! the Django-owned schema column-for-column. Migrations are not ported;
-//! Django stays schema owner until switchover.
+//! the shared schema column-for-column. Migrations are not ported here;
+//! the Rust migrator owns the schema (NEWPIDASH-380).
 //!
 //! Fixture (FX-CYCMOD-01):
 //! `rust-api/fixtures/v1_cycles_modules/models/cycle.columns.json`.

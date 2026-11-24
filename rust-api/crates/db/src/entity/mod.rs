@@ -2,7 +2,9 @@
 //! since the raw-SQL migration, so reads and writes can all move onto them).
 //!
 //! Generated with `sea-orm-cli generate entity` (1.1.20) against a database
-//! migrated by `apps/api` at OSS `main`. The first 20 tables were generated at
+//! migrated to the OSS `main` leaf — by Django `manage.py migrate`, or by
+//! `pidash-api migrate up` (NEWPIDASH-380); both produce the same schema.
+//! The first 20 tables were generated at
 //! Django `0a6fb8eca`; the agent-run set and every other table on 2026-11-04
 //! from a database migrated by the `v2026.11.03` release (`runner.0033`).
 //! Every base table in `public` is covered except Django's own (`django_*`,
@@ -100,7 +102,7 @@
 //! * Same for `pub mod comment_hooks;`: the generator-emitted empty impls
 //!   in `issue_comments.rs` and `descriptions.rs` are deleted again.
 //!
-//! Django stays the schema owner: after a Django sync the entities are
+//! The Rust migrator owns the schema (NEWPIDASH-380): after a Django sync the entities are
 //! regenerated and the `parity` test proves they still match
 //! `information_schema`.
 //!

@@ -6,8 +6,8 @@
 //! `:185-195` (`WorkspaceBaseModel`), `:372-517` (`WorkspaceUserProperties`,
 //! `WorkspaceUserLink`, `WorkspaceHomePreference`, `WorkspaceUserPreference`)
 //! and `apps/api/pi_dash/db/models/recent_visit.py:13-39` (`EntityNameEnum`,
-//! `UserRecentVisit`), adopting the Django-owned schema column-for-column;
-//! migrations are not ported — Django stays schema owner. Shape follows the
+//! `UserRecentVisit`), adopting the shared schema column-for-column;
+//! migrations are not ported here — the Rust migrator owns the schema (NEWPIDASH-380). Shape follows the
 //! merged `crate::app_modules::models` precedent: one `pub mod` per table
 //! (`TABLE`, `ORDERING`, `VERBOSE_NAME(_PLURAL)`, `COLUMNS`, field consts,
 //! `UNIQUE_*`, FK `ON_DELETE` + `RELATED_NAME`, `LIVE_SCOPE_WHERE`, a typed

@@ -2,9 +2,8 @@
 //!
 //! Ports `apps/api/pi_dash/db/models/page.py:1-182`: `Page` (`:23-77`),
 //! `PageLog` (`:80-117`), `PageLabel` (`:120-132`), `ProjectPage`
-//! (`:135-155`) and `PageVersion` (`:158-182`), adopting the Django-owned
-//! schema column-for-column; migrations are not ported — Django stays
-//! schema owner until switchover.
+//! (`:135-155`) and `PageVersion` (`:158-182`), adopting the shared
+//! schema column-for-column; migrations are not ported here — the Rust migrator owns the schema (NEWPIDASH-380).
 //!
 //! Column order in each `*_COLUMNS` const follows the Django `_meta` field
 //! order: the `id`-first base/audit prefix (`BaseModel.id`

@@ -4,8 +4,7 @@
 //! `Issue`), `:445-469` (`IssueAssignee`), `:669-681` (`IssueLabel`),
 //! `db/models/label.py:11-57` (`Label`) and
 //! `db/models/project.py:464-495` (`ProjectUserProperty`), adopting the
-//! Django-owned schema column-for-column; migrations are not ported —
-//! Django stays schema owner until switchover. Fixture source of truth:
+//! shared schema column-for-column; migrations are not ported here — the Rust migrator owns the schema (NEWPIDASH-380). Fixture source of truth:
 //! `rust-api/fixtures/app_issues/models/FX-ISS-07.core.json` (recorded by
 //! PIDASHCONV-637); the `#[cfg(test)]` suite replays it section by
 //! section.

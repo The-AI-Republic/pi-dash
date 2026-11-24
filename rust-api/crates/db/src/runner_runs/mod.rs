@@ -2,9 +2,8 @@
 //!
 //! Ports the run/chat/dedupe models in
 //! `apps/api/pi_dash/runner/models.py` plus the generated-column read
-//! semantics of `runner/fields.py:21-61`, adopting the Django-owned
-//! schema column-for-column; migrations are not ported — Django stays
-//! schema owner until switchover.
+//! semantics of `runner/fields.py:21-61`, adopting the shared
+//! schema column-for-column; migrations are not ported here — the Rust migrator owns the schema (NEWPIDASH-380).
 //!
 //! * [`pod`] — `Pod` (`models.py:52-177`): manager soft-delete scope,
 //!   `clean`/`save` workspace denorm + autofill, `default_for_project_id`

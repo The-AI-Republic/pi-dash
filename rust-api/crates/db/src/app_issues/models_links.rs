@@ -3,9 +3,9 @@
 //! Ports `apps/api/pi_dash/db/models/issue.py:372-421`
 //! (`IssueRelationChoices`, `IssueRelation`) and `:471-485` (`IssueLink`),
 //! `db/models/integration/git.py:224-272` (`GitCodeReviewLink`) and
-//! `db/models/asset.py:28-100` (`FileAsset`), adopting the Django-owned
-//! schema column-for-column; migrations are not ported — Django stays
-//! schema owner until switchover. Fixture source of truth:
+//! `db/models/asset.py:28-100` (`FileAsset`), adopting the shared
+//! schema column-for-column; migrations are not ported here — the Rust migrator owns the schema (NEWPIDASH-380).
+//! Fixture source of truth:
 //! `rust-api/fixtures/app_issues/models/FX-ISS-09.links.json` (recorded by
 //! PIDASHCONV-637); the `#[cfg(test)]` suite replays it section by
 //! section.

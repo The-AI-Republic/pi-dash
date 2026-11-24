@@ -1,10 +1,12 @@
 #![forbid(unsafe_code)]
 
-//! The `pidash-api` binary: one binary, two modes.
+//! The `pidash-api` binary: serve and worker modes, a Django ops-command
+//! port, inventory printers, and the native schema migrator.
 //!
 //! - `pidash-api serve` runs the axum HTTP server.
 //! - `pidash-api worker` runs the job worker loop plus the beat-equivalent
 //!   scheduler loop (F-09: Postgres queue, Celery-format forwarding).
+//! - `pidash-api migrate` owns the database schema (NEWPIDASH-380).
 //!
 //! This `main` is deliberately thin: `serve` and `worker` are thin
 //! callers of [`ServeBuilder`](pidash_api::startup::ServeBuilder) and
@@ -55,6 +57,11 @@ enum Mode {
         #[command(subcommand)]
         command: pidash_ops::OpsCommand,
     },
+    /// Manage the database schema (native migrator; owns the schema).
+    Migrate {
+        #[command(subcommand)]
+        command: MigrateCommand,
+    },
     /// Print the route inventory (parity tooling, PIDASHCONV-820).
     Routes {
         /// Emit the machine-readable inventory as JSON.
@@ -88,6 +95,68 @@ async fn worker(concurrency: u32, queue: String, no_scheduler: bool) -> MainResu
         .await
 }
 
+/// Native schema-migration commands (NEWPIDASH-380). Top-level, not under
+/// `ops`: `up` is the release/install step (replaces the Django migrator),
+/// `status` reports as JSON, and `check` is the read-only fail-fast gate the
+/// entrypoints run before services start (replaces `ops wait_for_migrations`
+/// and, once NEWPIDASH-378 lands, its interim check).
+#[derive(Debug, Subcommand)]
+enum MigrateCommand {
+    /// Apply pending migrations with MIGRATOR_DATABASE_URL; forward-only.
+    Up,
+    /// Print missing baseline and pending migrations as JSON; read-only.
+    Status,
+    /// Exit unsuccessfully when required migrations are missing; read-only.
+    Check,
+}
+
+fn nonempty_env(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+async fn migrate(command: MigrateCommand) -> MainResult {
+    let runtime_url = nonempty_env("DATABASE_URL");
+    let migrator_url = nonempty_env("MIGRATOR_DATABASE_URL");
+    match command {
+        MigrateCommand::Up => {
+            let url =
+                pidash_migration::select_up_url(migrator_url.as_deref(), runtime_url.as_deref())?;
+            let status = pidash_migration::run_up(&url).await?;
+            println!("{}", serde_json::to_string_pretty(&status)?);
+            Ok(())
+        }
+        MigrateCommand::Status => {
+            let url =
+                pidash_migration::select_read_url(runtime_url.as_deref(), migrator_url.as_deref())?;
+            let status = pidash_migration::run_status(&url).await?;
+            println!("{}", serde_json::to_string_pretty(&status)?);
+            Ok(())
+        }
+        MigrateCommand::Check => {
+            let url =
+                pidash_migration::select_read_url(runtime_url.as_deref(), migrator_url.as_deref())?;
+            // Gated here rather than via run_check so the JSON status is
+            // still printed before failing; the message mirrors
+            // Status::require_ready verbatim (kept in sync by hand).
+            let status = pidash_migration::run_status(&url).await?;
+            println!("{}", serde_json::to_string_pretty(&status)?);
+            if !status.ready() {
+                let mut missing = status.baseline_missing.clone();
+                missing.extend(status.pending.clone());
+                return Err(format!(
+                    "Database migrations are pending: {}. Run the release migrator before starting the API.",
+                    missing.join(", ")
+                )
+                .into());
+            }
+            Ok(())
+        }
+    }
+}
+
 type MainResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 fn main() -> MainResult {
@@ -104,7 +173,7 @@ fn main() -> MainResult {
     // carries the inventory (JSON with --json) and nothing else.
     if !matches!(
         cli.mode,
-        Mode::Ops { .. } | Mode::Routes { .. } | Mode::Jobs { .. }
+        Mode::Ops { .. } | Mode::Routes { .. } | Mode::Jobs { .. } | Mode::Migrate { .. }
     ) {
         tracing_subscriber::fmt()
             .with_env_filter(
@@ -124,6 +193,7 @@ fn main() -> MainResult {
             no_scheduler,
         } => runtime.block_on(worker(concurrency, queue, no_scheduler)),
         Mode::Ops { command } => runtime.block_on(pidash_ops::run(command)),
+        Mode::Migrate { command } => runtime.block_on(migrate(command)),
         Mode::Routes { json } => {
             if json {
                 println!("{}", inventory::routes_json());
