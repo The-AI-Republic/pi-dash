@@ -2042,6 +2042,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "core-foundation 0.9.4",
  "crossterm",
  "directories",
  "fs2",
@@ -2055,6 +2056,7 @@ dependencies = [
  "ratatui",
  "reqwest 0.12.28",
  "rusqlite",
+ "security-framework-sys",
  "semver",
  "serde",
  "serde_json",
@@ -2069,6 +2071,8 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "uuid",
+ "windows-sys 0.59.0",
+ "zbus",
 ]
 
 [[package]]
