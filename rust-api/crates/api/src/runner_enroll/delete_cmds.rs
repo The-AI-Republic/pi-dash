@@ -2270,8 +2270,8 @@ mod tests {
         theirs.sort_unstable();
         // NEWPIDASH-396: Antigravity is new-system-only — Django's
         // allow-list (frozen) has no such agent. Parity holds for every
-        // agent Django knows; see DIFF-63 in
-        // .ai_design/validation/differences.md (DIFF-65).
+        // agent Django knows; see DIFF-65 in
+        // .ai_design/validation/differences.md.
         let mut ours_without_new = ours.clone();
         ours_without_new.retain(|agent| *agent != "antigravity");
         assert_eq!(ours_without_new, theirs);

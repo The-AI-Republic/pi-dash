@@ -2518,6 +2518,11 @@ impl RunnerLoop {
     ) -> Option<FailureReason> {
         match agent_kind {
             AgentKind::OpenClaw | AgentKind::PidashAgent => None,
+            // NEWPIDASH-396: Antigravity never blocks on a guess until
+            // NEWPIDASH-397 lands its keychain presence check; the
+            // run-time -32000 safety net still reports expired sign-ins.
+            // Whichever issue lands second reworks this arm.
+            AgentKind::Antigravity => None,
             AgentKind::Codex if managed_codex => None,
             _ if !has_credentials => Some(FailureReason::AgentAuthMissing),
             _ => None,

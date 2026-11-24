@@ -262,9 +262,13 @@ def test_valid_agents_matches_runner_schema():
     # through a remote machine command, so the allowlist leaves it out
     # (.ai_design/built_engine_as_runner/design.md §7, "Pods": turning it
     # on remotely is not in the first version).
-    assert kebab - {"pidash-agent"} == set(_VALID_AGENTS)
+    # ``Antigravity`` (NEWPIDASH-396, DIFF-65) is new-system-only: the
+    # runner's AgentKind has it, Django's frozen allow-list deliberately
+    # does not. Parity holds for every agent Django knows.
+    assert kebab - {"pidash-agent", "antigravity"} == set(_VALID_AGENTS)
     assert "engine" not in _VALID_AGENTS
     assert "pidash-agent" not in _VALID_AGENTS
+    assert "antigravity" not in _VALID_AGENTS
 
 
 @pytest.mark.unit

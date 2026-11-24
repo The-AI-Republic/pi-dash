@@ -321,10 +321,10 @@ pub async fn ensure_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::query(ALTER_AGENT_CHECK_DROP_SQL)
         .execute(pool)
         .await?;
-    // raw-sql: add the wide CHECK; the DROP above makes this idempotent.
     // An already-wide constraint (reboot) fails the ADD with duplicate
     // constraint name — the same name is dropped and re-added every boot,
     // so tolerate that error and continue.
+    // raw-sql: add the wide CHECK; the DROP above makes this idempotent.
     if let Err(err) = sqlx::query(ensure_check_sql()).execute(pool).await {
         let msg = err.to_string();
         if !msg.contains("already exists") && !msg.contains("duplicate") {
