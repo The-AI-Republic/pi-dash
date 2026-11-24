@@ -409,9 +409,12 @@ entity for every OSS table (all but `django_*`, `auth_*` and the overlay's
 `cloud_*`); reads and writes migrate onto them
 (`.ai_design/rust_orm/reads.md`). The entities live at `crates/db/src/entity/`; the
 Rust migrator owns the schema — `pidash-api migrate` (`crates/migration/`)
-applies the baseline snapshot plus forward ports, and records every
-Django-equivalent migration in `django_migrations` while the Django
-fallback is kept.
+applies the baseline snapshot plus forward migrations written natively in
+Rust. The baseline stamps the full `django_migrations` history (so a
+fallback Django still sees a fully migrated database); native forward
+migrations record only the migrator's own history. The one pre-decision
+Django-authored tail change (`runner/0044`, NEWPIDASH-372) is carried as a
+port that imports its Django row.
 
 One pool, two handles (D5): the `DatabaseConnection` wraps the existing
 primary sqlx pool and opens no connections of its own. The binary builds

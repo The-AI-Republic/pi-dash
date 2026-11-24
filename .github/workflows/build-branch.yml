@@ -167,6 +167,84 @@ jobs:
         name: Checkout Files
         uses: actions/checkout@v6
 
+  django_schema_gate:
+    # NEWPIDASH-380 / NEWPIDASH-379 decision part 3: Django follows
+    # passively. The Django (fallback) release must fail when the schema the
+    # Rust migrator builds no longer matches Django's models and migrations:
+    # migrate one empty database with `pidash-api migrate up` and another
+    # with Django `migrate`, then compare them with compare_schema.py (the
+    # same comparison the native migrator parity workflow runs). Any
+    # difference fails this job — the script exits nonzero and prints the
+    # diff — and the backend image plus the release wait on this job.
+    name: Django release schema check
+    runs-on: ubuntu-24.04
+    needs: [branch_build_setup]
+    # Release-only: mismatches are found when the old system is released,
+    # not on every branch build. A skipped job still satisfies `needs`, so
+    # non-release image builds are unaffected.
+    if: ${{ needs.branch_build_setup.outputs.build_release == 'true' }}
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: release-schema-check
+          POSTGRES_DB: pidash_release_schema
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      SECRET_KEY: disposable-release-schema-check
+      WEB_URL: http://127.0.0.1:8123
+      APP_BASE_URL: http://127.0.0.1:8123
+      REDIS_URL: redis://127.0.0.1:6379/9
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: |
+            apps/api/requirements/production.txt
+            rust-api/contract-tests/requirements.txt
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-api
+
+      - name: Install Django dependencies
+        run: pip install -r apps/api/requirements/production.txt
+
+      - name: Install contract-test dependencies
+        working-directory: rust-api/contract-tests
+        run: pip install -r requirements.txt
+
+      - name: Build pidash-api migrator
+        working-directory: rust-api
+        run: cargo build --bin pidash-api
+
+      - name: Migrate the Django reference database
+        working-directory: apps/api
+        env:
+          DATABASE_URL: postgresql://postgres:release-schema-check@localhost:5432/pidash_django_release
+        run: |
+          psql "postgresql://postgres:release-schema-check@localhost:5432/pidash_release_schema" -c "CREATE DATABASE pidash_django_release;"
+          python manage.py migrate --no-input
+
+      - name: Migrate the Rust database
+        env:
+          MIGRATOR_DATABASE_URL: postgresql://postgres:release-schema-check@localhost:5432/pidash_release_schema
+        run: ./rust-api/target/debug/pidash-api migrate up
+
+      - name: Fail the release on any schema difference
+        run: |
+          python rust-api/contract-tests/migrations/compare_schema.py \
+            rust-release "postgresql://postgres:release-schema-check@localhost:5432/pidash_release_schema" \
+            django-release "postgresql://postgres:release-schema-check@localhost:5432/pidash_django_release"
+
   branch_build_push_admin:
     name: Build-Push Admin Docker Image
     runs-on: ubuntu-22.04
@@ -290,7 +368,7 @@ jobs:
   branch_build_push_api:
     name: Build-Push API Server Docker Image
     runs-on: ubuntu-22.04
-    needs: [branch_build_setup]
+    needs: [branch_build_setup, django_schema_gate]
     steps:
       - name: Checkout Files
         uses: actions/checkout@v6
@@ -439,6 +517,7 @@ jobs:
     needs:
       [
         branch_build_setup,
+        django_schema_gate,
         branch_build_push_admin,
         branch_build_push_web,
         branch_build_push_web_new,

@@ -5,15 +5,16 @@
 //! The Rust migrator owns the schema. It lives in OSS under `rust-api/`,
 //! needs no Python, and handles both fresh installs (a baseline snapshot at
 //! the current leaf, stamped with the full `django_migrations` history) and
-//! upgrades (forward ports, one transaction per migration, fail-fast with
-//! the failing migration named).
+//! upgrades (forward migrations written natively in Rust, one transaction
+//! per migration, fail-fast with the failing migration named).
 //!
 //! Modelled on `rust-cloud/crates/cloud-migration` (SeaORM migrator, an
 //! advisory lock, a split owner/app database URL): `up` applies OSS
-//! migrations in dependency order under one advisory lock, records each
-//! Django-equivalent migration in `django_migrations` (so a fallback Django
-//! still sees a fully migrated database), and imports migrations Django
-//! already applied without rerunning them. `status` and `check` are
+//! migrations in dependency order under one advisory lock, stamps the
+//! baseline's Django history into `django_migrations` (so a fallback Django
+//! still sees a fully migrated database), imports migrations Django
+//! already applied without rerunning them, and records native Rust-first
+//! migrations only in its own history table. `status` and `check` are
 //! read-only: they never create tables, never poll, never sleep.
 //!
 //! The cloud binary builds the same migrator from this OSS migration set
@@ -49,15 +50,18 @@ pub const HISTORY_TABLE: &str = "pidash_schema_migrations";
 pub const LOCK_ID: i64 = 0x5049_4441_5348_4D4F;
 
 /// Forward ports after the baseline: `(django_app, django_name)` pairs in
-/// application order. Empty until Part 2 lands the baseline snapshot and the
-/// first forwards (`runner/0044`, the `ensure_schema` upgrades); `up` refuses
-/// databases that are not at the baseline until then.
+/// application order. Only for the pre-decision Django-authored tail —
+/// `runner/0044` (NEWPIDASH-372), the last change authored with a Django
+/// half, which imports its `django_migrations` row on adopted databases and
+/// applies its SQL on fresh ones. New schema changes are written natively
+/// in Rust (`NATIVE` below), never as ports.
 pub const FORWARDS: &[(&str, &str)] = &[];
 
-/// Native-only migrations: no Django `(app, name)` history entry is stamped.
-/// Ordered after the forward ports. The `ensure_schema` upgrade (boot-time
-/// DDL moved into the migration set) is first; runner/0044 follows once
-/// NEWPIDASH-372 merges.
+/// Native-only migrations: no Django `(app, name)` history entry is stamped
+/// (NEWPIDASH-379 decision part 3: Django follows passively; new schema
+/// changes are written as Rust migrations only). Ordered after the forward
+/// ports. First is the `ensure_schema` upgrade (boot-time DDL moved into
+/// the migration set).
 pub const NATIVE: &[(&str, &str)] = &[("rust", "0002_ensure_schema_tables")];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -310,8 +314,8 @@ fn native_version(index: usize) -> String {
 }
 
 /// Stable history name for the snapshot. Never re-cut under a new name:
-/// later schema changes arrive as forward ports, so one name covers every
-/// database the migrator ever bootstrapped.
+/// later schema changes arrive as native forward migrations, so one name
+/// covers every database the migrator ever bootstrapped.
 const BASELINE_VERSION: &str = "m380_baseline_db0183_runner0043";
 
 struct Baseline;
@@ -392,10 +396,12 @@ impl MigrationName for Port {
 #[async_trait::async_trait]
 impl MigrationTrait for Port {
     async fn up(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
-        // Part 2 registers the first forward ports here: each port checks
-        // `django_migrations` first and imports (skips DDL for) migrations
-        // Django already applied, executes its SQL otherwise, then records
-        // the Django row — exactly like the cloud migrator's ports.
+        // Forward ports exist only for the pre-decision Django-authored
+        // tail (runner/0044): each port checks `django_migrations` first
+        // and imports (skips DDL for) migrations Django already applied,
+        // executes its SQL otherwise, then records the Django row —
+        // exactly like the cloud migrator's ports. New schema changes
+        // never land here; they are native (`PortNative`).
         let _ = self.index;
         Err(DbErr::Custom("No forward ports registered yet".into()))
     }

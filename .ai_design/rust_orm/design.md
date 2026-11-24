@@ -67,8 +67,9 @@ generated with `sea-orm-cli generate entity` against a database migrated to the
 current `origin/main` leaf (by Django, or by `pidash-api migrate` — both produce
 the same schema), then committed under
 `rust-api/crates/db/src/entity/`. Migrations live in `rust-api/crates/migration/`
-(baseline snapshot plus forward ports, recording `django_migrations` rows while the
-Django fallback is kept). A parity test compares
+(baseline snapshot plus forward migrations written natively in Rust; the
+baseline stamps the full `django_migrations` history while the Django
+fallback is kept). A parity test compares
 each entity's table, columns, types and nullability with `information_schema` on the
 migrated contract database, and fails on drift. Regenerating after a schema sync is
 part of the drift re-sync work.
@@ -158,10 +159,14 @@ fragments.
 
 ## 3. Non-goals
 
-- No schema change and no migration change outside the migrator. Django keeps
-  `makemigrations`/`migrate` for the fallback window (schema-only half of each
-  Rust schema change, per NEWPIDASH-380); the Rust migrator is the only thing
-  that applies schema changes in any deployment.
+- No schema change and no migration change outside the migrator. Schema
+  changes are written as Rust migrations only; no Django model field or
+  Django migration is required (NEWPIDASH-379 decision part 3). Django keeps
+  `makemigrations`/`migrate` only as the fallback's own tooling and follows
+  passively: the Django release runs a schema check comparing the
+  Rust-migrated schema with Django's models and migrations, and fails the
+  release on any mismatch. The Rust migrator is the only thing that applies
+  schema changes in any deployment.
 - Reads are not ported to SeaORM. About 1M lines of tuned sqlx/sea-query read code
   stay; a read moves only when its service already holds the entity.
 - No SeaORM 2.0 or sqlx 0.9 upgrade in this stage.
