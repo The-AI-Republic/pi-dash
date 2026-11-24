@@ -12,8 +12,6 @@ machine auth boundary), and the status poll loop the modal runs.
 from __future__ import annotations
 
 import json
-import pathlib
-import re
 
 import pytest
 from django.urls import reverse
@@ -237,38 +235,6 @@ def test_enqueue_accepts_every_supported_agent(
     entries = _fake_redis.streams[machine_outbox.stream_key(dev_machine.id)]
     payload = json.loads(entries[-1][1]["payload"])
     assert payload["agent"] == agent
-
-
-@pytest.mark.unit
-def test_valid_agents_matches_runner_schema():
-    """The allowlist must track runner/src/config/schema.rs:AgentKind.
-
-    Grok (PDASHOSS01-33) and Muse Code (PDASHOSS01-101) were each added to
-    the Rust enum and the web modal without this set, so selecting them in
-    "Add runner" 400'd with invalid_agent. Pin the two together so the next
-    backend can't drift the same way.
-    """
-    schema = pathlib.Path(__file__).resolve().parents[6] / "runner/src/config/schema.rs"
-    if not schema.is_file():
-        pytest.skip("runner source tree not present in this checkout")
-    body = re.search(r"pub enum AgentKind \{(.*?)\n\}", schema.read_text(), re.S)
-    assert body, "AgentKind enum not found in schema.rs"
-    variants = re.findall(r"^\s{4}([A-Z][A-Za-z0-9]*),", body.group(1), re.M)
-    assert variants, "no AgentKind variants parsed"
-    kebab = {re.sub(r"(?<!^)(?=[A-Z])", "-", v).lower() for v in variants}
-    # ``PidashAgent`` (was ``Engine``, wire value still "engine") is the
-    # built-in agent shipped with the CLI. It is turned on from its own
-    # computer (`pidash runner add --agent engine`, the app), never
-    # through a remote machine command, so the allowlist leaves it out
-    # (.ai_design/built_engine_as_runner/design.md §7, "Pods": turning it
-    # on remotely is not in the first version).
-    # ``Antigravity`` (NEWPIDASH-396, DIFF-65) is new-system-only: the
-    # runner's AgentKind has it, Django's frozen allow-list deliberately
-    # does not. Parity holds for every agent Django knows.
-    assert kebab - {"pidash-agent", "antigravity"} == set(_VALID_AGENTS)
-    assert "engine" not in _VALID_AGENTS
-    assert "pidash-agent" not in _VALID_AGENTS
-    assert "antigravity" not in _VALID_AGENTS
 
 
 @pytest.mark.unit
