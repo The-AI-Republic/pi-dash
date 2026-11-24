@@ -600,6 +600,7 @@ pub const VALID_AGENTS: &[&str] = &[
     "cursor-agent",
     "open-claw",
     "grok",
+    "antigravity",
     "muse-code",
 ];
 
@@ -1987,6 +1988,10 @@ mod tests {
         ));
         // Agents without an effort setting take none.
         assert!(!effort_fits_agent(&effort(None, "high"), Some("grok")));
+        assert!(!effort_fits_agent(
+            &effort(None, "high"),
+            Some("antigravity")
+        ));
         // Claude Code takes `max` but not Muse's `ultra`.
         assert!(effort_fits_agent(&effort(None, "max"), Some("claude-code")));
         assert!(!effort_fits_agent(
@@ -2263,7 +2268,14 @@ mod tests {
             .map(|agent| agent.as_str().expect("agent str"))
             .collect();
         theirs.sort_unstable();
-        assert_eq!(ours, theirs);
+        // NEWPIDASH-396: Antigravity is new-system-only — Django's
+        // allow-list (frozen) has no such agent. Parity holds for every
+        // agent Django knows; see DIFF-63 in
+        // .ai_design/validation/differences.md (DIFF-65).
+        let mut ours_without_new = ours.clone();
+        ours_without_new.retain(|agent| *agent != "antigravity");
+        assert_eq!(ours_without_new, theirs);
+        assert!(ours.contains(&"antigravity"));
         assert_eq!(DEFAULT_AGENT, "claude-code");
         let mut statuses = RESULT_STATUSES.to_vec();
         statuses.sort_unstable();

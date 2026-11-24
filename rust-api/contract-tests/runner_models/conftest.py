@@ -7,7 +7,7 @@
 Every test seeds Postgres directly and talks HTTP only. Users and the
 instance are wiped before each test (``Database.reset()``); the catalog
 table (Rust-owned, unknown to the reset) is restored to its seeded
-30-row state the same way, so tests never see each other's rows.
+32-row state the same way, so tests never see each other's rows.
 
 On Django the catalog table does not exist (new-system-only feature,
 recorded in the differences ledger); the restore is then a no-op and
@@ -50,6 +50,9 @@ SEED = [
     ("cursor-agent", "grok-4.3", "Grok 4.3", [], 11, False),
     ("grok", "grok-4.3", "Grok 4.3", [], 0, False),
     ("grok", "grok-code-fast-1", "Grok Code Fast 1", [], 1, False),
+    # antigravity (NEWPIDASH-396).
+    ("antigravity", "gemini-4-hydrogen", "Gemini 4 Hydrogen", [], 0, False),
+    ("antigravity", "gemini-4-neon", "Gemini 4 Neon", [], 1, False),
     # openhub (NEWPIDASH-302): assistant models, reasoning_efforts empty;
     # the free model is preselected (= the default).
     ("openhub", "moonshotai/kimi-k3", "Kimi K3", [], 0, False),
@@ -59,7 +62,7 @@ SEED = [
 
 
 def _restore_seed(db: Database) -> None:
-    """Restore the catalog to its seeded 30-row state (Rust only)."""
+    """Restore the catalog to its seeded 32-row state (Rust only)."""
     with db.connect() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT to_regclass('rust_runner_model_catalog')")

@@ -1,5 +1,6 @@
-//! Grok bridge. Acts as the ACP *client* for grok's native ACP server
-//! (`grok agent stdio`): it performs the JSON-RPC handshake
+//! Shared ACP bridge. Acts as the ACP *client* for a native ACP server
+//! (Grok's `grok agent stdio`, Antigravity's `agy acp`): it performs the
+//! JSON-RPC handshake
 //!
 //! ```text
 //! initialize → session/new {cwd} → session/prompt {sessionId, prompt}
@@ -9,22 +10,30 @@
 //! [`crate::agent::BridgeEvent::Raw`] and ends the turn on the
 //! `session/prompt` response's `stopReason`. Inbound frames are parsed with
 //! OpenClaw's shared [`AcpMessage`]; outbound requests are built in
-//! [`crate::grok::schema`].
+//! [`crate::acp::schema`].
 //!
 //! The public surface mirrors the other bridges so the agent dispatch layer
 //! (`crate::agent::AgentBridge`) can treat all agents uniformly. Unlike the
-//! one-shot cursor / acpx bridges, the grok process is a persistent server, so
+//! one-shot cursor / acpx bridges, an ACP server process is persistent, so
 //! `initialize` + `session/new` happen once (in `warm`) and multiple turns can
 //! reuse the same session.
 //!
-//! MVP limitations (tracked as follow-ups):
+//! Per-agent differences are carried by [`AcpProfile`]; behaviour notes:
 //! - **Approvals bypass**: a `session/request_permission` request is answered
 //!   automatically by selecting an "allow" option (see
 //!   [`schema::select_allow_option`]). Real per-tool approval — routing the
 //!   request through `runner/src/approval` — is the documented next step.
-//! - **Stateless turns**: each fresh bridge does a new `session/new`; a resume
-//!   session id only seeds the run's thread id, it does not `session/load`
-//!   prior conversation state.
+//! - **Resume**: a known resume session id is revived through
+//!   `session/resume` (no history replay) when the server advertises
+//!   `sessionCapabilities.resume`, else `session/load` when it advertises
+//!   `loadSession`, else the id is kept as the run's thread-id seed only.
+//! - **Run-time auth**: a turn that fails with the ACP authentication-required
+//!   error (code `-32000`) surfaces as `AgentAuthMissing` with the agent's
+//!   fix hint, not a plain agent crash. That catches expired or revoked
+//!   sign-ins, which the pre-pickup presence check cannot see.
+//! - **Token usage**: all `session/update` frames (including any future
+//!   `usage_update`) stream as `Raw` history events; the supervisor's usage
+//!   parser picks up the shapes it knows.
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -33,44 +42,87 @@ use std::path::Path;
 use std::time::Duration;
 use uuid::Uuid;
 
+use crate::acp::process::AcpProcess;
+use crate::acp::schema::{self, ConfigOption, ResumeSupport};
 use crate::agent::{
     AgentProcessHandle, BridgeEvent, ENGINE_STARTUP_TIMEOUT, RunPayload, StderrSnapshot,
 };
 use crate::cloud::protocol::{ApprovalDecision, FailureReason};
-use crate::grok::process::GrokProcess;
-use crate::grok::schema;
 use crate::openclaw::schema::AcpMessage;
 
+/// Per-agent ACP behaviour. Grok keeps its pre-shared posture (model on
+/// `session/new`, interrupt by OS signal); Antigravity applies the configured
+/// model through the advertised session config options and ends the turn
+/// through the protocol-level `session/cancel` notification.
+#[derive(Debug, Clone, Copy)]
+pub struct AcpProfile {
+    /// Agent label for logs and failure details (`"grok"`, `"antigravity"`).
+    pub label: &'static str,
+    /// Send the configured model as the extra `model` field on `session/new`.
+    /// Grok reads it; Antigravity ignores unknown fields, so it stays off
+    /// there (the model is applied via `session/set_config_option` instead).
+    pub send_model_on_session_new: bool,
+    /// Apply the configured model through the advertised `configOptions`
+    /// after `session/new` (or resume / load). Off for Grok (unchanged
+    /// behaviour); on for Antigravity.
+    pub apply_model_via_config_option: bool,
+    /// End the turn with the `session/cancel` notification before falling
+    /// back to the OS signal. Off for Grok (SIGINT only, unchanged); on for
+    /// Antigravity, whose server documents turn cancellation this way.
+    pub cancel_via_notification: bool,
+    /// Fix hint surfaced when a turn fails with the ACP
+    /// authentication-required error (`agent_auth_missing` detail).
+    pub auth_fix_hint: &'static str,
+}
+
 pub struct Bridge {
-    proc: GrokProcess,
+    proc: AcpProcess,
+    profile: AcpProfile,
     model: Option<String>,
     /// `initialize` completed for this process.
     initialized: bool,
-    /// A live ACP session exists on this process (via `session/new`).
+    /// A live ACP session exists on this process (via `session/new`, resume,
+    /// or load).
     session_ready: bool,
-    /// ACP session id — captured from `session/new`, or seeded from a resume id
-    /// (MVP: seed only; see module docs). Surfaced as the run's thread id.
+    /// How a known resume id is revived; read off the `initialize` response.
+    resume_support: ResumeSupport,
+    /// ACP session id — captured from `session/new` (or resume / load), or
+    /// seeded from a resume id when the server offers no revival path.
+    /// Surfaced as the run's thread id.
     session_id: Option<String>,
+    /// Session config options advertised by the latest `session/new` (or
+    /// resume / load) response; used to apply the configured model.
+    config_options: Vec<ConfigOption>,
     /// Frames pulled off stdout while awaiting a handshake response that were
-    /// notifications rather than the response — replayed by `next_events` so no
-    /// streamed output is lost.
+    /// notifications rather than the response — replayed by `next_events` so
+    /// no streamed output is lost.
     pending: VecDeque<serde_json::Value>,
 }
 
 impl Bridge {
-    pub async fn spawn(binary: &str, cwd: &Path, model_default: Option<String>) -> Result<Self> {
-        Self::spawn_with_resume(binary, cwd, model_default, None).await
+    pub async fn spawn(
+        profile: AcpProfile,
+        binary: &str,
+        argv: &[String],
+        cwd: &Path,
+        model_default: Option<String>,
+    ) -> Result<Self> {
+        Self::spawn_with_resume(profile, binary, argv, cwd, model_default, None).await
     }
 
     pub async fn spawn_with_resume(
+        profile: AcpProfile,
         binary: &str,
+        argv: &[String],
         cwd: &Path,
         model_default: Option<String>,
         resume_session_id: Option<&str>,
     ) -> Result<Self> {
-        let proc = GrokProcess::spawn(binary, cwd).await?;
+        let refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+        let proc = AcpProcess::spawn(profile.label, binary, &refs, cwd).await?;
         Ok(Self::from_process(
             proc,
+            profile,
             model_default,
             resume_session_id
                 .filter(|s| !s.is_empty())
@@ -79,28 +131,35 @@ impl Bridge {
     }
 
     /// Build a bridge over an already-constructed process. Used by tests to
-    /// substitute a fake `grok` subprocess.
+    /// substitute a fake ACP server subprocess.
     pub fn from_process(
-        proc: GrokProcess,
+        proc: AcpProcess,
+        profile: AcpProfile,
         model_default: Option<String>,
         resume_session_id: Option<String>,
     ) -> Self {
         Self {
             proc,
+            profile,
             model: model_default.filter(|s| !s.is_empty()),
             initialized: false,
             session_ready: false,
+            resume_support: ResumeSupport::SeedOnly,
             session_id: resume_session_id,
+            config_options: Vec::new(),
             pending: VecDeque::new(),
         }
     }
 
-    /// Prepare the ACP server for a turn: `initialize` (once) then `session/new`
-    /// (once). Returns the live session id so the cloud can anchor the run's
-    /// thread on it before the first turn lands.
+    /// Prepare the ACP server for a turn: `initialize` (once) then
+    /// `session/new` — or `session/resume` / `session/load` when a resume id
+    /// is known and the server supports it — (once). Applies the configured
+    /// model where the profile says to. Returns the live session id so the
+    /// cloud can anchor the run's thread on it before the first turn lands.
     pub async fn warm(&mut self, cwd: &Path) -> Result<Option<String>> {
         self.ensure_initialized().await?;
         self.ensure_session(cwd).await?;
+        self.apply_model_option().await?;
         Ok(self.session_id.clone())
     }
 
@@ -112,11 +171,13 @@ impl Bridge {
         let session_id = self
             .session_id
             .clone()
-            .context("grok session id missing after warm")?;
+            .with_context(|| format!("{} session id missing after warm", self.profile.label))?;
         let id = self.proc.alloc_id();
         let line = schema::session_prompt_request(id, &session_id, &payload.prompt);
         self.proc.send_raw(&line).await?;
         Ok(BridgeCursor {
+            profile_label: self.profile.label,
+            auth_fix_hint: self.profile.auth_fix_hint,
             run_id: payload.run_id,
             thread_id: session_id,
             model: self.model.clone(),
@@ -125,7 +186,7 @@ impl Bridge {
         })
     }
 
-    /// grok's ACP session persists across turns, so one-shot and chat `run` are
+    /// An ACP session persists across turns, so one-shot and chat `run` are
     /// identical at the process level.
     pub async fn run_one_shot(&mut self, payload: &RunPayload, cwd: &Path) -> Result<BridgeCursor> {
         self.run(payload, cwd).await
@@ -138,9 +199,11 @@ impl Bridge {
         let id = self.proc.alloc_id();
         let line = schema::initialize_request(id);
         self.proc.send_raw(&line).await?;
-        self.await_response(ENGINE_STARTUP_TIMEOUT)
+        let result = self
+            .await_response(ENGINE_STARTUP_TIMEOUT)
             .await
-            .context("grok initialize failed")?;
+            .with_context(|| format!("{} initialize failed", self.profile.label))?;
+        self.resume_support = schema::resume_support_from_initialize(&result);
         self.initialized = true;
         Ok(())
     }
@@ -149,23 +212,106 @@ impl Bridge {
         if self.session_ready {
             return Ok(());
         }
-        let id = self.proc.alloc_id();
+        let label = self.profile.label;
         let cwd_str = cwd.to_string_lossy();
-        let line = schema::session_new_request(id, &cwd_str, self.model.as_deref());
-        self.proc.send_raw(&line).await?;
-        let result = self
-            .await_response(ENGINE_STARTUP_TIMEOUT)
-            .await
-            .context("grok session/new failed")?;
-        // Prefer the id grok minted; fall back to any seeded resume id so we
-        // still have a stable thread id even if the server omits it.
-        if let Some(sid) = schema::session_id_from_result(&result) {
+        let model_on_new = self.profile.send_model_on_session_new;
+        let resume_id = self.session_id.clone();
+        let result = match (resume_id.filter(|s| !s.is_empty()), self.resume_support) {
+            (Some(known), ResumeSupport::Resume) => {
+                let id = self.proc.alloc_id();
+                self.proc
+                    .send_raw(&schema::session_resume_request(id, &known, &cwd_str))
+                    .await?;
+                let result = self
+                    .await_response(ENGINE_STARTUP_TIMEOUT)
+                    .await
+                    .with_context(|| format!("{label} session/resume failed"))?;
+                // The resumed session keeps its id; prefer one the server
+                // mints, fall back to the id we asked to resume.
+                Ok::<_, anyhow::Error>((
+                    schema::session_id_from_result(&result).or(Some(known)),
+                    result,
+                ))
+            }
+            (Some(known), ResumeSupport::Load) => {
+                let id = self.proc.alloc_id();
+                self.proc
+                    .send_raw(&schema::session_load_request(id, &known, &cwd_str))
+                    .await?;
+                let result = self
+                    .await_response(ENGINE_STARTUP_TIMEOUT)
+                    .await
+                    .with_context(|| format!("{label} session/load failed"))?;
+                Ok((
+                    schema::session_id_from_result(&result).or(Some(known)),
+                    result,
+                ))
+            }
+            _ => {
+                let id = self.proc.alloc_id();
+                let line = schema::session_new_request(
+                    id,
+                    &cwd_str,
+                    model_on_new.then_some(self.model.as_deref()).flatten(),
+                );
+                self.proc.send_raw(&line).await?;
+                let result = self
+                    .await_response(ENGINE_STARTUP_TIMEOUT)
+                    .await
+                    .with_context(|| format!("{label} session/new failed"))?;
+                // Prefer the id the server minted; fall back to any seeded
+                // resume id so we still have a stable thread id even if the
+                // server omits it.
+                Ok((schema::session_id_from_result(&result), result))
+            }
+        }?;
+        let (session_id, result) = result;
+        if let Some(sid) = session_id {
             self.session_id = Some(sid);
         }
+        self.config_options = schema::config_options_from_result(&result);
         if self.session_id.is_none() {
-            anyhow::bail!("grok session/new returned no sessionId");
+            anyhow::bail!("{label} session/new returned no sessionId");
         }
         self.session_ready = true;
+        Ok(())
+    }
+
+    /// Apply the configured model through the advertised session config
+    /// options, where the profile says to. No model configured, no advertised
+    /// model option, or no advertised value matching the configured slug:
+    /// the server default stays and the miss is logged, never fatal — the
+    /// run still proceeds.
+    async fn apply_model_option(&mut self) -> Result<()> {
+        if !self.profile.apply_model_via_config_option {
+            return Ok(());
+        }
+        let Some(model) = self.model.clone() else {
+            return Ok(());
+        };
+        let Some(session_id) = self.session_id.clone() else {
+            return Ok(());
+        };
+        match schema::select_config_value(&self.config_options, &model) {
+            Some((config_id, value)) => {
+                let id = self.proc.alloc_id();
+                let line =
+                    schema::session_set_config_option_request(id, &session_id, &config_id, &value);
+                self.proc.send_raw(&line).await?;
+                self.await_response(ENGINE_STARTUP_TIMEOUT)
+                    .await
+                    .with_context(|| {
+                        format!("{} session/set_config_option failed", self.profile.label)
+                    })?;
+            }
+            None => {
+                tracing::warn!(
+                    label = self.profile.label,
+                    model,
+                    "configured model matches no advertised session option; using server default"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -177,14 +323,15 @@ impl Bridge {
     /// the handshake sends one request at a time and awaits it before the next,
     /// so the first response we see is the one we asked for.
     async fn await_response(&mut self, timeout: Duration) -> Result<serde_json::Value> {
+        let label = self.profile.label;
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             let frame = tokio::time::timeout(remaining, self.proc.inbound.recv())
                 .await
-                .context("grok response timed out")?;
+                .with_context(|| format!("{label} response timed out"))?;
             let Some(value) = frame else {
-                anyhow::bail!("grok stdout closed while awaiting response");
+                anyhow::bail!("{label} stdout closed while awaiting response");
             };
             if self.try_auto_approve(&value).await? {
                 continue;
@@ -195,7 +342,7 @@ impl Bridge {
                     .and_then(|m| m.as_str())
                     .map(ToOwned::to_owned)
                     .unwrap_or_else(|| err.to_string());
-                anyhow::bail!("grok rpc error: {msg}");
+                anyhow::bail!("{label} rpc error: {msg}");
             }
             if value.get("result").is_some() {
                 return Ok(value
@@ -223,7 +370,7 @@ impl Bridge {
             // and surface the request as Raw so history records the ask.
             if is_permission_request(&value) {
                 if let Err(e) = self.try_auto_approve(&value).await {
-                    tracing::warn!("grok auto-approve failed: {e}");
+                    tracing::warn!("{} auto-approve failed: {e}", self.profile.label);
                 }
                 let translated = cursor.translate_raw("session/request_permission", value);
                 if !translated.is_empty() {
@@ -234,7 +381,10 @@ impl Bridge {
             let msg: AcpMessage = match serde_json::from_value(value.clone()) {
                 Ok(m) => m,
                 Err(e) => {
-                    tracing::warn!("grok emitted unparsable ACP frame ({e}): {value}");
+                    tracing::warn!(
+                        "{} emitted unparsable ACP frame ({e}): {value}",
+                        self.profile.label
+                    );
                     AcpMessage::Unknown(value)
                 }
             };
@@ -263,32 +413,52 @@ impl Bridge {
             }
             None => {
                 tracing::warn!(
-                    "grok session/request_permission offered no options; cannot auto-approve"
+                    "{} session/request_permission offered no options; cannot auto-approve",
+                    self.profile.label
                 );
             }
         }
         Ok(true)
     }
 
-    /// Approvals aren't routed for grok in the MVP — `next_events` auto-answers
-    /// every `session/request_permission` inline, so the supervisor never gets
-    /// an `ApprovalRequest` to decide. Reaching this is a programmer error.
+    /// Approvals aren't routed for ACP agents in the MVP — `next_events`
+    /// auto-answers every `session/request_permission` inline, so the
+    /// supervisor never gets an `ApprovalRequest` to decide. Reaching this is
+    /// a programmer error.
     pub async fn send_approval(
         &mut self,
         approval_id: &str,
         _decision: ApprovalDecision,
     ) -> Result<()> {
+        let label = self.profile.label;
         tracing::error!(
             approval_id,
-            "grok bridge received an approval decision but approvals are \
+            "{label} bridge received an approval decision but approvals are \
              auto-answered inline; refusing to silently drop it"
         );
         anyhow::bail!(
-            "grok bridge received approval {approval_id} but approvals are auto-answered"
+            "{label} bridge received approval {approval_id} but approvals are auto-answered"
         );
     }
 
     pub async fn interrupt(&mut self) -> Result<()> {
+        // Protocol-level cancel first where the profile says to: the server
+        // aborts the live turn and answers the in-flight `session/prompt`
+        // with `stopReason: "cancelled"`. Best-effort — a wedged server still
+        // dies by signal on shutdown.
+        if self.profile.cancel_via_notification
+            && let Some(session_id) = self.session_id.clone()
+        {
+            let line = schema::session_cancel_notification(&session_id);
+            if let Err(e) = self.proc.send_raw(&line).await {
+                tracing::warn!(
+                    "{} session/cancel send failed ({e}); falling back to signal",
+                    self.profile.label
+                );
+                return self.proc.interrupt().await;
+            }
+            return Ok(());
+        }
         self.proc.interrupt().await
     }
 
@@ -316,6 +486,8 @@ fn is_permission_request(value: &serde_json::Value) -> bool {
 /// streams as `Raw`, and the `session/prompt` response's `stopReason` (or a
 /// JSON-RPC error) ends the turn.
 pub struct BridgeCursor {
+    profile_label: &'static str,
+    auth_fix_hint: &'static str,
     pub run_id: Uuid,
     pub thread_id: String,
     pub model: Option<String>,
@@ -370,7 +542,10 @@ impl BridgeCursor {
                             vec![BridgeEvent::Failed {
                                 run_id: self.run_id,
                                 reason,
-                                detail: Some(format!("grok stopReason: {stop_reason}")),
+                                detail: Some(format!(
+                                    "{} stopReason: {stop_reason}",
+                                    self.profile_label
+                                )),
                             }]
                         } else {
                             let done_payload = serde_json::json!({
@@ -393,11 +568,31 @@ impl BridgeCursor {
             }
             AcpMessage::Error { error } => {
                 self.terminal = true;
+                // Expired or revoked credentials surface here (e.g. `agy acp`
+                // answers `session/new` with code -32000 "Authentication
+                // required" when the cached sign-in is gone). The pre-pickup
+                // presence check cannot see that, so report it as
+                // `agent_auth_missing` with the agent's fix hint rather than a
+                // plain crash.
+                if schema::is_auth_required_error(&error) {
+                    let message = error
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("Authentication required");
+                    return vec![BridgeEvent::Failed {
+                        run_id: self.run_id,
+                        reason: FailureReason::AgentAuthMissing,
+                        detail: Some(format!(
+                            "{}: {message}: {}",
+                            self.profile_label, self.auth_fix_hint
+                        )),
+                    }];
+                }
                 let detail = error
                     .get("message")
                     .and_then(|m| m.as_str())
                     .map(ToOwned::to_owned)
-                    .or_else(|| Some(format!("grok ACP error: {error}")));
+                    .or_else(|| Some(format!("{} ACP error: {error}", self.profile_label)));
                 vec![BridgeEvent::Failed {
                     run_id: self.run_id,
                     reason: FailureReason::AgentCrash,
@@ -432,8 +627,18 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    const TEST_PROFILE: AcpProfile = AcpProfile {
+        label: "test-acp",
+        send_model_on_session_new: false,
+        apply_model_via_config_option: true,
+        cancel_via_notification: true,
+        auth_fix_hint: "test fix hint",
+    };
+
     fn cursor() -> BridgeCursor {
         BridgeCursor {
+            profile_label: TEST_PROFILE.label,
+            auth_fix_hint: TEST_PROFILE.auth_fix_hint,
             run_id: Uuid::nil(),
             thread_id: "s1".into(),
             model: None,
@@ -494,6 +699,23 @@ mod tests {
     }
 
     #[test]
+    fn auth_required_error_maps_to_agent_auth_missing() {
+        let mut c = cursor();
+        let out = c.translate(msg(
+            r#"{"id":2,"error":{"code":-32000,"message":"Authentication required"}}"#,
+        ));
+        match &out[0] {
+            BridgeEvent::Failed { reason, detail, .. } => {
+                assert!(matches!(reason, FailureReason::AgentAuthMissing));
+                let detail = detail.as_deref().unwrap();
+                assert!(detail.contains("Authentication required"));
+                assert!(detail.contains("test fix hint"));
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn non_terminal_response_is_raw() {
         let mut c = cursor();
         let out = c.translate(msg(r#"{"id":1,"result":{"sessionId":"s1"}}"#));
@@ -515,12 +737,12 @@ mod tests {
         })));
     }
 
-    /// Drive the real handshake + translate path against a fake `grok agent
-    /// stdio` that prints canned ACP frames in order and then drains stdin.
+    /// Drive the real handshake + translate path against a fake ACP server
+    /// that prints canned ACP frames in order and then drains stdin.
     /// This exercises `initialize` → `session/new` → `session/prompt` and the
     /// terminal `stopReason` without a real binary.
     #[tokio::test]
-    async fn end_to_end_handshake_against_fake_grok() {
+    async fn end_to_end_handshake_against_fake_server() {
         // The fake ignores request ids and just emits, in order: the
         // initialize response, the session/new response (with a sessionId), a
         // streamed agent message, and the terminal stopReason. `exec cat` then
@@ -535,10 +757,10 @@ exec cat >/dev/null
 "#;
         let mut cmd = tokio::process::Command::new("bash");
         cmd.arg("-c").arg(script);
-        let proc = GrokProcess::spawn_command(cmd)
+        let proc = AcpProcess::spawn_command("test-acp", cmd)
             .await
-            .expect("spawn fake grok");
-        let mut bridge = Bridge::from_process(proc, None, None);
+            .expect("spawn fake ACP server");
+        let mut bridge = Bridge::from_process(proc, TEST_PROFILE, None, None);
 
         let payload = RunPayload {
             run_id: Uuid::nil(),
@@ -573,6 +795,112 @@ exec cat >/dev/null
             "expected the streamed session/update as a Raw event"
         );
         assert!(completed, "expected the stopReason to complete the turn");
+    }
+
+    /// A configured model is applied through the advertised config options:
+    /// the fake answers `session/new` with a Model option and expects a
+    /// `session/set_config_option` selecting the configured value.
+    #[tokio::test]
+    async fn configured_model_applied_via_set_config_option() {
+        // The fake pre-emits the initialize, session/new (advertising a
+        // Model option) and set_config_option responses, then drains the
+        // bridge's stdin writes into a file we inspect for the
+        // `session/set_config_option` the bridge must send.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let seen = dir.path().join("stdin.log");
+        let script = format!(
+            r#"
+printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":1}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"sessionId":"sess-m","configOptions":[{{"id":"model","name":"Model","category":"model","type":"select","currentValue":"model-a","options":[{{"value":"model-a"}},{{"value":"model-b"}}]}}]}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"configOptions":[]}}}}'
+cat > {}
+exec cat >/dev/null
+"#,
+            seen.display()
+        );
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.arg("-c").arg(&script);
+        let proc = AcpProcess::spawn_command("test-acp", cmd)
+            .await
+            .expect("spawn fake ACP server");
+        let mut bridge = Bridge::from_process(proc, TEST_PROFILE, Some("model-b".into()), None);
+
+        let payload = RunPayload {
+            run_id: Uuid::nil(),
+            prompt: "do it".into(),
+            model: None,
+        };
+        let cursor = bridge
+            .run(&payload, Path::new("/tmp"))
+            .await
+            .expect("run drives the handshake");
+        assert_eq!(cursor.thread_id, "sess-m");
+
+        // Let the fake drain stdin, then shut down and inspect what the
+        // bridge sent.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        bridge
+            .shutdown(std::time::Duration::from_secs(5))
+            .await
+            .ok();
+        let logged = std::fs::read_to_string(&seen).unwrap_or_default();
+        assert!(
+            logged.contains("session/set_config_option"),
+            "expected set_config_option in bridge stdin, got: {logged}"
+        );
+        assert!(
+            logged.contains("model-b"),
+            "expected the configured model value in stdin, got: {logged}"
+        );
+    }
+
+    /// `session/resume` is used when the server advertises it and a resume
+    /// id is known; the resumed id becomes the thread id.
+    #[tokio::test]
+    async fn resume_id_uses_session_resume_when_supported() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let seen = dir.path().join("stdin.log");
+        let script = format!(
+            r#"
+printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":1,"agentCapabilities":{{"sessionCapabilities":{{"resume":{{}}}}}}}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"sessionId":"sess-old"}}}}'
+cat > {}
+exec cat >/dev/null
+"#,
+            seen.display()
+        );
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.arg("-c").arg(&script);
+        let proc = AcpProcess::spawn_command("test-acp", cmd)
+            .await
+            .expect("spawn fake ACP server");
+        let mut bridge = Bridge::from_process(proc, TEST_PROFILE, None, Some("sess-old".into()));
+
+        let payload = RunPayload {
+            run_id: Uuid::nil(),
+            prompt: "continue".into(),
+            model: None,
+        };
+        let cursor = bridge
+            .run(&payload, Path::new("/tmp"))
+            .await
+            .expect("run drives resume");
+        assert_eq!(cursor.thread_id, "sess-old");
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        bridge
+            .shutdown(std::time::Duration::from_secs(5))
+            .await
+            .ok();
+        let logged = std::fs::read_to_string(&seen).unwrap_or_default();
+        assert!(
+            logged.contains("session/resume"),
+            "expected session/resume in bridge stdin, got: {logged}"
+        );
+        assert!(
+            !logged.contains("session/new"),
+            "expected no fresh session/new, got: {logged}"
+        );
     }
 
     #[test]
