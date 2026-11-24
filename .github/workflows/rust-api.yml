@@ -56,7 +56,9 @@ jobs:
           # skill/ ships with the runner: the installer is versioned with the
           # runner release and skill/test pins runner/src/cli commands
           # (NEWPIDASH-320), so it rides with runner/ by the repo's own tests.
-          BAD=$(echo "$CHANGED" | grep -v -e '^rust-api/' -e '^runner/' -e '^pidash-ipc/' -e '^skill/' -e '^apps/web_new/' -e '^packages/api-client/' -e '^\.github/workflows/rust-api.*\.yml$' -e '^Cargo\.toml$' -e '^Cargo\.lock$' -e '^\.ai_design/validation/' -e '^\.ai_design/dev_machine_run_queue/' -e '^\.ai_design/new_frontend_implementation/parity/' -e '^$' || true)
+          # apps/proxy/ Caddyfiles ride with rust-api PRs that change a URL the
+          # proxy must serve (NEWPIDASH-376 serves /static/logos/* from web_new).
+          BAD=$(echo "$CHANGED" | grep -v -e '^rust-api/' -e '^runner/' -e '^pidash-ipc/' -e '^skill/' -e '^apps/web_new/' -e '^apps/proxy/' -e '^packages/api-client/' -e '^\.github/workflows/rust-api.*\.yml$' -e '^Cargo\.toml$' -e '^Cargo\.lock$' -e '^\.ai_design/validation/' -e '^\.ai_design/dev_machine_run_queue/' -e '^\.ai_design/new_frontend_implementation/parity/' -e '^$' || true)
           if [ -n "$BAD" ]; then
             echo "::error::Files outside rust-api/ and the allowlist:"
             echo "$BAD"

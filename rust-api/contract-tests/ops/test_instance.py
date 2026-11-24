@@ -873,7 +873,7 @@ def test_register_current_version_chain(scratch_pair, tmp_path):
     assert instance_row(rust_db)["current_version"] == "9.9.9-contract"
     # Empty APP_VERSION counts as unset. With no package.json in cwd the
     # oracle falls back with the error line; Rust reports its owned embedded
-    # version instead (DIFF-64: rust-api/package.json, no apps/api file).
+    # version instead (DIFF-65: rust-api/package.json, no apps/api file).
     (tmp_path / "empty").mkdir()
     env = dict(DEAD_PROXY)
     env["APP_VERSION"] = ""

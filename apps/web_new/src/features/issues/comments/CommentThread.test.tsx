@@ -332,7 +332,9 @@ describe("CommentThread", () => {
     stubTransport(() => ({ status: 200, body: [comment()] }));
     renderThread();
     const card = await screen.findByText("Thread words", undefined, { timeout: 5000 });
-    const frame = card.closest("article")?.parentElement as HTMLElement;
+    // The article sits in the rail row's content cell, so the highlight
+    // frame is three levels above it.
+    const frame = card.closest("article")?.parentElement?.parentElement?.parentElement as HTMLElement;
     await waitFor(() => expect(frame.className).toContain("ring-1"));
     expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
     await new Promise((resolve) => setTimeout(resolve, 8100));
@@ -348,7 +350,8 @@ describe("CommentThread", () => {
       window.history.replaceState({}, "", `/acme/projects/p/issues/i#comment-${second.id}`);
       window.dispatchEvent(new HashChangeEvent("hashchange"));
     });
-    const frame = screen.getByText("Second words").closest("article")?.parentElement as HTMLElement;
+    const frame = screen.getByText("Second words").closest("article")?.parentElement?.parentElement
+      ?.parentElement as HTMLElement;
     await waitFor(() => expect(frame.className).toContain("ring-1"));
   });
 

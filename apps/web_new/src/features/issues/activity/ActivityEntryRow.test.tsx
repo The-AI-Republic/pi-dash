@@ -10,7 +10,7 @@ import type { IssueActivity } from "@pidash/api-client";
 import * as React from "react";
 import { describe, expect, it } from "vitest";
 
-import { ActivityEntryRow } from "./ActivityEntryRow.js";
+import { ActivityEntryRow, activityBadgeFor } from "./ActivityEntryRow.js";
 
 const ADA = "523e4567-e89b-12d3-a456-426614174004";
 
@@ -63,15 +63,15 @@ describe("ActivityEntryRow", () => {
     expect(screen.getByText("created the work item.")).toBeInTheDocument();
   });
 
-  it("shows the actor's avatar image when the profile carries one", () => {
-    render(
+  it("hangs a type badge on the rail instead of an avatar", () => {
+    const { container } = render(
       <ActivityEntryRow
         workspaceSlug="acme"
         activity={activity({ actor_detail: { ...ADA_DETAIL, avatar_url: "https://img.test/ada.png" } })}
       />
     );
-    const avatar = screen.getByRole("img", { name: "Ada L" });
-    expect(avatar.querySelector("img")).toHaveAttribute("src", "https://img.test/ada.png");
+    expect(screen.getByRole("img", { name: "Creation" })).toBeInTheDocument();
+    expect(container.querySelector("img")).toBeNull();
   });
 
   it("shows the age of the row", () => {
@@ -159,12 +159,13 @@ describe("ActivityEntryRow", () => {
     render(
       <ActivityEntryRow
         workspaceSlug="acme"
-        activity={activity({ field: "agent_wait", verb: "updated", old_value: "Review", new_value: "NEWFRONT-1" })}
+        activity={activity({ field: "agent_wait", verb: "created", old_value: "10", new_value: "1" })}
       />
     );
     expect(screen.queryByRole("link", { name: "Pi Dash" })).not.toBeInTheDocument();
     expect(screen.getByText("Pi Dash")).toBeInTheDocument();
-    expect(screen.getByText("started waiting on NEWFRONT-1 (Review).")).toBeInTheDocument();
+    expect(screen.getByText("chose to wait on a blocker (1 of 10).")).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Agent wait" })).toBeInTheDocument();
   });
 
   it("keeps the product credit unlinked even when the row names an actor", () => {
@@ -181,5 +182,54 @@ describe("ActivityEntryRow", () => {
   it("falls back for an unknown actor", () => {
     render(<ActivityEntryRow workspaceSlug="acme" activity={activity({ actor: null, actor_detail: null })} />);
     expect(screen.getByText("Unknown author")).toBeInTheDocument();
+  });
+});
+
+describe("activityBadgeFor", () => {
+  it("names a badge per entry type", () => {
+    const cases: Array<[Partial<IssueActivity>, string]> = [
+      [{ field: null, verb: "created" }, "Creation"],
+      [{ field: null, verb: "deleted" }, "Deletion"],
+      [{ field: "issue", verb: "deleted" }, "Deletion"],
+      [{ field: "name", verb: "updated", new_value: "Renamed" }, "Name"],
+      [{ field: "description", verb: "updated" }, "Description"],
+      [{ field: "state", verb: "updated", new_value: "Done" }, "State"],
+      [{ field: "assignees", verb: "created", new_value: "Bob" }, "Assignees"],
+      [{ field: "priority", verb: "updated", new_value: "high" }, "Priority"],
+      [{ field: "labels", verb: "created", new_value: "bug" }, "Labels"],
+      [{ field: "estimate_points", verb: "updated", new_value: "3" }, "Estimate"],
+      [{ field: "estimate_point", verb: "updated", new_value: "3" }, "Estimate"],
+      [{ field: "parent", verb: "updated", new_value: "PAR-9" }, "Parent"],
+      [{ field: "blocking", verb: "created", new_value: "PAR-1" }, "Blocking"],
+      [{ field: "blocked_by", verb: "created", new_value: "PAR-2" }, "Blocked by"],
+      [{ field: "duplicate", verb: "created", new_value: "PAR-3" }, "Duplicate"],
+      [{ field: "relates_to", verb: "created", new_value: "PAR-4" }, "Related"],
+      [{ field: "start_date", verb: "updated", new_value: "2026-10-01" }, "Start date"],
+      [{ field: "target_date", verb: "updated", new_value: "2026-10-09" }, "Due date"],
+      [{ field: "cycles", verb: "created", new_value: "Sprint 4" }, "Cycle"],
+      [{ field: "modules", verb: "created", new_value: "Core" }, "Module"],
+      [{ field: "link", verb: "created" }, "Link"],
+      [{ field: "attachment", verb: "created" }, "Attachment"],
+      [{ field: "archived_at", verb: "updated", new_value: "archive" }, "Archived"],
+      [{ field: "archived_at", verb: "updated", new_value: "restore" }, "Restored"],
+      [{ field: "agent_wait", verb: "created", old_value: "10", new_value: "1" }, "Agent wait"],
+      [{ field: "agent_wake", verb: "created", old_value: "completed", new_value: "PAR-1" }, "Agent wake"],
+      [{ field: "intake", verb: "1" }, "Intake"],
+      [{ field: "inbox", verb: "-1" }, "Intake"],
+      [{ field: "worklog", verb: "created", new_value: "90" }, "Worklog"],
+      [{ field: "mystery", verb: "updated" }, "Activity"],
+    ];
+    for (const [row, label] of cases) {
+      expect(activityBadgeFor({ field: null, verb: "created", new_value: null, ...row }).label).toBe(label);
+    }
+  });
+
+  it("gives relations a badge each instead of one shared badge", () => {
+    const icons = new Set(
+      (["blocking", "blocked_by", "duplicate", "relates_to"] as const).map(
+        (field) => activityBadgeFor({ field, verb: "created", new_value: "PAR-1" }).icon
+      )
+    );
+    expect(icons.size).toBe(4);
   });
 });
