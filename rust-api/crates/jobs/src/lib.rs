@@ -99,6 +99,10 @@ pub mod v1_assets;
 /// api-v1 cycles + modules task publishers (D-20, PIDASHCONV-310): Celery
 /// wire surface for the eleven `.delay()` units, no task bodies.
 pub mod v1_cycles_modules;
+/// Vendored-template fidelity pins (NEWPIDASH-376, test-only): every
+/// embedded email template byte-matches the frozen Django original.
+#[cfg(test)]
+mod vendored_templates;
 pub mod worker;
 
 pub use oss_worker::{register_oss_handlers, OssWorkerCtx};
