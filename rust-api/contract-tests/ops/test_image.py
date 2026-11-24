@@ -570,9 +570,9 @@ def test_dockerfile_copies():
 def test_dockerfile_builder_needs_no_apps_api():
     # NEWPIDASH-376: templates are vendored under rust-api/templates, so the
     # builder stage compiles with only the Rust tree in context. (The
-    # runtime stage still copies seeds + package.json fallbacks from
-    # apps/api until NEWPIDASH-377 lands — those are asserted above, and
-    # this case pins exactly the builder COPY that went away.)
+    # runtime stage copied seeds + package.json fallbacks from apps/api
+    # until NEWPIDASH-377 landed — those are asserted above, and this case
+    # pins exactly the builder COPY that went away.)
     text = dockerfile_text()
     assert "COPY rust-api ./rust-api" in text
     assert "COPY apps/api ./apps/api" not in text

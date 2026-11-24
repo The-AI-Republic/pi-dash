@@ -96,9 +96,9 @@ jobs:
       CONTRACT_TASK_TIMEOUT: "60"
       # The Rust worker joins SEED_DIR directly with the seed filenames
       # (services workspace_seed::read_seed_file), while Django uses
-      # SEED_DIR/"data". Point at the data dir itself so workspace_seed
-      # actually seeds; an unset dir silently yields an empty seed and the
-      # seed replay test times out waiting for its project row.
+      # SEED_DIR/"data". Point at the data dir itself to exercise the disk
+      # override (NEWPIDASH-377: an unset SEED_DIR seeds the embedded
+      # catalog instead of an empty workspace).
       SEED_DIR: ${{ github.workspace }}/apps/api/pi_dash/seeds/data
     steps:
       - uses: actions/checkout@v6
