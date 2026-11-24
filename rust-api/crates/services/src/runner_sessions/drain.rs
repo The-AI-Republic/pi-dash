@@ -132,7 +132,7 @@ use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::runner_runs::AgentRunStatus;
 use pidash_types::runner_sessions::envelopes::build_assign_msg;
 use sea_query::{
-    Alias, Condition, Expr, ExprTrait, LockBehavior, LockType, Order, Query, SelectStatement,
+    Alias, Condition, Expr, ExprTrait, Func, LockBehavior, LockType, Order, Query, SelectStatement,
     SimpleExpr, UpdateStatement,
 };
 use serde_json::{Map, Value};
@@ -143,7 +143,7 @@ use crate::runner_runs::guards::{
 };
 use crate::runner_runs::{SetClause, SetValue};
 
-use super::guards::{BUSY_STATUSES, RUNNER_COLUMNS};
+use super::guards::{BUSY_STATUSES, NON_TERMINAL_STATUSES, RUNNER_COLUMNS};
 
 // ---------------------------------------------------------------------------
 // Pod projection (FX-RSES-07 `drain_pod.sql[2]` SELECT list)
@@ -298,6 +298,85 @@ pub fn drain_for_runner_lock_stmt(threshold: DateTime<Utc>, runner_id: Uuid) -> 
         .order_by(("runner", "created_at"), Order::Desc)
         .limit(1u64)
         .lock_with_behavior(LockType::Update, LockBehavior::SkipLocked);
+    query
+}
+
+// ---------------------------------------------------------------------------
+// Machine capacity gate (NEWPIDASH-398)
+// ---------------------------------------------------------------------------
+//
+// The idle-runner selection above checks only per-runner state. A dev
+// machine with more runners than its concurrent-run limit would take
+// one run per idle runner, and the excess would wait in the daemon's
+// local queue even while other machines have free slots. The gate
+// below caps assignments per machine at its last reported limit:
+// the runner must be idle (today's check) *and* its machine's held
+// runs (assigned locally waiting, preparing, or running — any
+// non-terminal status) must be below the machine's limit.
+//
+// There is no Django counterpart: machine-aware matching is
+// new-system-only (DIFF-38 covers the queue; the ledger row for this
+// issue covers the server-side cap).
+
+/// Lock the drain's limited dev machines (`FOR UPDATE`, blocking).
+///
+/// `SELECT "dev_machine"."id", "dev_machine"."run_concurrency_limit"`
+/// `FROM "dev_machine"`
+/// `WHERE "dev_machine"."id" IN (...)`
+/// `AND "dev_machine"."run_concurrency_limit" IS NOT NULL FOR UPDATE`:
+/// serializes concurrent drains that share a limited machine, so two
+/// drains cannot both fill the last slot. Machines with no reported
+/// limit match no row, take no lock, and keep today's behaviour —
+/// the lock exists only to serialize gated assignments. The executor
+/// sorts the ids first, so overlapping drains lock in the same order
+/// and never deadlock. Blocking (no `SKIP LOCKED`): the loser waits,
+/// recounts after the winner commits, and takes only a genuinely
+/// free slot.
+/// Call inside a transaction, never with an empty list. Lock order is
+/// Runner (already locked, `SKIP LOCKED`) → Machine → AgentRun
+/// (`SKIP LOCKED`, so the drain never waits on a run row).
+pub fn machine_gate_lock_stmt(machine_ids: &[Uuid]) -> SelectStatement {
+    let mut query = Query::select().to_owned();
+    query
+        .column((Alias::new("dev_machine"), "id"))
+        .column((Alias::new("dev_machine"), "run_concurrency_limit"))
+        .from(Alias::new("dev_machine"))
+        .and_where(col("dev_machine", "id").is_in(machine_ids.iter().copied()))
+        .and_where(col("dev_machine", "run_concurrency_limit").is_not_null())
+        .lock(LockType::Update);
+    query
+}
+
+/// Held-run count for one machine: non-terminal `agent_run` rows on
+/// any of its runners.
+///
+/// `SELECT COUNT("agent_run"."id") AS "held" FROM "agent_run"`
+/// `WHERE "agent_run"."runner_id" IN`
+/// `(SELECT "id" FROM "runner" WHERE "runner"."dev_machine_id" = ...)`
+/// `AND "agent_run"."status" IN (<NON_TERMINAL_STATUSES...>)`.
+/// The runner set rides an `IN (subquery)` rather than a join, like
+/// [`engine_paused_excluded`]. Read after
+/// [`machine_gate_lock_stmt`]; the executor adds its own in-txn
+/// assignments on top (same-transaction writes are visible to it).
+pub fn machine_held_count_stmt(machine_id: Uuid) -> SelectStatement {
+    let held: Vec<SimpleExpr> = NON_TERMINAL_STATUSES
+        .iter()
+        .map(|status| status.value().into())
+        .collect();
+    let runners = Query::select()
+        .column("id")
+        .from(Alias::new("runner"))
+        .and_where(col("runner", "dev_machine_id").eq(machine_id))
+        .to_owned();
+    let mut query = Query::select().to_owned();
+    query
+        .expr_as(
+            Func::count(Expr::col((Alias::new("agent_run"), "id"))),
+            Alias::new("held"),
+        )
+        .from(Alias::new("agent_run"))
+        .and_where(col("agent_run", "runner_id").in_subquery(runners))
+        .and_where(col("agent_run", "status").is_in(held));
     query
 }
 
@@ -854,6 +933,63 @@ mod tests {
         ));
         assert!(sql.contains("dev_machine_id"));
         assert!(sql.contains("engine_paused_by_owner"));
+    }
+
+    // -- machine capacity gate (NEWPIDASH-398) -----------------------------
+
+    #[test]
+    fn machine_gate_lock_stmt_locks_machines_blocking() {
+        let m1 = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let m2 = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+        let sql = render(&machine_gate_lock_stmt(&[m1, m2]));
+        assert!(
+            sql.starts_with(
+                "SELECT \"dev_machine\".\"id\", \"dev_machine\".\"run_concurrency_limit\" \
+                 FROM \"dev_machine\""
+            ),
+            "{sql}"
+        );
+        assert!(sql.contains(&m1.to_string()), "{sql}");
+        assert!(sql.contains(&m2.to_string()), "{sql}");
+        // Only limited machines take the lock: unlimited machines
+        // keep today's behaviour with no serialization.
+        assert!(
+            sql.contains("\"run_concurrency_limit\" IS NOT NULL"),
+            "{sql}"
+        );
+        // Blocking: the loser waits and recounts after the winner
+        // commits — never SKIP LOCKED (which would under-assign).
+        assert!(sql.ends_with("FOR UPDATE"), "{sql}");
+        assert!(!sql.contains("SKIP LOCKED"), "{sql}");
+    }
+
+    #[test]
+    fn machine_held_count_stmt_counts_non_terminal() {
+        let m = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let sql = render(&machine_held_count_stmt(m));
+        assert!(
+            sql.starts_with("SELECT COUNT(\"agent_run\".\"id\") AS \"held\" FROM \"agent_run\""),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("SELECT \"id\" FROM \"runner\" WHERE \"runner\".\"dev_machine_id\" = "),
+            "{sql}"
+        );
+        assert!(sql.contains(&m.to_string()), "{sql}");
+        for status in NON_TERMINAL_STATUSES {
+            assert!(
+                sql.contains(&format!("'{}'", status.value())),
+                "held counts {}",
+                status.value()
+            );
+        }
+        // Terminal statuses never count as held.
+        for terminal in ["completed", "failed", "cancelled", "refused", "blocked"] {
+            assert!(
+                !sql.contains(&format!("'{terminal}'")),
+                "terminal {terminal} not counted"
+            );
+        }
     }
 
     // -- next_queued_run_for_pod ------------------------------------------

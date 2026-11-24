@@ -485,6 +485,11 @@ class DevMachine(models.Model):
     )
     # What the merge did, so a retry answers with the same result.
     merge_result = models.JSONField(default=dict, blank=True)
+    # Last concurrent-issue-run limit the daemon reported (NEWPIDASH-398).
+    # Written only from the validated ``limit`` in capacity reports and
+    # poll snapshots; NULL means the machine never reported one, and the
+    # matcher assigns as it did before. Schema-only: no Python behaviour.
+    run_concurrency_limit = models.IntegerField(null=True, blank=True)
     last_seen_at = models.DateTimeField(null=True, blank=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)

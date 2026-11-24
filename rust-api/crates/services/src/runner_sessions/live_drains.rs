@@ -269,6 +269,39 @@ async fn dispatch_facts_of(
     })
 }
 
+/// The winning session capabilities for one runner: the first active
+/// session advertising the machine queue wins, otherwise `[]`
+/// (legacy). Shared by the gate ([`protocol_for_runner`]) and the
+/// mint ([`mint_attempt`]) so both read the same snapshot.
+async fn queue_caps_for(db: &impl ConnectionTrait, runner_id: Uuid) -> Result<Value, DrainError> {
+    let caps = crate::runner_sessions::pubsub::active_runner_sessions(db, runner_id)
+        .await
+        .map_err(DrainError::from)
+        .unwrap_or_default();
+    // Centralized helper: first active session with queue capability wins,
+    // otherwise legacy.
+    let mut caps_value = serde_json::json!([]);
+    for session in caps {
+        if crate::runner_runs::capacity::supports_machine_queue(&session.capabilities) {
+            caps_value = session.capabilities.clone();
+            break;
+        }
+    }
+    Ok(caps_value)
+}
+
+/// The assignment protocol for one runner from its active session
+/// capabilities. Missing session or capability means legacy
+/// (protocol 0).
+async fn protocol_for_runner(
+    db: &impl ConnectionTrait,
+    runner_id: Uuid,
+) -> Result<i16, DrainError> {
+    Ok(crate::runner_runs::capacity::protocol_for_capabilities(
+        &queue_caps_for(db, runner_id).await?,
+    ))
+}
+
 /// Mint a fresh attempt token and choose the protocol from the runner's
 /// active session capabilities (Django `mint_assignment_attempt` +
 /// `protocol_for_runner`; Rust-only T1). Called inside the assignment
@@ -279,22 +312,104 @@ async fn mint_attempt(
     db: &impl ConnectionTrait,
     runner_id: Uuid,
 ) -> Result<(Uuid, i16), DrainError> {
-    let caps = crate::runner_sessions::pubsub::active_runner_sessions(db, runner_id)
-        .await
-        .map_err(DrainError::from)
-        .unwrap_or_default();
-    // Centralized helper: first active session with queue capability wins,
-    // otherwise legacy. Fresh UUID minted unconditionally.
-    let mut caps_value = serde_json::json!([]);
-    for session in caps {
-        if crate::runner_runs::capacity::supports_machine_queue(&session.capabilities) {
-            caps_value = session.capabilities.clone();
-            break;
+    Ok(crate::runner_runs::capacity::mint_for_capabilities(
+        &queue_caps_for(db, runner_id).await?,
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Machine capacity gate (NEWPIDASH-398)
+// ---------------------------------------------------------------------------
+
+/// Per-machine assignment budget for one drain transaction: the last
+/// reported limit plus the held count at lock time, with the runs
+/// this drain already assigned tracked on top (same-transaction
+/// writes are visible to later reads, but the counts are taken once
+/// up front, so the in-txn increments keep them exact).
+struct MachineGate {
+    /// Last reported concurrent-run limit per machine (`None` inside
+    /// means the machine never reported one: today's behaviour).
+    limits: std::collections::HashMap<Uuid, Option<i32>>,
+    /// Held (non-terminal) runs per machine at lock time.
+    held: std::collections::HashMap<Uuid, i64>,
+    /// Runs this drain already assigned per machine.
+    assigned: std::collections::HashMap<Uuid, i64>,
+}
+
+impl MachineGate {
+    /// True when the runner may take another run: no machine, no
+    /// reported limit, or a legacy (protocol-0) runner keeps today's
+    /// behaviour; otherwise held + already-assigned must be below
+    /// the machine's limit.
+    fn allows(&self, machine_id: Option<Uuid>, protocol: Option<i16>) -> bool {
+        let Some(machine_id) = machine_id else {
+            return true;
+        };
+        if protocol != Some(crate::runner_runs::capacity::PROTOCOL_MACHINE_QUEUE) {
+            return true;
+        }
+        let Some(limit) = self.limits.get(&machine_id).copied().flatten() else {
+            return true;
+        };
+        let held = self.held.get(&machine_id).copied().unwrap_or(0);
+        let assigned = self.assigned.get(&machine_id).copied().unwrap_or(0);
+        held + assigned < i64::from(limit)
+    }
+
+    /// Record one assignment on the runner's machine (called for
+    /// every assignment on a gated machine, whatever the protocol:
+    /// a legacy run still occupies a slot).
+    fn record(&mut self, machine_id: Option<Uuid>) {
+        if let Some(machine_id) = machine_id {
+            if self.limits.contains_key(&machine_id) {
+                *self.assigned.entry(machine_id).or_insert(0) += 1;
+            }
         }
     }
-    Ok(crate::runner_runs::capacity::mint_for_capabilities(
-        &caps_value,
-    ))
+}
+
+/// Lock the drain's machines (sorted, so overlapping drains lock in
+/// the same order) and snapshot limits + held counts. An empty input
+/// answers an empty gate with no query.
+async fn load_machine_gate(
+    db: &impl ConnectionTrait,
+    machine_ids: &[Uuid],
+) -> Result<MachineGate, DrainError> {
+    let mut gate = MachineGate {
+        limits: std::collections::HashMap::new(),
+        held: std::collections::HashMap::new(),
+        assigned: std::collections::HashMap::new(),
+    };
+    if machine_ids.is_empty() {
+        return Ok(gate);
+    }
+    let mut sorted = machine_ids.to_vec();
+    sorted.sort();
+    sorted.dedup();
+    let locked = db
+        .query_all(DbBackend::Postgres.build(&drain_kernel::machine_gate_lock_stmt(&sorted)))
+        .await?;
+    for row in &locked {
+        let id: Uuid = row.try_get("", "id")?;
+        let limit: Option<i32> = row.try_get("", "run_concurrency_limit")?;
+        gate.limits.insert(id, limit);
+    }
+    for id in &sorted {
+        // A machine row lock that finds no row (deleted mid-flight)
+        // gates nothing: today's behaviour.
+        if !gate.limits.contains_key(id) {
+            continue;
+        }
+        let row = db
+            .query_one(DbBackend::Postgres.build(&drain_kernel::machine_held_count_stmt(*id)))
+            .await?;
+        let held: i64 = match row {
+            Some(row) => row.try_get("", "held")?,
+            None => 0,
+        };
+        gate.held.insert(*id, held);
+    }
+    Ok(gate)
 }
 
 async fn write_assignment(
@@ -393,6 +508,22 @@ async fn drain_for_runner(
     let visibility: i16 = locked.try_get("", "visibility")?;
     let facts =
         dispatch_facts_of(&txn, runner_id, &provisioning, &pod_dispatch, machine_id).await?;
+    // NEWPIDASH-398: the machine gate. A run pinned to a runner on a
+    // full machine stays queued until that machine has a slot, instead
+    // of being assigned and waiting locally.
+    let machine_list: Vec<Uuid> = machine_id.into_iter().collect();
+    let mut gate = load_machine_gate(&txn, &machine_list).await?;
+    let gated_protocol = match machine_id {
+        Some(mid) if gate.limits.get(&mid).copied().flatten().is_some() => {
+            let protocol = protocol_for_runner(&txn, runner_id).await?;
+            if !gate.allows(machine_id, Some(protocol)) {
+                txn.commit().await?;
+                return Ok(false);
+            }
+            Some(protocol)
+        }
+        _ => None,
+    };
     // Non-private runners issue no query (the `qs.none()` arm).
     let Some(next_stmt) = drain_kernel::next_for_runner_stmt(
         i32::from(visibility),
@@ -418,7 +549,13 @@ async fn drain_for_runner(
             "drain_for_runner: run_config is not an object".to_owned(),
         ));
     };
-    let (assignment_token, assignment_protocol) = mint_attempt(&txn, runner_id).await?;
+    let (assignment_token, assignment_protocol) = match gated_protocol {
+        // The gate already negotiated the protocol from the same
+        // session snapshot; only the token is fresh per assignment.
+        Some(protocol) => (crate::runner_runs::capacity::mint_attempt_token(), protocol),
+        None => mint_attempt(&txn, runner_id).await?,
+    };
+    gate.record(machine_id);
     write_assignment(
         &txn,
         owner_id,
@@ -490,6 +627,20 @@ async fn drain_pod(
             DbBackend::Postgres.build(&drain_kernel::drain_pod_idle_list_stmt(threshold, pod_id)),
         )
         .await?;
+    // NEWPIDASH-398: lock the limited machines up front (sorted, so
+    // overlapping drains lock in the same order) and snapshot their
+    // budgets. Runners on a full machine are skipped below, so their
+    // queued runs stay on the server for a machine with a free slot.
+    let mut machine_ids: Vec<Uuid> = Vec::new();
+    for runner_row in &runners {
+        let machine_id: Option<Uuid> = runner_row.try_get("", "dev_machine_id")?;
+        if let Some(mid) = machine_id {
+            machine_ids.push(mid);
+        }
+    }
+    machine_ids.sort();
+    machine_ids.dedup();
+    let mut gate = load_machine_gate(&txn, &machine_ids).await?;
     let mut plans: Vec<drain_kernel::AssignmentPlan> = Vec::new();
     for runner_row in &runners {
         let runner_id: Uuid = runner_row.try_get("", "id")?;
@@ -500,6 +651,19 @@ async fn drain_pod(
         let visibility: i16 = runner_row.try_get("", "visibility")?;
         let facts =
             dispatch_facts_of(&txn, runner_id, &provisioning, &pod_dispatch, machine_id).await?;
+        // NEWPIDASH-398: the machine gate, before the run claim. A
+        // run that would wait in a full machine's local queue stays
+        // queued on the server instead.
+        let gated_protocol = match machine_id {
+            Some(mid) if gate.limits.get(&mid).copied().flatten().is_some() => {
+                let protocol = protocol_for_runner(&txn, runner_id).await?;
+                if !gate.allows(machine_id, Some(protocol)) {
+                    continue;
+                }
+                Some(protocol)
+            }
+            _ => None,
+        };
         let Some(next_stmt) = drain_kernel::next_for_runner_stmt(
             i32::from(visibility),
             pod_id,
@@ -522,7 +686,13 @@ async fn drain_pod(
                 "drain_pod: run_config is not an object".to_owned(),
             ));
         };
-        let (assignment_token, assignment_protocol) = mint_attempt(&txn, runner_id).await?;
+        let (assignment_token, assignment_protocol) = match gated_protocol {
+            // The gate already negotiated the protocol from the same
+            // session snapshot; only the token is fresh per assignment.
+            Some(protocol) => (crate::runner_runs::capacity::mint_attempt_token(), protocol),
+            None => mint_attempt(&txn, runner_id).await?,
+        };
+        gate.record(machine_id);
         write_assignment(
             &txn,
             owner_id,

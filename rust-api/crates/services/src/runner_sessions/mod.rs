@@ -12,6 +12,8 @@
 //!   PIDASHCONV-552).
 //! * [`live_drains`] — public drain executors over pool + Redis +
 //!   settings (PIDASHCONV-862; the jobs seam provider's entry).
+//! * [`machine_capacity`] — the single writer of the persisted
+//!   dev-machine concurrent-run limit (NEWPIDASH-398).
 //! * [`session_service`] — hello apply, heartbeat reaper, live-state
 //!   upsert, presence marks, project-slug resolve, session-open
 //!   redeliver + resume ack
@@ -59,6 +61,7 @@
 pub mod drain;
 pub mod guards;
 pub mod live_drains;
+pub mod machine_capacity;
 pub mod offline_recovery;
 pub mod pod_match;
 pub mod pubsub;
@@ -72,6 +75,7 @@ pub use drain::{
     AssignmentPlan, DispatchFacts, DrainEffect, NEXT_QUEUED_RUN_FOR_POD_SQL, POD_COLUMNS,
 };
 pub use live_drains::{drain_for_runner_by_id, drain_pod_by_id, DrainError, PoolPubsubStore};
+pub use machine_capacity::{persist_reported_limit, LimitChange};
 pub use offline_recovery::{
     clear_parent_thread_sql, clear_pin_sql, offline_fail_detail, offline_stamp_patch,
     paused_runner_pin_ids_select, paused_runner_pin_lock_select, release_pin_lock_select,

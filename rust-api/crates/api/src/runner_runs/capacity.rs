@@ -396,6 +396,21 @@ async fn run_capacity_inner(
         }
     };
 
+    // NEWPIDASH-398: persist the validated machine limit for the
+    // matcher gate (Runner → Session → Run → Machine order). A
+    // missing machine is a no-op; a persist failure rolls back with
+    // the rest of the transaction.
+    if let (Some(machine_id), Some(limit)) = (locked_runner.dev_machine_id, limit) {
+        let conn = TxConn::new(&mut tx);
+        if pidash_services::runner_sessions::persist_reported_limit(&conn, machine_id, limit)
+            .await
+            .is_err()
+        {
+            let _ = tx.rollback().await;
+            return server_error();
+        }
+    }
+
     let updated_run = {
         let conn = TxConn::new(&mut tx);
         agent_run::Entity::find_by_id(run_id).one(&conn).await

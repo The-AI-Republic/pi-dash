@@ -288,6 +288,7 @@ pub mod dev_machine {
             engine_state_reported_at: Set(None),
             merged_into_id: Set(None),
             merge_result: Set(serde_json::json!({})),
+            run_concurrency_limit: Set(None),
             last_seen_at: Set(Some(now.into())),
             revoked_at: Set(None),
             created_at: Set(now.into()),

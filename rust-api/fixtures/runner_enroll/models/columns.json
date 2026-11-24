@@ -291,6 +291,11 @@
           "default": "{}"
         },
         {
+          "name": "run_concurrency_limit",
+          "nullable": true,
+          "type": "integer"
+        },
+        {
           "name": "last_seen_at",
           "nullable": true,
           "type": "timestamptz"
