@@ -51,13 +51,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /code
 
 COPY --from=builder /tmp/pidash-api /usr/local/bin/pidash-api
-# register-instance reads ./package.json (cwd) for the version fallback
-COPY apps/api/package.json ./package.json
-# Worker seed data. FLAT layout (./seeds/*.json, no data/ segment): the live
-# worker joins seed_dir/filename directly (main.rs seed_data_dir), unlike
-# Python's SEED_DIR/data join — follow-up aligns the worker, then this
-# moves to data/.
-COPY apps/api/pi_dash/seeds/data/ ./seeds/
+# No apps/api files ship in the runtime image (NEWPIDASH-377): the instance
+# version is embedded from rust-api/package.json, and the worker seeds from
+# its embedded catalog when SEED_DIR is unset.
 # Entrypoints only (never the pidash-api/ sources beside them)
 COPY rust-api/bin/docker-entrypoint-*.sh ./bin/
 

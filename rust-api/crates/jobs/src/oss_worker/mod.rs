@@ -66,8 +66,9 @@ pub struct OssWorkerCtx {
     pub settings: Settings,
     /// The Mongo sink for cleanup tasks, if MongoDB is configured.
     pub mongo: Option<MongoSink>,
-    /// Seed-data dir for `workspace_seed` (`SEED_DIR` env or `seeds/`).
-    pub seed_dir: PathBuf,
+    /// Seed-data dir for `workspace_seed` (`Some` exactly when `SEED_DIR`
+    /// is set — the disk override; `None` seeds from the embedded catalog).
+    pub seed_dir: Option<PathBuf>,
     /// The assistant model-provider seam the worker-side
     /// runs-creation gates consult (tick, scheduler, handoff
     /// executor). The OSS binary installs the CE default; the cloud
@@ -135,7 +136,7 @@ impl OssWorkerCtx {
 ///     pools,
 ///     settings,
 ///     mongo: None,
-///     seed_dir: std::env::temp_dir(),
+///     seed_dir: Some(std::env::temp_dir()),
 ///     assistant_seam: std::sync::Arc::new(DefaultSeam),
 /// };
 /// register_oss_handlers(&mut registry, &ctx).expect("mail seams build");
@@ -512,7 +513,7 @@ mod tests {
             pools,
             settings,
             mongo: None,
-            seed_dir: std::env::temp_dir(),
+            seed_dir: Some(std::env::temp_dir()),
             assistant_seam: std::sync::Arc::new(DefaultSeam),
         };
         let mut registry = Registry::new();

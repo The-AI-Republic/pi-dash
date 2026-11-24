@@ -554,8 +554,11 @@ def test_dockerfile_env_keys_preserved():
 def test_dockerfile_copies():
     text = dockerfile_text()
     assert "COPY --from=builder /tmp/pidash-api /usr/local/bin/pidash-api" in text
-    assert "COPY apps/api/package.json ./package.json" in text
-    assert "COPY apps/api/pi_dash/seeds/data/ ./seeds/" in text
+    # NEWPIDASH-377: the runtime image ships no apps/api files — the
+    # instance version is embedded from rust-api/package.json and the
+    # worker seeds from its embedded catalog when SEED_DIR is unset.
+    assert "COPY apps/api/package.json ./package.json" not in text
+    assert "COPY apps/api/pi_dash/seeds/data/ ./seeds/" not in text
     assert "COPY rust-api/bin/docker-entrypoint-*.sh ./bin/" in text
     for line in text.splitlines():
         if line.startswith("COPY"):
@@ -567,9 +570,9 @@ def test_dockerfile_copies():
 def test_dockerfile_builder_needs_no_apps_api():
     # NEWPIDASH-376: templates are vendored under rust-api/templates, so the
     # builder stage compiles with only the Rust tree in context. (The
-    # runtime stage still copies seeds + package.json fallbacks from
-    # apps/api until NEWPIDASH-377 lands — those are asserted above, and
-    # this case pins exactly the builder COPY that went away.)
+    # runtime stage copied seeds + package.json fallbacks from apps/api
+    # until NEWPIDASH-377 landed — those are asserted above, and this case
+    # pins exactly the builder COPY that went away.)
     text = dockerfile_text()
     assert "COPY rust-api ./rust-api" in text
     assert "COPY apps/api ./apps/api" not in text

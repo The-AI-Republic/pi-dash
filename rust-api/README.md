@@ -544,7 +544,7 @@ Every variable the image sets or the scripts and boot path consume:
 | `AWS_SECRET_ACCESS_KEY`         | (unset)                                | create and update bucket      | S3 credentials                                               |
 | `AWS_S3_ENDPOINT_URL`           | (unset)                                | create and update bucket      | S3-compatible endpoint (MinIO, LocalStack)                   |
 | `AWS_S3_BUCKET_NAME`            | (unset)                                | create and update bucket      | default bucket                                               |
-| `SEED_DIR`                      | (unset)                                | worker seed path, 811 loader  | unset: worker reads ./seeds, loader serves embedded data     |
+| `SEED_DIR`                      | (unset)                                | worker seed path, 811 loader  | unset: worker seeds the embedded catalog; set: override reads that dir flat |
 | `PIDASH_RELEASES_URL`           | GitHub releases API                    | register-instance             | override for the latest-release probe (tests)                |
 | `INSTANCE_CHANGELOG_URL`        | (Dockerfile default)                   | settings                      | preserved from the Python image                              |
 | `PYTHONDONTWRITEBYTECODE`       | `1`                                    | (none)                        | preserved key; no interpreter in this image                  |

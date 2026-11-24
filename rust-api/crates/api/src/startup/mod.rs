@@ -80,12 +80,12 @@ async fn connect_serve_pools() -> Result<pidash_db::Pools, Box<dyn std::error::E
 }
 
 /// Seed-data directory for `workspace_seed` (`settings.SEED_DIR`,
-/// `apps/api/pi_dash/settings/common.py:743`): `SEED_DIR` env, else the
-/// `seeds` checkout dir. Missing files only empty the seed.
-fn seed_data_dir() -> std::path::PathBuf {
-    std::env::var("SEED_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("seeds"))
+/// `apps/api/pi_dash/settings/common.py:743`): `Some` exactly when `SEED_DIR`
+/// is set (the disk override); `None` seeds from the embedded catalog, so a
+/// worker started without `SEED_DIR` seeds exactly what the files carry
+/// instead of an empty workspace.
+fn seed_data_dir() -> Option<std::path::PathBuf> {
+    std::env::var("SEED_DIR").ok().map(std::path::PathBuf::from)
 }
 
 /// Graceful-shutdown trigger for `serve` and `worker`: SIGINT or SIGTERM.

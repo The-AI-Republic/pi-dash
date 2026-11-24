@@ -871,8 +871,9 @@ def test_register_current_version_chain(scratch_pair, tmp_path):
     )
     assert instance_row(django_db)["current_version"] == "9.9.9-contract"
     assert instance_row(rust_db)["current_version"] == "9.9.9-contract"
-    # Empty APP_VERSION counts as unset; missing package.json falls back
-    # with the error line (cwd without one).
+    # Empty APP_VERSION counts as unset. With no package.json in cwd the
+    # oracle falls back with the error line; Rust reports its owned embedded
+    # version instead (DIFF-65: rust-api/package.json, no apps/api file).
     (tmp_path / "empty").mkdir()
     env = dict(DEAD_PROXY)
     env["APP_VERSION"] = ""
@@ -884,15 +885,20 @@ def test_register_current_version_chain(scratch_pair, tmp_path):
     rust = run_rust(
         rust_db, "register-instance", "s", env_extra=rust_env, cwd=tmp_path / "empty"
     )
-    assert rust.stdout == oracle.stdout
-    assert rust.stdout == (
+    assert oracle.stdout == (
         b"Error checking for current version\n"
         b"Error checking for latest version\n"
         b"Instance already registered\n"
     )
+    assert rust.stdout == (
+        b"Error checking for latest version\n"
+        b"Instance already registered\n"
+    )
     assert instance_row(django_db)["current_version"] == "v0.1.0"
-    assert instance_row(rust_db)["current_version"] == "v0.1.0"
-    # A package.json version is read silently (apps/api ships 1.3.0).
+    owned_version = json.loads((RUST_ROOT / "package.json").read_text())["version"]
+    assert instance_row(rust_db)["current_version"] == owned_version
+    # A package.json version is read silently (apps/api ships 1.3.0, and the
+    # embedded owned copy carries the same release).
     env = dict(DEAD_PROXY)
     oracle = run_django(
         django_db, "register_instance", "s", env_extra=env, cwd=API_ROOT
