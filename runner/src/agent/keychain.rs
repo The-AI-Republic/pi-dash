@@ -12,11 +12,13 @@
 //! * Linux: Secret Service `SearchItems` over D-Bus, using both the
 //!   unlocked and the locked result lists. `SearchItems` returns object
 //!   paths only — no secrets — and does not need the keyring unlocked.
-//! * macOS: generic-password search by service, loading attributes only
-//!   (`kSecReturnAttributes`, never `kSecReturnData`). Attribute reads do
-//!   not trigger an access prompt.
-//! * Windows: `CredEnumerateW` with a target filter, ignoring the
-//!   credential blob.
+//! * macOS: `security find-generic-password -s <service>` as a
+//!   subprocess. Stdout is discarded so secret bytes never enter this
+//!   process — only the exit status is read (0 present, 44 absent). A
+//!   service-only lookup does not trigger an access prompt.
+//! * Windows: `cmdkey /list` as a subprocess, parsing target names only.
+//!   The listing never prints credential blobs, so there is no secret to
+//!   redact.
 //!
 //! Items are matched on the service alone: callers pass the service name
 //! plus optional extra attributes. On Linux the `service` argument always
@@ -48,6 +50,10 @@ pub enum KeychainPresence {
 /// Pure mapping of a Secret Service `SearchItems` result onto
 /// [`KeychainPresence`]: any unlocked match counts as unlocked, a match only
 /// in the locked list counts as locked, no match at all is absent.
+///
+/// Only the Linux probe calls this; the `cfg` keeps it (and its tests)
+/// without tripping `-D warnings` dead-code errors on other platforms.
+#[cfg(any(test, target_os = "linux"))]
 fn classify_search(unlocked: usize, locked: usize) -> KeychainPresence {
     if unlocked > 0 {
         KeychainPresence::Present { locked: false }
@@ -116,101 +122,97 @@ fn probe(service: &str, attrs: &[(String, String)]) -> KeychainPresence {
     outcome.unwrap_or(KeychainPresence::Unavailable)
 }
 
-/// Unbounded platform probe. Searches generic passwords by service and
-/// loads attributes only — no secret bytes cross into this process, so no
-/// access prompt appears and nothing sensitive can leak into logs.
+/// Unbounded platform probe. Runs `security find-generic-password` as a
+/// subprocess with stdout discarded, so secret bytes never enter this
+/// process — only the exit status is read. No `unsafe`, no FFI: the crate
+/// forbids unsafe code outright. A service-only lookup does not trigger
+/// an "allow access" prompt; `Command` passes the service as an argv
+/// entry, never through a shell, so service names cannot inject.
+///
+/// Exit statuses are the low byte of the OSStatus: 0 is success, 44 is
+/// `errSecItemNotFound` (-25300). Anything else — locked keychain,
+/// denied interaction, missing helper — is inconclusive, so it maps to
+/// [`KeychainPresence::Unavailable`] and callers let the run through
+/// rather than block on a guess.
 #[cfg(target_os = "macos")]
 fn probe(service: &str, _attrs: &[(String, String)]) -> KeychainPresence {
-    use core_foundation::array::{CFArray, CFArrayRef};
-    use core_foundation::base::TCFType;
-    use core_foundation::boolean::CFBoolean;
-    use core_foundation::dictionary::CFDictionary;
-    use core_foundation::string::CFString;
+    use std::process::{Command, Stdio};
 
-    // Every `extern static` access and the copy call are unsafe; the query
-    // itself only asks for attributes, never secret data.
-    let class_key =
-        unsafe { CFString::wrap_under_get_rule(security_framework_sys::item::kSecClass) };
-    let class_value = unsafe {
-        CFString::wrap_under_get_rule(security_framework_sys::item::kSecClassGenericPassword)
-    };
-    let service_key =
-        unsafe { CFString::wrap_under_get_rule(security_framework_sys::item::kSecAttrService) };
-    let return_key = unsafe {
-        CFString::wrap_under_get_rule(security_framework_sys::item::kSecReturnAttributes)
-    };
-    let limit_key =
-        unsafe { CFString::wrap_under_get_rule(security_framework_sys::item::kSecMatchLimit) };
-    let limit_value =
-        unsafe { CFString::wrap_under_get_rule(security_framework_sys::item::kSecMatchLimitAll) };
-    let query = CFDictionary::from_CFType_pairs(&[
-        (class_key.as_CFType(), class_value.as_CFType()),
-        (service_key.as_CFType(), CFString::new(service).as_CFType()),
-        (return_key.as_CFType(), CFBoolean::true_value().as_CFType()),
-        (limit_key.as_CFType(), limit_value.as_CFType()),
-    ]);
-    let mut result: *const std::ffi::c_void = std::ptr::null();
-    let status = unsafe {
-        security_framework_sys::keychain_item::SecItemCopyMatching(
-            query.as_concrete_TypeRef(),
-            &mut result,
-        )
-    };
-    if status == security_framework_sys::base::errSecSuccess {
-        if result.is_null() {
-            return KeychainPresence::Absent;
-        }
-        // `kSecMatchLimitAll` returns an array; take ownership (+1) so it
-        // is released on drop, then count without touching secrets.
-        let found: CFArray<core_foundation::base::CFType> =
-            unsafe { CFArray::wrap_under_create_rule(result as CFArrayRef) };
-        if found.is_empty() {
-            KeychainPresence::Absent
-        } else {
-            KeychainPresence::Present { locked: false }
-        }
-    } else if status == security_framework_sys::base::errSecItemNotFound {
-        KeychainPresence::Absent
-    } else {
-        // Locked keychain, denied interaction, no keychain: the item may
-        // exist, so report inconclusive rather than absent.
-        KeychainPresence::Unavailable
+    let code = Command::new("security")
+        .args(["find-generic-password", "-s", service])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok()
+        .and_then(|status| status.code());
+    match code {
+        Some(0) => KeychainPresence::Present { locked: false },
+        Some(44) => KeychainPresence::Absent,
+        _ => KeychainPresence::Unavailable,
     }
 }
 
-/// Unbounded platform probe. Enumerates credentials whose target starts
-/// with the service; the blob is never read.
+/// Unbounded platform probe. Runs `cmdkey /list` as a subprocess and
+/// parses target names only. The listing never prints credential blobs,
+/// so capturing it cannot leak a secret. No `unsafe`, no FFI: the crate
+/// forbids unsafe code outright.
 #[cfg(target_os = "windows")]
 fn probe(service: &str, _attrs: &[(String, String)]) -> KeychainPresence {
-    use windows_sys::Win32::Foundation::{ERROR_NOT_FOUND, GetLastError};
-    use windows_sys::Win32::Security::Credentials::{CREDENTIALW, CredEnumerateW, CredFree};
+    use std::process::{Command, Stdio};
 
-    // `agy` stores under targets like `gemini:antigravity` and
-    // `gemini/antigravity`; the prefix filter covers both spellings.
-    let filter: Vec<u16> = format!("{service}*")
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let mut count = 0u32;
-    let mut creds: *mut *mut CREDENTIALW = std::ptr::null_mut();
-    // SAFETY: `filter` is NUL-terminated; `count`/`creds` are valid
-    // out-pointers; the buffer is freed with `CredFree` on success.
-    let ok = unsafe { CredEnumerateW(filter.as_ptr(), 0, &mut count, &mut creds) };
-    if ok == 0 {
-        let err = unsafe { GetLastError() };
-        if err == ERROR_NOT_FOUND {
-            KeychainPresence::Absent
-        } else {
-            KeychainPresence::Unavailable
-        }
-    } else {
-        unsafe { CredFree(creds as *mut std::ffi::c_void) };
-        if count == 0 {
-            KeychainPresence::Absent
-        } else {
+    let text = Command::new("cmdkey")
+        .arg("/list")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
+    match text {
+        Some(text) if cmdkey_output_has_service(&text, service) => {
             KeychainPresence::Present { locked: false }
         }
+        Some(_) => KeychainPresence::Absent,
+        None => KeychainPresence::Unavailable,
     }
+}
+
+/// True when `cmdkey /list` output names a credential for `service`.
+///
+/// `agy` stores under targets like `gemini:antigravity` and
+/// `gemini/antigravity`, displayed as `LegacyGeneric:target=…`; the
+/// match is the value after `target=` (that marker is part of the stored
+/// name, so it survives non-English output), falling back to the value
+/// after the line's label (`Target: …`) so bare target forms match too.
+/// The match is the service alone (`gemini`), an exact hit, or the
+/// service followed by `:` or `/` — so per-account variants all count
+/// while `gemini2`-style neighbours do not. Case-insensitive: target
+/// names compare that way on Windows.
+#[cfg(any(test, target_os = "windows"))]
+fn cmdkey_output_has_service(output: &str, service: &str) -> bool {
+    let service = service.to_ascii_lowercase();
+    let exact = service.as_str();
+    let colon = format!("{service}:");
+    let slash = format!("{service}/");
+    output.lines().any(|line| {
+        let hay = line.to_ascii_lowercase();
+        let mut targets: Vec<&str> = hay
+            .split("target=")
+            .skip(1)
+            .map(|rest| rest.split_whitespace().next().unwrap_or(""))
+            .collect();
+        if targets.is_empty() {
+            let after_label = hay
+                .split_once(':')
+                .map(|(_, value)| value.trim())
+                .unwrap_or(hay.trim());
+            targets.push(after_label);
+        }
+        targets.iter().any(|target| {
+            *target == exact || target.starts_with(&colon) || target.starts_with(&slash)
+        })
+    })
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -258,5 +260,84 @@ mod tests {
             keychain_item_present(canary, &[("service", canary)]),
             KeychainPresence::Absent
         );
+    }
+
+    /// Same canary search via the `security` CLI: exit 44 means absent.
+    /// Needs a logged-in Mac; stays ignored in normal runs.
+    #[test]
+    #[ignore = "needs a real answering keychain; run explicitly with -- --ignored"]
+    #[cfg(target_os = "macos")]
+    fn live_security_search_reports_canary_absent() {
+        let canary = "pidash-antigravity-canary-8d2f";
+        assert_eq!(keychain_item_present(canary, &[]), KeychainPresence::Absent);
+    }
+
+    /// Same canary search via `cmdkey /list`. Needs a Windows host;
+    /// stays ignored in normal runs.
+    #[test]
+    #[ignore = "needs a real answering keychain; run explicitly with -- --ignored"]
+    #[cfg(target_os = "windows")]
+    fn live_cmdkey_search_reports_canary_absent() {
+        let canary = "pidash-antigravity-canary-8d2f";
+        assert_eq!(keychain_item_present(canary, &[]), KeychainPresence::Absent);
+    }
+
+    const CMDKEY_COLON: &str = "\
+Currently stored credentials:
+
+    Target: LegacyGeneric:target=gemini:antigravity
+    Type: Generic
+    User: someone@example.com
+";
+
+    const CMDKEY_SLASH: &str = "\
+Currently stored credentials:
+
+    Target: LegacyGeneric:target=gemini/antigravity
+    Type: Generic
+";
+
+    #[test]
+    fn cmdkey_colon_target_matches() {
+        assert!(cmdkey_output_has_service(CMDKEY_COLON, "gemini"));
+    }
+
+    #[test]
+    fn cmdkey_slash_target_matches() {
+        assert!(cmdkey_output_has_service(CMDKEY_SLASH, "gemini"));
+    }
+
+    #[test]
+    fn cmdkey_bare_target_matches() {
+        let output = "    Target: gemini:antigravity\n    Type: Generic\n";
+        assert!(cmdkey_output_has_service(output, "gemini"));
+        let output = "    Target: gemini\n";
+        assert!(cmdkey_output_has_service(output, "gemini"));
+    }
+
+    #[test]
+    fn cmdkey_match_is_case_insensitive() {
+        let output = "    Target: LegacyGeneric:target=GEMINI:Antigravity\n";
+        assert!(cmdkey_output_has_service(output, "gemini"));
+        assert!(cmdkey_output_has_service(CMDKEY_COLON, "GEMINI"));
+    }
+
+    #[test]
+    fn cmdkey_other_services_do_not_match() {
+        let output = "    Target: LegacyGeneric:target=gemini2:antigravity\n";
+        assert!(!cmdkey_output_has_service(output, "gemini"));
+        let output = "    Target: LegacyGeneric:target=mygemini:antigravity\n";
+        assert!(!cmdkey_output_has_service(output, "gemini"));
+        let output = "    Target: LegacyGeneric:target=other:service\n";
+        assert!(!cmdkey_output_has_service(output, "gemini"));
+    }
+
+    #[test]
+    fn cmdkey_empty_store_is_absent() {
+        assert!(!cmdkey_output_has_service("", "gemini"));
+        assert!(!cmdkey_output_has_service(
+            "Currently stored credentials:\n\n* NONE *\n",
+            "gemini"
+        ));
     }
 }

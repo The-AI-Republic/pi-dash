@@ -86,18 +86,13 @@ zbus = { version = "4", default-features = false, features = ["blocking", "async
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3.6", default-features = false, features = ["apple-native"] }
-# Agent keychain presence probe (agent::keychain, NEWPIDASH-397):
-# generic-password search by service via direct Security framework calls
-# (attribute-only: never secret bytes). Versions pinned to the locked
-# transitive set so no new downloads are needed.
-security-framework-sys = "2"
-core-foundation = "0.9"
+# Agent keychain presence probe (agent::keychain, NEWPIDASH-397) is a
+# `security find-generic-password` subprocess: no extra dependencies.
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3.6", default-features = false, features = ["windows-native"] }
-# Agent keychain presence probe (agent::keychain, NEWPIDASH-397):
-# CredEnumerateW with a target filter. Pinned to the locked 0.59 line.
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
+# Agent keychain presence probe (agent::keychain, NEWPIDASH-397) is a
+# `cmdkey /list` subprocess: no extra dependencies.
 # Windows network-change detection (NEWPIDASH-244): enumerates interface
 # addresses via pure-Rust helpers so the daemon can kick its backoff on
 # Wi-Fi/VPN drop without an app kick. No new Windows COM deps.
