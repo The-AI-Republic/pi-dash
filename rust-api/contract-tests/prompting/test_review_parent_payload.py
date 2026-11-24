@@ -7,12 +7,22 @@ Django's ``_parent_done_payload``
 ``\\uXXXX`` escape (surrogate pairs above the BMP). The review-kind
 preview of an issue whose parent run carries a non-ASCII done payload
 must show that escaped form, never raw UTF-8 (PIDASHCONV-1234).
+
+DIFF-54: the lean agent workflow change dropped the
+``parent_done_payload`` block from the Rust issue-run templates
+(design ``.ai_design/lean_agent_workflow/design.md`` §13 issue C), so on
+Rust the parent payload surfaces in the Runs-so-far history
+(result/note) instead of the old escaped-JSON "Latest implementation
+run output" block. The 500 NEWPIDASH-372 fixes masked this: every
+full-model ``agent_run`` select failed, so the preview never rendered.
 """
 
 import uuid
 from datetime import datetime, timezone
 
 from psycopg.types.json import Json
+
+from _harness.diffs import expect
 
 
 def _preview_url(tenant):
@@ -77,10 +87,30 @@ def test_review_preview_escapes_non_ascii_parent_payload(api, seed, tenant_a,
                      json={"issue_id": str(issue_id)})
         assert r.status_code == 200, r.text
         prompt = r.json()["prompt"]
-        assert '"summary": "fix \\u2014 done \\u2713"' in prompt
-        assert '"note": "ship \\ud83d\\ude80"' in prompt
-        assert "fix \u2014 done \u2713" not in prompt
-        assert "ship \U0001f680" not in prompt
+        # DIFF-54: each backend pins its own rendering (see module
+        # docstring). The status line above is the NEWPIDASH-372 proof:
+        # the preview 500'd on Rust before runner/0044 created the
+        # ``agent_run`` columns it selects.
+        assert expect(
+            "DIFF-54",
+            django='"summary": "fix \\u2014 done \\u2713"' in prompt,
+            rust="no result reported \u2014 ship \U0001f680" in prompt,
+        )
+        assert expect(
+            "DIFF-54",
+            django='"note": "ship \\ud83d\\ude80"' in prompt,
+            rust="Latest implementation run output" not in prompt,
+        )
+        assert expect(
+            "DIFF-54",
+            django="fix \u2014 done \u2713" not in prompt,
+            rust="Runs so far on this issue (oldest first):" in prompt,
+        )
+        assert expect(
+            "DIFF-54",
+            django="ship \U0001f680" not in prompt,
+            rust="fix \u2014 done \u2713" not in prompt,
+        )
     finally:
         with seed.conn.cursor() as cur:
             cur.execute("DELETE FROM issue_agent_ticker WHERE id = %s",
