@@ -30,7 +30,10 @@
 //! - **Run-time auth**: a turn that fails with the ACP authentication-required
 //!   error (code `-32000`) surfaces as `AgentAuthMissing` with the agent's
 //!   fix hint, not a plain agent crash. That catches expired or revoked
-//!   sign-ins, which the pre-pickup presence check cannot see.
+//!   sign-ins, which the pre-pickup presence check cannot see. A handshake
+//!   that fails the same way (e.g. `session/new` answering `-32000` before
+//!   any turn exists) surfaces a typed [`HandshakeAuthError`] so the
+//!   supervisor reports the same `agent_auth_missing` + fix hint.
 //! - **Token usage**: all `session/update` frames (including any future
 //!   `usage_update`) stream as `Raw` history events; the supervisor's usage
 //!   parser picks up the shapes it knows.
@@ -49,6 +52,49 @@ use crate::agent::{
 };
 use crate::cloud::protocol::{ApprovalDecision, FailureReason};
 use crate::openclaw::schema::AcpMessage;
+
+/// A handshake that failed with the ACP authentication-required error
+/// (code `-32000`). Produced by [`Bridge::await_response`] when a handshake
+/// request (`initialize`, `session/new`, `session/resume`, `session/load`,
+/// or `session/set_config_option`) is answered with that error — e.g. `agy
+/// acp` answering `session/new` when the cached sign-in expired or was
+/// revoked. Handshake callers propagate it unwrapped (see
+/// [`Bridge::await_handshake_response`]) so the supervisor's
+/// handshake-failure arm can match it by type via [`Self::find`] and report
+/// `agent_auth_missing` with the agent's fix hint — the same mapping
+/// [`BridgeCursor::translate`] applies to turn-time errors.
+#[derive(Debug)]
+pub struct HandshakeAuthError {
+    /// Agent label for failure details (`"grok"`, `"antigravity"`).
+    pub label: &'static str,
+    /// The server's `error.message` (defaults to `"Authentication required"`).
+    pub message: String,
+    /// Agent's fix hint (the profile's `auth_fix_hint`).
+    pub fix_hint: &'static str,
+}
+
+impl HandshakeAuthError {
+    /// Locate one in an error chain. Matches only when it is the outermost
+    /// error: handshake callers propagate it unwrapped, so a match means
+    /// the handshake itself failed with authentication-required.
+    pub fn find(err: &anyhow::Error) -> Option<&HandshakeAuthError> {
+        err.downcast_ref::<HandshakeAuthError>()
+    }
+
+    /// `RunFailed` detail, in the same shape as the turn-time mapping in
+    /// [`BridgeCursor::translate`]: `"<label>: <message>: <fix hint>"`.
+    pub fn detail(&self) -> String {
+        format!("{}: {}: {}", self.label, self.message, self.fix_hint)
+    }
+}
+
+impl std::fmt::Display for HandshakeAuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.detail())
+    }
+}
+
+impl std::error::Error for HandshakeAuthError {}
 
 /// Per-agent ACP behaviour. Grok keeps its pre-shared posture (model on
 /// `session/new`, interrupt by OS signal); Antigravity applies the configured
@@ -199,10 +245,7 @@ impl Bridge {
         let id = self.proc.alloc_id();
         let line = schema::initialize_request(id);
         self.proc.send_raw(&line).await?;
-        let result = self
-            .await_response(ENGINE_STARTUP_TIMEOUT)
-            .await
-            .with_context(|| format!("{} initialize failed", self.profile.label))?;
+        let result = self.await_handshake_response("initialize").await?;
         self.resume_support = schema::resume_support_from_initialize(&result);
         self.initialized = true;
         Ok(())
@@ -222,10 +265,7 @@ impl Bridge {
                 self.proc
                     .send_raw(&schema::session_resume_request(id, &known, &cwd_str))
                     .await?;
-                let result = self
-                    .await_response(ENGINE_STARTUP_TIMEOUT)
-                    .await
-                    .with_context(|| format!("{label} session/resume failed"))?;
+                let result = self.await_handshake_response("session/resume").await?;
                 // The resumed session keeps its id; prefer one the server
                 // mints, fall back to the id we asked to resume.
                 Ok::<_, anyhow::Error>((
@@ -238,10 +278,7 @@ impl Bridge {
                 self.proc
                     .send_raw(&schema::session_load_request(id, &known, &cwd_str))
                     .await?;
-                let result = self
-                    .await_response(ENGINE_STARTUP_TIMEOUT)
-                    .await
-                    .with_context(|| format!("{label} session/load failed"))?;
+                let result = self.await_handshake_response("session/load").await?;
                 Ok((
                     schema::session_id_from_result(&result).or(Some(known)),
                     result,
@@ -255,10 +292,7 @@ impl Bridge {
                     model_on_new.then_some(self.model.as_deref()).flatten(),
                 );
                 self.proc.send_raw(&line).await?;
-                let result = self
-                    .await_response(ENGINE_STARTUP_TIMEOUT)
-                    .await
-                    .with_context(|| format!("{label} session/new failed"))?;
+                let result = self.await_handshake_response("session/new").await?;
                 // Prefer the id the server minted; fall back to any seeded
                 // resume id so we still have a stable thread id even if the
                 // server omits it.
@@ -298,11 +332,8 @@ impl Bridge {
                 let line =
                     schema::session_set_config_option_request(id, &session_id, &config_id, &value);
                 self.proc.send_raw(&line).await?;
-                self.await_response(ENGINE_STARTUP_TIMEOUT)
-                    .await
-                    .with_context(|| {
-                        format!("{} session/set_config_option failed", self.profile.label)
-                    })?;
+                self.await_handshake_response("session/set_config_option")
+                    .await?;
             }
             None => {
                 tracing::warn!(
@@ -315,6 +346,23 @@ impl Bridge {
         Ok(())
     }
 
+    /// Await one handshake response, attaching `{label} {step} failed`
+    /// context to a plain failure. A [`HandshakeAuthError`] propagates
+    /// unwrapped so the supervisor's handshake-failure arm can match it by
+    /// type and report `agent_auth_missing` instead of a plain crash.
+    async fn await_handshake_response(&mut self, step: &str) -> Result<serde_json::Value> {
+        let label = self.profile.label;
+        self.await_response(ENGINE_STARTUP_TIMEOUT)
+            .await
+            .map_err(|e| {
+                if e.is::<HandshakeAuthError>() {
+                    e
+                } else {
+                    e.context(format!("{label} {step} failed"))
+                }
+            })
+    }
+
     /// Pull frames until the next JSON-RPC *response* arrives, returning its
     /// `result` (or bailing on an `error`). Non-response frames (notifications,
     /// and any early permission request) are handled along the way — permission
@@ -322,6 +370,10 @@ impl Bridge {
     /// `next_events` replays them. Responses are correlated by arrival order:
     /// the handshake sends one request at a time and awaits it before the next,
     /// so the first response we see is the one we asked for.
+    ///
+    /// An authentication-required error (code `-32000`) fails with a typed
+    /// [`HandshakeAuthError`] carrying the agent's fix hint, so callers can
+    /// report it as `agent_auth_missing` rather than a plain crash.
     async fn await_response(&mut self, timeout: Duration) -> Result<serde_json::Value> {
         let label = self.profile.label;
         let deadline = tokio::time::Instant::now() + timeout;
@@ -337,6 +389,19 @@ impl Bridge {
                 continue;
             }
             if let Some(err) = value.get("error").filter(|e| !e.is_null()) {
+                if schema::is_auth_required_error(err) {
+                    let message = err
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("Authentication required")
+                        .to_owned();
+                    return Err(HandshakeAuthError {
+                        label,
+                        message,
+                        fix_hint: self.profile.auth_fix_hint,
+                    }
+                    .into());
+                }
                 let msg = err
                     .get("message")
                     .and_then(|m| m.as_str())
@@ -900,6 +965,84 @@ exec cat >/dev/null
         assert!(
             !logged.contains("session/new"),
             "expected no fresh session/new, got: {logged}"
+        );
+    }
+
+    /// The exact frame a real `agy acp` returns for `session/new` without
+    /// cached credentials (Step 0 recording): the handshake fails with a
+    /// typed `HandshakeAuthError` — not a plain string — so the supervisor
+    /// reports `agent_auth_missing` with the fix hint instead of a crash.
+    #[tokio::test]
+    async fn handshake_session_new_auth_required_is_typed() {
+        let script = r#"
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}'
+printf '%s\n' '{"jsonrpc":"2.0","error":{"code":-32000,"message":"Authentication required"},"id":2}'
+exec cat >/dev/null
+"#;
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.arg("-c").arg(script);
+        let proc = AcpProcess::spawn_command("test-acp", cmd)
+            .await
+            .expect("spawn fake ACP server");
+        let mut bridge = Bridge::from_process(proc, TEST_PROFILE, None, None);
+
+        let payload = RunPayload {
+            run_id: Uuid::nil(),
+            prompt: "do it".into(),
+            model: None,
+        };
+        let err = bridge
+            .run(&payload, Path::new("/tmp"))
+            .await
+            .err()
+            .expect("session/new -32000 must fail the handshake");
+        let auth = HandshakeAuthError::find(&err).expect("handshake auth failure must be typed");
+        assert_eq!(auth.label, TEST_PROFILE.label);
+        let detail = auth.detail();
+        assert!(
+            detail.contains("Authentication required"),
+            "detail must carry the server message, got: {detail}"
+        );
+        assert!(
+            detail.contains(TEST_PROFILE.auth_fix_hint),
+            "detail must carry the fix hint, got: {detail}"
+        );
+    }
+
+    /// A non-auth handshake failure stays a plain (context-wrapped) error:
+    /// the supervisor must keep reporting those as crashes, never as
+    /// `agent_auth_missing`.
+    #[tokio::test]
+    async fn handshake_session_new_other_error_stays_untyped() {
+        let script = r#"
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32603,"message":"internal error"}}'
+exec cat >/dev/null
+"#;
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.arg("-c").arg(script);
+        let proc = AcpProcess::spawn_command("test-acp", cmd)
+            .await
+            .expect("spawn fake ACP server");
+        let mut bridge = Bridge::from_process(proc, TEST_PROFILE, None, None);
+
+        let payload = RunPayload {
+            run_id: Uuid::nil(),
+            prompt: "do it".into(),
+            model: None,
+        };
+        let err = bridge
+            .run(&payload, Path::new("/tmp"))
+            .await
+            .err()
+            .expect("session/new error must fail the handshake");
+        assert!(
+            HandshakeAuthError::find(&err).is_none(),
+            "non-auth handshake failure must stay untyped, got: {err:#}"
+        );
+        assert!(
+            format!("{err:#}").contains("session/new failed"),
+            "non-auth failure must keep its step context, got: {err:#}"
         );
     }
 

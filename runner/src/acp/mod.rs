@@ -27,5 +27,5 @@ pub mod bridge;
 pub mod process;
 pub mod schema;
 
-pub use bridge::{AcpProfile, Bridge, BridgeCursor};
+pub use bridge::{AcpProfile, Bridge, BridgeCursor, HandshakeAuthError};
 pub use process::AcpProcess;

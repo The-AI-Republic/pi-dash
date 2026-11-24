@@ -4988,7 +4988,23 @@ impl AssignWorker {
             let mut cursor = match started {
                 Ok(c) => c,
                 Err(e) => {
-                    let detail = self.build_failure_detail(&format!("{e:#}"), &bridge).await;
+                    // A handshake that fails with the ACP
+                    // authentication-required error (code -32000 — e.g. `agy
+                    // acp` answering `session/new` when the cached sign-in
+                    // expired or was revoked) is a missing sign-in, not a
+                    // crash: report `agent_auth_missing` with the agent's fix
+                    // hint, mirroring the turn-time mapping in
+                    // `BridgeCursor::translate`.
+                    let auth = crate::acp::bridge::HandshakeAuthError::find(&e);
+                    let reason = if auth.is_some() {
+                        FailureReason::AgentAuthMissing
+                    } else {
+                        self.crash_reason()
+                    };
+                    let base = auth
+                        .map(|a| a.detail())
+                        .unwrap_or_else(|| format!("{e:#}"));
+                    let detail = self.build_failure_detail(&base, &bridge).await;
                     hist.append(&HistoryEntry::Footer {
                         ts: Utc::now(),
                         final_status: "failed".to_string(),
@@ -4999,7 +5015,7 @@ impl AssignWorker {
                     .ok();
                     self.send(ClientMsg::RunFailed {
                         run_id,
-                        reason: self.crash_reason(),
+                        reason,
                         detail: Some(detail),
                         ended_at: Utc::now(),
                         tokens: None,
