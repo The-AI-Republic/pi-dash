@@ -19,9 +19,10 @@
 //! (running as the user's own service) can read. `GEMINI_API_KEY` plus
 //! `"modelProvider": "gemini"` in `~/.gemini/antigravity-cli/settings.json`,
 //! or `AGY_ADC_AUTH=true`, is the headless fallback. The pre-pickup presence
-//! check is NEWPIDASH-397; until it lands,
-//! [`crate::agent::auth::has_antigravity_credentials`] returns `true` (never
-//! block on a guess). The run-time safety net lives in the shared bridge: a
+//! check is [`crate::agent::auth::has_antigravity_credentials`]
+//! (NEWPIDASH-397: API key, ADC, or an OS-keychain sign-in item; an
+//! unanswered keychain lets the run through). The run-time safety net lives
+//! in the shared bridge: a
 //! turn that fails with the ACP authentication-required error (code `-32000`)
 //! surfaces as `agent_auth_missing` with the Antigravity fix hint.
 //!

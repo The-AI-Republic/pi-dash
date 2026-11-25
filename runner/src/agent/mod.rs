@@ -4,6 +4,7 @@
 //! not have to know which underlying CLI is driving a run.
 
 pub mod auth;
+pub mod keychain;
 pub mod package;
 
 use anyhow::Result;

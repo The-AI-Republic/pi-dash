@@ -406,24 +406,15 @@ async fn run_agent_checks(
                     blocker: true,
                 }),
             }
-            // Antigravity auth is a presence check owned by NEWPIDASH-397
-            // (OS-keychain item search). Until it lands the gate never
-            // blocks on a guess, so doctor reports which setup was found
-            // without failing the run. The run-time safety net (ACP
-            // error -32000 → `agent_auth_missing`) catches expired or
-            // revoked sign-ins the presence check cannot see.
-            let has_creds = crate::agent::auth::has_antigravity_credentials();
+            // NEWPIDASH-397 presence check: API key, Google Cloud ADC, or an
+            // OS-keychain sign-in item (existence only, never the secret). The
+            // run-time safety net (ACP error -32000 -> `agent_auth_missing`)
+            // still catches expired or revoked sign-ins this cannot see.
+            let detail = crate::agent::auth::antigravity_live_detail();
             checks.push(Check {
                 name: tag("antigravity-auth"),
-                ok: has_creds,
-                detail: if has_creds {
-                    "Antigravity credentials present (keyring sign-in, GEMINI_API_KEY or ADC — see NEWPIDASH-397)".to_string()
-                } else {
-                    format!(
-                        "missing Antigravity credentials: {}",
-                        crate::agent::auth::ANTIGRAVITY_FIX_HINT
-                    )
-                },
+                ok: detail != crate::agent::auth::AntigravityAuthDetail::Missing,
+                detail: detail.to_string(),
                 blocker: false,
             });
         }
