@@ -584,12 +584,17 @@ fn assert_candidate(kind: &str, stem: &str, raw: &str) {
         // Help and version requests are exempt from the operator refusal
         // (`early_operator_refusal` in super: reading help is never an
         // operation), so a bare `pidash --version` the prompt teaches as a
-        // diagnostic needs no Agent classification. Anything else the
-        // prompt teaches must be an agent command.
+        // diagnostic needs no Agent classification. `workspace me` is the
+        // other taught diagnostic: the reference teaches it as the
+        // credential probe to run before debugging any other command, and
+        // it stays operator-classified (refused in-run) because it is for
+        // chat sessions and the workstation, not issue runs.
+        // Anything else the prompt teaches must be an agent command.
         let help_or_version = argv.iter().any(|arg| {
             arg == "-h" || arg == "--help" || arg == "-V" || arg == "--version" || arg == "help"
         });
-        if !help_or_version {
+        let workspace_probe = argv.as_slice() == ["pidash", "workspace", "me"];
+        if !help_or_version && !workspace_probe {
             assert_eq!(
                 classify_name(name),
                 Some(CommandClass::Agent),

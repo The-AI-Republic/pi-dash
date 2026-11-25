@@ -30,13 +30,14 @@ pub const TOPICS: &[&str] = &[
     "run",
     "context",
     "recipes",
+    "workspace",
 ];
 
 #[derive(Debug, Args)]
 pub struct DocsArgs {
     /// Reference topic to print: issue, comment, workpad, page, label,
-    /// state, scheduler, pods, run, context, recipes. With no topic,
-    /// lists the topics.
+    /// state, scheduler, pods, run, context, recipes, workspace. With no
+    /// topic, lists the topics.
     pub topic: Option<String>,
 }
 
@@ -64,7 +65,7 @@ pub fn run(args: DocsArgs) -> i32 {
     }
 }
 
-const REFERENCE_TOPICS_LIST: &str = "pidash docs [<topic>] — print the CLI reference for one topic.\n\nTopics: issue, comment, workpad, page, label, state, scheduler, pods, run, context, recipes.\n\nThe prompt section `Pi Dash CLI` is the core; this reference is the rest.\n";
+const REFERENCE_TOPICS_LIST: &str = "pidash docs [<topic>] — print the CLI reference for one topic.\n\nTopics: issue, comment, workpad, page, label, state, scheduler, pods, run, context, recipes, workspace.\n\nThe prompt section `Pi Dash CLI` is the core; this reference is the rest.\n";
 
 /// The markdown section for `topic` (its `## <Name>` header through the
 /// next `## ` header), or `None` for an unknown topic. Case-insensitive.
@@ -229,6 +230,10 @@ mod tests {
             ("--remove-label", "--label", true),
             ("--remove-label", "--clear-labels", false),
             ("--enable", "--disable", false),
+            ("--work-type", "--clear-work-type", false),
+            ("--pod", "--clear-pod", false),
+            ("--rdate", "--clear-rdates", false),
+            ("--exdate", "--clear-exdates", false),
         ];
         let mut out = argv;
         for (keep, drop, takes_value) in pairs {
@@ -250,6 +255,112 @@ mod tests {
             }
         }
         out
+    }
+
+    /// Every agent-facing subcommand and long flag is mentioned in the
+    /// reference (NEWPIDASH-403). Walks the real clap command tree, so a
+    /// new subcommand or `--flag` on an agent-facing command fails here
+    /// until `runner/docs/cli-reference.md` documents it. Operator-only
+    /// commands (`COMMAND_CLASSES` in `super`) are allowlisted as a group;
+    /// the odd ones out are allowlisted individually with their reason.
+    /// Mention is by substring: a subcommand path like `issue move` must
+    /// appear verbatim, and every `--long-flag` must appear somewhere in
+    /// the reference.
+    #[test]
+    fn every_agent_facing_command_and_flag_is_documented() {
+        use clap::CommandFactory;
+        // Top-level commands no agent run may use (NEWPIDASH-320 §6.5):
+        // runner management, auth, install/update/engine, and the hidden
+        // internal shims. `docs` is self-referential — its topics are
+        // pinned by `every_topic_is_non_empty` instead.
+        const SKIP_COMMANDS: &[&str] = &[
+            "login",
+            "auth",
+            "connect",
+            "config",
+            "runner",
+            "install",
+            "uninstall",
+            "start",
+            "stop",
+            "restart",
+            "reconnect",
+            "status",
+            "tui",
+            "doctor",
+            "update",
+            "engine",
+            "remove",
+            "ai",
+            "docs",
+            "__run",
+            "__managed",
+            "__engine",
+        ];
+        // Agent-facing paths deliberately left out of the reference.
+        const SKIP_PATHS: &[&str] = &[
+            // Human-only: an agent must never re-grant tick budget.
+            "issue re-tick",
+        ];
+        // Deprecated (and hidden from `--help`): kept for prompts rendered
+        // before the workpad replaced the handoff.
+        const SKIP_FLAGS: &[&str] = &["handoff-file"];
+
+        // (subcommand path, long flags on that node).
+        fn walk(cmd: &clap::Command, prefix: &str, out: &mut Vec<(String, Vec<String>)>) {
+            for sub in cmd.get_subcommands() {
+                let name = sub.get_name();
+                let path = if prefix.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{prefix} {name}")
+                };
+                let longs = sub
+                    .get_arguments()
+                    .filter_map(|a| a.get_long().map(str::to_string))
+                    .collect();
+                out.push((path.clone(), longs));
+                walk(sub, &path, out);
+            }
+        }
+
+        let mut paths: Vec<(String, Vec<String>)> = Vec::new();
+        let root = crate::cli::Cli::command();
+        for sub in root.get_subcommands() {
+            let name = sub.get_name();
+            if SKIP_COMMANDS.contains(&name) {
+                continue;
+            }
+            // `workspace` is operator-class (refused in-run) but
+            // `workspace me` is the documented credential probe, so it is
+            // walked like an agent command.
+            let longs = sub
+                .get_arguments()
+                .filter_map(|a| a.get_long().map(str::to_string))
+                .collect();
+            paths.push((name.to_string(), longs));
+            walk(sub, name, &mut paths);
+        }
+        assert!(!paths.is_empty(), "no agent-facing commands walked");
+
+        let mut missing = Vec::new();
+        for (path, longs) in &paths {
+            if !SKIP_PATHS.contains(&path.as_str()) && !REFERENCE.contains(path.as_str()) {
+                missing.push(format!("subcommand `{path}`"));
+            }
+            for long in longs {
+                if !SKIP_FLAGS.contains(&long.as_str())
+                    && !REFERENCE.contains(format!("--{long}").as_str())
+                {
+                    missing.push(format!("flag `--{long}` (on `{path}`)"));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "agent-facing CLI surface missing from cli-reference.md:\n{}",
+            missing.join("\n")
+        );
     }
 
     /// Fixed dummy value per placeholder kind. Single tokens only, so a
