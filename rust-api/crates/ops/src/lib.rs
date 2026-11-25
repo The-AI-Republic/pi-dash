@@ -13,8 +13,8 @@
 //! * [`users`] — the users + membership commands (PIDASHCONV-807).
 //! * [`repair`] — the data-repair commands (PIDASHCONV-808).
 //! * [`instance`] — the instance lifecycle commands (PIDASHCONV-809).
-//! * [`prompting`] — the prompting reseed + revalidate commands
-//!   (PIDASHCONV-810).
+//! * [`prompting`] — the prompting revalidate command (PIDASHCONV-810;
+//!   the legacy `reseed_*_template` commands were removed in NEWPIDASH-404).
 //!
 //! # Embedding (the cloud binary)
 //!
@@ -187,22 +187,7 @@ pub enum OpsCommand {
     /// Instance lifecycle: configure, register, pods, mail, dry-run.
     #[command(subcommand)]
     Instance(instance::InstanceCommand),
-    // --- prompting (PIDASHCONV-810) ---
-    /// Refresh the global default PromptTemplate from the ordered fragments
-    /// in apps/api/pi_dash/prompting/fragments/. Does not touch
-    /// workspace-scoped templates.
-    #[command(name = "reseed_default_template")]
-    ReseedDefaultTemplate(prompting::ReseedArgs),
-    /// Refresh the global ``review`` PromptTemplate from the body in
-    /// pi_dash.prompting.seed.REVIEW_TEMPLATE_BODY. Does not touch
-    /// workspace-scoped templates.
-    #[command(name = "reseed_review_template")]
-    ReseedReviewTemplate(prompting::ReseedArgs),
-    /// Refresh the global ``test`` PromptTemplate from the body in
-    /// pi_dash.prompting.seed.TEST_TEMPLATE_BODY. Does not touch
-    /// workspace-scoped templates.
-    #[command(name = "reseed_test_template")]
-    ReseedTestTemplate(prompting::ReseedArgs),
+    // --- prompting (PIDASHCONV-810; reseed commands removed NEWPIDASH-404) ---
     /// Re-validate active prompt-section overrides; flag broken ones.
     #[command(name = "revalidate_section_overrides")]
     RevalidateSectionOverrides(prompting::RevalidateArgs),
@@ -293,7 +278,6 @@ fn boot_exit(error: OpsFailure) -> Box<dyn std::error::Error> {
 /// success. Success prints Django's lines to stdout and returns `Ok`
 /// (exit 0).
 pub async fn run(command: OpsCommand) -> Result<(), Box<dyn std::error::Error>> {
-    use pidash_services::ops::prompting::TemplateKind;
     match command {
         // --- boot (PIDASHCONV-806) ---
         OpsCommand::WaitForDb => boot::run_wait_for_db().await.map_err(boot_exit),
@@ -339,16 +323,7 @@ pub async fn run(command: OpsCommand) -> Result<(), Box<dyn std::error::Error>> 
             });
             Ok(())
         }
-        // --- prompting (PIDASHCONV-810) ---
-        OpsCommand::ReseedDefaultTemplate(args) => {
-            prompting::run_reseed(TemplateKind::Default, args).await
-        }
-        OpsCommand::ReseedReviewTemplate(args) => {
-            prompting::run_reseed(TemplateKind::Review, args).await
-        }
-        OpsCommand::ReseedTestTemplate(args) => {
-            prompting::run_reseed(TemplateKind::Test, args).await
-        }
+        // --- prompting (PIDASHCONV-810; reseed removed NEWPIDASH-404) ---
         OpsCommand::RevalidateSectionOverrides(args) => prompting::run_revalidate(args).await,
     }
 }
@@ -474,7 +449,7 @@ mod tests {
             &["cloud", "activate_user", "a@b.com"],
             &["cloud", "fix_duplicate_sequences", "FX-7"],
             &["cloud", "instance", "configure-instance"],
-            &["cloud", "reseed_default_template"],
+            &["cloud", "revalidate_section_overrides"],
         ];
         for argv in oss_argv {
             match ProbeCloudCli::try_parse_from(*argv)

@@ -1,11 +1,9 @@
-//! Prompting ops decisions: reseed + revalidate orchestration (D-37, stage 7).
+//! Prompting ops decisions: revalidate orchestration (D-37, stage 7).
 //!
 //! Ports the `handle()` logic of
-//! `apps/api/pi_dash/prompting/management/commands/reseed_{default,review,test}_template.py`
-//! (`seed_*(force)` + the `"<name> template: <result>"` line) and
-//! `revalidate_section_overrides.py` (scan active rows, flag-or-clear
-//! `needs_attention`, print the summary). Fixture F37-09
-//! (`rust-api/fixtures/ops/commands/prompting.golden.json`).
+//! `apps/api/pi_dash/prompting/management/commands/revalidate_section_overrides.py`
+//! (scan active rows, flag-or-clear `needs_attention`, print the summary).
+//! Fixture F37-09 (`rust-api/fixtures/ops/commands/prompting.golden.json`).
 //!
 //! Pure decisions only — this module holds no database handle, so no
 //! `sqlx` here. The DB edge (`pidash_db::ops::prompting`) preloads rows
@@ -16,7 +14,6 @@
 //!
 //! Ported behaviors (translate, don't redesign — same as the kernels):
 //!
-//! * `force` with an unchanged body reports `skipped` (no write).
 //! * A revalidate row with `user_id=NULL` renders as the literal string
 //!   `None` in the flagged line (Python f-string of `None`).
 //! * An unknown section key is broken *without* rendering
@@ -31,82 +28,6 @@
 //!   whole scan before writing matches Python's row-by-row loop exactly.
 
 use super::super::prompting::{composer, neutrality, seed};
-
-/// The three global templates the reseed commands own
-/// (`seed.py:29,99` + `models.py:20`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TemplateKind {
-    Default,
-    Review,
-    Test,
-}
-
-impl TemplateKind {
-    /// The `PromptTemplate.name` row this kind seeds
-    /// (`coding-task` / `review` / `test`).
-    pub fn name(self) -> &'static str {
-        match self {
-            TemplateKind::Default => seed::DEFAULT_TEMPLATE_NAME,
-            TemplateKind::Review => seed::REVIEW_TEMPLATE_NAME,
-            TemplateKind::Test => seed::TEST_TEMPLATE_NAME,
-        }
-    }
-
-    /// The command-output word (`default` / `review` / `test` in
-    /// `"<name> template: <result>"`).
-    pub fn label(self) -> &'static str {
-        match self {
-            TemplateKind::Default => "default",
-            TemplateKind::Review => "review",
-            TemplateKind::Test => "test",
-        }
-    }
-
-    /// The fresh body for this kind: the assembled fragments for
-    /// `default`, the embedded const bodies for `review` / `test`
-    /// (`seed.py:200-212`). The fragment sources are the same
-    /// `NN_*.md` mirrors the prompting domain embeds — this module
-    /// reads them through the kernels, never from its own copies.
-    pub fn body(self) -> String {
-        match self {
-            TemplateKind::Default => seed::read_default_body(),
-            TemplateKind::Review => seed::read_review_body().to_owned(),
-            TemplateKind::Test => seed::read_test_body().to_owned(),
-        }
-    }
-}
-
-/// The planned reseed: what to write (if anything) and what to print.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReseedPlan {
-    /// The fresh body the edge inserts or refreshes with.
-    pub body: String,
-    pub outcome: seed::SeedOutcome,
-    /// The version to write: `Some(1)` on create, the bumped version on
-    /// refresh, `None` when nothing is written.
-    pub version: Option<i32>,
-    /// The stdout line: `"<label> template: <result>"`.
-    pub line: String,
-}
-
-/// Pure half of `reseed_*_template.handle` (`seed.py:215-308` + the
-/// command's stdout line): decide from the preloaded global row (or
-/// `None`), the fresh body and the `--force` flag.
-pub fn plan_reseed(
-    kind: TemplateKind,
-    existing: Option<&seed::ExistingTemplate>,
-    force: bool,
-) -> ReseedPlan {
-    let body = kind.body();
-    let (outcome, version) = seed::decide_seed(existing, &body, force);
-    let line = seed::reseed_message(kind.label(), outcome);
-    ReseedPlan {
-        body,
-        outcome,
-        version,
-        line,
-    }
-}
 
 /// One active override row as handed over by the DB edge: the columns
 /// the revalidate loop reads, with ids as strings (UUID text, exactly
@@ -208,7 +129,7 @@ pub fn plan_revalidate(rows: &[ActiveOverride], clear: bool) -> RevalidatePlan {
             } else if let Some(issue) =
                 neutrality::override_neutrality_issue(&row.section_key, &row.body)
             {
-                // A core stage section override carrying software/git/PR
+                // A core stage section override carrying work-type-specific
                 // wording would leak into every work type
                 // (`revalidate_section_overrides.py`, PDASHOSS01-234).
                 broken = true;
@@ -259,72 +180,6 @@ pub fn plan_revalidate(rows: &[ActiveOverride], clear: bool) -> RevalidatePlan {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn existing(body: &str, version: i32) -> seed::ExistingTemplate {
-        seed::ExistingTemplate {
-            body: body.to_owned(),
-            version: Some(version),
-        }
-    }
-
-    /// `seed.py:215-308` decision table, per kind: missing → created v1;
-    /// present → skipped; force + different → refreshed v+1; force +
-    /// identical → skipped (the quirk).
-    #[test]
-    fn reseed_decision_table_per_kind() {
-        for kind in [
-            TemplateKind::Default,
-            TemplateKind::Review,
-            TemplateKind::Test,
-        ] {
-            let body = kind.body();
-            let plan = plan_reseed(kind, None, false);
-            assert_eq!(plan.outcome, seed::SeedOutcome::Created);
-            assert_eq!(plan.version, Some(1));
-            assert_eq!(plan.body, body);
-
-            let same = existing(&body, 3);
-            for force in [false, true] {
-                let plan = plan_reseed(kind, Some(&same), force);
-                assert_eq!(
-                    plan.outcome,
-                    seed::SeedOutcome::Skipped,
-                    "{kind:?} force={force}"
-                );
-                assert_eq!(plan.version, None);
-            }
-
-            let stale = existing("stale body", 3);
-            let plan = plan_reseed(kind, Some(&stale), false);
-            assert_eq!(plan.outcome, seed::SeedOutcome::Skipped);
-            assert_eq!(plan.version, None);
-            let plan = plan_reseed(kind, Some(&stale), true);
-            assert_eq!(plan.outcome, seed::SeedOutcome::Refreshed);
-            assert_eq!(plan.version, Some(4));
-        }
-    }
-
-    #[test]
-    fn reseed_line_names_kind_and_outcome() {
-        for (kind, label) in [
-            (TemplateKind::Default, "default"),
-            (TemplateKind::Review, "review"),
-            (TemplateKind::Test, "test"),
-        ] {
-            assert_eq!(kind.name(), kind_name(kind));
-            assert_eq!(kind.label(), label);
-            let plan = plan_reseed(kind, None, false);
-            assert_eq!(plan.line, format!("{label} template: created"));
-        }
-    }
-
-    fn kind_name(kind: TemplateKind) -> &'static str {
-        match kind {
-            TemplateKind::Default => "coding-task",
-            TemplateKind::Review => "review",
-            TemplateKind::Test => "test",
-        }
-    }
 
     fn active_override(section_key: &str, body: &str) -> ActiveOverride {
         ActiveOverride {
