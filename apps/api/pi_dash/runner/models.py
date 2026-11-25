@@ -995,6 +995,11 @@ class RunnerSession(models.Model):
     last_seen_at = models.DateTimeField(null=True, blank=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
     revoked_reason = models.CharField(max_length=32, blank=True, default="")
+    # Negotiated daemon capabilities (NEWPIDASH-241, dev-machine run queue):
+    # ``machine_run_queue_v1`` means the daemon supports protocol 1.
+    # Non-null JSONB default '[]' (database default keeps older writers
+    # that omit the column working).
+    capabilities = models.JSONField(default=list, blank=True)
 
     class Meta:
         db_table = "runner_session"
@@ -1485,6 +1490,16 @@ class AgentRun(models.Model):
     # dashboards and the ticker's per-reason retry policy; not declared as
     # ``choices`` so adding a taxonomy value never needs a migration.
     failure_reason = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    # Dev-machine run queue attempt identity (NEWPIDASH-241 / NEWPIDASH-372):
+    # minted per fresh assignment, preserved on redelivery. Nullable so
+    # existing rows stay legacy. Matches cloud native_runner_0040 exactly.
+    assignment_token = models.UUIDField(null=True, blank=True)
+    # 0 legacy, 1 machine queue, immutable per attempt. NOT NULL with a
+    # persistent database default 0 plus the IN (0, 1) check below, so older
+    # writers that omit the column keep working.
+    assignment_protocol = models.SmallIntegerField(default=0)
+    # Daemon-reported capacity phase JSON, or NULL when not waiting.
+    capacity_wait = models.JSONField(null=True, blank=True)
     llm_model = models.CharField(max_length=128, blank=True, default="")
     # Token usage as one bag of counters in the canonical shape documented in
     # ``pi_dash.runner.services.usage`` — input / output / total, the cache
@@ -1591,6 +1606,12 @@ class AgentRun(models.Model):
             models.CheckConstraint(
                 check=models.Q(pin_kind=PinKind.LOCALITY) | models.Q(executor_kind=AgentExecutorKind.LOCAL_RUNNER),
                 name="agent_run_dedicated_pin_is_local",
+            ),
+            # Dev-machine run queue (NEWPIDASH-241): 0 legacy, 1 machine
+            # queue. Same name and predicate as cloud native_runner_0040.
+            models.CheckConstraint(
+                check=models.Q(assignment_protocol__in=[0, 1]),
+                name="agent_run_assignment_protocol_check",
             ),
         ]
 

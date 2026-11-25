@@ -580,7 +580,7 @@ impl MentionSource for SqlMailDb {
 /// The Django original, embedded so template edits flow into the next build
 /// (same `include_str!` precedent as the auth templates in `mail_send`).
 const ISSUE_UPDATES_SOURCE: &str =
-    include_str!("../../../../../apps/api/templates/emails/notifications/issue-updates.html");
+    include_str!("../../../../../rust-api/templates/emails/notifications/issue-updates.html");
 
 /// Translated-site pins: `|slice:":2"` × 4, `|length|add:"-2"` × 4,
 /// `|length|add:"-1"` × 4. Any other count is template drift.
@@ -1019,6 +1019,18 @@ mod tests {
 
     const GOLDEN: &str =
         include_str!("../../../../fixtures/tasks_mail/send/F-SEND.minijinja-rendered.json");
+
+    #[test]
+    fn issue_updates_source_matches_vendored_copy() {
+        // NEWPIDASH-376: the embed is private to this module, so the
+        // crate-level fidelity test cannot see it — pin the wiring here.
+        let file = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../templates/emails/notifications/issue-updates.html"
+        ))
+        .expect("vendored template readable");
+        assert_eq!(ISSUE_UPDATES_SOURCE, file);
+    }
 
     fn golden_doc() -> Value {
         serde_json::from_str(GOLDEN).expect("golden parses")

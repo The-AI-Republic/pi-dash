@@ -82,6 +82,7 @@ pub async fn execute(paths: &Paths, runner_filter: Option<&str>) -> Result<Repor
             "cursor-agent",
             "acpx",
             "grok",
+            "agy",
             "muse",
             false,
         )
@@ -98,6 +99,7 @@ pub async fn execute(paths: &Paths, runner_filter: Option<&str>) -> Result<Repor
                 &r.cursor_agent.binary,
                 &r.openclaw.binary,
                 &r.grok.binary,
+                &r.antigravity.binary,
                 &r.muse_code.binary,
                 crate::agent::auth::is_managed_codex(&r.codex),
             )
@@ -206,6 +208,7 @@ async fn run_agent_checks(
     cursor_binary: &str,
     openclaw_binary: &str,
     grok_binary: &str,
+    antigravity_binary: &str,
     muse_binary: &str,
     codex_managed: bool,
 ) {
@@ -388,6 +391,33 @@ async fn run_agent_checks(
                 blocker: false,
             });
         }
+        crate::config::schema::AgentKind::Antigravity => {
+            match check_version(antigravity_binary).await {
+                Ok(detail) => checks.push(Check {
+                    name: tag("antigravity"),
+                    ok: true,
+                    detail,
+                    blocker: true,
+                }),
+                Err(e) => checks.push(Check {
+                    name: tag("antigravity"),
+                    ok: false,
+                    detail: e.to_string(),
+                    blocker: true,
+                }),
+            }
+            // NEWPIDASH-397 presence check: API key, Google Cloud ADC, or an
+            // OS-keychain sign-in item (existence only, never the secret). The
+            // run-time safety net (ACP error -32000 -> `agent_auth_missing`)
+            // still catches expired or revoked sign-ins this cannot see.
+            let detail = crate::agent::auth::antigravity_live_detail();
+            checks.push(Check {
+                name: tag("antigravity-auth"),
+                ok: detail != crate::agent::auth::AntigravityAuthDetail::Missing,
+                detail: detail.to_string(),
+                blocker: false,
+            });
+        }
         crate::config::schema::AgentKind::MuseCode => {
             match check_version(muse_binary).await {
                 Ok(detail) => checks.push(Check {
@@ -484,8 +514,9 @@ mod tests {
     //! per-runner tags are correct.
     use super::*;
     use crate::config::schema::{
-        AgentKind, ClaudeCodeSection, CodexSection, Config, CursorAgentSection, DaemonConfig,
-        GrokSection, MuseCodeSection, OpenClawSection, RunnerConfig, WorkspaceSection,
+        AgentKind, AntigravitySection, ClaudeCodeSection, CodexSection, Config, CursorAgentSection,
+        DaemonConfig, GrokSection, MuseCodeSection, OpenClawSection, RunnerConfig,
+        WorkspaceSection,
     };
     use std::path::PathBuf;
     use uuid::Uuid;
@@ -521,6 +552,7 @@ mod tests {
             cursor_agent: CursorAgentSection::default(),
             openclaw: OpenClawSection::default(),
             grok: GrokSection::default(),
+            antigravity: AntigravitySection::default(),
             muse_code: MuseCodeSection::default(),
             approval_policy: Default::default(),
         }
@@ -653,6 +685,7 @@ mod tests {
             "cursor-missing",
             "acpx-missing",
             "grok-missing",
+            "agy-missing",
             "muse-missing",
             false,
         )
@@ -666,6 +699,7 @@ mod tests {
             "cursor-missing",
             "acpx-missing",
             "grok-missing",
+            "agy-missing",
             "muse-missing",
             false,
         )
@@ -679,6 +713,7 @@ mod tests {
             "cursor-missing",
             "acpx-missing",
             "grok-missing",
+            "agy-missing",
             "muse-missing",
             false,
         )
@@ -692,6 +727,7 @@ mod tests {
             "cursor-missing",
             "acpx-missing",
             "grok-missing",
+            "agy-missing",
             "muse-missing",
             false,
         )
@@ -705,6 +741,7 @@ mod tests {
             "cursor-missing",
             "acpx-missing",
             "grok-missing",
+            "agy-missing",
             "muse-missing",
             false,
         )
@@ -719,6 +756,7 @@ mod tests {
             "cursor-missing",
             "acpx-missing",
             "grok-missing",
+            "agy-missing",
             "muse-missing",
             false,
         )
@@ -735,6 +773,33 @@ mod tests {
         assert!(grok_checks.iter().any(|c| c.name == "grok-auth"));
         assert!(muse_checks.iter().any(|c| c.name == "muse"));
         assert!(muse_checks.iter().any(|c| c.name == "muse-auth"));
+
+        let mut antigravity_checks: Vec<Check> = Vec::new();
+        run_agent_checks(
+            &mut antigravity_checks,
+            None,
+            AgentKind::Antigravity,
+            "codex-missing",
+            "claude-missing",
+            "cursor-missing",
+            "acpx-missing",
+            "grok-missing",
+            "agy-missing",
+            "muse-missing",
+            false,
+        )
+        .await;
+        assert!(antigravity_checks.iter().any(|c| c.name == "antigravity"));
+        // Until NEWPIDASH-397 lands the auth gate never blocks on a guess.
+        let auth = antigravity_checks
+            .iter()
+            .find(|c| c.name == "antigravity-auth")
+            .expect("antigravity-auth check present");
+        assert!(
+            auth.ok,
+            "antigravity-auth must be ok (never block on a guess)"
+        );
+        assert!(!auth.blocker);
     }
 
     #[tokio::test]
@@ -751,6 +816,7 @@ mod tests {
             "cursor-missing",
             "acpx-missing",
             "grok-missing",
+            "agy-missing",
             "muse-missing",
             true,
         )

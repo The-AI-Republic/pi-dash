@@ -1333,6 +1333,47 @@ mod tests {
         assert!(is_in_flight(Some(&run), Some("assigned")));
     }
 
+    #[test]
+    fn in_flight_at_timestamp_less_capacity_wait_is_not_protected() {
+        // NEWPIDASH-399: an old assigned never-started run whose waiting
+        // report has a matching token but no `reported_at` is not in
+        // flight — like a stale report — so the scheduler fires a
+        // replacement. Only a fresh timestamped report keeps it in flight.
+        use chrono::TimeZone;
+        let now = Utc.with_ymd_and_hms(2026, 11, 14, 12, 0, 0).unwrap();
+        let run = Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap();
+        let old = now - chrono::Duration::seconds(ASSIGNED_NEVER_STARTED_SECS + 1);
+        let tok = run.to_string();
+        let waiting = |cw: serde_json::Value| {
+            is_in_flight_at(
+                Some(&run),
+                Some("assigned"),
+                Some(&old),
+                None,
+                Some(&now),
+                Some(&cw),
+                Some(run),
+            )
+        };
+        // No timestamp: not protected.
+        assert!(!waiting(json!({
+            "phase": "waiting_for_capacity",
+            "assignment_token": tok,
+        })));
+        // Stale timestamp: not protected either.
+        assert!(!waiting(json!({
+            "phase": "waiting_for_capacity",
+            "assignment_token": tok,
+            "reported_at": "2026-11-14T11:50:00+00:00",
+        })));
+        // Fresh timestamp: still in flight.
+        assert!(waiting(json!({
+            "phase": "waiting_for_capacity",
+            "assignment_token": tok,
+            "reported_at": "2026-11-14T11:59:30+00:00",
+        })));
+    }
+
     // Bad-RRULE disable row, byte-exact against the golden
     // (`scheduler.py:188-195`): wording, truncation source, disable + NULL
     // cursor. The golden's `before` pins the preconditions this branch needs

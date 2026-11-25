@@ -53,7 +53,10 @@ const PROBE_ITEM: &str = "probe";
 /// containers, a user who wants the file without editing the config).
 pub const KEYRING_ENV: &str = "PIDASH_KEYRING";
 /// How long one keychain call may take before it counts as not answering.
-const KEYRING_TIMEOUT: Duration = Duration::from_secs(5);
+/// Shared with the agent keychain presence probe
+/// ([`crate::agent::keychain`]), which bounds its search by the same
+/// timeout.
+pub(crate) const KEYRING_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 #[error("the OS keychain is not available: {message}")]
