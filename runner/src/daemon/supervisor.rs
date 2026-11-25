@@ -1384,6 +1384,7 @@ fn agent_binary_for(config: &crate::config::schema::RunnerConfig) -> &str {
         crate::config::schema::AgentKind::CursorAgent => &config.cursor_agent.binary,
         crate::config::schema::AgentKind::OpenClaw => &config.openclaw.binary,
         crate::config::schema::AgentKind::Grok => &config.grok.binary,
+        crate::config::schema::AgentKind::Antigravity => &config.antigravity.binary,
         crate::config::schema::AgentKind::MuseCode => &config.muse_code.binary,
         crate::config::schema::AgentKind::PidashAgent => {
             crate::pidash_agent::agent::binary_display()
@@ -2517,6 +2518,11 @@ impl RunnerLoop {
     ) -> Option<FailureReason> {
         match agent_kind {
             AgentKind::OpenClaw | AgentKind::PidashAgent => None,
+            // NEWPIDASH-396: Antigravity never blocks on a guess until
+            // NEWPIDASH-397 lands its keychain presence check; the
+            // run-time -32000 safety net still reports expired sign-ins.
+            // Whichever issue lands second reworks this arm.
+            AgentKind::Antigravity => None,
             AgentKind::Codex if managed_codex => None,
             _ if !has_credentials => Some(FailureReason::AgentAuthMissing),
             _ => None,
@@ -3790,6 +3796,9 @@ impl ChatWorker {
                     warm.model,
                     resume_id.as_deref(),
                     None,
+                    // Chat turns have no runner log dir at hand; Antigravity
+                    // falls back to its default ACP log location.
+                    None,
                 )
                 .await?,
             );
@@ -3908,6 +3917,9 @@ impl ChatWorker {
                     workspace_path,
                     turn.model.clone(),
                     resume_id.as_deref(),
+                    None,
+                    // Chat turns have no runner log dir at hand; Antigravity
+                    // falls back to its default ACP log location.
                     None,
                 )
                 .await?,
@@ -4647,6 +4659,7 @@ impl AssignWorker {
             | AgentKind::CursorAgent
             | AgentKind::OpenClaw
             | AgentKind::Grok
+            | AgentKind::Antigravity
             | AgentKind::MuseCode => FailureReason::AgentCrash,
         }
     }
@@ -4875,10 +4888,12 @@ impl AssignWorker {
         // Bridge to the configured agent (Codex or Claude Code). `AgentBridge`
         // hides which CLI is actually being driven from the rest of this
         // worker; the event flow below is identical for both.
+        let logs_dir = self.runner_paths.logs_dir();
         let mut bridge = match AgentBridge::spawn_from_config(
             &self.runner_config,
             &workspace_path,
             expected_codex_model.clone(),
+            Some(logs_dir.as_path()),
         )
         .await
         {
@@ -4973,7 +4988,23 @@ impl AssignWorker {
             let mut cursor = match started {
                 Ok(c) => c,
                 Err(e) => {
-                    let detail = self.build_failure_detail(&format!("{e:#}"), &bridge).await;
+                    // A handshake that fails with the ACP
+                    // authentication-required error (code -32000 — e.g. `agy
+                    // acp` answering `session/new` when the cached sign-in
+                    // expired or was revoked) is a missing sign-in, not a
+                    // crash: report `agent_auth_missing` with the agent's fix
+                    // hint, mirroring the turn-time mapping in
+                    // `BridgeCursor::translate`.
+                    let auth = crate::acp::bridge::HandshakeAuthError::find(&e);
+                    let reason = if auth.is_some() {
+                        FailureReason::AgentAuthMissing
+                    } else {
+                        self.crash_reason()
+                    };
+                    let base = auth
+                        .map(|a| a.detail())
+                        .unwrap_or_else(|| format!("{e:#}"));
+                    let detail = self.build_failure_detail(&base, &bridge).await;
                     hist.append(&HistoryEntry::Footer {
                         ts: Utc::now(),
                         final_status: "failed".to_string(),
@@ -4984,7 +5015,7 @@ impl AssignWorker {
                     .ok();
                     self.send(ClientMsg::RunFailed {
                         run_id,
-                        reason: self.crash_reason(),
+                        reason,
                         detail: Some(detail),
                         ended_at: Utc::now(),
                         tokens: None,
@@ -5879,8 +5910,9 @@ mod tests {
     use super::*;
     use crate::cloud::protocol::Envelope;
     use crate::config::schema::{
-        AgentSection, ApprovalPolicySection, ClaudeCodeSection, CodexSection, CursorAgentSection,
-        GrokSection, MuseCodeSection, OpenClawSection, RunnerConfig, WorkspaceSection,
+        AgentSection, AntigravitySection, ApprovalPolicySection, ClaudeCodeSection, CodexSection,
+        CursorAgentSection, GrokSection, MuseCodeSection, OpenClawSection, RunnerConfig,
+        WorkspaceSection,
     };
     use crate::daemon::state::ExecCommandSnapshot;
     use chrono::TimeZone;
@@ -6013,6 +6045,7 @@ mod tests {
             cursor_agent: CursorAgentSection::default(),
             openclaw: OpenClawSection::default(),
             grok: GrokSection::default(),
+            antigravity: AntigravitySection::default(),
             muse_code: MuseCodeSection::default(),
             approval_policy: ApprovalPolicySection::default(),
         }
@@ -8536,6 +8569,13 @@ mod tests {
         assert_eq!(
             RunnerLoop::agent_auth_missing_rejection(AgentKind::Grok, false, false),
             Some(FailureReason::AgentAuthMissing)
+        );
+        // Antigravity never blocks on a guess until NEWPIDASH-397 lands its
+        // keychain presence check; the run-time -32000 safety net still
+        // reports expired sign-ins as AgentAuthMissing.
+        assert_eq!(
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::Antigravity, false, false),
+            None
         );
         assert_eq!(
             RunnerLoop::agent_auth_missing_rejection(AgentKind::OpenClaw, false, false),

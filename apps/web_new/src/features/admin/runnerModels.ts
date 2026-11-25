@@ -16,6 +16,7 @@ export const RUNNER_MODEL_AGENTS: readonly { agent: string; label: string }[] = 
   { agent: "cursor-agent", label: "Cursor" },
   { agent: "open-claw", label: "OpenClaw" },
   { agent: "grok", label: "Grok" },
+  { agent: "antigravity", label: "Antigravity" },
   { agent: "muse-code", label: "Muse Code" },
 ];
 
@@ -43,7 +44,8 @@ export const CLAUDE_CODE_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as 
 /**
  * The effort checkboxes one agent's rows offer (the server's
  * `efforts_for_agent`). Codex, Claude Code and Muse Code each have their own
- * set; Cursor, OpenClaw and Grok take no effort, so they get none.
+ * set; Cursor, OpenClaw, Grok and Antigravity take no effort, so they get
+ * none.
  */
 export function effortsForAgent(agent: string): readonly string[] {
   switch (agent) {
