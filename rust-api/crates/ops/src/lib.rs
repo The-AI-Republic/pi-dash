@@ -125,6 +125,16 @@ pub enum OpsCommand {
         about = "Wait for database migrations to complete before starting Celery worker/beat"
     )]
     WaitForMigrations,
+    /// Check that database migrations are complete; exit 1 when any are pending.
+    ///
+    /// New-system-only fail-fast gate (NEWPIDASH-378): one read-only probe,
+    /// no polling — entrypoints run this under `set -e` so a pending
+    /// schema fails startup instead of hanging it.
+    #[command(
+        name = "check_migrations",
+        about = "Check that database migrations are complete; exit 1 when any are pending"
+    )]
+    CheckMigrations,
     /// Clear Cache before starting the server to remove stale values.
     #[command(
         name = "clear_cache",
@@ -288,6 +298,7 @@ pub async fn run(command: OpsCommand) -> Result<(), Box<dyn std::error::Error>> 
         // --- boot (PIDASHCONV-806) ---
         OpsCommand::WaitForDb => boot::run_wait_for_db().await.map_err(boot_exit),
         OpsCommand::WaitForMigrations => boot::run_wait_for_migrations().await.map_err(boot_exit),
+        OpsCommand::CheckMigrations => boot::run_check_migrations().await.map_err(boot_exit),
         OpsCommand::ClearCache(args) => boot::run_clear_cache(args.key.as_deref())
             .await
             .map_err(boot_exit),

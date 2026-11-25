@@ -5,7 +5,8 @@
 //! the order boot, users, repair, instance, prompting so sibling rebases
 //! stay mechanical.
 //!
-//! * [`boot`] — `wait_for_db`, `wait_for_migrations`, `clear_cache`
+//! * [`boot`] — `wait_for_db`, `wait_for_migrations`, `check_migrations`,
+//!   `clear_cache`
 //!   (PIDASHCONV-806, fixtures F37-01/F37-02).
 //! * [`storage`] — `create_bucket`, `update_bucket` S3 flows
 //!   (PIDASHCONV-806).

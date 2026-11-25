@@ -2,8 +2,8 @@
 set -e
 
 pidash-api ops wait_for_db
-# Wait for migrations
-pidash-api ops wait_for_migrations
+# Fail fast on pending migrations (no waiting: the release migrator owns DDL)
+pidash-api ops check_migrations
 # Run the processes
 #
 # ``--concurrency`` bounds the prefork pool. Left unset, Celery forks one child
