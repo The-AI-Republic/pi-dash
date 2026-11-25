@@ -8,7 +8,7 @@
 // visibility, lead and icon with an auto-derived short code;
 // duplicates map onto their fields. The form offers no cover
 // control and the submit is a single POST with no cover value.
-import { Button, Combobox, Dialog, Input, Menu, Popover, Textarea, cn } from "@pidash/kit";
+import { Button, Dialog, Input, Menu, Popover, Textarea, cn } from "@pidash/kit";
 import type { WorkspaceMember } from "@pidash/api-client";
 import { Check, ChevronDown, Globe, Lock } from "lucide-react";
 import * as React from "react";
@@ -54,7 +54,6 @@ export function CreateProjectDialog({
   const [description, setDescription] = React.useState("");
   const [repoUrl, setRepoUrl] = React.useState("");
   const [baseBranch, setBaseBranch] = React.useState("");
-  const [template, setTemplate] = React.useState("blank");
   const [network, setNetwork] = React.useState<number>(CREATE_NETWORK_PUBLIC);
   const [lead, setLead] = React.useState<string | null>(null);
   const [icon, setIcon] = React.useState(() => pickCreateIcon());
@@ -71,7 +70,6 @@ export function CreateProjectDialog({
     setDescription("");
     setRepoUrl("");
     setBaseBranch("");
-    setTemplate("blank");
     setNetwork(CREATE_NETWORK_PUBLIC);
     setLead(null);
     setIcon(pickCreateIcon());
@@ -149,19 +147,6 @@ export function CreateProjectDialog({
       }
     >
       <div className="flex flex-col gap-(--space-4)">
-        <Combobox
-          trigger={
-            <Button variant="secondary" size="small" aria-label="Project template" className="w-fit">
-              Blank project
-            </Button>
-          }
-          options={[{ id: "blank", label: "Blank project" }]}
-          value={template}
-          onSelect={setTemplate}
-          listLabel="Project template"
-          searchEnabled={false}
-          emptyText="No templates"
-        />
         <div className="flex items-start gap-(--space-3)">
           <Popover
             trigger={
