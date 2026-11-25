@@ -29,12 +29,17 @@ def test_member_catalog_returns_grouped_seed(member_api):
         return
     agents = res.json()["agents"]
     assert sorted(agents) == sorted(
-        ["claude-code", "codex", "cursor-agent", "open-claw", "grok", "muse-code", "openhub"]
+        ["claude-code", "codex", "cursor-agent", "open-claw", "grok", "antigravity", "muse-code", "openhub"]
     )
     assert len(agents["claude-code"]) == 6
     assert len(agents["codex"]) == 7
     assert len(agents["cursor-agent"]) == 12
     assert len(agents["grok"]) == 2
+    assert len(agents["antigravity"]) == 2
+    assert [row["model"] for row in agents["antigravity"]] == [
+        "gemini-4-hydrogen",
+        "gemini-4-neon",
+    ]
     assert agents["open-claw"] == []
     assert agents["muse-code"] == []
     assert len(agents["openhub"]) == 3

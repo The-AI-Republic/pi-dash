@@ -60,6 +60,11 @@ fn grok_re() -> &'static regex::Regex {
     RE.get_or_init(|| regex::Regex::new(r"\bgrok\b").expect("grok pattern compiles"))
 }
 
+fn antigravity_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"\bantigravity\b").expect("antigravity pattern compiles"))
+}
+
 fn muse_re() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     RE.get_or_init(|| regex::Regex::new(r"\bmuse\b").expect("muse pattern compiles"))
@@ -158,6 +163,12 @@ fn match_agent_label(value: &str, from_model: bool) -> &'static str {
     }
     if !from_model && grok_re().is_match(&lowered) {
         return "Grok";
+    }
+    // NEWPIDASH-396: the runner reports `agent_kind: "antigravity"` on the
+    // wire; match the word here too so free-text mentions classify. Gated
+    // on `!from_model` like Grok: a model slug never names the agent.
+    if !from_model && antigravity_re().is_match(&lowered) {
+        return "Antigravity";
     }
     // Bare "muse" needs a word boundary ("museum", "amused"); the explicit
     // spellings stay substring matches ("muse_code" has no boundary).
@@ -998,6 +1009,11 @@ mod tests {
         assert_eq!(match_agent_label("grokking", false), "");
         assert_eq!(match_agent_label("my_grok", false), "");
         assert_eq!(match_agent_label("a grok b", false), "Grok");
+        assert_eq!(
+            match_agent_label("antigravity run failed", false),
+            "Antigravity"
+        );
+        assert_eq!(match_agent_label("antigravity", true), "");
         assert_eq!(match_agent_label("grok-4.3", true), "");
         // Auth header: first 401/403 wins; bare otherwise.
         assert_eq!(auth_header("error 4010 bad"), "authentication_failed");

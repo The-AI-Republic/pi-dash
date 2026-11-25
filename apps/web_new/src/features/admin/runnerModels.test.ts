@@ -31,13 +31,14 @@ function row(partial: Partial<RunnerModelRow>): RunnerModelRow {
 }
 
 describe("agent sections", () => {
-  it("covers the six agents in picker order", () => {
+  it("covers the seven agents in picker order", () => {
     expect(RUNNER_MODEL_AGENTS.map((entry) => entry.agent)).toEqual([
       "claude-code",
       "codex",
       "cursor-agent",
       "open-claw",
       "grok",
+      "antigravity",
       "muse-code",
     ]);
     expect(RUNNER_MODEL_EFFORTS).toEqual(["low", "medium", "high", "xhigh"]);
@@ -47,7 +48,8 @@ describe("agent sections", () => {
     expect(effortsForAgent("muse-code")).toEqual(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
     expect(effortsForAgent("codex")).toEqual(RUNNER_MODEL_EFFORTS);
     expect(effortsForAgent("claude-code")).toEqual(["low", "medium", "high", "xhigh", "max"]);
-    for (const agent of ["cursor-agent", "open-claw", "grok", "openhub"]) expect(effortsForAgent(agent)).toEqual([]);
+    for (const agent of ["cursor-agent", "open-claw", "grok", "antigravity", "openhub"])
+      expect(effortsForAgent(agent)).toEqual([]);
     expect(formatEfforts(row({ agent: "muse-code", reasoning_efforts: ["minimal", "max"] }))).toBe("Minimal, Max");
   });
 

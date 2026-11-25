@@ -25,10 +25,14 @@ type SeedRow = (
 );
 
 /// Mirrors `apps/web_new/.../addRunner/catalog.ts` on day one plus the
-/// OpenHub assistant models (NEWPIDASH-302): 6 Claude rows (Opus 4.8
-/// preselected), 7 Codex rows (each offering the four efforts; the
-/// picker crosses them), 12 Cursor rows, 2 Grok rows, and 3 OpenHub
-/// rows (free model preselected) — 30 rows, day-one behaviour unchanged.
+/// OpenHub assistant models (NEWPIDASH-302) and the Antigravity rows
+/// (NEWPIDASH-396): 6 Claude rows (Opus 4.8 preselected), 7 Codex rows
+/// (each offering the four efforts; the picker crosses them), 12 Cursor
+/// rows, 2 Grok rows, 2 Antigravity rows, and 3 OpenHub rows (free
+/// model preselected) — 32 rows. The Antigravity slugs follow the
+/// documented `agy` model ids; like every other row they are advisory —
+/// the runner matches the slug against the server's advertised session
+/// options and falls back to the server default on a miss.
 /// The three OpenHub rows mirror `OPENHUB_ASSISTANT_MODELS` defaults
 /// (`moonshotai/kimi-k3,deepseek/deepseek-v4-pro,openhub_free_llm`)
 /// and `OPENHUB_DEFAULT_MODEL=openhub_free_llm`.
@@ -197,6 +201,23 @@ const SEED: &[SeedRow] = &[
         1,
         false,
     ),
+    // antigravity (NEWPIDASH-396): no reasoning efforts (no effort knob).
+    (
+        "antigravity",
+        "gemini-4-hydrogen",
+        "Gemini 4 Hydrogen",
+        &[],
+        0,
+        false,
+    ),
+    (
+        "antigravity",
+        "gemini-4-neon",
+        "Gemini 4 Neon",
+        &[],
+        1,
+        false,
+    ),
     // openhub (NEWPIDASH-302): assistant models, reasoning_efforts empty.
     // Order mirrors OPENHUB_ASSISTANT_MODELS default; the free model is
     // the default (is_preselected). Labels are display names — the slug
@@ -220,8 +241,9 @@ const SEED: &[SeedRow] = &[
     ),
 ];
 
-/// Seed row count on a fresh table (6 + 7 + 12 + 2 + 3 openhub).
-pub const SEED_COUNT: usize = 30;
+/// Seed row count on a fresh table
+/// (6 + 7 + 12 + 2 grok + 2 antigravity + 3 openhub).
+pub const SEED_COUNT: usize = 32;
 
 /// OpenHub seed rows only, for the existing-table back-fill path.
 pub const OPENHUB_SEED: &[SeedRow] = &[
@@ -248,7 +270,7 @@ pub const OPENHUB_SEED: &[SeedRow] = &[
 pub fn ensure_schema_sql() -> &'static str {
     "CREATE TABLE IF NOT EXISTS rust_runner_model_catalog (\
         id UUID PRIMARY KEY, \
-        agent TEXT NOT NULL CHECK (agent IN ('claude-code','codex','cursor-agent','open-claw','grok','muse-code','openhub')), \
+        agent TEXT NOT NULL CHECK (agent IN ('claude-code','codex','cursor-agent','open-claw','grok','antigravity','muse-code','openhub')), \
         model TEXT NOT NULL, \
         label TEXT NOT NULL, \
         reasoning_efforts TEXT[] NOT NULL DEFAULT '{}', \
@@ -261,8 +283,9 @@ pub fn ensure_schema_sql() -> &'static str {
     )"
 }
 
-/// Expand the CHECK to include `openhub` on databases created by
-/// NEWPIDASH-169, whose inline CHECK rejects it. The inline CHECK has no
+/// Expand the CHECK to include `openhub` (NEWPIDASH-302) and `antigravity`
+/// (NEWPIDASH-396) on databases created by NEWPIDASH-169, whose inline
+/// CHECK rejects both. The inline CHECK has no
 /// explicit name, so it is `rust_runner_model_catalog_agent_check`.
 /// The DROP + ADD is idempotent: repeated boots drop the old constraint
 /// and re-add the wide one. Raw SQL is the same DDL exception as the
@@ -272,7 +295,7 @@ pub const ALTER_AGENT_CHECK_DROP_SQL: &str =
 
 pub fn ensure_check_sql() -> &'static str {
     "ALTER TABLE rust_runner_model_catalog ADD CONSTRAINT rust_runner_model_catalog_agent_check \
-        CHECK (agent IN ('claude-code','codex','cursor-agent','open-claw','grok','muse-code','openhub'))"
+        CHECK (agent IN ('claude-code','codex','cursor-agent','open-claw','grok','antigravity','muse-code','openhub'))"
 }
 
 /// DDL for the picker order index. Separate statement: Postgres rejects
@@ -282,25 +305,26 @@ pub fn ensure_index_sql() -> &'static str {
         ON rust_runner_model_catalog (agent, sort_order)"
 }
 
-/// Create the table + index, then seed the 30-row catalog when the table
+/// Create the table + index, then seed the 32-row catalog when the table
 /// is empty (delete-then-reboot resurrects only when every row is gone;
 /// a single delete never resurrects, and admin edits are never
-/// overwritten). On a populated table the three `openhub` rows are
-/// inserted only when missing (NEWPIDASH-302), so existing databases
-/// gain the group without touching the existing runner rows.
+/// overwritten). On a populated table the two `antigravity` rows
+/// (NEWPIDASH-396) and the three `openhub` rows (NEWPIDASH-302) are
+/// inserted only when missing, so existing databases gain the groups
+/// without touching the existing runner rows.
 pub async fn ensure_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
     // raw-sql: Rust-owned DDL (CREATE TABLE/INDEX IF NOT EXISTS) is an allowed exception per orm-migration.md §6: sea-query cannot express DDL, and the catalog table has no Django counterpart.
     sqlx::query(ensure_schema_sql()).execute(pool).await?;
     // raw-sql: Rust-owned DDL (CREATE TABLE/INDEX IF NOT EXISTS) is an allowed exception per orm-migration.md §6: sea-query cannot express DDL, and the catalog table has no Django counterpart.
     sqlx::query(ensure_index_sql()).execute(pool).await?;
-    // raw-sql: expand the CHECK to include openhub on NEWPIDASH-169 tables.
+    // raw-sql: expand the CHECK to include openhub/antigravity on old tables.
     sqlx::query(ALTER_AGENT_CHECK_DROP_SQL)
         .execute(pool)
         .await?;
-    // raw-sql: add the wide CHECK; the DROP above makes this idempotent.
     // An already-wide constraint (reboot) fails the ADD with duplicate
     // constraint name — the same name is dropped and re-added every boot,
     // so tolerate that error and continue.
+    // raw-sql: add the wide CHECK; the DROP above makes this idempotent.
     if let Err(err) = sqlx::query(ensure_check_sql()).execute(pool).await {
         let msg = err.to_string();
         if !msg.contains("already exists") && !msg.contains("duplicate") {
@@ -336,9 +360,32 @@ pub async fn ensure_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
         }
         return Ok(());
     }
-    // Populated table: back-fill missing openhub rows only.
-    ensure_openhub_rows(&db, now).await
+    // Populated table: back-fill missing openhub/antigravity rows only.
+    ensure_openhub_rows(&db, now).await?;
+    ensure_antigravity_rows(&db, now).await
 }
+
+/// Antigravity seed rows only (NEWPIDASH-396), for the existing-table
+/// back-fill path. Neither row is preselected: the add-runner picker
+/// defers to the agent default, like Grok.
+pub const ANTIGRAVITY_SEED: &[SeedRow] = &[
+    (
+        "antigravity",
+        "gemini-4-hydrogen",
+        "Gemini 4 Hydrogen",
+        &[],
+        0,
+        false,
+    ),
+    (
+        "antigravity",
+        "gemini-4-neon",
+        "Gemini 4 Neon",
+        &[],
+        1,
+        false,
+    ),
+];
 
 /// Insert the three OpenHub seed rows that are missing from a populated
 /// table. Existing OpenHub rows (admin edits) are never overwritten, and
@@ -403,12 +450,59 @@ async fn ensure_openhub_rows(
     Ok(())
 }
 
+/// Insert the Antigravity seed rows missing from a populated table.
+/// Existing rows (admin edits) are never overwritten.
+async fn ensure_antigravity_rows(
+    db: &sea_orm::DatabaseConnection,
+    now: chrono::DateTime<chrono::FixedOffset>,
+) -> Result<(), sqlx::Error> {
+    use sea_orm::ColumnTrait;
+    let existing = rust_runner_model_catalog::Entity::find()
+        .filter(rust_runner_model_catalog::Column::Agent.eq("antigravity"))
+        .all(db)
+        .await
+        .map_err(|_| {
+            sqlx::Error::Decode(Box::new(std::io::Error::other(
+                "seed antigravity fetch failed",
+            )))
+        })?;
+    let mut present: std::collections::HashSet<String> =
+        existing.iter().map(|row| row.model.clone()).collect();
+    for (agent, model, label, efforts, sort_order, preselected) in ANTIGRAVITY_SEED {
+        if present.contains(*model) {
+            continue;
+        }
+        let active = rust_runner_model_catalog::ActiveModel {
+            id: Set(uuid::Uuid::new_v4()),
+            agent: Set((*agent).to_owned()),
+            model: Set((*model).to_owned()),
+            label: Set((*label).to_owned()),
+            reasoning_efforts: Set(efforts.iter().map(|effort| (*effort).to_owned()).collect()),
+            sort_order: Set(*sort_order),
+            is_enabled: Set(true),
+            is_preselected: Set(*preselected),
+            created_at: Set(now),
+            updated_at: Set(now),
+        };
+        rust_runner_model_catalog::Entity::insert(active)
+            .exec(db)
+            .await
+            .map_err(|_| {
+                sqlx::Error::Decode(Box::new(std::io::Error::other(
+                    "seed antigravity insert failed",
+                )))
+            })?;
+        present.insert((*model).to_owned());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn seed_has_30_rows_with_claude_opus_and_openhub_preselected() {
+    fn seed_has_32_rows_with_claude_opus_and_openhub_preselected() {
         assert_eq!(SEED.len(), SEED_COUNT);
         // Two preselected: one per agent group (runner + openhub).
         let preselected: Vec<_> = SEED.iter().filter(|row| row.5).collect();
@@ -434,12 +528,14 @@ mod tests {
     }
 
     #[test]
-    fn seed_covers_codex_cursor_grok_and_openhub() {
+    fn seed_covers_codex_cursor_grok_antigravity_and_openhub() {
         let count = |agent: &str| SEED.iter().filter(|row| row.0 == agent).count();
         assert_eq!(count("claude-code"), 6);
         assert_eq!(count("codex"), 7);
         assert_eq!(count("cursor-agent"), 12);
         assert_eq!(count("grok"), 2);
+        // Antigravity (NEWPIDASH-396): the documented `agy` model ids.
+        assert_eq!(count("antigravity"), 2);
         assert_eq!(count("open-claw"), 0);
         assert_eq!(count("muse-code"), 0);
         assert_eq!(count("openhub"), 3);
@@ -466,6 +562,23 @@ mod tests {
     }
 
     #[test]
+    fn seed_antigravity_rows_mirror_backfill_seed() {
+        // The back-fill path inserts exactly the SEED antigravity rows.
+        let seeded: Vec<_> = SEED.iter().filter(|row| row.0 == "antigravity").collect();
+        assert_eq!(ANTIGRAVITY_SEED.len(), seeded.len());
+        for (seed_row, backfill_row) in seeded.iter().zip(ANTIGRAVITY_SEED.iter()) {
+            assert_eq!(seed_row.1, backfill_row.1);
+            assert_eq!(seed_row.2, backfill_row.2);
+            assert!(
+                backfill_row.3.is_empty(),
+                "antigravity rows carry no efforts"
+            );
+            assert_eq!(seed_row.4, backfill_row.4);
+        }
+        assert_eq!(ANTIGRAVITY_SEED.len(), 2);
+    }
+
+    #[test]
     fn seed_codex_rows_offer_all_four_efforts() {
         for row in SEED.iter().filter(|row| row.0 == "codex") {
             assert_eq!(row.3, &["low", "medium", "high", "xhigh"]);
@@ -477,7 +590,14 @@ mod tests {
 
     #[test]
     fn seed_sort_order_is_dense_per_agent() {
-        for agent in ["claude-code", "codex", "cursor-agent", "grok", "openhub"] {
+        for agent in [
+            "claude-code",
+            "codex",
+            "cursor-agent",
+            "grok",
+            "antigravity",
+            "openhub",
+        ] {
             let mut orders: Vec<i32> = SEED
                 .iter()
                 .filter(|row| row.0 == agent)

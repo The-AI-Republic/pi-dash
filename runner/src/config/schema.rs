@@ -598,6 +598,12 @@ pub struct RunnerConfig {
     /// parse. Only consulted when `agent.kind == grok`.
     #[serde(default)]
     pub grok: GrokSection,
+    /// Antigravity settings. Missing section falls back to
+    /// `AntigravitySection::default()` so existing `config.toml` files
+    /// (written before Antigravity support) still parse. Only consulted when
+    /// `agent.kind == antigravity`.
+    #[serde(default)]
+    pub antigravity: AntigravitySection,
     /// Muse Code settings. Missing section falls back to
     /// `MuseCodeSection::default()` so existing `config.toml` files (written
     /// before Muse Code support) still parse. Only consulted when
@@ -620,6 +626,7 @@ impl RunnerConfig {
             AgentKind::CursorAgent => self.cursor_agent.model_default.as_deref(),
             AgentKind::OpenClaw => self.openclaw.model_default.as_deref(),
             AgentKind::Grok => self.grok.model_default.as_deref(),
+            AgentKind::Antigravity => self.antigravity.model_default.as_deref(),
             AgentKind::MuseCode => self.muse_code.model_default.as_deref(),
             AgentKind::PidashAgent => None,
         }
@@ -655,6 +662,7 @@ impl RunnerConfig {
             AgentKind::CursorAgent => Some(&mut self.cursor_agent.model_default),
             AgentKind::OpenClaw => Some(&mut self.openclaw.model_default),
             AgentKind::Grok => Some(&mut self.grok.model_default),
+            AgentKind::Antigravity => Some(&mut self.antigravity.model_default),
             AgentKind::MuseCode => Some(&mut self.muse_code.model_default),
             AgentKind::PidashAgent => None,
         }
@@ -750,6 +758,10 @@ pub enum AgentKind {
     /// xAI Grok via its native ACP server (`grok agent stdio`), which the
     /// runner drives directly over the Agent Client Protocol.
     Grok,
+    /// Google Antigravity via its native ACP server (`agy acp`), which the
+    /// runner drives directly over the Agent Client Protocol (shared driver
+    /// with Grok, `crate::acp`).
+    Antigravity,
     /// Meta Muse Code via its headless one-shot mode
     /// (`muse exec --json --prompt-file <PATH>`), whose JSONL event stream the
     /// runner drives one turn per subprocess.
@@ -775,6 +787,7 @@ impl AgentKind {
             AgentKind::CursorAgent => "Cursor",
             AgentKind::OpenClaw => "OpenClaw",
             AgentKind::Grok => "Grok",
+            AgentKind::Antigravity => "Antigravity",
             AgentKind::MuseCode => "Muse Code",
             AgentKind::PidashAgent => "Pi Dash Agent",
         }
@@ -795,6 +808,9 @@ impl AgentKind {
             // Grok is its own ACP server (`grok agent stdio`), so the runner
             // invokes `grok` directly.
             AgentKind::Grok => "grok",
+            // Antigravity is its own ACP server (`agy acp`), so the runner
+            // invokes `agy` directly.
+            AgentKind::Antigravity => "agy",
             // Muse Code ships as the `muse` CLI; the runner drives `muse exec`.
             AgentKind::MuseCode => "muse",
             AgentKind::PidashAgent => crate::pidash_agent::ENGINE_BINARY_NAME,
@@ -811,6 +827,7 @@ impl AgentKind {
             AgentKind::CursorAgent => "cursoragent",
             AgentKind::OpenClaw => "openclaw",
             AgentKind::Grok => "grok",
+            AgentKind::Antigravity => "antigravity",
             AgentKind::MuseCode => "musecode",
             AgentKind::PidashAgent => "engine",
         }
@@ -826,6 +843,7 @@ impl AgentKind {
             AgentKind::CursorAgent => "https://cursor.com/download",
             AgentKind::OpenClaw => "https://github.com/openclaw/acpx",
             AgentKind::Grok => "https://x.ai/cli",
+            AgentKind::Antigravity => "https://antigravity.google/docs/getting-started/",
             AgentKind::MuseCode => "https://developer.meta.com/ai/products/muse-code/",
             AgentKind::PidashAgent => "https://github.com/The-AI-Republic/pi-dash",
         }
@@ -867,6 +885,16 @@ impl AgentKind {
                 windows: Some("irm 'https://cursor.com/install?win32=true' | iex"),
                 doc_url: "https://cursor.com/docs/cli/installation",
             }),
+            // Antigravity CLI — https://antigravity.google/docs/getting-started/
+            // (CLI tab). The unix installer was verified by running it on the
+            // dev box (installs `agy` 1.5.15 to `~/.local/bin`); the Windows
+            // `install.cmd` variant is documented on the same page but was not
+            // executed here, so Windows keeps the open-install-page fallback.
+            AgentKind::Antigravity => Some(AgentInstaller {
+                unix: Some("curl -fsSL https://antigravity.google/cli/install.sh | bash"),
+                windows: None,
+                doc_url: "https://antigravity.google/docs/getting-started/",
+            }),
             // OpenClaw (acpx), Grok, and Muse Code do not (yet) publish a
             // verified official one-line installer, so we keep the
             // open-install-page fallback for these agents rather than guess a
@@ -890,6 +918,9 @@ impl AgentKind {
             AgentKind::CursorAgent => Some("cursor-agent login  (or set CURSOR_API_KEY)"),
             AgentKind::OpenClaw => None,
             AgentKind::Grok => Some("set XAI_API_KEY  (or run `grok` and log in)"),
+            AgentKind::Antigravity => {
+                Some("run `agy` and sign in  (or `agy acp --login` over SSH)")
+            }
             AgentKind::MuseCode => Some("set META_API_KEY"),
             AgentKind::PidashAgent => Some("pidash login --engine"),
         }
@@ -1024,6 +1055,31 @@ impl Default for GrokSection {
     fn default() -> Self {
         Self {
             binary: default_grok_binary(),
+            model_default: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AntigravitySection {
+    /// The `agy` CLI binary the runner spawns as an ACP server (`agy acp`
+    /// with the Antigravity flags). Per-field default so a partial
+    /// `[antigravity]` block (e.g. only `model_default`) still parses
+    /// without spelling out `binary = "agy"`.
+    #[serde(default = "default_agy_binary")]
+    pub binary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_default: Option<String>,
+}
+
+fn default_agy_binary() -> String {
+    "agy".to_string()
+}
+
+impl Default for AntigravitySection {
+    fn default() -> Self {
+        Self {
+            binary: default_agy_binary(),
             model_default: None,
         }
     }
@@ -1434,6 +1490,7 @@ mod tests {
             cursor_agent: Default::default(),
             openclaw: Default::default(),
             grok: Default::default(),
+            antigravity: Default::default(),
             muse_code: Default::default(),
             approval_policy: Default::default(),
         }
@@ -1717,6 +1774,10 @@ mod tests {
             GrokSection::default().binary
         );
         assert_eq!(
+            AgentKind::Antigravity.default_binary(),
+            AntigravitySection::default().binary
+        );
+        assert_eq!(
             AgentKind::MuseCode.default_binary(),
             MuseCodeSection::default().binary
         );
@@ -1732,6 +1793,7 @@ mod tests {
             AgentKind::CursorAgent,
             AgentKind::OpenClaw,
             AgentKind::Grok,
+            AgentKind::Antigravity,
             AgentKind::MuseCode,
         ] {
             let url = kind.install_page_url();
@@ -1752,6 +1814,7 @@ mod tests {
             "chatgpt.com",
             "learn.chatgpt.com",
             "cursor.com",
+            "antigravity.google",
             "@openai/codex", // npm package name, not a URL host
         ];
         for kind in [
@@ -1760,6 +1823,7 @@ mod tests {
             AgentKind::CursorAgent,
             AgentKind::OpenClaw,
             AgentKind::Grok,
+            AgentKind::Antigravity,
             AgentKind::MuseCode,
         ] {
             let Some(installer) = kind.official_installer() else {
@@ -1791,12 +1855,13 @@ mod tests {
 
     #[test]
     fn agents_with_verified_installers_have_them_others_fall_back() {
-        // The three agents whose vendor scripts we verified must expose an
+        // The agents whose vendor scripts we verified must expose an
         // installer; the rest deliberately return None so `runner add` keeps
         // the open-install-page fallback.
         assert!(AgentKind::ClaudeCode.official_installer().is_some());
         assert!(AgentKind::Codex.official_installer().is_some());
         assert!(AgentKind::CursorAgent.official_installer().is_some());
+        assert!(AgentKind::Antigravity.official_installer().is_some());
         assert!(AgentKind::OpenClaw.official_installer().is_none());
         assert!(AgentKind::Grok.official_installer().is_none());
         assert!(AgentKind::MuseCode.official_installer().is_none());
@@ -1825,6 +1890,7 @@ mod tests {
             AgentKind::ClaudeCode,
             AgentKind::Codex,
             AgentKind::CursorAgent,
+            AgentKind::Antigravity,
         ] {
             assert!(
                 kind.post_install_login_hint().is_some(),

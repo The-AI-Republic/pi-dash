@@ -1119,9 +1119,9 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn runner_bin_pin_applies_to_plain_bridge_command() {
-        // Non-Codex bridges (Muse Code, Claude Code, Cursor, OpenClaw, Grok)
-        // call plain `login_shell_command` with no AgentEnv at all; the
-        // RUN_ENV pin must still reach them.
+        // Non-Codex bridges (Muse Code, Claude Code, Cursor, OpenClaw, Grok,
+        // Antigravity) call plain `login_shell_command` with no AgentEnv at
+        // all; the RUN_ENV pin must still reach them.
         let decoy_dir = tempfile::tempdir().expect("tempdir for decoy bin");
         marker_pidash(decoy_dir.path(), "decoy-pidash");
         let daemon_dir = tempfile::tempdir().expect("tempdir for daemon bin");

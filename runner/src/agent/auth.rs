@@ -239,8 +239,7 @@ pub const ANTIGRAVITY_KEYCHAIN_SERVICE: &str = "gemini";
 /// attribute is always set from [`ANTIGRAVITY_KEYCHAIN_SERVICE`] as well.
 pub const ANTIGRAVITY_KEYCHAIN_ATTRS: &[(&str, &str)] = &[("service", "gemini")];
 
-pub const ANTIGRAVITY_FIX_HINT: &str =
-    "run `agy` and sign in, or set GEMINI_API_KEY with modelProvider=gemini, for the daemon's user";
+pub const ANTIGRAVITY_FIX_HINT: &str = "run `agy` and sign in (or `agy acp --login` over SSH), or set GEMINI_API_KEY with modelProvider=gemini, for the daemon's user";
 
 pub const ANTIGRAVITY_KEYRING_LOCKED_HINT: &str =
     "Antigravity sign-in found but the keyring is locked; unlock it or use GEMINI_API_KEY";
@@ -439,6 +438,7 @@ pub fn has_credentials(kind: AgentKind) -> bool {
         AgentKind::ClaudeCode => has_claude_credentials(),
         AgentKind::CursorAgent => has_cursor_credentials(),
         AgentKind::Grok => has_grok_credentials(),
+        AgentKind::Antigravity => has_antigravity_credentials(),
         AgentKind::MuseCode => has_muse_credentials(),
         AgentKind::OpenClaw | AgentKind::PidashAgent => true,
     }
@@ -452,6 +452,7 @@ pub fn fix_hint(kind: AgentKind) -> &'static str {
         AgentKind::ClaudeCode => CLAUDE_FIX_HINT,
         AgentKind::CursorAgent => CURSOR_FIX_HINT,
         AgentKind::Grok => GROK_FIX_HINT,
+        AgentKind::Antigravity => antigravity_fix_hint(antigravity_live_detail()),
         AgentKind::MuseCode => MUSE_FIX_HINT,
         AgentKind::OpenClaw => OPENCLAW_FIX_HINT,
         AgentKind::PidashAgent => "run `pidash login --engine` for the daemon's environment",
@@ -946,6 +947,7 @@ mod tests {
             AgentKind::ClaudeCode,
             AgentKind::CursorAgent,
             AgentKind::Grok,
+            AgentKind::Antigravity,
             AgentKind::MuseCode,
         ] {
             assert!(!fix_hint(kind).is_empty(), "fix hint for {kind:?}");

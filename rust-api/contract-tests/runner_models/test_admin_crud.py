@@ -47,7 +47,8 @@ def test_admin_list_returns_all_rows(admin_api):
         return
     agents = res.json()["agents"]
     total = sum(len(rows) for rows in agents.values())
-    assert total == 30
+    assert total == 32
+    assert len(agents["antigravity"]) == 2
     assert len(agents["openhub"]) == 3
 
 

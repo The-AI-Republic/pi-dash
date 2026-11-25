@@ -1,4 +1,4 @@
-//! `grok agent stdio` subprocess wrapper. Grok's ACP server is a long-lived
+//! Native ACP server subprocess wrapper. An ACP server is a long-lived
 //! JSON-RPC endpoint on stdin/stdout, so this is modelled on
 //! `codex::app_server::AppServer` (persistent, owns stdin for outbound
 //! requests) rather than OpenClaw's one-shot argv process.
@@ -8,11 +8,11 @@
 //! (via [`crate::openclaw::schema::AcpMessage`]) *and* to read the JSON-RPC
 //! `id` off a `session/request_permission` request so it can answer with a
 //! matching response. Unparsable lines are dropped with a warning, keeping the
-//! reader resilient to any non-JSON chatter grok might emit.
+//! reader resilient to any non-JSON chatter the server might emit.
 //!
 //! `Child` is owned exclusively by an internal wait task (as in the Codex
 //! wrapper) because `Child::wait()` and `start_kill()` both need `&mut self`;
-//! the `GrokProcess` keeps only the side-channels to drive it.
+//! the `AcpProcess` keeps only the side-channels to drive it.
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -29,8 +29,11 @@ use crate::agent::{
 };
 use crate::util::shell::{is_benign_login_shell_warning, login_shell_command};
 
-/// Handles the `grok agent stdio` subprocess lifecycle + ACP JSON-RPC wire.
-pub struct GrokProcess {
+/// Handles one native ACP server subprocess lifecycle + JSON-RPC wire.
+/// `label` names the agent in logs and error strings (`"grok"`,
+/// `"antigravity"`); it carries no behaviour.
+pub struct AcpProcess {
+    label: &'static str,
     pid: Option<u32>,
     stdin: ChildStdin,
     next_id: AtomicU64,
@@ -49,37 +52,57 @@ enum KillRequest {
     Force,
 }
 
-impl GrokProcess {
-    /// Spawn `grok agent stdio` in `cwd` via the platform login-shell helper so
-    /// the probe (`pidash doctor`) and real launch stay aligned.
-    pub async fn spawn(binary: &str, cwd: &Path) -> Result<Self> {
-        let cmd = login_shell_command(binary, &["agent", "stdio"], Some(cwd));
-        Self::spawn_command(cmd).await
+impl AcpProcess {
+    /// Spawn an ACP server `binary` with `args` in `cwd` via the platform
+    /// login-shell helper so the probe (`pidash doctor`) and real launch stay
+    /// aligned.
+    pub async fn spawn(
+        label: &'static str,
+        binary: &str,
+        args: &[&str],
+        cwd: &Path,
+    ) -> Result<Self> {
+        let cmd = login_shell_command(binary, args, Some(cwd));
+        Self::spawn_command(label, cmd).await
     }
 
     /// Test-friendly constructor taking a fully-prepared `Command`. Forces the
     /// stdio disposition the reader / writer tasks expect.
-    pub async fn spawn_command(mut cmd: Command) -> Result<Self> {
+    pub async fn spawn_command(label: &'static str, mut cmd: Command) -> Result<Self> {
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().context("spawning grok subprocess")?;
-        let stdin = child.stdin.take().context("grok stdin missing")?;
-        let stdout = child.stdout.take().context("grok stdout missing")?;
-        let stderr = child.stderr.take().context("grok stderr missing")?;
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("spawning {label} ACP subprocess"))?;
+        let stdin = child
+            .stdin
+            .take()
+            .with_context(|| format!("{label} stdin missing"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .with_context(|| format!("{label} stdout missing"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .with_context(|| format!("{label} stderr missing"))?;
         let pid = child.id();
 
         let (tx, rx) = mpsc::channel(128);
         let stderr_ring: StderrRing = Arc::new(Mutex::new(StderrBuffer::new(STDERR_RING_LINES)));
-        tokio::spawn(read_frames(stdout, tx));
-        tokio::spawn(drain_stderr(stderr, stderr_ring.clone()));
+        let label_reader = label;
+        tokio::spawn(read_frames(label_reader, stdout, tx));
+        let label_stderr = label;
+        tokio::spawn(drain_stderr(label_stderr, stderr, stderr_ring.clone()));
 
         let (kill_tx, kill_rx) = mpsc::channel::<KillRequest>(2);
         let (exit_tx, exit_rx) = watch::channel::<Option<ExitSnapshot>>(None);
         tokio::spawn(wait_task(child, kill_rx, exit_tx));
 
         Ok(Self {
+            label,
             pid,
             stdin,
             next_id: AtomicU64::new(1),
@@ -99,7 +122,7 @@ impl GrokProcess {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Write a single JSON-RPC line to grok's stdin (newline-framed).
+    /// Write a single JSON-RPC line to the server's stdin (newline-framed).
     pub async fn send_raw(&mut self, line: &str) -> Result<()> {
         self.stdin.write_all(line.as_bytes()).await?;
         self.stdin.write_all(b"\n").await?;
@@ -118,10 +141,13 @@ impl GrokProcess {
         self.stderr_ring.lock().await.snapshot()
     }
 
-    /// Best-effort interrupt: SIGINT if we can, else force-kill. We don't hold
-    /// a spec-level `session/cancel` channel in the MVP, so the OS signal is
-    /// the lever (grok cleans up its ACP session on SIGINT).
+    /// Best-effort interrupt: SIGINT if we can, else force-kill. Servers that
+    /// end the turn through the protocol-level `session/cancel` notification
+    /// do so in the bridge (`Bridge::interrupt`), which runs before this;
+    /// this stays the OS-level lever for servers that clean up their ACP
+    /// session on SIGINT.
     pub async fn interrupt(&mut self) -> Result<()> {
+        let label = self.label;
         #[cfg(unix)]
         {
             use nix::sys::signal::{Signal, kill};
@@ -129,28 +155,34 @@ impl GrokProcess {
             if let Some(pid) = self.pid {
                 match kill(Pid::from_raw(pid as i32), Signal::SIGINT) {
                     Ok(()) => return Ok(()),
-                    Err(e) => tracing::warn!("grok SIGINT failed ({e}); falling back to SIGKILL"),
+                    Err(e) => {
+                        tracing::warn!("{label} SIGINT failed ({e}); falling back to SIGKILL")
+                    }
                 }
             }
         }
         self.kill_tx
             .send(KillRequest::Force)
             .await
-            .context("failed to send kill request to grok wait task")?;
+            .with_context(|| format!("failed to send kill request to {label} wait task"))?;
         Ok(())
     }
 
     pub async fn shutdown(mut self, grace: std::time::Duration) -> Result<()> {
-        // Half-close stdin so grok notices end-of-input and can exit cleanly.
+        // Half-close stdin so the server notices end-of-input and can exit
+        // cleanly.
         drop(self.stdin);
         let _ = self.kill_tx.send(KillRequest::Graceful).await;
         match tokio::time::timeout(grace, self.exit_rx.changed()).await {
             Ok(Ok(())) => {
                 let snap = self.exit_rx.borrow().clone();
-                tracing::debug!(?snap, "grok exited gracefully");
+                tracing::debug!(label = self.label, ?snap, "ACP server exited gracefully");
             }
             _ => {
-                tracing::warn!("grok did not exit within grace; sending SIGKILL");
+                tracing::warn!(
+                    label = self.label,
+                    "ACP server did not exit within grace; sending SIGKILL"
+                );
                 let _ = self.kill_tx.send(KillRequest::Force).await;
                 let _ = tokio::time::timeout(grace, self.exit_rx.changed()).await;
             }
@@ -209,7 +241,11 @@ fn exit_snapshot_from(status: Option<std::process::ExitStatus>) -> ExitSnapshot 
     }
 }
 
-async fn read_frames(stdout: tokio::process::ChildStdout, tx: mpsc::Sender<serde_json::Value>) {
+async fn read_frames(
+    label: &'static str,
+    stdout: tokio::process::ChildStdout,
+    tx: mpsc::Sender<serde_json::Value>,
+) {
     let mut reader = BufReader::new(stdout);
     let mut line = String::new();
     loop {
@@ -228,20 +264,20 @@ async fn read_frames(stdout: tokio::process::ChildStdout, tx: mpsc::Sender<serde
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("grok emitted non-JSON line ({e}): {trimmed}");
+                        tracing::warn!("{label} emitted non-JSON line ({e}): {trimmed}");
                     }
                 }
             }
             Err(e) => {
-                tracing::warn!("grok stdout read error: {e}");
+                tracing::warn!("{label} stdout read error: {e}");
                 break;
             }
         }
     }
 }
 
-async fn drain_stderr(stderr: tokio::process::ChildStderr, ring: StderrRing) {
-    // grok surfaces auth (missing/invalid XAI_API_KEY), model, and runtime
+async fn drain_stderr(label: &'static str, stderr: tokio::process::ChildStderr, ring: StderrRing) {
+    // Servers surface auth (missing/invalid credentials), model, and runtime
     // errors here. At the default level these would be invisible, so every
     // non-empty line is logged at `warn!` AND buffered into the per-process
     // ring for RunFailed-detail enrichment. The login-shell wrapper emits two
@@ -257,11 +293,11 @@ async fn drain_stderr(stderr: tokio::process::ChildStderr, ring: StderrRing) {
                 if trimmed.is_empty() || is_benign_login_shell_warning(trimmed) {
                     continue;
                 }
-                tracing::warn!(target: "grok.stderr", "{trimmed}");
+                tracing::warn!(target: "acp.stderr", label, "{trimmed}");
                 ring.lock().await.push(trimmed);
             }
             Err(e) => {
-                tracing::warn!("grok stderr read error: {e}");
+                tracing::warn!("{label} stderr read error: {e}");
                 break;
             }
         }

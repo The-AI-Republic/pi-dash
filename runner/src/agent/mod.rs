@@ -331,13 +331,17 @@ pub fn agent_env_for_config(runner: &RunnerConfig) -> crate::util::shell::AgentE
 }
 
 /// Enum dispatch over the concrete bridges. Each variant owns the agent's
-/// subprocess; the supervisor treats them uniformly.
+/// subprocess; the supervisor treats them uniformly. Grok and Antigravity
+/// share the native-ACP driver (`crate::acp`); they stay separate variants
+/// so each keeps its own profile (argv, model, interrupt and resume posture)
+/// and reports its own wire `agent_kind`.
 pub enum AgentBridge {
     Codex(crate::codex::bridge::Bridge),
     ClaudeCode(crate::claude_code::bridge::Bridge),
     CursorAgent(crate::cursor_agent::bridge::Bridge),
     OpenClaw(crate::openclaw::bridge::Bridge),
-    Grok(crate::grok::bridge::Bridge),
+    Grok(crate::acp::Bridge),
+    Antigravity(crate::acp::Bridge),
     MuseCode(crate::muse_code::bridge::Bridge),
 }
 
@@ -348,7 +352,8 @@ pub enum AgentCursor {
     ClaudeCode(crate::claude_code::bridge::BridgeCursor),
     CursorAgent(crate::cursor_agent::bridge::BridgeCursor),
     OpenClaw(crate::openclaw::bridge::BridgeCursor),
-    Grok(crate::grok::bridge::BridgeCursor),
+    Grok(crate::acp::BridgeCursor),
+    Antigravity(crate::acp::BridgeCursor),
     MuseCode(crate::muse_code::bridge::BridgeCursor),
 }
 
@@ -360,6 +365,7 @@ impl AgentCursor {
             AgentCursor::CursorAgent(c) => c.run_id,
             AgentCursor::OpenClaw(c) => c.run_id,
             AgentCursor::Grok(c) => c.run_id,
+            AgentCursor::Antigravity(c) => c.run_id,
             AgentCursor::MuseCode(c) => c.run_id,
         }
     }
@@ -371,6 +377,7 @@ impl AgentCursor {
             AgentCursor::CursorAgent(c) => &c.thread_id,
             AgentCursor::OpenClaw(c) => &c.thread_id,
             AgentCursor::Grok(c) => &c.thread_id,
+            AgentCursor::Antigravity(c) => &c.thread_id,
             AgentCursor::MuseCode(c) => &c.thread_id,
         }
     }
@@ -389,6 +396,7 @@ impl AgentCursor {
             AgentCursor::CursorAgent(_) => "cursor_agent",
             AgentCursor::OpenClaw(_) => "openclaw",
             AgentCursor::Grok(_) => "grok",
+            AgentCursor::Antigravity(_) => "antigravity",
             AgentCursor::MuseCode(_) => "muse_code",
         }
     }
@@ -400,6 +408,7 @@ impl AgentCursor {
             AgentCursor::CursorAgent(c) => c.model.as_deref(),
             AgentCursor::OpenClaw(c) => c.model.as_deref(),
             AgentCursor::Grok(c) => c.model.as_deref(),
+            AgentCursor::Antigravity(c) => c.model.as_deref(),
             AgentCursor::MuseCode(c) => c.model.as_deref(),
         }
     }
@@ -413,8 +422,9 @@ impl AgentBridge {
         runner: &RunnerConfig,
         cwd: &Path,
         model_override: Option<String>,
+        log_dir: Option<&Path>,
     ) -> Result<Self> {
-        Self::spawn_from_config_with_resume(runner, cwd, model_override, None, None).await
+        Self::spawn_from_config_with_resume(runner, cwd, model_override, None, None, log_dir).await
     }
 
     /// Spawn the configured agent, optionally resuming a session and, for the
@@ -422,12 +432,16 @@ impl AgentBridge {
     /// mode keeps the codex bridge's default (historical full-access) posture,
     /// which is what the cloud path passes so its behaviour is unchanged; only
     /// the local chat lane supplies an explicit mode.
+    ///
+    /// `log_dir` is the runner's log directory; the Antigravity bridge points
+    /// its ACP server log (`--log-file`) there. Ignored by every other agent.
     pub async fn spawn_from_config_with_resume(
         runner: &RunnerConfig,
         cwd: &Path,
         model_override: Option<String>,
         resume_session_id: Option<&str>,
         mode: Option<crate::cloud::protocol::ApprovalMode>,
+        log_dir: Option<&Path>,
     ) -> Result<Self> {
         match runner.agent.kind {
             AgentKind::Codex => {
@@ -510,14 +524,28 @@ impl AgentBridge {
                 Ok(AgentBridge::OpenClaw(b))
             }
             AgentKind::Grok => {
-                let b = crate::grok::bridge::Bridge::spawn_with_resume(
+                let b = crate::acp::Bridge::spawn_with_resume(
+                    crate::grok::PROFILE,
                     &runner.grok.binary,
+                    &crate::grok::argv(),
                     cwd,
                     selected_model(model_override, runner.grok.model_default.clone()),
                     resume_session_id,
                 )
                 .await?;
                 Ok(AgentBridge::Grok(b))
+            }
+            AgentKind::Antigravity => {
+                let b = crate::acp::Bridge::spawn_with_resume(
+                    crate::antigravity::PROFILE,
+                    &runner.antigravity.binary,
+                    &crate::antigravity::argv(log_dir),
+                    cwd,
+                    selected_model(model_override, runner.antigravity.model_default.clone()),
+                    resume_session_id,
+                )
+                .await?;
+                Ok(AgentBridge::Antigravity(b))
             }
             AgentKind::MuseCode => {
                 let b = crate::muse_code::bridge::Bridge::spawn_with_resume(
@@ -547,6 +575,7 @@ impl AgentBridge {
             AgentBridge::CursorAgent(b) => Ok(AgentCursor::CursorAgent(b.run(payload, cwd).await?)),
             AgentBridge::OpenClaw(b) => Ok(AgentCursor::OpenClaw(b.run(payload, cwd).await?)),
             AgentBridge::Grok(b) => Ok(AgentCursor::Grok(b.run(payload, cwd).await?)),
+            AgentBridge::Antigravity(b) => Ok(AgentCursor::Antigravity(b.run(payload, cwd).await?)),
             AgentBridge::MuseCode(b) => Ok(AgentCursor::MuseCode(b.run(payload, cwd).await?)),
         }
     }
@@ -564,6 +593,9 @@ impl AgentBridge {
                 Ok(AgentCursor::OpenClaw(b.run_one_shot(payload, cwd).await?))
             }
             AgentBridge::Grok(b) => Ok(AgentCursor::Grok(b.run_one_shot(payload, cwd).await?)),
+            AgentBridge::Antigravity(b) => Ok(AgentCursor::Antigravity(
+                b.run_one_shot(payload, cwd).await?,
+            )),
             AgentBridge::MuseCode(b) => {
                 Ok(AgentCursor::MuseCode(b.run_one_shot(payload, cwd).await?))
             }
@@ -582,6 +614,7 @@ impl AgentBridge {
             AgentBridge::CursorAgent(b) => b.warm(cwd).await,
             AgentBridge::OpenClaw(b) => b.warm(cwd).await,
             AgentBridge::Grok(b) => b.warm(cwd).await,
+            AgentBridge::Antigravity(b) => b.warm(cwd).await,
             AgentBridge::MuseCode(b) => b.warm(cwd).await,
         }
     }
@@ -599,6 +632,7 @@ impl AgentBridge {
             (AgentBridge::CursorAgent(b), AgentCursor::CursorAgent(c)) => b.next_events(c).await,
             (AgentBridge::OpenClaw(b), AgentCursor::OpenClaw(c)) => b.next_events(c).await,
             (AgentBridge::Grok(b), AgentCursor::Grok(c)) => b.next_events(c).await,
+            (AgentBridge::Antigravity(b), AgentCursor::Antigravity(c)) => b.next_events(c).await,
             (AgentBridge::MuseCode(b), AgentCursor::MuseCode(c)) => b.next_events(c).await,
             // These pairings are constructed together by `run`, so a mismatch
             // is a programmer error — fail loudly.
@@ -617,6 +651,7 @@ impl AgentBridge {
             AgentBridge::CursorAgent(b) => b.send_approval(approval_id, decision).await,
             AgentBridge::OpenClaw(b) => b.send_approval(approval_id, decision).await,
             AgentBridge::Grok(b) => b.send_approval(approval_id, decision).await,
+            AgentBridge::Antigravity(b) => b.send_approval(approval_id, decision).await,
             AgentBridge::MuseCode(b) => b.send_approval(approval_id, decision).await,
         }
     }
@@ -628,6 +663,7 @@ impl AgentBridge {
             AgentBridge::CursorAgent(b) => b.interrupt().await,
             AgentBridge::OpenClaw(b) => b.interrupt().await,
             AgentBridge::Grok(b) => b.interrupt().await,
+            AgentBridge::Antigravity(b) => b.interrupt().await,
             AgentBridge::MuseCode(b) => b.interrupt().await,
         }
     }
@@ -639,6 +675,7 @@ impl AgentBridge {
             AgentBridge::CursorAgent(b) => b.shutdown(grace).await,
             AgentBridge::OpenClaw(b) => b.shutdown(grace).await,
             AgentBridge::Grok(b) => b.shutdown(grace).await,
+            AgentBridge::Antigravity(b) => b.shutdown(grace).await,
             AgentBridge::MuseCode(b) => b.shutdown(grace).await,
         }
     }
@@ -654,6 +691,7 @@ impl AgentBridge {
             AgentBridge::CursorAgent(b) => b.process_handle(),
             AgentBridge::OpenClaw(b) => b.process_handle(),
             AgentBridge::Grok(b) => b.process_handle(),
+            AgentBridge::Antigravity(b) => b.process_handle(),
             AgentBridge::MuseCode(b) => b.process_handle(),
         }
     }
@@ -670,6 +708,7 @@ impl AgentBridge {
             AgentBridge::CursorAgent(b) => b.recent_stderr().await,
             AgentBridge::OpenClaw(b) => b.recent_stderr().await,
             AgentBridge::Grok(b) => b.recent_stderr().await,
+            AgentBridge::Antigravity(b) => b.recent_stderr().await,
             AgentBridge::MuseCode(b) => b.recent_stderr().await,
         }
     }

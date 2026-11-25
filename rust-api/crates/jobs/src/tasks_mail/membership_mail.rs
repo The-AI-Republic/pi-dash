@@ -124,22 +124,22 @@ pub const MEMBERSHIP_MAIL_TASKS: [&str; 4] = [
 
 /// `emails/user/user_activation.html` — serves `user_activation_email`.
 pub const USER_ACTIVATION_TEMPLATE: &str =
-    include_str!("../../../../../apps/api/templates/emails/user/user_activation.html");
+    include_str!("../../../../../rust-api/templates/emails/user/user_activation.html");
 /// `emails/user/user_deactivation.html` — serves `user_deactivation_email`.
 pub const USER_DEACTIVATION_TEMPLATE: &str =
-    include_str!("../../../../../apps/api/templates/emails/user/user_deactivation.html");
+    include_str!("../../../../../rust-api/templates/emails/user/user_deactivation.html");
 /// `emails/notifications/project_addition.html` — serves
 /// `project_add_user_email`.
 pub const PROJECT_ADDITION_TEMPLATE: &str =
-    include_str!("../../../../../apps/api/templates/emails/notifications/project_addition.html");
+    include_str!("../../../../../rust-api/templates/emails/notifications/project_addition.html");
 /// `emails/invitations/workspace_invitation.html` — serves
 /// `workspace_invitation`.
 pub const WORKSPACE_INVITATION_TEMPLATE: &str =
-    include_str!("../../../../../apps/api/templates/emails/invitations/workspace_invitation.html");
+    include_str!("../../../../../rust-api/templates/emails/invitations/workspace_invitation.html");
 /// `emails/invitations/project_invitation.html` — serves
 /// `project_invitation` (PIDASHCONV-1104).
 pub const PROJECT_INVITATION_TEMPLATE: &str =
-    include_str!("../../../../../apps/api/templates/emails/invitations/project_invitation.html");
+    include_str!("../../../../../rust-api/templates/emails/invitations/project_invitation.html");
 
 /// Python `first_name or display_name or email`: empty strings fall
 /// through; the caller passes the email already through [`py_str`] (so a

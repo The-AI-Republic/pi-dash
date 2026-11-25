@@ -318,12 +318,14 @@ impl<'a> ChatHost<'a> {
         resume_id: Option<&str>,
         mode: ApprovalMode,
     ) -> Result<AgentBridge> {
+        let logs_dir = self.inst.paths.logs_dir();
         AgentBridge::spawn_from_config_with_resume(
             &self.inst.config,
             workspace,
             model,
             resume_id,
             Some(mode),
+            Some(logs_dir.as_path()),
         )
         .await
     }
@@ -1579,6 +1581,7 @@ mod tests {
             cursor_agent: CursorAgentSection::default(),
             openclaw: Default::default(),
             grok: Default::default(),
+            antigravity: Default::default(),
             muse_code: Default::default(),
             approval_policy: ApprovalPolicySection::default(),
         }
