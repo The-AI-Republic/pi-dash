@@ -1721,6 +1721,65 @@ mod tests {
         }
     }
 
+    /// Chat variant of the `pidash-cli` section (NEWPIDASH-402): the runner
+    /// renders the same source file with `run.kind == "chat"` and injects
+    /// it into the first turn of every runner chat session. The chat text
+    /// keeps the auth line, output contract, `pidash docs` pointer and
+    /// command index, and drops the run-only material (env defaults,
+    /// workpad, `run finish` / `run yield`, `issue wait`, lifecycle).
+    /// It renders from a minimal context — no issue or project — so an
+    /// unguarded `{{ issue.* }}` / `{{ project.* }}` reference in a
+    /// chat-taken branch fails here rather than in the runner.
+    #[test]
+    fn chat_cli_section_renders_without_issue_or_project() {
+        let cli = &registry::get_section("pidash-cli")
+            .expect("pidash-cli")
+            .default_body;
+        let ctx = serde_json::json!({
+            "run": {
+                "kind": "chat",
+                "rendered_at": "2026-11-25T08:05:46Z",
+            },
+        });
+        let body = renderer::render(cli, &ctx).expect("chat renders");
+        for kept in [
+            "## Pi Dash CLI (`pidash`)",
+            "already authenticated **as this runner's owner**",
+            "Every command prints one JSON document",
+            "Run `pidash docs <topic>`",
+            "### Other commands",
+            "There is no current issue or run",
+            "Nothing is pre-loaded",
+            "state list unavailable",
+            "`pidash issue list --project <PROJ>",
+            "`pidash issue create --project <PROJ>",
+            "`pidash state list",
+            "say so in chat instead of calling it",
+        ] {
+            assert!(body.contains(kept), "chat carries {kept:?}");
+        }
+        for dropped in [
+            "PIDASH_ISSUE_IDENTIFIER",
+            "PIDASH_RUN_ID",
+            "plus this run's id",
+            "workpad",
+            "pidash run finish",
+            "pidash run yield",
+            "run_kind",
+            "issue wait",
+            "Blocking the run",
+            "Lifecycle",
+            "already shown below",
+        ] {
+            assert!(!body.contains(dropped), "chat drops {dropped:?}");
+        }
+        assert!(
+            body.len() <= CLI_SECTION_BUDGET,
+            "chat pidash-cli section {} bytes exceeds budget {CLI_SECTION_BUDGET}",
+            body.len()
+        );
+    }
+
     #[test]
     fn attribution_without_context_returns_detail() {
         // No context disables the probe (`composer.py:253-254`); with no

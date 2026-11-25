@@ -2623,6 +2623,7 @@ impl RunnerLoop {
             out: self.out.clone(),
             command_rx: rx,
             active_tx,
+            guidance_sent: false,
         };
         tokio::spawn(async move {
             worker.run(chat_session_id).await;
@@ -3536,6 +3537,11 @@ struct ChatWorker {
     out: RunnerOut,
     command_rx: mpsc::Receiver<ChatCommand>,
     active_tx: watch::Sender<bool>,
+    /// Whether the live bridge already received the CLI guidance
+    /// (NEWPIDASH-402). A worker owns one session runtime; a fresh
+    /// worker (revival) starts with a fresh subprocess, so this
+    /// starts false and is cleared whenever the bridge is dropped.
+    guidance_sent: bool,
 }
 
 impl ChatWorker {
@@ -3614,6 +3620,7 @@ impl ChatWorker {
                         }
                         workspace_path.take();
                         started_sent = false;
+                        self.guidance_sent = false;
                     }
                 }
                 ChatCommand::Message(turn) => {
@@ -3645,6 +3652,7 @@ impl ChatWorker {
                                 bridge.shutdown(Duration::from_secs(5)).await.ok();
                             }
                             started_sent = false;
+                            self.guidance_sent = false;
                             false
                         }
                     };
@@ -3775,6 +3783,7 @@ impl ChatWorker {
                 bridge.shutdown(Duration::from_secs(1)).await.ok();
             }
             *started_sent = false;
+            self.guidance_sent = false;
         }
 
         let already_warm = bridge.is_some();
@@ -3898,6 +3907,7 @@ impl ChatWorker {
                 bridge.shutdown(Duration::from_secs(1)).await.ok();
             }
             *started_sent = false;
+            self.guidance_sent = false;
         }
 
         let resume_id = chat_resume_id(
@@ -3946,9 +3956,17 @@ impl ChatWorker {
         let bridge = bridge_slot
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("chat bridge missing"))?;
+        // First turn of a bridge carries the CLI guidance
+        // (NEWPIDASH-402); later turns send the user's text verbatim.
+        let injected = !self.guidance_sent;
+        let prompt = if injected {
+            crate::chat_guidance::with_chat_guidance(&turn.content)
+        } else {
+            turn.content.clone()
+        };
         let payload = RunPayload {
             run_id: turn.message_id,
-            prompt: turn.content,
+            prompt,
             model: turn.model,
         };
         let turn_started_at = Instant::now();
@@ -3992,6 +4010,7 @@ impl ChatWorker {
                     bridge.shutdown(Duration::from_secs(5)).await.ok();
                 }
                 *started_sent = false;
+                self.guidance_sent = false;
                 self.out
                     .send(ClientMsg::ChatMessageCompleted {
                         chat_session_id,
@@ -4015,6 +4034,10 @@ impl ChatWorker {
                 return Ok(close_after_turn);
             }
         };
+        // The engine accepted the turn: the bridge is live and guided
+        // from here on (or was already). A later drop re-arms via the
+        // resets above (NEWPIDASH-402).
+        self.guidance_sent = true;
         let turn_id = cursor.thread_id().to_string();
         self.send_timing_event(
             chat_session_id,
@@ -7110,6 +7133,123 @@ mod tests {
         }
     }
 
+    /// A fake Codex app-server that logs every request line to
+    /// `$PROMPT_LOG` and completes two turns (NEWPIDASH-402).
+    fn logging_codex_script() -> &'static str {
+        r#"
+            set -e
+            log() { printf '%s\n' "$1" >> "$PROMPT_LOG"; }
+            read line; log "$line"
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+            read line; log "$line"
+            read thread; log "$thread"
+            case "$thread" in *'"method":"thread/start"'*) ;; *) exit 1;; esac
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"threadId":"th_chat"}}'
+            for n in 1 2; do
+                read turn; log "$turn"
+                case "$turn" in *'"method":"turn/start"'*) ;; *) exit 1;; esac
+                printf '%s\n' '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"text":"hello"}}'
+                printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"conclusion":"success","done":{"status":"ok","summary":"done"}}}'
+            done
+            sleep 0.3
+        "#
+    }
+
+    #[tokio::test]
+    async fn chat_turn_prefixes_guidance_only_on_the_first_turn() {
+        // The cloud-relayed lane is the second acceptance hook
+        // (NEWPIDASH-402): the first turn of a bridge carries the
+        // CLI guidance in its `turn/start` prompt, the second sends
+        // the user's text verbatim.
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("prompts.log");
+        let wd = tmp.path().join("work");
+        std::fs::create_dir_all(&wd).unwrap();
+        let config = runner_config("main", "WEB", wd);
+        let (tx, mut rx) = mpsc::channel::<Envelope<ClientMsg>>(64);
+        let (_cmd_tx, cmd_rx) = mpsc::channel(1);
+        let (active_tx, _active_rx) = watch::channel(false);
+        let mut chat = ChatWorker {
+            runner_config: config.clone(),
+            state: StateHandle::new(Config {
+                engine: Default::default(),
+                auth: Default::default(),
+                auth_event: None,
+                version: 2,
+                daemon: Default::default(),
+                runners: vec![config.clone()],
+                cli: None,
+            }),
+            approvals: ApprovalRouter::new(),
+            out: RunnerOut::new(config.runner_id, tx),
+            command_rx: cmd_rx,
+            active_tx,
+            guidance_sent: false,
+        };
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg(logging_codex_script())
+            .env("PROMPT_LOG", &log);
+        let server = crate::codex::app_server::AppServer::spawn_command(cmd)
+            .await
+            .expect("spawn fake codex");
+        let mut bridge = Some(AgentBridge::Codex(
+            crate::codex::bridge::Bridge::from_server(server, None),
+        ));
+        let mut workspace_path: Option<std::path::PathBuf> = None;
+        let (mut seq, mut started) = (0u64, false);
+        for content in ["list the open issues", "second question"] {
+            let turn = ChatTurn {
+                message_id: uuid::Uuid::new_v4(),
+                content: content.into(),
+                cwd: None,
+                model: None,
+                local_thread_id: None,
+                local_session_id: None,
+            };
+            let close = tokio::time::timeout(
+                Duration::from_secs(15),
+                chat.handle_turn(
+                    uuid::Uuid::new_v4(),
+                    turn,
+                    &mut bridge,
+                    &mut workspace_path,
+                    &mut seq,
+                    &mut started,
+                ),
+            )
+            .await
+            .expect("turn timed out")
+            .expect("turn ok");
+            assert!(!close, "turn completes without closing");
+        }
+        let turns: Vec<String> = std::fs::read_to_string(&log)
+            .expect("prompt log written")
+            .lines()
+            .filter(|line| line.contains("\"method\":\"turn/start\""))
+            .map(str::to_string)
+            .collect();
+        assert_eq!(turns.len(), 2, "two turn/start prompts logged");
+        assert!(
+            turns[0].contains("## Pi Dash CLI") && turns[0].contains("list the open issues"),
+            "first turn carries guidance plus user text"
+        );
+        assert!(
+            !turns[1].contains("## Pi Dash CLI") && turns[1].contains("second question"),
+            "second turn sends the user's text verbatim"
+        );
+        // The user-visible history (the cloud chat frames) never shows
+        // the injected text: frames carry no user content.
+        rx.close();
+        let mut leaked = false;
+        while let Some(env) = rx.recv().await {
+            if format!("{:?}", env.body).contains("## Pi Dash CLI") {
+                leaked = true;
+            }
+        }
+        assert!(!leaked, "no cloud chat frame leaks the injected text");
+    }
+
     #[tokio::test]
     async fn chat_and_run_resolve_to_the_same_working_dir() {
         // One exclusive dir per runner: the chat lane resolves to exactly the
@@ -7136,6 +7276,7 @@ mod tests {
             out: RunnerOut::new(config.runner_id, tx),
             command_rx: cmd_rx,
             active_tx,
+            guidance_sent: false,
         };
         let chat_dir = chat
             .resolve_chat_workspace(uuid::Uuid::new_v4(), None)

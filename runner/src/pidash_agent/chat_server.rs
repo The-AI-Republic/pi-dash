@@ -273,6 +273,10 @@ struct SessionEntry {
 
 struct SessionData {
     thread_id: Option<String>,
+    /// Whether the live thread already received the CLI guidance
+    /// (NEWPIDASH-402). Cleared whenever the thread is (re)created so
+    /// a revival in a fresh subprocess injects again.
+    guidance_sent: bool,
     /// The approval mode this session's thread was started under. Captured
     /// once, on the first warm, and held for the thread's life so a mode
     /// change mid-session cannot retune a turn in flight.
@@ -925,6 +929,7 @@ impl EngineChatServer {
                 Arc::new(SessionEntry {
                     mutex: Mutex::new(SessionData {
                         thread_id: None,
+                        guidance_sent: false,
                         approval_mode: ApprovalMode::default(),
                         workspace: None,
                         started_reported: false,
@@ -1197,6 +1202,12 @@ impl EngineChatServer {
         } else {
             self.start_thread(&workspace, spec, mode).await?
         };
+        if data.thread_id.as_deref() != Some(thread_id.as_str()) {
+            // New or replaced thread: its first turn must carry the
+            // guidance again (NEWPIDASH-402). A resumed known thread
+            // keeps whatever flag it had.
+            data.guidance_sent = false;
+        }
         data.thread_id = Some(thread_id.clone());
         data.last_used_at = Instant::now();
         data.seq = data.seq.saturating_add(1);
@@ -1436,6 +1447,16 @@ impl EngineChatServer {
                 })
                 .await;
         }
+        // First turn of a thread carries the CLI guidance
+        // (NEWPIDASH-402); later turns send the user's text verbatim.
+        // The history the user sees never shows this: frames carry
+        // only the user's typed content on the way in (server-side)
+        // and the engine's own deltas back.
+        let text = if data.guidance_sent {
+            spec.content.clone()
+        } else {
+            crate::chat_guidance::with_chat_guidance(&spec.content)
+        };
         let turn_id = match self
             .rpc(
                 "turn/start",
@@ -1443,7 +1464,7 @@ impl EngineChatServer {
                     thread_id: thread_id.clone(),
                     input: vec![TurnInputItem {
                         item_type: "text".into(),
-                        text: spec.content.clone(),
+                        text,
                     }],
                     model: spec.model.clone(),
                     effort: None,
@@ -1454,7 +1475,10 @@ impl EngineChatServer {
             .context("starting the turn")
             .and_then(|resp| turn_id_of(&resp).context("turn/start missing turn id"))
         {
-            Ok(id) => id,
+            Ok(id) => {
+                data.guidance_sent = true;
+                id
+            }
             Err(e) => {
                 return self
                     .end_turn(&mut data, true)
@@ -2019,6 +2043,79 @@ done
             let seqs: Vec<u64> = sink.events.iter().map(|(s, _, _)| *s).collect();
             assert!(seqs.windows(2).all(|w| w[0] < w[1]), "{seqs:?}");
         }
+    }
+
+    /// Fake that logs every request line with `printf` (the shared
+    /// scripts use `echo`, and this platform's `echo` interprets
+    /// backslash escapes — a multi-line prompt's `\n` sequences would
+    /// land in the log as real newlines and the assertion below could
+    /// not see the whole payload) and completes every turn.
+    fn guidance_script() -> String {
+        PRELUDE.to_string()
+            + r#"
+n=0
+while read -r line; do
+  printf '%s\n' "$line" >> "$DIR/requests.log"
+  case "$line" in
+    *'"method":"thread/start"'*)
+      n=$((n+1)); id=$(rid "$line")
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"threadId":"%s"}}\n' "$id" "th-$n";;
+    *'"method":"thread/resume"'*)
+      id=$(rid "$line"); t=$(tidp "$line")
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"threadId":"%s"}}\n' "$id" "$t";;
+    *'"method":"turn/start"'*)
+      id=$(rid "$line"); t=$(tidp "$line")
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"turn":{"id":"turn-%s"}}}\n' "$id" "$t"
+            printf '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"%s","text":"%s"}}\n' "$t" "hi-$t"
+            printf '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"%s","turn":{"id":"%s","status":"completed"},"done":{"text":"%s"}}}\n' "$t" "turn-$t" "done-$t";;
+    *'"method":"turn/interrupt"'*)
+      id=$(rid "$line")
+            printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id";;
+    *'"method":"thread/unsubscribe"'*)
+      id=$(rid "$line")
+            printf '{"jsonrpc":"2.0","id":%s,"result":{"status":"unsubscribed"}}\n' "$id";;
+  esac
+done
+"#
+    }
+
+    #[tokio::test]
+    async fn first_turn_of_a_thread_carries_cli_guidance() {
+        // NEWPIDASH-402: the engine lane injects the rendered chat
+        // guidance into the first `turn/start` of a thread and sends
+        // later turns on the same thread verbatim. The request log is
+        // the argument capture the acceptance criterion asks for; the
+        // sinks (what the user sees) never carry the injected text.
+        let probe = Probe::new(vec![&guidance_script()]);
+        let id = Uuid::new_v4();
+        let mut sink = RecSink::default();
+        for content in ["list the open issues", "second question"] {
+            let terminal = run_send(&probe.server, id, probe.send_spec(content), &mut sink).await;
+            assert!(
+                matches!(terminal, TurnTerminal::Completed { .. }),
+                "{content}: {terminal:?}"
+            );
+        }
+        let turns: Vec<String> = probe
+            .log()
+            .lines()
+            .filter(|line| line.contains("\"method\":\"turn/start\""))
+            .map(str::to_string)
+            .collect();
+        assert_eq!(turns.len(), 2, "two turn/start prompts logged");
+        assert!(
+            turns[0].contains("## Pi Dash CLI") && turns[0].contains("list the open issues"),
+            "first turn carries guidance plus user text"
+        );
+        assert!(
+            !turns[1].contains("## Pi Dash CLI") && turns[1].contains("second question"),
+            "second turn sends the user's text verbatim"
+        );
+        let seen: String = format!("{:?}", (sink.started.clone(), sink.messages.clone()));
+        assert!(
+            !seen.contains("## Pi Dash CLI"),
+            "sinks stay free of guidance"
+        );
     }
 
     #[tokio::test]
