@@ -27,6 +27,7 @@ pub const AGENT_KINDS: &[&str] = &[
     "cursor-agent",
     "open-claw",
     "grok",
+    "antigravity",
     "muse-code",
 ];
 pub const LOG_LEVELS: &[&str] = &["trace", "debug", "info", "warn", "error"];
@@ -46,6 +47,8 @@ pub enum FieldId {
     OpenClawModelDefault,
     GrokBinary,
     GrokModelDefault,
+    AntigravityBinary,
+    AntigravityModelDefault,
     MuseCodeBinary,
     MuseCodeModelDefault,
     ApprovalAutoReadonly,
@@ -72,6 +75,8 @@ impl FieldId {
             FieldId::OpenClawModelDefault => "field:openclaw_model_default",
             FieldId::GrokBinary => "field:grok_binary",
             FieldId::GrokModelDefault => "field:grok_model_default",
+            FieldId::AntigravityBinary => "field:antigravity_binary",
+            FieldId::AntigravityModelDefault => "field:antigravity_model_default",
             FieldId::MuseCodeBinary => "field:muse_code_binary",
             FieldId::MuseCodeModelDefault => "field:muse_code_model_default",
             FieldId::ApprovalAutoReadonly => "field:approval_auto_readonly",
@@ -97,6 +102,8 @@ impl FieldId {
             "field:openclaw_model_default" => FieldId::OpenClawModelDefault,
             "field:grok_binary" => FieldId::GrokBinary,
             "field:grok_model_default" => FieldId::GrokModelDefault,
+            "field:antigravity_binary" => FieldId::AntigravityBinary,
+            "field:antigravity_model_default" => FieldId::AntigravityModelDefault,
             "field:muse_code_binary" => FieldId::MuseCodeBinary,
             "field:muse_code_model_default" => FieldId::MuseCodeModelDefault,
             "field:approval_auto_readonly" => FieldId::ApprovalAutoReadonly,
@@ -204,6 +211,18 @@ pub const FIELDS: &[FieldSpec] = &[
         kind: FieldKind::Text,
     },
     FieldSpec {
+        id: FieldId::AntigravityBinary,
+        label: "binary",
+        section: "Antigravity",
+        kind: FieldKind::Text,
+    },
+    FieldSpec {
+        id: FieldId::AntigravityModelDefault,
+        label: "model_default",
+        section: "Antigravity",
+        kind: FieldKind::Text,
+    },
+    FieldSpec {
         id: FieldId::MuseCodeBinary,
         label: "binary",
         section: "Muse Code",
@@ -253,6 +272,9 @@ pub fn field_agent_kind(id: FieldId) -> Option<AgentKind> {
         FieldId::CursorBinary | FieldId::CursorModelDefault => Some(AgentKind::CursorAgent),
         FieldId::OpenClawBinary | FieldId::OpenClawModelDefault => Some(AgentKind::OpenClaw),
         FieldId::GrokBinary | FieldId::GrokModelDefault => Some(AgentKind::Grok),
+        FieldId::AntigravityBinary | FieldId::AntigravityModelDefault => {
+            Some(AgentKind::Antigravity)
+        }
         FieldId::MuseCodeBinary | FieldId::MuseCodeModelDefault => Some(AgentKind::MuseCode),
         _ => None,
     }
@@ -315,6 +337,7 @@ pub fn display_value(cfg: &Config, id: FieldId, runner_idx: usize) -> String {
             AgentKind::CursorAgent => "cursor-agent".into(),
             AgentKind::OpenClaw => "open-claw".into(),
             AgentKind::Grok => "grok".into(),
+            AgentKind::Antigravity => "antigravity".into(),
             AgentKind::MuseCode => "muse-code".into(),
             AgentKind::PidashAgent => "engine".into(),
         },
@@ -332,6 +355,10 @@ pub fn display_value(cfg: &Config, id: FieldId, runner_idx: usize) -> String {
         FieldId::OpenClawModelDefault => runner.openclaw.model_default.clone().unwrap_or_default(),
         FieldId::GrokBinary => runner.grok.binary.clone(),
         FieldId::GrokModelDefault => runner.grok.model_default.clone().unwrap_or_default(),
+        FieldId::AntigravityBinary => runner.antigravity.binary.clone(),
+        FieldId::AntigravityModelDefault => {
+            runner.antigravity.model_default.clone().unwrap_or_default()
+        }
         FieldId::MuseCodeBinary => runner.muse_code.binary.clone(),
         FieldId::MuseCodeModelDefault => runner.muse_code.model_default.clone().unwrap_or_default(),
         FieldId::ApprovalAutoReadonly => runner
@@ -446,6 +473,19 @@ pub fn set_text_value(
                 Some(s.to_string())
             };
         }
+        FieldId::AntigravityBinary => {
+            if s.trim().is_empty() {
+                return Err("binary cannot be empty".into());
+            }
+            runner.antigravity.binary = s.to_string();
+        }
+        FieldId::AntigravityModelDefault => {
+            runner.antigravity.model_default = if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            };
+        }
         FieldId::MuseCodeBinary => {
             if s.trim().is_empty() {
                 return Err("binary cannot be empty".into());
@@ -506,7 +546,8 @@ pub fn cycle_enum(cfg: &mut Config, id: FieldId, runner_idx: usize) {
                 AgentKind::ClaudeCode => AgentKind::CursorAgent,
                 AgentKind::CursorAgent => AgentKind::OpenClaw,
                 AgentKind::OpenClaw => AgentKind::Grok,
-                AgentKind::Grok => AgentKind::MuseCode,
+                AgentKind::Grok => AgentKind::Antigravity,
+                AgentKind::Antigravity => AgentKind::MuseCode,
                 AgentKind::MuseCode => AgentKind::Codex,
                 // An engine runner is enrolled as one (`pidash runner add
                 // --agent engine`); its agent is not switchable here.
@@ -669,6 +710,11 @@ pub fn editable_lines(
             "Grok",
             AgentKind::Grok,
             [FieldId::GrokBinary, FieldId::GrokModelDefault],
+        ),
+        (
+            "Antigravity",
+            AgentKind::Antigravity,
+            [FieldId::AntigravityBinary, FieldId::AntigravityModelDefault],
         ),
     ] {
         if kind != selected_kind {
@@ -927,6 +973,7 @@ mod tests {
             cursor_agent: Default::default(),
             openclaw: Default::default(),
             grok: Default::default(),
+            antigravity: Default::default(),
             muse_code: Default::default(),
             approval_policy: Default::default(),
         };

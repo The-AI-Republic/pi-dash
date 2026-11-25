@@ -19,12 +19,13 @@ use serde_json::Value;
 /// the list itself stays in code per NEWPIDASH-169). `openhub` is NOT a
 /// runner agent (NEWPIDASH-302) and never appears here; the add-runner
 /// picker reads only this set.
-pub const KNOWN_AGENTS: [&str; 6] = [
+pub const KNOWN_AGENTS: [&str; 7] = [
     "claude-code",
     "codex",
     "cursor-agent",
     "open-claw",
     "grok",
+    "antigravity",
     "muse-code",
 ];
 
@@ -32,12 +33,13 @@ pub const KNOWN_AGENTS: [&str; 6] = [
 /// the OpenHub assistant group (`openhub`): a catalog group, not a runner
 /// agent. Admin CRUD validates against this; the runner picker never
 /// renders `openhub`.
-pub const CATALOG_AGENTS: [&str; 7] = [
+pub const CATALOG_AGENTS: [&str; 8] = [
     "claude-code",
     "codex",
     "cursor-agent",
     "open-claw",
     "grok",
+    "antigravity",
     "muse-code",
     "openhub",
 ];
@@ -68,7 +70,8 @@ pub const KNOWN_EFFORTS: [&str; 8] = MUSE_CODE_EFFORTS;
 
 /// The effort tiers valid for `agent`, matching the runner's
 /// `efforts_for_agent`: Codex, Claude Code and Muse Code each have their own
-/// set, and every other runner agent (Cursor, OpenClaw, Grok) takes none.
+/// set, and every other runner agent (Cursor, OpenClaw, Grok, Antigravity)
+/// takes none.
 /// `None` (agent unknown) is the union. `openhub` is the union too so its
 /// rows fail with the clearer `efforts_not_allowed`, checked afterwards.
 pub fn efforts_for_agent(agent: Option<&str>) -> &'static [&'static str] {
@@ -484,7 +487,7 @@ mod tests {
 
     #[test]
     fn agents_without_an_effort_setting_take_none() {
-        for agent in ["cursor-agent", "open-claw", "grok"] {
+        for agent in ["cursor-agent", "open-claw", "grok", "antigravity"] {
             assert_eq!(
                 validate_create(&json!({
                     "agent": agent, "model": "m", "label": "M",

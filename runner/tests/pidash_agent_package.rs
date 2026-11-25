@@ -75,6 +75,7 @@ fn configures_every_supported_protocol_without_changing_other_runner_fields() {
         ("cursor_agent", AgentKind::CursorAgent),
         ("open_claw", AgentKind::OpenClaw),
         ("grok", AgentKind::Grok),
+        ("antigravity", AgentKind::Antigravity),
         ("muse_code", AgentKind::MuseCode),
     ] {
         let path = manifest(
@@ -92,6 +93,7 @@ fn configures_every_supported_protocol_without_changing_other_runner_fields() {
             AgentKind::CursorAgent => expected.cursor_agent.binary = binary,
             AgentKind::OpenClaw => expected.openclaw.binary = binary,
             AgentKind::Grok => expected.grok.binary = binary,
+            AgentKind::Antigravity => expected.antigravity.binary = binary,
             AgentKind::MuseCode => expected.muse_code.binary = binary,
             AgentKind::PidashAgent => unreachable!("the engine is not an agent package"),
         }
@@ -250,7 +252,7 @@ while read -r rest; do :; done
     std::fs::create_dir_all(cwd).unwrap();
     assert!(!cwd.join("package-started").exists());
     std::fs::write(cwd.join("notes.txt"), "keep this task input").unwrap();
-    let mut bridge = AgentBridge::spawn_from_config(runner, cwd, None)
+    let mut bridge = AgentBridge::spawn_from_config(runner, cwd, None, None)
         .await
         .unwrap();
     let payload = RunPayload {

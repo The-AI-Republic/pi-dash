@@ -340,12 +340,14 @@ impl<'a> ChatHost<'a> {
     ) -> Result<AgentBridge> {
         match &self.lane {
             Lane::Runner(inst) => {
+                let logs_dir = inst.paths.logs_dir();
                 AgentBridge::spawn_from_config_with_resume(
                     &inst.config,
                     workspace,
                     model,
                     resume_id,
                     Some(mode),
+                    Some(logs_dir.as_path()),
                 )
                 .await
             }
@@ -1289,6 +1291,7 @@ mod tests {
             cursor_agent: CursorAgentSection::default(),
             openclaw: Default::default(),
             grok: Default::default(),
+            antigravity: Default::default(),
             muse_code: Default::default(),
             approval_policy: ApprovalPolicySection::default(),
         }

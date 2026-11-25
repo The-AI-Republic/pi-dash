@@ -1031,6 +1031,7 @@ sleep 1
             cursor_agent: Default::default(),
             openclaw: Default::default(),
             grok: Default::default(),
+            antigravity: Default::default(),
             muse_code: Default::default(),
             approval_policy: Default::default(),
         }
@@ -1393,6 +1394,7 @@ sleep 1
                 cursor_agent: Default::default(),
                 openclaw: Default::default(),
                 grok: Default::default(),
+                antigravity: Default::default(),
                 muse_code: Default::default(),
                 approval_policy: Default::default(),
             }],

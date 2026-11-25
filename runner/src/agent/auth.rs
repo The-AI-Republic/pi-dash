@@ -228,6 +228,26 @@ pub fn has_muse_credentials() -> bool {
 pub const MUSE_FIX_HINT: &str = crate::muse_code::auth::FIX_HINT;
 
 // ---------------------------------------------------------------------------
+// Antigravity — presence check is NEWPIDASH-397 (OS-keychain item search);
+// until it lands, never block on a guess.
+// ---------------------------------------------------------------------------
+
+/// The env var Antigravity reads for Gemini API-key auth when the keyring
+/// sign-in is unavailable (`"modelProvider": "gemini"` in
+/// `~/.gemini/antigravity-cli/settings.json`).
+pub const GEMINI_API_KEY_ENV: &str = "GEMINI_API_KEY";
+
+/// Presence check placeholder. NEWPIDASH-397 owns the real check (API key +
+/// settings file, ADC env, OS-keychain item). Until it lands this returns
+/// `true` so runs are never refused on a guess — the same posture as
+/// OpenClaw today. Whichever issue lands second connects the two.
+pub fn has_antigravity_credentials() -> bool {
+    true
+}
+
+pub const ANTIGRAVITY_FIX_HINT: &str = "run `agy` and sign in (or `agy acp --login` over SSH), or set GEMINI_API_KEY with modelProvider=gemini, for the daemon's user";
+
+// ---------------------------------------------------------------------------
 // OpenClaw / Engine — no reliable presence check; skip blocking.
 // ---------------------------------------------------------------------------
 
@@ -253,6 +273,7 @@ pub fn has_credentials(kind: AgentKind) -> bool {
         AgentKind::ClaudeCode => has_claude_credentials(),
         AgentKind::CursorAgent => has_cursor_credentials(),
         AgentKind::Grok => has_grok_credentials(),
+        AgentKind::Antigravity => has_antigravity_credentials(),
         AgentKind::MuseCode => has_muse_credentials(),
         AgentKind::OpenClaw | AgentKind::PidashAgent => true,
     }
@@ -266,6 +287,7 @@ pub fn fix_hint(kind: AgentKind) -> &'static str {
         AgentKind::ClaudeCode => CLAUDE_FIX_HINT,
         AgentKind::CursorAgent => CURSOR_FIX_HINT,
         AgentKind::Grok => GROK_FIX_HINT,
+        AgentKind::Antigravity => ANTIGRAVITY_FIX_HINT,
         AgentKind::MuseCode => MUSE_FIX_HINT,
         AgentKind::OpenClaw => OPENCLAW_FIX_HINT,
         AgentKind::PidashAgent => "run `pidash login --engine` for the daemon's environment",
@@ -416,6 +438,14 @@ mod tests {
         assert!(!grok_credentials_present(None, &empty_home(&dir)));
     }
 
+    // ---- Antigravity (NEWPIDASH-397 owns the real check) ----
+    #[test]
+    fn antigravity_is_never_blocked_on_a_guess() {
+        assert!(has_antigravity_credentials());
+        assert!(has_credentials(AgentKind::Antigravity));
+        assert!(!fix_hint(AgentKind::Antigravity).is_empty());
+    }
+
     // ---- Managed Codex ----
     #[test]
     fn managed_codex_is_detected() {
@@ -442,6 +472,7 @@ mod tests {
             AgentKind::ClaudeCode,
             AgentKind::CursorAgent,
             AgentKind::Grok,
+            AgentKind::Antigravity,
             AgentKind::MuseCode,
         ] {
             assert!(!fix_hint(kind).is_empty(), "fix hint for {kind:?}");

@@ -673,6 +673,7 @@ mod tests {
             cursor_agent: CursorAgentSection::default(),
             openclaw: OpenClawSection::default(),
             grok: GrokSection::default(),
+            antigravity: AntigravitySection::default(),
             muse_code: MuseCodeSection::default(),
             approval_policy: ApprovalPolicySection::default(),
         };
@@ -712,6 +713,7 @@ mod tests {
             cursor_agent: CursorAgentSection::default(),
             openclaw: OpenClawSection::default(),
             grok: GrokSection::default(),
+            antigravity: AntigravitySection::default(),
             muse_code: MuseCodeSection::default(),
             approval_policy: ApprovalPolicySection::default(),
         };
@@ -785,6 +787,10 @@ mod tests {
         );
         assert_eq!(parse_agent_kind("open-claw").unwrap(), AgentKind::OpenClaw);
         assert_eq!(parse_agent_kind("grok").unwrap(), AgentKind::Grok);
+        assert_eq!(
+            parse_agent_kind("antigravity").unwrap(),
+            AgentKind::Antigravity
+        );
         assert_eq!(parse_agent_kind("muse-code").unwrap(), AgentKind::MuseCode);
         assert_eq!(parse_agent_kind("").unwrap(), AgentKind::default());
         assert!(parse_agent_kind("skynet").is_err());
