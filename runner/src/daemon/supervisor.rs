@@ -2430,11 +2430,6 @@ impl RunnerLoop {
     ) -> Option<FailureReason> {
         match agent_kind {
             AgentKind::OpenClaw | AgentKind::PidashAgent => None,
-            // NEWPIDASH-396: Antigravity never blocks on a guess until
-            // NEWPIDASH-397 lands its keychain presence check; the
-            // run-time -32000 safety net still reports expired sign-ins.
-            // Whichever issue lands second reworks this arm.
-            AgentKind::Antigravity => None,
             AgentKind::Codex if managed_codex => None,
             _ if !has_credentials => Some(FailureReason::AgentAuthMissing),
             _ => None,
@@ -8323,11 +8318,15 @@ mod tests {
             RunnerLoop::agent_auth_missing_rejection(AgentKind::Grok, false, false),
             Some(FailureReason::AgentAuthMissing)
         );
-        // Antigravity never blocks on a guess until NEWPIDASH-397 lands its
-        // keychain presence check; the run-time -32000 safety net still
-        // reports expired sign-ins as AgentAuthMissing.
+        // Antigravity is gated by the NEWPIDASH-397 presence check (API key,
+        // ADC, or OS-keychain item; an unanswered keychain counts as present,
+        // so `has_credentials` is only false when a sign-in is provably absent).
         assert_eq!(
             RunnerLoop::agent_auth_missing_rejection(AgentKind::Antigravity, false, false),
+            Some(FailureReason::AgentAuthMissing)
+        );
+        assert_eq!(
+            RunnerLoop::agent_auth_missing_rejection(AgentKind::Antigravity, true, false),
             None
         );
         assert_eq!(
