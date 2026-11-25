@@ -18,8 +18,8 @@
 //!   and the GitHub probe around those shapes.
 //! * [`seeds`] — the workspace seed data + loader (PIDASHCONV-811,
 //!   fixture F37-10).
-//! * [`prompting`] — reseed + revalidate decisions over the prompting
-//!   kernels (PIDASHCONV-810, fixture F37-09).
+//! * [`prompting`] — revalidate decisions over the prompting kernels
+//!   (PIDASHCONV-810, fixture F37-09; reseed removed NEWPIDASH-404).
 
 pub mod boot;
 pub mod instance;
