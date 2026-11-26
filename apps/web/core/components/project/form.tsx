@@ -440,7 +440,7 @@ export function ProjectDetailsForm(props: IProjectDetailsForm) {
                 id="description"
                 name="description"
                 value={value}
-                placeholder={t("Project Context (Will be shown to AI agents)")}
+                placeholder={t("Enter project description")}
                 onChange={onChange}
                 className="min-h-[102px] text-13 font-medium"
                 hasError={Boolean(errors?.description)}
