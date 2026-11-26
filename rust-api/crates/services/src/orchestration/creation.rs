@@ -469,10 +469,10 @@ pub const BUNDLE_ASSIGNEES_SQL: &str = "SELECT u.display_name, u.email FROM issu
     JOIN users u ON u.id = ia.assignee_id WHERE ia.issue_id = $1 \
     ORDER BY u.created_at DESC";
 
-/// `State.objects.filter(project=…)` (`context.py:538-544`): triage
-/// excluded, `sequence` order. `$1` is the project id.
+/// `State.objects.filter(project=…)` (`context.py:538-544`): triage and
+/// hidden states excluded, `sequence` order. `$1` is the project id.
 pub const BUNDLE_PROJECT_STATES_SQL: &str = "SELECT name, \"group\", description FROM states \
-    WHERE project_id = $1 AND deleted_at IS NULL AND \"group\" != 'triage' ORDER BY sequence";
+    WHERE project_id = $1 AND deleted_at IS NULL AND \"group\" != 'triage' AND is_hidden = FALSE ORDER BY sequence";
 
 /// Direct children (`context.py:94-107`): live, non-triage,
 /// non-archived, non-draft, oldest first. `$1` is the issue id.
@@ -1129,8 +1129,8 @@ pub mod orm {
             .to_owned()
     }
 
-    /// [`super::BUNDLE_PROJECT_STATES_SQL`]: live non-triage states by
-    /// `sequence`.
+    /// [`super::BUNDLE_PROJECT_STATES_SQL`]: live non-triage, non-hidden
+    /// states by `sequence`.
     pub fn bundle_project_states_select(project_id: Uuid) -> SelectStatement {
         Query::select()
             .columns([
@@ -1142,6 +1142,7 @@ pub mod orm {
             .and_where(Expr::col(states::Column::ProjectId).eq(project_id))
             .and_where(Expr::col(states::Column::DeletedAt).is_null())
             .and_where(Expr::col(states::Column::Group).ne("triage"))
+            .and_where(Expr::col(states::Column::IsHidden).eq(false))
             .order_by(states::Column::Sequence, Order::Asc)
             .to_owned()
     }

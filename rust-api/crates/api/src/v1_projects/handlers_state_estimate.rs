@@ -941,6 +941,7 @@ async fn render_state(
         row.sequence,
         &row.group,
         row.is_triage,
+        row.is_hidden,
         row.default,
         row.external_source.as_deref(),
         row.external_id.as_deref(),
@@ -1335,6 +1336,7 @@ struct StateInput {
     sequence: Option<f64>,
     group: Option<String>,
     is_triage: Option<bool>,
+    is_hidden: Option<bool>,
     default: Option<bool>,
     external_source: Option<Option<String>>,
     external_id: Option<Option<String>>,
@@ -1723,6 +1725,7 @@ fn validate_state_input(
     let sequence = check_optional_float(&mut errors, "sequence", body.get("sequence")).flatten();
     let group = check_optional_group(&mut errors, "group", body.get("group")).flatten();
     let is_triage = check_optional_bool(&mut errors, "is_triage", body.get("is_triage")).flatten();
+    let is_hidden = check_optional_bool(&mut errors, "is_hidden", body.get("is_hidden")).flatten();
     let default = check_optional_bool(&mut errors, "default", body.get("default")).flatten();
     let external_source =
         check_nullable_text(&mut errors, "external_source", body.get("external_source"));
@@ -1735,6 +1738,7 @@ fn validate_state_input(
             sequence,
             group,
             is_triage,
+            is_hidden,
             default,
             external_source,
             external_id,
@@ -2011,6 +2015,7 @@ async fn create_state_inner(
     let slug_value = state_model::slugify_name(&name);
     let description = input.description.clone().unwrap_or_default();
     let is_triage = input.is_triage.unwrap_or(state_model::DEFAULT_IS_TRIAGE);
+    let is_hidden = input.is_hidden.unwrap_or(state_model::DEFAULT_IS_HIDDEN);
     let default = input.default.unwrap_or(state_model::DEFAULT_IS_DEFAULT);
     // Each external field saves independently (missing or explicit null → null).
     let external_source = input.external_source.clone().flatten();
@@ -2027,6 +2032,7 @@ async fn create_state_inner(
             sequence,
             group: &group,
             is_triage,
+            is_hidden,
             default,
             external_source: external_source.as_deref(),
             external_id: external_id.as_deref(),
@@ -2073,6 +2079,7 @@ async fn create_state_inner(
         sequence,
         group,
         is_triage,
+        is_hidden,
         default,
         external_source,
         external_id,
@@ -2125,9 +2132,10 @@ async fn fetch_project_workspace(
     row.ok_or(HandlerError::ServerError)
 }
 
-/// Max sibling sequence over the default-manager scope (soft-deleted and triage
-/// rows excluded): `State.objects.filter(project=...).aggregate(Max("sequence"))`
-/// (`db/models/state.py:133-138`).
+/// Max sibling sequence over the default-manager scope (soft-deleted,
+/// triage and hidden rows excluded):
+/// `State.objects.filter(project=...).aggregate(Max("sequence"))`
+/// (`db/models/state.py:159-166`).
 async fn max_sibling_sequence(
     pool: &sqlx::PgPool,
     project_id: Uuid,
@@ -2138,6 +2146,7 @@ async fn max_sibling_sequence(
         .filter(states::Column::ProjectId.eq(project_id))
         .filter(states::Column::DeletedAt.is_null())
         .filter(states::Column::Group.ne(state_model::TRIAGE_GROUP))
+        .filter(states::Column::IsHidden.eq(false))
         .into_tuple()
         .one(&orm(pool))
         .await
@@ -2162,6 +2171,7 @@ fn state_from_entity(row: states::Model) -> state_model::State {
         sequence: row.sequence,
         group: row.group,
         is_triage: row.is_triage,
+        is_hidden: row.is_hidden,
         default: row.default,
         external_source: row.external_source,
         external_id: row.external_id,
@@ -2170,8 +2180,8 @@ fn state_from_entity(row: states::Model) -> state_model::State {
 }
 
 /// The create-time external-id lookup (`views/state.py:92-104`): `State.objects`
-/// scope (soft-deleted and triage rows excluded) with no scope on the joined
-/// workspace, exactly like the Django filter.
+/// scope (soft-deleted, triage and hidden rows excluded) with no scope on
+/// the joined workspace, exactly like the Django filter.
 async fn fetch_state_by_external(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -2193,6 +2203,7 @@ async fn fetch_state_by_external(
         .filter(states::Column::ExternalId.eq(external_id))
         .filter(states::Column::DeletedAt.is_null())
         .filter(states::Column::Group.ne(state_model::TRIAGE_GROUP))
+        .filter(states::Column::IsHidden.eq(false))
         .limit(1)
         .one(&orm(pool))
         .await
@@ -2221,6 +2232,7 @@ async fn fetch_state_by_name(
         .filter(states::Column::Name.eq(name))
         .filter(states::Column::DeletedAt.is_null())
         .filter(states::Column::Group.ne(state_model::TRIAGE_GROUP))
+        .filter(states::Column::IsHidden.eq(false))
         .limit(1)
         .one(&orm(pool))
         .await
@@ -2446,6 +2458,9 @@ async fn patch_state_inner(
     if let Some(is_triage) = input.is_triage {
         row.is_triage = is_triage;
     }
+    if let Some(is_hidden) = input.is_hidden {
+        row.is_hidden = is_hidden;
+    }
     if let Some(default) = input.default {
         row.default = default;
     }
@@ -2471,6 +2486,7 @@ async fn patch_state_inner(
             sequence: row.sequence,
             group: &row.group,
             is_triage: row.is_triage,
+            is_hidden: row.is_hidden,
             default: row.default,
             external_source: row.external_source.as_deref(),
             external_id: row.external_id.as_deref(),
@@ -2490,7 +2506,7 @@ async fn patch_state_inner(
 }
 
 /// The PATCH-time external clash probe (`views/state.py:284-289`): `State.objects`
-/// scope (soft-deleted and triage-group rows excluded). The source is
+/// scope (soft-deleted, triage-group and hidden rows excluded). The source is
 /// `request.data.get("external_source", state.external_source)` — a NULL
 /// source (absent key on a NULL-source row, or explicit null) filters as
 /// `IS NULL`, exactly like Django's `filter(external_source=None)`.
@@ -2516,6 +2532,7 @@ async fn state_external_exists(
         .filter(states::Column::ExternalId.eq(external_id))
         .filter(states::Column::DeletedAt.is_null())
         .filter(states::Column::Group.ne(state_model::TRIAGE_GROUP))
+        .filter(states::Column::IsHidden.eq(false))
         .limit(1);
     query = match external_source {
         None => query.filter(states::Column::ExternalSource.is_null()),
@@ -2793,6 +2810,7 @@ mod tests {
                 "sequence",
                 "group",
                 "is_triage",
+                "is_hidden",
                 "default",
                 "external_source",
                 "external_id",

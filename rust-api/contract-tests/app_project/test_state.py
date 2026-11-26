@@ -33,7 +33,13 @@ def test_list_states_shape(world):
     # NEWPIDASH-305: "AI Completed" shares the completed group with "Done"
     # and sorts between In Test and Done by sequence.
     assert by_group["completed"] == ["AI Completed", "Done"]
+    # NEWPIDASH-417: "Paused" is the only visible unstarted state; "Todo"
+    # is hidden from the listing (like triage) and sorts by sequence
+    # between Backlog and In Progress.
+    assert by_group["unstarted"] == ["Paused"]
     names = [item["name"] for item in body]
+    assert "Todo" not in names
+    assert names.index("Paused") == names.index("In Progress") - 1
     assert names.index("AI Completed") == names.index("In Test") + 1
     assert names.index("Done") == names.index("AI Completed") + 1
 
@@ -82,6 +88,9 @@ def test_create_state_shape(world, db):
 
 def test_create_duplicate_state_400(world):
     client, _, ws, project = world.full_stack()
+    # NEWPIDASH-417: "Todo" stays a valid duplicate pin — the app create
+    # answers 400 off the IntegrityError itself, with no holder lookup,
+    # so the hidden exclusion changes nothing here.
     body = {"name": "Todo", "color": "#000000", "group": "unstarted", "sequence": 1}
     resp = client.post(
         f"/api/workspaces/{ws['slug']}/projects/{project['id']}/states/", json=body)

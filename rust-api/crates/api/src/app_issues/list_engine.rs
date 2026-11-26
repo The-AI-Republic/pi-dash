@@ -1890,6 +1890,12 @@ pub async fn fetch_ids(pool: &sqlx::PgPool, stmt: &SelectStatement) -> Result<Ve
 
 /// The known group buckets per field (`issue_group_values`), the three
 /// queryset-derived fields over this set.
+///
+/// Deliberate divergence (NEWPIDASH-417, DIFF-70): for `state_id` the
+/// buckets are the visible states plus any hidden state the filtered set
+/// actually references, so issues already in Todo keep their column
+/// ("shows only while it has issues"). Django seeds buckets from the
+/// state list only, so those issues vanish from its grouped views.
 pub async fn group_values(
     pool: &sqlx::PgPool,
     field: &str,
@@ -1899,7 +1905,30 @@ pub async fn group_values(
 ) -> Result<Vec<String>, Denial> {
     match distinct_bucket_values(set, field) {
         Some(stmt) => fetch_buckets(pool, &stmt).await,
-        None => super::known_group_values(pool, field, slug, project_id).await,
+        None => {
+            let mut known = super::known_group_values(pool, field, slug, project_id).await?;
+            if field == "state_id" {
+                // Hidden states referenced by the filtered set keep their
+                // bucket; stateless rows stay bucketless like Django (no
+                // "None" bucket is seeded for `state_id` on either backend).
+                let mut stmt = set.select();
+                stmt.distinct()
+                    .expr_as(
+                        issue(issues::Column::StateId).cast_as(a("text")),
+                        a("bucket"),
+                    )
+                    .and_where(issue(issues::Column::StateId).is_not_null());
+                let db = pidash_db::pool::sea_orm_connection(pool);
+                for row in query_built::<BucketRow>(&db, &stmt).await? {
+                    if let Some(bucket) = row.bucket {
+                        if !known.contains(&bucket) {
+                            known.push(bucket);
+                        }
+                    }
+                }
+            }
+            Ok(known)
+        }
     }
 }
 

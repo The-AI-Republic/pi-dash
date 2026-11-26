@@ -280,18 +280,18 @@ pub fn triage_lookup_sql() -> String {
     )
 }
 
-/// `State.save` resequence read (`db/models/state.py:132-139`): the
+/// `State.save` resequence read (`db/models/state.py:159-166`): the
 /// `State.objects.create` in `views/intake.py:176-184` runs `save`,
 /// which overwrites `sequence` with `Max(sequence) + 15000` over the
-/// default manager — live (`deleted_at IS NULL`, `db/mixins.py:56-58`)
-/// non-triage project states (`db/models/state.py:79-83`). A `NULL`
-/// aggregate (no such state) keeps the passed `65000`
-/// ([`TRIAGE_SEQUENCE_FALLBACK`]).
+/// default manager — live (`deleted_at IS NULL`, `db/mixins.py:56-58`),
+/// non-triage, non-hidden project states
+/// (`db/models/state.py:104-110`). A `NULL` aggregate (no such state)
+/// keeps the passed `65000` ([`TRIAGE_SEQUENCE_FALLBACK`]).
 ///
 /// Bind contract: `$1` project id.
 pub fn triage_max_sequence_sql() -> String {
     format!(
-        r#"SELECT MAX("sequence") FROM "{t}" WHERE ("{t}"."project_id" = $1 AND "{t}"."group" != 'triage' AND "{t}"."deleted_at" IS NULL)"#,
+        r#"SELECT MAX("sequence") FROM "{t}" WHERE ("{t}"."project_id" = $1 AND "{t}"."group" != 'triage' AND "{t}"."is_hidden" = FALSE AND "{t}"."deleted_at" IS NULL)"#,
         t = state::TABLE,
     )
 }
@@ -466,8 +466,9 @@ mod tests {
     #[test]
     fn triage_max_sequence_scopes_live_nontriage() {
         // fx-q-intake triage_get_or_create resequence
-        // (`db/models/state.py:132-139`): MAX over the default manager —
-        // the project, minus triage, minus soft-deleted.
+        // (`db/models/state.py:159-166`): MAX over the default manager —
+        // the project, minus triage, minus hidden states, minus
+        // soft-deleted.
         let sql = triage_max_sequence_sql();
         assert!(
             sql.contains(r#"SELECT MAX("sequence") FROM "states""#),
@@ -475,6 +476,7 @@ mod tests {
         );
         assert!(sql.contains(r#""states"."project_id" = $1"#), "{sql}");
         assert!(sql.contains(r#""states"."group" != 'triage'"#), "{sql}");
+        assert!(sql.contains(r#""states"."is_hidden" = FALSE"#), "{sql}");
         assert!(sql.contains(r#""states"."deleted_at" IS NULL"#), "{sql}");
     }
 

@@ -2227,9 +2227,10 @@ pub mod states {
     use pidash_db::entity::states as tbl;
 
     /// One state row: every column without a DB default. The app
-    /// endpoint passes `is_triage == false`, no externals and no
-    /// `updated_by`; the v1 endpoint passes its validated values. Both
-    /// store the one row shape.
+    /// endpoint passes `is_triage == false` (and `is_hidden == false` —
+    /// hidden states are never created through the app API), no
+    /// externals and no `updated_by`; the v1 endpoint passes its
+    /// validated values. Both store the one row shape.
     pub struct NewState<'a> {
         pub project_id: Uuid,
         pub workspace_id: Uuid,
@@ -2241,6 +2242,7 @@ pub mod states {
         pub sequence: f64,
         pub group: &'a str,
         pub is_triage: bool,
+        pub is_hidden: bool,
         pub default: bool,
         pub external_source: Option<&'a str>,
         pub external_id: Option<&'a str>,
@@ -2266,6 +2268,7 @@ pub mod states {
             sequence: Set(s.sequence),
             group: Set(s.group.to_owned()),
             is_triage: Set(s.is_triage),
+            is_hidden: Set(s.is_hidden),
             default: Set(s.default),
             external_source: Set(s.external_source.map(str::to_owned)),
             external_id: Set(s.external_id.map(str::to_owned)),
@@ -2287,20 +2290,21 @@ pub mod states {
         Ok(id)
     }
 
-    /// The default-flip side effect (`state.py:21-22`):
+    /// The default-flip side effect (`api/serializers/state.py:22`):
     /// `State.objects.filter(project_id=...).update(default=False)`.
     ///
     /// The queryset starts from `StateManager.get_queryset`, which is the
     /// soft-delete filter (`deleted_at IS NULL`, `db/mixins.py:49-51`) plus
-    /// the triage exclusion (`db/models/state.py:82-84`) — so triage and
-    /// soft-deleted siblings keep their `default`. Moved from
-    /// `v1_projects::ser_workflow` (PIDASHCONV-1630).
+    /// the triage and hidden exclusions (`db/models/state.py:104-110`) —
+    /// so triage, hidden and soft-deleted siblings keep their `default`.
+    /// Moved from `v1_projects::ser_workflow` (PIDASHCONV-1630).
     pub(crate) fn clear_project_defaults_stmt(project_id: Uuid) -> UpdateMany<tbl::Entity> {
         tbl::Entity::update_many()
             .col_expr(tbl::Column::Default, Expr::value(false))
             .filter(tbl::Column::ProjectId.eq(project_id))
             .filter(tbl::Column::DeletedAt.is_null())
             .filter(tbl::Column::Group.ne("triage"))
+            .filter(tbl::Column::IsHidden.eq(false))
     }
 
     /// Clear `default` on every sibling state in the project
@@ -2320,8 +2324,8 @@ pub mod states {
     }
 
     /// One `DEFAULT_STATES` row: `description`/`slug` `\"\"`,
-    /// `is_triage` false, nullables `NULL` (`bulk_create` calls no
-    /// `save()`).
+    /// `is_triage` false, `is_hidden` from the seed tuple, nullables
+    /// `NULL` (`bulk_create` calls no `save()`).
     pub struct NewDefaultState<'a> {
         pub project_id: Uuid,
         pub workspace_id: Uuid,
@@ -2330,6 +2334,7 @@ pub mod states {
         pub sequence: f64,
         pub group: &'a str,
         pub default: bool,
+        pub is_hidden: bool,
         pub created_by: Uuid,
         pub now: DateTime<Utc>,
     }
@@ -2351,6 +2356,7 @@ pub mod states {
             sequence: Set(s.sequence),
             group: Set(s.group.to_owned()),
             is_triage: Set(false),
+            is_hidden: Set(s.is_hidden),
             default: Set(s.default),
             external_source: Set(None),
             external_id: Set(None),
@@ -2373,7 +2379,7 @@ pub mod states {
 
     /// The intake triage row: `name 'Triage'`, `description ''`,
     /// `slug 'triage'`, `color '#4E5355'`, `group 'triage'`,
-    /// `default`/`is_triage` false, externals `NULL`.
+    /// `default`/`is_triage`/`is_hidden` false, externals `NULL`.
     fn triage_row(
         id: Uuid,
         project_id: Uuid,
@@ -2399,6 +2405,7 @@ pub mod states {
             sequence: Set(sequence),
             group: Set("triage".to_owned()),
             is_triage: Set(false),
+            is_hidden: Set(false),
             default: Set(false),
             external_source: Set(None),
             external_id: Set(None),
@@ -2438,7 +2445,7 @@ pub mod states {
 
     /// The v1 state PATCH save (`views/state.py`): supplied fields only
     /// (merged driver-side), the slug recomputed unconditionally
-    /// (`db/models/state.py:132`), `updated_by` stamped (crum) plus
+    /// (`db/models/state.py:160`), `updated_by` stamped (crum) plus
     /// `updated_at` (auto_now). Conflict arms stay at the driver
     /// (unique violation → 400).
     pub struct SaveState<'a> {
@@ -2452,6 +2459,7 @@ pub mod states {
         pub sequence: f64,
         pub group: &'a str,
         pub is_triage: bool,
+        pub is_hidden: bool,
         pub default: bool,
         pub external_source: Option<&'a str>,
         pub external_id: Option<&'a str>,
@@ -2470,6 +2478,7 @@ pub mod states {
             .col_expr(C::Sequence, Expr::value(v.sequence))
             .col_expr(C::Group, Expr::value(v.group))
             .col_expr(C::IsTriage, Expr::value(v.is_triage))
+            .col_expr(C::IsHidden, Expr::value(v.is_hidden))
             .col_expr(C::Default, Expr::value(v.default))
             .col_expr(C::ExternalSource, Expr::value(v.external_source))
             .col_expr(C::ExternalId, Expr::value(v.external_id))
@@ -2520,6 +2529,7 @@ pub mod states {
             sequence: Set(state.sequence),
             group: Set(state.group.to_owned()),
             is_triage: Set(false),
+            is_hidden: Set(false),
             default: Set(state.is_default),
             external_source: Set(None),
             external_id: Set(None),
@@ -2566,6 +2576,7 @@ pub mod states {
             description: Set(String::new()),
             slug: Set(String::new()),
             is_triage: Set(false),
+            is_hidden: Set(false),
             ..Default::default()
         })
         .exec_without_returning(db)
@@ -2655,7 +2666,7 @@ pub mod states {
     /// `StateViewSet.mark_as_default` (`state/base.py:111-119`): the
     /// clear leg — plain `.update()`, no `updated_at`/`updated_by`
     /// touch (queryset updates bypass `save()`). Clears every live
-    /// non-triage default in the project.
+    /// non-triage, non-hidden default in the project.
     pub async fn clear_defaults(
         db: &impl ConnectionTrait,
         slug: &str,
@@ -2668,6 +2679,7 @@ pub mod states {
             .filter(tbl::Column::Default.eq(true))
             .filter(tbl::Column::DeletedAt.is_null())
             .filter(tbl::Column::Group.ne("triage"))
+            .filter(tbl::Column::IsHidden.eq(false))
             .exec(db)
             .await
             .map(|_| ())
@@ -2676,7 +2688,7 @@ pub mod states {
 
     /// `StateViewSet.mark_as_default` (`state/base.py:111-119`): the
     /// set leg — same scoping plus the `pk`. Marks one live
-    /// non-triage state the default.
+    /// non-triage, non-hidden state the default.
     pub async fn mark_default(
         db: &impl ConnectionTrait,
         slug: &str,
@@ -2690,6 +2702,7 @@ pub mod states {
             .filter(tbl::Column::Id.eq(state_id))
             .filter(tbl::Column::DeletedAt.is_null())
             .filter(tbl::Column::Group.ne("triage"))
+            .filter(tbl::Column::IsHidden.eq(false))
             .exec(db)
             .await
             .map(|_| ())
@@ -3169,7 +3182,7 @@ mod tests {
             flip,
             format!(
                 "UPDATE \"states\" SET \"default\" = FALSE WHERE \"states\".\"project_id\" = \
-                 '{project}' AND \"states\".\"deleted_at\" IS NULL AND \"states\".\"group\" <> 'triage'"
+                 '{project}' AND \"states\".\"deleted_at\" IS NULL AND \"states\".\"group\" <> 'triage' AND \"states\".\"is_hidden\" = FALSE"
             )
         );
     }
@@ -3336,7 +3349,7 @@ mod tests {
         project_id UUID NOT NULL, workspace_id UUID NOT NULL, name TEXT NOT NULL,
         description TEXT NOT NULL, color TEXT NOT NULL, slug TEXT NOT NULL,
         sequence DOUBLE PRECISION NOT NULL, \"group\" TEXT NOT NULL,
-        is_triage BOOLEAN NOT NULL, \"default\" BOOLEAN NOT NULL,
+        is_triage BOOLEAN NOT NULL, is_hidden BOOLEAN NOT NULL, \"default\" BOOLEAN NOT NULL,
         external_source TEXT, external_id TEXT)";
 
     fn props() -> serde_json::Value {
@@ -4448,6 +4461,7 @@ mod tests {
             sequence: 25000.0,
             group: "unstarted",
             is_triage: false,
+            is_hidden: false,
             default: false,
             external_source: None,
             external_id: None,
@@ -4487,6 +4501,7 @@ mod tests {
             sequence: 15000.0,
             group: "backlog",
             default: true,
+            is_hidden: false,
             created_by: actor,
             now,
         };
@@ -4603,6 +4618,7 @@ mod tests {
             sequence: state.sequence,
             group: state.group,
             is_triage: state.is_triage,
+            is_hidden: state.is_hidden,
             default: state.default,
             external_source: state.external_source,
             external_id: state.external_id,
@@ -4623,6 +4639,7 @@ mod tests {
             sequence: state.sequence,
             group: state.group,
             default: state.default,
+            is_hidden: state.is_hidden,
             created_by: state.created_by,
             now: state.now,
         }

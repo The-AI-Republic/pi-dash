@@ -25,6 +25,7 @@ pub struct Model {
     pub external_id: Option<String>,
     pub external_source: Option<String>,
     pub is_triage: bool,
+    pub is_hidden: bool,
     pub deleted_at: Option<DateTimeWithTimeZone>,
 }
 

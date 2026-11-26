@@ -2162,8 +2162,8 @@ async fn collection_create(
     };
     // Triage auto-create (`:128-143`): reuse the state, else insert with
     // the `State.save` resequence (`max+15000`, `65000` on empty). The max
-    // runs over `State.objects` — live, non-triage project states
-    // (`db/models/state.py:79-83,131-139`; PIDASHCONV-1638).
+    // runs over `State.objects` — live, non-triage, non-hidden project
+    // states (`db/models/state.py:104-110,159-166`; PIDASHCONV-1638).
     // SeaORM triage lookup replaces the raw builder.
     let db_triage = pidash_db::pool::sea_orm_connection(pool);
     let triage_id: Option<Uuid> = match states::Entity::find()
@@ -2195,6 +2195,7 @@ async fn collection_create(
                     .filter(states::Column::ProjectId.eq(board.project_id))
                     .filter(states::Column::DeletedAt.is_null())
                     .filter(states::Column::Group.ne("triage"))
+                    .filter(states::Column::IsHidden.eq(false))
                     .select_only()
                     .expr_as(Func::max(Expr::col(states::Column::Sequence)), "max_seq")
                     .into_model::<MaxRow>()

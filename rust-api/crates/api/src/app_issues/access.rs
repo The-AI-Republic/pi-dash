@@ -212,9 +212,9 @@ pub async fn issue_type_is_epic(
         .await
 }
 
-/// The `issue_group_values` id lists (`utils/grouper.py`): every live row
-/// of the grouped relation in this workspace slug (and project, when the
-/// relation is per-project).
+/// The `issue_group_values` id lists (`utils/grouper.py`): every live,
+/// non-hidden row of the grouped relation in this workspace slug (and
+/// project, when the relation is per-project).
 pub async fn non_triage_state_ids(
     db: &impl ConnectionTrait,
     slug: &str,
@@ -226,6 +226,7 @@ pub async fn non_triage_state_ids(
         .join(JoinType::InnerJoin, states::Relation::Workspaces.def())
         .filter(states::Column::IsTriage.eq(false))
         .filter(states::Column::Group.ne("triage"))
+        .filter(states::Column::IsHidden.eq(false))
         .filter(workspaces::Column::Slug.eq(slug))
         .filter(states::Column::ProjectId.eq(project_id))
         .filter(states::Column::DeletedAt.is_null())

@@ -1027,6 +1027,7 @@ fn bundle_project_states_query(project_id: Uuid) -> sea_orm::Select<states::Enti
         .filter(states::Column::ProjectId.eq(project_id))
         .filter(states::Column::DeletedAt.is_null())
         .filter(states::Column::Group.ne("triage"))
+        .filter(states::Column::IsHidden.eq(false))
         .order_by_asc(states::Column::Sequence)
 }
 

@@ -1025,7 +1025,8 @@ async fn state_row_by_id(pool: &sqlx::PgPool, id: uuid::Uuid) -> Result<StateRow
         .ok_or(Denial::ServerError)
 }
 
-/// The live, non-triage state row for `(pk)` in `(slug, project_id)`.
+/// The live, non-triage, non-hidden state row for `(pk)` in
+/// `(slug, project_id)`.
 async fn scoped_state_row(
     pool: &sqlx::PgPool,
     pk: uuid::Uuid,
@@ -1036,6 +1037,7 @@ async fn scoped_state_row(
         .join(JoinType::InnerJoin, st_entity::Relation::Workspaces.def())
         .filter(st_entity::Column::DeletedAt.is_null())
         .filter(st_entity::Column::Group.ne("triage"))
+        .filter(st_entity::Column::IsHidden.eq(false))
         .filter(st_entity::Column::Id.eq(pk))
         .filter(st_entity::Column::ProjectId.eq(project_id))
         .filter(ws_entity::Column::Slug.eq(slug))
@@ -1095,6 +1097,7 @@ async fn state_list(
         )
         .filter(st_entity::Column::DeletedAt.is_null())
         .filter(st_entity::Column::Group.ne("triage"))
+        .filter(st_entity::Column::IsHidden.eq(false))
         .filter(ws_entity::Column::Slug.eq(slug))
         .filter(st_entity::Column::ProjectId.eq(project_id))
         .filter(pm_entity::Column::MemberId.eq(actor.id))
@@ -1206,6 +1209,7 @@ async fn state_retrieve(
         )
         .filter(st_entity::Column::DeletedAt.is_null())
         .filter(st_entity::Column::Group.ne("triage"))
+        .filter(st_entity::Column::IsHidden.eq(false))
         .filter(ws_entity::Column::Slug.eq(slug))
         .filter(st_entity::Column::ProjectId.eq(project_id))
         .filter(st_entity::Column::Id.eq(pk))
@@ -1381,8 +1385,8 @@ async fn state_create(
         .map_err(orm_denial)?;
     let workspace_id = workspace.ok_or(Denial::ObjectNotFound)?;
     // `State.save`: `sequence = max(sibling) + 15000` over the default
-    // (triage-excluding) manager; an explicit sequence is overwritten
-    // when siblings exist.
+    // (triage- and hidden-excluding) manager; an explicit sequence is
+    // overwritten when siblings exist.
     let max_sibling = st_entity::Entity::find()
         .select_only()
         .column_as(
@@ -1392,6 +1396,7 @@ async fn state_create(
         .filter(st_entity::Column::ProjectId.eq(project_id))
         .filter(st_entity::Column::DeletedAt.is_null())
         .filter(st_entity::Column::Group.ne("triage"))
+        .filter(st_entity::Column::IsHidden.eq(false))
         .into_model::<StateMaxSequence>()
         .one(&db)
         .await
@@ -1418,6 +1423,7 @@ async fn state_create(
             sequence,
             group: &group,
             is_triage: false,
+            is_hidden: false,
             default,
             external_source: None,
             external_id: None,
@@ -1616,6 +1622,7 @@ async fn state_destroy(
         .join(JoinType::InnerJoin, st_entity::Relation::Workspaces.def())
         .filter(st_entity::Column::DeletedAt.is_null())
         .filter(st_entity::Column::Group.ne("triage"))
+        .filter(st_entity::Column::IsHidden.eq(false))
         .filter(st_entity::Column::IsTriage.eq(false))
         .filter(st_entity::Column::Id.eq(pk))
         .filter(st_entity::Column::ProjectId.eq(project_id))

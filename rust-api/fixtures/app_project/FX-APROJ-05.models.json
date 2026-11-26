@@ -1,5 +1,5 @@
 {
-  "_trace": "apps/api/pi_dash/db/models/project.py:28-31 (ROLE), :34-40 (ProjectNetwork), :72-299 (Project incl. resolve :191-224, Meta :228-253, save :255-299), :302-311 (ProjectBaseModel), :314-329 (ProjectMemberInvite), :332-382 (ProjectMember), :386-403 (ProjectIdentifier), :422-439 (ProjectDeployBoard), :442-461 (ProjectPublicMember), :464-494 (ProjectUserProperty); apps/api/pi_dash/db/models/state.py:14-22 (StateGroup), :26-76 (DEFAULT_STATES), :79-90 (managers), :93-140 (State); apps/api/pi_dash/db/models/estimate.py:13-15 (EstimateType), :18-40 (Estimate), :43-57 (EstimatePoint); apps/api/pi_dash/db/models/deploy_board.py:19-57 (DeployBoard); ROLE comparison apps/api/pi_dash/app/permissions/base.py:13-16; audit columns apps/api/pi_dash/db/mixins.py:16-70, pk apps/api/pi_dash/db/models/base.py:17-18",
+  "_trace": "apps/api/pi_dash/db/models/project.py:28-31 (ROLE), :34-40 (ProjectNetwork), :72-299 (Project incl. resolve :191-224, Meta :228-253, save :255-299), :302-311 (ProjectBaseModel), :314-329 (ProjectMemberInvite), :332-382 (ProjectMember), :386-403 (ProjectIdentifier), :422-439 (ProjectDeployBoard), :442-461 (ProjectPublicMember), :464-494 (ProjectUserProperty); apps/api/pi_dash/db/models/state.py:14-22 (StateGroup), :26-98 (DEFAULT_STATES), :101-117 (managers), :120-168 (State); apps/api/pi_dash/db/models/estimate.py:13-15 (EstimateType), :18-40 (Estimate), :43-57 (EstimatePoint); apps/api/pi_dash/db/models/deploy_board.py:19-57 (DeployBoard); ROLE comparison apps/api/pi_dash/app/permissions/base.py:13-16; audit columns apps/api/pi_dash/db/mixins.py:16-70, pk apps/api/pi_dash/db/models/base.py:17-18",
   "_method": "Django shell probes (pi_dash.settings.test) against scratch Postgres pidash_562_fixtures; ORM + serializer + queryset code executed directly. Django 4.2.30, djangorestframework 3.15.2. Columns/defaults/constraints introspected from live model _meta; save()/resolve() executed against scratch rows; partial-index enforcement proven with a duplicate INSERT.",
   "models": {
     "Project": {
@@ -1365,6 +1365,12 @@
           "default": false
         },
         {
+          "name": "is_hidden",
+          "column": "is_hidden",
+          "type": "BooleanField",
+          "default": false
+        },
+        {
           "name": "default",
           "column": "default",
           "type": "BooleanField",
@@ -1927,49 +1933,71 @@
         "color": "#60646C",
         "sequence": 15000,
         "group": "backlog",
-        "default": true
+        "default": true,
+        "is_hidden": false
       },
       {
         "name": "Todo",
         "color": "#60646C",
         "sequence": 25000,
-        "group": "unstarted"
+        "group": "unstarted",
+        "is_hidden": true
+      },
+      {
+        "name": "Paused",
+        "color": "#DC2626",
+        "sequence": 30000,
+        "group": "unstarted",
+        "is_hidden": false
       },
       {
         "name": "In Progress",
         "color": "#F59E0B",
         "sequence": 35000,
-        "group": "started"
+        "group": "started",
+        "is_hidden": false
       },
       {
         "name": "In Review",
         "color": "#5B5BD6",
         "sequence": 40000,
-        "group": "review"
+        "group": "review",
+        "is_hidden": false
       },
       {
         "name": "In Test",
         "color": "#14B8A6",
         "sequence": 42500,
-        "group": "test"
+        "group": "test",
+        "is_hidden": false
+      },
+      {
+        "name": "AI Completed",
+        "color": "#30A46C",
+        "sequence": 43750,
+        "group": "completed",
+        "is_hidden": false
       },
       {
         "name": "Done",
         "color": "#46A758",
         "sequence": 45000,
-        "group": "completed"
+        "group": "completed",
+        "is_hidden": false
       },
       {
         "name": "Cancelled",
         "color": "#9AA4BC",
         "sequence": 55000,
-        "group": "cancelled"
+        "group": "cancelled",
+        "is_hidden": false
       },
       {
         "name": "Triage",
         "color": "#4E5355",
         "sequence": 65000,
-        "group": "triage"
+        "group": "triage",
+        "is_hidden": false
       }
     ],
     "EstimateType": [

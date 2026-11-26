@@ -2599,12 +2599,13 @@ async fn live_exists(pool: &sqlx::PgPool, table: &str, id: &Uuid) -> Result<bool
     Ok(exists)
 }
 
-/// `StateManager`: live rows outside the triage group.
+/// `StateManager`: live rows outside the triage group that are not hidden.
 async fn state_choice_exists(pool: &sqlx::PgPool, id: &Uuid) -> Result<bool, Denial> {
     let db = pidash_db::pool::sea_orm_connection(pool);
     let hit = states::Entity::find_by_id(*id)
         .filter(states::Column::DeletedAt.is_null())
         .filter(states::Column::Group.ne("triage"))
+        .filter(states::Column::IsHidden.eq(false))
         .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
@@ -3506,6 +3507,7 @@ async fn validate_intake_input(
             .filter(states::Column::Default.eq(true))
             .filter(states::Column::DeletedAt.is_null())
             .filter(states::Column::Group.ne("triage"))
+            .filter(states::Column::IsHidden.eq(false))
             .one(&db)
             .await
             .map_err(|_| Denial::ServerError)?;
@@ -3816,6 +3818,7 @@ async fn fetch_default_state(
         .filter(states::Column::Default.eq(true))
         .filter(states::Column::DeletedAt.is_null())
         .filter(states::Column::Group.ne("triage"))
+        .filter(states::Column::IsHidden.eq(false))
         .order_by_asc(states::Column::Sequence)
         .one(&db)
         .await
@@ -4197,8 +4200,8 @@ fn json_has_nonfinite(value: &Value) -> bool {
 /// `(project, slug)` first; the insert on a miss (a lost race hits the
 /// unique `name`+`project` row → the `IntegrityError` 400). The insert
 /// carries the `State.save` resequence (`max + 15000` over the live
-/// non-triage project states, `65000` when there are none) and the
-/// crum `created_by` (the request user).
+/// non-triage, non-hidden project states, `65000` when there are none)
+/// and the crum `created_by` (the request user).
 async fn ensure_triage(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -4228,6 +4231,7 @@ async fn ensure_triage(
         let row = states::Entity::find()
             .filter(states::Column::ProjectId.eq(project.id))
             .filter(states::Column::Group.ne("triage"))
+            .filter(states::Column::IsHidden.eq(false))
             .filter(states::Column::DeletedAt.is_null())
             .select_only()
             .column(states::Column::Sequence)
@@ -16139,10 +16143,12 @@ mod tests {
             triage_sql.contains("ORDER BY \"states\".\"sequence\" ASC"),
             "triage order: {triage_sql}"
         );
-        // Max-sequence: ORDER BY sequence DESC LIMIT 1 over live non-triage.
+        // Max-sequence: ORDER BY sequence DESC LIMIT 1 over live
+        // non-triage, non-hidden rows.
         let max_sql = states::Entity::find()
             .filter(states::Column::ProjectId.eq(project_id))
             .filter(states::Column::Group.ne("triage"))
+            .filter(states::Column::IsHidden.eq(false))
             .filter(states::Column::DeletedAt.is_null())
             .select_only()
             .column(states::Column::Sequence)
@@ -16213,13 +16219,15 @@ mod tests {
             intake_sql.contains("ORDER BY \"intakes\".\"name\" ASC"),
             "intake order: {intake_sql}"
         );
-        // fetch_default_state: sequence ASC over live non-triage defaults.
+        // fetch_default_state: sequence ASC over live non-triage,
+        // non-hidden defaults.
         let default_sql = states::Entity::find()
             .filter(states::Column::WorkspaceId.eq(id))
             .filter(states::Column::ProjectId.eq(project_id))
             .filter(states::Column::Default.eq(true))
             .filter(states::Column::DeletedAt.is_null())
             .filter(states::Column::Group.ne("triage"))
+            .filter(states::Column::IsHidden.eq(false))
             .order_by_asc(states::Column::Sequence)
             .build(DbBackend::Postgres)
             .to_string();
@@ -16300,6 +16308,7 @@ mod tests {
         let s_hit = st_e::Entity::find_by_id(state_id)
             .filter(st_e::Column::DeletedAt.is_null())
             .filter(st_e::Column::Group.ne("triage"))
+            .filter(st_e::Column::IsHidden.eq(false))
             .one(&db)
             .await
             .expect("state")
@@ -16308,6 +16317,7 @@ mod tests {
         let t_hit = st_e::Entity::find_by_id(triage_id)
             .filter(st_e::Column::DeletedAt.is_null())
             .filter(st_e::Column::Group.ne("triage"))
+            .filter(st_e::Column::IsHidden.eq(false))
             .one(&db)
             .await
             .expect("triage")

@@ -134,8 +134,9 @@ fn join_member_visibility(sel: &mut SelectStatement, table: &str) {
 /// Shared `WHERE` for the state list and detail scopes
 /// (`views/state.py:49-56,172-179`): workspace slug, project id, an active
 /// membership row for the acting user, the `is_triage=False` view filter,
-/// the default-manager triage exclusion, the soft-delete scope on the
-/// `states` and `project_members` rows, plus the archived-project guard.
+/// the default-manager triage and hidden exclusions, the soft-delete scope
+/// on the `states` and `project_members` rows, plus the archived-project
+/// guard.
 /// The `workspaces` / `projects` joins carry NO deleted predicate: Django
 /// only scopes the base model through its manager, and the joined tables
 /// ride along unscoped (verified against live Django SQL — states in a
@@ -165,6 +166,7 @@ fn state_scope_condition_stmt(
     }
     cond.add(Expr::col((states.clone(), Alias::new("is_triage"))).eq(false))
         .add(Expr::col((states.clone(), Alias::new("group"))).ne(state::TRIAGE_GROUP))
+        .add(Expr::col((states.clone(), Alias::new("is_hidden"))).eq(false))
         .add(Expr::col((states, Alias::new("deleted_at"))).is_null())
         .add(Expr::col((projects, Alias::new("archived_at"))).is_null())
 }
@@ -327,6 +329,7 @@ fn state_from_result(row: &QueryResult) -> Result<state::State, DbErr> {
         sequence: row.try_get_by("sequence")?,
         group: row.try_get_by("group")?,
         is_triage: row.try_get_by("is_triage")?,
+        is_hidden: row.try_get_by("is_hidden")?,
         default: row.try_get_by("default")?,
         external_source: row.try_get_by("external_source")?,
         external_id: row.try_get_by("external_id")?,
@@ -364,6 +367,7 @@ fn state_direct_stmt(
             .add(Expr::col((states.clone(), Alias::new("id"))).eq(state_id))
             .add(Expr::col((states.clone(), Alias::new("is_triage"))).eq(false))
             .add(Expr::col((states.clone(), Alias::new("group"))).ne(state::TRIAGE_GROUP))
+            .add(Expr::col((states.clone(), Alias::new("is_hidden"))).eq(false))
             .add(Expr::col((states, Alias::new("deleted_at"))).is_null()),
     );
     sel.limit(1);
@@ -391,8 +395,10 @@ pub async fn fetch_state_direct(
 /// PATCH direct get (`views/state.py:278`). Unlike the delete get it carries
 /// NO `is_triage` filter: `is_triage` is a writable field, so a row flipped
 /// to `is_triage=True` keeps serving PATCH while the list/detail/delete
-/// paths hide it. The default-manager scope (triage-group + soft-deleted
-/// rows excluded) still applies; the `archived_at` guard is skipped like
+/// paths hide it. (`is_hidden` is writable too, but unlike `is_triage` the
+/// default manager filters it, so a hidden row 404s here — same as Django.)
+/// The default-manager scope (triage-group, hidden, + soft-deleted rows
+/// excluded) still applies; the `archived_at` guard is skipped like
 /// the delete get.
 fn state_direct_for_patch_stmt(
     workspace_slug: &str,
@@ -411,6 +417,7 @@ fn state_direct_for_patch_stmt(
             .add(Expr::col((states.clone(), Alias::new("project_id"))).eq(project_id))
             .add(Expr::col((states.clone(), Alias::new("id"))).eq(state_id))
             .add(Expr::col((states.clone(), Alias::new("group"))).ne(state::TRIAGE_GROUP))
+            .add(Expr::col((states.clone(), Alias::new("is_hidden"))).eq(false))
             .add(Expr::col((states, Alias::new("deleted_at"))).is_null()),
     );
     sel.limit(1);
@@ -822,6 +829,7 @@ mod tests {
         );
         assert!(sql.contains(r#""states"."is_triage" = FALSE"#), "{sql}");
         assert!(sql.contains(r#""states"."group" <> 'triage'"#), "{sql}");
+        assert!(sql.contains(r#""states"."is_hidden" = FALSE"#), "{sql}");
         assert!(sql.contains(r#""projects"."archived_at" IS NULL"#), "{sql}");
         // Soft-delete scope on the base table + the membership rows only.
         // The `workspaces` / `projects` joins carry NO deleted predicate:
@@ -857,6 +865,7 @@ mod tests {
             r#""project_members"."is_active" = TRUE"#,
             r#""states"."is_triage" = FALSE"#,
             r#""states"."group" <> 'triage'"#,
+            r#""states"."is_hidden" = FALSE"#,
             r#""projects"."archived_at" IS NULL"#,
         ] {
             assert!(mcp.contains(needle), "{needle}: {mcp}");
@@ -907,6 +916,7 @@ mod tests {
         );
         assert!(sql.contains(r#""states"."is_triage" = FALSE"#), "{sql}");
         assert!(sql.contains(r#""states"."group" <> 'triage'"#), "{sql}");
+        assert!(sql.contains(r#""states"."is_hidden" = FALSE"#), "{sql}");
         assert_eq!(sql.matches(r#""deleted_at" IS NULL"#).count(), 1, "{sql}");
         assert!(sql.contains("LIMIT 1"), "{sql}");
     }
@@ -914,8 +924,8 @@ mod tests {
     #[test]
     fn state_direct_for_patch_has_no_is_triage_filter() {
         // FX-Q-STATEEST S2b patch get (`views/state.py:278`): the
-        // default-manager scope (triage-group + soft-deleted excluded) with
-        // NO `is_triage` filter and NO archived check.
+        // default-manager scope (triage-group, hidden, + soft-deleted
+        // excluded) with NO `is_triage` filter and NO archived check.
         let state_id =
             uuid::Uuid::parse_str("33333333-3333-3333-3333-333333333333").expect("test state");
         let sql = render(&state_direct_for_patch_stmt("acme", test_pid(), state_id));
@@ -923,8 +933,9 @@ mod tests {
         assert!(!sql.contains(r#"JOIN "projects""#), "{sql}");
         assert!(!sql.contains("archived_at"), "{sql}");
         // No `is_triage` filter predicate (the column is still projected
-        // for the row struct).
+        // for the row struct) — but the manager's hidden exclusion applies.
         assert!(!sql.contains(r#""is_triage" = FALSE"#), "{sql}");
+        assert!(sql.contains(r#""states"."is_hidden" = FALSE"#), "{sql}");
         assert!(
             sql.contains(r#""states"."id" = '33333333-3333-3333-3333-333333333333'"#),
             "{sql}"
@@ -1036,7 +1047,7 @@ mod tests {
         "CREATE TEMPORARY TABLE workspaces (id UUID PRIMARY KEY, slug VARCHAR(48) NOT NULL UNIQUE, deleted_at TIMESTAMPTZ)",
         "CREATE TEMPORARY TABLE projects (id UUID PRIMARY KEY, workspace_id UUID NOT NULL, archived_at TIMESTAMPTZ, deleted_at TIMESTAMPTZ)",
         "CREATE TEMPORARY TABLE project_members (id UUID PRIMARY KEY, project_id UUID NOT NULL, workspace_id UUID NOT NULL, member_id UUID, is_active BOOLEAN NOT NULL, deleted_at TIMESTAMPTZ)",
-        "CREATE TEMPORARY TABLE states (id UUID PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, created_by_id UUID, updated_by_id UUID, deleted_at TIMESTAMPTZ, project_id UUID NOT NULL, workspace_id UUID NOT NULL, name VARCHAR(255) NOT NULL, description TEXT NOT NULL, color VARCHAR(255) NOT NULL, slug VARCHAR(100) NOT NULL, sequence FLOAT8 NOT NULL, \"group\" VARCHAR(20) NOT NULL, is_triage BOOLEAN NOT NULL, \"default\" BOOLEAN NOT NULL, external_source VARCHAR(255), external_id VARCHAR(255))",
+        "CREATE TEMPORARY TABLE states (id UUID PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, created_by_id UUID, updated_by_id UUID, deleted_at TIMESTAMPTZ, project_id UUID NOT NULL, workspace_id UUID NOT NULL, name VARCHAR(255) NOT NULL, description TEXT NOT NULL, color VARCHAR(255) NOT NULL, slug VARCHAR(100) NOT NULL, sequence FLOAT8 NOT NULL, \"group\" VARCHAR(20) NOT NULL, is_triage BOOLEAN NOT NULL, is_hidden BOOLEAN NOT NULL, \"default\" BOOLEAN NOT NULL, external_source VARCHAR(255), external_id VARCHAR(255))",
         "CREATE TEMPORARY TABLE estimates (id UUID PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, created_by_id UUID, updated_by_id UUID, deleted_at TIMESTAMPTZ, project_id UUID NOT NULL, workspace_id UUID NOT NULL, name VARCHAR(255) NOT NULL, description TEXT NOT NULL, \"type\" VARCHAR(255) NOT NULL, last_used BOOLEAN NOT NULL)",
         "CREATE TEMPORARY TABLE estimate_points (id UUID PRIMARY KEY, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, created_by_id UUID, updated_by_id UUID, deleted_at TIMESTAMPTZ, project_id UUID NOT NULL, workspace_id UUID NOT NULL, estimate_id UUID NOT NULL, key BIGINT NOT NULL, description TEXT NOT NULL, value VARCHAR(255) NOT NULL)",
     ];
@@ -1123,7 +1134,7 @@ mod tests {
         is_triage: bool,
         deleted: bool,
     ) {
-        sqlx::query("INSERT INTO states (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, name, description, color, slug, sequence, \"group\", is_triage, \"default\", external_source, external_id) VALUES ($1, $2, $2, NULL, NULL, $3, $4, $5, $6, '', '#000000', $6, 35000.0, $7, $8, FALSE, NULL, NULL)")
+        sqlx::query("INSERT INTO states (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, project_id, workspace_id, name, description, color, slug, sequence, \"group\", is_triage, is_hidden, \"default\", external_source, external_id) VALUES ($1, $2, $2, NULL, NULL, $3, $4, $5, $6, '', '#000000', $6, 35000.0, $7, $8, FALSE, FALSE, NULL, NULL)")
             .bind(id)
             .bind(live_ts(1_700_000_000))
             .bind(if deleted {
@@ -1263,6 +1274,23 @@ mod tests {
             false,
         )
         .await;
+        // Hidden flag: excluded by the default manager like triage.
+        seed_state(
+            &mut tx,
+            live_uuid(45),
+            proja,
+            wsa,
+            "parked",
+            "unstarted",
+            false,
+            false,
+        )
+        .await;
+        sqlx::query("UPDATE states SET is_hidden = TRUE WHERE id = $1")
+            .bind(live_uuid(45))
+            .execute(&mut *tx)
+            .await
+            .expect("hide state");
 
         let got = fetch_state_list(&TxConn::new(&mut tx), "acme", proja, user)
             .await
@@ -1291,7 +1319,7 @@ mod tests {
                 .map(|s| s.name),
             Some("in-progress".to_string())
         );
-        for hidden in [41u8, 42, 43] {
+        for hidden in [41u8, 42, 43, 45] {
             assert_eq!(
                 fetch_state_detail(
                     &TxConn::new(&mut tx),

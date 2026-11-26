@@ -932,6 +932,7 @@ impl PgDummyData {
             .filter(states::Column::WorkspaceId.eq(workspace_uuid))
             .filter(states::Column::ProjectId.eq(project_uuid))
             .filter(states::Column::Group.ne(plan::TRIAGE_GROUP.to_owned()))
+            .filter(states::Column::IsHidden.eq(false))
             .filter(states::Column::DeletedAt.is_null())
             .select_only()
             .columns([states::Column::Id])
@@ -1491,12 +1492,17 @@ mod tests {
             .filter(states::Column::WorkspaceId.eq(ws))
             .filter(states::Column::ProjectId.eq(proj))
             .filter(states::Column::Group.ne("triage".to_owned()))
+            .filter(states::Column::IsHidden.eq(false))
             .filter(states::Column::DeletedAt.is_null())
             .select_only()
             .columns([states::Column::Id])
             .build(DbBackend::Postgres)
             .to_string();
         assert!(sql.contains("\"group\" <>"), "triage excluded: {sql}");
+        assert!(
+            sql.contains("\"is_hidden\" = FALSE"),
+            "hidden excluded: {sql}"
+        );
         assert!(sql.contains("\"deleted_at\" IS NULL"), "{sql}");
         assert!(!sql.contains("MAX("), "id list, not aggregate: {sql}");
     }

@@ -63,11 +63,11 @@ async fn default_pod<C: ConnectionTrait>(db: &C, project_id: Uuid) -> Result<Opt
         .await
 }
 
-/// The NULL-state default assignment (`issue.py:288-301`): the default
+/// The NULL-state default assignment (`issue.py:326-340`): the default
 /// state first, else the first non-triage state, both `ORDER BY sequence`.
-/// Predicates are the `State.objects` manager (live + non-triage group)
-/// plus the explicit `~is_triage` filter — `is_triage` is a plain boolean
-/// with no save-sync, so both predicates stay.
+/// Predicates are the `State.objects` manager (live + non-triage group +
+/// non-hidden) plus the explicit `~is_triage` filter — `is_triage` is a
+/// plain boolean with no save-sync, so both predicates stay.
 ///
 /// The two pre-consolidation copies spelled the group guard differently
 /// (`NOT (s."group" = 'triage')` vs `s."group" != 'triage'`); the forms
@@ -84,6 +84,7 @@ async fn default_state_first<C: ConnectionTrait>(
         .filter(states::Column::DeletedAt.is_null())
         .filter(states::Column::Group.ne("triage"))
         .filter(states::Column::IsTriage.eq(false))
+        .filter(states::Column::IsHidden.eq(false))
         .order_by_asc(states::Column::Sequence)
         .limit(1)
         .select_only()
@@ -104,6 +105,7 @@ async fn default_state_marked<C: ConnectionTrait>(
         .filter(states::Column::DeletedAt.is_null())
         .filter(states::Column::Group.ne("triage"))
         .filter(states::Column::IsTriage.eq(false))
+        .filter(states::Column::IsHidden.eq(false))
         .filter(states::Column::Default.eq(true))
         .order_by_asc(states::Column::Sequence)
         .limit(1)
@@ -420,14 +422,16 @@ mod tests {
             "default pod shape: {sql}"
         );
 
-        // DEFAULT_STATE_*_SQL: live + non-triage group + non-triage flag,
-        // least sequence first; marked-default adds the default column.
+        // DEFAULT_STATE_*_SQL: live + non-triage group + non-hidden +
+        // non-triage flag, least sequence first; marked-default adds the
+        // default column.
         for marked in [false, true] {
             let query = states::Entity::find()
                 .filter(states::Column::ProjectId.eq(Uuid::nil()))
                 .filter(states::Column::DeletedAt.is_null())
                 .filter(states::Column::Group.ne("triage"))
-                .filter(states::Column::IsTriage.eq(false));
+                .filter(states::Column::IsTriage.eq(false))
+                .filter(states::Column::IsHidden.eq(false));
             let query = if marked {
                 query.filter(states::Column::Default.eq(true))
             } else {
@@ -443,6 +447,7 @@ mod tests {
             assert!(
                 sql.contains("\"states\".\"group\" <> 'triage'")
                     && sql.contains("\"states\".\"is_triage\" = FALSE")
+                    && sql.contains("\"states\".\"is_hidden\" = FALSE")
                     && sql.contains("ORDER BY \"states\".\"sequence\" ASC"),
                 "default state shape (marked={marked}): {sql}"
             );

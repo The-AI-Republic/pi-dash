@@ -1057,6 +1057,7 @@ async fn fetch_update_snapshots(
             .filter(states::Column::ProjectId.eq(project_uuid))
             .filter(states::Column::DeletedAt.is_null())
             .filter(states::Column::Group.ne("triage"))
+            .filter(states::Column::IsHidden.eq(false))
             .into_model::<StateRow>()
             .all(&db)
             .await
@@ -2496,11 +2497,16 @@ mod tests {
             .filter(states::Column::ProjectId.eq(project))
             .filter(states::Column::DeletedAt.is_null())
             .filter(states::Column::Group.ne("triage"))
+            .filter(states::Column::IsHidden.eq(false))
             .build(DbBackend::Postgres)
             .to_string();
         assert!(
             state_sql.contains("\"group\" <> 'triage'"),
             "missing triage exclusion: {state_sql}"
+        );
+        assert!(
+            state_sql.contains("\"is_hidden\" = FALSE"),
+            "missing hidden exclusion: {state_sql}"
         );
         // The custom user manager has no soft-delete scope.
         let user_sql = users::Entity::find()
@@ -2516,7 +2522,8 @@ mod tests {
     }
 
     // PIDASHCONV-1278 · the default `StateManager` excludes triage-group
-    // states (`db/models/state.py:79-83`); the lookup renders the same.
+    // and hidden states (`db/models/state.py:104-110`); the lookup renders
+    // the same.
     #[test]
     fn state_lookup_excludes_triage() {
         use sea_orm::{DbBackend, QueryTrait};
@@ -2529,11 +2536,16 @@ mod tests {
             .filter(states::Column::ProjectId.eq(project))
             .filter(states::Column::DeletedAt.is_null())
             .filter(states::Column::Group.ne("triage"))
+            .filter(states::Column::IsHidden.eq(false))
             .build(DbBackend::Postgres)
             .to_string();
         assert!(
             state_sql.contains("\"group\" <> 'triage'"),
             "missing triage exclusion: {state_sql}"
+        );
+        assert!(
+            state_sql.contains("\"is_hidden\" = FALSE"),
+            "missing hidden exclusion: {state_sql}"
         );
     }
 

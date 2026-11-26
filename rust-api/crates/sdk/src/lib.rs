@@ -1023,7 +1023,7 @@ mod tests {
     }
 
     /// OVL-10 (PIDASHCONV-1656): the state `__all__` renderer resolves
-    /// through the SDK facade with the same 18-key wire bytes MCP
+    /// through the SDK facade with the same 19-key wire bytes MCP
     /// `list_states` ports today.
     #[test]
     fn read_state_all_renderer_is_exported() {
@@ -1042,6 +1042,7 @@ mod tests {
             "ct-state",
             15000.0,
             "backlog",
+            false,
             false,
             true,
             Some("github"),
@@ -1062,6 +1063,7 @@ mod tests {
                 "sequence",
                 "group",
                 "is_triage",
+                "is_hidden",
                 "default",
                 "external_source",
                 "external_id",

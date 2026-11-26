@@ -726,7 +726,7 @@ pub fn binding_scan_query(binding_id: Uuid) -> Select<git_repository_bindings::E
 
 /// `_project_default_state` (`git_sync_task.py:35-39`): default state
 /// first, else first state — both through `StateManager` (live rows only,
-/// `group <> 'triage'`), Meta ordering `sequence ASC`.
+/// `group <> 'triage'`, `is_hidden = false`), Meta ordering `sequence ASC`.
 /// `default_state_query(true)` is tried first; on a miss,
 /// `default_state_query(false)`.
 pub fn default_state_query(prefer_default: bool, project_id: Uuid) -> Select<states::Entity> {
@@ -736,6 +736,7 @@ pub fn default_state_query(prefer_default: bool, project_id: Uuid) -> Select<sta
         .filter(states::Column::ProjectId.eq(project_id))
         .filter(states::Column::DeletedAt.is_null())
         .filter(states::Column::Group.ne("triage"))
+        .filter(states::Column::IsHidden.eq(false))
         .order_by_asc(states::Column::Sequence);
     if prefer_default {
         query = query.filter(states::Column::Default.eq(true));
@@ -743,10 +744,11 @@ pub fn default_state_query(prefer_default: bool, project_id: Uuid) -> Select<sta
     query.limit(1)
 }
 
-/// Save-time state resolution (`Issue.save`, `issue.py:288-301`): unlike
+/// Save-time state resolution (`Issue.save`, `issue.py:326-340`): unlike
 /// `_project_default_state` this filters the `is_triage` boolean (not the
 /// group) — `WHERE … AND is_triage = FALSE` (`~Q(is_triage=True)` on a
-/// non-nullable column). Ordering `sequence ASC`.
+/// non-nullable column) — through `State.objects`, so hidden rows are out
+/// too. Ordering `sequence ASC`.
 pub fn save_state_query(prefer_default: bool, project_id: Uuid) -> Select<states::Entity> {
     let mut query = states::Entity::find()
         .select_only()
@@ -756,6 +758,7 @@ pub fn save_state_query(prefer_default: bool, project_id: Uuid) -> Select<states
         .filter(states::Column::DeletedAt.is_null())
         .filter(states::Column::Group.ne("triage"))
         .filter(states::Column::IsTriage.eq(false))
+        .filter(states::Column::IsHidden.eq(false))
         .order_by_asc(states::Column::Sequence);
     if prefer_default {
         query = query.filter(states::Column::Default.eq(true));

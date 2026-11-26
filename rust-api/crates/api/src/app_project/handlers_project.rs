@@ -3614,7 +3614,8 @@ fn classify_fk_input(value: &Value) -> Result<uuid::Uuid, String> {
 /// One FK existence probe: `PrimaryKeyRelatedField` looks the value up in
 /// the target's default manager; a miss answers `Invalid pk …`. `sql`
 /// carries the manager's filters (soft-deleted rows excluded, except the
-/// stock-manager `users` table; triage excluded for `default_state`).
+/// stock-manager `users` table; triage and hidden states excluded for
+/// `default_state`).
 async fn validate_fk(
     pool: &sqlx::PgPool,
     value: &Value,
@@ -3654,6 +3655,7 @@ async fn validate_fk(
             .column(pidash_db::entity::states::Column::Id)
             .filter(pidash_db::entity::states::Column::DeletedAt.is_null())
             .filter(pidash_db::entity::states::Column::Group.ne("triage"))
+            .filter(pidash_db::entity::states::Column::IsHidden.eq(false))
             .into_tuple::<uuid::Uuid>()
             .one(&db),
         "workspaces" => ws_entity::Entity::find_by_id(id)
@@ -4919,11 +4921,11 @@ async fn insert_member(
     Ok(())
 }
 
-/// `State.objects.bulk_create([... DEFAULT_STATES ...])` (`base.py:283-293`):
-/// explicit name/color/sequence/group/default plus project/workspace and
-/// `created_by`; everything else is Django field defaults (`description`
-/// `slug` `""`, `is_triage` false, nullables NULL, `updated_by` NULL —
-/// `bulk_create` calls no `save()`), stamps at `now`.
+/// `State.objects.bulk_create([... DEFAULT_STATES ...])` (`base.py:282-296`):
+/// explicit name/color/sequence/group/default/is_hidden plus
+/// project/workspace and `created_by`; everything else is Django field
+/// defaults (`description`/`slug` `""`, `is_triage` false, nullables NULL,
+/// `updated_by` NULL — `bulk_create` calls no `save()`), stamps at `now`.
 async fn insert_default_states(
     pool: &sqlx::PgPool,
     project_id: &uuid::Uuid,
@@ -4933,7 +4935,7 @@ async fn insert_default_states(
 ) -> Result<(), Denial> {
     use pidash_db::app_project::models::state::DEFAULT_STATES;
     use pidash_services::domain::projects::states as project_states;
-    for &(name, color, sequence, group, default) in DEFAULT_STATES.iter() {
+    for &(name, color, sequence, group, default, is_hidden) in DEFAULT_STATES.iter() {
         project_states::add_default(
             &pidash_db::pool::sea_orm_connection(pool),
             &project_states::NewDefaultState {
@@ -4944,6 +4946,7 @@ async fn insert_default_states(
                 sequence,
                 group,
                 default,
+                is_hidden,
                 created_by: *actor_id,
                 now,
             },

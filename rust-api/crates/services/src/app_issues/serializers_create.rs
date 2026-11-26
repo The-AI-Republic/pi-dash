@@ -997,13 +997,14 @@ pub fn issue_create_validate(
 pub const POD_FETCH_SQL: &str = "SELECT id, project_id, deleted_at FROM pod WHERE id = $1";
 
 /// `State.objects.filter(project_id, pk).exists()` (`:357-364`): the default
-/// manager excludes soft-deleted AND triage-group rows
-/// (`db/models/state.py:64-67`). Django renders the exclusion as
-/// `NOT ("group" = 'triage')`, kept verbatim. Params: `$1` project id
-/// (uuid), `$2` state id (uuid). A `None` context project renders
-/// `IS NULL` (unreachable: every call site passes `project_id`).
+/// manager excludes soft-deleted, triage-group AND hidden rows
+/// (`db/models/state.py:104-110`). Django renders the exclusions as
+/// `NOT ("group" = 'triage')` and `NOT ("is_hidden" = true)`, kept
+/// verbatim. Params: `$1` project id (uuid), `$2` state id (uuid). A
+/// `None` context project renders `IS NULL` (unreachable: every call
+/// site passes `project_id`).
 pub const STATE_EXISTS_SQL: &str = "SELECT 1 FROM states WHERE project_id = $1 AND id = $2 \
-     AND deleted_at IS NULL AND NOT (\"group\" = 'triage') LIMIT 1";
+     AND deleted_at IS NULL AND NOT (\"group\" = 'triage') AND NOT (\"is_hidden\" = true) LIMIT 1";
 
 /// `State.triage_objects.filter(project_id, pk).exists()` (`:207-208`,
 /// `:357-364`): triage-group rows only, soft-deleted excluded
@@ -1135,8 +1136,8 @@ pub async fn fetch_pod_ref(
     }))
 }
 
-/// [`STATE_EXISTS_SQL`]: a live non-triage state in the context project.
-/// A `None` project renders Django's `project_id IS NULL`.
+/// [`STATE_EXISTS_SQL`]: a live non-triage, non-hidden state in the
+/// context project. A `None` project renders Django's `project_id IS NULL`.
 pub async fn state_exists(
     db: &impl sea_orm::ConnectionTrait,
     project_id: Option<uuid::Uuid>,
@@ -1154,6 +1155,7 @@ pub async fn state_exists(
         .filter(states::Column::Id.eq(state_id))
         .filter(states::Column::DeletedAt.is_null())
         .filter(states::Column::Group.ne("triage"))
+        .filter(states::Column::IsHidden.eq(false))
         .into_tuple()
         .one(db)
         .await?;
@@ -2760,9 +2762,13 @@ mod tests {
             !POD_FETCH_SQL.contains("deleted_at IS NULL"),
             "{POD_FETCH_SQL}"
         );
-        // State managers: triage exclusion vs triage-only.
+        // State managers: triage and hidden exclusions vs triage-only.
         assert!(
             STATE_EXISTS_SQL.contains("NOT (\"group\" = 'triage')"),
+            "{STATE_EXISTS_SQL}"
+        );
+        assert!(
+            STATE_EXISTS_SQL.contains("NOT (\"is_hidden\" = true)"),
             "{STATE_EXISTS_SQL}"
         );
         assert!(

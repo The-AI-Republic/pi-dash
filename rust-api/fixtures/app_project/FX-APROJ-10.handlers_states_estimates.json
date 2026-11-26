@@ -95,15 +95,15 @@
           "order": 1.0
         },
         {
-          "id": "33e8975c-af56-4392-b4b6-68f8bd695c9c",
+          "id": "16a4b008-d6b5-50b1-bd14-275925bfdc01",
           "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
           "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
-          "name": "Todo",
-          "color": "#60646C",
+          "name": "Paused",
+          "color": "#DC2626",
           "group": "unstarted",
           "default": false,
           "description": "",
-          "sequence": 25000.0,
+          "sequence": 30000.0,
           "order": 1.0
         },
         {
@@ -141,6 +141,18 @@
           "description": "",
           "sequence": 42500.0,
           "order": 1.0
+        },
+        {
+          "id": "91e8aa52-b7fb-5a89-b0c1-00660bfc9a7b",
+          "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+          "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+          "name": "AI Completed",
+          "color": "#30A46C",
+          "group": "completed",
+          "default": false,
+          "description": "",
+          "sequence": 43750.0,
+          "order": 0.5
         },
         {
           "id": "405455f6-9132-4b8e-a41b-5f43e5d2835c",
@@ -185,45 +197,17 @@
             "order": 1.0
           }
         ],
-        "cancelled": [
+        "unstarted": [
           {
-            "id": "570cc941-85fb-4e2b-aa5c-c6134b460f5b",
+            "id": "16a4b008-d6b5-50b1-bd14-275925bfdc01",
             "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
             "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
-            "name": "Cancelled",
-            "color": "#9AA4BC",
-            "group": "cancelled",
+            "name": "Paused",
+            "color": "#DC2626",
+            "group": "unstarted",
             "default": false,
             "description": "",
-            "sequence": 55000.0,
-            "order": 1.0
-          }
-        ],
-        "completed": [
-          {
-            "id": "405455f6-9132-4b8e-a41b-5f43e5d2835c",
-            "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
-            "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
-            "name": "Done",
-            "color": "#46A758",
-            "group": "completed",
-            "default": false,
-            "description": "",
-            "sequence": 45000.0,
-            "order": 1.0
-          }
-        ],
-        "review": [
-          {
-            "id": "48738819-d0d5-4d0e-b342-b59f1fe78cb8",
-            "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
-            "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
-            "name": "In Review",
-            "color": "#5B5BD6",
-            "group": "review",
-            "default": false,
-            "description": "",
-            "sequence": 40000.0,
+            "sequence": 30000.0,
             "order": 1.0
           }
         ],
@@ -241,6 +225,20 @@
             "order": 1.0
           }
         ],
+        "review": [
+          {
+            "id": "48738819-d0d5-4d0e-b342-b59f1fe78cb8",
+            "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+            "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+            "name": "In Review",
+            "color": "#5B5BD6",
+            "group": "review",
+            "default": false,
+            "description": "",
+            "sequence": 40000.0,
+            "order": 1.0
+          }
+        ],
         "test": [
           {
             "id": "55f36ea0-3825-4458-be57-43dc05815651",
@@ -255,17 +253,43 @@
             "order": 1.0
           }
         ],
-        "unstarted": [
+        "completed": [
           {
-            "id": "33e8975c-af56-4392-b4b6-68f8bd695c9c",
+            "id": "91e8aa52-b7fb-5a89-b0c1-00660bfc9a7b",
             "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
             "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
-            "name": "Todo",
-            "color": "#60646C",
-            "group": "unstarted",
+            "name": "AI Completed",
+            "color": "#30A46C",
+            "group": "completed",
             "default": false,
             "description": "",
-            "sequence": 25000.0,
+            "sequence": 43750.0,
+            "order": 0.5
+          },
+          {
+            "id": "405455f6-9132-4b8e-a41b-5f43e5d2835c",
+            "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+            "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+            "name": "Done",
+            "color": "#46A758",
+            "group": "completed",
+            "default": false,
+            "description": "",
+            "sequence": 45000.0,
+            "order": 1.0
+          }
+        ],
+        "cancelled": [
+          {
+            "id": "570cc941-85fb-4e2b-aa5c-c6134b460f5b",
+            "project_id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
+            "workspace_id": "94f09a58-8b7e-46c3-a43b-afe7c649a108",
+            "name": "Cancelled",
+            "color": "#9AA4BC",
+            "group": "cancelled",
+            "default": false,
+            "description": "",
+            "sequence": 55000.0,
             "order": 1.0
           }
         ]

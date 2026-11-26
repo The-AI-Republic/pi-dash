@@ -43,8 +43,8 @@ pub async fn fetch_project_rows(
 }
 
 /// `list_states` states (`pi_dash_cloud/mcp/tools.py:777-789`): live
-/// non-triage states of the project in the slug where the caller holds
-/// an active project membership, the project unarchived,
+/// non-triage, non-hidden states of the project in the slug where the
+/// caller holds an active project membership, the project unarchived,
 /// sequence-ordered, distinct. Runs on the MCP scope
 /// (`pidash_db::v1_projects::queries_stateest::fetch_state_list_mcp`):
 /// the v1 list scope with the `project_members` soft-delete guard off

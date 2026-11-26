@@ -1533,7 +1533,8 @@ enum FieldShape {
 enum PkQueryset {
     /// `State.all_state_objects` (everything, even soft-deleted).
     StatesAll,
-    /// `State.objects` (no triage group, no soft-deleted).
+    /// `State.objects` (no triage group, no hidden states, no
+    /// soft-deleted).
     States,
     /// `Issue.all_objects` (even soft-deleted).
     IssuesAll,
@@ -3011,7 +3012,8 @@ async fn state_row(
         PkQueryset::States => {
             query = query
                 .filter(states::Column::DeletedAt.is_null())
-                .filter(states::Column::Group.ne("triage"));
+                .filter(states::Column::Group.ne("triage"))
+                .filter(states::Column::IsHidden.eq(false));
         }
         _ => return Ok(None),
     }

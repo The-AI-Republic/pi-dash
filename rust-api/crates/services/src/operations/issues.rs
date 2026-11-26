@@ -864,9 +864,9 @@ async fn probe_exists(pool: &PgPool, table: PkTable, ids: &[Uuid]) -> Result<Vec
                 .all(&db)
                 .await
         }
-        // `State.objects` is the triage-excluding `StateManager`
-        // (`db/models/state.py:91-100`): triage ids miss here (field
-        // error), never reaching `validate()`.
+        // `State.objects` is the triage- and hidden-excluding
+        // `StateManager` (`db/models/state.py:104-110`): triage and hidden
+        // ids miss here (field error), never reaching `validate()`.
         PkTable::States => {
             states::Entity::find()
                 .select_only()
@@ -874,6 +874,7 @@ async fn probe_exists(pool: &PgPool, table: PkTable, ids: &[Uuid]) -> Result<Vec
                 .filter(states::Column::Id.is_in(ids.to_vec()))
                 .filter(states::Column::DeletedAt.is_null())
                 .filter(states::Column::Group.ne("triage"))
+                .filter(states::Column::IsHidden.eq(false))
                 .into_tuple::<Uuid>()
                 .all(&db)
                 .await
@@ -3031,8 +3032,9 @@ async fn run_write_validate(
     }
 
     // State / parent / estimate project checks (`:261-286`), each under
-    // its field's manager scope (`StateManager` excludes triage;
-    // `Issue.objects` keeps drafts, archived and triage rows).
+    // its field's manager scope (`StateManager` excludes triage and
+    // hidden states; `Issue.objects` keeps drafts, archived and triage
+    // rows).
     if let Some(Some(state_id)) = parsed.state {
         let hit = states::Entity::find()
             .select_only()
@@ -3041,6 +3043,7 @@ async fn run_write_validate(
             .filter(states::Column::Id.eq(state_id))
             .filter(states::Column::DeletedAt.is_null())
             .filter(states::Column::Group.ne("triage"))
+            .filter(states::Column::IsHidden.eq(false))
             .into_tuple::<Uuid>()
             .one(&pidash_db::pool::sea_orm_connection(pool))
             .await

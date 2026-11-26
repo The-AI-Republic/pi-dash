@@ -893,7 +893,7 @@ pub fn group_values_query(field: &str) -> Option<GroupValuesQuery> {
             table: "\"states\"",
             column: "\"id\"",
             project_filter: "\"project_id\"",
-            extra_where: "\"states\".\"is_triage\" = false AND \"states\".\"group\" <> 'triage'",
+            extra_where: "\"states\".\"is_triage\" = false AND \"states\".\"group\" <> 'triage' AND \"states\".\"is_hidden\" = false",
             workspace_column: "\"states\".\"workspace_id\"",
             none_sentinel: false,
         }),
