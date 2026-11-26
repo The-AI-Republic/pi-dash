@@ -18,6 +18,10 @@ pub enum HistoryEntry {
         prompt_preview: String,
         started_at: DateTime<Utc>,
         repo_url: Option<String>,
+        /// The assign's merged repository list (NEWPIDASH-414). History
+        /// files written before the list default to empty.
+        #[serde(default)]
+        repos: Vec<crate::cloud::protocol::AssignRepo>,
     },
     Lifecycle {
         ts: DateTime<Utc>,

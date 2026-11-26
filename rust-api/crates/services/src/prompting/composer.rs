@@ -1721,6 +1721,39 @@ mod tests {
         }
     }
 
+    /// NEWPIDASH-414: the repository section lists every repo. One repo
+    /// renders exactly the legacy text; several render one block each
+    /// with the provider named.
+    #[test]
+    fn repo_section_lists_every_repo() {
+        let mut ctx = crate::prompting::validation::sample_contexts(recipes::KIND_CODING_TASK)
+            .into_iter()
+            .next()
+            .expect("populated sample first");
+        // One repo: the legacy text, byte for byte.
+        let single = compose_ctx(recipes::KIND_CODING_TASK, "software", &ctx);
+        assert!(single.contains(
+            "Repository:\n\n- Remote: https://example.com/repo.git\n\
+             - Default branch: main\n- This issue's branch: `pi-dash/sample-1`"
+        ));
+        assert!(!single.contains("(other)"));
+        // Three repos: every URL, provider and branch is listed.
+        ctx["repo"]["repos"] = serde_json::json!([
+            {"url": "https://github.com/acme/web", "provider": "github", "base_branch": "main"},
+            {"url": "https://gitlab.com/acme/api", "provider": "gitlab", "base_branch": null},
+            {"url": "https://example.com/acme/docs.git", "provider": "other", "base_branch": "docs"},
+        ]);
+        let multi = compose_ctx(recipes::KIND_CODING_TASK, "software", &ctx);
+        assert!(multi.contains("- Remote: https://github.com/acme/web (github)"));
+        assert!(multi.contains("- Remote: https://gitlab.com/acme/api (gitlab)"));
+        assert!(multi.contains("- Remote: https://example.com/acme/docs.git (other)"));
+        assert!(multi.contains("- Default branch: main"));
+        assert!(multi.contains("- Default branch: docs"));
+        // An empty base branch resolves the repo's own default branch.
+        assert!(multi.contains("resolve with `git symbolic-ref --short refs/remotes/origin/HEAD`"));
+        assert!(multi.contains("- This issue's branch: `pi-dash/sample-1`"));
+    }
+
     /// Chat variant of the `pidash-cli` section (NEWPIDASH-402): the runner
     /// renders the same source file with `run.kind == "chat"` and injects
     /// it into the first turn of every runner chat session. The chat text

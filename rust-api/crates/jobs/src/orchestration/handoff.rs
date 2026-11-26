@@ -195,6 +195,7 @@ struct ProjectRow {
     description: Option<String>,
     repo_url: Option<String>,
     base_branch: Option<String>,
+    settings: Value,
     default_agent_executor: String,
     default_work_type: String,
     project_lead_id: Option<Uuid>,
@@ -310,6 +311,13 @@ fn issue_view_from_row(row: IssueRow) -> IssueView {
 }
 
 fn project_view_from_row(row: ProjectRow) -> ProjectView {
+    // Same merged read as run creation (NEWPIDASH-409): in memory,
+    // never through the columns directly.
+    let repos = pidash_services::domain::project_repos::rendered_merged_repos(
+        &row.settings,
+        row.repo_url.as_deref().unwrap_or(""),
+        row.base_branch.as_deref().unwrap_or(""),
+    );
     ProjectView {
         id: row.id,
         workspace_id: row.workspace_id,
@@ -318,6 +326,7 @@ fn project_view_from_row(row: ProjectRow) -> ProjectView {
         description: row.description,
         repo_url: row.repo_url,
         base_branch: row.base_branch,
+        repos,
         default_agent_executor: row.default_agent_executor,
         default_work_type: row.default_work_type,
         project_lead_id: row.project_lead_id,
@@ -362,6 +371,7 @@ fn project_select_query(project_id: Uuid) -> sea_orm::Select<projects::Entity> {
             projects::Column::Description,
             projects::Column::RepoUrl,
             projects::Column::BaseBranch,
+            projects::Column::Settings,
             projects::Column::DefaultAgentExecutor,
             projects::Column::DefaultWorkType,
             projects::Column::ProjectLeadId,

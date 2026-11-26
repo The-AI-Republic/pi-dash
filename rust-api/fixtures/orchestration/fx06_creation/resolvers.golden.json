@@ -60,7 +60,8 @@
         "model": "fx6-model",
         "repo_url": "https://example.com/fx6b.git",
         "repo_ref": "develop",
-        "git_work_branch": "fx6/feature"
+        "git_work_branch": "fx6/feature",
+        "repos": []
       },
       "base_unmutated": {
         "model": "fx6-model",
@@ -75,7 +76,8 @@
       "result": {
         "repo_url": "https://example.com/fx6b.git",
         "repo_ref": "develop",
-        "git_work_branch": "fx6/feature"
+        "git_work_branch": "fx6/feature",
+        "repos": []
       }
     }
   }

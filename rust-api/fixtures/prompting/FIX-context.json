@@ -41,6 +41,7 @@
           "host_url",
           "provider",
           "provider_display_name",
+          "repos",
           "url",
           "work_branch"
         ],

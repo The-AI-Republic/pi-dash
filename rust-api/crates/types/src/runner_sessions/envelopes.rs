@@ -338,13 +338,14 @@ pub fn ensure_envelope(message: &Map<String, Value>, fresh_mid: &str) -> Map<Str
 /// (`matcher.py:306-330`).
 ///
 /// Key order is `v, type, run_id, work_item_id, prompt, repo_url,
-/// repo_ref, git_work_branch, expected_codex_model,
+/// repo_ref, repos, git_work_branch, expected_codex_model,
 /// approval_policy_overrides, deadline`, then — only when the run's
 /// `run_config` carries them — `issue_identifier`, `project_identifier`,
 /// `workpad_body`, `workpad_sha256` (NEWPIDASH-320 §6.1, §6.3).
 /// `run_config` lookups default to `null` exactly like `dict.get`
-/// (note `expected_codex_model` reads the `model` key). Old daemons
-/// ignore the new keys; old servers never send them.
+/// (note `expected_codex_model` reads the `model` key), except `repos`,
+/// which defaults to `[]` (NEWPIDASH-414: old run configs predate the
+/// list). Old daemons ignore the new keys; old servers never send them.
 pub fn build_assign_msg(
     run_id: &str,
     work_item_id: Option<&str>,
@@ -352,7 +353,7 @@ pub fn build_assign_msg(
     run_config: &Map<String, Value>,
 ) -> Map<String, Value> {
     let get = |key: &str| run_config.get(key).cloned().unwrap_or(Value::Null);
-    let mut msg = Map::with_capacity(15);
+    let mut msg = Map::with_capacity(16);
     msg.insert("v".to_string(), Value::from(1));
     msg.insert("type".to_string(), Value::String("assign".to_string()));
     msg.insert("run_id".to_string(), Value::String(run_id.to_string()));
@@ -363,6 +364,13 @@ pub fn build_assign_msg(
     msg.insert("prompt".to_string(), Value::String(prompt.to_string()));
     msg.insert("repo_url".to_string(), get("repo_url"));
     msg.insert("repo_ref".to_string(), get("repo_ref"));
+    msg.insert(
+        "repos".to_string(),
+        match run_config.get("repos") {
+            Some(Value::Array(entries)) => Value::Array(entries.clone()),
+            _ => Value::Array(Vec::new()),
+        },
+    );
     msg.insert("git_work_branch".to_string(), get("git_work_branch"));
     msg.insert("expected_codex_model".to_string(), get("model"));
     msg.insert(
@@ -820,6 +828,7 @@ mod tests {
         for (config_key, msg_key) in [
             ("repo_url", "repo_url"),
             ("repo_ref", "repo_ref"),
+            ("repos", "repos"),
             ("git_work_branch", "git_work_branch"),
             ("model", "expected_codex_model"),
             ("approval_policy_overrides", "approval_policy_overrides"),
@@ -911,6 +920,7 @@ mod tests {
                 "prompt",
                 "repo_url",
                 "repo_ref",
+                "repos",
                 "git_work_branch",
                 "expected_codex_model",
                 "approval_policy_overrides",

@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+use crate::cloud::protocol::AssignRepo;
 use crate::util::fs::create_dir_all_private;
 use crate::workspace::git;
 
@@ -26,16 +27,19 @@ pub enum Resolution {
 /// Git. PDASHOSS01-136 already removed platform-side branch checkout on this
 /// reasoning; clone bootstrap is the same kind of decision.
 ///
-/// So `repo_url` is a best-effort *convenience* for a working dir that is empty
+/// So `repos` is a best-effort *convenience* for a working dir that is empty
 /// and therefore unambiguous to populate — never a requirement imposed on the
-/// workspace. When it cannot be honoured (dir already has files, url is a shape
-/// we won't hand to `git clone`, clone itself failed) the run proceeds in the
-/// directory as an ordinary task folder. The only failure left is a working dir
-/// that cannot be used as a directory at all.
-pub async fn resolve(
-    working_dir: &Path,
-    repo_url: Option<&str>,
-) -> Result<Resolution, ResolveError> {
+/// workspace. When it cannot be honoured (dir already has files, a url is a
+/// shape we won't hand to `git clone`, a clone itself failed) the run proceeds
+/// in the directory as an ordinary task folder. The only failure left is a
+/// working dir that cannot be used as a directory at all.
+///
+/// Layout (NEWPIDASH-414): with exactly one repo the clone lands in the
+/// working dir itself, exactly as before. With several, each repo is cloned
+/// into one subdirectory of the working dir named `<owner>-<name>` from the
+/// repo URL (e.g. `acme-web` for `https://github.com/acme/web`); the prompt's
+/// repository list tells the agent which subdirectory is which.
+pub async fn resolve(working_dir: &Path, repos: &[AssignRepo]) -> Result<Resolution, ResolveError> {
     // Owner-only when the daemon creates it (it holds agent work products);
     // an existing working dir's mode is never changed.
     if let Err(e) = create_dir_all_private(working_dir) {
@@ -52,9 +56,14 @@ pub async fn resolve(
     if git::is_git_repo(working_dir) {
         return Ok(Resolution::ExistingRepo(dir));
     }
-    let Some(url) = repo_url.filter(|url| !url.trim().is_empty()) else {
+    let urls: Vec<&str> = repos
+        .iter()
+        .map(|repo| repo.url.as_str())
+        .filter(|url| !url.trim().is_empty())
+        .collect();
+    if urls.is_empty() {
         return Ok(Resolution::Directory(dir));
-    };
+    }
     // Bootstrap only what is unambiguously safe to bootstrap. A directory that
     // already holds files belongs to the operator — it may be a parent of
     // clones, a multi-repo workspace, or a plain task folder — so never clone
@@ -67,6 +76,66 @@ pub async fn resolve(
         );
         return Ok(Resolution::Directory(dir));
     }
+    if urls.len() == 1 {
+        return Ok(clone_into(working_dir, &dir, urls[0]).await);
+    }
+    // Several repos: one subdirectory per repo, named `<owner>-<name>`
+    // from the repo URL. Best effort per repo — a failed clone never
+    // fails the run.
+    let mut names = std::collections::HashSet::new();
+    for url in urls {
+        let mut name = repo_dir_name(url);
+        let stem = name.clone();
+        let mut suffix = 2;
+        while !names.insert(name.clone()) {
+            name = format!("{stem}-{suffix}");
+            suffix += 1;
+        }
+        let target = working_dir.join(&name);
+        if !is_supported_clone_url(url) {
+            tracing::warn!(
+                working_dir = ?dir,
+                target = ?target,
+                // The shape only — a clone url can embed a token.
+                scheme = url_shape(url),
+                "repo url is not a shape we hand to `git clone`; skipping its \
+                 clone bootstrap and running as a task folder"
+            );
+            continue;
+        }
+        if let Err(e) = create_dir_all_private(&target) {
+            tracing::warn!(
+                working_dir = ?dir,
+                target = ?target,
+                error = %e,
+                "cannot create the repo subdirectory; skipping its clone"
+            );
+            continue;
+        }
+        if let Err(err) = git::clone(url, &target).await {
+            if let Err(cleanup) = discard_partial_clone(&target) {
+                tracing::error!(
+                    target = ?target,
+                    error = %cleanup,
+                    "could not remove a failed clone's leftovers"
+                );
+            }
+            tracing::warn!(
+                working_dir = ?dir,
+                target = ?target,
+                error = %err,
+                "clone bootstrap failed; running as a task folder — the agent \
+                 can clone with its own credentials if the task needs the repo"
+            );
+        }
+    }
+    Ok(Resolution::Cloned(dir))
+}
+
+/// Clone one repo into `working_dir` itself (the single-repo layout),
+/// degrading a failed clone to an ordinary task folder. See [`resolve`]
+/// for why a failure never fails the run.
+async fn clone_into(working_dir: &Path, dir: &Path, url: &str) -> Resolution {
     if !is_supported_clone_url(url) {
         tracing::warn!(
             working_dir = ?dir,
@@ -75,10 +144,10 @@ pub async fn resolve(
             "repo_url is not a shape we hand to `git clone`; skipping clone \
              bootstrap and running as a task folder"
         );
-        return Ok(Resolution::Directory(dir));
+        return Resolution::Directory(dir.to_path_buf());
     }
     match git::clone(url, working_dir).await {
-        Ok(()) => Ok(Resolution::Cloned(dir)),
+        Ok(()) => Resolution::Cloned(dir.to_path_buf()),
         Err(err) => {
             // `git clone` usually tears its own partial checkout down, but not
             // always: a clone that fetches successfully and then fails to
@@ -110,8 +179,51 @@ pub async fn resolve(
                 "clone bootstrap failed; running as a task folder — the agent \
                  can clone with its own credentials if the task needs the repo"
             );
-            Ok(Resolution::Directory(dir))
+            Resolution::Directory(dir.to_path_buf())
         }
+    }
+}
+
+/// The `<owner>-<name>` subdirectory for a repo URL: the last two path
+/// segments, sanitized to filename-safe characters. Unknown shapes fall
+/// back to `repo`.
+fn repo_dir_name(url: &str) -> String {
+    let path = match url.split_once("://") {
+        Some((_, rest)) => rest.split('@').next_back().unwrap_or(rest),
+        None => url.split('@').next_back().unwrap_or(url),
+    };
+    // scp-like `git@host:owner/name` keeps `owner/name` after the host.
+    let path = match path.split_once(':') {
+        Some((_, rest)) if !rest.starts_with('/') && rest.contains('/') => rest,
+        _ => path,
+    };
+    let path = path.trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let mut segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    // Drop a leading host segment (`github.com/acme/web` → `acme/web`).
+    if segments.len() > 2 {
+        segments = segments[segments.len() - 2..].to_vec();
+    }
+    let name = segments
+        .iter()
+        .map(|s| {
+            s.chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+                        c
+                    } else {
+                        '-'
+                    }
+                })
+                .collect::<String>()
+        })
+        .collect::<Vec<String>>()
+        .join("-");
+    let name = name.trim_matches(|c| c == '.' || c == '-').to_owned();
+    if name.is_empty() {
+        "repo".to_owned()
+    } else {
+        name
     }
 }
 
@@ -201,11 +313,23 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn repo(url: &str) -> AssignRepo {
+        AssignRepo {
+            url: url.to_owned(),
+            provider: None,
+            base_branch: None,
+        }
+    }
+
+    fn repos(urls: &[&str]) -> Vec<AssignRepo> {
+        urls.iter().map(|url| repo(url)).collect()
+    }
+
     #[tokio::test]
     async fn detects_existing_repo() {
         let tmp = tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(".git")).unwrap();
-        let r = resolve(tmp.path(), None).await.unwrap();
+        let r = resolve(tmp.path(), &[]).await.unwrap();
         assert!(matches!(r, Resolution::ExistingRepo(_)));
     }
 
@@ -217,7 +341,7 @@ mod tests {
     async fn runs_as_task_folder_when_non_empty_and_not_a_repo() {
         let tmp = tempdir().unwrap();
         std::fs::write(tmp.path().join("junk"), b"keep").unwrap();
-        let resolution = resolve(tmp.path(), Some("https://example.com/repo.git"))
+        let resolution = resolve(tmp.path(), &repos(&["https://example.com/repo.git"]))
             .await
             .unwrap();
         assert!(matches!(resolution, Resolution::Directory(_)));
@@ -233,7 +357,7 @@ mod tests {
         for repo in ["pi-dash", "private-pi-dash"] {
             std::fs::create_dir_all(tmp.path().join(repo).join(".git")).unwrap();
         }
-        let resolution = resolve(tmp.path(), Some("https://example.com/repo.git"))
+        let resolution = resolve(tmp.path(), &repos(&["https://example.com/repo.git"]))
             .await
             .unwrap();
         assert!(matches!(resolution, Resolution::Directory(p) if p == tmp.path()));
@@ -245,7 +369,7 @@ mod tests {
     #[tokio::test]
     async fn accepts_empty_directory_without_repo_url() {
         let tmp = tempdir().unwrap();
-        let resolution = resolve(tmp.path(), None).await.unwrap();
+        let resolution = resolve(tmp.path(), &[]).await.unwrap();
         assert!(matches!(resolution, Resolution::Directory(_)));
         assert!(!tmp.path().join(".git").exists());
     }
@@ -254,9 +378,9 @@ mod tests {
     async fn preserves_existing_files_without_repo_url() {
         let tmp = tempdir().unwrap();
         std::fs::write(tmp.path().join("notes.txt"), "user notes").unwrap();
-        for url in [None, Some(""), Some("  ")] {
+        for urls in [&[] as &[&str], &[""], &["  "]] {
             assert!(matches!(
-                resolve(tmp.path(), url).await.unwrap(),
+                resolve(tmp.path(), &repos(urls)).await.unwrap(),
                 Resolution::Directory(_)
             ));
             assert_eq!(
@@ -272,7 +396,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let path = tmp.path().join("tasks/new");
         assert!(
-            matches!(resolve(&path, None).await.unwrap(), Resolution::Directory(p) if p == path)
+            matches!(resolve(&path, &[]).await.unwrap(), Resolution::Directory(p) if p == path)
         );
         assert!(path.is_dir());
     }
@@ -283,7 +407,7 @@ mod tests {
         let path = tmp.path().join("notes.txt");
         std::fs::write(&path, "keep").unwrap();
         assert!(matches!(
-            resolve(&path, None).await.unwrap_err(),
+            resolve(&path, &[]).await.unwrap_err(),
             ResolveError::Io(_)
         ));
         assert_eq!(std::fs::read_to_string(path).unwrap(), "keep");
@@ -301,7 +425,7 @@ mod tests {
             "file:///etc",
         ] {
             let tmp = tempdir().unwrap();
-            let resolution = resolve(tmp.path(), Some(url)).await.unwrap();
+            let resolution = resolve(tmp.path(), &repos(&[url])).await.unwrap();
             assert!(
                 matches!(resolution, Resolution::Directory(_)),
                 "expected task folder for {url:?}"
@@ -318,7 +442,7 @@ mod tests {
     async fn falls_back_to_task_folder_when_clone_fails() {
         let tmp = tempdir().unwrap();
         // Port 1 on loopback refuses immediately — no DNS, no network egress.
-        let resolution = resolve(tmp.path(), Some("https://127.0.0.1:1/x.git"))
+        let resolution = resolve(tmp.path(), &repos(&["https://127.0.0.1:1/x.git"]))
             .await
             .unwrap();
         assert!(matches!(resolution, Resolution::Directory(p) if p == tmp.path()));
@@ -383,7 +507,7 @@ mod tests {
         std::fs::create_dir(&path).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
 
-        let result = resolve(&path, Some("https://example.com/repo.git")).await;
+        let result = resolve(&path, &repos(&["https://example.com/repo.git"])).await;
 
         // Restore before asserting so the tempdir can always clean itself up.
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -402,7 +526,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempdir().unwrap();
         let path = tmp.path().join("tasks/new");
-        let _ = resolve(&path, None).await.unwrap();
+        let _ = resolve(&path, &[]).await.unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700, "created working dir must be owner-only");
         let parent_mode = std::fs::metadata(tmp.path().join("tasks"))
@@ -426,7 +550,7 @@ mod tests {
         let path = tmp.path().join("shared");
         std::fs::create_dir(&path).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let _ = resolve(&path, None).await.unwrap();
+        let _ = resolve(&path, &[]).await.unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(
             mode, 0o755,
@@ -451,5 +575,75 @@ mod tests {
             assert!(!url_shape(url).contains("tok"));
             assert!(!url_shape(url).contains("org"));
         }
+    }
+
+    #[test]
+    fn repo_dir_name_uses_owner_and_name() {
+        assert_eq!(repo_dir_name("https://github.com/acme/web"), "acme-web");
+        assert_eq!(repo_dir_name("https://github.com/acme/web.git"), "acme-web");
+        assert_eq!(repo_dir_name("git@github.com:acme/web.git"), "acme-web");
+        assert_eq!(
+            repo_dir_name("ssh://git@github.com/acme/web.git"),
+            "acme-web"
+        );
+        assert_eq!(
+            repo_dir_name("https://user:tok@github.com/acme/web"),
+            "acme-web"
+        );
+        assert_eq!(repo_dir_name("https://gitlab.com/acme/api"), "acme-api");
+        // Unknown shapes degrade to something filename-safe, never empty.
+        assert_eq!(repo_dir_name("not a url at all"), "not-a-url-at-all");
+        assert_eq!(repo_dir_name(""), "repo");
+    }
+
+    /// NEWPIDASH-414: several repos in an empty working dir clone one
+    /// per subdirectory, named `<owner>-<name>`. Unreachable hosts fail
+    /// per repo without failing the run.
+    #[tokio::test]
+    async fn clones_several_repos_into_subdirectories() {
+        let tmp = tempdir().unwrap();
+        let resolution = resolve(
+            tmp.path(),
+            &repos(&[
+                "https://127.0.0.1:1/acme/web.git",
+                "https://127.0.0.1:1/acme/api.git",
+            ]),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(resolution, Resolution::Cloned(p) if p == tmp.path()));
+        // No clone landed in the working dir itself …
+        assert!(!tmp.path().join(".git").exists());
+        // … each repo got its own subdirectory, and a failed clone
+        // leaves no partial checkout behind.
+        for name in ["acme-web", "acme-api"] {
+            let sub = tmp.path().join(name);
+            assert!(sub.is_dir(), "{name} created");
+            assert!(!sub.join(".git").exists(), "{name} has no leftovers");
+        }
+    }
+
+    /// NEWPIDASH-414: a non-empty working dir is never cloned into,
+    /// however many repos the assign carries.
+    #[tokio::test]
+    async fn several_repos_never_clone_into_non_empty_dir() {
+        let tmp = tempdir().unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), "mine").unwrap();
+        let resolution = resolve(
+            tmp.path(),
+            &repos(&[
+                "https://example.com/acme/web.git",
+                "https://example.com/acme/api.git",
+            ]),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(resolution, Resolution::Directory(p) if p == tmp.path()));
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("notes.txt")).unwrap(),
+            "mine"
+        );
+        assert!(!tmp.path().join("acme-web").exists());
+        assert!(!tmp.path().join("acme-api").exists());
     }
 }

@@ -1194,6 +1194,7 @@ mod tests {
                     "prompt",
                     "repo_url",
                     "repo_ref",
+                    "repos",
                     "git_work_branch",
                     "expected_codex_model",
                     "approval_policy_overrides",

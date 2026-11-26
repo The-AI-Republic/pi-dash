@@ -4,7 +4,11 @@ title: Repository context
 customizable: locked
 ---
 Repository:
-{% if repo.url %}
+{% if repo.repos %}
+{% for repo_entry in repo.repos %}- Remote: {{ repo_entry.url }}{% if repo.repos|length > 1 %} ({{ repo_entry.provider }}){% endif %}
+- Default branch: {{ repo_entry.base_branch or "(resolve with `git symbolic-ref --short refs/remotes/origin/HEAD` and drop the `origin/` prefix)" }}
+{% endfor %}- This issue's branch: {{ ("`" ~ repo.work_branch ~ "`") if repo.work_branch else "(none yet)" }}
+{% elif repo.url %}
 - Remote: {{ repo.url }}
 - Default branch: {{ repo.base_branch or "(resolve with `git symbolic-ref --short refs/remotes/origin/HEAD` and drop the `origin/` prefix)" }}
 - This issue's branch: {{ ("`" ~ repo.work_branch ~ "`") if repo.work_branch else "(none yet)" }}

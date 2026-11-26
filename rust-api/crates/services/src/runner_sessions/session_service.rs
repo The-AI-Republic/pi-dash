@@ -3151,6 +3151,7 @@ mod tests {
         let mut run_config = Map::new();
         run_config.insert("repo_url".to_string(), msg["repo_url"].clone());
         run_config.insert("repo_ref".to_string(), msg["repo_ref"].clone());
+        run_config.insert("repos".to_string(), msg["repos"].clone());
         run_config.insert(
             "git_work_branch".to_string(),
             msg["git_work_branch"].clone(),

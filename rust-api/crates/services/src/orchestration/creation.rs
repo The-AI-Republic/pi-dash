@@ -102,6 +102,7 @@ use pidash_types::agent_runs::AgentExecutorKind;
 pub use pidash_types::orchestration::PROJECT_MOVE_HANDOFF_CONFIG_KEY;
 use pidash_types::orchestration::{ContinuationOutcome, PhaseConfig, StateRef, TransitionOutcome};
 
+use crate::domain::project_repos::RenderedRepo;
 use crate::domain::project_settings::AgentStages;
 use crate::prompting::{composer, context, recipes, work_types};
 use crate::run_creation::UserFlags;
@@ -180,7 +181,7 @@ pub const ISSUE_SELECT_SQL: &str = "SELECT id, workspace_id, project_id, state_i
 /// executor scope, repo snapshot, creator fallback and clock policy).
 /// `$1` is the project id.
 pub const PROJECT_SELECT_SQL: &str = "SELECT id, workspace_id, identifier, name, description, \
-    repo_url, base_branch, default_agent_executor, project_lead_id, default_assignee_id, \
+    repo_url, base_branch, settings, default_agent_executor, project_lead_id, default_assignee_id, \
     agent_default_max_ticks, agent_default_interval_seconds, \
     agent_review_default_interval_seconds, agent_test_default_interval_seconds, \
     default_work_type FROM projects WHERE id = $1";
@@ -737,6 +738,7 @@ pub mod orm {
                 C::Description,
                 C::RepoUrl,
                 C::BaseBranch,
+                C::Settings,
                 C::DefaultAgentExecutor,
                 C::ProjectLeadId,
                 C::DefaultAssigneeId,
@@ -1480,6 +1482,11 @@ pub struct ProjectView {
     pub description: Option<String>,
     pub repo_url: Option<String>,
     pub base_branch: Option<String>,
+    /// The merged repository list (NEWPIDASH-409 `settings.repos`
+    /// merged with the legacy columns, providers filled), resolved by
+    /// the loader through the merged read — never from the columns
+    /// directly. Feeds the prompt repo list and the run envelope.
+    pub repos: Vec<RenderedRepo>,
     pub default_agent_executor: String,
     pub project_lead_id: Option<Uuid>,
     pub default_assignee_id: Option<Uuid>,
@@ -1965,11 +1972,17 @@ pub fn phase_kind_for_issue(state: Option<StateView>) -> String {
 /// (`_run_config_for_issue`, `service.py:550-566`): model/approval
 /// overrides survive, project-derived repo fields are replaced, and
 /// the private handoff marker is stripped. `base` is never mutated.
+///
+/// `repos` is the project's merged repository list (NEWPIDASH-414):
+/// it rides the `repos` key so runners that know about it clone every
+/// repo. Runners that do not keep reading `repo_url` / `repo_ref`,
+/// filled from the legacy repo, or the first entry when there is none.
 pub fn run_config_for_issue(
     repo_url: Option<&str>,
     repo_ref: Option<&str>,
     git_work_branch: Option<&str>,
     base: Option<&Value>,
+    repos: &[RenderedRepo],
 ) -> Value {
     let mut config: Map<String, Value> =
         base.and_then(Value::as_object).cloned().unwrap_or_default();
@@ -1978,8 +1991,27 @@ pub fn run_config_for_issue(
         Some(text) if !text.is_empty() => Value::String(text.to_owned()),
         _ => Value::Null,
     };
-    config.insert("repo_url".to_owned(), or_null(repo_url));
-    config.insert("repo_ref".to_owned(), or_null(repo_ref));
+    let first = repos.first();
+    let url = match repo_url {
+        Some(text) if !text.is_empty() => Some(text.to_owned()),
+        _ => first.map(|entry| entry.url.clone()),
+    };
+    let branch = match repo_ref {
+        Some(text) if !text.is_empty() => Some(text.to_owned()),
+        _ => first.and_then(|entry| entry.base_branch.clone()),
+    };
+    config.insert(
+        "repo_url".to_owned(),
+        url.map(Value::String).unwrap_or(Value::Null),
+    );
+    config.insert(
+        "repo_ref".to_owned(),
+        branch.map(Value::String).unwrap_or(Value::Null),
+    );
+    config.insert(
+        "repos".to_owned(),
+        serde_json::to_value(repos).unwrap_or(Value::Null),
+    );
     config.insert("git_work_branch".to_owned(), or_null(git_work_branch));
     Value::Object(config)
 }
@@ -2302,6 +2334,7 @@ pub fn render_first_turn(
         &context::ProjectRepoView {
             url: project.repo_url.clone(),
             base_branch: project.base_branch.clone(),
+            repos: project.repos.clone(),
         },
         issue.git_work_branch.as_deref(),
         bundle.remote.as_ref(),
@@ -2753,6 +2786,7 @@ pub async fn create_and_dispatch_run<S: CreationSeam + FinalizeAgentRunSeam>(
             project.base_branch.as_deref(),
             issue.git_work_branch.as_deref(),
             None,
+            &project.repos,
         ),
         Some(&context::issue_identifier(
             &project.identifier,
@@ -2915,6 +2949,7 @@ pub async fn create_continuation_run<S: CreationSeam + FinalizeAgentRunSeam>(
             project.base_branch.as_deref(),
             issue.git_work_branch.as_deref(),
             None,
+            &project.repos,
         ),
         Some(&context::issue_identifier(
             &project.identifier,
@@ -3061,6 +3096,7 @@ pub async fn create_project_move_handoff_run<S: CreationSeam + FinalizeAgentRunS
         project.base_branch.as_deref(),
         issue.git_work_branch.as_deref(),
         Some(&req.parent.run_config),
+        &project.repos,
     );
     if let Some(map) = run_config.as_object_mut() {
         map.remove("workpad_body");
@@ -3675,6 +3711,7 @@ mod tests {
             description: None,
             repo_url: Some("https://example.com/fx6.git".to_owned()),
             base_branch: Some("main".to_owned()),
+            repos: vec![],
             default_agent_executor: "local_runner".to_owned(),
             project_lead_id: None,
             default_assignee_id: None,
@@ -4239,6 +4276,7 @@ mod tests {
             Some("develop"),
             Some("fx6/feature"),
             Some(&r9["base"]),
+            &[],
         );
         assert_eq!(refreshed, r9["result"]);
         // The base dict is never mutated.
@@ -4249,15 +4287,72 @@ mod tests {
                 Some("https://example.com/fx6b.git"),
                 Some("develop"),
                 Some("fx6/feature"),
-                None
+                None,
+                &[]
             ),
             r10["result"]
         );
         // Empty strings collapse to null (`or None`).
         assert_eq!(
-            run_config_for_issue(Some(""), Some(""), Some(""), None),
-            json!({"repo_url": null, "repo_ref": null, "git_work_branch": null})
+            run_config_for_issue(Some(""), Some(""), Some(""), None, &[]),
+            json!({"repo_url": null, "repo_ref": null, "git_work_branch": null, "repos": []})
         );
+    }
+
+    /// NEWPIDASH-414: the envelope carries every repo, while
+    /// `repo_url` / `repo_ref` keep the legacy values for runners that
+    /// do not know about `repos` yet — filled from the legacy repo, or
+    /// the first entry when there is none.
+    #[test]
+    fn run_config_carries_every_repo_with_legacy_fallback() {
+        use crate::domain::project_repos::RenderedRepo;
+        let repos = vec![
+            RenderedRepo {
+                id: uid(0x01),
+                url: "https://github.com/acme/web".to_owned(),
+                provider: "github".to_owned(),
+                base_branch: Some("main".to_owned()),
+            },
+            RenderedRepo {
+                id: uid(0x02),
+                url: "https://gitlab.com/acme/api".to_owned(),
+                provider: "gitlab".to_owned(),
+                base_branch: None,
+            },
+            RenderedRepo {
+                id: uid(0x03),
+                url: "https://example.com/acme/docs.git".to_owned(),
+                provider: "other".to_owned(),
+                base_branch: Some("docs".to_owned()),
+            },
+        ];
+        // Legacy repo present: legacy values win, all three ride along.
+        let legacy = run_config_for_issue(
+            Some("https://github.com/acme/web"),
+            Some("main"),
+            None,
+            None,
+            &repos,
+        );
+        assert_eq!(legacy["repo_url"], json!("https://github.com/acme/web"));
+        assert_eq!(legacy["repo_ref"], json!("main"));
+        assert_eq!(
+            legacy["repos"].as_array().expect("array").len(),
+            3,
+            "envelope repos has all three entries"
+        );
+        // No legacy repo: the first entry fills the legacy keys.
+        let first_fallback = run_config_for_issue(None, None, None, None, &repos);
+        assert_eq!(
+            first_fallback["repo_url"],
+            json!("https://github.com/acme/web")
+        );
+        assert_eq!(first_fallback["repo_ref"], json!("main"));
+        // No repos at all: legacy keys stay null, list stays empty.
+        let bare = run_config_for_issue(None, None, None, None, &[]);
+        assert_eq!(bare["repo_url"], Value::Null);
+        assert_eq!(bare["repo_ref"], Value::Null);
+        assert_eq!(bare["repos"], json!([]));
     }
 
     /// NEWPIDASH-320 §6.1, §6.3: the runner-context stamp — identifiers
@@ -4803,6 +4898,7 @@ mod tests {
             json!({
                 "repo_url": "https://example.com/fx6.git",
                 "repo_ref": "main",
+                "repos": [],
                 "git_work_branch": null,
                 "issue_identifier": "FX6-1",
                 "project_identifier": "FX6",
@@ -5234,6 +5330,7 @@ mod tests {
             json!({
                 "repo_url": "https://example.com/fx6.git",
                 "repo_ref": "main",
+                "repos": [],
                 "git_work_branch": null,
                 "issue_identifier": "FX6-1",
                 "project_identifier": "FX6",

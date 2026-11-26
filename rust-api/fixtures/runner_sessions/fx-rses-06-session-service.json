@@ -560,6 +560,14 @@
       "prompt": "do the thing",
       "repo_url": "https://example.com/r.git",
       "repo_ref": "main",
+      "repos": [
+        {
+          "id": "11111111-1111-1111-1111-111111111111",
+          "url": "https://example.com/r.git",
+          "provider": "other",
+          "base_branch": "main"
+        }
+      ],
       "git_work_branch": "pi-dash/x",
       "expected_codex_model": "claude-4",
       "approval_policy_overrides": {

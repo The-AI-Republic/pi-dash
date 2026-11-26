@@ -104,6 +104,13 @@ fn issue_sample(kind: &str, populated: bool) -> serde_json::Value {
             "repo": {
                 "url": "https://example.com/repo.git",
                 "base_branch": "main",
+                "repos": [
+                    {
+                        "url": "https://example.com/repo.git",
+                        "provider": "other",
+                        "base_branch": "main",
+                    },
+                ],
                 "work_branch": "pi-dash/sample-1",
                 "provider": "github",
                 "provider_display_name": "GitHub",
@@ -229,6 +236,7 @@ fn issue_sample(kind: &str, populated: bool) -> serde_json::Value {
             "repo": {
                 "url": null,
                 "base_branch": null,
+                "repos": [],
                 "work_branch": null,
                 "provider": null,
                 "provider_display_name": "Git provider",
