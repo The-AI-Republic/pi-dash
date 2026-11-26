@@ -2368,3 +2368,133 @@ describe("WebNewDriver description placeholders", () => {
     );
   });
 });
+
+describe("WebNewDriver repository list", () => {
+  function reposRowDouble(url: string, provider: string, branch: string, error?: string): GeneralFakeLocator {
+    return new GeneralFakeLocator(
+      {},
+      {
+        testId: (testId) => {
+          if (testId === "general-repos-row-url") return new GeneralFakeLocator({ text: ` ${url} ` });
+          if (testId === "general-repos-row-provider") return new GeneralFakeLocator({ text: provider });
+          if (testId === "general-repos-row-branch") return new GeneralFakeLocator({ text: branch });
+          if (testId === "general-repos-edit" || testId === "general-repos-remove") {
+            return new GeneralFakeLocator();
+          }
+          if (testId === "general-repos-row-error") {
+            return error === undefined ? generalAbsent() : new GeneralFakeLocator({ text: error });
+          }
+          return generalAbsent();
+        },
+      }
+    );
+  }
+
+  it("reads the rows, the empty state and the add control", async () => {
+    const stub = generalSettingsPageDouble({
+      testId: (testId) => {
+        if (testId === "general-repos-row") {
+          return new GeneralFakeLocator({
+            items: [
+              reposRowDouble("https://github.com/acme/site", "GitHub", "develop"),
+              reposRowDouble("git@git.test:acme/other.git", "Other", "repo default"),
+            ],
+          });
+        }
+        if (testId === "general-repos-empty") return new GeneralFakeLocator();
+        if (testId === "general-repos-add") return new GeneralFakeLocator({ disabled: false });
+        return generalAbsent();
+      },
+    });
+    const driver = new WebNewDriver(stub.page);
+    await expect(driver.settingsGeneralReposRows()).resolves.toEqual([
+      { url: "https://github.com/acme/site", provider: "GitHub", branch: "develop" },
+      { url: "git@git.test:acme/other.git", provider: "Other", branch: "repo default" },
+    ]);
+    await expect(driver.settingsGeneralReposEmptyVisible()).resolves.toBe(true);
+    await expect(driver.settingsGeneralReposAddDisabled()).resolves.toBe(false);
+
+    const bare = generalSettingsPageDouble();
+    await expect(new WebNewDriver(bare.page).settingsGeneralReposRows()).resolves.toEqual([]);
+    await expect(new WebNewDriver(bare.page).settingsGeneralReposEmptyVisible()).resolves.toBe(false);
+  });
+
+  it("adds through the form and settles on the write", async () => {
+    const urlInput = new GeneralFakeLocator();
+    const branchInput = new GeneralFakeLocator();
+    const stub = generalSettingsPageDouble({
+      testId: (testId) => {
+        if (testId === "general-repos-add") return new GeneralFakeLocator();
+        if (testId === "general-repos-new-url") return urlInput;
+        if (testId === "general-repos-new-branch") return branchInput;
+        if (testId === "general-repos-new-confirm") return new GeneralFakeLocator();
+        return generalAbsent();
+      },
+      locator: () => generalAbsent(),
+    });
+    await new WebNewDriver(stub.page).settingsGeneralReposAdd("https://github.com/acme/new", "trunk");
+    expect(urlInput.fill).toHaveBeenCalledWith("https://github.com/acme/new", expect.anything());
+    expect(branchInput.fill).toHaveBeenCalledWith("trunk", expect.anything());
+    expect(stub.pageObject.waitForResponse).toHaveBeenCalled();
+  });
+
+  it("settles a refused confirm on the form error without a write", async () => {
+    const stub = generalSettingsPageDouble({
+      response: "reject",
+      testId: (testId) => {
+        if (testId === "general-repos-add") return new GeneralFakeLocator();
+        if (testId === "general-repos-new-url") return new GeneralFakeLocator();
+        if (testId === "general-repos-new-branch") return new GeneralFakeLocator();
+        if (testId === "general-repos-new-confirm") return new GeneralFakeLocator();
+        return generalAbsent();
+      },
+      locator: (selector) =>
+        selector === "#general-repos-new-url-error"
+          ? new GeneralFakeLocator({ text: "This repository is already in the list." })
+          : generalAbsent(),
+    });
+    const driver = new WebNewDriver(stub.page);
+    await driver.settingsGeneralReposAdd("git@github.com:acme/site.git", "");
+    await expect(driver.settingsGeneralReposFormError()).resolves.toBe("This repository is already in the list.");
+  });
+
+  it("edits and removes through the row controls", async () => {
+    const urlInput = new GeneralFakeLocator();
+    const stub = generalSettingsPageDouble({
+      testId: (testId) => {
+        if (testId === "general-repos-row") {
+          return new GeneralFakeLocator({ items: [reposRowDouble("https://github.com/acme/site", "GitHub", "main")] });
+        }
+        if (testId === "general-repos-edit-url") return urlInput;
+        if (testId === "general-repos-edit-branch") return new GeneralFakeLocator();
+        if (testId === "general-repos-edit-confirm") return new GeneralFakeLocator();
+        if (testId === "general-repos-form-cancel") return new GeneralFakeLocator();
+        return generalAbsent();
+      },
+      locator: () => generalAbsent(),
+    });
+    const driver = new WebNewDriver(stub.page);
+    await driver.settingsGeneralReposEdit(0, "https://github.com/acme/renamed", "");
+    expect(urlInput.fill).toHaveBeenCalledWith("https://github.com/acme/renamed", expect.anything());
+    await driver.settingsGeneralReposRemove(0);
+    await driver.settingsGeneralReposCancelForm();
+    expect(stub.pageObject.waitForResponse).toHaveBeenCalledTimes(2);
+  });
+
+  it("reads the row error or empty when the slot is absent", async () => {
+    const stub = generalSettingsPageDouble({
+      testId: (testId) =>
+        testId === "general-repos-row"
+          ? new GeneralFakeLocator({ items: [reposRowDouble("https://github.com/acme/site", "GitHub", "main", "dup")] })
+          : generalAbsent(),
+    });
+    await expect(new WebNewDriver(stub.page).settingsGeneralReposRowError(0)).resolves.toBe("dup");
+    await expect(new WebNewDriver(generalSettingsPageDouble().page).settingsGeneralReposRowError(0)).resolves.toBe("");
+  });
+
+  it("installs the echo route for project-row writes", async () => {
+    const stub = generalSettingsPageDouble();
+    await new WebNewDriver(stub.page).settingsGeneralReposEchoWrites();
+    expect(stub.pageObject.route).toHaveBeenCalledTimes(1);
+  });
+});

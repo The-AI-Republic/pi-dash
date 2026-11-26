@@ -29,6 +29,7 @@ import {
   serverCleanupProject,
   serverCreateProjectWithFlags,
   serverIdentifierTaken,
+  serverPatchProject,
   serverProjectRecord,
   signInAuthedSession,
   signInSession,
@@ -93,8 +94,17 @@ test(
       expect(await driver.settingsGeneralFieldValue("name")).toBe(String(record["name"] ?? ""));
       expect(await driver.settingsGeneralFieldValue("description")).toBe(String(record["description"] ?? ""));
       expect(await driver.settingsGeneralFieldValue("identifier")).toBe(String(record["identifier"] ?? ""));
-      expect(await driver.settingsGeneralFieldValue("repoUrl")).toBe(String(record["repo_url"] ?? ""));
-      expect(await driver.settingsGeneralFieldValue("baseBranch")).toBe(String(record["base_branch"] ?? ""));
+      if (driver.target === "web_new") {
+        // NEWPIDASH-413: repositories render as a list, not single
+        // fields — the seeded project names no repository, so the empty
+        // state shows and the per-row branches are asserted in the
+        // repositories scenario below.
+        expect(await driver.settingsGeneralReposEmptyVisible()).toBe(true);
+        expect(await driver.settingsGeneralReposRows()).toEqual([]);
+      } else {
+        expect(await driver.settingsGeneralFieldValue("repoUrl")).toBe(String(record["repo_url"] ?? ""));
+        expect(await driver.settingsGeneralFieldValue("baseBranch")).toBe(String(record["base_branch"] ?? ""));
+      }
     });
 
     await test.step("network, timezone and run-policy defaults match the server record", async () => {
@@ -253,9 +263,18 @@ test(
 
       await test.step("a bad base branch blocks the save with a field error", async () => {
         await driver.settingsGeneralFill("identifier", String(before["identifier"]));
-        await driver.settingsGeneralFill("baseBranch", "no spaces allowed!");
-        await driver.settingsGeneralSave();
-        expect(await driver.settingsGeneralFieldError("baseBranch")).not.toBe("");
+        if (driver.target === "web_new") {
+          // NEWPIDASH-413: branches live per repository row, so the bad
+          // branch is refused on the open form before any request fires
+          // and no row joins the list.
+          await driver.settingsGeneralReposAdd("https://github.com/acme/rules", "no spaces allowed!");
+          expect(await driver.settingsGeneralReposFormError()).not.toBe("");
+          expect(await driver.settingsGeneralReposRows()).toEqual([]);
+        } else {
+          await driver.settingsGeneralFill("baseBranch", "no spaces allowed!");
+          await driver.settingsGeneralSave();
+          expect(await driver.settingsGeneralFieldError("baseBranch")).not.toBe("");
+        }
       });
     } finally {
       await serverCleanupProject(seed.workspaceSlug, projectId, session);
@@ -275,9 +294,98 @@ test(
 
     expect(await driver.settingsGeneralFormVisible()).toBe(true);
     expect(await driver.settingsGeneralFormDimmed()).toBe(true);
-    for (const field of ["name", "description", "identifier", "repoUrl", "baseBranch"] as const) {
+    // NEWPIDASH-413: the new app renders branches per repository row, so
+    // it has no base-branch field to disable.
+    const fields =
+      driver.target === "web_new"
+        ? (["name", "description", "identifier", "repoUrl"] as const)
+        : (["name", "description", "identifier", "repoUrl", "baseBranch"] as const);
+    for (const field of fields) {
       expect(await driver.settingsGeneralFieldDisabled(field)).toBe(true);
     }
+    if (driver.target === "web_new") {
+      expect(await driver.settingsGeneralReposAddDisabled()).toBe(true);
+    }
     expect(await driver.settingsGeneralDangerVisible()).toBe(false);
+  }
+);
+
+test(
+  specTitle(["PSET-005", "PSET-006"], "repositories render as a list with add, edit, remove and duplicate errors"),
+  { tag: specTags(["PSET-005", "PSET-006"]) },
+  async ({ driver, seed }) => {
+    // NEWPIDASH-413, web_new only: the old app renders a single repo URL
+    // field, so it cannot exercise the list. Writes are echoed by the
+    // driver (the stack backend stores settings raw), so every assertion
+    // below holds on any backend.
+    test.skip(driver.target === "web", "repository list is a web_new surface");
+    const tag = `NF413 repos ${Date.now()}`;
+    const session = await signInSession(seed.email, seed.password);
+    const projectId = await serverCreateProjectWithFlags(
+      seed.workspaceSlug,
+      `${tag} project`,
+      parityProjectIdentifier("N413"),
+      {},
+      session
+    );
+    try {
+      await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
+      await driver.settingsGeneralOpen(seed.workspaceSlug, projectId);
+      await driver.settingsGeneralReposEchoWrites();
+
+      await test.step("an empty project shows the empty state", async () => {
+        expect(await driver.settingsGeneralReposEmptyVisible()).toBe(true);
+        expect(await driver.settingsGeneralReposRows()).toEqual([]);
+      });
+
+      await test.step("a legacy repository renders as one row with the repo-default caption", async () => {
+        await serverPatchProject(seed.workspaceSlug, projectId, session, {
+          repo_url: "https://github.com/acme/legacy",
+          base_branch: "",
+        });
+        await driver.settingsGeneralOpen(seed.workspaceSlug, projectId);
+        await driver.settingsGeneralReposEchoWrites();
+        await expect
+          .poll(() => driver.settingsGeneralReposRows(), { timeout: 30_000 })
+          .toEqual([{ url: "https://github.com/acme/legacy", provider: "GitHub", branch: "repo default" }]);
+      });
+
+      await test.step("add writes the whole list and the new row renders", async () => {
+        await driver.settingsGeneralReposAdd("git@github.com:acme/added.git", "trunk");
+        await expect
+          .poll(() => driver.settingsGeneralReposRows(), { timeout: 30_000 })
+          .toEqual([
+            { url: "https://github.com/acme/legacy", provider: "GitHub", branch: "repo default" },
+            { url: "git@github.com:acme/added.git", provider: "GitHub", branch: "trunk" },
+          ]);
+      });
+
+      await test.step("edit rewrites the row in place", async () => {
+        await driver.settingsGeneralReposEdit(1, "https://github.com/acme/renamed", "");
+        await expect
+          .poll(() => driver.settingsGeneralReposRows(), { timeout: 30_000 })
+          .toEqual([
+            { url: "https://github.com/acme/legacy", provider: "GitHub", branch: "repo default" },
+            { url: "https://github.com/acme/renamed", provider: "GitHub", branch: "repo default" },
+          ]);
+      });
+
+      await test.step("a duplicate of another row is refused on the form", async () => {
+        await driver.settingsGeneralReposAdd("git@github.com:acme/legacy.git", "");
+        expect(await driver.settingsGeneralReposFormError()).toContain("already in the list");
+        expect(await driver.settingsGeneralReposRows()).toHaveLength(2);
+        await driver.settingsGeneralReposCancelForm();
+      });
+
+      await test.step("remove drops the row and the empty state returns", async () => {
+        await driver.settingsGeneralReposRemove(1);
+        await expect.poll(() => driver.settingsGeneralReposRows(), { timeout: 30_000 }).toHaveLength(1);
+        await driver.settingsGeneralReposRemove(0);
+        await expect.poll(() => driver.settingsGeneralReposRows(), { timeout: 30_000 }).toEqual([]);
+        expect(await driver.settingsGeneralReposEmptyVisible()).toBe(true);
+      });
+    } finally {
+      await serverCleanupProject(seed.workspaceSlug, projectId, session);
+    }
   }
 );

@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // The General tab's identity fields (parity/specs/project-settings-general.md
-// §PSET-006): name, description, short code and base branch, each with its
-// own rule and inline message. Visibility and timezone are pickers, so they
-// live with their own controls in the form.
+// §PSET-006): name, description and short code, each with its own rule and
+// inline message. Repository branches live per row in the repositories
+// list (NEWPIDASH-413). Visibility and timezone are pickers, so they live
+// with their own controls in the form.
 
 import { Button, Combobox, Input, Textarea } from "@pidash/kit";
 import { ChevronDown } from "lucide-react";
@@ -136,16 +137,6 @@ export function GeneralDetailsFields({
           onChange={(event) => onChange({ description: event.target.value })}
         />
       </div>
-      <Input
-        id="baseBranch"
-        name="baseBranch"
-        label="Base branch"
-        value={values.baseBranch}
-        disabled={disabled}
-        autoComplete="off"
-        {...(errors.baseBranch === undefined ? {} : { error: errors.baseBranch })}
-        onChange={(event) => onChange({ baseBranch: event.target.value })}
-      />
     </div>
   );
 }

@@ -30,8 +30,12 @@ import {
   REPO_BIND_FAILED_TITLE,
   REPO_BOUND_MESSAGE,
   REPO_BOUND_TITLE,
+  REPOS_SAVE_FAILED_TITLE,
+  REPOS_SAVED_MESSAGE,
+  REPOS_SAVED_TITLE,
   useBindRepository,
   useSaveProjectGeneral,
+  useSaveProjectRepos,
   useUploadEmblem,
 } from "./mutations.js";
 import { generalKeys } from "./queries.js";
@@ -236,6 +240,48 @@ describe("useSaveProjectGeneral", () => {
       hook.result.current.mutate({ name: "" });
     });
     await waitFor(() => expect(hook.result.current.isError).toBe(true));
+    expect(notifySuccess).not.toHaveBeenCalled();
+  });
+});
+
+describe("useSaveProjectRepos", () => {
+  const entry = {
+    id: "323e4567-e89b-12d3-a456-426614174002",
+    url: "https://github.com/acme/site",
+    provider: "github",
+    base_branch: "main",
+  };
+
+  it("PATCHes the whole list through settings, confirms, and re-reads the row", async () => {
+    const { calls } = stubApi({
+      patchRows: [projectRow({ settings: { repos: [entry] }, repos: [entry] })],
+    });
+    const queryClient = testClient();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const hook = renderHook(() => useSaveProjectRepos("acme", UUID), { wrapper: wrapper(queryClient) });
+
+    act(() => {
+      hook.result.current.mutate({ repos: [entry] });
+    });
+    await waitFor(() => expect(hook.result.current.isSuccess).toBe(true));
+
+    expect(calls.find((call) => call.method === "PATCH")?.body).toEqual({ settings: { repos: [entry] } });
+    expect(notifySuccess).toHaveBeenCalledWith(REPOS_SAVED_TITLE, REPOS_SAVED_MESSAGE);
+    expect(queryClient.getQueryData(generalKeys.detail("acme", UUID))).toMatchObject({
+      settings: { repos: [entry] },
+    });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: generalKeys.detail("acme", UUID) });
+  });
+
+  it("toasts the refusal and confirms nothing", async () => {
+    stubApi({ patchStatus: 400 });
+    const hook = renderHook(() => useSaveProjectRepos("acme", UUID), { wrapper: wrapper(testClient()) });
+
+    act(() => {
+      hook.result.current.mutate({ repos: [] });
+    });
+    await waitFor(() => expect(hook.result.current.isError).toBe(true));
+    expect(notifyError).toHaveBeenCalledWith(REPOS_SAVE_FAILED_TITLE, expect.any(String));
     expect(notifySuccess).not.toHaveBeenCalled();
   });
 });

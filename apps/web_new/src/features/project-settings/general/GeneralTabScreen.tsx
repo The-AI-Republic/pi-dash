@@ -23,6 +23,7 @@ import { ExecutionSection } from "./components/ExecutionSection.js";
 import { GeneralDetailsFields } from "./components/GeneralDetailsFields.js";
 import { GeneralDangerZone } from "./components/GeneralDangerZone.js";
 import { GeneralIdentity } from "./components/GeneralIdentity.js";
+import { RepositoriesSection } from "./components/RepositoriesSection.js";
 import { RepositoryRow } from "./components/RepositoryRow.js";
 import {
   EMBLEM_UPLOAD_FAILED_MESSAGE,
@@ -30,6 +31,7 @@ import {
   PROJECT_SAVE_FAILED_TITLE,
   useBindRepository,
   useSaveProjectGeneral,
+  useSaveProjectRepos,
   useUploadEmblem,
 } from "./api/mutations.js";
 import {
@@ -45,6 +47,8 @@ import {
   generalFormFrom,
   IDENTIFIER_CHECK_FAILED_MESSAGE,
   identifierUnavailable,
+  reposServerErrors,
+  reposToPayload,
   reseatGeneralForm,
   saveFailureMessage,
   shapeIdentifier,
@@ -53,6 +57,8 @@ import {
   validateGeneralFields,
   type GeneralFieldErrors,
   type GeneralFormValues,
+  type RepoRow,
+  type ReposServerErrors,
 } from "./rules.js";
 
 /** Save control copy at rest and while the write is in flight. */
@@ -88,6 +94,8 @@ function GeneralTabBody({
   // server (PSET-007) rather than saving a half-applied form.
   const [emblemUploadFailed, setEmblemUploadFailed] = React.useState(false);
   const save = useSaveProjectGeneral(workspaceSlug, projectId);
+  const reposSave = useSaveProjectRepos(workspaceSlug, projectId);
+  const [reposErrors, setReposErrors] = React.useState<ReposServerErrors>({ rows: new Map(), general: [] });
   const bind = useBindRepository(workspaceSlug, projectId);
   const upload = useUploadEmblem(workspaceSlug, projectId);
   const status = useRepositoryStatus(workspaceSlug, projectId, true);
@@ -107,6 +115,25 @@ function GeneralTabBody({
   const precheck = useIdentifierCheck(
     workspaceSlug,
     identifierChanged && values.identifier.trim() !== "" ? values.identifier.trim() : null
+  );
+
+  /**
+   * Write a confirmed repository list (NEWPIDASH-413). The mutation
+   * re-seeds and re-reads the row, so a kept write reseats the form
+   * from the server; a refusal maps onto the rows it rejected.
+   */
+  const commitRepos = React.useCallback(
+    async (rows: RepoRow[]): Promise<boolean> => {
+      setReposErrors({ rows: new Map(), general: [] });
+      try {
+        await reposSave.mutateAsync({ repos: reposToPayload(rows) });
+        return true;
+      } catch (error: unknown) {
+        setReposErrors(reposServerErrors(error));
+        return false;
+      }
+    },
+    [reposSave]
   );
 
   const update = React.useCallback((patch: Partial<GeneralFormValues>): void => {
@@ -225,6 +252,13 @@ function GeneralTabBody({
         timezonesLoading={timezones.isPending}
         timezonesFailed={timezones.isError}
         onChange={update}
+      />
+      <RepositoriesSection
+        rows={values.repos}
+        disabled={!canEdit}
+        saving={reposSave.isPending}
+        serverErrors={reposErrors}
+        onCommit={commitRepos}
       />
       <RepositoryRow
         value={values.repoUrl}

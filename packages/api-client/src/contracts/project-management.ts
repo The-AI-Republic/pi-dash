@@ -13,7 +13,7 @@
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
 import { dateTime, nullableDateTime, nullableUuid, uuid } from "./fields.js";
-import { ProjectDetails, WorkspaceUserProperties } from "./projects.js";
+import { ProjectDetails, WorkspaceUserProperties, type ProjectRepo } from "./projects.js";
 
 export interface ProjectCreateInput {
   name: string;
@@ -21,6 +21,13 @@ export interface ProjectCreateInput {
   description?: string;
   repo_url?: string;
   base_branch?: string;
+  /**
+   * Validated settings bag the server stores (NEWPIDASH-409): the new
+   * UI creates with a `repos` list instead of the legacy columns.
+   */
+  settings?: {
+    repos?: ProjectRepo[];
+  };
   network?: number;
   project_lead?: string | null;
   logo_props?: Record<string, unknown>;
@@ -113,12 +120,14 @@ export interface ProjectUpdateInput {
   /**
    * Typed per-project settings (NEWPIDASH-261): the nested partial
    * the server merges into `projects.settings`. The registered keys are
-   * `issue_run_policy` and `agent_stages`; project/workspace admins only
-   * (403 otherwise). `agent_stages` is replaced whole on write.
+   * `issue_run_policy`, `agent_stages` and `repos` (NEWPIDASH-409);
+   * project/workspace admins only (403 otherwise). `agent_stages` and
+   * `repos` are each replaced whole on write.
    */
   settings?: {
     issue_run_policy?: "creator_and_assignees" | "project_members";
     agent_stages?: { mode: "auto" | "custom"; review?: boolean; test?: boolean };
+    repos?: ProjectRepo[];
   };
 }
 

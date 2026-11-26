@@ -11,7 +11,6 @@ import { describe, expect, it } from "vitest";
 import type { ProjectSettingsDetail } from "@pidash/api-client";
 import {
   BASE_BRANCH_CHARS_MESSAGE,
-  BASE_BRANCH_TOO_LONG_MESSAGE,
   budgetOnSave,
   buildGeneralPayload,
   cadenceSeconds,
@@ -28,6 +27,7 @@ import {
   emblemFileError,
   generalConflictError,
   generalFormFrom,
+  inferRepoProvider,
   reseatGeneralForm,
   IDENTIFIER_REQUIRED_MESSAGE,
   IDENTIFIER_TAKEN_CODE,
@@ -42,7 +42,18 @@ import {
   NAME_TAKEN_CODE,
   NAME_TAKEN_MESSAGE,
   NAME_TOO_LONG_MESSAGE,
+  REPO_BRANCH_TOO_LONG_MESSAGE,
+  REPO_DUPLICATE_MESSAGE,
+  REPO_PROVIDER_LABELS,
+  REPO_URL_INVALID_MESSAGE,
+  REPO_URL_REQUIRED_MESSAGE,
+  REPO_URL_TOO_LONG_MESSAGE,
   repositoryBoundState,
+  reposRowsFrom,
+  reposServerErrors,
+  reposToPayload,
+  repoIdentityKey,
+  repoRowsValid,
   saveFailureMessage,
   selectCadence,
   shapeBudget,
@@ -51,7 +62,9 @@ import {
   stagesFrom,
   uploadedEmblem,
   validateGeneralFields,
+  validateRepoRows,
   type GeneralFormValues,
+  type RepoRow,
 } from "./rules.js";
 
 const STORED: ProjectSettingsDetail = {
@@ -116,6 +129,16 @@ function values(overrides: Partial<GeneralFormValues> = {}): GeneralFormValues {
   return { ...generalFormFrom(STORED), ...overrides };
 }
 
+function row(overrides: Partial<RepoRow> = {}): RepoRow {
+  return {
+    id: "223e4567-e89b-12d3-a456-426614174010",
+    url: "https://github.com/acme/site",
+    provider: "github",
+    baseBranch: "develop",
+    ...overrides,
+  };
+}
+
 describe("generalFormFrom", () => {
   it("prefills every editable field from the stored row", () => {
     const form = generalFormFrom(STORED);
@@ -125,7 +148,6 @@ describe("generalFormFrom", () => {
       description: "Public site work",
       network: 2,
       timezone: "Europe/Lisbon",
-      baseBranch: "develop",
       repoUrl: "https://github.com/acme/site",
       ticking: true,
       budget: "7",
@@ -133,6 +155,15 @@ describe("generalFormFrom", () => {
       lastCappedBudget: "7",
       cadence: "21600",
     });
+    // Servers that predate the list answer no repos key: the stored
+    // legacy URL still renders as the one row.
+    expect(form.repos).toHaveLength(1);
+    expect(form.repos[0]).toMatchObject({
+      url: "https://github.com/acme/site",
+      provider: "github",
+      baseBranch: "develop",
+    });
+    expect(typeof form.repos[0]?.id).toBe("string");
     expect(form.logoProps).toEqual(STORED.logo_props);
   });
 
@@ -236,17 +267,6 @@ describe("validateGeneralFields", () => {
     });
   });
 
-  it("allows a blank base branch, caps it and restricts its characters", () => {
-    expect(validateGeneralFields(values({ baseBranch: "" }))).toEqual({});
-    expect(validateGeneralFields(values({ baseBranch: "a".repeat(129) }))).toEqual({
-      baseBranch: BASE_BRANCH_TOO_LONG_MESSAGE,
-    });
-    expect(validateGeneralFields(values({ baseBranch: "feature branch" }))).toEqual({
-      baseBranch: BASE_BRANCH_CHARS_MESSAGE,
-    });
-    expect(validateGeneralFields(values({ baseBranch: "release/2.0_hotfix-1" }))).toEqual({});
-  });
-
   it("requires a whole budget of at least one while ticking", () => {
     expect(validateGeneralFields(values({ budget: "" }))).toEqual({ budget: expect.any(String) });
     expect(validateGeneralFields(values({ budget: "0" }))).toEqual({ budget: expect.any(String) });
@@ -323,7 +343,7 @@ describe("stages", () => {
 });
 
 describe("buildGeneralPayload", () => {
-  it("carries the editable fields but never the repository URL", () => {
+  it("carries the editable fields but never the repository URL or branch", () => {
     const payload = buildGeneralPayload({ values: values({ name: "New name" }), cadenceDirty: false });
     expect(payload).toEqual({
       name: "New name",
@@ -331,12 +351,13 @@ describe("buildGeneralPayload", () => {
       description: "Public site work",
       network: 2,
       timezone: "Europe/Lisbon",
-      base_branch: "develop",
       logo_props: STORED.logo_props,
       agent_ticking_enabled: true,
       agent_default_max_ticks: 7,
     });
     expect("repo_url" in payload).toBe(false);
+    // Branches ride the repos list now; the general save carries none.
+    expect("base_branch" in payload).toBe(false);
     // Runner is the only executor: the tab never writes one.
     expect("default_agent_executor" in payload).toBe(false);
   });
@@ -503,5 +524,152 @@ describe("emblem values", () => {
   it("refuses another type or an oversized image", () => {
     expect(emblemFileError({ type: "image/svg+xml", size: 10 })).toBe(EMBLEM_TYPE_MESSAGE);
     expect(emblemFileError({ type: "image/png", size: EMBLEM_MAX_BYTES + 1 })).toBe(EMBLEM_SIZE_MESSAGE);
+  });
+});
+
+describe("reposRowsFrom", () => {
+  it("reads the merged list as rows, filling providers and blank branches", () => {
+    const rows = reposRowsFrom({
+      ...STORED,
+      repos: [
+        {
+          id: "223e4567-e89b-12d3-a456-426614174011",
+          url: "https://github.com/acme/site",
+          provider: "github",
+          base_branch: "develop",
+        },
+        { id: "223e4567-e89b-12d3-a456-426614174012", url: "git@git.test:acme/other.git", base_branch: null },
+      ],
+    });
+    expect(rows).toEqual([
+      {
+        id: "223e4567-e89b-12d3-a456-426614174011",
+        url: "https://github.com/acme/site",
+        provider: "github",
+        baseBranch: "develop",
+      },
+      {
+        id: "223e4567-e89b-12d3-a456-426614174012",
+        url: "git@git.test:acme/other.git",
+        provider: "other",
+        baseBranch: "",
+      },
+    ]);
+  });
+
+  it("renders an empty list as empty, and a legacy-only URL as one fallback row", () => {
+    expect(reposRowsFrom({ ...STORED, repos: [], repo_url: "https://github.com/acme/site" })).toEqual([]);
+    const fallback = reposRowsFrom({ ...STORED, repo_url: "https://github.com/acme/site", base_branch: "" });
+    expect(fallback).toHaveLength(1);
+    expect(fallback[0]).toMatchObject({ url: "https://github.com/acme/site", provider: "github", baseBranch: "" });
+    expect(reposRowsFrom({ ...STORED, repo_url: "  " })).toEqual([]);
+  });
+});
+
+describe("inferRepoProvider", () => {
+  it("reads the host, defaulting to other", () => {
+    expect(inferRepoProvider("https://github.com/acme/site")).toBe("github");
+    expect(inferRepoProvider("git@github.com:acme/site.git")).toBe("github");
+    expect(inferRepoProvider("https://gitlab.com/acme/site")).toBe("gitlab");
+    expect(inferRepoProvider("ssh://git@git.test/acme/site.git")).toBe("other");
+    expect(inferRepoProvider("not a repo")).toBe("other");
+    expect(REPO_PROVIDER_LABELS).toEqual({ github: "GitHub", gitlab: "GitLab", other: "Other" });
+  });
+});
+
+describe("repoIdentityKey", () => {
+  it("maps every URL form of one repo to one key", () => {
+    const key = repoIdentityKey("https://github.com/acme/web");
+    expect(key).toBe("github.com/acme/web");
+    for (const form of [
+      "https://github.com/acme/web/",
+      "https://github.com/acme/web.git",
+      "https://GITHUB.COM/acme/web",
+      "https://github.com/ACME/WEB",
+      "git@github.com:acme/web.git",
+      "git@github.com:acme/web",
+      "ssh://git@github.com/acme/web.git",
+      "http://github.com/acme/web",
+    ]) {
+      expect(repoIdentityKey(form)).toBe(key);
+    }
+  });
+
+  it("keeps non-GitHub owner case and query strings out of the key", () => {
+    expect(repoIdentityKey("https://git.test/Acme/Web")).toBe("git.test/Acme/Web");
+    expect(repoIdentityKey("https://git.test/acme/web?x=1#frag")).toBe("git.test/acme/web");
+    expect(repoIdentityKey("https://gitlab.com/group/sub/repo")).toBe("gitlab.com/group/sub/repo");
+  });
+
+  it("refuses anything unparseable", () => {
+    for (const bad of ["", "   ", "not a repo", "ftp://git.test/acme/web", "https://", "github.com", "git@test:"]) {
+      expect(repoIdentityKey(bad)).toBeNull();
+    }
+  });
+});
+
+describe("validateRepoRows", () => {
+  it("accepts clean rows", () => {
+    expect(
+      validateRepoRows([row(), row({ id: "id-2", url: "https://github.com/acme/other", baseBranch: "" })])
+    ).toEqual([{}, {}]);
+    expect(repoRowsValid([row()])).toBe(true);
+  });
+
+  it("requires a shaped URL within its cap", () => {
+    expect(validateRepoRows([row({ url: "   " })])[0]?.url).toBe(REPO_URL_REQUIRED_MESSAGE);
+    expect(validateRepoRows([row({ url: `https://git.test/${"x".repeat(600)}` })])[0]?.url).toBe(
+      REPO_URL_TOO_LONG_MESSAGE
+    );
+    expect(validateRepoRows([row({ url: "not a repo" })])[0]?.url).toBe(REPO_URL_INVALID_MESSAGE);
+    expect(repoRowsValid([row({ url: "not a repo" })])).toBe(false);
+  });
+
+  it("caps the branch with the server's charset", () => {
+    expect(validateRepoRows([row({ baseBranch: "a".repeat(129) })])[0]?.baseBranch).toBe(REPO_BRANCH_TOO_LONG_MESSAGE);
+    expect(validateRepoRows([row({ baseBranch: "feature branch" })])[0]?.baseBranch).toBe(BASE_BRANCH_CHARS_MESSAGE);
+    expect(validateRepoRows([row({ baseBranch: "release/2.0_hotfix-1" })])[0]).toEqual({});
+  });
+
+  it("rejects two rows for one repository in another URL form", () => {
+    const errors = validateRepoRows([row(), row({ id: "id-2", url: "git@github.com:acme/site.git" })]);
+    expect(errors[0]).toEqual({});
+    expect(errors[1]?.url).toBe(REPO_DUPLICATE_MESSAGE);
+    expect(repoRowsValid([row(), row({ id: "id-2", url: "git@github.com:acme/site.git" })])).toBe(false);
+  });
+});
+
+describe("reposToPayload", () => {
+  it("trims URLs and writes blank branches as null", () => {
+    expect(reposToPayload([row({ url: "  https://github.com/acme/site  ", baseBranch: "" })])).toEqual([
+      { id: row().id, url: "https://github.com/acme/site", provider: "github", base_branch: null },
+    ]);
+    expect(reposToPayload([row()])[0]?.base_branch).toBe("develop");
+  });
+});
+
+describe("reposServerErrors", () => {
+  function refused(fields: Record<string, string[]>): ApiError {
+    return new ApiError({ status: 400, code: "validation", message: "invalid", fields });
+  }
+
+  it("maps each entry message onto its row", () => {
+    const parsed = reposServerErrors(
+      refused({ settings: ["invalid value for repos: entry 1 is a duplicate of another repository in the list"] })
+    );
+    expect(parsed.rows.get(1)).toBe("is a duplicate of another repository in the list");
+    expect(parsed.general).toEqual([]);
+  });
+
+  it("surfaces unindexed messages under the section", () => {
+    const parsed = reposServerErrors(refused({ settings: ["settings must be a JSON object"] }));
+    expect(parsed.rows.size).toBe(0);
+    expect(parsed.general).toEqual(["settings must be a JSON object"]);
+  });
+
+  it("ignores foreign fields and non-API errors", () => {
+    expect(reposServerErrors(refused({ name: ["REQUIRED"] })).rows.size).toBe(0);
+    expect(reposServerErrors(new Error("boom")).general).toEqual([]);
+    expect(reposServerErrors(undefined).general).toEqual([]);
   });
 });

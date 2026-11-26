@@ -14,6 +14,7 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
 });
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import userEvent from "@testing-library/user-event";
 import { CREATED_TITLE } from "../api/mutations.js";
 import { CREATE_ICON_CHOICES, CREATE_REPO_URL_MAX_LENGTH } from "../lib/project-create.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
@@ -164,8 +165,12 @@ describe("CreateProjectDialog", () => {
     expect((screen.getByPlaceholderText("Project ID") as HTMLInputElement).value).toBe("");
     expect(screen.queryByRole("button", { name: "Project template" })).toBeNull();
     expect(screen.getByPlaceholderText("Project Context (Will be shown to AI agents)")).toBeInTheDocument();
-    expect(screen.getByPlaceholderText("Repository URL, e.g. https://github.com/team/project")).toBeInTheDocument();
-    expect(screen.getByPlaceholderText("Base branch (blank uses the remote default)")).toBeInTheDocument();
+    // Repositories are a list now: the dialog starts empty with an add
+    // control, and no single URL or branch input remains.
+    expect(screen.getByTestId("general-repos")).toBeInTheDocument();
+    expect(screen.getByTestId("general-repos-empty")).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Repository URL, e.g. https://github.com/team/project")).toBeNull();
+    expect(screen.queryByPlaceholderText("Base branch (blank uses the remote default)")).toBeNull();
   });
 
   it("derives the short code from the name until hand-edited", () => {
@@ -203,35 +208,62 @@ describe("CreateProjectDialog", () => {
     expect(notifySuccess).not.toHaveBeenCalled();
   });
 
-  it("shows repository and base-branch errors without sending a request", () => {
-    const { calls } = succeed();
+  it("shows row errors and never commits a refused draft", async () => {
+    const user = userEvent.setup();
+    succeed();
     setup();
 
     fireEvent.change(screen.getByPlaceholderText("Project name"), { target: { value: "Nebula" } });
-    fireEvent.change(screen.getByPlaceholderText("Base branch (blank uses the remote default)"), {
-      target: { value: "feat branch" },
+    await user.click(screen.getByTestId("general-repos-add"));
+    fireEvent.change(screen.getByTestId("general-repos-new-url"), {
+      target: { value: "https://github.com/acme/nebula" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
-    expect(screen.getByText("Base branch may only contain letters, numbers, and . _ / -.")).toBeInTheDocument();
-    expect(calls).toHaveLength(0);
+    fireEvent.change(screen.getByTestId("general-repos-new-branch"), { target: { value: "feat branch" } });
+    await user.click(screen.getByTestId("general-repos-new-confirm"));
+    // The shared section renders its own copy in both surfaces.
+    expect(screen.getByText("A branch name may contain only letters, numbers, and . _ / -")).toBeInTheDocument();
+    expect(screen.queryByTestId("general-repos-row")).toBeNull();
   });
 
-  it("shows the repository length error without sending a request", () => {
-    const { calls } = succeed();
+  it("shows the repository length error without committing", async () => {
+    const user = userEvent.setup();
+    succeed();
     setup();
 
     fireEvent.change(screen.getByPlaceholderText("Project name"), { target: { value: "Nebula" } });
-    fireEvent.change(screen.getByPlaceholderText("Repository URL, e.g. https://github.com/team/project"), {
+    await user.click(screen.getByTestId("general-repos-add"));
+    fireEvent.change(screen.getByTestId("general-repos-new-url"), {
       target: { value: "x".repeat(CREATE_REPO_URL_MAX_LENGTH + 1) },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
-    expect(
-      screen.getByText(`Keep the repository URL to ${CREATE_REPO_URL_MAX_LENGTH} characters or fewer.`)
-    ).toBeInTheDocument();
-    expect(calls).toHaveLength(0);
+    await user.click(screen.getByTestId("general-repos-new-confirm"));
+    // The shared section renders its own copy in both surfaces.
+    expect(screen.getByText(`Keep the repository URL to ${CREATE_REPO_URL_MAX_LENGTH} characters`)).toBeInTheDocument();
+    expect(screen.queryByTestId("general-repos-row")).toBeNull();
   });
 
-  it("creates with one POST carrying identity, visibility, lead, icon and timezone", async () => {
+  it("rejects a duplicate of another row in another URL form", async () => {
+    const user = userEvent.setup();
+    succeed();
+    setup();
+
+    fireEvent.change(screen.getByPlaceholderText("Project name"), { target: { value: "Nebula" } });
+    await user.click(screen.getByTestId("general-repos-add"));
+    fireEvent.change(screen.getByTestId("general-repos-new-url"), {
+      target: { value: "https://github.com/acme/nebula" },
+    });
+    await user.click(screen.getByTestId("general-repos-new-confirm"));
+    expect(screen.getAllByTestId("general-repos-row")).toHaveLength(1);
+    await user.click(screen.getByTestId("general-repos-add"));
+    fireEvent.change(screen.getByTestId("general-repos-new-url"), {
+      target: { value: "git@github.com:acme/nebula.git" },
+    });
+    await user.click(screen.getByTestId("general-repos-new-confirm"));
+    expect(screen.getByText("This repository is already in the list.")).toBeInTheDocument();
+    expect(screen.getAllByTestId("general-repos-row")).toHaveLength(1);
+  });
+
+  it("creates with one POST carrying identity, visibility, lead, icon, timezone and repos", async () => {
+    const user = userEvent.setup();
     const { calls, bodies } = succeed();
     const { onOpenChange } = setup();
 
@@ -245,12 +277,13 @@ describe("CreateProjectDialog", () => {
     fireEvent.change(screen.getByPlaceholderText("Project Context (Will be shown to AI agents)"), {
       target: { value: "Team space" },
     });
-    fireEvent.change(screen.getByPlaceholderText("Repository URL, e.g. https://github.com/team/project"), {
+    await user.click(screen.getByTestId("general-repos-add"));
+    fireEvent.change(screen.getByTestId("general-repos-new-url"), {
       target: { value: "git@github.com:acme/nebula.git" },
     });
-    fireEvent.change(screen.getByPlaceholderText("Base branch (blank uses the remote default)"), {
-      target: { value: "develop" },
-    });
+    fireEvent.change(screen.getByTestId("general-repos-new-branch"), { target: { value: "develop" } });
+    await user.click(screen.getByTestId("general-repos-new-confirm"));
+    expect(screen.getAllByTestId("general-repos-row")).toHaveLength(1);
 
     const timezoneLine = screen.getByText(/^Timezone:/).textContent ?? "";
     fireEvent.click(screen.getByRole("button", { name: "Create project" }));
@@ -264,8 +297,16 @@ describe("CreateProjectDialog", () => {
       name: "Nebula Craft",
       identifier: "NEBULACRAF",
       description: "Team space",
-      repo_url: "git@github.com:acme/nebula.git",
-      base_branch: "develop",
+      settings: {
+        repos: [
+          {
+            id: expect.any(String),
+            url: "git@github.com:acme/nebula.git",
+            provider: "github",
+            base_branch: "develop",
+          },
+        ],
+      },
       network: 0,
       project_lead: LEAD_ID,
       logo_props: { in_use: "emoji", emoji: { value: CREATE_ICON_CHOICES[3] } },
@@ -276,10 +317,45 @@ describe("CreateProjectDialog", () => {
       page_view: false,
       intake_view: false,
     });
+    expect("repo_url" in payload).toBe(false);
+    expect("base_branch" in payload).toBe(false);
     for (const key of Object.keys(payload)) {
       expect(key.startsWith("cover_")).toBe(false);
     }
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("creates with no settings bag when no repository is listed", async () => {
+    const { bodies } = succeed();
+    setup();
+
+    fireEvent.change(screen.getByPlaceholderText("Project name"), { target: { value: "Nebula Craft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(CREATED_TITLE, "Project created successfully"));
+
+    const payload = JSON.parse(bodies[0] ?? "{}") as Record<string, unknown>;
+    expect("settings" in payload).toBe(false);
+    expect("repo_url" in payload).toBe(false);
+    expect("base_branch" in payload).toBe(false);
+  });
+
+  it("maps a refused repos entry onto its row and stays open", async () => {
+    const user = userEvent.setup();
+    failWith(JSON.stringify({ settings: ["invalid value for repos: entry 0 url must be a valid repository URL"] }));
+    const { onOpenChange } = setup();
+
+    fireEvent.change(screen.getByPlaceholderText("Project name"), { target: { value: "Nebula Craft" } });
+    await user.click(screen.getByTestId("general-repos-add"));
+    fireEvent.change(screen.getByTestId("general-repos-new-url"), {
+      target: { value: "https://github.com/acme/nebula" },
+    });
+    await user.click(screen.getByTestId("general-repos-new-confirm"));
+    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+    expect(await screen.findByTestId("general-repos-row-error")).toHaveTextContent(
+      "url must be a valid repository URL"
+    );
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(notifyError).not.toHaveBeenCalled();
   });
 
   it("closes on success with no feature step (PSET-048)", async () => {

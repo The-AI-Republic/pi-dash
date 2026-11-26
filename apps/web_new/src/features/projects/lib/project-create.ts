@@ -22,6 +22,28 @@ export const CREATE_BASE_BRANCH_MAX_LENGTH = 128;
 /** Characters a base branch may contain. */
 export const BASE_BRANCH_PATTERN = /^[A-Za-z0-9._/-]*$/;
 
+/** Repository list providers the server accepts (NEWPIDASH-409). */
+export const CREATE_REPO_PROVIDERS = ["github", "gitlab", "other"] as const;
+export type CreateRepoProvider = (typeof CREATE_REPO_PROVIDERS)[number];
+
+/** Provider labels the create form renders. */
+export const CREATE_REPO_PROVIDER_LABELS: Record<CreateRepoProvider, string> = {
+  github: "GitHub",
+  gitlab: "GitLab",
+  other: "Other",
+};
+
+/** Caption a row shows when the entry follows the repo's own default branch. */
+export const CREATE_REPO_DEFAULT_BRANCH_LABEL = "repo default";
+
+/** Field-level messages the repository rows render inline. */
+export const CREATE_REPO_URL_REQUIRED_MESSAGE = "Enter a repository URL.";
+export const CREATE_REPO_URL_TOO_LONG_MESSAGE = `Keep the repository URL to ${CREATE_REPO_URL_MAX_LENGTH} characters or fewer.`;
+export const CREATE_REPO_URL_INVALID_MESSAGE = "Enter a valid repository URL.";
+export const CREATE_REPO_BRANCH_TOO_LONG_MESSAGE = `Keep the base branch to ${CREATE_BASE_BRANCH_MAX_LENGTH} characters.`;
+export const CREATE_REPO_PROVIDER_MESSAGE = "Choose GitHub, GitLab or Other.";
+export const CREATE_REPO_DUPLICATE_MESSAGE = "This repository is already in the list.";
+
 /** Guidance the description field carries on the create form (target main#503). */
 export const CREATE_DESCRIPTION_PLACEHOLDER = "Project Context (Will be shown to AI agents)";
 
@@ -99,21 +121,37 @@ export function buildCreateLogoProps(emoji: string): Record<string, unknown> {
   return { in_use: "emoji", emoji: { value: emoji } };
 }
 
+/** One repository draft on the create form (NEWPIDASH-413). */
+export interface CreateRepoDraft {
+  url: string;
+  provider: CreateRepoProvider;
+  /** Blank means the repo's own default branch. */
+  baseBranch: string;
+}
+
 export interface CreateFieldValues {
   name: string;
   identifier: string;
-  repoUrl?: string;
-  baseBranch?: string;
+  repos?: CreateRepoDraft[];
+}
+
+/** Per-row errors the create form renders inline; `row` is a whole-row server message. */
+export interface CreateRepoRowErrors {
+  url?: string | undefined;
+  provider?: string | undefined;
+  baseBranch?: string | undefined;
+  row?: string | undefined;
 }
 
 export interface CreateFieldErrors {
   name?: string | undefined;
   identifier?: string | undefined;
-  repoUrl?: string | undefined;
-  baseBranch?: string | undefined;
+  repos?: CreateRepoRowErrors[] | undefined;
+  /** A list-level refusal that names no row. */
+  reposError?: string | undefined;
 }
 
-/** Client-side rules: identity required; repository and branch length/shape capped. */
+/** Client-side rules: identity required; every repository row validated. */
 export function validateCreateFields(values: CreateFieldValues): CreateFieldErrors {
   const errors: CreateFieldErrors = {};
   if (values.name.trim() === "") {
@@ -128,33 +166,152 @@ export function validateCreateFields(values: CreateFieldValues): CreateFieldErro
   } else if (!IDENTIFIER_PATTERN.test(values.identifier.toUpperCase())) {
     errors.identifier = "Use up to 10 letters and numbers only.";
   }
-  if ((values.repoUrl ?? "").trim().length > CREATE_REPO_URL_MAX_LENGTH) {
-    errors.repoUrl = `Keep the repository URL to ${CREATE_REPO_URL_MAX_LENGTH} characters or fewer.`;
-  }
-  if ((values.baseBranch ?? "").length > CREATE_BASE_BRANCH_MAX_LENGTH) {
-    errors.baseBranch = `Keep the base branch to ${CREATE_BASE_BRANCH_MAX_LENGTH} characters.`;
-  } else if (!BASE_BRANCH_PATTERN.test(values.baseBranch ?? "")) {
-    errors.baseBranch = "Base branch may only contain letters, numbers, and . _ / -.";
+  const rows = validateCreateRepoRows(values.repos ?? []);
+  if (rows.some((row) => Object.keys(row).length > 0)) {
+    errors.repos = rows;
   }
   return errors;
 }
 
 /**
+ * Infer the provider label for a repository URL (NEWPIDASH-413): the
+ * client's mirror of the server rule — `github.com` reads as GitHub,
+ * `gitlab.com` as GitLab, anything else (including an unparseable URL)
+ * as Other. Kept beside the settings tab's copy; the server stays
+ * authoritative on every write.
+ */
+export function inferCreateRepoProvider(url: string): CreateRepoProvider {
+  const host = createRepoUrlHost(url);
+  if (host === "github.com") return "github";
+  if (host === "gitlab.com") return "gitlab";
+  return "other";
+}
+
+/** Whitespace or control characters disqualify a URL (mirrors the server). */
+function hasBadCreateUrlChar(candidate: string): boolean {
+  for (const char of candidate) {
+    if (/\s/.test(char)) return true;
+    const code = char.codePointAt(0) ?? 0;
+    if (code <= 0x1f || code === 0x7f || (code >= 0x80 && code <= 0x9f)) return true;
+  }
+  return false;
+}
+
+/** Lowercase host of a repository URL, or null when it has no usable one. */
+function createRepoUrlHost(url: string): string | null {
+  const candidate = url.trim();
+  if (candidate === "" || hasBadCreateUrlChar(candidate)) return null;
+  const schemeAt = candidate.indexOf("://");
+  if (schemeAt !== -1) {
+    const scheme = candidate.slice(0, schemeAt).toLowerCase();
+    if (scheme !== "http" && scheme !== "https" && scheme !== "ssh") return null;
+    const authority = candidate.slice(schemeAt + 3).split("/", 1)[0] ?? "";
+    const hostPort = authority.split("@").pop() ?? "";
+    const host = hostPort.toLowerCase().replace(/:(443|80)$/, "");
+    return host === "" ? null : host;
+  }
+  const colonAt = candidate.indexOf(":");
+  if (colonAt === -1) return null;
+  const left = candidate.slice(0, colonAt);
+  const path = candidate.slice(colonAt + 1);
+  if (left === "" || left.includes("/") || path === "" || path.startsWith("/") || path.includes("\\")) return null;
+  const host = (left.split("@").pop() ?? "").toLowerCase();
+  return host === "" ? null : host;
+}
+
+/**
+ * The client's duplicate key (NEWPIDASH-413): a trimmed URL with a
+ * lowercased host, one trailing `.git` and trailing slashes stripped,
+ * and — for GitHub only, like the server — a lowercased path. Null for
+ * anything unparseable; the server stays authoritative there.
+ */
+export function createRepoIdentityKey(url: string): string | null {
+  const candidate = url.trim();
+  if (candidate === "" || hasBadCreateUrlChar(candidate)) return null;
+  const host = createRepoUrlHost(candidate);
+  if (host === null) return null;
+  const schemeAt = candidate.indexOf("://");
+  const rawPath =
+    schemeAt !== -1
+      ? candidate.slice(candidate.indexOf("/", schemeAt + 3) + 1 || candidate.length)
+      : candidate.slice(candidate.indexOf(":") + 1);
+  const path = rawPath.split("?")[0]?.split("#")[0] ?? "";
+  const clean = path.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
+  if (clean === "" || clean.includes(":") || clean.split("/").some((part) => part === "")) return null;
+  const keyed = host === "github.com" ? clean.toLowerCase() : clean;
+  return `${host}/${keyed}`;
+}
+
+/**
+ * Client-side row rules (NEWPIDASH-413): URL required, capped and shaped;
+ * provider known; branch capped with the server's charset; no two rows
+ * share an identity key.
+ */
+export function validateCreateRepoRows(rows: CreateRepoDraft[]): CreateRepoRowErrors[] {
+  const keys = rows.map((row) => createRepoIdentityKey(row.url));
+  return rows.map((row, index) => {
+    const errors: CreateRepoRowErrors = {};
+    if (row.url.trim() === "") {
+      errors.url = CREATE_REPO_URL_REQUIRED_MESSAGE;
+    } else if (row.url.length > CREATE_REPO_URL_MAX_LENGTH) {
+      errors.url = CREATE_REPO_URL_TOO_LONG_MESSAGE;
+    } else if (createRepoIdentityKey(row.url) === null) {
+      errors.url = CREATE_REPO_URL_INVALID_MESSAGE;
+    }
+    if (!(CREATE_REPO_PROVIDERS as readonly string[]).includes(row.provider)) {
+      errors.provider = CREATE_REPO_PROVIDER_MESSAGE;
+    }
+    if (row.baseBranch.length > CREATE_BASE_BRANCH_MAX_LENGTH) {
+      errors.baseBranch = CREATE_REPO_BRANCH_TOO_LONG_MESSAGE;
+    } else if (!BASE_BRANCH_PATTERN.test(row.baseBranch)) {
+      errors.baseBranch = "Base branch may only contain letters, numbers, and . _ / -.";
+    }
+    // Like the server, only the later entry is the duplicate.
+    if (
+      errors.url === undefined &&
+      keys[index] !== null &&
+      keys.some((key, other) => other < index && key !== null && key === keys[index])
+    ) {
+      errors.url = CREATE_REPO_DUPLICATE_MESSAGE;
+    }
+    return errors;
+  });
+}
+
+/**
  * Map a failed create POST onto the offending fields. Reused names or
- * codes surface the targeted taken messages; anything else leaves both
- * fields clear so the caller falls back to a generic notice.
+ * codes surface the targeted taken messages; a refused repos list maps
+ * each `entry <n>` message onto its row and anything unindexed onto the
+ * list. Anything else leaves every field clear so the caller falls back
+ * to a generic notice.
  */
 export function selectCreateFieldErrors(error: unknown): CreateFieldErrors {
   if (!isApiError(error) || error.fields === undefined) return {};
   const errors: CreateFieldErrors = {};
   if (error.fields["name"]?.includes(NAME_TAKEN_CODE)) errors.name = NAME_TAKEN_MESSAGE;
   if (error.fields["identifier"]?.includes(IDENTIFIER_TAKEN_CODE)) errors.identifier = IDENTIFIER_TAKEN_MESSAGE;
+  const settings = error.fields["settings"] ?? [];
+  if (settings.length > 0) {
+    const rows: CreateRepoRowErrors[] = [];
+    const general: string[] = [];
+    for (const message of settings) {
+      const match = /entry (\d+)\b/.exec(message);
+      if (match === null || match.index === undefined) {
+        general.push(message);
+        continue;
+      }
+      const index = Number(match[1]);
+      const detail = message.slice(match.index + match[0].length).trim();
+      const text = detail === "" ? message : detail;
+      rows[index] = { ...rows[index], row: rows[index]?.row === undefined ? text : `${rows[index]?.row} ${text}` };
+    }
+    if (rows.some((row) => row !== undefined && Object.keys(row).length > 0)) errors.repos = rows;
+    if (general.length > 0) errors.reposError = general.join(" ");
+  }
   return errors;
 }
 
 export interface CreatePayloadValues extends CreateFieldValues {
-  repoUrl?: string;
-  baseBranch?: string;
   description: string;
   network: number;
   projectLead: string | null;
@@ -163,17 +320,34 @@ export interface CreatePayloadValues extends CreateFieldValues {
 }
 
 /**
+ * One repository entry as the create POST carries it: a fresh id, the
+ * trimmed URL, and a null branch for the repo's own default.
+ */
+export function buildCreateReposPayload(
+  rows: CreateRepoDraft[]
+): NonNullable<NonNullable<ProjectCreateInput["settings"]>["repos"]> {
+  return rows.map((row) => ({
+    id: globalThis.crypto.randomUUID(),
+    url: row.url.trim(),
+    provider: row.provider,
+    base_branch: row.baseBranch === "" ? null : row.baseBranch,
+  }));
+}
+
+/**
  * The single-POST body (SHELL-040, SHELL-041): identity, visibility,
- * lead and icon plus the work-items-only view flags. No cover keys —
- * nothing here uploads, confirms or patches a cover (SHELL-042).
+ * lead and icon plus the work-items-only view flags. Repositories ride
+ * the validated settings bag (NEWPIDASH-413); the legacy columns stay
+ * empty. No cover keys — nothing here uploads, confirms or patches a
+ * cover (SHELL-042).
  */
 export function buildCreatePayload(values: CreatePayloadValues): ProjectCreateInput {
+  const repos = values.repos ?? [];
   return {
     name: values.name.trim(),
     identifier: values.identifier.toUpperCase(),
     description: values.description,
-    repo_url: (values.repoUrl ?? "").trim(),
-    base_branch: (values.baseBranch ?? "").trim(),
+    ...(repos.length === 0 ? {} : { settings: { repos: buildCreateReposPayload(repos) } }),
     network: values.network,
     project_lead: values.projectLead,
     logo_props: buildCreateLogoProps(values.icon),

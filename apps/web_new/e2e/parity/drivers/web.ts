@@ -281,6 +281,7 @@ import type {
   WsSettingsApiTokenBackup,
   WsSettingsApiTokenRow,
   SettingsGeneralField,
+  SettingsGeneralRepoRow,
   CommentActivityTraffic,
 } from "./parity-driver";
 
@@ -56305,6 +56306,42 @@ export class WebDriver implements ParityDriver {
     const bound = this.generalForm().getByRole("button", { name: "Bound", exact: true });
     if ((await bound.count()) > 0 && (await bound.first().isDisabled())) return "bound";
     return "bind";
+  }
+
+  /**
+   * The old app renders a single repository URL field, never a list
+   * (NEWPIDASH-413): the repos-list scenarios run web_new-only, so these
+   * stay inert here and only satisfy the shared driver contract.
+   */
+  async settingsGeneralReposRows(): Promise<SettingsGeneralRepoRow[]> {
+    return [];
+  }
+  async settingsGeneralReposEmptyVisible(): Promise<boolean> {
+    return false;
+  }
+  async settingsGeneralReposAddDisabled(): Promise<boolean> {
+    return true;
+  }
+  async settingsGeneralReposAdd(_url: string, _branch: string): Promise<void> {
+    throw new Error("[parity] the old app has no repository list");
+  }
+  async settingsGeneralReposEdit(_index: number, _url: string, _branch: string): Promise<void> {
+    throw new Error("[parity] the old app has no repository list");
+  }
+  async settingsGeneralReposRemove(_index: number): Promise<void> {
+    throw new Error("[parity] the old app has no repository list");
+  }
+  async settingsGeneralReposRowError(): Promise<string> {
+    return "";
+  }
+  async settingsGeneralReposFormError(): Promise<string> {
+    return "";
+  }
+  async settingsGeneralReposCancelForm(): Promise<void> {
+    return undefined;
+  }
+  async settingsGeneralReposEchoWrites(): Promise<void> {
+    return undefined;
   }
 
   async settingsGeneralBind(): Promise<void> {

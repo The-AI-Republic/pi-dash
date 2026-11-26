@@ -13,6 +13,7 @@ import type { WorkspaceMember } from "@pidash/api-client";
 import { Check, ChevronDown, Globe, Lock } from "lucide-react";
 import * as React from "react";
 
+import { RepositoriesSection, type RepoRow, type ReposServerErrors } from "../../project-settings/index.js";
 import { notifyError } from "../../../shared/shell/index.js";
 import { useCreateProject } from "../api/mutations.js";
 import {
@@ -20,7 +21,6 @@ import {
   CREATE_ICON_CHOICES,
   CREATE_IDENTIFIER_MAX_LENGTH,
   CREATE_DESCRIPTION_PLACEHOLDER,
-  CREATE_REPO_URL_MAX_LENGTH,
   CREATE_NETWORK_PRIVATE,
   CREATE_NETWORK_PUBLIC,
   deriveProjectIdentifier,
@@ -52,8 +52,7 @@ export function CreateProjectDialog({
   const [identifier, setIdentifier] = React.useState("");
   const [autoSync, setAutoSync] = React.useState(true);
   const [description, setDescription] = React.useState("");
-  const [repoUrl, setRepoUrl] = React.useState("");
-  const [baseBranch, setBaseBranch] = React.useState("");
+  const [repos, setRepos] = React.useState<RepoRow[]>([]);
   const [network, setNetwork] = React.useState<number>(CREATE_NETWORK_PUBLIC);
   const [lead, setLead] = React.useState<string | null>(null);
   const [icon, setIcon] = React.useState(() => pickCreateIcon());
@@ -68,8 +67,7 @@ export function CreateProjectDialog({
     setIdentifier("");
     setAutoSync(true);
     setDescription("");
-    setRepoUrl("");
-    setBaseBranch("");
+    setRepos([]);
     setNetwork(CREATE_NETWORK_PUBLIC);
     setLead(null);
     setIcon(pickCreateIcon());
@@ -92,8 +90,35 @@ export function CreateProjectDialog({
     setFieldErrors((prev) => ({ ...prev, identifier: undefined }));
   }
 
+  /**
+   * A refused create POST maps its `entry <n>` messages onto the rows
+   * they rejected, so the dialog can show them where they belong.
+   */
+  const reposErrors: ReposServerErrors = React.useMemo(() => {
+    const rows = new Map<number, string>();
+    (fieldErrors.repos ?? []).forEach((row, index) => {
+      if (row === undefined) return;
+      const parts = [row.url, row.provider, row.baseBranch, row.row].filter(
+        (part): part is string => part !== undefined
+      );
+      if (parts.length > 0) rows.set(index, parts.join(" "));
+    });
+    return { rows, general: fieldErrors.reposError === undefined ? [] : [fieldErrors.reposError] };
+  }, [fieldErrors]);
+
+  /**
+   * Keep a confirmed list locally: the rows are stored with the project
+   * on create, so confirming only updates the draft and clears any
+   * mapped refusal for the changed rows.
+   */
+  const commitRepos = React.useCallback(async (rows: RepoRow[]): Promise<boolean> => {
+    setRepos(rows);
+    setFieldErrors((prev) => ({ ...prev, repos: undefined, reposError: undefined }));
+    return true;
+  }, []);
+
   function submit(): void {
-    const local = validateCreateFields({ name, identifier, repoUrl, baseBranch });
+    const local = validateCreateFields({ name, identifier, repos });
     if (Object.keys(local).length > 0) {
       setFieldErrors(local);
       return;
@@ -105,8 +130,7 @@ export function CreateProjectDialog({
           name,
           identifier,
           description,
-          repoUrl,
-          baseBranch,
+          repos,
           network,
           projectLead: lead,
           icon,
@@ -119,7 +143,7 @@ export function CreateProjectDialog({
         },
         onError: (error) => {
           const mapped = selectCreateFieldErrors(error);
-          if (mapped.name === undefined && mapped.identifier === undefined) {
+          if (Object.keys(mapped).length === 0) {
             notifyError(CREATE_FAILED_TITLE, (error as Error).message);
             return;
           }
@@ -207,29 +231,13 @@ export function CreateProjectDialog({
           placeholder={CREATE_DESCRIPTION_PLACEHOLDER}
           rows={3}
         />
-        <Input
-          label="Repository URL"
-          value={repoUrl}
-          maxLength={CREATE_REPO_URL_MAX_LENGTH}
-          onChange={(event) => {
-            setRepoUrl(event.target.value);
-            setFieldErrors((prev) => ({ ...prev, repoUrl: undefined }));
-          }}
-          placeholder="Repository URL, e.g. https://github.com/team/project"
-          autoComplete="off"
-          {...(fieldErrors.repoUrl === undefined ? {} : { error: fieldErrors.repoUrl })}
-        />
-        <Input
-          label="Base branch"
-          value={baseBranch}
-          maxLength={128}
-          onChange={(event) => {
-            setBaseBranch(event.target.value);
-            setFieldErrors((prev) => ({ ...prev, baseBranch: undefined }));
-          }}
-          placeholder="Base branch (blank uses the remote default)"
-          autoComplete="off"
-          {...(fieldErrors.baseBranch === undefined ? {} : { error: fieldErrors.baseBranch })}
+        <RepositoriesSection
+          rows={repos}
+          disabled={false}
+          saving={false}
+          serverErrors={reposErrors}
+          hint="Add zero or more repositories. They are stored with the project when it is created."
+          onCommit={commitRepos}
         />
         <div className="flex flex-wrap items-center gap-(--space-2)">
           <Menu
