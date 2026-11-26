@@ -131,6 +131,12 @@ jobs:
                 bad = self.GOOD.replace("      - run: make\n", f"      - run: {cmd}\n")
                 self.assertTrue(self.problems(bad))
 
+    def test_read_only_git_commands_are_allowed(self):
+        ok = self.GOOD.replace("      - run: make\n", "      - run: git tag --list 'v*' --merged HEAD\n")
+        self.assertEqual(self.problems(ok), [])
+        bad = self.GOOD.replace("      - run: make\n", "      - run: git tag v1.0.0\n")
+        self.assertTrue(self.problems(bad))
+
     def test_publisher_without_scan_dependency_is_rejected(self):
         bad = self.GOOD.replace("    needs: [scan]\n", "    needs: [build]\n")
         self.assertTrue(any("scan" in p for p in self.problems(bad)))
@@ -188,7 +194,8 @@ def _fake(*parts):
 
 SYNTHETIC_AWS = _fake("AKIA", "Z7Q2", "W9X4", "K1M3", "P8R5")
 SYNTHETIC_GH = _fake("ghp", "_", "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8s9")
-SYNTHETIC_KEY = _fake("-----BEGIN ", "OPENSSH PRIVATE", " KEY-----")
+SYNTHETIC_KEY = _fake("-----BEGIN ", "OPENSSH PRIVATE", " KEY-----\n", "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ")
+KEY_HEADER_ONLY = _fake("-----BEGIN ", "RSA PRIVATE", " KEY-----")
 SYNTHETIC_MARKER = _fake("not-for-", "public-", "canary-7f3a")
 
 
@@ -229,6 +236,38 @@ class Scanner(unittest.TestCase):
         findings = self.scan()
         self.assertTrue(findings)
         self.assertIn("config.env", findings[0].location)
+
+    def test_a_bare_key_header_is_not_a_key(self):
+        # Compiled PEM parsers carry the header text without any key.
+        (self.tmp / "pidash").write_bytes(b"\x7fELF" + KEY_HEADER_ONLY.encode() + b"\x00\x01")
+        self.assertEqual(self.scan(), [])
+
+    def test_leak_in_an_image_layer_is_found(self):
+        # An OCI image archive: an uncompressed tar whose blobs are gzipped
+        # layer tars with no file extension.
+        layer = io.BytesIO()
+        with tarfile.open(fileobj=layer, mode="w:gz") as tar:
+            data = b"\0" * 100_000 + f"KEY={SYNTHETIC_AWS}".encode()
+            info = tarfile.TarInfo("srv/app/settings.py")
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+        with tarfile.open(self.tmp / "pi-dash-backend.tar", "w") as oci:
+            blob = layer.getvalue()
+            info = tarfile.TarInfo("blobs/sha256/" + "0" * 64)
+            info.size = len(blob)
+            oci.addfile(info, io.BytesIO(blob))
+        findings = self.scan()
+        self.assertEqual([f.rule for f in findings], ["aws-access-key"])
+        self.assertIn("srv/app/settings.py", findings[0].location)
+
+    def test_leak_across_a_read_boundary_is_found(self):
+        old = gate.CHUNK
+        gate.CHUNK = 64  # the leak straddles reads after the 512-byte sniff
+        try:
+            (self.tmp / "big.txt").write_text("x" * 1000 + " " + SYNTHETIC_GH + "\n")
+            self.assertTrue(self.scan())
+        finally:
+            gate.CHUNK = old
 
     def test_findings_never_echo_the_secret(self):
         (self.tmp / "notes.txt").write_text(f"x = {SYNTHETIC_GH}\n")

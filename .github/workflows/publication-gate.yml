@@ -1,0 +1,45 @@
+# Publication gate policy check. Runs on every pull request into main, so a
+# change cannot add a tag-triggered publish, a publish credential outside the
+# protected publisher, or a weaker tag ruleset without failing here.
+# The policy checker is read from the base branch, so a pull request cannot
+# relax the rules it is checked against.
+name: publication-gate
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    name: publication gate policy
+    runs-on: ubuntu-22.04
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --quiet "pyyaml==6.0.2"
+      - name: Gate unit tests
+        run: python -m unittest discover -s .github/publication-gate/tests -v
+      - name: Policy, as the base branch defines it
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+        run: |
+          set -euo pipefail
+          checker=".github/publication-gate/gate.py"
+          if git cat-file -e "origin/${BASE_REF}:${checker}" 2>/dev/null; then
+            # Run the base checker against this checkout's workflows.
+            git show "origin/${BASE_REF}:${checker}" > "$checker.base.py"
+            python "$checker.base.py" check-policy
+          else
+            echo "No checker on ${BASE_REF} yet; using this branch's."
+            python "$checker" check-policy
+          fi

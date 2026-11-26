@@ -1,8 +1,20 @@
 name: Branch Build CE
 
+# Publication gate (.github/publication-gate/README.md): this workflow builds
+# the platform images and self-host assets from a commit already on main,
+# finishes every transformation, scans the final candidate, and hands it to
+# the protected `publish` job. Only that job, in the `release-publisher`
+# environment, holds registry credentials, pushes images, or creates the
+# release tag. Nothing here starts on a push or a tag, so creating a tag
+# publishes nothing.
+
 on:
   workflow_dispatch:
     inputs:
+      sha:
+        description: "Full commit SHA on main to build"
+        required: true
+        type: string
       build_type:
         description: "Type of build to run"
         required: true
@@ -12,7 +24,7 @@ on:
           - "Build"
           - "Release"
       releaseVersion:
-        description: "Release Version"
+        description: "Release Version (vX.Y.Z[-pre]; Release only)"
         type: string
         default: v0.0.0
       isPrerelease:
@@ -30,17 +42,9 @@ on:
         required: false
         default: false
         type: boolean
-  push:
-    branches:
-      - preview
-      - canary
-    tags:
-      # Platform-only release tag scheme. Runner CLI releases use the
-      # `pidash-v*.*.*` pattern handled by .github/workflows/release.yml
-      # (cargo-dist parses that prefix as the `pidash` Cargo package).
-      # `platform-` is intentionally distinct so the two release pipelines
-      # never fire on the same tag.
-      - 'platform-v*.*.*'
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -59,86 +63,61 @@ jobs:
     name: Build Setup
     runs-on: ubuntu-22.04
     outputs:
+      sha: ${{ steps.stage.outputs.sha }}
       gh_branch_name: ${{ steps.set_env_variables.outputs.TARGET_BRANCH }}
-      gh_buildx_driver: ${{ steps.set_env_variables.outputs.BUILDX_DRIVER }}
-      gh_buildx_version: ${{ steps.set_env_variables.outputs.BUILDX_VERSION }}
       gh_buildx_platforms: ${{ steps.set_env_variables.outputs.BUILDX_PLATFORMS }}
-      gh_buildx_endpoint: ${{ steps.set_env_variables.outputs.BUILDX_ENDPOINT }}
-
-      dh_img_web: ${{ steps.set_env_variables.outputs.DH_IMG_WEB }}
-      dh_img_web_new: ${{ steps.set_env_variables.outputs.DH_IMG_WEB_NEW }}
-      dh_img_space: ${{ steps.set_env_variables.outputs.DH_IMG_SPACE }}
-      dh_img_admin: ${{ steps.set_env_variables.outputs.DH_IMG_ADMIN }}
-      dh_img_live: ${{ steps.set_env_variables.outputs.DH_IMG_LIVE }}
-      dh_img_backend: ${{ steps.set_env_variables.outputs.DH_IMG_BACKEND }}
-      dh_img_proxy: ${{ steps.set_env_variables.outputs.DH_IMG_PROXY }}
-      dh_img_aio: ${{ steps.set_env_variables.outputs.DH_IMG_AIO }}
-
-      build_type: ${{steps.set_env_variables.outputs.BUILD_TYPE}}
+      build_type: ${{ steps.set_env_variables.outputs.BUILD_TYPE }}
       build_release: ${{ steps.set_env_variables.outputs.BUILD_RELEASE }}
       build_prerelease: ${{ steps.set_env_variables.outputs.BUILD_PRERELEASE }}
       release_version: ${{ steps.set_env_variables.outputs.RELEASE_VERSION }}
       aio_build: ${{ steps.set_env_variables.outputs.AIO_BUILD }}
+      image_version: ${{ steps.set_env_variables.outputs.IMAGE_VERSION }}
 
     steps:
-      - id: tag_release_detect
-        name: Detect tag-triggered release
-        if: ${{ startsWith(github.ref, 'refs/tags/platform-v') }}
+      - name: Checkout Files
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      # Build only a staged ref: a full commit SHA that is already on main
+      # (reviewed and merged).
+      - id: stage
+        name: Check the staged commit
+        env:
+          SHA: ${{ github.event.inputs.sha }}
         run: |
-          # Pushing a `platform-v<semver>` tag is interpreted as a Release.
-          # Strip the `platform-` prefix; anything with an alpha suffix
-          # (e.g. -alpha.1, -rc1) is treated as a prerelease.
-          TAG="${GITHUB_REF#refs/tags/}"          # platform-v1.4.0
-          VERSION="${TAG#platform-}"              # v1.4.0
-          echo "BUILD_TYPE=Release" >> $GITHUB_ENV
-          echo "RELEASE_VERSION=${VERSION}" >> $GITHUB_ENV
-          if [[ "$VERSION" =~ -[a-zA-Z] ]]; then
-            echo "IS_PRERELEASE=true" >> $GITHUB_ENV
-          else
-            echo "IS_PRERELEASE=false" >> $GITHUB_ENV
+          set -euo pipefail
+          if [[ ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::sha must be a full 40-character commit SHA"; exit 1
           fi
-          echo "Tag-triggered release detected: $TAG -> $VERSION"
+          git fetch --quiet origin main
+          if ! git merge-base --is-ancestor "$SHA" origin/main; then
+            echo "::error::$SHA is not on main; only merged commits can be built for publication"; exit 1
+          fi
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
       - id: set_env_variables
         name: Set Environment Variables
         run: |
-          # Buildx driver selection. The `cloud` driver requires Docker Build
-          # Cloud (paid) which is not configured for this project; use the
-          # local `docker-container` driver everywhere. Multi-arch on releases
-          # is achieved via QEMU emulation rather than the cloud builder.
+          set -euo pipefail
+          # Multi-arch on releases (or when asked) via QEMU emulation on the
+          # local docker-container driver.
           if [ "${{ env.ARM64_BUILD }}" == "true" ] || [ "${{ env.BUILD_TYPE }}" == "Release" ]; then
-            echo "BUILDX_DRIVER=docker-container" >> $GITHUB_OUTPUT
-            echo "BUILDX_VERSION=latest" >> $GITHUB_OUTPUT
             echo "BUILDX_PLATFORMS=linux/amd64,linux/arm64" >> $GITHUB_OUTPUT
-            echo "BUILDX_ENDPOINT=" >> $GITHUB_OUTPUT
           else
-            echo "BUILDX_DRIVER=docker-container" >> $GITHUB_OUTPUT
-            echo "BUILDX_VERSION=latest" >> $GITHUB_OUTPUT
             echo "BUILDX_PLATFORMS=linux/amd64" >> $GITHUB_OUTPUT
-            echo "BUILDX_ENDPOINT=" >> $GITHUB_OUTPUT
           fi
           BR_NAME=$( echo "${{ env.TARGET_BRANCH }}" |sed 's/[^a-zA-Z0-9.-]//g')
           echo "TARGET_BRANCH=$BR_NAME" >> $GITHUB_OUTPUT
-
-          echo "DH_IMG_WEB=pi-dash-frontend" >> $GITHUB_OUTPUT
-          echo "DH_IMG_WEB_NEW=pi-dash-web-new" >> $GITHUB_OUTPUT
-          echo "DH_IMG_SPACE=pi-dash-space" >> $GITHUB_OUTPUT
-          echo "DH_IMG_ADMIN=pi-dash-admin" >> $GITHUB_OUTPUT
-          echo "DH_IMG_LIVE=pi-dash-live" >> $GITHUB_OUTPUT
-          echo "DH_IMG_BACKEND=pi-dash-backend" >> $GITHUB_OUTPUT
-          echo "DH_IMG_PROXY=pi-dash-proxy" >> $GITHUB_OUTPUT
-          echo "DH_IMG_AIO=pi-dash-aio-community" >> $GITHUB_OUTPUT
 
           echo "BUILD_TYPE=${{env.BUILD_TYPE}}" >> $GITHUB_OUTPUT
           BUILD_RELEASE=false
           BUILD_PRERELEASE=false
           RELVERSION="latest"
-
           BUILD_AIO=${{ env.AIO_BUILD }}
 
           if [ "${{ env.BUILD_TYPE }}" == "Release" ]; then
             FLAT_RELEASE_VERSION=$(echo "${{ env.RELEASE_VERSION }}" | sed 's/[^a-zA-Z0-9.-]//g')
-            echo "FLAT_RELEASE_VERSION=${FLAT_RELEASE_VERSION}" >> $GITHUB_OUTPUT
 
             semver_regex="^v([0-9]+)\.([0-9]+)\.([0-9]+)(-[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*)?$"
             if [[ ! $FLAT_RELEASE_VERSION =~ $semver_regex ]]; then
@@ -146,224 +125,93 @@ jobs:
               echo "Please provide a valid SemVer version"
               echo "e.g. v1.2.3 or v1.2.3-alpha-1"
               echo "Exiting the build process"
-              exit 1  # Exit with status 1 to fail the step
+              exit 1
+            fi
+            if git ls-remote --exit-code --tags origin "refs/tags/$FLAT_RELEASE_VERSION" >/dev/null; then
+              echo "::error::$FLAT_RELEASE_VERSION already exists; release tags are never moved"; exit 1
             fi
             BUILD_RELEASE=true
             RELVERSION=$FLAT_RELEASE_VERSION
 
-            if [ "${{ env.IS_PRERELEASE }}" == "true" ]; then
+            if [ "${{ env.IS_PRERELEASE }}" == "true" ] || [[ "$FLAT_RELEASE_VERSION" =~ -[a-zA-Z] ]]; then
               BUILD_PRERELEASE=true
             fi
 
             BUILD_AIO=true
           fi
 
+          # The tag every component image is built for; the AIO image builds
+          # FROM these exact tags.
+          if [ "$BUILD_RELEASE" == "true" ]; then IMAGE_VERSION=$RELVERSION; else IMAGE_VERSION=$BR_NAME; fi
+
           echo "BUILD_RELEASE=${BUILD_RELEASE}" >> $GITHUB_OUTPUT
           echo "BUILD_PRERELEASE=${BUILD_PRERELEASE}" >> $GITHUB_OUTPUT
           echo "RELEASE_VERSION=${RELVERSION}" >> $GITHUB_OUTPUT
           echo "AIO_BUILD=${BUILD_AIO}" >> $GITHUB_OUTPUT
+          echo "IMAGE_VERSION=${IMAGE_VERSION}" >> $GITHUB_OUTPUT
 
-      - id: checkout_files
-        name: Checkout Files
-        uses: actions/checkout@v6
-
-  branch_build_push_admin:
-    name: Build-Push Admin Docker Image
+  # Build every component image into an OCI archive. Nothing is pushed here.
+  branch_build_images:
+    name: Build ${{ matrix.image }} image
     runs-on: ubuntu-22.04
     needs: [branch_build_setup]
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - image: pi-dash-admin
+            context: .
+            dockerfile: ./apps/admin/Dockerfile.admin
+          - image: pi-dash-frontend
+            context: .
+            dockerfile: ./apps/web/Dockerfile.web
+          - image: pi-dash-web-new
+            context: .
+            dockerfile: ./apps/web_new/Dockerfile.web-new
+          - image: pi-dash-space
+            context: .
+            dockerfile: ./apps/space/Dockerfile.space
+          - image: pi-dash-live
+            context: .
+            dockerfile: ./apps/live/Dockerfile.live
+          - image: pi-dash-backend
+            context: ./apps/api
+            dockerfile: ./apps/api/Dockerfile.api
+          - image: pi-dash-proxy
+            context: ./apps/proxy
+            dockerfile: ./apps/proxy/Dockerfile.ce
     steps:
       - name: Checkout Files
         uses: actions/checkout@v6
-      - name: Admin Build and Push
-        uses: ./.github/actions/build-push
         with:
-          build-release: ${{ needs.branch_build_setup.outputs.build_release }}
-          build-prerelease: ${{ needs.branch_build_setup.outputs.build_prerelease }}
-          release-version: ${{ needs.branch_build_setup.outputs.release_version }}
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
-          docker-image-owner: airepublic
-          docker-image-name: ${{ needs.branch_build_setup.outputs.dh_img_admin }}
-          build-context: .
-          dockerfile-path: ./apps/admin/Dockerfile.admin
-          buildx-driver: ${{ needs.branch_build_setup.outputs.gh_buildx_driver }}
-          buildx-version: ${{ needs.branch_build_setup.outputs.gh_buildx_version }}
-          buildx-platforms: ${{ needs.branch_build_setup.outputs.gh_buildx_platforms }}
-          buildx-endpoint: ${{ needs.branch_build_setup.outputs.gh_buildx_endpoint }}
-
-  branch_build_push_web:
-    name: Build-Push Web Docker Image
-    runs-on: ubuntu-22.04
-    needs: [branch_build_setup]
-    steps:
-      - name: Checkout Files
-        uses: actions/checkout@v6
-      - name: Web Build and Push
-        uses: ./.github/actions/build-push
+          ref: ${{ needs.branch_build_setup.outputs.sha }}
+      - name: Build image
+        uses: ./.github/actions/build-image
         with:
-          build-release: ${{ needs.branch_build_setup.outputs.build_release }}
-          build-prerelease: ${{ needs.branch_build_setup.outputs.build_prerelease }}
-          release-version: ${{ needs.branch_build_setup.outputs.release_version }}
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
-          docker-image-owner: airepublic
-          docker-image-name: ${{ needs.branch_build_setup.outputs.dh_img_web }}
-          build-context: .
-          dockerfile-path: ./apps/web/Dockerfile.web
-          buildx-driver: ${{ needs.branch_build_setup.outputs.gh_buildx_driver }}
-          buildx-version: ${{ needs.branch_build_setup.outputs.gh_buildx_version }}
+          image-name: ${{ matrix.image }}
+          build-context: ${{ matrix.context }}
+          dockerfile-path: ${{ matrix.dockerfile }}
           buildx-platforms: ${{ needs.branch_build_setup.outputs.gh_buildx_platforms }}
-          buildx-endpoint: ${{ needs.branch_build_setup.outputs.gh_buildx_endpoint }}
 
-  branch_build_push_web_new:
-    name: Build-Push Web-New Docker Image
-    runs-on: ubuntu-22.04
-    needs: [branch_build_setup]
-    steps:
-      - name: Checkout Files
-        uses: actions/checkout@v6
-      - name: Web-New Build and Push
-        uses: ./.github/actions/build-push
-        with:
-          build-release: ${{ needs.branch_build_setup.outputs.build_release }}
-          build-prerelease: ${{ needs.branch_build_setup.outputs.build_prerelease }}
-          release-version: ${{ needs.branch_build_setup.outputs.release_version }}
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
-          docker-image-owner: airepublic
-          docker-image-name: ${{ needs.branch_build_setup.outputs.dh_img_web_new }}
-          build-context: .
-          dockerfile-path: ./apps/web_new/Dockerfile.web-new
-          buildx-driver: ${{ needs.branch_build_setup.outputs.gh_buildx_driver }}
-          buildx-version: ${{ needs.branch_build_setup.outputs.gh_buildx_version }}
-          buildx-platforms: ${{ needs.branch_build_setup.outputs.gh_buildx_platforms }}
-          buildx-endpoint: ${{ needs.branch_build_setup.outputs.gh_buildx_endpoint }}
-
-  branch_build_push_space:
-    name: Build-Push Space Docker Image
-    runs-on: ubuntu-22.04
-    needs: [branch_build_setup]
-    steps:
-      - name: Checkout Files
-        uses: actions/checkout@v6
-      - name: Space Build and Push
-        uses: ./.github/actions/build-push
-        with:
-          build-release: ${{ needs.branch_build_setup.outputs.build_release }}
-          build-prerelease: ${{ needs.branch_build_setup.outputs.build_prerelease }}
-          release-version: ${{ needs.branch_build_setup.outputs.release_version }}
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
-          docker-image-owner: airepublic
-          docker-image-name: ${{ needs.branch_build_setup.outputs.dh_img_space }}
-          build-context: .
-          dockerfile-path: ./apps/space/Dockerfile.space
-          buildx-driver: ${{ needs.branch_build_setup.outputs.gh_buildx_driver }}
-          buildx-version: ${{ needs.branch_build_setup.outputs.gh_buildx_version }}
-          buildx-platforms: ${{ needs.branch_build_setup.outputs.gh_buildx_platforms }}
-          buildx-endpoint: ${{ needs.branch_build_setup.outputs.gh_buildx_endpoint }}
-
-  branch_build_push_live:
-    name: Build-Push Live Collaboration Docker Image
-    runs-on: ubuntu-22.04
-    needs: [branch_build_setup]
-    steps:
-      - name: Checkout Files
-        uses: actions/checkout@v6
-      - name: Live Build and Push
-        uses: ./.github/actions/build-push
-        with:
-          build-release: ${{ needs.branch_build_setup.outputs.build_release }}
-          build-prerelease: ${{ needs.branch_build_setup.outputs.build_prerelease }}
-          release-version: ${{ needs.branch_build_setup.outputs.release_version }}
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
-          docker-image-owner: airepublic
-          docker-image-name: ${{ needs.branch_build_setup.outputs.dh_img_live }}
-          build-context: .
-          dockerfile-path: ./apps/live/Dockerfile.live
-          buildx-driver: ${{ needs.branch_build_setup.outputs.gh_buildx_driver }}
-          buildx-version: ${{ needs.branch_build_setup.outputs.gh_buildx_version }}
-          buildx-platforms: ${{ needs.branch_build_setup.outputs.gh_buildx_platforms }}
-          buildx-endpoint: ${{ needs.branch_build_setup.outputs.gh_buildx_endpoint }}
-
-  branch_build_push_api:
-    name: Build-Push API Server Docker Image
-    runs-on: ubuntu-22.04
-    needs: [branch_build_setup]
-    steps:
-      - name: Checkout Files
-        uses: actions/checkout@v6
-      - name: Backend Build and Push
-        uses: ./.github/actions/build-push
-        with:
-          build-release: ${{ needs.branch_build_setup.outputs.build_release }}
-          build-prerelease: ${{ needs.branch_build_setup.outputs.build_prerelease }}
-          release-version: ${{ needs.branch_build_setup.outputs.release_version }}
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
-          docker-image-owner: airepublic
-          docker-image-name: ${{ needs.branch_build_setup.outputs.dh_img_backend }}
-          build-context: ./apps/api
-          dockerfile-path: ./apps/api/Dockerfile.api
-          buildx-driver: ${{ needs.branch_build_setup.outputs.gh_buildx_driver }}
-          buildx-version: ${{ needs.branch_build_setup.outputs.gh_buildx_version }}
-          buildx-platforms: ${{ needs.branch_build_setup.outputs.gh_buildx_platforms }}
-          buildx-endpoint: ${{ needs.branch_build_setup.outputs.gh_buildx_endpoint }}
-
-  branch_build_push_proxy:
-    name: Build-Push Proxy Docker Image
-    runs-on: ubuntu-22.04
-    needs: [branch_build_setup]
-    steps:
-      - name: Checkout Files
-        uses: actions/checkout@v6
-      - name: Proxy Build and Push
-        uses: ./.github/actions/build-push
-        with:
-          build-release: ${{ needs.branch_build_setup.outputs.build_release }}
-          build-prerelease: ${{ needs.branch_build_setup.outputs.build_prerelease }}
-          release-version: ${{ needs.branch_build_setup.outputs.release_version }}
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
-          docker-image-owner: airepublic
-          docker-image-name: ${{ needs.branch_build_setup.outputs.dh_img_proxy }}
-          build-context: ./apps/proxy
-          dockerfile-path: ./apps/proxy/Dockerfile.ce
-          buildx-driver: ${{ needs.branch_build_setup.outputs.gh_buildx_driver }}
-          buildx-version: ${{ needs.branch_build_setup.outputs.gh_buildx_version }}
-          buildx-platforms: ${{ needs.branch_build_setup.outputs.gh_buildx_platforms }}
-          buildx-endpoint: ${{ needs.branch_build_setup.outputs.gh_buildx_endpoint }}
-
-  branch_build_push_aio:
+  branch_build_aio:
     if: ${{ needs.branch_build_setup.outputs.aio_build == 'true' }}
-    name: Build-Push AIO Docker Image
+    name: Build AIO Docker Image
     runs-on: ubuntu-22.04
     needs:
       - branch_build_setup
-      - branch_build_push_admin
-      - branch_build_push_web
-      - branch_build_push_web_new
-      - branch_build_push_space
-      - branch_build_push_live
-      - branch_build_push_api
-      - branch_build_push_proxy
+      - branch_build_images
+    env:
+      IMAGE_VERSION: ${{ needs.branch_build_setup.outputs.image_version }}
     steps:
       - name: Checkout Files
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.branch_build_setup.outputs.sha }}
 
       - name: Prepare AIO Assets
-        id: prepare_aio_assets
         run: |
           cd deployments/aio/community
-
-          if [ "${{ needs.branch_build_setup.outputs.build_type }}" == "Release" ]; then
-            aio_version=${{ needs.branch_build_setup.outputs.release_version }}
-          else
-            aio_version=${{ needs.branch_build_setup.outputs.gh_branch_name }}
-          fi
-          bash ./build.sh --release $aio_version
-          echo "AIO_BUILD_VERSION=${aio_version}" >> $GITHUB_OUTPUT
+          bash ./build.sh --release "$IMAGE_VERSION"
 
       - name: Upload AIO Assets
         uses: actions/upload-artifact@v7
@@ -371,110 +219,260 @@ jobs:
           path: ./deployments/aio/community/dist
           name: aio-assets-dist
 
-      - name: AIO Build and Push
-        uses: ./.github/actions/build-push
+      # The AIO image builds FROM the component images. They are not public
+      # yet, so point each FROM at the candidate archive built above instead
+      # of a registry.
+      - name: Fetch candidate component images
+        uses: actions/download-artifact@v6
         with:
-          build-release: ${{ needs.branch_build_setup.outputs.build_release }}
-          build-prerelease: ${{ needs.branch_build_setup.outputs.build_prerelease }}
-          release-version: ${{ needs.branch_build_setup.outputs.release_version }}
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
-          docker-image-owner: airepublic
-          docker-image-name: ${{ needs.branch_build_setup.outputs.dh_img_aio }}
+          pattern: image-*
+          path: ${{ runner.temp }}/components
+          merge-multiple: true
+
+      - id: contexts
+        name: Map component images to their candidate archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "contexts<<EOF"
+            for tarball in "$RUNNER_TEMP"/components/*.tar; do
+              name="$(basename "$tarball" .tar)"
+              layout="$RUNNER_TEMP/layouts/$name"
+              mkdir -p "$layout"
+              tar -xf "$tarball" -C "$layout"
+              echo "airepublic/${name}:${IMAGE_VERSION}=oci-layout://${layout}@$(cat "${tarball%.tar}.digest")"
+            done
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build AIO image
+        uses: ./.github/actions/build-image
+        with:
+          image-name: pi-dash-aio-community
           build-context: ./deployments/aio/community
           dockerfile-path: ./deployments/aio/community/Dockerfile
-          buildx-driver: ${{ needs.branch_build_setup.outputs.gh_buildx_driver }}
-          buildx-version: ${{ needs.branch_build_setup.outputs.gh_buildx_version }}
           buildx-platforms: ${{ needs.branch_build_setup.outputs.gh_buildx_platforms }}
-          buildx-endpoint: ${{ needs.branch_build_setup.outputs.gh_buildx_endpoint }}
           additional-assets: aio-assets-dist
           additional-assets-dir: ./deployments/aio/community/dist
+          build-contexts: ${{ steps.contexts.outputs.contexts }}
           build-args: |
-            PI_DASH_VERSION=${{ steps.prepare_aio_assets.outputs.AIO_BUILD_VERSION }}
+            PI_DASH_VERSION=${{ env.IMAGE_VERSION }}
 
-  upload_build_assets:
-    name: Upload Build Assets
+  # Finish the candidate: the self-host assets with their release pins, the
+  # release notes, the image archives and the tags each image will get. Every
+  # byte the publisher will publish is fixed here, before the scan.
+  branch_build_candidate:
+    name: Assemble Candidate
     runs-on: ubuntu-22.04
+    if: ${{ always() && needs.branch_build_images.result == 'success' && (needs.branch_build_aio.result == 'success' || needs.branch_build_aio.result == 'skipped') }}
     needs:
       - branch_build_setup
-      - branch_build_push_admin
-      - branch_build_push_web
-      - branch_build_push_web_new
-      - branch_build_push_space
-      - branch_build_push_live
-      - branch_build_push_api
-      - branch_build_push_proxy
+      - branch_build_images
+      - branch_build_aio
+    env:
+      SHA: ${{ needs.branch_build_setup.outputs.sha }}
+      BUILD_RELEASE: ${{ needs.branch_build_setup.outputs.build_release }}
+      BUILD_PRERELEASE: ${{ needs.branch_build_setup.outputs.build_prerelease }}
+      RELEASE_VERSION: ${{ needs.branch_build_setup.outputs.release_version }}
+      IMAGE_VERSION: ${{ needs.branch_build_setup.outputs.image_version }}
+      BRANCH: ${{ needs.branch_build_setup.outputs.gh_branch_name }}
     steps:
       - name: Checkout Files
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.branch_build_setup.outputs.sha }}
+          fetch-depth: 0
 
-      - name: Update Assets
+      - name: Fetch candidate images
+        uses: actions/download-artifact@v6
+        with:
+          pattern: image-*
+          path: candidate/images
+          merge-multiple: true
+
+      - name: Pin the self-host assets
         run: |
-          if [ "${{ needs.branch_build_setup.outputs.build_type }}" == "Release" ]; then
-            REL_VERSION=${{ needs.branch_build_setup.outputs.release_version }}
+          set -euo pipefail
+          mkdir -p candidate/assets
+          cp ./deployments/cli/community/install.sh candidate/assets/setup.sh
+          cp ./deployments/cli/community/restore.sh \
+             ./deployments/cli/community/restore-airgapped.sh \
+             ./deployments/cli/community/docker-compose.yml \
+             ./deployments/cli/community/variables.env \
+             ./deployments/swarm/community/swarm.sh \
+             candidate/assets/
+          sed -i 's/${APP_RELEASE:-stable}/${APP_RELEASE:-'"${IMAGE_VERSION}"'}/g' candidate/assets/docker-compose.yml
+
+      - name: Write the image tags and release text
+        run: |
+          set -euo pipefail
+          mkdir -p candidate/release
+          # Same tags as before the gate: :<version> (plus :stable and :latest
+          # for a final release), or :<branch> and :<branch>-<sha> otherwise.
+          if [ "$BUILD_RELEASE" = "true" ]; then
+            tags="$RELEASE_VERSION"
+            if [ "$BUILD_PRERELEASE" != "true" ]; then tags="$tags stable latest"; fi
           else
-            REL_VERSION=${{ needs.branch_build_setup.outputs.gh_branch_name }}
+            tags="$BRANCH $BRANCH-${SHA:0:7}"
+          fi
+          echo "$tags" > candidate/release/image-tags.txt
+          echo "$BUILD_PRERELEASE" > candidate/release/prerelease.txt
+          if [ "$BUILD_RELEASE" = "true" ]; then
+            previous="$(git tag --list 'v[0-9]*' --sort=-v:refname --merged "$SHA" | grep -v -- '-' | head -n1 || true)"
+            {
+              echo "## What's changed"
+              echo
+              if [ -n "$previous" ]; then
+                git log --no-merges --pretty='- %s' "${previous}..${SHA}"
+                echo
+                echo "**Full changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${previous}...${RELEASE_VERSION}"
+              else
+                git log --no-merges --pretty='- %s' -n 200 "$SHA"
+              fi
+            } > candidate/release/notes.md
           fi
 
-          cp ./deployments/cli/community/install.sh deployments/cli/community/setup.sh
-          sed -i 's/${APP_RELEASE:-stable}/${APP_RELEASE:-'${REL_VERSION}'}/g' deployments/cli/community/docker-compose.yml
-          # sed -i 's/APP_RELEASE=stable/APP_RELEASE='${REL_VERSION}'/g' deployments/cli/community/variables.env
+      - name: Record the candidate
+        run: |
+          tag=""
+          if [ "$BUILD_RELEASE" = "true" ]; then tag="$RELEASE_VERSION"; fi
+          python3 .github/publication-gate/gate.py build-manifest candidate --tag "$tag" --sha "$SHA"
 
-      - name: Upload Assets
+      - name: Upload candidate
         uses: actions/upload-artifact@v7
         with:
-          name: community-assets
-          path: |
-            ./deployments/cli/community/setup.sh
-            ./deployments/cli/community/restore.sh
-            ./deployments/cli/community/restore-airgapped.sh
-            ./deployments/cli/community/docker-compose.yml
-            ./deployments/cli/community/variables.env
-            ./deployments/swarm/community/swarm.sh
+          name: platform-candidate
+          path: candidate
+          if-no-files-found: error
+          compression-level: 0
 
-  publish_release:
-    if: ${{ needs.branch_build_setup.outputs.build_type == 'Release' }}
-    name: Build Release
+  # Scan the final candidate (images, assets, release text) and the source
+  # tree of the commit it was built from.
+  branch_build_scan:
+    name: Scan Candidate
     runs-on: ubuntu-22.04
+    environment: publication-scan
+    if: ${{ always() && needs.branch_build_candidate.result == 'success' }}
     needs:
-      [
-        branch_build_setup,
-        branch_build_push_admin,
-        branch_build_push_web,
-        branch_build_push_web_new,
-        branch_build_push_space,
-        branch_build_push_live,
-        branch_build_push_api,
-        branch_build_push_proxy,
-      ]
+      - branch_build_setup
+      - branch_build_candidate
+    outputs:
+      manifest-digest: ${{ steps.approve.outputs.digest }}
     env:
-      REL_VERSION: ${{ needs.branch_build_setup.outputs.release_version }}
+      SHA: ${{ needs.branch_build_setup.outputs.sha }}
+      PUBLICATION_DENYLIST: ${{ secrets.PUBLICATION_DENYLIST }}
+      PYTHONDONTWRITEBYTECODE: "1"
     steps:
-      - name: Checkout
+      - name: Checkout Files
         uses: actions/checkout@v6
-
-      - name: Update Assets
-        run: |
-          cp ./deployments/cli/community/install.sh deployments/cli/community/setup.sh
-          sed -i 's/${APP_RELEASE:-stable}/${APP_RELEASE:-'${REL_VERSION}'}/g' deployments/cli/community/docker-compose.yml
-          # sed -i 's/APP_RELEASE=stable/APP_RELEASE='${REL_VERSION}'/g' deployments/cli/community/variables.env
-
-      - name: Create Release
-        id: create_release
-        uses: softprops/action-gh-release@v2.6.1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This token is provided by Actions, you do not need to create your own token
         with:
-          tag_name: ${{ env.REL_VERSION }}
-          name: ${{ env.REL_VERSION }}
-          target_commitish: ${{ github.sha }}
-          draft: false
-          prerelease: ${{ env.IS_PRERELEASE }}
-          generate_release_notes: true
-          files: |
-            ${{ github.workspace }}/deployments/cli/community/setup.sh
-            ${{ github.workspace }}/deployments/cli/community/restore.sh
-            ${{ github.workspace }}/deployments/cli/community/restore-airgapped.sh
-            ${{ github.workspace }}/deployments/cli/community/docker-compose.yml
-            ${{ github.workspace }}/deployments/cli/community/variables.env
-            ${{ github.workspace }}/deployments/swarm/community/swarm.sh
+          ref: ${{ needs.branch_build_setup.outputs.sha }}
+          path: source
+      - uses: actions/download-artifact@v6
+        with:
+          name: platform-candidate
+          path: candidate
+      - name: Candidate is intact
+        run: python3 source/.github/publication-gate/gate.py verify-manifest candidate
+      - name: Scanner rejects a planted leak
+        run: python3 source/.github/publication-gate/gate.py self-test --denylist-env PUBLICATION_DENYLIST --require-denylist
+      - name: Scan the candidate and its source tree
+        run: |
+          set -euo pipefail
+          mkdir tree
+          git -C source archive "$SHA" | tar -x -C tree
+          cd source
+          python3 .github/publication-gate/gate.py scan --denylist-env PUBLICATION_DENYLIST --require-denylist ../candidate ../tree
+      - id: approve
+        name: Approve this exact candidate
+        run: |
+          digest="$(python3 -c 'import json,sys; sys.path.insert(0,"source/.github/publication-gate"); import gate; print(gate.manifest_digest(json.load(open("candidate/publication-manifest.json"))))')"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Approved candidate manifest $digest"
+
+  # The protected publisher: the only job with registry and release
+  # credentials. It runs after a reviewer approves the `release-publisher`
+  # environment and publishes only the files and image digests the scan
+  # approved.
+  publish:
+    name: Publish
+    runs-on: ubuntu-22.04
+    environment: release-publisher
+    if: ${{ always() && needs.branch_build_scan.result == 'success' }}
+    needs:
+      - branch_build_setup
+      - branch_build_scan
+    permissions:
+      contents: read
+    env:
+      SHA: ${{ needs.branch_build_setup.outputs.sha }}
+      BUILD_RELEASE: ${{ needs.branch_build_setup.outputs.build_release }}
+      RELEASE_VERSION: ${{ needs.branch_build_setup.outputs.release_version }}
+      IMAGE_OWNER: airepublic
+    steps:
+      - name: Checkout Files
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.branch_build_setup.outputs.sha }}
+          path: source
+      - uses: actions/download-artifact@v6
+        with:
+          name: platform-candidate
+          path: candidate
+      - name: Publish only what was scanned
+        run: python3 source/.github/publication-gate/gate.py verify-manifest candidate --expect-digest "${{ needs.branch_build_scan.outputs.manifest-digest }}"
+
+      - name: Push the scanned images
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$DOCKERHUB_TOKEN" | skopeo login docker.io -u "$DOCKERHUB_USERNAME" --password-stdin
+          read -r -a tags < candidate/release/image-tags.txt
+          for archive in candidate/images/*.tar; do
+            name="$(basename "$archive" .tar)"
+            digest="$(cat "${archive%.tar}.digest")"
+            for tag in "${tags[@]}"; do
+              ref="docker://docker.io/${IMAGE_OWNER}/${name}:${tag}"
+              # --preserve-digests refuses any conversion, so the registry
+              # holds the scanned bytes or the push fails.
+              skopeo copy --all --preserve-digests "oci-archive:${archive}" "$ref"
+              pushed="sha256:$(skopeo inspect --raw "$ref" | sha256sum | cut -d' ' -f1)"
+              if [ "$pushed" != "$digest" ]; then
+                echo "::error::${name}:${tag} is ${pushed} in the registry, but the scan approved ${digest}"; exit 1
+              fi
+              echo "Pushed ${name}:${tag} @ ${digest}"
+            done
+          done
+          skopeo logout docker.io
+
+      - id: app-token
+        if: ${{ env.BUILD_RELEASE == 'true' }}
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.PUBLISHER_APP_ID }}
+          private-key: ${{ secrets.PUBLISHER_APP_PRIVATE_KEY }}
+
+      - name: Tag ruleset is live
+        if: ${{ env.BUILD_RELEASE == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: python3 source/.github/publication-gate/gate.py check-live-ruleset --repo "$GITHUB_REPOSITORY" --app-id "${{ vars.PUBLISHER_APP_ID }}"
+
+      - name: Create the release tag and the GitHub Release
+        if: ${{ env.BUILD_RELEASE == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          # The tag is created here, by the publisher, at the scanned commit.
+          # No workflow starts on tag creation, so this does not publish twice.
+          gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$RELEASE_VERSION" -f sha="$SHA" >/dev/null
+          flags=()
+          if [ "$(cat candidate/release/prerelease.txt)" = "true" ]; then flags+=(--prerelease); fi
+          gh release create "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag "${flags[@]}" \
+            --title "$RELEASE_VERSION" \
+            --notes-file candidate/release/notes.md \
+            candidate/assets/*

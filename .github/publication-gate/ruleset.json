@@ -1,0 +1,20 @@
+{
+  "name": "publication-gate: release tags",
+  "target": "tag",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": ["refs/tags/pidash-v*", "refs/tags/platform-v*", "refs/tags/v*"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    { "type": "creation" },
+    { "type": "update" },
+    { "type": "deletion" },
+    { "type": "non_fast_forward" }
+  ],
+  "bypass_actors": [
+    { "actor_id": "PUBLISHER_APP_ID", "actor_type": "Integration", "bypass_mode": "always" }
+  ]
+}
