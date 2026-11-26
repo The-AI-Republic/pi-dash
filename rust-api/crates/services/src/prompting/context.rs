@@ -2028,7 +2028,7 @@ mod tests {
             recipes::KIND_TEST,
         ] {
             for executor in [None, Some("cloud_agent")] {
-                let turn = build_first_turn(kind, &ctx, &index, Some("ws-1"), None, executor, 1)
+                let turn = build_first_turn(kind, &ctx, &index, Some("ws-1"), None, executor, 1, None)
                     .expect("turn");
                 out.push((kind, executor, turn.text));
             }
@@ -2060,7 +2060,9 @@ mod tests {
         for text in issue_turns(&input) {
             assert!(!text.contains("Only a description, no agent context."));
             assert!(!text.contains("Project-level instructions in the project context"));
-            assert!(text.contains("This issue belongs to the Project:"));
+            // All three kinds name the project (intro: "belongs to", review/test: "in project").
+            assert!(text.contains("Project"));
+            assert!(text.contains("FX"));
         }
     }
 

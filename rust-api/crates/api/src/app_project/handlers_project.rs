@@ -7610,7 +7610,7 @@ mod tests {
         );
         assert_eq!(WRITE_FIELDS[WRITE_FIELDS.len() - 1], "default_state");
         assert_eq!(WRITE_FIELDS[WRITE_FIELDS.len() - 6], "workspace");
-        assert_eq!(WRITE_FIELDS.len(), 45);
+        assert_eq!(WRITE_FIELDS.len(), 46);
     }
 
     #[test]
