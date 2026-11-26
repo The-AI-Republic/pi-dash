@@ -7,15 +7,24 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildCreateLogoProps,
   buildCreatePayload,
+  buildCreateReposPayload,
   CREATE_DEFAULT_ICON,
   CREATE_ICON_CHOICES,
   CREATE_BASE_BRANCH_MAX_LENGTH,
   CREATE_IDENTIFIER_MAX_LENGTH,
   CREATE_NAME_MAX_LENGTH,
+  CREATE_REPO_BRANCH_TOO_LONG_MESSAGE,
+  CREATE_REPO_DUPLICATE_MESSAGE,
+  CREATE_REPO_PROVIDER_LABELS,
+  CREATE_REPO_URL_INVALID_MESSAGE,
   CREATE_REPO_URL_MAX_LENGTH,
+  CREATE_REPO_URL_REQUIRED_MESSAGE,
+  CREATE_REPO_URL_TOO_LONG_MESSAGE,
+  createRepoIdentityKey,
   deriveProjectIdentifier,
   IDENTIFIER_TAKEN_CODE,
   IDENTIFIER_TAKEN_MESSAGE,
+  inferCreateRepoProvider,
   NAME_TAKEN_CODE,
   NAME_TAKEN_MESSAGE,
   pickCreateIcon,
@@ -23,7 +32,13 @@ import {
   sanitizeProjectIdentifier,
   selectCreateFieldErrors,
   validateCreateFields,
+  validateCreateRepoRows,
+  type CreateRepoDraft,
 } from "./project-create.js";
+
+function draft(overrides: Partial<CreateRepoDraft> = {}): CreateRepoDraft {
+  return { url: "https://github.com/acme/nebula", provider: "github", baseBranch: "develop", ...overrides };
+}
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -137,21 +152,9 @@ describe("validateCreateFields", () => {
     expect(validateCreateFields({ name: "Nebula", identifier: "NEB!" }).identifier).toContain("letters and numbers");
   });
 
-  it("caps the repository URL", () => {
-    const long = "x".repeat(CREATE_REPO_URL_MAX_LENGTH + 1);
-    expect(validateCreateFields({ name: "Nebula", identifier: "NEB", repoUrl: long }).repoUrl).toContain(
-      String(CREATE_REPO_URL_MAX_LENGTH)
-    );
-  });
-
-  it("caps and shapes the base branch", () => {
-    const long = "x".repeat(CREATE_BASE_BRANCH_MAX_LENGTH + 1);
-    expect(validateCreateFields({ name: "Nebula", identifier: "NEB", baseBranch: long }).baseBranch).toContain(
-      String(CREATE_BASE_BRANCH_MAX_LENGTH)
-    );
-    expect(validateCreateFields({ name: "Nebula", identifier: "NEB", baseBranch: "feat branch" }).baseBranch).toContain(
-      "may only contain"
-    );
+  it("accepts zero repositories", () => {
+    expect(validateCreateFields({ name: "Nebula", identifier: "NEB", repos: [] })).toEqual({});
+    expect(validateCreateFields({ name: "Nebula", identifier: "NEB" })).toEqual({});
   });
 });
 
@@ -181,6 +184,28 @@ describe("selectCreateFieldErrors", () => {
     expect(selectCreateFieldErrors(error)).toEqual({ name: NAME_TAKEN_MESSAGE, identifier: IDENTIFIER_TAKEN_MESSAGE });
   });
 
+  it("maps a refused repos entry onto its row", () => {
+    const error = new ApiError({
+      status: 400,
+      code: "http",
+      message: "invalid",
+      fields: { settings: ["invalid value for repos: entry 1 is a duplicate of another repository in the list"] },
+    });
+    expect(selectCreateFieldErrors(error)).toEqual({
+      repos: [undefined, { row: "is a duplicate of another repository in the list" }],
+    });
+  });
+
+  it("surfaces unindexed settings refusals on the list", () => {
+    const error = new ApiError({
+      status: 400,
+      code: "http",
+      message: "invalid",
+      fields: { settings: ["settings must be a JSON object"] },
+    });
+    expect(selectCreateFieldErrors(error)).toEqual({ reposError: "settings must be a JSON object" });
+  });
+
   it("leaves fields clear for other failures", () => {
     expect(selectCreateFieldErrors(new Error("boom"))).toEqual({});
     expect(selectCreateFieldErrors(new ApiError({ status: 500, code: "http", message: "broke" }))).toEqual({});
@@ -201,14 +226,50 @@ describe("selectCreateFieldErrors", () => {
   });
 });
 
+describe("validateCreateRepoRows", () => {
+  it("accepts clean rows and infers providers by host", () => {
+    expect(validateCreateRepoRows([draft()])).toEqual([{}]);
+    expect(inferCreateRepoProvider("https://github.com/acme/nebula")).toBe("github");
+    expect(inferCreateRepoProvider("https://gitlab.com/acme/nebula")).toBe("gitlab");
+    expect(inferCreateRepoProvider("ssh://git@git.test/acme/nebula.git")).toBe("other");
+    expect(CREATE_REPO_PROVIDER_LABELS).toEqual({ github: "GitHub", gitlab: "GitLab", other: "Other" });
+  });
+
+  it("requires a shaped URL within its cap", () => {
+    expect(validateCreateRepoRows([draft({ url: "  " })])[0]?.url).toBe(CREATE_REPO_URL_REQUIRED_MESSAGE);
+    const long = `https://git.test/${"x".repeat(CREATE_REPO_URL_MAX_LENGTH)}`;
+    expect(validateCreateRepoRows([draft({ url: long })])[0]?.url).toBe(CREATE_REPO_URL_TOO_LONG_MESSAGE);
+    expect(validateCreateRepoRows([draft({ url: "not a repo" })])[0]?.url).toBe(CREATE_REPO_URL_INVALID_MESSAGE);
+  });
+
+  it("caps the branch and rejects duplicates in another URL form", () => {
+    const long = "x".repeat(CREATE_BASE_BRANCH_MAX_LENGTH + 1);
+    expect(validateCreateRepoRows([draft({ baseBranch: long })])[0]?.baseBranch).toBe(
+      CREATE_REPO_BRANCH_TOO_LONG_MESSAGE
+    );
+    expect(validateCreateRepoRows([draft({ baseBranch: "feat branch" })])[0]?.baseBranch).toContain("may only contain");
+    const errors = validateCreateRepoRows([draft(), draft({ url: "git@github.com:acme/nebula.git" })]);
+    expect(errors[0]).toEqual({});
+    expect(errors[1]?.url).toBe(CREATE_REPO_DUPLICATE_MESSAGE);
+  });
+
+  it("maps every URL form of one repo to one key", () => {
+    const key = createRepoIdentityKey("https://github.com/acme/nebula");
+    expect(key).toBe("github.com/acme/nebula");
+    for (const form of ["git@github.com:acme/nebula.git", "https://GITHUB.COM/ACME/NEBULA/"]) {
+      expect(createRepoIdentityKey(form)).toBe(key);
+    }
+    expect(createRepoIdentityKey("not a repo")).toBeNull();
+  });
+});
+
 describe("buildCreatePayload", () => {
   it("assembles the single-POST body with work-items-only flags", () => {
     const payload = buildCreatePayload({
       name: "  Nebula Craft ",
       identifier: "neb",
       description: "Team space",
-      repoUrl: "git@github.com:acme/nebula.git",
-      baseBranch: "develop",
+      repos: [draft()],
       network: 2,
       projectLead: null,
       icon: "🌊",
@@ -218,8 +279,16 @@ describe("buildCreatePayload", () => {
       name: "Nebula Craft",
       identifier: "NEB",
       description: "Team space",
-      repo_url: "git@github.com:acme/nebula.git",
-      base_branch: "develop",
+      settings: {
+        repos: [
+          {
+            id: expect.any(String),
+            url: "https://github.com/acme/nebula",
+            provider: "github",
+            base_branch: "develop",
+          },
+        ],
+      },
       network: 2,
       project_lead: null,
       logo_props: { in_use: "emoji", emoji: { value: "🌊" } },
@@ -230,6 +299,23 @@ describe("buildCreatePayload", () => {
       page_view: false,
       intake_view: false,
     });
+    expect("repo_url" in payload).toBe(false);
+    expect("base_branch" in payload).toBe(false);
+  });
+
+  it("writes blank branches as null and fresh ids per entry", () => {
+    const entries = buildCreateReposPayload([
+      draft({ baseBranch: "" }),
+      draft({ url: "git@gitlab.com:acme/other.git", provider: "gitlab", baseBranch: "trunk" }),
+    ]);
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toMatchObject({ url: "https://github.com/acme/nebula", provider: "github", base_branch: null });
+    expect(entries[1]).toMatchObject({
+      url: "git@gitlab.com:acme/other.git",
+      provider: "gitlab",
+      base_branch: "trunk",
+    });
+    expect(entries[0]?.id).not.toBe(entries[1]?.id);
   });
 
   it("carries no cover keys", () => {
@@ -237,8 +323,7 @@ describe("buildCreatePayload", () => {
       name: "Nebula",
       identifier: "NEB",
       description: "",
-      repoUrl: "",
-      baseBranch: "",
+      repos: [],
       network: 0,
       projectLead: "323e4567-e89b-12d3-a456-426614174002",
       icon: "🌊",
@@ -250,7 +335,7 @@ describe("buildCreatePayload", () => {
     expect(payload.project_lead).toBe("323e4567-e89b-12d3-a456-426614174002");
   });
 
-  it("sends empty repository fields when the optional values are omitted", () => {
+  it("sends no settings bag when no repository is listed", () => {
     const payload = buildCreatePayload({
       name: "Nebula",
       identifier: "NEB",
@@ -260,7 +345,8 @@ describe("buildCreatePayload", () => {
       icon: "🌊",
       timezone: "UTC",
     });
-    expect(payload.repo_url).toBe("");
-    expect(payload.base_branch).toBe("");
+    expect("settings" in payload).toBe(false);
+    expect("repo_url" in payload).toBe(false);
+    expect("base_branch" in payload).toBe(false);
   });
 });

@@ -48,9 +48,10 @@ import {
   PROJECT_SAVED_TITLE,
   REPO_BIND_FAILED_TITLE,
   REPO_BOUND_TITLE,
+  REPOS_SAVED_MESSAGE,
+  REPOS_SAVED_TITLE,
 } from "./api/mutations.js";
 import {
-  BASE_BRANCH_CHARS_MESSAGE,
   BUDGET_REQUIRED_MESSAGE,
   DESCRIPTION_PLACEHOLDER,
   IDENTIFIER_CHECK_FAILED_MESSAGE,
@@ -347,7 +348,10 @@ describe("PSET-005 read view", () => {
       "placeholder",
       DESCRIPTION_PLACEHOLDER
     );
-    expect(field("Base branch")).toHaveValue("develop");
+    // Branches live per row now; a project with no repository renders the
+    // empty list state. The bind control keeps its own URL draft.
+    expect(screen.queryByRole("textbox", { name: "Base branch" })).not.toBeInTheDocument();
+    expect(screen.getByTestId("general-repos-empty")).toBeInTheDocument();
     expect(field("Repository URL")).toHaveValue("");
     expect(screen.getByTestId("general-visibility")).toHaveTextContent("Public");
     expect(screen.getByTestId("general-timezone")).toHaveTextContent("Europe/Lisbon");
@@ -399,12 +403,13 @@ describe("PSET-006 save and validation", () => {
     expect(field("Short code")).toHaveValue("AB12CD");
   });
 
-  it("rejects a base branch outside the character set", async () => {
+  it("never carries a repository branch on the general save", async () => {
     const { calls } = await renderLoaded();
-    fireEvent.change(field("Base branch"), { target: { value: "feature branch" } });
+    fireEvent.change(field("Project name"), { target: { value: "Website relaunch v2" } });
     save();
-    expect(await screen.findByText(BASE_BRANCH_CHARS_MESSAGE)).toBeInTheDocument();
-    expect(patchCalls(calls)).toHaveLength(0);
+    await waitFor(() => expect(patchCalls(calls)).toHaveLength(1));
+    expect("base_branch" in patchBodyAt(calls)).toBe(false);
+    expect("repo_url" in patchBodyAt(calls)).toBe(false);
   });
 
   it("maps a write-time identifier collision onto its field", async () => {
@@ -537,8 +542,8 @@ describe("PSET-006 save and validation", () => {
     expect(field("Project name")).toBeDisabled();
     expect(field("Short code")).toBeDisabled();
     expect(screen.getByRole("textbox", { name: "Description" })).toBeDisabled();
-    expect(field("Base branch")).toBeDisabled();
     expect(field("Repository URL")).toBeDisabled();
+    expect(screen.getByTestId("general-repos-add")).toBeDisabled();
     expect(screen.getByTestId("general-visibility-trigger")).toBeDisabled();
     expect(screen.getByTestId("general-ticking")).toHaveAttribute("aria-disabled", "true");
     expect(screen.getByTestId("general-repo-bind")).toBeDisabled();
@@ -551,6 +556,88 @@ describe("PSET-006 save and validation", () => {
     harness.role = role;
     await renderLoaded();
     expect(field("Project name")).toBeDisabled();
+  });
+});
+
+describe("repository list", () => {
+  const ENTRY = {
+    id: "323e4567-e89b-12d3-a456-426614174002",
+    url: "https://github.com/acme/site",
+    provider: "github",
+    base_branch: "",
+  };
+
+  it("shows a legacy-only repository as one row with the repo-default caption", async () => {
+    await renderLoaded({ row: () => projectRow({ repo_url: ENTRY.url, base_branch: "" }) });
+    const rows = screen.getAllByTestId("general-repos-row");
+    expect(rows).toHaveLength(1);
+    expect(within(rows[0] as HTMLElement).getByTestId("general-repos-row-url")).toHaveTextContent(ENTRY.url);
+    expect(within(rows[0] as HTMLElement).getByTestId("general-repos-row-provider")).toHaveTextContent("GitHub");
+    expect(within(rows[0] as HTMLElement).getByTestId("general-repos-row-branch")).toHaveTextContent("repo default");
+  });
+
+  it("shows each stored entry with its own branch", async () => {
+    const stored = { ...ENTRY, base_branch: "trunk" };
+    await renderLoaded({
+      row: () =>
+        projectRow({ repo_url: ENTRY.url, base_branch: "trunk", repos: [stored], settings: { repos: [stored] } }),
+    });
+    const rows = screen.getAllByTestId("general-repos-row");
+    expect(rows).toHaveLength(1);
+    expect(within(rows[0] as HTMLElement).getByTestId("general-repos-row-branch")).toHaveTextContent("trunk");
+  });
+
+  it("adds a repository through the settings PATCH and confirms", async () => {
+    const user = userEvent.setup();
+    const { calls } = await renderLoaded({ row: () => projectRow({ repo_url: "", base_branch: "" }) });
+    await user.click(screen.getByTestId("general-repos-add"));
+    fireEvent.change(screen.getByTestId("general-repos-new-url"), {
+      target: { value: "https://github.com/acme/new" },
+    });
+    await user.click(screen.getByTestId("general-repos-new-confirm"));
+    await waitFor(() => expect(patchCalls(calls)).toHaveLength(1));
+    const body = patchBodyAt(calls) as { settings: { repos: Array<Record<string, unknown>> } };
+    expect(body.settings.repos).toHaveLength(1);
+    expect(body.settings.repos[0]).toMatchObject({
+      url: "https://github.com/acme/new",
+      provider: "github",
+      base_branch: null,
+    });
+    expect(notify.success).toHaveBeenCalledWith(REPOS_SAVED_TITLE, REPOS_SAVED_MESSAGE);
+  });
+
+  it("removes a row through the settings PATCH and shows the empty list", async () => {
+    const user = userEvent.setup();
+    const { calls } = await renderLoaded({
+      row: () => projectRow({ repo_url: ENTRY.url, base_branch: "", repos: [ENTRY], settings: { repos: [ENTRY] } }),
+      patchRows: [projectRow({ repo_url: "", base_branch: "", repos: [], settings: { repos: [] } })],
+    });
+    await user.click(screen.getByTestId("general-repos-remove"));
+    await waitFor(() => expect(patchCalls(calls)).toHaveLength(1));
+    expect(patchBodyAt(calls)).toEqual({ settings: { repos: [] } });
+    expect(notify.success).toHaveBeenCalledWith(REPOS_SAVED_TITLE, REPOS_SAVED_MESSAGE);
+    await waitFor(() => expect(screen.getByTestId("general-repos-empty")).toBeInTheDocument());
+  });
+
+  it("maps a refused write onto its row", async () => {
+    const user = userEvent.setup();
+    const stored = { ...ENTRY, base_branch: "trunk" };
+    await renderLoaded({
+      row: () =>
+        projectRow({ repo_url: ENTRY.url, base_branch: "trunk", repos: [stored], settings: { repos: [stored] } }),
+      patchStatus: 400,
+      patchBody: {
+        settings: [
+          "invalid value for repos: entry 0 base_branch: Branch name may contain only letters, numbers, and . _ / -",
+        ],
+      },
+    });
+    await user.click(screen.getByTestId("general-repos-edit"));
+    fireEvent.change(screen.getByTestId("general-repos-edit-url"), {
+      target: { value: "https://github.com/acme/renamed" },
+    });
+    await user.click(screen.getByTestId("general-repos-edit-confirm"));
+    expect(await screen.findByTestId("general-repos-edit-error")).toHaveTextContent("Branch name may contain");
   });
 });
 

@@ -7,12 +7,13 @@
 // follow a rename or a new emblem without a reload. Notices live here
 // because every caller of these writes shows the same copy.
 
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import {
   bindProjectRepository,
   updateProjectSettings,
   uploadProjectAsset,
   type ByteUpload,
+  type ProjectRepo,
   type ProjectRepositoryBound,
   type ProjectRepositoryStatus,
   type ProjectSettingsDetail,
@@ -32,6 +33,42 @@ export const PROJECT_SAVE_FAILED_TITLE = "Error!";
 export const REPO_BIND_FAILED_TITLE = "Bind failed";
 export const REPO_BOUND_TITLE = "Repository bound";
 export const REPO_BOUND_MESSAGE = "Enable sync in the repository settings to start importing work.";
+
+/** Repository list notices (NEWPIDASH-413). */
+export const REPOS_SAVED_TITLE = "Success!";
+export const REPOS_SAVED_MESSAGE = "Repositories updated";
+export const REPOS_SAVE_FAILED_TITLE = "Error!";
+
+/**
+ * The row a repos-list write re-seeds: the PATCH answer already carries
+ * the reconciled list, so seeding matches the server and the invalidation
+ * re-reads it.
+ */
+function seedReposRow(queryClient: QueryClient, slug: string, projectId: string, saved: ProjectSettingsDetail): void {
+  seedProjectRow(queryClient, slug, projectId, saved);
+  void queryClient.invalidateQueries({ queryKey: generalKeys.detail(slug, projectId) });
+}
+
+/**
+ * Write the repository list (NEWPIDASH-413): a full-list replace through
+ * the settings PATCH. The columns follow renames and clears on the
+ * server (double delete), so removing the legacy-matching row needs no
+ * special casing here. The write re-seeds the row and re-reads it, so
+ * the list always matches the server after a write.
+ */
+export function useSaveProjectRepos(slug: string, projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation<ProjectSettingsDetail, Error, { repos: ProjectRepo[] }>({
+    mutationFn: ({ repos }) => updateProjectSettings(getAppClient(), slug, projectId, { settings: { repos } }),
+    onSuccess: (saved) => {
+      seedReposRow(queryClient, slug, projectId, saved);
+      notifySuccess(REPOS_SAVED_TITLE, REPOS_SAVED_MESSAGE);
+    },
+    onError: (error) => {
+      notifyError(REPOS_SAVE_FAILED_TITLE, error.message);
+    },
+  });
+}
 
 /** Emblem upload failure (PSET-007): the whole save aborts. */
 export const EMBLEM_UPLOAD_FAILED_TITLE = "Error!";

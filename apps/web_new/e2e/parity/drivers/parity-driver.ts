@@ -10921,6 +10921,36 @@ export interface WsSettingsMemberRowFacts {
   settingsGeneralStallCoverUpload(): Promise<void>;
   /** Release a cover-upload stall installed above. */
   settingsGeneralReleaseCoverUpload(): Promise<void>;
+  /**
+   * Repository list rows in display order; empty while the section shows
+   * its empty state.
+   */
+  settingsGeneralReposRows(): Promise<SettingsGeneralRepoRow[]>;
+  /** Whether the repositories section shows its empty state. */
+  settingsGeneralReposEmptyVisible(): Promise<boolean>;
+  /** Whether the add-repository control is currently disabled. */
+  settingsGeneralReposAddDisabled(): Promise<boolean>;
+  /**
+   * Add a repository through the section form; resolves once the write
+   * settles. A blank branch writes the repo's own default.
+   */
+  settingsGeneralReposAdd(url: string, branch: string): Promise<void>;
+  /** Edit the row at `index` (display order); resolves once the write settles. */
+  settingsGeneralReposEdit(index: number, url: string, branch: string): Promise<void>;
+  /** Remove the row at `index` (display order); resolves once the write settles. */
+  settingsGeneralReposRemove(index: number): Promise<void>;
+  /** Inline error text on the row at `index`, or "" when it shows none. */
+  settingsGeneralReposRowError(index: number): Promise<string>;
+  /** Inline error text on the open add or edit form, or "" when it shows none. */
+  settingsGeneralReposFormError(): Promise<string>;
+  /** Close the open add or edit form without committing. */
+  settingsGeneralReposCancelForm(): Promise<void>;
+  /**
+   * Answer project-row PATCHes by echoing the written repos list back
+   * onto the row (the scenarios assert their own writes without needing
+   * the merged-read backend). Reads pass through untouched.
+   */
+  settingsGeneralReposEchoWrites(): Promise<void>;
   // Archive/restore entries, card reads, toasts and the delete phrase
   // fill reuse the sibling areas' methods (openArchiveProjectDialog,
   // clickCardRestore, confirmArchive/confirmRestore,
@@ -11006,6 +11036,17 @@ export interface WsSettingsMemberRowFacts {
 
 /** General-tab text field addressed by the settingsGeneral field methods (NEWFRONT-389). */
 export type SettingsGeneralField = "name" | "description" | "identifier" | "repoUrl" | "baseBranch" | "budget";
+
+/**
+ * One repository list row as the tab renders it (NEWPIDASH-413): the
+ * URL, the provider label and the branch caption ("repo default" when
+ * the entry follows the repo's own default branch).
+ */
+export interface SettingsGeneralRepoRow {
+  url: string;
+  provider: string;
+  branch: string;
+}
 
 /** Inline image in the page body editor (NEWFRONT-316, PAGE-039). */
 export interface PagesBlocksInlineImage {

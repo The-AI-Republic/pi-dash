@@ -278,6 +278,7 @@ import type {
   WsSettingsApiTokenBackup,
   WsSettingsApiTokenRow,
   SettingsGeneralField,
+  SettingsGeneralRepoRow,
   CommentActivityTraffic,
   ModulesXPaletteMenuItem,
 } from "./parity-driver";
@@ -52147,6 +52148,178 @@ export class WebNewDriver implements ParityDriver {
         { timeout: 30_000 }
       )
       .not.toBe("waiting");
+  }
+  async settingsGeneralReposRows(): Promise<SettingsGeneralRepoRow[]> {
+    const rows = this.page.getByTestId("general-repos-row");
+    const count = await rows.count();
+    const out: SettingsGeneralRepoRow[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const row = rows.nth(index);
+      out.push({
+        url: ((await row.getByTestId("general-repos-row-url").innerText()) ?? "").trim(),
+        provider: ((await row.getByTestId("general-repos-row-provider").innerText()) ?? "").trim(),
+        branch: ((await row.getByTestId("general-repos-row-branch").innerText()) ?? "").trim(),
+      });
+    }
+    return out;
+  }
+  async settingsGeneralReposEmptyVisible(): Promise<boolean> {
+    return (await this.page.getByTestId("general-repos-empty").count()) > 0;
+  }
+  async settingsGeneralReposAddDisabled(): Promise<boolean> {
+    const add = this.page.getByTestId("general-repos-add");
+    await add.waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    return await add.isDisabled();
+  }
+  /**
+   * Echo every project-row repos PATCH back with the written list merged
+   * on top (NEWPIDASH-413): the parity stack's Django backend stores the
+   * settings bag raw and never renders a merged list, so the scenarios
+   * answer their own writes and stay backend-agnostic. The tab re-reads
+   * the row after every write, so re-reads replay the last write for
+   * that project row; every other read passes through untouched.
+   */
+  async settingsGeneralReposEchoWrites(): Promise<void> {
+    const writtenByRow = new Map<string, unknown>();
+    const withRepos = (row: { settings?: Record<string, unknown>; repos?: unknown }, written: unknown) => {
+      row.settings = { ...(row.settings ?? {}), repos: written };
+      row.repos = written;
+      return row;
+    };
+    await this.page.route(
+      (url) => url.pathname.match(/\/api\/workspaces\/[^/]+\/projects\/[^/]+\/$/) !== null,
+      async (route) => {
+        const request = route.request();
+        const key = new URL(request.url()).pathname;
+        if (request.method() === "PATCH") {
+          const response = await route.fetch();
+          const row = (await response.json()) as {
+            settings?: Record<string, unknown>;
+            repos?: unknown;
+          };
+          const written = (request.postDataJSON() as { settings?: { repos?: unknown } } | null)?.settings?.repos;
+          if (written !== undefined) {
+            writtenByRow.set(key, written);
+            withRepos(row, written);
+          }
+          await route.fulfill({ response, json: row });
+          return;
+        }
+        const replay = request.method() === "GET" ? writtenByRow.get(key) : undefined;
+        if (replay === undefined) {
+          await route.fallback();
+          return;
+        }
+        // The tab can abandon this re-read (remount aborts the fetch and
+        // disposes the upstream answer); fall back untouched in that case
+        // rather than failing the row — the settled re-read replays.
+        try {
+          const response = await route.fetch();
+          const row = (await response.json()) as {
+            settings?: Record<string, unknown>;
+            repos?: unknown;
+          };
+          await route.fulfill({ response, json: withRepos(row, replay) });
+        } catch {
+          await route.fallback();
+        }
+      }
+    );
+  }
+  /**
+   * Every inline error the open add or edit form can show: kit input
+   * alerts render as `#{inputId}-error`, while row-level and provider
+   * errors carry testids on the section itself.
+   */
+  private static readonly REPOS_FORM_ERROR_SELECTORS = [
+    '[data-testid="general-repos-new-error"]',
+    '[data-testid="general-repos-edit-error"]',
+    '[data-testid="general-repos-new-provider-error"]',
+    '[data-testid="general-repos-edit-provider-error"]',
+    "#general-repos-new-url-error",
+    "#general-repos-new-branch-error",
+    "#general-repos-edit-url-error",
+    "#general-repos-edit-branch-error",
+  ];
+
+  private async settingsGeneralReposFormErrorText(): Promise<string> {
+    for (const selector of WebNewDriver.REPOS_FORM_ERROR_SELECTORS) {
+      const error = this.page.locator(selector).first();
+      if ((await error.count()) === 0) continue;
+      const text = ((await error.innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
+      if (text !== "") return text;
+    }
+    return "";
+  }
+
+  /**
+   * Settle a confirmed add or edit: the write answers with a project-row
+   * PATCH, while a client-side refusal surfaces an inline error with no
+   * request at all. Whichever shows first settles the confirm.
+   */
+  private async settingsGeneralReposWaitSettled(): Promise<void> {
+    let patched = false;
+    void this.page
+      .waitForResponse((seen) => seen.url().includes("/projects/") && seen.request().method() === "PATCH", {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .then(
+        () => {
+          patched = true;
+        },
+        () => {
+          patched = false;
+        }
+      );
+    await expect
+      .poll(
+        async () => {
+          if (patched) return "settled";
+          return (await this.settingsGeneralReposFormErrorText()) !== "" ? "settled" : "waiting";
+        },
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .toBe("settled");
+  }
+  async settingsGeneralReposAdd(url: string, branch: string): Promise<void> {
+    await this.page.getByTestId("general-repos-add").click({ timeout: WebNewDriver.WAIT_MS });
+    const urlInput = this.page.getByTestId("general-repos-new-url");
+    await urlInput.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await urlInput.fill(url, { timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("general-repos-new-branch").fill(branch, { timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("general-repos-new-confirm").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.settingsGeneralReposWaitSettled();
+  }
+  async settingsGeneralReposEdit(index: number, url: string, branch: string): Promise<void> {
+    const rows = this.page.getByTestId("general-repos-row");
+    await rows.nth(index).getByTestId("general-repos-edit").click({ timeout: WebNewDriver.WAIT_MS });
+    const urlInput = this.page.getByTestId("general-repos-edit-url");
+    await urlInput.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await urlInput.fill(url, { timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("general-repos-edit-branch").fill(branch, { timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("general-repos-edit-confirm").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.settingsGeneralReposWaitSettled();
+  }
+  async settingsGeneralReposRemove(index: number): Promise<void> {
+    const rows = this.page.getByTestId("general-repos-row");
+    await rows.nth(index).getByTestId("general-repos-remove").click({ timeout: WebNewDriver.WAIT_MS });
+    // Removing always writes: any subset of a valid list stays valid, so
+    // the refused branch cannot fire here.
+    await this.page.waitForResponse(
+      (seen) => seen.url().includes("/projects/") && seen.request().method() === "PATCH",
+      { timeout: WebNewDriver.WAIT_MS }
+    );
+  }
+  async settingsGeneralReposRowError(index: number): Promise<string> {
+    const error = this.page.getByTestId("general-repos-row").nth(index).getByTestId("general-repos-row-error");
+    if ((await error.count()) === 0) return "";
+    return ((await error.innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
+  }
+  async settingsGeneralReposFormError(): Promise<string> {
+    return this.settingsGeneralReposFormErrorText();
+  }
+  async settingsGeneralReposCancelForm(): Promise<void> {
+    await this.page.getByTestId("general-repos-form-cancel").click({ timeout: WebNewDriver.WAIT_MS });
   }
   private generalEmblemDialog(): Locator {
     // Kit dialogs carry no testid (the prop does not forward), so the

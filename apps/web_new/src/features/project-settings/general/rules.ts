@@ -5,19 +5,24 @@
 // (parity/specs/project-settings-general.md §PSET-005–009). Render-free so
 // the form, the write payloads and the unit suites share one answer: field
 // limits and messages, the short-code shaper, the visibility options, the
-// automated-run policy math, the emblem value shapes and the parsed failure
-// codes. There is no executor choice: projects run on runners and the
-// default pod decides who runs the work (Pi Dash Agent design §6), so the
-// tab neither shows nor writes `default_agent_executor`.
+// automated-run policy math, the emblem value shapes, the repository list
+// rows with their validation and server-error mapping, and the parsed
+// failure codes. There is no executor choice: projects run on runners and
+// the default pod decides who runs the work (Pi Dash Agent design §6), so
+// the tab neither shows nor writes `default_agent_executor`.
 
-import { isApiError, type ProjectSettingsDetail, type ProjectUpdateInput } from "@pidash/api-client";
+import {
+  isApiError,
+  projectReposOrDefault,
+  type ProjectRepo,
+  type ProjectSettingsDetail,
+  type ProjectUpdateInput,
+} from "@pidash/api-client";
 
 /** Longest project name the server stores (PSET-006). */
 export const GENERAL_NAME_MAX_LENGTH = 255;
 /** Longest short code; typed input is stripped to alphanumerics and capped. */
 export const GENERAL_IDENTIFIER_MAX_LENGTH = 10;
-/** Longest base branch; the server also restricts its characters. */
-export const GENERAL_BASE_BRANCH_MAX_LENGTH = 128;
 /** Longest repository URL the input accepts (binding enforces it too). */
 export const GENERAL_REPO_URL_MAX_LENGTH = 512;
 
@@ -36,7 +41,6 @@ export const IDENTIFIER_REQUIRED_MESSAGE = "A short code is required";
 export const IDENTIFIER_TOO_LONG_MESSAGE = `Keep the short code to ${GENERAL_IDENTIFIER_MAX_LENGTH} characters`;
 export const IDENTIFIER_UNAVAILABLE_MESSAGE = "That short code is already reserved by another project.";
 export const IDENTIFIER_CHECK_FAILED_MESSAGE = "That short code could not be checked. Try again.";
-export const BASE_BRANCH_TOO_LONG_MESSAGE = `Keep the base branch to ${GENERAL_BASE_BRANCH_MAX_LENGTH} characters`;
 export const BASE_BRANCH_CHARS_MESSAGE = "A branch name may contain only letters, numbers, and . _ / -";
 export const BUDGET_REQUIRED_MESSAGE = "Enter a run budget, or tick no cap";
 export const BUDGET_BELOW_ONE_MESSAGE = "The run budget must be at least one";
@@ -56,6 +60,33 @@ export const EMBLEM_SIZE_MESSAGE = "Keep the emblem under 5 MB.";
 /** Empty repository input is refused client-side, with no request (PSET-008). */
 export const REPO_EMPTY_TITLE = "Error!";
 export const REPO_EMPTY_MESSAGE = "Enter a Git repository URL first.";
+
+/** Longest repository list entry URL; the server enforces the same bound. */
+export const REPO_LIST_URL_MAX_LENGTH = 512;
+/** Longest repository list entry branch; the server enforces the same bound. */
+export const REPO_LIST_BRANCH_MAX_LENGTH = 128;
+
+/** Repository list providers the server accepts (NEWPIDASH-409). */
+export const REPO_PROVIDERS = ["github", "gitlab", "other"] as const;
+export type RepoProvider = (typeof REPO_PROVIDERS)[number];
+
+/** Provider labels the list rows render. */
+export const REPO_PROVIDER_LABELS: Record<RepoProvider, string> = {
+  github: "GitHub",
+  gitlab: "GitLab",
+  other: "Other",
+};
+
+/** Caption a row shows when the entry follows the repo's own default branch. */
+export const REPO_DEFAULT_BRANCH_LABEL = "repo default";
+
+/** Field-level messages the repository list rows render inline. */
+export const REPO_URL_REQUIRED_MESSAGE = "Enter a repository URL.";
+export const REPO_URL_TOO_LONG_MESSAGE = `Keep the repository URL to ${REPO_LIST_URL_MAX_LENGTH} characters`;
+export const REPO_URL_INVALID_MESSAGE = "Enter a valid repository URL.";
+export const REPO_BRANCH_TOO_LONG_MESSAGE = `Keep the base branch to ${REPO_LIST_BRANCH_MAX_LENGTH} characters`;
+export const REPO_PROVIDER_MESSAGE = "Choose GitHub, GitLab or Other.";
+export const REPO_DUPLICATE_MESSAGE = "This repository is already in the list.";
 
 /** Visibility choices the server reads: 0 private, 2 public. */
 export const VISIBILITY_OPTIONS = [
@@ -82,6 +113,16 @@ export const CADENCE_OPTIONS = [
 export const CUSTOM_CADENCE_VALUE = "custom";
 export const CUSTOM_CADENCE_LABEL = "Custom";
 
+/** One repository list draft the tab renders (NEWPIDASH-413). */
+export interface RepoRow {
+  /** Stable entry id; a fresh UUID for rows added on this client. */
+  id: string;
+  url: string;
+  provider: RepoProvider;
+  /** Blank means the repo's own default branch. */
+  baseBranch: string;
+}
+
 /** Shape the tab renders; every editable field is a string. */
 export interface GeneralFormValues {
   name: string;
@@ -89,7 +130,8 @@ export interface GeneralFormValues {
   description: string;
   network: number;
   timezone: string;
-  baseBranch: string;
+  repos: RepoRow[];
+  /** Binding draft for the repository bind control (PSET-008), never saved. */
   repoUrl: string;
   logoProps: Record<string, unknown>;
   ticking: boolean;
@@ -141,8 +183,16 @@ export function stagesChanged(values: GeneralFormValues, project: Pick<ProjectSe
   );
 }
 
-export type GeneralField = "name" | "identifier" | "baseBranch" | "budget";
+export type GeneralField = "name" | "identifier" | "budget";
 export type GeneralFieldErrors = Partial<Record<GeneralField, string>>;
+
+/** Per-row errors the repository list renders inline; `row` is a whole-row server message. */
+export interface RepoRowErrors {
+  url?: string | undefined;
+  provider?: string | undefined;
+  baseBranch?: string | undefined;
+  row?: string | undefined;
+}
 
 /** The stored budget when it is a real cap, else null (uncapped/unset). */
 export function cappedBudgetOf(project: Pick<ProjectSettingsDetail, "agent_default_max_ticks">): number | null {
@@ -158,7 +208,7 @@ export function generalFormFrom(project: ProjectSettingsDetail): GeneralFormValu
     description: project.description,
     network: project.network === 2 ? 2 : 0,
     timezone: project.timezone,
-    baseBranch: project.base_branch,
+    repos: reposRowsFrom(project),
     repoUrl: project.repo_url,
     logoProps: project.logo_props,
     ticking: project.agent_ticking_enabled,
@@ -263,11 +313,6 @@ export function validateGeneralFields(values: GeneralFormValues): GeneralFieldEr
   } else if (values.identifier.length > GENERAL_IDENTIFIER_MAX_LENGTH) {
     errors.identifier = IDENTIFIER_TOO_LONG_MESSAGE;
   }
-  if (values.baseBranch.length > GENERAL_BASE_BRANCH_MAX_LENGTH) {
-    errors.baseBranch = BASE_BRANCH_TOO_LONG_MESSAGE;
-  } else if (!BASE_BRANCH_CHARS.test(values.baseBranch)) {
-    errors.baseBranch = BASE_BRANCH_CHARS_MESSAGE;
-  }
   // Nothing validates while the clock is off (PSET-009).
   if (values.ticking && !values.noCap) {
     if (values.budget.trim() === "") errors.budget = BUDGET_REQUIRED_MESSAGE;
@@ -297,9 +342,11 @@ export interface BuildPayloadInput {
 
 /**
  * The project PATCH body (PSET-006/007/009). It never carries the
- * repository URL: binding owns that field (PSET-008). Per-stage cadence
- * columns ride along only when the picker moved, so a rhythm set elsewhere
- * survives an unrelated save.
+ * repository URL: binding owns that field (PSET-008). Repository branches
+ * ride the repos list instead (NEWPIDASH-413): each row writes through the
+ * settings PATCH and the columns follow, so the general save carries no
+ * base branch either. Per-stage cadence columns ride along only when the
+ * picker moved, so a rhythm set elsewhere survives an unrelated save.
  */
 export function buildGeneralPayload({
   values,
@@ -312,7 +359,6 @@ export function buildGeneralPayload({
     description: values.description,
     network: values.network,
     timezone: values.timezone,
-    base_branch: values.baseBranch,
     logo_props: values.logoProps,
     agent_ticking_enabled: values.ticking,
     agent_default_max_ticks: budgetOnSave(values),
@@ -360,6 +406,203 @@ export function generalConflictError(error: unknown): { field: GeneralField; mes
 /** Text a non-conflict save failure shows under the notice. */
 export function saveFailureMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Infer the provider label for a repository URL (NEWPIDASH-413): the
+ * client's mirror of the server rule — `github.com` reads as GitHub,
+ * `gitlab.com` as GitLab, anything else (including an unparseable URL)
+ * as Other. New rows start here; the select keeps an explicit pick.
+ */
+export function inferRepoProvider(url: string): RepoProvider {
+  const host = repoUrlHost(url);
+  if (host === "github.com") return "github";
+  if (host === "gitlab.com") return "gitlab";
+  return "other";
+}
+
+/** Whitespace or control characters disqualify a URL (mirrors the server). */
+function hasBadUrlChar(candidate: string): boolean {
+  for (const char of candidate) {
+    if (/\s/.test(char)) return true;
+    const code = char.codePointAt(0) ?? 0;
+    if (code <= 0x1f || code === 0x7f || (code >= 0x80 && code <= 0x9f)) return true;
+  }
+  return false;
+}
+
+/** Lowercase host of a repository URL, or null when it has no usable one. */
+function repoUrlHost(url: string): string | null {
+  const candidate = url.trim();
+  if (candidate === "" || hasBadUrlChar(candidate)) return null;
+  const schemeAt = candidate.indexOf("://");
+  if (schemeAt !== -1) {
+    const scheme = candidate.slice(0, schemeAt).toLowerCase();
+    if (scheme !== "http" && scheme !== "https" && scheme !== "ssh") return null;
+    const authority = candidate.slice(schemeAt + 3).split("/", 1)[0] ?? "";
+    const hostPort = authority.split("@").pop() ?? "";
+    const host = hostPort.toLowerCase().replace(/:(443|80)$/, "");
+    return host === "" ? null : host;
+  }
+  const colonAt = candidate.indexOf(":");
+  if (colonAt === -1) return null;
+  const left = candidate.slice(0, colonAt);
+  const path = candidate.slice(colonAt + 1);
+  if (left === "" || left.includes("/") || path === "" || path.startsWith("/") || path.includes("\\")) return null;
+  const host = (left.split("@").pop() ?? "").toLowerCase();
+  return host === "" ? null : host;
+}
+
+/**
+ * The client's duplicate key (NEWPIDASH-413): a trimmed URL with a
+ * lowercased host, one trailing `.git` and trailing slashes stripped,
+ * and — for GitHub only, like the server — a lowercased path. Null for
+ * anything unparseable; the server stays authoritative there and its
+ * 400 lands on the row.
+ */
+export function repoIdentityKey(url: string): string | null {
+  const candidate = url.trim();
+  if (candidate === "" || hasBadUrlChar(candidate)) return null;
+  const host = repoUrlHost(candidate);
+  if (host === null) return null;
+  const schemeAt = candidate.indexOf("://");
+  const rawPath =
+    schemeAt !== -1
+      ? candidate.slice(candidate.indexOf("/", schemeAt + 3) + 1 || candidate.length)
+      : candidate.slice(candidate.indexOf(":") + 1);
+  const path = rawPath.split("?")[0]?.split("#")[0] ?? "";
+  const clean = stripOneGitSuffix(path.replace(/^\/+|\/+$/g, ""));
+  if (clean === "" || clean.includes(":") || clean.split("/").some((part) => part === "")) return null;
+  const keyed = host === "github.com" ? clean.toLowerCase() : clean;
+  return `${host}/${keyed}`;
+}
+
+/** Drop one trailing `.git`, if present. */
+function stripOneGitSuffix(path: string): string {
+  return path.endsWith(".git") ? path.slice(0, -".git".length) : path;
+}
+
+/** A fresh client-side entry id; the server requires a UUID per entry. */
+export function newRepoId(): string {
+  return globalThis.crypto.randomUUID();
+}
+
+/**
+ * Rows the tab renders (NEWPIDASH-413). The merged `repos` list answers
+ * first load already reconciled (a legacy-only repo arrives as one
+ * copied entry). Servers that predate the list answer no `repos` key:
+ * a stored legacy URL still renders as the one row, so the list never
+ * opens empty while the project names a repository.
+ */
+export function reposRowsFrom(project: Pick<ProjectSettingsDetail, "repos" | "repo_url" | "base_branch">): RepoRow[] {
+  const merged = projectReposOrDefault(project.repos);
+  if (merged.length > 0 || project.repos !== undefined) {
+    return merged.map((entry) => ({
+      id: entry.id,
+      url: entry.url,
+      provider: (REPO_PROVIDERS as readonly string[]).includes(entry.provider ?? "")
+        ? (entry.provider as RepoProvider)
+        : inferRepoProvider(entry.url),
+      baseBranch: entry.base_branch ?? "",
+    }));
+  }
+  const legacy = project.repo_url.trim();
+  if (legacy === "") return [];
+  return [
+    { id: newRepoId(), url: project.repo_url, provider: inferRepoProvider(legacy), baseBranch: project.base_branch },
+  ];
+}
+
+/** Whether every row passes the client-side rules. */
+export function repoRowsValid(rows: RepoRow[]): boolean {
+  return validateRepoRows(rows).every((errors) => Object.keys(errors).length === 0);
+}
+
+/**
+ * Client-side row rules (NEWPIDASH-413): URL required, capped and shaped;
+ * provider known; branch capped with the server's charset; no two rows
+ * share an identity key. The server re-checks everything — its 400s map
+ * back onto rows separately — so the shape rule stays permissive.
+ */
+export function validateRepoRows(rows: RepoRow[]): RepoRowErrors[] {
+  const keys = rows.map((row) => repoIdentityKey(row.url));
+  return rows.map((row, index) => {
+    const errors: RepoRowErrors = {};
+    const url = row.url.trim();
+    if (url === "") {
+      errors.url = REPO_URL_REQUIRED_MESSAGE;
+    } else if (row.url.length > REPO_LIST_URL_MAX_LENGTH) {
+      errors.url = REPO_URL_TOO_LONG_MESSAGE;
+    } else if (repoIdentityKey(row.url) === null) {
+      errors.url = REPO_URL_INVALID_MESSAGE;
+    }
+    if (!(REPO_PROVIDERS as readonly string[]).includes(row.provider)) {
+      errors.provider = REPO_PROVIDER_MESSAGE;
+    }
+    if (row.baseBranch.length > REPO_LIST_BRANCH_MAX_LENGTH) {
+      errors.baseBranch = REPO_BRANCH_TOO_LONG_MESSAGE;
+    } else if (!BASE_BRANCH_CHARS.test(row.baseBranch)) {
+      errors.baseBranch = BASE_BRANCH_CHARS_MESSAGE;
+    }
+    // Like the server, only the later entry is the duplicate.
+    if (
+      errors.url === undefined &&
+      keys[index] !== null &&
+      keys.some((key, other) => other < index && key !== null && key === keys[index])
+    ) {
+      errors.url = REPO_DUPLICATE_MESSAGE;
+    }
+    return errors;
+  });
+}
+
+/** The settings-PATCH write body: the whole list, blank branches as null. */
+export function reposToPayload(rows: RepoRow[]): ProjectRepo[] {
+  return rows.map((row) => ({
+    id: row.id,
+    url: row.url.trim(),
+    provider: row.provider,
+    base_branch: row.baseBranch === "" ? null : row.baseBranch,
+  }));
+}
+
+/** One parsed server refusal: whole-section messages plus per-row ones. */
+export interface ReposServerErrors {
+  rows: Map<number, string>;
+  general: string[];
+}
+
+/**
+ * Map a repos write refusal onto its rows (NEWPIDASH-413). The server
+ * answers `{"settings": ["... entry <n> ..."]}`; the index names the
+ * row the write rejected, and the message already says why. Messages
+ * without an entry index surface under the section instead.
+ */
+export function reposServerErrors(error: unknown): ReposServerErrors {
+  const parsed: ReposServerErrors = { rows: new Map(), general: [] };
+  if (!isApiError(error) || error.fields === undefined) return parsed;
+  for (const message of error.fields["settings"] ?? []) {
+    const match = /entry (\d+)\b/.exec(message);
+    if (match === null || match.index === undefined) {
+      parsed.general.push(message);
+      continue;
+    }
+    const index = Number(match[1]);
+    const detail = message.slice(match.index + match[0].length).trim();
+    const prior = parsed.rows.get(index);
+    parsed.rows.set(
+      index,
+      prior === undefined ? (detail === "" ? message : detail) : `${prior} ${detail === "" ? message : detail}`
+    );
+  }
+  return parsed;
+}
+
+/** The 400 a legacy-column duplicate answers names no entry; surface it whole. */
+export function reposLegacyDuplicateMessage(error: unknown): string | null {
+  if (!isApiError(error) || error.fields === undefined) return null;
+  const first = error.fields["repo_url"]?.[0];
+  return first === undefined ? null : first;
 }
 
 /** The URL shapes a binding answer can carry (spec §PSET-008). */

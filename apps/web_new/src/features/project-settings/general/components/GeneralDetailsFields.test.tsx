@@ -70,10 +70,10 @@ describe("GeneralDetailsFields", () => {
     const { onChange } = setup();
     fireEvent.change(screen.getByRole("textbox", { name: "Project name" }), { target: { value: "Renamed" } });
     fireEvent.change(screen.getByRole("textbox", { name: "Description" }), { target: { value: "Notes" } });
-    fireEvent.change(screen.getByRole("textbox", { name: "Base branch" }), { target: { value: "trunk" } });
     expect(onChange).toHaveBeenCalledWith({ name: "Renamed" });
     expect(onChange).toHaveBeenCalledWith({ description: "Notes" });
-    expect(onChange).toHaveBeenCalledWith({ baseBranch: "trunk" });
+    // Repository branches live per row in the repositories list now.
+    expect(screen.queryByRole("textbox", { name: "Base branch" })).not.toBeInTheDocument();
   });
 
   it("picks visibility and timezone", async () => {
@@ -102,7 +102,6 @@ describe("GeneralDetailsFields", () => {
     expect(screen.getByRole("textbox", { name: "Project name" })).toBeDisabled();
     expect(screen.getByRole("textbox", { name: "Short code" })).toBeDisabled();
     expect(screen.getByRole("textbox", { name: "Description" })).toBeDisabled();
-    expect(screen.getByRole("textbox", { name: "Base branch" })).toBeDisabled();
     expect(screen.getByTestId("general-visibility-trigger")).toBeDisabled();
     expect(screen.getByTestId("general-timezone-trigger")).toBeDisabled();
   });
