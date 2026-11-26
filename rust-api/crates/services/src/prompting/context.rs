@@ -2028,8 +2028,9 @@ mod tests {
             recipes::KIND_TEST,
         ] {
             for executor in [None, Some("cloud_agent")] {
-                let turn = build_first_turn(kind, &ctx, &index, Some("ws-1"), None, executor, 1, None)
-                    .expect("turn");
+                let turn =
+                    build_first_turn(kind, &ctx, &index, Some("ws-1"), None, executor, 1, None)
+                        .expect("turn");
                 out.push((kind, executor, turn.text));
             }
         }
