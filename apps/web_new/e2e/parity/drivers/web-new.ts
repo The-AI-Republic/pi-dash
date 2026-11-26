@@ -52172,31 +52172,57 @@ export class WebNewDriver implements ParityDriver {
     return await add.isDisabled();
   }
   /**
-   * Echo every project-row PATCH back with the written repos list merged
+   * Echo every project-row repos PATCH back with the written list merged
    * on top (NEWPIDASH-413): the parity stack's Django backend stores the
    * settings bag raw and never renders a merged list, so the scenarios
-   * answer their own writes and stay backend-agnostic. Reads pass through.
+   * answer their own writes and stay backend-agnostic. The tab re-reads
+   * the row after every write, so re-reads replay the last write for
+   * that project row; every other read passes through untouched.
    */
   async settingsGeneralReposEchoWrites(): Promise<void> {
+    const writtenByRow = new Map<string, unknown>();
+    const withRepos = (row: { settings?: Record<string, unknown>; repos?: unknown }, written: unknown) => {
+      row.settings = { ...(row.settings ?? {}), repos: written };
+      row.repos = written;
+      return row;
+    };
     await this.page.route(
       (url) => url.pathname.match(/\/api\/workspaces\/[^/]+\/projects\/[^/]+\/$/) !== null,
       async (route) => {
         const request = route.request();
-        if (request.method() !== "PATCH") {
+        const key = new URL(request.url()).pathname;
+        if (request.method() === "PATCH") {
+          const response = await route.fetch();
+          const row = (await response.json()) as {
+            settings?: Record<string, unknown>;
+            repos?: unknown;
+          };
+          const written = (request.postDataJSON() as { settings?: { repos?: unknown } } | null)?.settings?.repos;
+          if (written !== undefined) {
+            writtenByRow.set(key, written);
+            withRepos(row, written);
+          }
+          await route.fulfill({ response, json: row });
+          return;
+        }
+        const replay = request.method() === "GET" ? writtenByRow.get(key) : undefined;
+        if (replay === undefined) {
           await route.fallback();
           return;
         }
-        const response = await route.fetch();
-        const row = (await response.json()) as {
-          settings?: Record<string, unknown>;
-          repos?: unknown;
-        };
-        const written = (request.postDataJSON() as { settings?: { repos?: unknown } } | null)?.settings?.repos;
-        if (written !== undefined) {
-          row.settings = { ...(row.settings ?? {}), repos: written };
-          row.repos = written;
+        // The tab can abandon this re-read (remount aborts the fetch and
+        // disposes the upstream answer); fall back untouched in that case
+        // rather than failing the row — the settled re-read replays.
+        try {
+          const response = await route.fetch();
+          const row = (await response.json()) as {
+            settings?: Record<string, unknown>;
+            repos?: unknown;
+          };
+          await route.fulfill({ response, json: withRepos(row, replay) });
+        } catch {
+          await route.fallback();
         }
-        await route.fulfill({ response, json: row });
       }
     );
   }
