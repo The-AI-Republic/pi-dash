@@ -4315,6 +4315,7 @@ async fn render_moved_issue_api(
         expanded_labels: &[],
         blockers: Some(&blockers),
         relations: None,
+        code_reviews: None,
         active_run: None,
         expansions: &[],
     };
