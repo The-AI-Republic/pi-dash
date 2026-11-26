@@ -151,9 +151,11 @@ afterEach(() => {
 });
 
 describe("CreateProjectDialog", () => {
-  it("shows a fresh form with a prefilled icon, timezone and public visibility", () => {
+  it("shows a fresh form with a prefilled icon, timezone and public visibility", async () => {
     succeed();
     setup();
+    // The repositories editor loads lazily through the settings barrel.
+    await screen.findByTestId("general-repos");
 
     expect(screen.getByRole("heading", { name: "New project" })).not.toBeNull();
     const icon = screen.getByRole("button", { name: "Project icon" });
@@ -212,6 +214,7 @@ describe("CreateProjectDialog", () => {
     const user = userEvent.setup();
     succeed();
     setup();
+    await screen.findByTestId("general-repos");
 
     fireEvent.change(screen.getByPlaceholderText("Project name"), { target: { value: "Nebula" } });
     await user.click(screen.getByTestId("general-repos-add"));
@@ -229,6 +232,7 @@ describe("CreateProjectDialog", () => {
     const user = userEvent.setup();
     succeed();
     setup();
+    await screen.findByTestId("general-repos");
 
     fireEvent.change(screen.getByPlaceholderText("Project name"), { target: { value: "Nebula" } });
     await user.click(screen.getByTestId("general-repos-add"));
@@ -245,6 +249,7 @@ describe("CreateProjectDialog", () => {
     const user = userEvent.setup();
     succeed();
     setup();
+    await screen.findByTestId("general-repos");
 
     fireEvent.change(screen.getByPlaceholderText("Project name"), { target: { value: "Nebula" } });
     await user.click(screen.getByTestId("general-repos-add"));
@@ -266,6 +271,7 @@ describe("CreateProjectDialog", () => {
     const user = userEvent.setup();
     const { calls, bodies } = succeed();
     const { onOpenChange } = setup();
+    await screen.findByTestId("general-repos");
 
     fireEvent.click(screen.getByRole("button", { name: "Visibility" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Private" }));
@@ -343,6 +349,7 @@ describe("CreateProjectDialog", () => {
     const user = userEvent.setup();
     failWith(JSON.stringify({ settings: ["invalid value for repos: entry 0 url must be a valid repository URL"] }));
     const { onOpenChange } = setup();
+    await screen.findByTestId("general-repos");
 
     fireEvent.change(screen.getByPlaceholderText("Project name"), { target: { value: "Nebula Craft" } });
     await user.click(screen.getByTestId("general-repos-add"));

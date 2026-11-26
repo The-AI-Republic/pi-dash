@@ -112,8 +112,7 @@ export { markEmblem } from "./general/rules.js";
 export { GeneralSkeleton, ProjectSettingsGeneralTab, SAVE_LABEL, SAVING_LABEL } from "./general/GeneralTabScreen.js";
 export type { GeneralTabProps } from "./general/GeneralTabScreen.js";
 export { RepositoriesSection } from "./general/components/RepositoriesSection.js";
-export type { RepositoriesSectionProps } from "./general/components/RepositoriesSection.js";
-export type { RepoProvider, RepoRow, RepoRowErrors, ReposServerErrors } from "./general/rules.js";
+export type { RepoRow, ReposServerErrors } from "./general/rules.js";
 export {
   LOST_RUNNER_RULE_SAVE_FAILED_MESSAGE,
   LOST_RUNNER_RULE_SAVE_FAILED_TITLE,

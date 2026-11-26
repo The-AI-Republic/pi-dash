@@ -13,7 +13,19 @@ import type { WorkspaceMember } from "@pidash/api-client";
 import { Check, ChevronDown, Globe, Lock } from "lucide-react";
 import * as React from "react";
 
-import { RepositoriesSection, type RepoRow, type ReposServerErrors } from "../../project-settings/index.js";
+import type { RepoRow, ReposServerErrors } from "../../project-settings/index.js";
+
+/**
+ * The repositories editor lives in project-settings and is reached
+ * through its barrel (import boundary). It loads lazily so the
+ * create dialog never joins a static import cycle with the settings
+ * feature (members/api -> projects barrel -> dialog -> settings
+ * barrel -> members): the section chunk resolves when the dialog
+ * opens, long after the module graph settled.
+ */
+const RepositoriesSection = React.lazy(() =>
+  import("../../project-settings/index.js").then((module) => ({ default: module.RepositoriesSection }))
+);
 import { notifyError } from "../../../shared/shell/index.js";
 import { useCreateProject } from "../api/mutations.js";
 import {
@@ -231,14 +243,16 @@ export function CreateProjectDialog({
           placeholder={CREATE_DESCRIPTION_PLACEHOLDER}
           rows={3}
         />
-        <RepositoriesSection
-          rows={repos}
-          disabled={false}
-          saving={false}
-          serverErrors={reposErrors}
-          hint="Add zero or more repositories. They are stored with the project when it is created."
-          onCommit={commitRepos}
-        />
+        <React.Suspense fallback={null}>
+          <RepositoriesSection
+            rows={repos}
+            disabled={false}
+            saving={false}
+            serverErrors={reposErrors}
+            hint="Add zero or more repositories. They are stored with the project when it is created."
+            onCommit={commitRepos}
+          />
+        </React.Suspense>
         <div className="flex flex-wrap items-center gap-(--space-2)">
           <Menu
             trigger={
