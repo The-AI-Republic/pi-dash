@@ -14,8 +14,8 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use pidash_db::entity::{
-    estimate_points, file_assets, issue_assignees, issue_comments, issue_labels, issue_relations,
-    issues, project_members, projects, states, users, workspaces,
+    estimate_points, file_assets, git_code_review_links, issue_assignees, issue_comments,
+    issue_labels, issue_relations, issues, project_members, projects, states, users, workspaces,
 };
 use sea_orm::sea_query::{Alias, Expr, Func, SimpleExpr};
 use sea_orm::{
@@ -171,6 +171,56 @@ async fn fetch_active_run(
             .as_ref()
             .map(crate::integrations::serializers::isoformat),
     }))
+}
+
+/// Attached code reviews (NEWPIDASH-366): the issue's
+/// `git_code_review_links` rows, soft-deleted excluded, newest first.
+/// A read-time join — nothing is stored on the issue. The caller renders
+/// the (possibly empty) list whenever the fields gate passes.
+async fn fetch_code_review_items(
+    pool: &PgPool,
+    issue_id: Uuid,
+) -> Result<Vec<shape::CodeReviewItem>, Error> {
+    #[derive(Debug, FromQueryResult)]
+    struct CodeReviewRow {
+        url: String,
+        title: String,
+        state: String,
+        merged: bool,
+        draft: bool,
+        provider: String,
+        external_iid: String,
+    }
+
+    let orm = pidash_db::pool::sea_orm_connection(pool);
+    let rows = git_code_review_links::Entity::find()
+        .select_only()
+        .column_as(git_code_review_links::Column::Url, "url")
+        .column_as(git_code_review_links::Column::Title, "title")
+        .column_as(git_code_review_links::Column::State, "state")
+        .column_as(git_code_review_links::Column::Merged, "merged")
+        .column_as(git_code_review_links::Column::Draft, "draft")
+        .column_as(git_code_review_links::Column::Provider, "provider")
+        .column_as(git_code_review_links::Column::ExternalIid, "external_iid")
+        .filter(git_code_review_links::Column::IssueId.eq(issue_id))
+        .filter(git_code_review_links::Column::DeletedAt.is_null())
+        .order_by_desc(git_code_review_links::Column::CreatedAt)
+        .into_model::<CodeReviewRow>()
+        .all(&orm)
+        .await
+        .map_err(|_| Error::Failed("render-decoded"))?;
+    Ok(rows
+        .into_iter()
+        .map(|row| shape::CodeReviewItem {
+            url: row.url,
+            title: row.title,
+            state: row.state,
+            merged: row.merged,
+            draft: row.draft,
+            provider: row.provider,
+            external_iid: row.external_iid,
+        })
+        .collect())
 }
 
 /// A decoded `issues` row: every column the renderer or the write paths
@@ -1561,6 +1611,21 @@ pub async fn render_decoded(
         None
     };
 
+    // Attached code reviews (NEWPIDASH-366): the two single GET reads
+    // (detail + by-identifier, the only callers passing a viewer),
+    // `?fields=`-gated like the relations block above. Fetched only
+    // when the gate passes; the key still renders (as `[]`) when the
+    // issue has no reviews. Write responses (no viewer) omit the key,
+    // so their payloads stay unchanged.
+    let reviews_gate = req.viewer.is_some()
+        && !req.is_list
+        && (requested.is_empty() || requested.contains(&"code_reviews"));
+    let code_reviews = if reviews_gate {
+        Some(fetch_code_review_items(pool, issue_id).await?)
+    } else {
+        None
+    };
+
     // Every `RenderError` arm is 500-class: `Fields` is unreachable
     // (query strings only build `Include` specs), the binary/NaN arms
     // reproduce Django 500s, and the `Missing*` arms are unreachable by
@@ -1576,6 +1641,7 @@ pub async fn render_decoded(
         expanded_labels: &expanded_labels,
         blockers: blockers.as_ref(),
         relations: relations.as_ref(),
+        code_reviews: code_reviews.as_deref(),
         active_run: active_run.as_ref(),
         expansions: &expansions,
     })

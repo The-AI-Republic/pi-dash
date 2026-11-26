@@ -36,7 +36,9 @@ pub enum IssueCommand {
     /// Fetch a work item by `PROJ-123` identifier. Prints the full payload as
     /// JSON, including the blocker summary: `relations_summary` (`blocked_by`
     /// / `blocking` lists of `{identifier, state, state_group}`) and
-    /// `has_open_blockers`.
+    /// `has_open_blockers`, plus the attached code reviews: `code_reviews`
+    /// (newest-first list of `{url, title, state, merged, draft, provider,
+    /// external_iid}`, `[]` when the issue has no reviews).
     Get {
         /// Project-scoped identifier, e.g. `ENG-42`.
         identifier: String,
@@ -553,9 +555,10 @@ async fn cmd_get(client: &ApiClient, identifier: &str) -> Result<(), CliError> {
 
 /// The JSON document `pidash issue get` prints. The server payload is passed
 /// through verbatim, so its blocker summary (`relations_summary`,
-/// `has_open_blockers`) reaches the agent exactly as the API and the run
-/// prompt describe it. Nothing is synthesized: an older server that doesn't
-/// send the block yields a payload without it.
+/// `has_open_blockers`) and its attached code reviews (`code_reviews`)
+/// reach the agent exactly as the API and the run prompt describe them.
+/// Nothing is synthesized: an older server that doesn't send a block
+/// yields a payload without it.
 pub async fn get_issue(client: &ApiClient, identifier: &str) -> Result<Value, CliError> {
     Ok(resolve_issue(client, identifier).await?.raw)
 }

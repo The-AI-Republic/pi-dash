@@ -1222,6 +1222,21 @@ pub struct BlockerSummary<'a> {
     pub has_open_blockers: bool,
 }
 
+/// One attached code review (NEWPIDASH-366): a `git_code_review_links`
+/// row for the issue, rendered newest-first. `state` is the stored value
+/// (`merged` carries the merged flag separately); soft-deleted rows are
+/// excluded by the fetch, never rendered. Serializable in wire order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CodeReviewItem {
+    pub url: String,
+    pub title: String,
+    pub state: String,
+    pub merged: bool,
+    pub draft: bool,
+    pub provider: String,
+    pub external_iid: String,
+}
+
 /// The issue-detail `active_run` key (NEWPIDASH-251): the newest run
 /// occupying the one-active-run slot, with the assigned runner's last
 /// heartbeat, so coordinators can tell "really running" from "stuck".
@@ -1392,6 +1407,11 @@ pub struct RepresentationInput<'a> {
     /// `relations_viewer` context key is set AND the payload is single AND the
     /// fields gate passes); `None` omits the block.
     pub relations: Option<&'a GroupedRelations<'a>>,
+    /// Attached code reviews (NEWPIDASH-366): `Some` on the two single
+    /// GET reads (viewer present, single payload, fields gate passes);
+    /// `None` omits the block. Renders as an array, empty when the issue
+    /// has no reviews.
+    pub code_reviews: Option<&'a [CodeReviewItem]>,
     /// Newest active run (NEWPIDASH-251): rendered as `active_run`
     /// on single payloads when `?fields=` requests it (or no `fields=`
     /// given) and a run occupies the one-active-run slot. Only the
@@ -1653,6 +1673,20 @@ pub fn render_issue(input: &RepresentationInput<'_>) -> Result<Map<String, Value
             out.insert(
                 "relations".to_string(),
                 Value::Object(relations_block(groups)),
+            );
+        }
+    }
+
+    // Attached code reviews (NEWPIDASH-366): the issue's
+    // `git_code_review_links` rows, newest first, soft-deleted excluded.
+    // `Some` on the input already folds the viewer/single/`?fields=`
+    // gate (like `relations` above); always an array, empty when the
+    // issue has no reviews.
+    if let Some(reviews) = input.code_reviews {
+        if !input.is_list && (requested.is_empty() || requested.contains(&"code_reviews")) {
+            out.insert(
+                "code_reviews".to_string(),
+                serde_json::to_value(reviews).expect("CodeReviewItem is always serializable"),
             );
         }
     }
@@ -2765,6 +2799,7 @@ mod tests {
             expanded_labels,
             blockers,
             relations,
+            code_reviews: None,
             active_run: None,
             expansions: no_expansions,
         })
@@ -2864,6 +2899,7 @@ mod tests {
             expanded_labels: &[],
             blockers: None,
             relations: None,
+            code_reviews: None,
             active_run: None,
             expansions: no_expansions,
         });
@@ -2900,6 +2936,7 @@ mod tests {
                 expanded_labels: &[],
                 blockers: Some(&blockers),
                 relations: None,
+                code_reviews: None,
                 active_run: Some(&run),
                 expansions: no_expansions,
             })
@@ -2926,6 +2963,97 @@ mod tests {
         // Lists never carry it (like the blocker keys).
         let list = render(None, true);
         assert!(!list.contains_key("active_run"));
+    }
+
+    #[test]
+    fn render_code_reviews_block_gated() {
+        // NEWPIDASH-366: attached reviews ride single payloads as an
+        // array, newest first (the fetch orders them); `?fields=`-gated
+        // and absent on lists. Empty stays `[]`, never omitted.
+        let row = full_row();
+        let blockers = empty_blockers();
+        let reviews = vec![
+            CodeReviewItem {
+                url: "https://github.com/acme/web/pull/2".to_string(),
+                title: "Second".to_string(),
+                state: "open".to_string(),
+                merged: false,
+                draft: false,
+                provider: "github".to_string(),
+                external_iid: "2".to_string(),
+            },
+            CodeReviewItem {
+                url: "https://github.com/acme/web/pull/1".to_string(),
+                title: "First".to_string(),
+                state: "merged".to_string(),
+                merged: true,
+                draft: false,
+                provider: "github".to_string(),
+                external_iid: "1".to_string(),
+            },
+        ];
+        let no_rows: &[UserLiteRow] = &[];
+        let no_expansions: &[(&str, Option<Value>)] = &[];
+        let render =
+            |fields: Option<&[FieldSpec]>, is_list: bool, reviews: Option<&[CodeReviewItem]>| {
+                render_issue(&RepresentationInput {
+                    row: &row,
+                    fields,
+                    expand: &[],
+                    is_list,
+                    assignee_ids: &[],
+                    assignee_rows: no_rows,
+                    label_ids: &[],
+                    expanded_labels: &[],
+                    blockers: Some(&blockers),
+                    relations: None,
+                    code_reviews: reviews,
+                    active_run: None,
+                    expansions: no_expansions,
+                })
+                .expect("render succeeds")
+            };
+        let out = render(None, false, Some(&reviews));
+        let block = out["code_reviews"].as_array().expect("array");
+        assert_eq!(block.len(), 2);
+        assert_eq!(block[0]["url"].as_str().unwrap(), reviews[0].url);
+        assert_eq!(block[0]["state"].as_str().unwrap(), "open");
+        assert!(!block[0]["merged"].as_bool().unwrap());
+        assert_eq!(block[1]["state"].as_str().unwrap(), "merged");
+        assert!(block[1]["merged"].as_bool().unwrap());
+        let key_names: Vec<&str> = block[1]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            key_names,
+            vec![
+                "url",
+                "title",
+                "state",
+                "merged",
+                "draft",
+                "provider",
+                "external_iid"
+            ]
+        );
+        // No reviews still renders the key as `[]`.
+        let empty = render(None, false, Some(&[]));
+        assert_eq!(empty["code_reviews"], Value::Array(Vec::new()));
+        // `None` (list-adjacent writers) omits the key.
+        let omitted = render(None, false, None);
+        assert!(!omitted.contains_key("code_reviews"));
+        // `?fields=id,name` excludes the block; explicit
+        // `?fields=code_reviews` includes it on single payloads.
+        let restricted = render(Some(&includes(&["id", "name"])), false, Some(&reviews));
+        assert!(!restricted.contains_key("code_reviews"));
+        let explicit = render(Some(&includes(&["code_reviews"])), false, Some(&reviews));
+        assert!(explicit.contains_key("code_reviews"));
+        // Lists never carry it (like the blocker keys).
+        let list = render(None, true, Some(&reviews));
+        assert!(!list.contains_key("code_reviews"));
     }
 
     #[test]
@@ -3023,6 +3151,7 @@ mod tests {
             expanded_labels: &[],
             blockers: Some(&blockers),
             relations: None,
+            code_reviews: None,
             active_run: None,
             expansions: no_expansions,
         })
@@ -3095,6 +3224,7 @@ mod tests {
             expanded_labels: &[],
             blockers: None,
             relations: None,
+            code_reviews: None,
             active_run: None,
             expansions: no_expansions,
         });
@@ -3248,6 +3378,7 @@ mod tests {
             expanded_labels: &[],
             blockers: Some(&blockers),
             relations: None,
+            code_reviews: None,
             active_run: None,
             expansions: &expansions,
         })
@@ -3267,6 +3398,7 @@ mod tests {
             expanded_labels: &[],
             blockers: Some(&blockers),
             relations: None,
+            code_reviews: None,
             active_run: None,
             expansions: &[],
         });
@@ -3313,6 +3445,7 @@ mod tests {
             expanded_labels: &[],
             blockers: Some(&blockers),
             relations: None,
+            code_reviews: None,
             active_run: None,
             expansions: no_expansions,
         });
@@ -3331,6 +3464,7 @@ mod tests {
             expanded_labels: &[],
             blockers: Some(&blockers),
             relations: None,
+            code_reviews: None,
             active_run: None,
             expansions: no_expansions,
         });
