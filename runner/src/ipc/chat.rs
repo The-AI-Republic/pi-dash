@@ -138,6 +138,11 @@ struct SessionRuntime {
     workspace: Option<PathBuf>,
     bridge_seq: u64,
     started_sent: bool,
+    /// Whether the live bridge already received the CLI guidance
+    /// (NEWPIDASH-402). Set on the first turn of a bridge, cleared
+    /// whenever the bridge is dropped so a revival in a fresh
+    /// subprocess injects again.
+    guidance_sent: bool,
     /// The approval mode this session's engine thread was spawned under.
     /// Captured once, when the bridge is first spawned, and then held for the
     /// life of the thread so a mode change mid-session cannot retune a turn
@@ -318,12 +323,14 @@ impl<'a> ChatHost<'a> {
         resume_id: Option<&str>,
         mode: ApprovalMode,
     ) -> Result<AgentBridge> {
+        let logs_dir = self.inst.paths.logs_dir();
         AgentBridge::spawn_from_config_with_resume(
             &self.inst.config,
             workspace,
             model,
             resume_id,
             Some(mode),
+            Some(logs_dir.as_path()),
         )
         .await
     }
@@ -473,6 +480,7 @@ pub(crate) async fn handle_warm<S: ChatSink>(
                 bridge.shutdown(Duration::from_secs(5)).await.ok();
             }
             rt.started_sent = false;
+            rt.guidance_sent = false;
             sink.emit(Response::ChatEvent {
                 chat_session_id,
                 bridge_seq: rt.bridge_seq,
@@ -565,6 +573,10 @@ pub(crate) async fn handle_send<S: ChatSink>(
     let mut bridge_seq = rt.bridge_seq;
     let mut started_sent = rt.started_sent;
     let approval_mode = rt.approval_mode;
+    // First turn of a bridge carries the CLI guidance (NEWPIDASH-402);
+    // later turns on the same bridge send the user's text verbatim.
+    let guidance = (!rt.guidance_sent).then(crate::chat_guidance::chat_guidance);
+    let injected = guidance.is_some();
     let outcome = {
         let bridge = rt
             .bridge
@@ -575,6 +587,7 @@ pub(crate) async fn handle_send<S: ChatSink>(
                 chat_session_id,
                 message_id: args.message_id,
                 content: args.content,
+                guidance,
                 model: args.model,
                 mode: approval_mode,
                 runner_id: host.config().runner_id,
@@ -631,6 +644,10 @@ pub(crate) async fn handle_send<S: ChatSink>(
         }
         rt.started_sent = false;
     }
+    // A dropped bridge re-arms guidance for the fresh subprocess; a live
+    // bridge that just received it stays quiet (NEWPIDASH-402).
+    rt.guidance_sent =
+        crate::chat_guidance::next_guidance_sent(rt.guidance_sent, injected, rt.bridge.is_some());
     Ok(terminal)
 }
 
@@ -1095,6 +1112,8 @@ async fn ensure_bridge(
             bridge.shutdown(Duration::from_secs(1)).await.ok();
         }
         rt.started_sent = false;
+        // The replacement below is a fresh subprocess: re-arm guidance.
+        rt.guidance_sent = false;
     }
     if rt.bridge.is_none() {
         // Capture the mode for the whole thread the moment we spawn it. A
@@ -1128,6 +1147,10 @@ struct DriveCtx<'a> {
     chat_session_id: Uuid,
     message_id: Uuid,
     content: String,
+    /// Rendered CLI guidance for the first turn of a bridge
+    /// (NEWPIDASH-402); `None` once the bridge has it. The user
+    /// history never shows this: frames carry no user content.
+    guidance: Option<String>,
     model: Option<String>,
     mode: ApprovalMode,
     runner_id: Uuid,
@@ -1152,6 +1175,7 @@ async fn drive_turn<S: ChatSink>(
         chat_session_id,
         message_id,
         content,
+        guidance,
         model,
         mode,
         runner_id,
@@ -1161,9 +1185,13 @@ async fn drive_turn<S: ChatSink>(
         cancel,
     } = ctx;
 
+    let prompt = match guidance {
+        Some(g) => crate::chat_guidance::prefix_with(&g, &content),
+        None => content,
+    };
     let payload = RunPayload {
         run_id: message_id,
-        prompt: content,
+        prompt,
         model: model.clone(),
     };
     // A single pinned cancel future, created before startup: `notify_waiters()`
@@ -1579,6 +1607,7 @@ mod tests {
             cursor_agent: CursorAgentSection::default(),
             openclaw: Default::default(),
             grok: Default::default(),
+            antigravity: Default::default(),
             muse_code: Default::default(),
             approval_policy: ApprovalPolicySection::default(),
         }
@@ -1629,6 +1658,7 @@ mod tests {
                     chat_session_id: Uuid::new_v4(),
                     message_id: Uuid::new_v4(),
                     content: "hi".into(),
+                    guidance: None,
                     model: None,
                     mode: ApprovalMode::Ask,
                     runner_id: cfg.runner_id,
@@ -1672,6 +1702,7 @@ mod tests {
                 chat_session_id,
                 message_id,
                 content: "hi".into(),
+                guidance: None,
                 model: None,
                 mode: ApprovalMode::Ask,
                 runner_id: cfg.runner_id,
@@ -1718,6 +1749,123 @@ mod tests {
         );
     }
 
+    /// A fake app-server that logs every request line to `$PROMPT_LOG`
+    /// and completes two turns. Lets the test inspect the exact
+    /// `turn/start` prompt the engine received.
+    fn logging_script() -> &'static str {
+        r#"
+            set -e
+            log() { printf '%s\n' "$1" >> "$PROMPT_LOG"; }
+            read line; log "$line"
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+            read line; log "$line"
+            read thread; log "$thread"
+            case "$thread" in *'"method":"thread/start"'*) ;; *) exit 1;; esac
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"threadId":"th_log"}}'
+            for n in 1 2; do
+                read turn; log "$turn"
+                case "$turn" in *'"method":"turn/start"'*) ;; *) exit 1;; esac
+                printf '%s\n' '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"text":"hello"}}'
+                printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"conclusion":"success","done":{"status":"ok","summary":"done"}}}'
+            done
+            sleep 0.3
+        "#
+    }
+
+    async fn fake_logging_bridge(script: &str, log: &std::path::Path) -> AgentBridge {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(script).env("PROMPT_LOG", log);
+        let server = AppServer::spawn_command(cmd)
+            .await
+            .expect("spawn fake codex");
+        AgentBridge::Codex(Bridge::from_server(server, None))
+    }
+
+    fn turn_start_lines(log: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(log)
+            .expect("prompt log written")
+            .lines()
+            .filter(|line| line.contains("\"method\":\"turn/start\""))
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn drive_turn_prefixes_guidance_only_on_the_first_turn() {
+        // The bridge payload is the acceptance hook (NEWPIDASH-402):
+        // the first turn of a bridge carries the CLI guidance, the
+        // second sends the user's text verbatim, and no user-visible
+        // frame leaks the injected text.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let log = tmp.path().join("prompts.log");
+        let cfg = config();
+        let approvals = ApprovalRouter::new();
+        let cancel = Notify::new();
+        let mut bridge = fake_logging_bridge(logging_script(), &log).await;
+        bridge.warm(&cfg.workspace.working_dir).await.expect("warm");
+
+        let mut sink = VecSink::default();
+        let (mut seq, mut started) = (0u64, false);
+        drive_turn(
+            DriveCtx {
+                chat_session_id: Uuid::new_v4(),
+                message_id: Uuid::new_v4(),
+                content: "list the open issues".into(),
+                guidance: Some("GUIDANCE-MARKER-402".into()),
+                model: None,
+                mode: ApprovalMode::Ask,
+                runner_id: cfg.runner_id,
+                config: &cfg,
+                approvals: &approvals,
+                workspace: &cfg.workspace.working_dir,
+                cancel: &cancel,
+            },
+            &mut bridge,
+            &mut seq,
+            &mut started,
+            &mut sink,
+        )
+        .await
+        .expect("first turn");
+        drive_turn(
+            DriveCtx {
+                chat_session_id: Uuid::new_v4(),
+                message_id: Uuid::new_v4(),
+                content: "second question".into(),
+                guidance: None,
+                model: None,
+                mode: ApprovalMode::Ask,
+                runner_id: cfg.runner_id,
+                config: &cfg,
+                approvals: &approvals,
+                workspace: &cfg.workspace.working_dir,
+                cancel: &cancel,
+            },
+            &mut bridge,
+            &mut seq,
+            &mut started,
+            &mut sink,
+        )
+        .await
+        .expect("second turn");
+
+        let turns = turn_start_lines(&log);
+        assert_eq!(turns.len(), 2, "two turn/start prompts logged");
+        assert!(
+            turns[0].contains("GUIDANCE-MARKER-402") && turns[0].contains("list the open issues"),
+            "first turn carries guidance plus user text"
+        );
+        assert!(
+            !turns[1].contains("GUIDANCE-MARKER-402") && turns[1].contains("second question"),
+            "second turn sends the user's text verbatim"
+        );
+        assert!(
+            !format!("{:?}", sink.frames).contains("GUIDANCE-MARKER-402"),
+            "no user-visible frame leaks the injected text"
+        );
+        bridge.shutdown(Duration::from_secs(1)).await.ok();
+    }
+
     #[tokio::test]
     async fn cancel_signal_interrupts_a_running_turn() {
         // A script that warms, then hangs on the turn (never completes) until
@@ -1754,6 +1902,7 @@ mod tests {
                     chat_session_id: Uuid::new_v4(),
                     message_id: Uuid::new_v4(),
                     content: "hang".into(),
+                    guidance: None,
                     model: None,
                     mode: ApprovalMode::Ask,
                     runner_id: cfg.runner_id,
@@ -1839,6 +1988,7 @@ mod tests {
                         chat_session_id: Uuid::new_v4(),
                         message_id: Uuid::new_v4(),
                         content: content.into(),
+                        guidance: None,
                         model: None,
                         mode: ApprovalMode::Ask,
                         runner_id: cfg.runner_id,
@@ -1946,6 +2096,7 @@ mod tests {
                     chat_session_id: Uuid::new_v4(),
                     message_id: Uuid::new_v4(),
                     content: content.into(),
+                    guidance: None,
                     model: None,
                     mode: ApprovalMode::Ask,
                     runner_id: cfg.runner_id,
@@ -2157,6 +2308,7 @@ mod tests {
                     chat_session_id: Uuid::new_v4(),
                     message_id: Uuid::new_v4(),
                     content: "run it".into(),
+                    guidance: None,
                     model: None,
                     mode: ApprovalMode::Ask,
                     runner_id: cfg.runner_id,

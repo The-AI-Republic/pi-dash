@@ -141,6 +141,7 @@ fn base_config(machine_id: Option<Uuid>) -> RunnerConfig {
         cursor_agent: Default::default(),
         openclaw: Default::default(),
         grok: Default::default(),
+        antigravity: Default::default(),
         muse_code: Default::default(),
         approval_policy: ApprovalPolicySection::default(),
     }

@@ -1,5 +1,6 @@
 //! Boot-group ops commands: `wait_for_db`, `wait_for_migrations`,
-//! `clear_cache` (PIDASHCONV-806).
+//! `check_migrations`, `clear_cache` (PIDASHCONV-806; the check is the
+//! NEWPIDASH-378 fail-fast gate, new-system-only).
 //!
 //! Thin clap/env wrappers: argument shapes live here, the flows live in
 //! `pidash-services` (`ops::boot`), and stdout stays byte-identical.
@@ -41,6 +42,19 @@ pub async fn run_wait_for_migrations() -> Result<(), OpsFailure> {
     let url = database_url()?;
     let mut out = print_line;
     boot::run_wait_for_migrations(&url, &mut out, WAIT_FOR_MIGRATIONS_SLEEP, None)
+        .await
+        .map_err(|error| OpsFailure(error.to_string()))?;
+    Ok(())
+}
+
+/// Fail-fast gate (NEWPIDASH-378): one probe, no polling, no sleeps.
+/// Current schema prints the success line and exits 0; pending
+/// migrations, a missing table or an unreachable database exits 1 with
+/// one stderr line (the `MigrationsPending` / crash-path text).
+pub async fn run_check_migrations() -> Result<(), OpsFailure> {
+    let url = database_url()?;
+    let mut out = print_line;
+    boot::run_check_migrations(&url, &mut out)
         .await
         .map_err(|error| OpsFailure(error.to_string()))?;
     Ok(())

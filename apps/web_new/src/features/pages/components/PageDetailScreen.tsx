@@ -327,6 +327,9 @@ export function PageDetailScreen({
     })
   );
   const deleteCount = knownDeleteCount ?? deleteChildren.data?.length;
+  // A rejected children read is not a pending one: the dialog stays
+  // confirmable and names the failure instead of counting forever.
+  const deleteCountFailed = knownDeleteCount === undefined && deleteChildren.isError;
 
   // The skeleton is a cold-load surface: one committed paint of the
   // placeholder, then the stored body, and never again for this page in
@@ -387,6 +390,15 @@ export function PageDetailScreen({
       queryKey: pageKeys.version(workspaceSlug, projectId, pageId, versionId),
     });
   };
+
+  // A failed history read keeps the pane: asking again drops the rejected
+  // answer so the read flies afresh and the skeleton returns. The pane
+  // reports the failure instead of loading forever.
+  const retryVersions = React.useCallback((): void => {
+    void queryClient.invalidateQueries({
+      queryKey: pageKeys.versions(workspaceSlug, projectId, pageId),
+    });
+  }, [queryClient, workspaceSlug, projectId, pageId]);
 
   // Restore is the live document taking the snapshot's body: the editor
   // reports the write through its own update, so the draft seam and the
@@ -684,6 +696,9 @@ export function PageDetailScreen({
           document={paneDocument}
           actors={actors}
           versions={search.paneTab === "info" ? versions.data : undefined}
+          {...(search.paneTab === "info" && versions.isError
+            ? { versionsFailed: true, onRetryVersions: retryVersions }
+            : {})}
           versionMembers={versionMembers}
           onSelectTab={openPaneTab}
           onClose={closePane}
@@ -697,6 +712,7 @@ export function PageDetailScreen({
         onOpenChange={setDeleteOpen}
         pageName={page.name}
         {...(deleteCount === undefined ? {} : { rehomedCount: deleteCount })}
+        {...(deleteCountFailed ? { countFailed: true, onRetryCount: () => void deleteChildren.refetch() } : {})}
         pending={deletion.pending}
         onConfirm={() => {
           deletion.remove({

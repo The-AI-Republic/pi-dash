@@ -24,14 +24,23 @@ import {
 } from "./catalog.js";
 
 describe("agent list", () => {
-  it("offers the six CLIs in display order", () => {
-    expect(RUNNER_AGENTS).toEqual(["claude-code", "codex", "cursor-agent", "open-claw", "grok", "muse-code"]);
+  it("offers the seven CLIs in display order", () => {
+    expect(RUNNER_AGENTS).toEqual([
+      "claude-code",
+      "codex",
+      "cursor-agent",
+      "open-claw",
+      "grok",
+      "antigravity",
+      "muse-code",
+    ]);
     expect(RUNNER_AGENTS.map((agent) => AGENT_LABELS[agent])).toEqual([
       "Claude Code",
       "Codex",
       "Cursor",
       "OpenClaw",
       "Grok",
+      "Antigravity",
       "Muse Code",
     ]);
   });
@@ -84,6 +93,15 @@ describe("model lists", () => {
   it("offers only the sentinel for agents without a curated list", () => {
     expect(MODEL_CHOICES["open-claw"]).toHaveLength(1);
     expect(MODEL_CHOICES["muse-code"]).toHaveLength(1);
+  });
+
+  it("offers Antigravity's documented models (NEWPIDASH-396)", () => {
+    const choices = MODEL_CHOICES["antigravity"];
+    expect(choices.map((choice) => choice.id)).toEqual([DEFAULT_MODEL_ID, "gemini-4-hydrogen", "gemini-4-neon"]);
+    expect(modelContribution("antigravity", "gemini-4-neon")).toEqual({
+      model: "gemini-4-neon",
+    });
+    expect(PRESELECTED_MODEL["antigravity"]).toBe(DEFAULT_MODEL_ID);
   });
 
   it("emits no flags for the default sentinel or an unknown id", () => {

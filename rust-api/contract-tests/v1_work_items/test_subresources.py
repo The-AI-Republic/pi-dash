@@ -595,14 +595,14 @@ def _identifier_url(world):
 
 
 def test_issue_detail_code_reviews_empty(api, world):
-    """NEWPIDASH-366 (DIFF-64): an issue with no reviews renders `"code_reviews": []`.
+    """NEWPIDASH-366 (DIFF-68): an issue with no reviews renders `"code_reviews": []`.
 
     Django (the ``django=`` arm) has no such key: the field is
     new-system-only. Rust (the ``rust=`` arm) renders the empty list.
     """
     from _harness.diffs import expect
 
-    expected = expect("DIFF-64", django=None, rust=[])
+    expected = expect("DIFF-68", django=None, rust=[])
     for url in (issue_url(world, world["issue"]["id"]), _identifier_url(world)):
         response = api.get(url)
         assert response.status_code == 200, response.text
@@ -614,7 +614,7 @@ def test_issue_detail_code_reviews_empty(api, world):
 
 
 def test_issue_detail_code_reviews(api, world, db, seeder):
-    """NEWPIDASH-366 (DIFF-64): detail carries attached reviews newest-first.
+    """NEWPIDASH-366 (DIFF-68): detail carries attached reviews newest-first.
 
     Two attached reviews (one merged, one open) both appear under
     ``code_reviews`` with the stored ``state``/``merged``; a soft-deleted
@@ -659,7 +659,7 @@ def test_issue_detail_code_reviews(api, world, db, seeder):
         (dead_link["id"],),
     )
     expected = expect(
-        "DIFF-64",
+        "DIFF-68",
         django=None,
         rust=[
             {

@@ -140,8 +140,10 @@ pub fn token_matches(stored: Option<Uuid>, provided: Option<Uuid>) -> bool {
 
 /// Fresh same-attempt waiting check (90s server-receipt freshness).
 /// `capacity_wait` is the stored JSON object; `reported_at` is RFC3339
-/// string. Falls back to fresh when reported_at absent (back-compat earlier
-/// in Django; every Rust store path writes it).
+/// string. A missing (or non-string) `reported_at` is stale: only a
+/// server receipt time can prove the wait is fresh. Every Rust store
+/// path writes it, so absence means a hand-edited row or a write path
+/// that forgot the timestamp — never a live wait.
 pub fn is_fresh_capacity_wait(
     capacity_wait: &Value,
     current_token: Option<Uuid>,
@@ -165,11 +167,8 @@ pub fn is_fresh_capacity_wait(
     if cur != payload_token {
         return false;
     }
-    let Some(reported_raw) = obj.get("reported_at") else {
-        return true; // back-compat: treat as fresh when absent
-    };
-    let Some(reported_str) = reported_raw.as_str() else {
-        return false;
+    let Some(reported_str) = obj.get("reported_at").and_then(Value::as_str) else {
+        return false; // no (string) server receipt time: cannot prove fresh
     };
     // RFC3339 parse supporting Z and +00:00.
     let normalized = reported_str.replace('Z', "+00:00");
@@ -531,9 +530,23 @@ mod tests {
         // preparing never qualifies
         let prep = json!({"phase": "preparing", "assignment_token": tok_str});
         assert!(!is_fresh_capacity_wait(&prep, Some(tok), now));
-        // missing reported_at treated as fresh (back-compat)
+        // missing reported_at is stale: no server receipt time proves fresh
+        // (NEWPIDASH-399 — a timestamp-less wait must never pin the reaper).
         let no_time = json!({"phase": "waiting_for_capacity", "assignment_token": tok_str});
-        assert!(is_fresh_capacity_wait(&no_time, Some(tok), now));
+        assert!(!is_fresh_capacity_wait(&no_time, Some(tok), now));
+        // non-string reported_at is stale too.
+        let num_time = json!({
+            "phase": "waiting_for_capacity",
+            "assignment_token": tok_str,
+            "reported_at": 1234567890
+        });
+        assert!(!is_fresh_capacity_wait(&num_time, Some(tok), now));
+        let null_time = json!({
+            "phase": "waiting_for_capacity",
+            "assignment_token": tok_str,
+            "reported_at": null
+        });
+        assert!(!is_fresh_capacity_wait(&null_time, Some(tok), now));
     }
 
     #[test]

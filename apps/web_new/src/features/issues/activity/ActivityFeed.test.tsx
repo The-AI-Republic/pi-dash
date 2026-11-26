@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { ActivityFeed, FEED_LOAD_FAILED } from "./ActivityFeed.js";
 import { FILTERS_STORAGE_KEY, SORT_STORAGE_KEY } from "./model.js";
+import type { TimelinePosition } from "./TimelineRow.js";
 
 const ISSUE = "123e4567-e89b-12d3-a456-426614174000";
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
@@ -124,6 +125,8 @@ interface RenderFeedProps {
   archived?: boolean;
   worklogEnabled?: boolean;
   headerLeading?: React.ReactNode;
+  /** Collects each comment's timeline position, in row order. */
+  commentPositions?: TimelinePosition[];
 }
 
 function renderFeed(props: RenderFeedProps = {}) {
@@ -137,6 +140,7 @@ function renderFeed(props: RenderFeedProps = {}) {
     archived = false,
     worklogEnabled = false,
     headerLeading,
+    commentPositions,
   } = props;
   stubTransport((call) => {
     if (call.url.includes("activity_type=issue-property")) {
@@ -157,7 +161,10 @@ function renderFeed(props: RenderFeedProps = {}) {
         commentsPending={commentsPending}
         commentsError={commentsStatus !== 200}
         composer={<form aria-label="Composer">Composer</form>}
-        renderComment={(row) => <article data-testid={`comment-${row.id}`}>{row.comment_stripped}</article>}
+        renderComment={(row, position) => {
+          commentPositions?.push(position);
+          return <article data-testid={`comment-${row.id}`}>{row.comment_stripped}</article>;
+        }}
         archived={archived}
         worklogEnabled={worklogEnabled}
         headerLeading={headerLeading}
@@ -446,5 +453,52 @@ describe("ActivityFeed estimate history (EST-023)", () => {
     expect(await screen.findByText("set the estimate point to 3.")).toBeInTheDocument();
     expect(screen.queryByText(/removed the estimate/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/cleared the estimate/i)).not.toBeInTheDocument();
+  });
+});
+
+describe("ActivityFeed timeline", () => {
+  it("hangs a different badge per activity type", async () => {
+    renderFeed({
+      activities: [
+        activity(),
+        activity({
+          id: "a13e4567-e89b-12d3-a456-426614174002",
+          field: "agent_wait",
+          verb: "created",
+          actor_detail: null,
+          old_value: "10",
+          new_value: "1",
+          created_at: "2026-10-16T12:00:00Z",
+        }),
+      ],
+    });
+    await waitFor(() => expect(rows()).toHaveLength(2));
+    expect(screen.getByRole("img", { name: "Creation" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Agent wait" })).toBeInTheDocument();
+    expect(screen.getByText("chose to wait on a blocker (1 of 10).")).toBeInTheDocument();
+  });
+
+  it("stacks rows with no gap so the rail segments join", async () => {
+    renderFeed({
+      activities: [activity(), activity({ id: "a13e4567-e89b-12d3-a456-426614174002" })],
+    });
+    await waitFor(() => expect(rows()).toHaveLength(2));
+    const list = rows()[0]?.parentElement as HTMLElement;
+    expect(list.className).toContain("flex-col");
+    expect(list.className).not.toContain("gap-");
+  });
+
+  it("passes each row its timeline position for the rail trim", async () => {
+    const commentPositions: TimelinePosition[] = [];
+    renderFeed({
+      activities: [activity()],
+      comments: [comment(), comment({ id: "923e4567-e89b-12d3-a456-426614174009" })],
+      commentPositions,
+    });
+    await waitFor(() => expect(rows()).toHaveLength(3));
+    expect(commentPositions).toEqual(["middle", "last"]);
+    const firstRow = rows()[0]?.firstElementChild as HTMLElement;
+    expect(firstRow.className).toContain("pb-(--space-2)");
+    expect(firstRow.className).not.toContain("pt-(--space-2)");
   });
 });

@@ -340,6 +340,21 @@ mod tests {
         );
     }
 
+    /// `check_migrations` is new-system-only (NEWPIDASH-378 fail-fast
+    /// gate, no Django counterpart): still snake_case like the Django
+    /// names, and kebab-case is still rejected.
+    #[test]
+    fn check_migrations_name_is_snake_case() {
+        assert!(matches!(
+            parse_ops(&["check_migrations"]),
+            pidash_ops::OpsCommand::CheckMigrations
+        ));
+        assert!(
+            Cli::try_parse_from(["pidash-api", "ops", "check-migrations"]).is_err(),
+            "kebab-case is not accepted for the new command either"
+        );
+    }
+
     /// `--key` takes an optional value (`nargs="?"`): absent and bare
     /// both yield the full-clear path, like argparse's `None` const.
     #[test]

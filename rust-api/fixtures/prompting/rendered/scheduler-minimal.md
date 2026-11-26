@@ -82,13 +82,14 @@ Keep every scratch file under `.pidash/`; that directory stays out of version co
 
 Run `pidash docs <topic>` (or `pidash <command> --help`) before first use. If `pidash docs` is not a known command, use `--help`.
 
-- `issue`: create, patch (title, labels, another issue's state), list/filter, search history, relate/unrelate/wait, relations, run-ai
+- `issue`: create, patch (title, labels, state, parent, work type), move, attach-review, list/filter, search history, relate/unrelate/wait, relations, run-ai
 - `page`: project wiki pages (read before re-deriving a convention)
 - `label`: list, create, update, delete; attach via `issue patch --add-label`
 - `state`: list workflow states (already shown below)
 - `scheduler`: view or change scheduled automation (admin; only when asked)
-- `project`: list runners
+- `project`: list, runners
 - `context`: the `context.md` files that list the projects on this machine
+- `workspace`: me
 
 You don't need to load a `pidash` / `pi-dash` skill: this section and `pidash docs` are the reference. Commands that manage the runner itself are refused inside a run; if one seems necessary, file a Pi Dash issue describing the blocker instead (see "Ending the scheduled run"). `pidash issue re-tick` is a human decision; never call it.
 

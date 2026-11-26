@@ -93,17 +93,31 @@ total_count, next_cursor, prev_cursor, next_page_results, results:
   A run moves its own issue with the `run finish` command, not this: the
   server refuses a run moving its own issue to Done, Cancelled or a stage
   the project switched off.
-- `pidash issue patch <identifier> [--title <s>] [--description <md>] [--description-file <path>] [--priority <priority>] [--parent <PROJ-123-or-UUID>] [--clear-parent] [--add-label <name-or-UUID>] [--remove-label <name-or-UUID>] [--label <name-or-UUID>] [--clear-labels]` —
+- `pidash issue patch <identifier> [--title <s>] [--description <md>] [--description-file <path>] [--priority <priority>] [--parent <PROJ-123-or-UUID>] [--clear-parent] [--add-label <name-or-UUID>] [--remove-label <name-or-UUID>] [--label <name-or-UUID>] [--clear-labels] [--work-type <key> --clear-work-type] [--git-work-branch <branch>]` —
   update other fields. At least one flag is required. `--parent`
   re-parents the issue under the given issue (identifier or UUID), e.g. to
   attach an existing issue to a tracking parent; `--clear-parent`
   detaches it to top-level. `--parent` and `--clear-parent` are mutually
-  exclusive. Prefer `--add-label` / `--remove-label` over `--label`: they
+  exclusive. `--work-type` sets the issue's work type (e.g. `software`),
+  which selects the per-work-type guidance the agent prompts carry;
+  `--clear-work-type` removes it so the issue inherits the project default,
+  and the two are mutually exclusive. `--git-work-branch` records the
+  branch the issue's work lives on, so later runs check it out instead of
+  cutting a new one — set it only after the branch exists on the remote.
+  Prefer `--add-label` / `--remove-label` over `--label`: they
   keep the labels a human already set, while `--label` and
   `--clear-labels` replace the whole set. Do **not** edit title or
   description for planning or progress tracking.
   The one case where `--description` is correct is recording the child
   list on a **tracking parent** after a split.
+- `pidash issue move <identifier> --project <PROJ-or-UUID>` — move a work
+  item into another project in the same workspace.
+- `pidash issue attach-review <identifier> --url <url>` — attach a GitHub
+  pull request or GitLab merge request to a work item so Pi Dash links it
+  and tracks its status. Idempotent: one issue may have many code reviews,
+  but one code review attaches to exactly one issue.
+  `pidash issue attach-pr <identifier> --url <url>` is the same command
+  under its script-friendly alias.
 - `pidash issue relate <identifier> --blocked-by <ID>` — record that the
   issue cannot finish until each listed issue does. Other flags (exactly
   one per call): `--blocking`, `--relates-to`, `--duplicate`,
@@ -136,7 +150,7 @@ cap}`: a refusal (`wait_cap_reached` once the one-pool allowance is
   grouped by type from its side (`blocked_by`, `blocking`,
   `relates_to`, …), each `{id, identifier, name, state, state_group}`.
   `pidash issue get <identifier>` carries the same block as `relations`.
-- `pidash issue search <query> [--project <PROJ-or-UUID>] [--status <status>] [--since <iso8601>] [--limit <N>] [--sort <order>]` —
+- `pidash issue search <query> [--project <PROJ-or-UUID>] [--status <status>] [--state-group <group>] [--since <iso8601>] [--limit <N>] [--sort <order>]` —
   full-text search across work item titles, descriptions, **and** comments.
   Use this to recover historical context: check whether a similar issue has
   been filed before, look up the _resolution_ of a past task (the answer
@@ -170,10 +184,13 @@ workpad, not in comments.**
   the same JSON shape — and an empty list when there are none. Use
   `--since` to check for human replies newer than the prompt instead of
   re-reading the whole thread.
-- `pidash comment add [<issue>] --body-file <path> [--fold]` — post a new
+- `pidash comment add [<issue>] --body-file <path> [--image <path>] [--fold]` — post a new
   comment from a file and mark it as spoken by this AI agent run.
   `--body <markdown>` works for one-liners. Prefer `--body-file` for
-  anything multi-line — shell quoting of markdown is error-prone. The
+  anything multi-line — shell quoting of markdown is error-prone.
+  `--image <path>` uploads an image and embeds it in the comment;
+  repeatable for several images, and at least one image or a body is
+  required. The
   speaker defaults come from the run: `--as-agent` from
   `PIDASH_AGENT_NAME`, `--agent-run-id` from `PIDASH_RUN_ID` — so `pidash comment add --body-file <path>` with no other flags posts as the agent run, and
   explicit flags win. Flag-level detail: `--as-agent <name>` marks the
@@ -181,10 +198,10 @@ workpad, not in comments.**
 <uuid>` attaches the producing run (it requires `--as-agent`). Outside
   a run both stay unset and the comment is attributed to the human owner,
   as posting in your own workspace does.
-- `pidash comment update <identifier> <comment-id> --body-file <path>` —
+- `pidash comment update <identifier> <comment-id> --body-file <path> [--allow-empty]` —
   edit a comment you own. Both the issue identifier and the comment UUID
   are required. Rarely needed — prefer posting a fresh comment for new
-  information.
+  information. An empty body is rejected unless `--allow-empty` is passed.
 
 Use `--fold` only for low-value status/noop updates that should remain
 available to humans without cluttering the thread. Folded comments are
@@ -257,10 +274,11 @@ results: [...]}`; while `next_page_results` is `true`, pass
   create a page; the body is markdown. `--body-file -` reads stdin.
   **List first** and prefer updating an existing page over creating a
   near-duplicate.
-- `pidash page update <page-id> --project <PROJ-or-UUID> [--title <s>] [--body <md>] [--body-file <path>] [--parent <page-id>] [--clear-parent] [--access <access>]` —
+- `pidash page update <page-id> --project <PROJ-or-UUID> [--title <s>] [--body <md>] [--body-file <path>] [--parent <page-id>] [--clear-parent] [--access <access>] [--allow-empty]` —
   change only the fields you pass (at least one). A body flag replaces
   the whole body — fetch with `--body-only` first, edit, then write it
-  back. Exit 2 with a 409 means the page is locked or archived; exit 5
+  back. An empty body is rejected unless `--allow-empty` is passed.
+  Exit 2 with a 409 means the page is locked or archived; exit 5
   with a 503 means the live document service is down — retry later, do
   not work around it.
 - `pidash page archive <page-id> --project <PROJ-or-UUID>` — archive a
@@ -281,7 +299,7 @@ vocabulary this project already uses; reach for `pidash label create --name <nam
 only when nothing existing fits, because a near-duplicate (`front-end`
 next to `frontend`) is worse than no label at all.
 
-- `pidash label list [--project <PROJ-or-UUID>]` — list the project's
+- `pidash label list [--project <PROJ-or-UUID>] [--cursor <c>] [--per-page <N>]` — list the project's
   labels with `id`, `name`, `color`, `description`, and `parent`. Returns
   the usual paginated envelope. Everywhere else a label is named you may
   pass its name (case-insensitive) or its UUID; names are unique within a
@@ -362,12 +380,18 @@ command takes the scheduler's UUID or its slug.
   `status`, `trigger`, `created_at`/`started_at`/`ended_at`,
   `error_code`, and `issues` — the work items the run wrote comments to,
   so you can trace what a scheduled run touched. Default 30, max 100.
-- `pidash scheduler update <scheduler> [--project <PROJ-or-UUID>] [--extra-context-file <path>] [--extra-context <text>] [--enable] [--disable] [--rrule <rule>] [--dtstart <iso8601>] [--tzid <tz>] [--outcome-mode <mode>] [--pod <uuid>] [--if-updated-at <updated_at>]` —
+- `pidash scheduler update <scheduler> [--project <PROJ-or-UUID>] [--extra-context-file <path>] [--extra-context <text>] [--enable] [--disable] [--rrule <rule>] [--dtstart <iso8601>] [--tzid <tz>] [--rdate <rdate> --clear-rdates] [--exdate <exdate> --clear-exdates] [--outcome-mode <mode>] [--pod <uuid> --clear-pod] [--if-updated-at <updated_at>]` —
   edit the install; only the flags you pass change. `extra_context` is
   multi-paragraph markdown and **replaces the whole text**, so read it
   first with `pidash scheduler get <scheduler>`, edit a file, and send it with
   `--extra-context-file <path>` (`-` reads stdin) rather than quoting it
-  inline. A cadence flag recomputes `next_run_at`. Pass `--if-updated-at`
+  inline. A cadence flag recomputes `next_run_at`. Repeatable `--rdate`
+  adds an extra one-off firing and `--exdate` a firing to skip (ISO 8601
+  datetimes); each replaces the whole list, while `--clear-rdates` and
+  `--clear-exdates` empty it — each clear is mutually exclusive with its
+  set flag. `--clear-pod` drops the pod override so the
+  install uses the project default pod, and is mutually exclusive with
+  `--pod`. Pass `--if-updated-at`
   with the install's `updated_at` from your read to fail with a 412
   instead of overwriting an edit made in between. Prints the updated
   install plus `previous` — the prior value of every field you changed;
@@ -391,11 +415,11 @@ command takes the scheduler's UUID or its slug.
   is disabled, a run from it is still active (queued counts), or its
   schedule has no future occurrence. Read the `code` in the error detail;
   do not retry in a loop.
-- `pidash scheduler create --name <s> --slug <slug> --prompt-file <path> [--description <s>] [--disabled]` —
+- `pidash scheduler create --name <s> --slug <slug> --prompt-file <path> [--description <s>] [--color <#rrggbb>] [--disabled]` —
   create a definition (workspace admin). It runs nowhere until installed.
   The prompt is read from a file, never inline. A taken or built-in slug
   exits 2 with a `slug` field error. Prints the new definition.
-- `pidash scheduler edit <scheduler> [--prompt-file <path>] [--name <s>] [--description <s>] [--enable] [--disable] [--if-updated-at <updated_at>]` —
+- `pidash scheduler edit <scheduler> [--prompt-file <path>] [--name <s>] [--description <s>] [--color <#rrggbb>] [--enable] [--disable] [--if-updated-at <updated_at>]` —
   edit a user-created definition (workspace admin); only the flags you
   pass change. Same output and rules as `update --prompt-file`:
   `previous` is the revert, `affected_projects` the blast radius, and a
@@ -407,9 +431,11 @@ command takes the scheduler's UUID or its slug.
   installed. Without `--yes` it asks for confirmation, which fails when
   there is no terminal — pass `--yes` only when the task asks for the
   delete. Built-in schedulers exit 2 with `code: builtin_scheduler`.
-- `pidash scheduler install <scheduler> [--project <PROJ-or-UUID>] --rrule <rule> [--dtstart <iso8601>] [--tzid <tz>] [--outcome-mode <mode>] [--pod <uuid>] [--disabled]` —
+- `pidash scheduler install <scheduler> [--project <PROJ-or-UUID>] --rrule <rule> [--dtstart <iso8601>] [--tzid <tz>] [--rdate <rdate>] [--exdate <exdate>] [--outcome-mode <mode>] [--pod <uuid>] [--disabled]` —
   install a scheduler on a project (project admin). `--dtstart` defaults
-  to now; `--rrule ""` is a single shot at `--dtstart`. Prints the
+  to now; `--rrule ""` is a single shot at `--dtstart`. Repeatable
+  `--rdate` adds an extra one-off firing and `--exdate` a firing to skip
+  (ISO 8601 datetimes). Prints the
   install with `next_run_at` set. Exit 2 with a 409 means `code:
 already_installed` (use `update` instead) or `scheduler_disabled` (the
   definition is off).
@@ -424,6 +450,10 @@ or to **one dedicated runner**, chosen because of the machine, tools or
 access that runner has. A dedicated runner is a bottleneck by design: every
 run of the issue goes to it and to no other.
 
+- `pidash project list` — list the projects in the active workspace, each
+  with `id`, `identifier`, `name`, `description`, `repo_url` and
+  `is_default`. Use it to resolve a project's slug before scoping other
+  commands to it.
 - `pidash project runners --project <PROJ-or-UUID> [--assignable-for <mode>]` —
   list the project's runners. With `--assignable-for`, each row carries
   `assignable`, `not_assignable_code`, `is_busy` and `queue_depth`: check it
@@ -488,12 +518,13 @@ result reference.
     runs switched off is refused with the list of valid states.
   - A repeated call changes nothing: re-running the same call after a
     success is a no-op.
-- `pidash run yield --outcome <outcome> [--note <line>] [--stop-ticking]` —
+- `pidash run yield --outcome <outcome> [--note <line>] [--stop-ticking] [--run-id <uuid>]` —
   report a scheduler run's outcome. Optional; when you send it, make it
   your **last** `pidash` command. The outcome is recorded on the run for
   the humans reading the schedule's run history. A scheduled run has no
   ticking clock: no outcome changes when the schedule next fires, and
-  nothing it reports disables the schedule.
+  nothing it reports disables the schedule. `--run-id` defaults to
+  `PIDASH_RUN_ID`; only scripted use should need it.
 
 ## Context
 
@@ -518,8 +549,9 @@ stale or is missing, run `pidash context refresh` to rewrite it for the
 bound workspace. (Its path follows `PIDASH_CONFIG_DIR` when set, otherwise
 `~/.pidash`.)
 
-- `pidash context init --project <PROJ-or-UUID>` — write the working-dir
-  `.pidash/context.md` for the current directory's project.
+- `pidash context init --project <PROJ-or-UUID> [--workspace <path>]` — write the working-dir
+  `.pidash/context.md` for the current directory's project. `--workspace`
+  writes it for another local directory instead of the current one.
 - `pidash context refresh` — rewrite the machine-level `~/.pidash/context.md`
   for the bound workspace.
 
@@ -553,3 +585,9 @@ pidash issue create --project ENG --title <title> --description-file .pidash/fin
 
 Write `.pidash/finding.md` first: evidence, file path, severity,
 suggested fix (markdown).
+
+## Workspace
+
+- `pidash workspace me` — verify the CLI's Pi Dash credentials end to
+  end and print the authenticated user. No flags. When this fails, fix
+  the login before debugging any other command.

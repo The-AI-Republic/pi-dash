@@ -61,7 +61,7 @@ ISSUE_WRITE_KEYS = ISSUE_ROW_KEYS | {"relations_summary", "has_open_blockers"}
 ISSUE_DETAIL_KEYS = (
     ISSUE_WRITE_KEYS
     | {"relations"}
-    | expect("DIFF-64", django=set(), rust={"code_reviews"})
+    | expect("DIFF-68", django=set(), rust={"code_reviews"})
 )
 
 
