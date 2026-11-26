@@ -385,7 +385,10 @@ fn split_owner_name(rest: &str, allow_trailing_slash: bool) -> Option<(String, S
 /// (`https://github.com/<owner>/<repo>[.git][/]`) or SSH
 /// (`git@github.com:<owner>/<repo>[.git]`), github.com only, schemes
 /// lowercase-only, exactly like the regexes.
-fn parse_github_repo_url(url: &str) -> Option<(String, String)> {
+/// `pub(crate)` for the repos identity key
+/// ([`crate::domain::project_repos`], NEWPIDASH-409): the exact
+/// owner/name rules, lowercased, for `github.com` URLs.
+pub(crate) fn parse_github_repo_url(url: &str) -> Option<(String, String)> {
     if url.is_empty() {
         return None;
     }
