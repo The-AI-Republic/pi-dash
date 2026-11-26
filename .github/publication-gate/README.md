@@ -59,7 +59,8 @@ it, uses a protected environment outside `release.yml` and
 requires third-party actions pinned to a commit SHA, keeps `inputs`, `env`
 and event expressions out of `run` scripts, and checks that the publisher
 runs nothing but checkout and download before `verify-manifest
---expect-digest`. Other workflows may keep their own test secrets and write
+--expect-digest`, that this step has no `if:` or `continue-on-error`, and
+that no secret sits in the publisher's job-level `env`. Other workflows may keep their own test secrets and write
 non-publishing scopes (checks, pull request comments, code scanning).
 
 ## One-time setup (repository admin)

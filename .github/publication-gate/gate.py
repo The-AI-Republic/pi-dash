@@ -264,8 +264,17 @@ def _publisher_problems(where, job, steps, scanners):
     if verify_at is None:
         problems.append(f"{where}: the publisher never runs gate.py verify-manifest")
         return problems
-    if "--expect-digest" not in steps[verify_at]["run"]:
+    verify = steps[verify_at]
+    if "--expect-digest" not in verify["run"]:
         problems.append(f"{where}: the publisher runs verify-manifest without --expect-digest")
+    # A skipped or failure-tolerant check is no check.
+    if "if" in verify or verify.get("continue-on-error") not in (None, False):
+        problems.append(f"{where}: the verify-manifest step has an if: or continue-on-error")
+    if job.get("continue-on-error") not in (None, False):
+        problems.append(f"{where}: the publisher job has continue-on-error")
+    # Job-level env and defaults reach every step, those before the check too.
+    if list(secret_refs([job.get("env") or {}, job.get("defaults") or {}])):
+        problems.append(f"{where}: job-level env reads a secret, so steps before verify-manifest see it")
     for step in steps[:verify_at]:
         if not isinstance(step, dict):
             continue
