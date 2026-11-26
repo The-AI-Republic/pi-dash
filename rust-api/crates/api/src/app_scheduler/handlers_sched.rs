@@ -42,6 +42,17 @@
 //!   check-then-write race backstop (`BaseAPIView.handle_exception`,
 //!   `app/views/base.py:211-240`, still flattens Django-side races the
 //!   same way).
+//! * NEW (NEWPIDASH-257, `DIFF-34`): a slug breaking the web-form format
+//!   (`^[a-z0-9][a-z0-9-]*$`) answers 400
+//!   `{"slug": ["Use lowercase letters, numbers, and dashes only."]}` on
+//!   POST and on PATCH-that-changes-the-slug. Django's `validate_slug`
+//!   has no format rule and accepts any slug up to 64 chars; this is the
+//!   deliberate difference. A PATCH that re-sends the stored slug
+//!   verbatim skips the format check, so an edit that leaves a stored
+//!   bad slug unchanged still saves (mirroring the built-in-slug lock's
+//!   "unchanged passes" rule in `a4cacc6cc`). As in DRF's single
+//!   `validate_slug` hook, a format failure skips the duplicate check for
+//!   that slug (at most one slug error).
 //! * A non-UUID detail id matches NO Django route, so Django's
 //!   `custom_404_view` answers 404 `{"error": "Page not found."}` before
 //!   any view code runs (F36-10 `routing_note`). The Rust route takes the
@@ -553,7 +564,12 @@ fn validate_field(
     write: &mut SchedulerWrite,
 ) -> Result<(), Vec<String>> {
     match field {
-        "slug" => char_field(value, false, Some(64)).map(|slug| write.slug = slug),
+        "slug" => {
+            let slug = char_field(value, false, Some(64))?;
+            shape::validate_slug_format(&slug)
+                .map(|()| write.slug = slug)
+                .map_err(|message| vec![message.to_owned()])
+        }
         "name" => char_field(value, false, Some(255)).map(|name| write.name = name),
         "description" => {
             char_field(value, true, None).map(|description| write.description = description)
@@ -637,6 +653,18 @@ pub fn validate_patch_body(body: &Value, existing: &SchedulerRow) -> Result<Sche
     let mut errors = Map::new();
     for &field in WRITABLE_FIELDS {
         if let Some(value) = object.get(field) {
+            // Grandfather (NEWPIDASH-257): a PATCH that re-sends the
+            // stored slug verbatim saves even when the stored slug breaks
+            // the format rule — the format rule only rejects *new*
+            // slugs. (A usable-formatted equal slug passes anyway; only
+            // a malformed stored slug needs this.)
+            if field == "slug"
+                && char_field(value, false, Some(64))
+                    .ok()
+                    .is_some_and(|slug| slug == existing.slug)
+            {
+                continue;
+            }
             if let Err(messages) = validate_field(field, value, &mut write) {
                 errors.insert(
                     field.to_owned(),
@@ -657,13 +685,18 @@ pub fn validate_patch_body(body: &Value, existing: &SchedulerRow) -> Result<Sche
 // ---------------------------------------------------------------------------
 
 /// `validate_slug`'s input: the body's slug iff present and
-/// `CharField`-valid. DRF calls the `validate_<field>` hook only when
-/// the field's own validation passed, so missing, blank, over-long, or
-/// wrong-typed slugs — and non-dict bodies — never reach the EXISTS
-/// check (the DB constraint stays the backstop there, as in Django).
+/// `CharField`-valid *and* format-valid. DRF calls the
+/// `validate_<field>` hook only when the field's own validation passed,
+/// and the hook answers at most one error (format first, then the
+/// duplicate EXISTS check), so missing, blank, over-long,
+/// wrong-typed, and badly formatted slugs — and non-dict bodies —
+/// never reach the EXISTS check (the DB constraint stays the backstop
+/// there, as in Django).
 fn candidate_slug(body: &Value) -> Option<String> {
     let slug = body.as_object()?.get("slug")?;
-    char_field(slug, false, Some(64)).ok()
+    let slug = char_field(slug, false, Some(64)).ok()?;
+    shape::validate_slug_format(&slug).ok()?;
+    Some(slug)
 }
 
 /// R7 slug-unique check, with or without the PATCH self-row exclusion.
@@ -734,7 +767,9 @@ async fn enforce_slug_unique(
 /// `active_binding_count` is the resolved count (annotation or R6
 /// fallback, decided by the caller per [`shape::resolve_active_binding_count`]
 /// semantics), datetimes render in the actor zone, `color` renders
-/// as stored (no normalization on read).
+/// as stored (no normalization on read). `is_builtin` is slug-in-catalog
+/// (mirroring `definition_writes.is_builtin`), not `source` — `source`
+/// defaults to `builtin` for user-created rows too (PDASHOSS01-290).
 pub fn render_scheduler_row(row: &SchedulerRow, active_binding_count: i64, tz: &Tz) -> Value {
     let mut rendered = Map::new();
     rendered.insert("id".to_owned(), Value::String(row.id.to_string()));
@@ -751,6 +786,10 @@ pub fn render_scheduler_row(row: &SchedulerRow, active_binding_count: i64, tz: &
     rendered.insert("prompt".to_owned(), Value::String(row.prompt.clone()));
     rendered.insert("color".to_owned(), Value::String(row.color.clone()));
     rendered.insert("source".to_owned(), Value::String(row.source.clone()));
+    rendered.insert(
+        "is_builtin".to_owned(),
+        Value::Bool(crate::v1_schedulers::writes::is_builtin_slug(&row.slug)),
+    );
     rendered.insert("is_enabled".to_owned(), Value::Bool(row.is_enabled));
     rendered.insert(
         "active_binding_count".to_owned(),
@@ -1673,8 +1712,15 @@ mod tests {
     fn create_max_length_counts_chars_not_bytes() {
         let emoji_slug: String = "e".repeat(63) + "\u{1F600}";
         assert_eq!(emoji_slug.chars().count(), 64);
-        validate_create_body(&json!({"slug": emoji_slug, "name": "n", "prompt": "p"}))
-            .expect("64 chars (67 bytes) fit max_length 64");
+        // The 64-char emoji slug now fails the format rule (`DIFF-34`:
+        // only ASCII lowercase/digit/dash), which proves `char_field`
+        // accepted the 64 chars first: a bytes-counted `max_length`
+        // would have answered the max-length error instead.
+        let errors = errors_for(json!({"slug": emoji_slug, "name": "n", "prompt": "p"}));
+        assert_eq!(
+            Value::Object(errors),
+            json!({"slug": [shape::SLUG_FORMAT_ERROR]})
+        );
         let long_slug = "s".repeat(65);
         let errors = errors_for(json!({"slug": long_slug, "name": "n", "prompt": "p"}));
         assert_eq!(
@@ -2147,6 +2193,155 @@ mod tests {
         );
         assert_eq!(message.kwargs.len(), 1);
         assert_eq!(message.kwargs.get("using"), Some(&Value::Null));
+    }
+
+    // -- Slug format (NEWPIDASH-257, DIFF-34) ---------------------------------
+
+    #[test]
+    fn create_rejects_badly_formatted_slugs() {
+        for bad in [
+            "Bad Slug",
+            "Nightly",
+            "NIGHTLY",
+            "nightly_scan",
+            "-nightly",
+            "nightly.1",
+            "nightly/scan",
+            "café",
+            "nightly scan",
+        ] {
+            let errors = errors_for(json!({"slug": bad, "name": "N", "prompt": "p"}));
+            assert_eq!(
+                Value::Object(errors.clone()),
+                json!({"slug": [shape::SLUG_FORMAT_ERROR]}),
+                "bad slug {bad:?} must answer only the format error"
+            );
+            assert_eq!(
+                serde_json::to_string(&Value::Object(errors)).expect("body JSON"),
+                shape::field_error_body("slug", shape::SLUG_FORMAT_ERROR)
+            );
+        }
+    }
+
+    #[test]
+    fn create_accepts_valid_slugs_including_padded() {
+        for good in [
+            "nightly-bug-scan",
+            "a",
+            "1",
+            "a1",
+            "1-2",
+            "a-",
+            "5",
+            "security-audit",
+        ] {
+            let write = validate_create_body(&json!({"slug": good, "name": "N", "prompt": "p"}))
+                .expect("valid slug validates");
+            assert_eq!(write.slug, good);
+        }
+        // DRF strips first: a padded slug is checked stripped, so the
+        // padded valid slug saves stripped.
+        let padded = "\u{1f}nightly-bug-scan\u{1c}";
+        let write = validate_create_body(&json!({"slug": padded, "name": "N", "prompt": "p"}))
+            .expect("padded slug validates");
+        assert_eq!(write.slug, "nightly-bug-scan");
+    }
+
+    #[test]
+    fn create_format_error_accumulates_with_other_errors() {
+        // Like DRF field-error accumulation: the format error is in
+        // declaration order (slug first), and the missing-name error still
+        // accumulates. The duplicate check never runs for a malformed
+        // slug, so no duplicate body merges in either.
+        let errors = errors_for(json!({"slug": "Bad Slug", "prompt": "p"}));
+        assert_eq!(
+            serde_json::to_string(&Value::Object(errors.clone())).expect("body JSON"),
+            format!(
+                "{{\"slug\":[\"{}\"],\"name\":[\"{}\"]}}",
+                shape::SLUG_FORMAT_ERROR,
+                REQUIRED_MESSAGE
+            )
+        );
+        assert_eq!(errors.keys().collect::<Vec<_>>(), vec!["slug", "name"]);
+        // candidate_slug is None for a malformed slug: the R7 duplicate
+        // probe must not prepend a slug error.
+        assert_eq!(candidate_slug(&json!({"slug": "Bad Slug"})), None);
+        assert_eq!(
+            candidate_slug(&json!({"slug": "nightly"})),
+            Some("nightly".to_owned())
+        );
+    }
+
+    #[test]
+    fn create_char_errors_preempt_format() {
+        // DRF order: CharField errors (blank, max-length, NUL) reject
+        // before the `validate_slug` format check runs.
+        let errors = errors_for(json!({"slug": "", "name": "N", "prompt": "p"}));
+        assert_eq!(Value::Object(errors), json!({"slug": [BLANK_MESSAGE]}));
+        let long = "a".repeat(65);
+        let errors = errors_for(json!({"slug": long, "name": "N", "prompt": "p"}));
+        assert_eq!(
+            Value::Object(errors),
+            json!({"slug": [max_length_message(64)]})
+        );
+        let errors = errors_for(json!({"slug": "a\0b", "name": "N", "prompt": "p"}));
+        assert_eq!(
+            Value::Object(errors),
+            json!({"slug": [NULL_CHARACTERS_MESSAGE]})
+        );
+    }
+
+    #[test]
+    fn patch_rejects_badly_formatted_rename() {
+        for bad in ["Bad Slug", "Nightly", "nightly_scan", "-nightly"] {
+            let errors = match validate_patch_body(&json!({"slug": bad}), &sample_row()) {
+                Ok(_) => panic!("expected format error for {bad:?}"),
+                Err(Value::Object(map)) => map,
+                Err(other) => panic!("expected error object, got {other}"),
+            };
+            assert_eq!(
+                Value::Object(errors),
+                json!({"slug": [shape::SLUG_FORMAT_ERROR]}),
+                "rename to {bad:?} must answer only the format error"
+            );
+        }
+        // A valid rename still validates.
+        let write = validate_patch_body(&json!({"slug": "nightly-2"}), &sample_row())
+            .expect("valid rename validates");
+        assert_eq!(write.slug, "nightly-2");
+    }
+
+    #[test]
+    fn patch_grandfathers_unchanged_stored_slug() {
+        // A stored slug that already breaks the rule (created via APIs
+        // before NEWPIDASH-257) must not block edits that leave it
+        // unchanged: absent, present-and-equal, and name-only edits
+        // all save.
+        let mut existing = sample_row();
+        existing.slug = "Bad Slug".to_owned();
+        let write = validate_patch_body(&json!({}), &existing).expect("empty patch saves");
+        assert_eq!(write.slug, "Bad Slug");
+        let write = validate_patch_body(&json!({"slug": "Bad Slug"}), &existing)
+            .expect("re-sent stored slug saves");
+        assert_eq!(write.slug, "Bad Slug");
+        let write =
+            validate_patch_body(&json!({"name": "Renamed"}), &existing).expect("name edit saves");
+        assert_eq!(write.slug, "Bad Slug");
+        assert_eq!(write.name, "Renamed");
+        // ...but changing it to a different bad slug is still refused.
+        let errors = match validate_patch_body(&json!({"slug": "Other Slug"}), &existing) {
+            Ok(_) => panic!("expected format error on rename to bad slug"),
+            Err(Value::Object(map)) => map,
+            Err(other) => panic!("expected error object, got {other}"),
+        };
+        assert_eq!(
+            Value::Object(errors),
+            json!({"slug": [shape::SLUG_FORMAT_ERROR]})
+        );
+        // ...and renaming it to a valid slug works.
+        let write = validate_patch_body(&json!({"slug": "nightly-2"}), &existing)
+            .expect("valid rename saves");
+        assert_eq!(write.slug, "nightly-2");
     }
 
     #[test]

@@ -45,6 +45,7 @@ export function ConversationGate({ workspaceSlug, threadId, state }: Conversatio
           threadId={threadId}
           state={state}
           configured={!setup}
+          config={config.data}
         />
       )}
     </div>

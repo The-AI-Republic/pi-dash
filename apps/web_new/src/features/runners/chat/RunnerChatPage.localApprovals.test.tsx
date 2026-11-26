@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const contracts = vi.hoisted(() => ({
   getSttConfig: vi.fn(),
-  getAgentProfile: vi.fn(),
+  getPidashAgentProfile: vi.fn(),
 }));
 const platformState = vi.hoisted(() => ({
   api: null as unknown,
@@ -50,7 +50,7 @@ const { createAppClient, resetAppClient } = await import("../../../core/api/inde
 const { buildRunnersAreaValue, RunnersAreaProvider } = await import("../area.js");
 const { testClient } = await import("./harness.js");
 const { registerLocalChatTransport, resetLocalChatTransportForTests } = await import("./localBootstrap.js");
-const { APPROVAL_MODE_COPY, approvalModeKey } = await import("./approvalCopy.js");
+const { approvalModeKey } = await import("./approvalCopy.js");
 const { RunnerChatPage } = await import("./RunnerChatPage.js");
 
 type LocalChatApi = import("../../../core/platform/index.js").LocalChatApi;
@@ -151,7 +151,7 @@ beforeEach(() => {
     has_api_key: false,
     last_verified_at: null,
   });
-  contracts.getAgentProfile.mockResolvedValue({
+  contracts.getPidashAgentProfile.mockResolvedValue({
     managed_runner_enabled: true,
     lane: "local",
     base_url: "",
@@ -168,7 +168,7 @@ afterEach(() => {
   resetLocalChatTransportForTests();
   resetAppClient();
   globalThis.localStorage.clear();
-  contracts.getAgentProfile.mockReset();
+  contracts.getPidashAgentProfile.mockReset();
 });
 
 function approvalFrame(): LocalChatFrame {
@@ -230,11 +230,9 @@ describe("RunnerChatPage local approvals", () => {
 
   it("remembers the mode the user picks for the next thread", async () => {
     renderPage();
-    await userEvent.click(await screen.findByRole("button", { name: APPROVAL_MODE_COPY.ask.label }));
+    await userEvent.selectOptions(await screen.findByRole("combobox", { name: "Approval mode" }), "ask");
     expect(globalThis.localStorage.getItem(approvalModeKey("pidash-builtin"))).toBe("ask");
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: APPROVAL_MODE_COPY.ask.label })).toHaveAttribute("aria-pressed", "true")
-    );
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Approval mode" })).toHaveValue("ask"));
   });
 
   it("warms a conversation created after mount under the stored mode", async () => {
@@ -283,9 +281,9 @@ describe("RunnerChatPage local approvals", () => {
   it("picks up the approval controls when the transport installs after the page mounted", async () => {
     resetLocalChatTransportForTests();
     renderPage();
-    expect(screen.queryByRole("group", { name: "Approval mode" })).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Approval mode" })).toBeNull();
     await act(async () => registerLocalChatTransport());
-    expect(await screen.findByRole("group", { name: "Approval mode" })).toBeInTheDocument();
+    expect(await screen.findByRole("combobox", { name: "Approval mode" })).toBeInTheDocument();
   });
 });
 

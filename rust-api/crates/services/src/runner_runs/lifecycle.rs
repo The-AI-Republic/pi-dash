@@ -35,7 +35,8 @@ use pidash_db::app_pages::strip::{django_strip_tags, ml_strip_tags};
 use pidash_db::entity as orm;
 use pidash_db::runner_runs::agent_run;
 use pidash_types::runner_runs::{
-    enrich_run_error, merge_usage, AgentRunStatus, RefusalCategory, RunnerInfo,
+    classify_failure, classify_run_error_for_reason, enrich_run_error, merge_usage, AgentRunStatus,
+    RefusalCategory, RunFailureReason, RunnerInfo,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -45,6 +46,7 @@ use super::{
     py_str, py_strip, py_truthy, qualified_columns, truncate_chars, LifecycleEffect, SetValue,
     ISSUE_COLUMNS, PROJECT_COLUMNS, STATE_COLUMNS,
 };
+use crate::orchestration::clock::FailureClockEffect;
 
 /// `PROJECT_MOVE_HANDOFF_CONFIG_KEY`
 /// (`orchestration/service.py:57`): the `run_config` key whose
@@ -58,11 +60,11 @@ pub const RUN_ERROR_MAX_CHARS: usize = 16_000;
 pub const LLM_MODEL_MAX_CHARS: usize = 128;
 
 /// Detail prefixes that suppress the failure comment
-/// (`run_lifecycle.py:335-338`), in tuple order.
-pub const INFRA_FAILURE_DETAIL_PREFIXES: [&str; 2] = [
-    "daemon shutdown requested",
-    "agent stalled: no events for >",
-];
+/// (`run_lifecycle.py:335-338`), in tuple order. NEWPIDASH-253 (DIFF-42)
+/// drops `daemon shutdown requested`: daemon-restart failures now post
+/// like any other failure (see [`failure_comment_gate`]), so only the
+/// stall-reaper prefix remains infra noise.
+pub const INFRA_FAILURE_DETAIL_PREFIXES: [&str; 1] = ["agent stalled: no events for >"];
 
 /// `fire_tick` Celery wire name (`bgtasks/agent_ticker.py:77`).
 pub const FIRE_TICK_TASK: &str = "pi_dash.bgtasks.agent_ticker.fire_tick";
@@ -249,7 +251,7 @@ pub fn live_state_by_runner_sql() -> String {
 }
 
 /// Pause phase-2 re-read (`apply_run_paused:197`):
-/// `select_related("work_item").get(id)` — 41 + 34 columns, `.get()`
+/// `select_related("work_item").get(id)` — 42 + 34 columns, `.get()`
 /// so no `LIMIT`. A missing row returns from the whole function
 /// *before* the `on_commit` registration, skipping the drain too.
 /// Param: `$1` run id.
@@ -265,7 +267,7 @@ pub fn pause_reread_sql() -> String {
 
 /// `_pause_and_drain` re-read (`apply_run_paused:231-239`):
 /// `select_related("work_item", "work_item__state",
-/// "work_item__project").filter(pk).first()` — 41 + 34 + 46 + 18
+/// "work_item__project").filter(pk).first()` — 42 + 34 + 46 + 18
 /// columns. Join order follows Django's field-definition order
 /// (projects before states), not the argument order. Param: `$1` run id.
 pub fn pause_drain_reread_sql() -> String {
@@ -284,12 +286,17 @@ pub fn pause_drain_reread_sql() -> String {
 
 /// Failure-comment re-read (`_post_failure_comment:367`):
 /// `select_related("work_item", "work_item__project").filter(pk).first()` —
-/// 41 + 34 + 46 columns. Param: `$1` run id.
+/// 42 + 34 + 46 columns, plus the NEWPIDASH-253 (DIFF-42) runner +
+/// dev-machine legs for the trailing `Runner:` line. Param: `$1` run id.
 pub fn failure_reread_sql() -> String {
     format!(
-        "SELECT {}, {}, {} FROM \"agent_run\" LEFT OUTER JOIN \"issues\" ON \
+        "SELECT {}, {}, {}, \"runner\".\"name\" AS \"runner_name\", \"runner\".\"host_label\" AS \"runner_host_label\", \
+         \"dev_machine\".\"label\" AS \"machine_label\", \"dev_machine\".\"host_label\" AS \"machine_host_label\" FROM \"agent_run\" \
+         LEFT OUTER JOIN \"issues\" ON \
          (\"agent_run\".\"work_item_id\" = \"issues\".\"id\") LEFT OUTER JOIN \
-         \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") WHERE \
+         \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \
+         \"runner\" ON (\"agent_run\".\"runner_id\" = \"runner\".\"id\") LEFT OUTER JOIN \
+         \"dev_machine\" ON (\"runner\".\"dev_machine_id\" = \"dev_machine\".\"id\") WHERE \
          \"agent_run\".\"id\" = $1 ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1",
         qualified_columns("agent_run", agent_run::COLUMNS),
         qualified_columns("issues", ISSUE_COLUMNS),
@@ -594,8 +601,8 @@ pub fn plan_requeue_from_locked(run: &RequeueRunFacts) -> RequeuePlan {
 /// `DatabaseError`.
 pub fn requeue_update_sql() -> &'static str {
     "UPDATE \"agent_run\" SET \"status\" = $1, \"runner_id\" = $2, \
-     \"pinned_runner_id\" = $3, \"assigned_at\" = $4 \
-     WHERE \"agent_run\".\"id\" = $5"
+     \"pinned_runner_id\" = $3, \"assigned_at\" = $4, \"capacity_wait\" = $5 \
+     WHERE \"agent_run\".\"id\" = $6"
 }
 
 /// Requeue `UPDATE` for a dedicated pin
@@ -605,8 +612,8 @@ pub fn requeue_update_sql() -> &'static str {
 /// null, `$4` run id.
 pub fn requeue_update_keep_pin_sql() -> &'static str {
     "UPDATE \"agent_run\" SET \"status\" = $1, \"runner_id\" = $2, \
-     \"assigned_at\" = $3 \
-     WHERE \"agent_run\".\"id\" = $4"
+     \"assigned_at\" = $3, \"capacity_wait\" = $4 \
+     WHERE \"agent_run\".\"id\" = $5"
 }
 
 /// Parent thread clear (`apply_run_resume_unavailable:279-281`):
@@ -633,6 +640,25 @@ pub fn plan_assign_rejected_busy(runner_id: Uuid, run: &RequeueRunFacts) -> Assi
     }
 }
 
+/// The Muse auth-missing rejection: same DB effect as
+/// [`plan_assign_rejected_busy`] (BUSY flip + requeue) so the pod drain
+/// cannot instantly re-dispatch `agent_auth_missing` to the same
+/// credential-less runner. Wire name `agent_auth_missing` distinguishes
+/// telemetry from `assign_rejected_busy`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentAuthMissingPlan {
+    pub busy_flip_runner_id: Uuid,
+    pub requeue: RequeuePlan,
+}
+
+/// Plan the auth-missing rejection: the flip plus [`plan_requeue_from_locked`].
+pub fn plan_agent_auth_missing(runner_id: Uuid, run: &RequeueRunFacts) -> AgentAuthMissingPlan {
+    AgentAuthMissingPlan {
+        busy_flip_runner_id: runner_id,
+        requeue: plan_requeue_from_locked(run),
+    }
+}
+
 /// Runner `BUSY` flip (`apply_assign_rejected_busy:321`): single-column
 /// update, no timestamp touch. Params: `$1` `busy`, `$2` runner id.
 pub fn runner_busy_update_sql() -> &'static str {
@@ -643,13 +669,16 @@ pub fn runner_busy_update_sql() -> &'static str {
 /// `done_payload`/`tokens`/`model`/`refusal_category` are raw frame
 /// values; `error_detail` the raw `detail` (stringified-and-checked,
 /// since Django crashes on truthy non-strings here); `live` the
-/// live-state snapshot; `runner` the enrich signals for `FAILED`.
+/// live-state snapshot; `runner` the enrich signals for `FAILED`;
+/// `runner_failure_reason` the raw frame `reason` (the runner protocol's
+/// `FailureReason`, PDASHOSS01-183 — `Null` on paths without one).
 /// (`RunnerInfo` has no `PartialEq`, so neither does this struct.)
 #[derive(Debug, Clone)]
 pub struct TerminalUpdateInputs<'a> {
     pub status: AgentRunStatus,
     pub done_payload: &'a Value,
     pub error_detail: &'a Value,
+    pub runner_failure_reason: &'a Value,
     pub refusal_category: &'a Value,
     pub tokens: &'a Value,
     pub model: &'a Value,
@@ -663,12 +692,15 @@ pub struct TerminalUpdateInputs<'a> {
 /// pre-merge — the merge runs in the finalize step against the locked
 /// row); `error` on `COMPLETED` (`""`), `FAILED` (enriched, only when
 /// the detail is non-empty) and `REFUSED` (raw, same gate);
-/// `refusal_category` always on `REFUSED`. Usage/model follow
+/// `refusal_category` always on `REFUSED`; `failure_reason` always on
+/// `FAILED` (classified from the *raw* detail plus the runner reason,
+/// before enrichment — PDASHOSS01-183). Usage/model follow
 /// [`usage_updates`] with the frame model winning.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TerminalUpdates {
     pub status: AgentRunStatus,
     pub done_payload: Option<Value>,
+    pub failure_reason: Option<String>,
     pub error: Option<String>,
     pub refusal_category: Option<RefusalCategory>,
     pub usage: Option<Value>,
@@ -686,6 +718,7 @@ pub fn plan_terminal_updates(
     let mut updates = TerminalUpdates {
         status: inputs.status,
         done_payload: None,
+        failure_reason: None,
         error: None,
         refusal_category: None,
         usage: None,
@@ -694,6 +727,27 @@ pub fn plan_terminal_updates(
     if inputs.status == AgentRunStatus::Completed {
         updates.done_payload = Some(inputs.done_payload.clone());
         updates.error = Some(String::new());
+    }
+    if inputs.status == AgentRunStatus::Failed {
+        // `classify(error_detail, runner_reason=str(runner_failure_reason
+        // or ""))`: `str(raw or "")` inside `classify`. A truthy
+        // non-string detail classifies by its `str()` here and then
+        // crashes the enrich step below, exactly as the source does.
+        let raw = if py_truthy(inputs.error_detail) {
+            py_str(inputs.error_detail)
+        } else {
+            String::new()
+        };
+        let runner_reason = if py_truthy(inputs.runner_failure_reason) {
+            py_str(inputs.runner_failure_reason)
+        } else {
+            String::new()
+        };
+        updates.failure_reason = Some(
+            classify_failure(&raw, &runner_reason, "")
+                .value()
+                .to_owned(),
+        );
     }
     if inputs.status == AgentRunStatus::Failed && py_truthy(inputs.error_detail) {
         let detail = terminal_detail_str(inputs.error_detail)?;
@@ -737,8 +791,8 @@ fn terminal_detail_str(detail: &Value) -> Result<&str, LifecycleError> {
 
 /// Caller-`updates` extras for the finalize values, in exact dict
 /// insertion order: per-status keys first (`done_payload`, `error` /
-/// `refusal_category`, `error` / `error`), then `usage`, then
-/// `llm_model`. `status`/`ended_at` are *not* extras —
+/// `refusal_category`, `error` / `failure_reason`, `error`), then `usage`,
+/// then `llm_model`. `status`/`ended_at` are *not* extras —
 /// they overwrite the finalize base in place.
 pub fn terminal_extras(updates: &TerminalUpdates) -> Vec<(&'static str, SetValue)> {
     let mut extras = Vec::new();
@@ -763,6 +817,9 @@ pub fn terminal_extras(updates: &TerminalUpdates) -> Vec<(&'static str, SetValue
             }
         }
         _ => {
+            if let Some(reason) = &updates.failure_reason {
+                extras.push(("failure_reason", SetValue::Text(reason.clone())));
+            }
             if let Some(error) = &updates.error {
                 extras.push(("error", SetValue::Text(error.clone())));
             }
@@ -797,28 +854,294 @@ pub fn is_infra_failure_detail(stripped_detail: &str) -> bool {
         .any(|prefix| stripped_detail.starts_with(prefix))
 }
 
-/// Plan the failure comment (`_post_failure_comment:341-399`): strip,
-/// suppress infra noise, then render — the `<pre>` detail block, or
-/// `(no diagnostic detail)` when empty. `None` means suppressed; the
-/// executing layer still runs the row re-read and the dedupe check
-/// (a hit or a missing work item also means silence).
-pub fn plan_failure_comment(error: &str, run_id: Uuid) -> Option<CommentPlan> {
+/// The failure comment's input (`_post_failure_comment`): the stripped
+/// detail it will render, for the run it belongs to, and whether that
+/// detail is infra noise. Everything else the comment needs — the stored
+/// `failure_reason`, the clock effect, the dedupe verdict — is read by the
+/// executing layer after the run re-read (PDASHOSS01-183), then fed to
+/// [`failure_comment_gate`] and [`FailureCommentPlan::render`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailureCommentPlan {
+    pub run_id: Uuid,
+    pub detail: String,
+    /// The detail starts with an [`INFRA_FAILURE_DETAIL_PREFIXES`] entry:
+    /// kept off the thread unless the failure stops the clock.
+    pub infra: bool,
+}
+
+/// Plan the failure comment (`_post_failure_comment`): strip and flag
+/// infra noise. The executing layer then runs the row re-read, the clock
+/// effect, the gate and the dedupe check (each can mean silence).
+pub fn plan_failure_comment(error: &str, run_id: Uuid) -> FailureCommentPlan {
     let detail = py_strip(error);
-    if is_infra_failure_detail(detail) {
-        return None;
+    FailureCommentPlan {
+        run_id,
+        detail: detail.to_owned(),
+        infra: is_infra_failure_detail(detail),
     }
-    let html = if detail.is_empty() {
-        format!(
-            "<p><strong>Run failed.</strong> {}</p>",
-            escape_html("(no diagnostic detail)")
-        )
+}
+
+/// The per-reason gate (`_post_failure_comment`, PDASHOSS01-183) run
+/// after the re-read and before the dedupe check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureCommentGate {
+    /// Silence: a failure the policy is about to free-retry, or infra
+    /// noise that does not stop the clock.
+    Suppress,
+    /// Post the comment; `clock_stopped` adds the paused paragraph and
+    /// raises the clock-stopped notification after the insert.
+    Post { clock_stopped: bool },
+}
+
+/// Decide the gate from the predicted clock effect
+/// ([`failure_clock_effect`][crate::orchestration::clock::failure_clock_effect],
+/// the decision `_apply_failure_policy` makes when the run's `RUN_ENDED`
+/// reconciles right after this hook): a free retry is silent; infra noise
+/// is silent unless the clock stops — the user must hear about that.
+/// NEWPIDASH-253 (DIFF-42) exempts `daemon_restart`: a daemon stop is
+/// never silently free-retried — it always posts (one comment per
+/// in-flight run, stating the trigger), even below the backstop.
+pub fn failure_comment_gate(
+    plan: &FailureCommentPlan,
+    failure_reason: &str,
+    effect: FailureClockEffect,
+) -> FailureCommentGate {
+    if RunFailureReason::from_value(py_strip(failure_reason))
+        == Some(RunFailureReason::DaemonRestart)
+    {
+        return FailureCommentGate::Post {
+            clock_stopped: effect.clock_stopped,
+        };
+    }
+    if effect.free_retry {
+        return FailureCommentGate::Suppress;
+    }
+    if plan.infra && !effect.clock_stopped {
+        return FailureCommentGate::Suppress;
+    }
+    FailureCommentGate::Post {
+        clock_stopped: effect.clock_stopped,
+    }
+}
+
+/// The paused paragraph's text (`_post_failure_comment`).
+const CLOCK_STOPPED_PARAGRAPH: &str = "Automatic runs on this issue are paused — no further tick budget will be spent on this failure. Once it is fixed, press Re-tick (or Run AI) to resume.";
+
+/// Where a run ran, for the trailing `Runner:` line (NEWPIDASH-253,
+/// DIFF-42). `machine` is already resolved (dev-machine label, else
+/// dev-machine host label, else runner host label); `None` means no
+/// machine label was stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerIdentity {
+    pub runner_name: String,
+    pub machine: Option<String>,
+}
+
+impl RunnerIdentity {
+    /// Resolve the machine label exactly as diagnostics `_runner_location`
+    /// does: dev-machine `label` wins over `host_label`, falling back to
+    /// the runner's `host_label`. Returns `None` when there is no runner
+    /// name to display (the comment then omits the line).
+    pub fn new(
+        runner_name: Option<&str>,
+        runner_host_label: Option<&str>,
+        machine_label: Option<&str>,
+        machine_host_label: Option<&str>,
+    ) -> Option<Self> {
+        let name = py_strip(runner_name.unwrap_or(""));
+        if name.is_empty() {
+            return None;
+        }
+        let mut machine = py_strip(machine_label.unwrap_or(""));
+        if machine.is_empty() {
+            machine = py_strip(machine_host_label.unwrap_or(""));
+        }
+        if machine.is_empty() {
+            machine = py_strip(runner_host_label.unwrap_or(""));
+        }
+        Some(Self {
+            runner_name: name.to_owned(),
+            machine: if machine.is_empty() {
+                None
+            } else {
+                Some(machine.to_owned())
+            },
+        })
+    }
+
+    /// The `Runner:` line's text (NEWPIDASH-253): `Runner: <name> on
+    /// <machine>`, or `Runner: <name>` without a machine.
+    pub fn line(&self) -> String {
+        match &self.machine {
+            Some(machine) => format!("Runner: {} on {machine}", self.runner_name),
+            None => format!("Runner: {}", self.runner_name),
+        }
+    }
+}
+
+/// A rendered failure comment plus what the clock-stopped notification
+/// reuses (`label`, `action`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RenderedFailureComment {
+    pub comment: CommentPlan,
+    pub clock_stopped: bool,
+    pub label: String,
+    pub action: String,
+}
+
+impl FailureCommentPlan {
+    /// Render the body (`_post_failure_comment`, PDASHOSS01-183): the
+    /// reason label + action header (plain `Run failed.` for an unknown or
+    /// empty reason), the paused paragraph when the clock stopped, then
+    /// the `<pre>` detail — or `(no diagnostic detail)` when there is
+    /// neither a detail nor a label — then the trailing `Runner:` line
+    /// (NEWPIDASH-253, DIFF-42) when `runner` is `Some`. Each argument
+    /// escaped as `format_html` does.
+    pub fn render(
+        &self,
+        failure_reason: &str,
+        clock_stopped: bool,
+        runner: Option<&RunnerIdentity>,
+    ) -> RenderedFailureComment {
+        let reason = py_strip(failure_reason);
+        let label = RunFailureReason::from_value(reason)
+            .map(|known| known.label())
+            .unwrap_or("");
+        let action = classify_run_error_for_reason(Some(&self.detail), Some(reason))
+            .map(|diagnostic| diagnostic.action)
+            .unwrap_or_default();
+        let mut html = String::new();
+        if label.is_empty() {
+            html.push_str("<p><strong>Run failed.</strong></p>");
+        } else {
+            let suffix = if action.is_empty() {
+                String::new()
+            } else {
+                format!(" {action}")
+            };
+            html.push_str(&format!(
+                "<p><strong>Run failed — {}.</strong>{}</p>",
+                escape_html(label),
+                escape_html(&suffix)
+            ));
+        }
+        if clock_stopped {
+            html.push_str(&format!("<p>{}</p>", escape_html(CLOCK_STOPPED_PARAGRAPH)));
+        }
+        if !self.detail.is_empty() {
+            html.push_str(&format!("<pre>{}</pre>", escape_html(&self.detail)));
+        } else if label.is_empty() {
+            html.push_str(&format!("<p>{}</p>", escape_html("(no diagnostic detail)")));
+        }
+        if let Some(identity) = runner {
+            html.push_str(&format!("<p>{}</p>", escape_html(&identity.line())));
+        }
+        RenderedFailureComment {
+            comment: CommentPlan::failure(html, self.run_id),
+            clock_stopped,
+            label: label.to_owned(),
+            action,
+        }
+    }
+}
+
+/// `Notification.sender` for the clock-stopped notification
+/// (`_notify_clock_stopped`, PDASHOSS01-183).
+pub const CLOCK_STOPPED_SENDER: &str = "in_app:agent_runs:clock_stopped";
+
+/// `Notification.entity_name` for the clock-stopped notification.
+pub const CLOCK_STOPPED_ENTITY_NAME: &str = "issue";
+
+/// One receiver candidate (`issue.created_by`, then `run.runner.owner`):
+/// the user id when the FK is set, plus the two flags the filter reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReceiverCandidate {
+    pub user_id: Option<Uuid>,
+    pub is_active: bool,
+    pub is_bot: bool,
+}
+
+/// `_notify_clock_stopped`'s receiver loop: candidates in order, the
+/// first occurrence of an id wins, inactive users and bots are skipped.
+/// An empty answer means no notification at all.
+pub fn clock_stopped_receivers(candidates: &[ReceiverCandidate]) -> Vec<Uuid> {
+    let mut receivers: Vec<Uuid> = Vec::new();
+    for candidate in candidates {
+        let Some(user_id) = candidate.user_id else {
+            continue;
+        };
+        if receivers.contains(&user_id) {
+            continue;
+        }
+        if !candidate.is_active || candidate.is_bot {
+            continue;
+        }
+        receivers.push(user_id);
+    }
+    receivers
+}
+
+/// `_notify_clock_stopped`'s `message_html` (`format_html`, each argument
+/// escaped).
+pub fn clock_stopped_message_html(issue_name: &str, label: &str, action: &str) -> String {
+    let label = if label.is_empty() {
+        "the last run failed"
     } else {
-        format!(
-            "<p><strong>Run failed.</strong></p><pre>{}</pre>",
-            escape_html(detail)
-        )
+        label
     };
-    Some(CommentPlan::failure(html, run_id))
+    let action = if action.is_empty() {
+        "Fix the cause, then press Re-tick to resume."
+    } else {
+        action
+    };
+    format!(
+        "<p>Automatic agent runs on <strong>{}</strong> are paused: {}. {}</p>",
+        escape_html(issue_name),
+        escape_html(label),
+        escape_html(action)
+    )
+}
+
+/// The issue half of the clock-stopped notification's `data`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClockStoppedIssue<'a> {
+    pub id: Uuid,
+    pub name: &'a str,
+    /// `str(issue.project.identifier) if issue.project_id else ""`.
+    pub project_identifier: &'a str,
+    pub sequence_id: i32,
+}
+
+/// `_notify_clock_stopped`'s `data` payload, in the source dict order.
+pub fn clock_stopped_data(
+    issue: &ClockStoppedIssue<'_>,
+    run_id: Uuid,
+    failure_reason: &str,
+    action: &str,
+) -> Value {
+    serde_json::json!({
+        "issue": {
+            "id": issue.id.to_string(),
+            "name": issue.name,
+            "identifier": issue.project_identifier,
+            "sequence_id": issue.sequence_id,
+        },
+        "agent_run": {
+            "id": run_id.to_string(),
+            "failure_reason": failure_reason,
+            "action": action,
+        },
+    })
+}
+
+/// Clock-stopped notification `INSERT` (`Notification.objects.bulk_create`
+/// — no `save()`, so the audit FKs stay NULL), one row per call: `$1` id,
+/// `$2`/`$3` now, `$4` workspace, `$5` project, `$6` data, `$7` issue id
+/// (`entity_identifier`), `$8` `"issue"`, `$9` title (issue name), `$10`
+/// message html, `$11` sender, `$12` receiver. `message`,
+/// `message_stripped`, `triggered_by` and the three state stamps are NULL.
+pub fn clock_stopped_notification_insert_sql() -> &'static str {
+    "INSERT INTO \"notifications\" (\"id\", \"created_at\", \"updated_at\", \"created_by_id\", \"updated_by_id\", \"deleted_at\", \"workspace_id\", \"project_id\", \"data\", \"entity_identifier\", \"entity_name\", \"title\", \"message\", \"message_html\", \"message_stripped\", \"sender\", \"triggered_by_id\", \"receiver_id\", \"read_at\", \"snoozed_till\", \"archived_at\") VALUES ($1, $2, $3, NULL, NULL, NULL, $4, $5, $6, $7, $8, $9, NULL, $10, NULL, $11, NULL, $12, NULL, NULL, NULL)"
 }
 
 // ---------------------------------------------------------------------------
@@ -940,13 +1263,39 @@ pub async fn pause_update(
 /// The failure-comment re-read ([`failure_reread_sql`]): the run's work
 /// item plus the joined issue's id / project / workspace (`None` without
 /// an issue row — `LEFT JOIN`). The `projects` leg Django adds is a
-/// primary-key join nothing reads.
+/// primary-key join nothing reads. NEWPIDASH-253 (DIFF-42) adds the
+/// runner + dev-machine legs for [`RunnerIdentity`] (`None` without a
+/// `runner_id` or without those rows — the comment omits the line).
 #[derive(Debug, Clone, PartialEq, Eq, sea_orm::FromQueryResult)]
 pub struct FailureRereadRow {
     pub work_item_id: Option<Uuid>,
     pub issue_id: Option<Uuid>,
     pub issue_project_id: Option<Uuid>,
     pub issue_workspace_id: Option<Uuid>,
+    /// The stored canonical reason (PDASHOSS01-183); blank pre-backfill.
+    pub failure_reason: String,
+    /// The run's `phase_kind` (`""` when never set) — the failure policy's
+    /// stage guard.
+    pub phase_kind: String,
+    /// The joined issue's `state_id` — the failure policy's bucket guard.
+    pub issue_state_id: Option<Uuid>,
+    pub runner_name: Option<String>,
+    pub runner_host_label: Option<String>,
+    pub machine_label: Option<String>,
+    pub machine_host_label: Option<String>,
+}
+
+impl FailureRereadRow {
+    /// The trailing `Runner:` identity for this run (NEWPIDASH-253):
+    /// `None` when the run has no runner name to display.
+    pub fn runner_identity(&self) -> Option<RunnerIdentity> {
+        RunnerIdentity::new(
+            self.runner_name.as_deref(),
+            self.runner_host_label.as_deref(),
+            self.machine_label.as_deref(),
+            self.machine_host_label.as_deref(),
+        )
+    }
 }
 
 /// `agent_run.work_item_id -> issues.id` (trimmed from the entity).
@@ -958,7 +1307,26 @@ fn work_item_rel() -> sea_orm::RelationDef {
         .into()
 }
 
-/// Failure re-read ([`failure_reread_sql`]): run `LEFT JOIN issues`,
+/// `agent_run.runner_id -> runner.id` (NEWPIDASH-253).
+fn failure_runner_rel() -> sea_orm::RelationDef {
+    use sea_orm::EntityTrait;
+    orm::agent_run::Entity::belongs_to(orm::runner::Entity)
+        .from(orm::agent_run::Column::RunnerId)
+        .to(orm::runner::Column::Id)
+        .into()
+}
+
+/// `runner.dev_machine_id -> dev_machine.id` (NEWPIDASH-253).
+fn failure_dev_machine_rel() -> sea_orm::RelationDef {
+    use sea_orm::EntityTrait;
+    orm::runner::Entity::belongs_to(orm::dev_machine::Entity)
+        .from(orm::runner::Column::DevMachineId)
+        .to(orm::dev_machine::Column::Id)
+        .into()
+}
+
+/// Failure re-read ([`failure_reread_sql`]): run `LEFT JOIN issues` +
+/// `LEFT JOIN runner` + `LEFT JOIN dev_machine`,
 /// `ORDER BY created_at DESC LIMIT 1`.
 pub fn failure_reread_select(
     run_id: Uuid,
@@ -971,7 +1339,16 @@ pub fn failure_reread_select(
         .column_as(orm::issues::Column::Id, "issue_id")
         .column_as(orm::issues::Column::ProjectId, "issue_project_id")
         .column_as(orm::issues::Column::WorkspaceId, "issue_workspace_id")
+        .column(Column::FailureReason)
+        .column(Column::PhaseKind)
+        .column_as(orm::issues::Column::StateId, "issue_state_id")
+        .column_as(orm::runner::Column::Name, "runner_name")
+        .column_as(orm::runner::Column::HostLabel, "runner_host_label")
+        .column_as(orm::dev_machine::Column::Label, "machine_label")
+        .column_as(orm::dev_machine::Column::HostLabel, "machine_host_label")
         .join(JoinType::LeftJoin, work_item_rel())
+        .join(JoinType::LeftJoin, failure_runner_rel())
+        .join(JoinType::LeftJoin, failure_dev_machine_rel())
         .filter(Column::Id.eq(run_id))
         .order_by_desc(Column::CreatedAt)
         .limit(1)
@@ -1080,6 +1457,7 @@ pub fn requeue_update_statement(run_id: Uuid) -> sea_orm::UpdateMany<orm::agent_
         .col_expr(Column::RunnerId, SimpleExpr::Keyword(Keyword::Null))
         .col_expr(Column::PinnedRunnerId, SimpleExpr::Keyword(Keyword::Null))
         .col_expr(Column::AssignedAt, SimpleExpr::Keyword(Keyword::Null))
+        .col_expr(Column::CapacityWait, SimpleExpr::Keyword(Keyword::Null))
         .filter(Column::Id.eq(run_id))
 }
 
@@ -1108,6 +1486,7 @@ pub fn requeue_update_keep_pin_statement(
         .col_expr(Column::Status, Expr::value(AgentRunStatus::Queued.value()))
         .col_expr(Column::RunnerId, SimpleExpr::Keyword(Keyword::Null))
         .col_expr(Column::AssignedAt, SimpleExpr::Keyword(Keyword::Null))
+        .col_expr(Column::CapacityWait, SimpleExpr::Keyword(Keyword::Null))
         .filter(Column::Id.eq(run_id))
 }
 
@@ -1622,8 +2001,8 @@ mod tests {
         assert_eq!(
             requeue_update_keep_pin_sql(),
             "UPDATE \"agent_run\" SET \"status\" = $1, \"runner_id\" = $2, \
-             \"assigned_at\" = $3 \
-             WHERE \"agent_run\".\"id\" = $4"
+             \"assigned_at\" = $3, \"capacity_wait\" = $4 \
+             WHERE \"agent_run\".\"id\" = $5"
         );
     }
 
@@ -1645,6 +2024,15 @@ mod tests {
         assert_eq!(plan.requeue, plan_requeue_from_locked(&requeue_facts()));
     }
 
+    #[test]
+    fn agent_auth_missing_plan_matches_busy_effect() {
+        // `agent_auth_missing` reuses the busy rejection's DB effect: BUSY flip
+        // + shared requeue, with a distinct plan type for telemetry.
+        let plan = plan_agent_auth_missing(Uuid::nil(), &requeue_facts());
+        assert_eq!(plan.busy_flip_runner_id, Uuid::nil());
+        assert_eq!(plan.requeue, plan_requeue_from_locked(&requeue_facts()));
+    }
+
     // ------------------------------------------------------------------
     // terminal updates
     // ------------------------------------------------------------------
@@ -1661,6 +2049,7 @@ mod tests {
             status,
             done_payload,
             error_detail,
+            runner_failure_reason: &Value::Null,
             refusal_category,
             tokens,
             model,
@@ -1890,7 +2279,10 @@ mod tests {
             &Value::Null,
         );
         let updates = plan_terminal_updates(&inputs).expect("plans");
-        assert!(terminal_extras(&updates).is_empty());
+        // Only the canonical reason (PDASHOSS01-183): every FAILED row
+        // carries one, detail or not.
+        let keys: Vec<&str> = terminal_extras(&updates).iter().map(|(k, _)| *k).collect();
+        assert_eq!(keys, ["failure_reason"]);
     }
 
     #[test]
@@ -1952,6 +2344,243 @@ mod tests {
     // failure comment
     // ------------------------------------------------------------------
 
+    /// The pre-taxonomy comment: a re-read row with no stored
+    /// `failure_reason` (legacy rows) renders exactly the FX-RUN-05 body.
+    fn legacy_comment(detail: &str, run_id: Uuid) -> Option<CommentPlan> {
+        let plan = plan_failure_comment(detail, run_id);
+        match failure_comment_gate(&plan, "", FailureClockEffect::default()) {
+            FailureCommentGate::Suppress => None,
+            FailureCommentGate::Post { clock_stopped } => {
+                Some(plan.render("", clock_stopped, None).comment)
+            }
+        }
+    }
+
+    fn fx10() -> Value {
+        serde_json::from_str(include_str!(
+            "../../../../fixtures/runner_runs/fx-run-10-failure.golden.json"
+        ))
+        .expect("FX-RUN-10 parses")
+    }
+
+    /// FX-RUN-10 `failure_comment`: the real `_post_failure_comment` body
+    /// for every reason × detail × streak × armed clock (I/O mocked; the
+    /// real `failure_clock_effect` over an injected streak and ticker on an
+    /// in-bucket, same-stage, allowed clock) — clock effect, gate, render
+    /// and the notify decision.
+    #[test]
+    fn failure_comment_replays_fx_run_10() {
+        let fx = fx10();
+        let rows = fx["failure_comment"].as_array().expect("rows");
+        assert_eq!(rows.len(), 960);
+        let issue = crate::orchestration::clock::ClockIssue {
+            issue_id: Uuid::nil(),
+            state: Some(pidash_types::orchestration::StateRef {
+                group: "started",
+                name: "In Progress",
+            }),
+            policy: Default::default(),
+        };
+        for row in rows {
+            let detail = row["detail"].as_str().expect("detail");
+            let reason = row["failure_reason"].as_str().expect("reason");
+            let streak = row["streak"].as_u64().expect("streak") as u32;
+            let armed = row["armed"].as_bool().expect("armed");
+            let mut ticker = crate::orchestration::clock::new_ticker_row(
+                Uuid::nil(),
+                Uuid::nil(),
+                chrono::Utc::now(),
+                None,
+            );
+            ticker.enabled = armed;
+            let effect = crate::orchestration::clock::failure_clock_effect(
+                Some(&ticker),
+                &issue,
+                "",
+                py_strip(reason),
+                streak,
+            );
+            let plan = plan_failure_comment(detail, Uuid::nil());
+            let rendered = match failure_comment_gate(&plan, reason, effect) {
+                FailureCommentGate::Suppress => None,
+                FailureCommentGate::Post { clock_stopped } => {
+                    Some(plan.render(reason, clock_stopped, None))
+                }
+            };
+            let case = format!("({detail:?}, {reason:?}, streak={streak}, armed={armed})");
+            // NEWPIDASH-253 (DIFF-42): daemon-shutdown details always post
+            // in the new system (infra list is stalled-only, and
+            // `daemon_restart` is exempt from the free-retry gate), so
+            // Django's suppressed (null html) rows for them now render.
+            // Expect the fixed behaviour there; every other row keeps the
+            // Django html byte-exact.
+            if row["html"].is_null()
+                && (py_strip(reason) == "daemon_restart"
+                    || py_strip(detail).starts_with("daemon shutdown requested"))
+            {
+                // DIFF-42: daemon_restart rows must now post — assert presence
+                // so a still-suppressed daemon fails here, not null==null below.
+                // Detail-only daemon rows with other RetryFree reasons (e.g.
+                // `network`, streak 0) still suppress on free-retry by design,
+                // so they keep the lenient Some→assert / None→fall-through shape.
+                if py_strip(reason) == "daemon_restart" {
+                    let rendered = rendered
+                        .as_ref()
+                        .unwrap_or_else(|| panic!("daemon must post (DIFF-42) {case}"));
+                    assert!(
+                        rendered.comment.comment_html.contains("Run failed"),
+                        "daemon html {case}"
+                    );
+                    assert!(
+                        !py_strip(detail).is_empty() || !rendered.comment.comment_html.is_empty(),
+                        "daemon html {case}"
+                    );
+                    let notified = rendered.clock_stopped;
+                    assert_eq!(Value::Bool(notified), row["notified"], "notified {case}");
+                    continue;
+                }
+                if let Some(rendered) = rendered.as_ref() {
+                    assert!(
+                        rendered.comment.comment_html.contains("Run failed"),
+                        "daemon html {case}"
+                    );
+                    assert!(
+                        !py_strip(detail).is_empty() || !rendered.comment.comment_html.is_empty(),
+                        "daemon html {case}"
+                    );
+                    let notified = rendered.clock_stopped;
+                    assert_eq!(Value::Bool(notified), row["notified"], "notified {case}");
+                    continue;
+                }
+            }
+            assert_eq!(
+                rendered.as_ref().map(|r| r.comment.comment_html.as_str()),
+                row["html"].as_str(),
+                "html {case}"
+            );
+            let notified = rendered.as_ref().is_some_and(|r| r.clock_stopped);
+            assert_eq!(Value::Bool(notified), row["notified"], "notified {case}");
+            if notified {
+                let rendered = rendered.as_ref().expect("rendered");
+                assert_eq!(
+                    Some(rendered.label.as_str()),
+                    row["notify_label"].as_str(),
+                    "label {case}"
+                );
+                assert_eq!(
+                    Some(rendered.action.as_str()),
+                    row["notify_action"].as_str(),
+                    "action {case}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clock_stopped_notification_replays_fx_run_10() {
+        let fx = fx10();
+        let rows = fx["clock_stopped_notification"].as_array().expect("rows");
+        assert_eq!(rows.len(), 3);
+        for row in rows {
+            assert_eq!(
+                Some(
+                    clock_stopped_message_html(
+                        row["issue_name"].as_str().expect("name"),
+                        row["label"].as_str().expect("label"),
+                        row["action"].as_str().expect("action"),
+                    )
+                    .as_str()
+                ),
+                row["message_html"].as_str()
+            );
+        }
+        assert_eq!(CLOCK_STOPPED_SENDER, "in_app:agent_runs:clock_stopped");
+    }
+
+    #[test]
+    fn clock_stopped_receivers_dedupe_and_filter_in_order() {
+        let a = Uuid::from_u128(1);
+        let b = Uuid::from_u128(2);
+        let active = |id| ReceiverCandidate {
+            user_id: Some(id),
+            is_active: true,
+            is_bot: false,
+        };
+        assert_eq!(clock_stopped_receivers(&[active(a), active(b)]), vec![a, b]);
+        assert_eq!(clock_stopped_receivers(&[active(a), active(a)]), vec![a]);
+        let bot = ReceiverCandidate {
+            is_bot: true,
+            ..active(a)
+        };
+        let inactive = ReceiverCandidate {
+            is_active: false,
+            ..active(b)
+        };
+        assert!(clock_stopped_receivers(&[bot, inactive]).is_empty());
+        let none = ReceiverCandidate {
+            user_id: None,
+            is_active: true,
+            is_bot: false,
+        };
+        assert_eq!(clock_stopped_receivers(&[none, active(b)]), vec![b]);
+        let data = clock_stopped_data(
+            &ClockStoppedIssue {
+                id: a,
+                name: "n",
+                project_identifier: "PROJ",
+                sequence_id: 7,
+            },
+            b,
+            "timeout",
+            "act",
+        );
+        assert_eq!(data["issue"]["identifier"], "PROJ");
+        assert_eq!(data["issue"]["sequence_id"], 7);
+        assert_eq!(data["agent_run"]["failure_reason"], "timeout");
+    }
+
+    #[test]
+    fn terminal_failed_classifies_raw_detail_with_runner_reason() {
+        let detail = json!("401 Unauthorized");
+        let reason = json!("agent_crash");
+        let null = Value::Null;
+        let mut inputs =
+            terminal_inputs(AgentRunStatus::Failed, &null, &detail, &null, &null, &null);
+        inputs.runner_failure_reason = &reason;
+        let updates = plan_terminal_updates(&inputs).expect("plans");
+        assert_eq!(
+            updates.failure_reason.as_deref(),
+            Some("agent_error.provider_auth_or_access")
+        );
+        // Classified before enrichment: the stored error is enriched, the
+        // reason came from the raw detail; `failure_reason` precedes
+        // `error` in the dict order.
+        let keys: Vec<&str> = terminal_extras(&updates).iter().map(|(k, _)| *k).collect();
+        assert_eq!(&keys[..2], ["failure_reason", "error"]);
+        // Old runners' bare reasons stay platform-side.
+        let workspace = json!("workspace_setup");
+        inputs.runner_failure_reason = &workspace;
+        let updates = plan_terminal_updates(&inputs).expect("plans");
+        assert_eq!(updates.failure_reason.as_deref(), Some("workspace_setup"));
+        // No detail at all still classifies (the invariant).
+        inputs.error_detail = &null;
+        inputs.runner_failure_reason = &null;
+        let updates = plan_terminal_updates(&inputs).expect("plans");
+        assert_eq!(
+            updates.failure_reason.as_deref(),
+            Some("agent_error.unknown")
+        );
+        // Non-FAILED terminal states never write it.
+        let completed =
+            terminal_inputs(AgentRunStatus::Completed, &null, &null, &null, &null, &null);
+        assert_eq!(
+            plan_terminal_updates(&completed)
+                .expect("plans")
+                .failure_reason,
+            None
+        );
+    }
+
     fn failure_case<'a>(fx: &'a Value, name: &str) -> &'a Value {
         fx.get("post_failure_comment")
             .and_then(Value::as_array)
@@ -1965,7 +2594,7 @@ mod tests {
     fn failure_comment_matches_fixture() {
         let fx = fixture();
         let gold = failure_case(&fx, "normal");
-        let plan = plan_failure_comment("boom detail", Uuid::nil()).expect("comment");
+        let plan = legacy_comment("boom detail", Uuid::nil()).expect("comment");
         assert_eq!(
             plan.comment_html,
             gold["comment"]
@@ -1983,29 +2612,30 @@ mod tests {
         );
         assert_eq!(plan.speaker, CommentSpeaker::System);
         // Detail is stripped before render.
-        let plan = plan_failure_comment("  boom detail\n", Uuid::nil()).expect("comment");
+        let plan = legacy_comment("  boom detail\n", Uuid::nil()).expect("comment");
         assert!(plan.comment_html.ends_with("<pre>boom detail</pre>"));
     }
 
     #[test]
     fn failure_comment_suppresses_infra_prefixes() {
+        // NEWPIDASH-253 (DIFF-42): `daemon shutdown requested` no longer
+        // suppresses — daemon-restart failures post like any other.
         assert_eq!(
             INFRA_FAILURE_DETAIL_PREFIXES,
-            [
-                "daemon shutdown requested",
-                "agent stalled: no events for >"
-            ]
+            ["agent stalled: no events for >"]
         );
+        assert_eq!(
+            legacy_comment("agent stalled: no events for >30s", Uuid::nil()),
+            None,
+            "stalled prefix still suppressed"
+        );
+        // Daemon details now post (legacy reason "" has no free_retry).
         for detail in [
             "daemon shutdown requested",
-            "daemon shutdown requested at 2026-01-01 (context suffix)",
-            "agent stalled: no events for >30s",
+            "daemon shutdown requested (SIGTERM; previous exit: oom-kill)",
         ] {
-            assert_eq!(
-                plan_failure_comment(detail, Uuid::nil()),
-                None,
-                "suppressed: {detail}"
-            );
+            let plan = legacy_comment(detail, Uuid::nil()).expect("daemon posts");
+            assert!(plan.comment_html.contains("Run failed."), "posts: {detail}");
         }
         let fx = fixture();
         assert_eq!(
@@ -2016,8 +2646,7 @@ mod tests {
         );
         // Case-sensitive: caps variant posts.
         let caps = failure_case(&fx, "prefix-case-sensitive?");
-        let plan =
-            plan_failure_comment("Daemon Shutdown Requested (caps)", Uuid::nil()).expect("posts");
+        let plan = legacy_comment("Daemon Shutdown Requested (caps)", Uuid::nil()).expect("posts");
         assert_eq!(
             plan.comment_html,
             caps.get("html").and_then(Value::as_str).expect("html")
@@ -2026,11 +2655,134 @@ mod tests {
     }
 
     #[test]
+    fn daemon_restart_always_posts_even_on_free_retry() {
+        // DIFF-42: the gate never silently free-retries a daemon stop.
+        let plan = plan_failure_comment("daemon shutdown requested (SIGTERM)", Uuid::nil());
+        let free_retry = FailureClockEffect {
+            clock_stopped: false,
+            free_retry: true,
+        };
+        match failure_comment_gate(&plan, "daemon_restart", free_retry) {
+            FailureCommentGate::Post {
+                clock_stopped: false,
+            } => {}
+            gate => panic!("daemon_restart must post on free_retry, got {gate:?}"),
+        }
+        // Every other free-retry reason stays silent.
+        let other = plan_failure_comment("boom detail", Uuid::nil());
+        assert_eq!(
+            failure_comment_gate(&other, "network", free_retry),
+            FailureCommentGate::Suppress
+        );
+        // The clock-stopped flag still flows through for daemon_restart.
+        let stopped = FailureClockEffect {
+            clock_stopped: true,
+            free_retry: false,
+        };
+        assert_eq!(
+            failure_comment_gate(&plan, "daemon_restart", stopped),
+            FailureCommentGate::Post {
+                clock_stopped: true
+            }
+        );
+    }
+
+    #[test]
+    fn runner_identity_resolves_machine_and_omits_without_runner() {
+        let identity = RunnerIdentity::new(
+            Some("home-muse-frontend-04"),
+            Some("runner-host"),
+            Some("rich-ThinkCentre-M90t"),
+            Some("dev-host"),
+        )
+        .expect("identity");
+        assert_eq!(
+            identity.line(),
+            "Runner: home-muse-frontend-04 on rich-ThinkCentre-M90t"
+        );
+        // Dev label wins over dev host label, which wins over runner host.
+        let fallback = RunnerIdentity::new(Some("r"), Some("runner-host"), None, Some("dev-host"))
+            .expect("fallback");
+        assert_eq!(fallback.line(), "Runner: r on dev-host");
+        let runner_host =
+            RunnerIdentity::new(Some("r"), Some("runner-host"), None, None).expect("runner host");
+        assert_eq!(runner_host.line(), "Runner: r on runner-host");
+        let bare = RunnerIdentity::new(Some("r"), None, None, None).expect("bare");
+        assert_eq!(bare.line(), "Runner: r");
+        assert_eq!(RunnerIdentity::new(None, None, None, None), None);
+        assert_eq!(RunnerIdentity::new(Some("  "), None, None, None), None);
+        // The rendered comment ends with the escaped line.
+        let plan = plan_failure_comment("boom detail", Uuid::nil());
+        let html = plan
+            .render("internal", false, Some(&identity))
+            .comment
+            .comment_html;
+        assert!(
+            html.ends_with("<p>Runner: home-muse-frontend-04 on rich-ThinkCentre-M90t</p>"),
+            "{html}"
+        );
+        // No runner: no line (cloud runs).
+        let bare_html = plan.render("internal", false, None).comment.comment_html;
+        assert!(!bare_html.contains("Runner:"), "{bare_html}");
+    }
+
+    #[test]
+    fn failure_shapes_name_runner_and_machine() {
+        // NEWPIDASH-253 Done-when: the three shapes each end with the
+        // Runner line. Reaped, start-timeout/offline and daemon-shutdown
+        // all funnel through this render.
+        let identity = RunnerIdentity::new(
+            Some("home-muse-frontend-04"),
+            None,
+            Some("rich-ThinkCentre-M90t"),
+            None,
+        )
+        .expect("identity");
+        let line = "<p>Runner: home-muse-frontend-04 on rich-ThinkCentre-M90t</p>";
+        // Reaped (runner_offline): plain-words detail, Runner line.
+        let reaped = plan_failure_comment(
+            "run reaped: the runner daemon restarted and no longer knows this run (runner reported in_flight_run=(none) but cloud had this run marked busy)",
+            Uuid::nil(),
+        );
+        let html = reaped
+            .render("runner_offline", false, Some(&identity))
+            .comment
+            .comment_html;
+        assert!(html.ends_with(line), "reaped: {html}");
+        assert!(
+            html.contains("daemon restarted and no longer knows this run"),
+            "reaped: {html}"
+        );
+        // Start-timeout / offline sweep (runner_offline).
+        let offline = plan_failure_comment(
+            "runner offline: no heartbeat for >3600s while this run was assigned to it",
+            Uuid::nil(),
+        );
+        let html = offline
+            .render("runner_offline", false, Some(&identity))
+            .comment
+            .comment_html;
+        assert!(html.ends_with(line), "offline: {html}");
+        // Daemon-shutdown (daemon_restart) with the SIGTERM trigger.
+        let daemon = plan_failure_comment(
+            "daemon shutdown requested (SIGTERM; previous exit: oom-kill)",
+            Uuid::nil(),
+        );
+        let html = daemon
+            .render("daemon_restart", false, Some(&identity))
+            .comment
+            .comment_html;
+        assert!(html.ends_with(line), "daemon: {html}");
+        assert!(html.contains("SIGTERM"), "daemon: {html}");
+        assert!(html.contains("oom-kill"), "daemon: {html}");
+    }
+
+    #[test]
     fn failure_comment_empty_detail_posts_placeholder() {
         let fx = fixture();
         let gold = failure_case(&fx, "empty-detail");
         for detail in ["", "   "] {
-            let plan = plan_failure_comment(detail, Uuid::nil()).expect("placeholder posts");
+            let plan = legacy_comment(detail, Uuid::nil()).expect("placeholder posts");
             assert_eq!(
                 plan.comment_html,
                 gold.get("html").and_then(Value::as_str).expect("html")
@@ -2038,7 +2790,7 @@ mod tests {
         }
         assert_eq!(
             gold.get("html").and_then(Value::as_str),
-            Some("<p><strong>Run failed.</strong> (no diagnostic detail)</p>")
+            Some("<p><strong>Run failed.</strong></p><p>(no diagnostic detail)</p>")
         );
     }
 
@@ -2092,9 +2844,11 @@ mod tests {
 
     #[test]
     fn lock_sql_match_django_tails() {
+        // NEWPIDASH-241 T1: agent_run projections carry 45 columns
+        // (42 Django baseline + 3 native-owned); tails are unchanged.
         let pause = lock_run_for_pause_sql();
         assert!(pause.starts_with("SELECT \"agent_run\".\"id\", "), "prefix");
-        assert_eq!(select_runs(&pause), vec![("\"agent_run\"".to_owned(), 40)]);
+        assert_eq!(select_runs(&pause), vec![("\"agent_run\"".to_owned(), 45)]);
         assert!(
             pause.ends_with(
                 " FROM \"agent_run\" WHERE (\"agent_run\".\"id\" = $1 AND \
@@ -2107,7 +2861,7 @@ mod tests {
         let requeue = lock_run_for_requeue_sql();
         assert_eq!(
             select_runs(&requeue),
-            vec![("\"agent_run\"".to_owned(), 40)]
+            vec![("\"agent_run\"".to_owned(), 45)]
         );
         assert!(
             requeue.ends_with(
@@ -2126,8 +2880,8 @@ mod tests {
         assert_eq!(
             select_runs(&reread),
             vec![
-                ("\"agent_run\"".to_owned(), 40),
-                ("\"issues\"".to_owned(), 34),
+                ("\"agent_run\"".to_owned(), 45),
+                ("\"issues\"".to_owned(), 35),
             ]
         );
         assert!(
@@ -2142,9 +2896,9 @@ mod tests {
         assert_eq!(
             select_runs(&drain),
             vec![
-                ("\"agent_run\"".to_owned(), 40),
-                ("\"issues\"".to_owned(), 34),
-                ("\"projects\"".to_owned(), 47),
+                ("\"agent_run\"".to_owned(), 45),
+                ("\"issues\"".to_owned(), 35),
+                ("\"projects\"".to_owned(), 48),
                 ("\"states\"".to_owned(), 18),
             ]
         );
@@ -2159,23 +2913,39 @@ mod tests {
             "tail: {drain}"
         );
         let failure = failure_reread_sql();
+        // NEWPIDASH-253 (DIFF-42): + runner name/host + dev label/host.
         assert_eq!(
             select_runs(&failure),
             vec![
-                ("\"agent_run\"".to_owned(), 40),
-                ("\"issues\"".to_owned(), 34),
-                ("\"projects\"".to_owned(), 47),
+                ("\"agent_run\"".to_owned(), 45),
+                ("\"issues\"".to_owned(), 35),
+                ("\"projects\"".to_owned(), 48),
+                ("\"runner\"".to_owned(), 2),
+                ("\"dev_machine\"".to_owned(), 2),
             ]
         );
         assert!(
             failure.ends_with(
                 " FROM \"agent_run\" LEFT OUTER JOIN \"issues\" ON \
                  (\"agent_run\".\"work_item_id\" = \"issues\".\"id\") LEFT OUTER JOIN \
-                 \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") WHERE \
+                 \"projects\" ON (\"issues\".\"project_id\" = \"projects\".\"id\") LEFT OUTER JOIN \
+                 \"runner\" ON (\"agent_run\".\"runner_id\" = \"runner\".\"id\") LEFT OUTER JOIN \
+                 \"dev_machine\" ON (\"runner\".\"dev_machine_id\" = \"dev_machine\".\"id\") WHERE \
                  \"agent_run\".\"id\" = $1 ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1"
             ),
             "tail: {failure}"
         );
+        // Raw-SQL guard: the four DIFF-42 columns must carry distinct
+        // aliases matching FailureRereadRow (two bare host_labels would be
+        // a duplicate output column).
+        for alias in [
+            "\"runner\".\"name\" AS \"runner_name\"",
+            "\"runner\".\"host_label\" AS \"runner_host_label\"",
+            "\"dev_machine\".\"label\" AS \"machine_label\"",
+            "\"dev_machine\".\"host_label\" AS \"machine_host_label\"",
+        ] {
+            assert!(failure.contains(alias), "alias {alias}: {failure}");
+        }
     }
 
     #[test]
@@ -2236,8 +3006,8 @@ mod tests {
         assert_eq!(
             requeue_update_sql(),
             "UPDATE \"agent_run\" SET \"status\" = $1, \"runner_id\" = $2, \
-             \"pinned_runner_id\" = $3, \"assigned_at\" = $4 \
-             WHERE \"agent_run\".\"id\" = $5"
+             \"pinned_runner_id\" = $3, \"assigned_at\" = $4, \"capacity_wait\" = $5 \
+             WHERE \"agent_run\".\"id\" = $6"
         );
         assert_eq!(
             parent_thread_clear_sql(),
@@ -2488,6 +3258,13 @@ mod tests {
                 issue_id: Some(issue),
                 issue_project_id: Some(project),
                 issue_workspace_id: Some(workspace),
+                failure_reason: String::new(),
+                phase_kind: String::new(),
+                issue_state_id: reread.issue_state_id,
+                runner_name: None,
+                runner_host_label: None,
+                machine_label: None,
+                machine_host_label: None,
             }
         );
         assert_eq!(

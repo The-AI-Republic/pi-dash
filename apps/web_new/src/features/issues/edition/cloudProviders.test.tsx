@@ -95,12 +95,12 @@ describe("listTeamProjectOptions", () => {
 describe("listWorkItemTypeOptions", () => {
   it("maps the project type list to picker options", async () => {
     mocks.listIssueTypes.mockResolvedValue([
-      { id: "t-1", name: "Bug" },
-      { id: "t-2", name: "Epic" },
+      { id: "t-1", name: "Bug", is_default: true },
+      { id: "t-2", name: "Epic", is_default: false },
     ]);
     await expect(listWorkItemTypeOptions({ workspaceSlug: "acme", projectId: "p-1" })).resolves.toEqual([
-      { id: "t-1", name: "Bug" },
-      { id: "t-2", name: "Epic" },
+      { id: "t-1", name: "Bug", isDefault: true },
+      { id: "t-2", name: "Epic", isDefault: false },
     ]);
     expect(mocks.listIssueTypes).toHaveBeenCalledWith({ stub: true }, "acme", "p-1");
   });
@@ -205,7 +205,7 @@ describe("CloudTypePicker", () => {
       </QueryClientProvider>
     );
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "No type" }));
+    await user.click(await screen.findByRole("button", { name: "Issue type" }));
     await user.click(await screen.findByRole("option", { name: "Bug" }));
     expect(onTypeChange).toHaveBeenCalledWith("t-1");
   });

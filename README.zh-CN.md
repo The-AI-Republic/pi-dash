@@ -174,15 +174,15 @@ Pi Dash 不附带 AI 智能体——你需要自备。请确保你所选的智�
 
 ### 4. 面向编码智能体的 Pi Dash skill（可选）
 
-[`pi-dash-skill`](https://github.com/The-AI-Republic/pi-dash-skill) 将一个可移植的智能体 skill 打包在一起，使 Claude Code 或 Codex 能够通过 `pidash` CLI 直接在编码会话中创建、列出、移动和查看 Pi Dash issue。
+[`skill/`](skill/) 将一个可移植的智能体 skill 打包在一起，使 Claude Code 或 Codex 能够通过 `pidash` CLI 直接在编码会话中创建、列出、移动和查看 Pi Dash issue。
 
 ```bash
 npx @airepublic/pidash-skill-installer           # 安装到 Claude Code、Codex 或两者
 ```
 
-安装程序会提示选择目标（默认：全部），并按需从 GitHub 获取 skill——无需克隆。传入 `--all`、`--claude-code` 或 `--codex` 可跳过提示。
+安装程序会提示选择目标（默认：全部）；skill 已随 npm 包一同发布，无需克隆。传入 `--all`、`--claude-code` 或 `--codex` 可跳过提示。
 
-Codex 用户也可以在 Codex 会话内通过内置的 `$skill-installer` 进行安装。关于环境变量覆盖（`CLAUDE_HOME` / `CODEX_HOME`）、基于克隆的安装方式以及其他替代方案，详见 [pi-dash-skill README](https://github.com/The-AI-Republic/pi-dash-skill#readme)。
+Codex 用户也可以在 Codex 会话内通过内置的 `$skill-installer` 进行安装。关于环境变量覆盖（`CLAUDE_HOME` / `CODEX_HOME`）、基于克隆的安装方式以及其他替代方案，详见 [skill README](skill/README.md)。
 
 ## ⚙️ 技术栈
 

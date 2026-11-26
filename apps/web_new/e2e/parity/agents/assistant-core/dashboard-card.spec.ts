@@ -2,11 +2,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Oracle scenario (NEWFRONT-187): the dashboard assistant card offers
-// quick entry — a single-line input with Ask, suggestion chips that fill
+// quick entry — an entry composer with Ask, suggestion chips that fill
 // the draft, and up to five recent threads deep-linking out — and blocks
 // keyless sends with an error notice instead of starting. (Card presence
 // itself is SHELL-007, already green; guests see nothing per AGT-041.)
 // Row: AGT-048.
+// NEWPIDASH-301 (DIFF-39): the new home renders a multi-line textarea
+// composer with the Ask action inside it and recents as their own
+// section under the composer, while the oracle home keeps its
+// single-line input with recents inside the card. The driver abstracts
+// the DOM difference, so this scenario runs unchanged against both.
 import { test, expect } from "../../fixtures";
 import {
   serverAssistantConfigDelete,

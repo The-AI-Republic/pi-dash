@@ -39,6 +39,7 @@ const CARD_HOTKEYS: &str = "hotkeys";
 const ITEM_LOG_LEVEL: &str = "field:log_level";
 const ITEM_LOG_RETENTION: &str = "field:log_retention_days";
 const ITEM_AUTO_UPDATE: &str = "field:auto_update";
+const ITEM_MAX_CONCURRENT: &str = "field:max_concurrent_agent_runs";
 
 const CARD_REGISTER: &str = "register";
 const ITEM_REG_CLOUD_URL: &str = "register:cloud_url";
@@ -220,6 +221,11 @@ impl Tab for GeneralTab {
                         interactive: true,
                         row: 2,
                     },
+                    FocusNode::Item {
+                        id: ITEM_MAX_CONCURRENT,
+                        interactive: true,
+                        row: 3,
+                    },
                 ],
             },
             FocusNode::Card {
@@ -364,6 +370,15 @@ impl Tab for GeneralTab {
                     return KeyHandled::NotConsumed;
                 };
                 cfg.daemon.auto_update = !cfg.daemon.auto_update;
+                KeyHandled::Consumed
+            }
+            ITEM_MAX_CONCURRENT => {
+                let Some(cfg) = ctx.data.config_working.as_ref() else {
+                    return KeyHandled::NotConsumed;
+                };
+                self.edit_buffer = Some(TextArea::with_text(
+                    cfg.daemon.max_concurrent_agent_runs.to_string(),
+                ));
                 KeyHandled::Consumed
             }
             ITEM_REG_SUBMIT => {
@@ -935,12 +950,14 @@ pub async fn submit_register(
         cursor_agent: Default::default(),
         openclaw: Default::default(),
         grok: Default::default(),
+        antigravity: Default::default(),
         muse_code: Default::default(),
         approval_policy: Default::default(),
     };
     let cfg = crate::config::schema::Config {
         engine: Default::default(),
         auth: Default::default(),
+        auth_event: None,
         version: 2,
         daemon: crate::config::schema::DaemonConfig {
             cloud_url: cloud_url.clone(),
@@ -950,6 +967,7 @@ pub async fn submit_register(
             agent_observability_v1: false,
             agent_watchdog: Default::default(),
             auto_update: true,
+            max_concurrent_agent_runs: 3,
         },
         runners: vec![new_runner_block],
         cli: None,

@@ -35,7 +35,19 @@ def test_test_group_is_in_the_canonical_lifecycle_order():
         "cancelled",
     )
     assert tuple(group.value for group in StateGroup if group is not StateGroup.TRIAGE) == STATE_GROUP_ORDER
-    assert tuple(state["group"] for state in DEFAULT_STATES if state["group"] != StateGroup.TRIAGE) == STATE_GROUP_ORDER
+    # NEWPIDASH-305 added "AI Completed" as a second completed-group state
+    # between "In Test" and "Done", so the group list repeats "completed"
+    # (both are terminal) while canonical order is preserved.
+    assert tuple(state["group"] for state in DEFAULT_STATES if state["group"] != StateGroup.TRIAGE) == (
+        "backlog",
+        "unstarted",
+        "started",
+        "review",
+        "test",
+        "completed",
+        "completed",
+        "cancelled",
+    )
 
 
 def test_test_group_is_open_and_active_but_not_closed():

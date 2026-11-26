@@ -279,6 +279,8 @@ mod tests {
             workspace_integration_id: None,
             status: "connected".into(),
             verified_at: Some(stamp()),
+            suspended_at: None,
+            last_checked_at: None,
             last_check_error: String::new(),
             metadata: json!({}),
         }

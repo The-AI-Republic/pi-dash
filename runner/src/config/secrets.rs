@@ -34,7 +34,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use super::schema::{
-    AuthSection, Config, CredentialsStoreMode, EngineCredential, SECRETS_IN_KEYRING,
+    AuthSection, Config, CredentialsStoreMode, PidashAgentCredential, SECRETS_IN_KEYRING,
     WorkspaceCredential,
 };
 use crate::util::paths::Paths;
@@ -53,7 +53,10 @@ const PROBE_ITEM: &str = "probe";
 /// containers, a user who wants the file without editing the config).
 pub const KEYRING_ENV: &str = "PIDASH_KEYRING";
 /// How long one keychain call may take before it counts as not answering.
-const KEYRING_TIMEOUT: Duration = Duration::from_secs(5);
+/// Shared with the agent keychain presence probe
+/// ([`crate::agent::keychain`]), which bounds its search by the same
+/// timeout.
+pub(crate) const KEYRING_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 #[error("the OS keychain is not available: {message}")]
@@ -599,7 +602,7 @@ fn assign(cfg: &mut Config, item: &str, value: String) {
         cli.token = Some(value);
     } else if item == ITEM_ENGINE_CREDENTIAL {
         cli.engine_credential
-            .get_or_insert_with(EngineCredential::default)
+            .get_or_insert_with(PidashAgentCredential::default)
             .token = value;
     } else if let Some(slug) = item.strip_prefix(ITEM_WORKSPACE_PREFIX) {
         match cli.workspaces.iter_mut().find(|w| w.slug == slug) {
@@ -997,7 +1000,7 @@ mod tests {
                     slug: "beta".into(),
                     token: "mt_beta".into(),
                 }],
-                engine_credential: Some(EngineCredential {
+                engine_credential: Some(PidashAgentCredential {
                     token: "ec_secret".into(),
                     expires_at: Some(chrono::Utc::now() + chrono::Duration::days(14)),
                 }),
@@ -1008,6 +1011,7 @@ mod tests {
                 credentials_store: mode,
                 ..Default::default()
             },
+            auth_event: None,
         }
     }
 
@@ -1298,7 +1302,7 @@ mod tests {
         migrate_credentials_store(&p).unwrap();
         let beta = format!("{ITEM_WORKSPACE_PREFIX}beta");
         keyring.break_item(&beta);
-        // `pidash auth logout --engine`: forgets the engine credential only.
+        // A scoped sign-out: forgets the engine credential only.
         {
             let _forget =
                 forget_unreadable(&p, ForgetScope::Items(vec![ITEM_ENGINE_CREDENTIAL.into()]));

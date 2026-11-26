@@ -75,6 +75,10 @@ pub enum Error {
     ProjectNotFound,
     /// 409, view-inline body (external duplicate).
     Conflict(String),
+    /// 412, pre-rendered body: the workpad stale-write guard
+    /// (NEWPIDASH-320 §6.1). The payload carries the current hash so the
+    /// caller can re-read and retry without another round-trip.
+    PreconditionFailed(String),
     /// The move's `IssueMoveError` mapping: `{"error":message}` with a
     /// dynamic status (400/403/409).
     Rejection { status: u16, message: String },
@@ -92,6 +96,7 @@ impl Error {
             Error::NotFoundBody(body) => (404, body.clone()),
             Error::ProjectNotFound => (404, PROJECT_NOT_FOUND_BODY.to_owned()),
             Error::Conflict(body) => (409, body.clone()),
+            Error::PreconditionFailed(body) => (412, body.clone()),
             Error::Rejection { status, message } => (*status, error_body(message)),
             Error::ServerError => (500, pidash_compat::response::SERVER_ERROR_BODY.to_owned()),
         }

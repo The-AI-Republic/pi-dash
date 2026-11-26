@@ -1734,12 +1734,12 @@ pub fn tool_schemas() -> Vec<ToolSchema> {
         },
         ToolSchema {
             name: "create_issue",
-            description: "Create an issue. Requires Member or Admin role. Pass parent_issue_id to link it as a sub-issue of another issue in the same project. Pass assigned_runner (UUID or name) to dedicate the issue to one runner and assigned_pod (UUID or name) to set its pod; eligibility follows the shared E-code rules and any E-code is returned to the model. (Assignees/labels: set them afterwards in the UI — not yet supported by this tool.)",
+            description: "Create an issue. Requires Member or Admin role. Pass parent_issue_id to link it as a sub-issue of another issue in the same project. Pass assigned_runner (UUID or name) to dedicate the issue to one runner and assigned_pod (UUID or name) to set its pod; eligibility follows the shared E-code rules and any E-code is returned to the model. (Assignees/labels: set them afterwards in the UI — not yet supported by this tool.) Write name as a plain-language TL;DR a human understands at a glance.",
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "project_id": string_param("Project to create in (scope-checked, write-gated)."),
-                    "name": string_param("Issue name (required, stripped, cut to 255 chars)."),
+                    "name": string_param("Issue name (required, stripped, cut to 255 chars). A plain-language TL;DR a human understands at a glance."),
                     "description_md": optional_string_param("Markdown body, rendered to sanitized HTML."),
                     "state_id": optional_string_param("State id; defaults to the project's default state."),
                     "priority": optional_string_param("One of urgent, high, medium, low, none (default none)."),

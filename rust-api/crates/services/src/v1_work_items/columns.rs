@@ -24,7 +24,6 @@
 //! | `IssueActivity` | `issue_activities` | `app_issues::models_read::issue_activity` | — |
 //! | `FileAsset` | `file_assets` | `v1_assets::model::file_asset` | `app_assets::columns` (D-31, columns + helpers) |
 //! | `IssueRelation` | `issue_relations` | `app_issues::models_links::issue_relation` | `space::columns::issue_relation` (D-02, columns only) |
-//! | `GithubPullRequestLink` | `github_pull_request_links` | `app_issues::models_links::github_pull_request_link` (D-26, full port) | `integrations::github_models::github_pull_request_link` (D-05) |
 //! | `GitCodeReviewLink` | `git_code_review_links` | `app_issues::models_links::git_code_review_link` (D-26, full port) | `integrations::git_models::git_code_review_link` (D-05) |
 //! | `Page` | `pages` | `app_pages::page` | — |
 //! | `ProjectPage` | `project_pages` | `app_pages::project_page` | — |
@@ -52,7 +51,7 @@
 /// `issues` nullable columns (`app_issues::models_core::issue`, F18-05
 /// `Issue`, `db/models/issue.py`), in fixture ordinal order.
 pub mod issue {
-    /// Columns whose F18-05 entry has `nullable: true` (19 of 34).
+    /// Columns whose F18-05 entry has `nullable: true` (20 of 35).
     pub const NULLABLE: &[&str] = &[
         "start_date",
         "target_date",
@@ -73,6 +72,7 @@ pub mod issue {
         "assigned_pod_id",
         "created_via",
         "agent_executor",
+        "work_type",
     ];
 }
 
@@ -170,20 +170,6 @@ pub mod issue_relation {
     pub const NULLABLE: &[&str] = &["created_by_id", "updated_by_id", "deleted_at"];
 }
 
-/// `github_pull_request_links` nullable columns
-/// (`app_issues::models_links::github_pull_request_link`, F18-05
-/// `GithubPullRequestLink`, `db/models/github_pr.py`), in fixture ordinal
-/// order.
-pub mod github_pull_request_link {
-    /// Columns whose F18-05 entry has `nullable: true` (4 of 18).
-    pub const NULLABLE: &[&str] = &[
-        "deleted_at",
-        "pr_updated_at",
-        "created_by_id",
-        "updated_by_id",
-    ];
-}
-
 /// `git_code_review_links` nullable columns
 /// (`app_issues::models_links::git_code_review_link`, F18-05
 /// `GitCodeReviewLink`, `db/models/code_review.py`), in fixture ordinal
@@ -227,8 +213,8 @@ pub mod project_page {
 #[cfg(test)]
 mod tests {
     use super::{
-        file_asset, git_code_review_link, github_pull_request_link, issue, issue_activity,
-        issue_comment, issue_link, issue_relation, label, page, project_page,
+        file_asset, git_code_review_link, issue, issue_activity, issue_comment, issue_link,
+        issue_relation, label, page, project_page,
     };
     use pidash_db::{app_assets, app_issues, app_pages, integrations, space, v1_assets};
     use serde_json::Value;
@@ -402,18 +388,6 @@ mod tests {
     }
 
     #[test]
-    fn github_pull_request_link_matches_fixture() {
-        assert_table(
-            "GithubPullRequestLink",
-            app_issues::models_links::github_pull_request_link::TABLE,
-            app_issues::models_links::github_pull_request_link::COLUMNS,
-            github_pull_request_link::NULLABLE,
-        );
-        let row = sample_github_pull_request_link();
-        assert!(row.pr_updated_at.is_none());
-    }
-
-    #[test]
     fn git_code_review_link_matches_fixture() {
         assert_table(
             "GitCodeReviewLink",
@@ -471,17 +445,10 @@ mod tests {
         );
         // D-05 PR/review defs (full structs, pinned below too).
         assert_secondary(
-            "GithubPullRequestLink",
-            integrations::github_models::github_pull_request_link::TABLE,
-            integrations::github_models::github_pull_request_link::COLUMNS,
-        );
-        assert_secondary(
             "GitCodeReviewLink",
             integrations::git_models::git_code_review_link::TABLE,
             integrations::git_models::git_code_review_link::COLUMNS,
         );
-        let pr = sample_d05_github_pull_request_link();
-        assert!(pr.pr_updated_at.is_none());
         let review = sample_d05_git_code_review_link();
         assert!(review.remote_updated_at.is_none());
     }
@@ -535,6 +502,7 @@ mod tests {
             created_via: None,
             assigned_pod_id: None,
             agent_executor: None,
+            work_type: None,
         }
     }
 
@@ -674,30 +642,6 @@ mod tests {
         }
     }
 
-    fn sample_github_pull_request_link(
-    ) -> app_issues::models_links::github_pull_request_link::GithubPullRequestLink {
-        app_issues::models_links::github_pull_request_link::GithubPullRequestLink {
-            id: uid(),
-            created_at: ts(),
-            updated_at: ts(),
-            created_by_id: None,
-            updated_by_id: None,
-            deleted_at: None,
-            project_id: uid(),
-            workspace_id: uid(),
-            issue_id: uid(),
-            repo_owner: String::new(),
-            repo_name: String::new(),
-            pr_number: 0,
-            url: String::new(),
-            title: String::new(),
-            state: String::new(),
-            merged: false,
-            draft: false,
-            pr_updated_at: None,
-        }
-    }
-
     fn sample_git_code_review_link(
     ) -> app_issues::models_links::git_code_review_link::GitCodeReviewLink {
         app_issues::models_links::git_code_review_link::GitCodeReviewLink {
@@ -769,30 +713,6 @@ mod tests {
             project_id: uid(),
             page_id: uid(),
             workspace_id: uid(),
-        }
-    }
-
-    fn sample_d05_github_pull_request_link(
-    ) -> integrations::github_models::github_pull_request_link::GithubPullRequestLink {
-        integrations::github_models::github_pull_request_link::GithubPullRequestLink {
-            id: uid(),
-            created_at: ts(),
-            updated_at: ts(),
-            created_by_id: None,
-            updated_by_id: None,
-            deleted_at: None,
-            project_id: uid(),
-            workspace_id: uid(),
-            issue_id: uid(),
-            repo_owner: String::new(),
-            repo_name: String::new(),
-            pr_number: 0,
-            url: String::new(),
-            title: String::new(),
-            state: String::new(),
-            merged: false,
-            draft: false,
-            pr_updated_at: None,
         }
     }
 

@@ -1122,7 +1122,7 @@ pub async fn run_webhook_send(
 
 /// Deactivation email template source (`:224`).
 pub const DEACTIVATION_HTML_SOURCE: &str =
-    include_str!("../../../../../apps/api/templates/emails/notifications/webhook-deactivate.html");
+    include_str!("../../../../../rust-api/templates/emails/notifications/webhook-deactivate.html");
 
 /// Live `send_webhook_deactivation_email` (`:190-249`): receiver +
 /// webhook + workspace lookups (misses log and return through the broad

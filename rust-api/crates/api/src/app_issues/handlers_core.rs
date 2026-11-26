@@ -47,8 +47,9 @@
 //!   `{"error": "The required key does not exist."}` (the `KeyError`
 //!   branch); PUT ignores `label_ids` (labels are kept, verified live on
 //!   both backends — there is no wipe).
-//! - PUT/partial-update `completed_at` input is discarded (save() recomputes
-//!   it from the state group); create without `state_id` keeps it.
+//! - PUT/partial-update `completed_at` input is discarded (the update
+//!   overlay drops it and the save keeps the stored stamp unless the
+//!   state group changed — DIFF-62); create without `state_id` keeps it.
 //! - explicit `sort_order`/`sequence_id` on create are overwritten
 //!   (sibling max + 10000 / project max + 1).
 //! - `agent_executor=""` 400s `"unknown agent executor"` (ChoiceField
@@ -128,13 +129,6 @@ use pidash_services::app_issues::serializers_detail::{
 };
 use pidash_services::app_issues::serializers_engage;
 use pidash_services::auth_session::shapes::{base_host, HostSettings};
-use pidash_services::dispatch::admission::{
-    managed_runner_availability, managed_runner_probe, LlmProfile, ManagedRunnerProbe,
-    HEARTBEAT_GRACE_SECS,
-};
-use pidash_services::dispatch::policy::{
-    cloud_agent_is_configured, managed_runner_is_enabled, UserFlags,
-};
 use pidash_services::domain::activity::TaskEnqueueHook;
 use pidash_services::domain::issues as domain_issues;
 use pidash_services::domain::issues::IssueFieldSet as IssueSaveRow;
@@ -142,7 +136,12 @@ use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::orchestration::clock::ProjectClockPolicy;
 use pidash_services::read;
-use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason};
+use pidash_services::run_creation::executor_policy::{pidash_agent_is_enabled, UserFlags};
+use pidash_services::run_creation::pidash_agent_availability::{
+    pidash_agent_availability, pidash_agent_probe, LlmProfile, PidashAgentProbe,
+    HEARTBEAT_GRACE_SECS,
+};
+use pidash_types::agent_runs::{AgentExecutorKind, PidashAgentReason};
 use pidash_types::orchestration::StateRef;
 use pidash_types::WorkspaceId;
 
@@ -354,6 +353,14 @@ async fn core_gate(
     };
     if !decide_allow(&spec, &scope, &facts) {
         return Err(Denial::Forbidden);
+    }
+    if let Some(info) = crate::project_archived::archived_by_id(pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
     }
     tenant_facts(pool, slug, &project_id, user_id, project_check)
         .await
@@ -1725,6 +1732,15 @@ const FIELD_TABLE: &[FieldSpec] = &[
         allow_null: true,
     },
     FieldSpec {
+        name: "work_type",
+        shape: FieldShape::Char {
+            max_length: Some(32),
+            allow_blank: true,
+            branch_regex: false,
+        },
+        allow_null: true,
+    },
+    FieldSpec {
         name: "parent",
         shape: FieldShape::UuidPk(PkQueryset::Issues),
         allow_null: true,
@@ -2339,10 +2355,6 @@ async fn git_issue_synced(pool: &sqlx::PgPool, issue_id: &Uuid) -> Result<bool, 
     serializers_engage::git_issue_synced(&orm(pool), *issue_id).await
 }
 
-async fn github_issue_synced(pool: &sqlx::PgPool, issue_id: &Uuid) -> Result<bool, DbErr> {
-    serializers_engage::github_issue_synced(&orm(pool), *issue_id).await
-}
-
 async fn has_active_run(pool: &sqlx::PgPool, issue_id: &Uuid) -> Result<bool, DbErr> {
     serializers_create::has_active_run(&orm(pool), *issue_id).await
 }
@@ -2418,9 +2430,9 @@ pub(crate) async fn enrolled_runner(
     project_id: &Uuid,
     workspace_id: &Uuid,
 ) -> Result<bool, DbErr> {
-    let hit = managed_runner_probe(
+    let hit = pidash_agent_probe(
         &orm(pool),
-        ManagedRunnerProbe::Enrolled,
+        PidashAgentProbe::Enrolled,
         *user_id,
         *project_id,
         *workspace_id,
@@ -2436,9 +2448,9 @@ pub(crate) async fn online_runner(
     workspace_id: &Uuid,
 ) -> Result<bool, DbErr> {
     let bound = Utc::now() - chrono::Duration::seconds(HEARTBEAT_GRACE_SECS);
-    let hit = managed_runner_probe(
+    let hit = pidash_agent_probe(
         &orm(pool),
-        ManagedRunnerProbe::Online(bound),
+        PidashAgentProbe::Online(bound),
         *user_id,
         *project_id,
         *workspace_id,
@@ -2454,9 +2466,9 @@ pub(crate) async fn paused_runner(
     project_id: &Uuid,
     workspace_id: &Uuid,
 ) -> Result<bool, DbErr> {
-    let hit = managed_runner_probe(
+    let hit = pidash_agent_probe(
         &orm(pool),
-        ManagedRunnerProbe::Paused,
+        PidashAgentProbe::Paused,
         *user_id,
         *project_id,
         *workspace_id,
@@ -2566,6 +2578,12 @@ async fn run_validate(
         Some(Validated::Text(executor)) => Some(Some(executor.as_str())),
         _ => None,
     };
+    let work_type: Option<Option<&str>> = match validated.get("work_type") {
+        None => None,
+        Some(Validated::Null) => Some(None),
+        Some(Validated::Text(work_type)) => Some(Some(work_type.as_str())),
+        _ => None,
+    };
     let description_stripped: Option<Option<&str>> = match validated.get("description_stripped") {
         None => None,
         Some(Validated::Null) => Some(None),
@@ -2597,6 +2615,7 @@ async fn run_validate(
         assigned_pod,
         assigned_runner,
         agent_executor,
+        work_type,
         description_html: text("description_html"),
         description_binary: None,
         assignee_ids: assignee_ids.as_deref(),
@@ -2624,8 +2643,8 @@ async fn run_validate(
     });
 
     // Step 1 probes. `issue_is_actively_synced` short-circuits: empty /
-    // missing source runs nothing; otherwise git, then github iff git
-    // misses — ahead of the blocked-keys check either way.
+    // missing source runs nothing; otherwise git-only (PDASHOSS01-354) —
+    // ahead of the blocked-keys check either way.
     let synced_source = current
         .as_ref()
         .and_then(|row| row.external_source)
@@ -2634,13 +2653,6 @@ async fn run_validate(
     let instance_id = instance.map(|row| row.id).unwrap_or(Uuid::nil());
     let git_sync = if synced_source {
         git_issue_synced(pool, &instance_id)
-            .await
-            .map_err(|_| db_error())?
-    } else {
-        false
-    };
-    let github_sync = if synced_source && !git_sync {
-        github_issue_synced(pool, &instance_id)
             .await
             .map_err(|_| db_error())?
     } else {
@@ -2677,7 +2689,7 @@ async fn run_validate(
     let mut fetched_project: Option<ResolvedProject> = None;
     let mut llm_profile = LlmProfile {
         available: false,
-        reason_code: ManagedRunnerReason::LLM_CONFIG_MISSING.to_owned(),
+        reason_code: PidashAgentReason::LLM_CONFIG_MISSING.to_owned(),
     };
     let mut enrolled_exists = false;
     let mut online_exists = false;
@@ -2692,11 +2704,10 @@ async fn run_validate(
             match AgentExecutorKind::from_value(executor) {
                 None => executor_returns = true,
                 Some(kind) => {
-                    if kind == AgentExecutorKind::CloudAgent
-                        && !cloud_agent_is_configured(&state.settings().cloud_agent)
-                    {
-                        executor_returns = true;
-                    } else if kind == AgentExecutorKind::ManagedRunner {
+                    // P1 (agent naming convention): a `cloud_agent` write
+                    // on this non-pod path is normalized, not gated on
+                    // CLOUD_AGENT_ENABLED — it must not block the run.
+                    if kind == AgentExecutorKind::PidashAgent {
                         let project = match instance {
                             Some(row) => Some(row.resolved_project()),
                             None => match project_id {
@@ -2713,14 +2724,14 @@ async fn run_validate(
                         match project {
                             None => executor_returns = true,
                             Some(project) => {
-                                // `managed_runner_availability` gates in
+                                // `pidash_agent_availability` gates in
                                 // fixed order: the LLM seam runs only
                                 // past the instance switch + viewer
                                 // legs; enrolled/online only past a
                                 // usable profile (never in CE — the
                                 // profile is always unavailable — but
                                 // the structure mirrors the policy).
-                                if managed_runner_is_enabled(&state.settings().managed_runner)
+                                if pidash_agent_is_enabled(&state.settings().pidash_agent)
                                     && viewer.is_active
                                     && !viewer.is_bot
                                 {
@@ -2730,9 +2741,9 @@ async fn run_validate(
                                     llm_profile = LlmProfile {
                                         available: false,
                                         reason_code: if keyed {
-                                            ManagedRunnerReason::BYOK_UNSUPPORTED.to_owned()
+                                            PidashAgentReason::BYOK_UNSUPPORTED.to_owned()
                                         } else {
-                                            ManagedRunnerReason::LLM_CONFIG_MISSING.to_owned()
+                                            PidashAgentReason::LLM_CONFIG_MISSING.to_owned()
                                         },
                                     };
                                     if llm_profile.available {
@@ -2769,8 +2780,8 @@ async fn run_validate(
                                         }
                                     }
                                 }
-                                let verdict = managed_runner_availability(
-                                    &state.settings().managed_runner,
+                                let verdict = pidash_agent_availability(
+                                    &state.settings().pidash_agent,
                                     Some(&viewer),
                                     || llm_profile.clone(),
                                     enrolled_exists,
@@ -2779,7 +2790,7 @@ async fn run_validate(
                                 );
                                 if !verdict.available
                                     && verdict.reason_code
-                                        != ManagedRunnerReason::NO_RUNNER_FOR_PROJECT
+                                        != PidashAgentReason::NO_RUNNER_FOR_PROJECT
                                 {
                                     executor_returns = true;
                                 }
@@ -2895,13 +2906,11 @@ async fn run_validate(
         None => None,
     };
     let policy = ExecutorPolicy {
-        cloud: &state.settings().cloud_agent,
-        managed: &state.settings().managed_runner,
+        managed: &state.settings().pidash_agent,
         viewer: Some(&viewer),
     };
     let probes = ValidateProbes {
         git_sync_exists: &|| git_sync,
-        github_sync_exists: &|| github_sync,
         has_active_run: &|| run_value,
         filter_assignees: &|_| filtered_assignees.clone().unwrap_or_default(),
         filter_labels: &|_| filtered_labels.clone().unwrap_or_default(),
@@ -3487,7 +3496,7 @@ impl FromQueryResult for AnnotatedIssueRow {
     }
 }
 
-/// One looked-up issue: the 34 storable columns, the scalar annotations
+/// One looked-up issue: the 35 storable columns, the scalar annotations
 /// (each `None`/empty when its leg is absent), and the joined state pair
 /// for the ticker leg.
 struct CoreIssueRow {
@@ -3691,7 +3700,7 @@ async fn fetch_clock_policy(
     pool: &sqlx::PgPool,
     project_id: &Uuid,
 ) -> Result<ProjectClockPolicy, Denial> {
-    let row: Option<(bool, i32, i32, i32, i32)> = projects::Entity::find()
+    let row: Option<(bool, i32, i32, i32, i32, serde_json::Value)> = projects::Entity::find()
         .select_only()
         .columns([
             projects::Column::AgentTickingEnabled,
@@ -3699,6 +3708,7 @@ async fn fetch_clock_policy(
             projects::Column::AgentDefaultIntervalSeconds,
             projects::Column::AgentReviewDefaultIntervalSeconds,
             projects::Column::AgentTestDefaultIntervalSeconds,
+            projects::Column::Settings,
         ])
         .filter(projects::Column::Id.eq(*project_id))
         .filter(projects::Column::DeletedAt.is_null())
@@ -3708,7 +3718,7 @@ async fn fetch_clock_policy(
         .map_err(|_| Denial::ServerError)?;
     // A missing project row raises on Django (`ticker.issue.project`
     // re-fetches through the live-only manager) → 500, never a default.
-    let Some((ticking, max_ticks, interval, review_interval, test_interval)) = row else {
+    let Some((ticking, max_ticks, interval, review_interval, test_interval, settings)) = row else {
         return Err(Denial::ServerError);
     };
     Ok(ProjectClockPolicy {
@@ -3717,7 +3727,9 @@ async fn fetch_clock_policy(
         agent_default_interval_seconds: Some(i64::from(interval)),
         agent_review_default_interval_seconds: Some(i64::from(review_interval)),
         agent_test_default_interval_seconds: Some(i64::from(test_interval)),
-    })
+        ..Default::default()
+    }
+    .with_stages(&settings))
 }
 
 /// The issue's latest and active runs, the run count and the cumulative
@@ -3793,10 +3805,7 @@ async fn render_detail_map(
         .as_deref()
         .is_some_and(|source| !source.is_empty())
     {
-        let git = git_issue_synced(pool, &row.save.id)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-        git || github_issue_synced(pool, &row.save.id)
+        git_issue_synced(pool, &row.save.id)
             .await
             .map_err(|_| Denial::ServerError)?
     } else {
@@ -3859,6 +3868,7 @@ async fn render_detail_map(
         assigned_pod_id: assigned_pod_id.as_deref(),
         assigned_runner_id: assigned_runner_id.as_deref(),
         agent_executor: save.agent_executor.as_deref(),
+        work_type: save.work_type.as_deref(),
         module_ids: Some(module_refs),
         label_ids: Some(label_refs),
         assignee_ids: Some(assignee_refs),
@@ -3964,6 +3974,46 @@ fn v_state(validated: &BTreeMap<&'static str, Validated>) -> (bool, Option<Uuid>
         Some(Validated::State(id, group)) => (touched, Some(*id), Some(group.clone())),
         Some(Validated::Uuid(id)) => (touched, Some(*id), None),
         _ => (touched, None, None),
+    }
+}
+
+/// NEWPIDASH-261: refuse a human state move the caller may not make
+/// under the project's `issue_run_policy`, before any write (so a
+/// state move that would also dispatch is refused as a whole). Runs
+/// after validation, so an invalid body still 400s first. A request
+/// that does not touch the state (or re-states the current one) is
+/// not gated; other edits keep today's rules.
+async fn gate_web_state_change(
+    pool: &sqlx::PgPool,
+    actor: Uuid,
+    issue_id: Uuid,
+    project_id: Uuid,
+    current_state: Option<Uuid>,
+    touched: bool,
+    requested: Option<Uuid>,
+) -> Result<(), Denial> {
+    if !touched || requested == current_state {
+        return Ok(());
+    }
+    let orm = orm(pool);
+    let issue = issues::Entity::find_by_id(issue_id)
+        .one(&orm)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)?;
+    let project = projects::Entity::find_by_id(project_id)
+        .one(&orm)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::ServerError)?;
+    let allowed =
+        pidash_services::domain::project_settings::can_run_issue(&orm, actor, &issue, &project)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+    if allowed {
+        Ok(())
+    } else {
+        Err(Denial::NotIssueRunner)
     }
 }
 
@@ -4091,6 +4141,7 @@ fn assemble_new_issue(
         assigned_runner_id: v_uuid(validated, "assigned_runner_id"),
         // The normalized write (#2903): deprecated choices land local.
         agent_executor: filtered.agent_executor.clone().flatten(),
+        work_type: filtered.work_type.clone().flatten(),
     };
     Ok((
         row,
@@ -4101,8 +4152,11 @@ fn assemble_new_issue(
 
 /// `super().update(instance, validated_data)`: every present key applies
 /// (`Null` clears); absent keys keep the row. `description_stripped`
-/// input is skipped — `save()` recomputes it unconditionally. The state
-/// decision (default assignment, `completed_at`) moved to the save hooks.
+/// input is skipped — `save()` recomputes it unconditionally.
+/// `completed_at` input is skipped too — Django's `save()` recomputes it
+/// from the state group, and DIFF-62 keeps the stored stamp unless the
+/// group changed. The state decision (default assignment,
+/// `completed_at`) moved to the save hooks.
 fn apply_validated_to_existing(
     row: &mut IssueSaveRow,
     validated: &BTreeMap<&'static str, Validated>,
@@ -4142,6 +4196,11 @@ fn apply_validated_to_existing(
         // `attrs["agent_executor"]` holds the normalized write (#2903):
         // deprecated values land as local_runner.
         row.agent_executor = filtered.agent_executor.clone().flatten();
+    }
+    if validated.contains_key("work_type") {
+        row.work_type = v_text(validated, "work_type")
+            .filter(|work_type| !work_type.is_empty())
+            .map(str::to_owned);
     }
     if let Some(priority) = v_text(validated, "priority") {
         row.priority = priority.to_owned();
@@ -4185,12 +4244,11 @@ fn apply_validated_to_existing(
             row.sort_order = *order;
         }
     }
-    if validated.contains_key("completed_at") {
-        row.completed_at = match validated.get("completed_at") {
-            Some(Validated::DateTime(moment)) => Some(*moment),
-            _ => None,
-        };
-    }
+    // `completed_at` input is discarded on update (Django's `save()`
+    // recomputes it from the state group, so the serializer value never
+    // survives; DIFF-62 keeps the stored stamp unless the group changed,
+    // which likewise ignores the input). The row's stored value rides
+    // through untouched.
     if validated.contains_key("archived_at") {
         row.archived_at = match validated.get("archived_at") {
             Some(Validated::Date(date)) => Some(*date),
@@ -4219,7 +4277,8 @@ fn apply_validated_to_existing(
         row.created_via = v_text(validated, "created_via").map(str::to_owned);
     }
     // `state` overlays here; the default assignment (when the final id
-    // is `None`) and the `completed_at` recompute run in the save hooks.
+    // is `None`) and the `completed_at` transition rule (DIFF-62) run in
+    // the save hooks.
     let (touched, state_id, _) = v_state(validated);
     if touched {
         row.state_id = state_id;
@@ -4431,6 +4490,7 @@ async fn render_put_body(
         git_work_branch: row.git_work_branch.as_str(),
         created_via: row.created_via.as_deref(),
         agent_executor: row.agent_executor.as_deref(),
+        work_type: row.work_type.as_deref(),
         point: row.point,
         deleted_at: deleted_at.as_deref(),
         created_at: created_at.as_str(),
@@ -4788,6 +4848,19 @@ async fn partial_update_inner(
     let prev = crate::issue_transition::capture_prior_state_pool(&pool, Some(pk))
         .await
         .map_err(|_| Denial::ServerError)?;
+    // NEWPIDASH-261: a human state move is gated by the project's
+    // `issue_run_policy` (PATCH only; the epic twin shares this inner).
+    let (state_touched, requested_state, _) = v_state(&validated);
+    gate_web_state_change(
+        &pool,
+        user_id,
+        pk,
+        tenant.project_id,
+        looked_up.save.state_id,
+        state_touched,
+        requested_state,
+    )
+    .await?;
     let mut row = looked_up.save;
     apply_validated_to_existing(&mut row, &validated, &filtered)?;
     if row.state_id.is_none() {
@@ -4970,6 +5043,19 @@ pub async fn put_update_issue(
     let prev = crate::issue_transition::capture_prior_state_pool(&pool, Some(pk))
         .await
         .map_err(|_| Denial::ServerError)?;
+    // NEWPIDASH-261: same human state gate as PATCH (PUT is the same
+    // "every way a person changes state" covered by the issue).
+    let (state_touched, requested_state, _) = v_state(&validated);
+    gate_web_state_change(
+        &pool,
+        user_id,
+        pk,
+        project_id,
+        looked_up.state_id,
+        state_touched,
+        requested_state,
+    )
+    .await?;
     let mut row = looked_up;
     apply_validated_to_existing(&mut row, &validated, &filtered)?;
     if row.state_id.is_none() {
@@ -5124,13 +5210,10 @@ async fn destroy_issue_inner(
     let Some(mut row) = fetch_destroy_issue(&pool, &slug, &tenant.project_id, &pk).await? else {
         return Ok(not_found_detail(NOT_FOUND_BODY, StatusCode::NOT_FOUND));
     };
-    // `GitIssueSync...exists() or GithubIssueSync...exists()` — short-circuit.
+    // Git-only synced guard (PDASHOSS01-354).
     let synced = git_issue_synced(&pool, &pk)
         .await
-        .map_err(|_| Denial::ServerError)?
-        || github_issue_synced(&pool, &pk)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+        .map_err(|_| Denial::ServerError)?;
     if synced {
         return Ok(not_found_detail(DESTROY_SYNCED_BODY, StatusCode::CONFLICT));
     }

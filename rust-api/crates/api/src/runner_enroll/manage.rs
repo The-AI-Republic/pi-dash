@@ -150,24 +150,15 @@ pub const POD_OTHER_WORKSPACE_BODY: &str = r#"{"error":"pod is in a different wo
 /// Runner busy guard — 409 (`runners.py:414-417`).
 pub const RUNNER_BUSY_BODY: &str = r#"{"error":"runner has an in-flight or queued run; wait for it to finish or cancel it first","code":"runner_busy"}"#;
 
-/// Cross-project pod move with dedicated issues — 409 (PDASHOSS01-297,
-/// §13.1): I1/E2 would break. The issue list (max 20) rides along.
-pub fn runner_has_assigned_issues_body(issues: &[(Uuid, String)]) -> String {
-    serde_json::json!({
-        "error": "runner has assigned issues; clear their dedicated runner first",
-        "code": "runner_has_assigned_issues",
-        "issues": issues.iter().map(|(id, name)| serde_json::json!({
-            "id": id.to_string(),
-            "name": name,
-        })).collect::<Vec<_>>(),
-    })
-    .to_string()
-}
 /// `pod_dispatch` validation — 400 (`runners.py` #2903).
 pub const POD_DISPATCH_INVALID_BODY: &str =
     r#"{"error":"pod_dispatch must be one of: pinned_only, pod_member"}"#;
 /// Engine pod-move restriction — 400 (`runners.py` #2903).
 pub const ENGINE_PROJECT_FIXED_BODY: &str = r#"{"error":"a built-in engine runner can only move between pods of its project","code":"engine_runner_project_fixed"}"#;
+/// A runner's project is fixed at registration (pod/project design §3,
+/// "No runtime project re-binding"): a pod move may not leave it — 400.
+/// To serve another project, remove the runner and add a new one.
+pub const RUNNER_PROJECT_FIXED_BODY: &str = r#"{"error":"a runner can only move between pods of its project; add a new runner to serve another project","code":"runner_project_fixed"}"#;
 /// Pod delete guard 1 — 409 (`pods.py:230-234`).
 pub const POD_HAS_RUNNERS_BODY: &str =
     r#"{"error":"pod has runners; move or revoke them first","code":"pod_has_runners"}"#;
@@ -465,9 +456,9 @@ fn pod_dispatch_value(value: Option<&JVal>) -> Option<String> {
     }
 }
 
-/// Whether a runner is a built-in engine runner (`provisioning` check,
-/// `Runner.is_engine`, `models.py` #2903).
-fn is_engine_runner(executor: &RunnerOwned) -> bool {
+/// Whether a runner is a Pi Dash Agent runner (`provisioning` check,
+/// `Runner.is_pidash_agent`, `models.py` #2903).
+fn is_pidash_agent_runner(executor: &RunnerOwned) -> bool {
     executor.provisioning == "desktop_bundled"
 }
 
@@ -972,11 +963,12 @@ impl DevMachineRender {
 
 fn render_machine(machine: &DevMachineOwned) -> Result<String, Response> {
     let now = Utc::now();
-    let sign_in_state = pidash_services::domain::engine_credential::current_engine_sign_in_state(
-        &machine.engine_sign_in_state,
-        machine.engine_credential_expires_at,
-        now,
-    );
+    let sign_in_state =
+        pidash_services::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
+            &machine.engine_sign_in_state,
+            machine.engine_credential_expires_at,
+            now,
+        );
     DevMachineRender {
         id: machine.id.to_string(),
         host_label: machine.host_label.clone(),
@@ -1085,7 +1077,7 @@ impl RunnerRender {
         let dev_machine = match self.dev_machine_detail.as_ref() {
             Some(detail) => {
                 dev_mini_state =
-                    pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                    pidash_services::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
                         &detail.engine_sign_in_state,
                         detail.engine_credential_expires_at,
                         now,
@@ -1127,7 +1119,7 @@ impl RunnerRender {
             name: &self.name,
             status: &self.status,
             host_label: &self.host_label,
-            is_engine: self.is_engine,
+            is_pidash_agent: self.is_engine,
             engine_paused: self.engine_paused,
             dispatch_paused: self.dispatch_paused,
             machine_display_name: &self.machine_display_name,
@@ -1182,7 +1174,7 @@ fn runner_render(
     live_state: Option<LiveStateOwned>,
     eligibility: RunnerEligibility,
 ) -> RunnerRender {
-    // `Runner.is_engine` / `engine_paused` / `machine_display_name`
+    // `Runner.is_pidash_agent` / `engine_paused` / `machine_display_name`
     // (`models.py:740-755`): engine-ness from provisioning, pause from
     // the machine's engine pair, display from the machine when bound.
     let is_engine = runner.provisioning == "desktop_bundled";
@@ -1659,7 +1651,7 @@ pub async fn dev_machine_patch(
             // fields from the updated model.
             let now = Utc::now();
             let sign_in_state =
-                pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                pidash_services::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
                     &updated.model.engine_sign_in_state,
                     updated
                         .model
@@ -2038,39 +2030,15 @@ pub async fn runner_patch(
         if target.workspace_id != runner.workspace_id {
             return bad_request(POD_OTHER_WORKSPACE_BODY);
         }
-        // Engine pod-move restriction (`runners.py` #2903): an engine
-        // runner that already has a pod may only move within its project.
+        // A runner's project is fixed at registration: a pod move stays
+        // inside it. Engines keep their own sentence (`runners.py` #2903).
         // This runs after the workspace check and before the busy guard.
-        if is_engine_runner(&runner) && target.project_id != hit.row.pod_project_id {
-            return bad_request(ENGINE_PROJECT_FIXED_BODY);
-        }
-        // Cross-project move (§13.1, §23.4): refused while any issue is
-        // dedicated to the runner — I1/E2 would break. Same-project
-        // moves follow the runner (§13.1): the assigned_pod update
-        // below tracks the move.
-        if manage_reads::is_real_move(&target.id, &runner.pod_id)
-            && target.project_id != hit.row.pod_project_id
-        {
-            use pidash_db::entity::issues;
-            use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
-            let conn = TxConn::new(&mut tx);
-            let dedicated: Vec<(Uuid, String)> = match issues::Entity::find()
-                .filter(issues::Column::AssignedRunnerId.eq(runner.id))
-                .select_only()
-                .column(issues::Column::Id)
-                .column(issues::Column::Name)
-                .order_by_asc(issues::Column::CreatedAt)
-                .limit(20u64)
-                .into_tuple()
-                .all(&conn)
-                .await
-            {
-                Ok(rows) => rows,
-                Err(_) => return server_error(),
-            };
-            if !dedicated.is_empty() {
-                return conflict(runner_has_assigned_issues_body(&dedicated).as_str());
-            }
+        if target.project_id != hit.row.pod_project_id {
+            return bad_request(if is_pidash_agent_runner(&runner) {
+                ENGINE_PROJECT_FIXED_BODY
+            } else {
+                RUNNER_PROJECT_FIXED_BODY
+            });
         }
         if manage_reads::is_real_move(&target.id, &runner.pod_id) {
             let busy = match manage_reads::runner_is_busy(&TxConn::new(&mut tx), runner.id).await {
@@ -2102,8 +2070,8 @@ pub async fn runner_patch(
             return server_error();
         }
         // §13.1 follow: same-project moves pull the dedicated issues'
-        // assigned_pod to the new pod (the cross-project case is
-        // refused above).
+        // assigned_pod to the new pod (cross-project moves are refused
+        // above).
         if manage_reads::is_real_move(&target.id, &runner.pod_id)
             && target.project_id == hit.row.pod_project_id
             && pidash_services::domain::issue_assignment::follow_pod_move(
@@ -2120,7 +2088,7 @@ pub async fn runner_patch(
         let mut drain_runner = false;
         let mut drain_pods: Vec<Uuid> = Vec::new();
         if dispatch_changed {
-            if new_dispatch.as_deref() == Some("pinned_only") && is_engine_runner(&runner) {
+            if new_dispatch.as_deref() == Some("pinned_only") && is_pidash_agent_runner(&runner) {
                 match pidash_services::runner_enroll::dispatch_rules::release_locality_pins(
                     &TxConn::new(&mut tx),
                     &[runner.id],
@@ -2176,7 +2144,7 @@ pub async fn runner_patch(
             }
             let mut drain_runner = false;
             let mut drain_pods: Vec<Uuid> = Vec::new();
-            if new_dispatch.as_deref() == Some("pinned_only") && is_engine_runner(&runner) {
+            if new_dispatch.as_deref() == Some("pinned_only") && is_pidash_agent_runner(&runner) {
                 match pidash_services::runner_enroll::dispatch_rules::release_locality_pins(
                     &TxConn::new(&mut tx),
                     &[runner.id],

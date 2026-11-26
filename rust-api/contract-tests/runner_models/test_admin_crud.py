@@ -47,7 +47,9 @@ def test_admin_list_returns_all_rows(admin_api):
         return
     agents = res.json()["agents"]
     total = sum(len(rows) for rows in agents.values())
-    assert total == 27
+    assert total == 32
+    assert len(agents["antigravity"]) == 2
+    assert len(agents["openhub"]) == 3
 
 
 def test_create_then_read_back(admin_api):
@@ -201,3 +203,68 @@ def test_delete_removes_row(admin_api):
     # Deleting again is 404.
     res = admin_api.delete(f"{ADMIN_PATH}{row_id}/")
     assert res.status_code == 404
+
+
+def test_openhub_create_and_validation(admin_api):
+    # OpenHub rows are created without reasoning efforts.
+    res = admin_api.post(
+        ADMIN_PATH,
+        json={"agent": "openhub", "model": "openhub-test-model", "label": "Test Model"},
+    )
+    assert res.status_code == expect("DIFF-9", django=404, rust=201)
+    if not is_rust():
+        return
+    created = res.json()
+    assert created["agent"] == "openhub"
+    assert created["model"] == "openhub-test-model"
+    assert created["reasoning_efforts"] == []
+    assert created["is_preselected"] is False
+    row_id = created["id"]
+
+    # OpenHub rejects reasoning efforts on create.
+    res = admin_api.post(
+        ADMIN_PATH,
+        json={
+            "agent": "openhub",
+            "model": "openhub-bad",
+            "label": "Bad",
+            "reasoning_efforts": ["low"],
+        },
+    )
+    assert res.status_code == 400
+    assert res.json() == {"error": "efforts_not_allowed"}
+
+    # Empty slug is rejected for openhub as well.
+    res = admin_api.post(
+        ADMIN_PATH,
+        json={"agent": "openhub", "model": "  ", "label": "Empty"},
+    )
+    assert res.status_code == 400
+    assert res.json() == {"error": "empty_model"}
+
+    # OpenHub rejects efforts on PATCH as well.
+    res = admin_api.patch(
+        f"{ADMIN_PATH}{row_id}/", json={"reasoning_efforts": ["high"]}
+    )
+    assert res.status_code == 400
+    assert res.json() == {"error": "efforts_not_allowed"}
+
+    # Duplicate openhub slug is rejected.
+    res = admin_api.post(
+        ADMIN_PATH,
+        json={"agent": "openhub", "model": "openhub-test-model", "label": "Dupe"},
+    )
+    assert res.status_code == 400
+    assert res.json() == {"error": "duplicate_model"}
+
+    # Clean up.
+    res = admin_api.delete(f"{ADMIN_PATH}{row_id}/")
+    assert res.status_code == 204
+
+
+def test_member_admin_openhub_is_403(member_admin_api):
+    res = member_admin_api.post(
+        ADMIN_PATH,
+        json={"agent": "openhub", "model": "openhub-x", "label": "X"},
+    )
+    assert res.status_code == expect("DIFF-9", django=404, rust=403)

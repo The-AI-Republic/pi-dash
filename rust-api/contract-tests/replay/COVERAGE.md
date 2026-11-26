@@ -1,15 +1,15 @@
 # Replay corpus coverage (PIDASHCONV-823)
 
-Write ``(route, method)`` pairs: **593** total, **497** covered by the corpus.
+Write `(route, method)` pairs: **595** total, **496** covered by the corpus.
 
-| bucket | pairs |
-| --- | --- |
-| covered | 497 |
-| proxied by design | 94 |
-| debug toolbar (dev-only) | 0 |
-| missing with fix issue | 0 |
-| excluded with reason | 0 |
-| owned, no session yet | 2 |
+| bucket                   | pairs |
+| ------------------------ | ----- |
+| covered                  | 496   |
+| proxied by design        | 94    |
+| debug toolbar (dev-only) | 0     |
+| missing with fix issue   | 0     |
+| excluded with reason     | 0     |
+| owned, no session yet    | 5     |
 
 ## Covered
 
@@ -71,7 +71,6 @@ Write ``(route, method)`` pairs: **593** total, **497** covered by the corpus.
 - `DELETE /api/runners/dev-machines/{}/` (runner_web) — runner_web_lifecycle (owned)
 - `PATCH /api/runners/dev-machines/{}/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/runners/dev-machines/{}/create-runner/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle, runner_web_lifecycle (owned)
-- `POST /api/runners/dev-machines/{}/engine-sign-out/` (runner_web) — runner_web_engine_sign_out, runner_web_engine_sign_out, runner_web_engine_sign_out (owned)
 - `POST /api/runners/dev-machines/{}/revoke/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/runners/dev-machines/{}/rotate/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle (owned)
 - `POST /api/runners/invites/` (runner_web) — runner_web_lifecycle, runner_web_lifecycle (owned)
@@ -622,5 +621,8 @@ Write ``(route, method)`` pairs: **593** total, **497** covered by the corpus.
 
 ## Owned, no session yet
 
+- `POST /api/v1/auth/desktop-handoff/` (api_v1) — desktop_unified_signin §5: the handoff issue landed without a replay session (a code is single-use and lives 60s, so a recorded replay cannot redeem it); covered by Django's tests/contract/runner/test_desktop_handoff.py and the services live-db test instead.
+- `POST /api/v1/auth/desktop-handoff/redeem/` (api_v1) — desktop_unified_signin §5: the handoff redeem landed without a replay session (single-use 60s code + app-held verifier); covered by Django's tests/contract/runner/test_desktop_handoff.py and the services live-db test instead.
 - `PATCH /api/v1/runner/dev-machines/{}/` (runner) — NEWPIDASH-52: daemon machine PATCH landed without a replay session; covered by runner/test_engine_machine.py contract tests on both halves instead. Delete this entry when batch 4 adds the runner corpus session.
 - `POST /api/v1/runner/dev-machines/{}/merge-into/` (runner) — NEWPIDASH-52: daemon merge-into landed without a replay session; covered by runner/test_engine_machine.py contract tests on both halves instead. Delete this entry when batch 4 adds the runner corpus session.
+- `POST /auth/desktop-handoff/redeem/` (auth) — desktop_unified_signin §5: the redeem path the desktop app posts to, same handler as /api/v1/auth/desktop-handoff/redeem/; covered by Django's test_redeem_also_answers_on_the_auth_path instead.

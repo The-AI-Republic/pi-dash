@@ -344,7 +344,7 @@ test(
         expect(await driver.desktopRuntimeRailSectionHeaders()).not.toContain("Built-in");
       });
 
-      await test.step("the built-in chat address renders no local-mode UI", async () => {
+      await test.step("the Pi Dash Agent chat address renders no local-mode UI", async () => {
         await driver.desktopRuntimeOpenChat(seed.workspaceSlug, BUILTIN_CHAT_ID);
         expect(await driver.desktopRuntimeIsTauriPresent()).toBe(false);
         expect(await driver.desktopRuntimeApprovalModeVisible()).toBe(false);
@@ -1117,24 +1117,15 @@ async function desk007Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
   await test.step("the mode control pins a choice that survives reload", async () => {
     await driver.desktopRuntimeOpenChat(seed.workspaceSlug, BUILTIN_CHAT_ID);
     await expect.poll(() => driver.desktopRuntimeApprovalModeVisible(), RUNTIME_POLL).toBe(true);
-    const mode = driver.page.getByRole("group", { name: "Approval mode" });
-    await mode.getByRole("button", { name: "Working copy", exact: true }).click();
-    await expect
-      .poll(() => mode.getByRole("button", { name: "Working copy", exact: true }).getAttribute("aria-pressed"))
-      .toBe("true");
+    const mode = driver.page.getByRole("combobox", { name: "Approval mode" });
+    await mode.selectOption("workspace");
+    await expect.poll(() => mode.inputValue()).toBe("workspace");
     const keys = await driver.desktopRuntimeStorageKeys();
     expect(keys.local).toContain(`pidash:chat-approval-mode:${BUILTIN_CHAT_ID}`);
     await driver.page.reload();
     await expect
-      .poll(
-        () =>
-          driver.page
-            .getByRole("group", { name: "Approval mode" })
-            .getByRole("button", { name: "Working copy", exact: true })
-            .getAttribute("aria-pressed"),
-        RUNTIME_POLL
-      )
-      .toBe("true");
+      .poll(() => driver.page.getByRole("combobox", { name: "Approval mode" }).inputValue(), RUNTIME_POLL)
+      .toBe("workspace");
   });
 
   await test.step("the pinned choice survives failed turns on new sessions", async () => {
@@ -1142,14 +1133,13 @@ async function desk007Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
     // (DESK-001 row note), so the mode capture travels no observable call
     // here; what the page owns is that the choice stays pinned across
     // sessions and refusals instead of resetting.
-    const mode = driver.page.getByRole("group", { name: "Approval mode" });
-    const choice = (): Promise<string | null> =>
-      mode.getByRole("button", { name: "Working copy", exact: true }).getAttribute("aria-pressed");
+    const mode = driver.page.getByRole("combobox", { name: "Approval mode" });
+    const choice = (): Promise<string> => mode.inputValue();
     const before = await ensureChatSelected(driver);
     await driver.page.getByRole("button", { name: "New chat", exact: true }).click();
     await expect.poll(() => shownChatSession(driver), RUNTIME_POLL).not.toBe(before);
     await sendChatMessageStored(driver, "mode turn one");
-    await expect.poll(() => choice(), RUNTIME_POLL).toBe("true");
+    await expect.poll(() => choice(), RUNTIME_POLL).toBe("workspace");
     expect(await desktopInvocations(driver.page, "chat_warm")).toEqual([]);
     expect(await desktopInvocations(driver.page, "chat_send")).toEqual([]);
   });

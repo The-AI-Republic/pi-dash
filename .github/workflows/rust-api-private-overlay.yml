@@ -1,0 +1,137 @@
+name: rust-api private overlay compile
+
+# NEWPIDASH-368: does private-pi-dash still compile against this PR?
+#
+# private-pi-dash (the cloud build) calls this repo's Rust code through
+# the `pidash-sdk` crate, pinned to an OSS commit. A PR here can change an
+# SDK type the private code uses (e.g. a new required field on
+# `operations::workpad::WorkpadWrite`), and nothing on this side noticed:
+# the break surfaced only when a private release moved its pin to OSS main
+# (v2026.11.20.3, fixed by private-pi-dash#426).
+#
+# This job checks out private-pi-dash `main`, points its `pidash-sdk`
+# dependency at this PR's checkout, and runs `cargo check`. When it fails,
+# the PR needs a paired private-pi-dash PR: bump `rust-cloud/OSS_PIN` to
+# this PR's merge commit and update the private caller, merged right
+# after this one.
+#
+# This repo is public, so its Actions logs and caches are readable by
+# anyone. The job therefore:
+#   - runs only for PRs from branches in this repo, never forks, so the
+#     read token is never exposed to outside code;
+#   - prints only `file:line: error[...]: message` lines, never the source
+#     snippets rustc normally shows;
+#   - caches only the public crate downloads (`cache-targets: false`), never
+#     compiled private code, and never runs on `main`, so a fork PR can
+#     never restore a private-built cache.
+#
+# Secret: PRIVATE_PIDASH_READ_TOKEN, a fine-grained token with read-only
+# Contents access to The-AI-Republic/private-pi-dash and nothing else.
+# Without it the job skips with a notice instead of failing every PR.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "rust-api/**"
+      - ".github/workflows/rust-api-private-overlay.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-api-private-overlay-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  overlay-check:
+    name: private-pi-dash compiles against this PR
+    # Never for fork PRs (no secret there, and no private code for them).
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      HAS_TOKEN: ${{ secrets.PRIVATE_PIDASH_READ_TOKEN != '' }}
+    steps:
+      - name: Skip without the read token
+        if: env.HAS_TOKEN != 'true'
+        run: |
+          echo "::notice::PRIVATE_PIDASH_READ_TOKEN is not set: skipping the private-pi-dash compile check."
+          echo "Skipped: the PRIVATE_PIDASH_READ_TOKEN secret is not set." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check out this PR
+        if: env.HAS_TOKEN == 'true'
+        uses: actions/checkout@v4
+        with:
+          path: oss
+          fetch-depth: 1
+
+      - name: Check out private-pi-dash main
+        if: env.HAS_TOKEN == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: The-AI-Republic/private-pi-dash
+          ref: main
+          path: private
+          fetch-depth: 1
+          token: ${{ secrets.PRIVATE_PIDASH_READ_TOKEN }}
+          # No credentials left in private/.git for later steps.
+          persist-credentials: false
+
+      - name: Point pidash-sdk at this PR
+        if: env.HAS_TOKEN == 'true'
+        working-directory: private/rust-cloud
+        run: |
+          set -euo pipefail
+          SDK="$GITHUB_WORKSPACE/oss/rust-api/crates/sdk"
+          test -f "$SDK/Cargo.toml"
+          # The one git dependency on this repo; the rest of the OSS crates
+          # come in through pidash-sdk's own path dependencies.
+          pattern='^pidash-sdk = \{ git = "https://github.com/The-AI-Republic/pi-dash", rev = "[0-9a-f]{40}", package = "pidash-sdk" \}$'
+          if ! grep -Eq "$pattern" Cargo.toml; then
+            echo "::error::private-pi-dash rust-cloud/Cargo.toml no longer has the expected pidash-sdk git dependency line; update this workflow."
+            exit 1
+          fi
+          sed -i -E "s#$pattern#pidash-sdk = { path = \"$SDK\" }#" Cargo.toml
+          grep -q "pidash-sdk = { path = \"$SDK\" }" Cargo.toml
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: env.HAS_TOKEN == 'true'
+
+      # Public crate downloads only: no target dir, so no private build output.
+      - uses: Swatinem/rust-cache@v2
+        if: env.HAS_TOKEN == 'true'
+        with:
+          workspaces: private/rust-cloud
+          cache-targets: false
+          shared-key: private-overlay
+
+      - name: cargo check private-pi-dash against this PR
+        if: env.HAS_TOKEN == 'true'
+        working-directory: private/rust-cloud
+        run: |
+          set -uo pipefail
+          # Full output stays on the runner; only error locations and
+          # messages are printed (no private source snippets).
+          cargo check --workspace --all-targets --message-format=short -q > "$RUNNER_TEMP/check.log" 2>&1
+          status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "private-pi-dash compiles against this PR." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          errors=$(grep -E '^[^ ]+:[0-9]+:[0-9]+: error' "$RUNNER_TEMP/check.log" | sort -u | head -40 || true)
+          if [ -z "$errors" ]; then
+            errors="cargo check failed without a located compile error (exit $status); rerun locally against this PR."
+          fi
+          echo "$errors"
+          {
+            echo "### private-pi-dash does not compile against this PR"
+            echo
+            echo "This PR changes Rust code private-pi-dash uses through \`pidash-sdk\`. Before or right after merging, open a paired private-pi-dash PR:"
+            echo "bump \`rust-cloud/OSS_PIN\` (plus the \`Cargo.toml\` rev and the Dockerfile \`ARG OSS_SHA\`) to this PR's merge commit, and update the callers below."
+            echo
+            echo '```'
+            echo "$errors"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1

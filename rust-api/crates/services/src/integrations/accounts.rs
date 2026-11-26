@@ -309,7 +309,7 @@ pub const PROVIDER_ACCOUNT_SCOPE_SQL: &str = "workspace_id = $1 AND provider = $
 /// `resolve_provider_account_repository` (`.order_by("created_at")`,
 /// `services.py:169-175`); the single-row `select` path narrows with
 /// [`PROVIDER_ACCOUNT_GET_SQL`].
-pub const PROVIDER_ACCOUNT_LIST_SQL: &str = "SELECT id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, provider, host_url, auth_type, external_account_id, external_account_login, display_name, capabilities, credential_config, workspace_integration_id, status, verified_at, last_check_error, metadata FROM git_provider_accounts WHERE workspace_id = $1 AND provider = $2 AND host_url = $3 AND status IN ('connected', 'degraded') AND deleted_at IS NULL ORDER BY created_at ASC";
+pub const PROVIDER_ACCOUNT_LIST_SQL: &str = "SELECT id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, provider, host_url, auth_type, external_account_id, external_account_login, display_name, capabilities, credential_config, workspace_integration_id, status, verified_at, suspended_at, last_checked_at, last_check_error, metadata FROM git_provider_accounts WHERE workspace_id = $1 AND provider = $2 AND host_url = $3 AND status IN ('connected', 'degraded') AND deleted_at IS NULL ORDER BY created_at ASC";
 
 /// Scoped single-account fetch (`services.py:127`
 /// `queryset.filter(id=…).first()`).
@@ -317,7 +317,7 @@ pub const PROVIDER_ACCOUNT_LIST_SQL: &str = "SELECT id, created_at, updated_at, 
 /// Parameters: `$1` workspace id, `$2` provider key, `$3` normalized
 /// host, `$4` account id. Django's `first()` on an unordered queryset
 /// orders by pk; the id predicate already yields at most one row.
-pub const PROVIDER_ACCOUNT_GET_SQL: &str = "SELECT id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, provider, host_url, auth_type, external_account_id, external_account_login, display_name, capabilities, credential_config, workspace_integration_id, status, verified_at, last_check_error, metadata FROM git_provider_accounts WHERE workspace_id = $1 AND provider = $2 AND host_url = $3 AND id = $4 AND status IN ('connected', 'degraded') AND deleted_at IS NULL ORDER BY id ASC LIMIT 1";
+pub const PROVIDER_ACCOUNT_GET_SQL: &str = "SELECT id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, workspace_id, provider, host_url, auth_type, external_account_id, external_account_login, display_name, capabilities, credential_config, workspace_integration_id, status, verified_at, suspended_at, last_checked_at, last_check_error, metadata FROM git_provider_accounts WHERE workspace_id = $1 AND provider = $2 AND host_url = $3 AND id = $4 AND status IN ('connected', 'degraded') AND deleted_at IS NULL ORDER BY id ASC LIMIT 1";
 
 /// `INSERT` for `create_provider_account` (`services.py:95-114`).
 ///
@@ -417,10 +417,9 @@ pub trait GitStore {
     ) -> Result<Option<super::repositories::ProjectRef>, StoreError>;
 
     /// The binding section of `bind_repository` as one transaction:
-    /// delete the existing project binding (hard), delete the project's
-    /// `GithubRepositorySync` rows (hard), insert the new binding, apply
-    /// the project `repo_url`/`base_branch` updates. `BINDING_*_SQL`,
-    /// `GITHUB_SYNC_DELETE_SQL`, `PROJECT_REPO_UPDATE_SQL`.
+    /// delete the existing project binding (hard), insert the new
+    /// binding, apply the project `repo_url`/`base_branch` updates.
+    /// `BINDING_*_SQL`, `PROJECT_REPO_UPDATE_SQL`.
     async fn apply_bind(
         &self,
         plan: super::repositories::BindPlan,
@@ -448,21 +447,8 @@ pub trait GitStore {
         StoreError,
     >;
 
-    /// `set_binding_sync_enabled` Github mirror
-    /// (`GITHUB_SYNC_SET_ENABLED_SQL`); returns rows updated.
-    async fn set_github_syncs_enabled(
-        &self,
-        project_id: Uuid,
-        workspace_slug: &str,
-        enabled: bool,
-    ) -> Result<u64, StoreError>;
-
     /// Hard-delete one binding by id (`BINDING_DELETE_ONE_SQL`).
     async fn delete_binding(&self, binding_id: Uuid) -> Result<(), StoreError>;
-
-    /// Hard-delete a project's `GithubRepositorySync` rows
-    /// (`GITHUB_SYNC_DELETE_SQL`); returns rows deleted.
-    async fn delete_github_syncs_for_project(&self, project_id: Uuid) -> Result<u64, StoreError>;
 }
 
 /// Insert plan for `create_provider_account` (`services.py:95-114`).
@@ -1226,6 +1212,8 @@ pub(crate) mod fakes {
                 workspace_integration_id: None,
                 status: row.status,
                 verified_at: Some(row.verified_at),
+                suspended_at: None,
+                last_checked_at: None,
                 last_check_error: String::new(),
                 metadata: row.metadata,
             };
@@ -1317,23 +1305,7 @@ pub(crate) mod fakes {
             unimplemented!("repositories tests provide the full fake")
         }
 
-        async fn set_github_syncs_enabled(
-            &self,
-            _project_id: Uuid,
-            _workspace_slug: &str,
-            _enabled: bool,
-        ) -> Result<u64, StoreError> {
-            unimplemented!("repositories tests provide the full fake")
-        }
-
         async fn delete_binding(&self, _binding_id: Uuid) -> Result<(), StoreError> {
-            unimplemented!("repositories tests provide the full fake")
-        }
-
-        async fn delete_github_syncs_for_project(
-            &self,
-            _project_id: Uuid,
-        ) -> Result<u64, StoreError> {
             unimplemented!("repositories tests provide the full fake")
         }
     }
@@ -1385,6 +1357,8 @@ pub(crate) mod fakes {
             workspace_integration_id: None,
             status: git_provider_account::STATUS_CONNECTED.into(),
             verified_at: Some(created_at),
+            suspended_at: None,
+            last_checked_at: None,
             last_check_error: String::new(),
             metadata: serde_json::json!({}),
         }

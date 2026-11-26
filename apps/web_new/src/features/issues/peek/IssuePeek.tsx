@@ -17,11 +17,14 @@ import { ArrowUpRight } from "lucide-react";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
-import { useWorkspace } from "../../../core/session/index.js";
+import { useMe, useWorkspace } from "../../../core/session/index.js";
+import { canRunIssue } from "../runPolicy.js";
+import { useNarrowViewport } from "../../../shared/shell/narrowViewport.js";
 import { canEditInProject } from "../../../shared/shell/contextual/index.js";
 import { projectDetailsQueryOptions } from "../../projects/index.js";
 import { issueKeys } from "../api/keys.js";
 import { TITLE_SAVE_FAILED_TITLE, useUpdateIssue } from "../api/mutations.js";
+import { invalidateCommentViews } from "../comments/api.js";
 import { issueDetailQueryOptions } from "../api/queries.js";
 import type { SubIssueItem } from "@pidash/api-client";
 import { CommentThread } from "../comments/CommentThread.js";
@@ -190,11 +193,20 @@ export function IssuePeek({
   const project = projectQuery.data?.find((row) => row.id === projectId);
   const titleUpdate = useUpdateIssue({ workspaceSlug, projectId, issueId, failureTitle: TITLE_SAVE_FAILED_TITLE });
   const attachmentsRef = React.useRef<AttachmentsWidgetHandle>(null);
+  const narrow = useNarrowViewport();
+  const me = useMe();
   useRefocusOrigin();
 
+  // The agent panel's poll rides this too, so it also re-reads the
+  // comment and activity feeds (ISS-164): both stay sibling keys outside
+  // the detail query, and both refetch incrementally.
   const refreshDetail = React.useCallback(
-    () => queryClient.invalidateQueries({ queryKey: issueKeys.detail(workspaceSlug, issueId) }),
-    [queryClient, issueId, workspaceSlug]
+    () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: issueKeys.detail(workspaceSlug, issueId) }),
+        invalidateCommentViews(queryClient, { workspaceSlug, projectId, issueId }),
+      ]).then(() => undefined),
+    [queryClient, issueId, projectId, workspaceSlug]
   );
 
   const writeNesting = React.useCallback(
@@ -338,7 +350,62 @@ export function IssuePeek({
     },
   ];
 
-  const main = (
+  const activityNode = (
+    <div className="flex flex-col gap-(--space-6)">
+      <WidgetActionsProvider>
+        <SubIssuesWidget
+          workspaceSlug={workspaceSlug}
+          issue={issue}
+          project={project}
+          editable={writable}
+          projectIdentifier={resolved.identifier}
+          canWrite={writable}
+          onOpen={(row: SubIssueItem, identifier: string) => {
+            openNested({ issueId: row.id, projectId: row.project_id, issueKey: identifier });
+          }}
+          extraSections={widgetSections}
+          onAttach={() => attachmentsRef.current?.openPicker()}
+          runAIAction={
+            <IssueRunAIAction
+              workspaceSlug={workspaceSlug}
+              workspaceId={workspace?.id ?? null}
+              projectId={projectId}
+              issue={issue}
+              disabled={!writable}
+              label="Manually Run AI"
+              size="medium"
+            />
+          }
+          createProjects={
+            project === undefined
+              ? []
+              : [
+                  {
+                    id: project.id,
+                    name: project.name,
+                    identifier: project.identifier,
+                    memberRole: project.member_role,
+                    archived: project.archived_at !== null,
+                  },
+                ]
+          }
+        />
+      </WidgetActionsProvider>
+      <CodeReviewsWidget workspaceSlug={workspaceSlug} projectId={projectId} issueId={issue.id} editable={writable} />
+      <CommentThread
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        issueId={issue.id}
+        archived={archived}
+        published={project?.anchor != null}
+        assigneeIds={issue.assignee_ids}
+        memberRole={project?.member_role ?? null}
+        commentAndRun={{ workspaceId: workspace?.id ?? null, disabled: !writable }}
+      />
+    </div>
+  );
+
+  const titleDesc = (
     <>
       <ParentBanner workspaceSlug={workspaceSlug} projectId={projectId} issue={issue} editable={editable} />
       <DetailMainColumn
@@ -348,65 +415,6 @@ export function IssuePeek({
         editable={editable}
         showTitle={false}
         pipeline={pipeline}
-        activity={
-          <div className="flex flex-col gap-(--space-6)">
-            <WidgetActionsProvider>
-              <SubIssuesWidget
-                workspaceSlug={workspaceSlug}
-                issue={issue}
-                project={project}
-                editable={writable}
-                projectIdentifier={resolved.identifier}
-                canWrite={writable}
-                onOpen={(row: SubIssueItem, identifier: string) => {
-                  openNested({ issueId: row.id, projectId: row.project_id, issueKey: identifier });
-                }}
-                extraSections={widgetSections}
-                onAttach={() => attachmentsRef.current?.openPicker()}
-                runAIAction={
-                  <IssueRunAIAction
-                    workspaceSlug={workspaceSlug}
-                    workspaceId={workspace?.id ?? null}
-                    projectId={projectId}
-                    issue={issue}
-                    disabled={!writable}
-                    label="Manually Run AI"
-                    size="medium"
-                  />
-                }
-                createProjects={
-                  project === undefined
-                    ? []
-                    : [
-                        {
-                          id: project.id,
-                          name: project.name,
-                          identifier: project.identifier,
-                          memberRole: project.member_role,
-                          archived: project.archived_at !== null,
-                        },
-                      ]
-                }
-              />
-            </WidgetActionsProvider>
-            <CodeReviewsWidget
-              workspaceSlug={workspaceSlug}
-              projectId={projectId}
-              issueId={issue.id}
-              editable={writable}
-            />
-            <CommentThread
-              workspaceSlug={workspaceSlug}
-              projectId={projectId}
-              issueId={issue.id}
-              archived={archived}
-              published={project?.anchor != null}
-              assigneeIds={issue.assignee_ids}
-              memberRole={project?.member_role ?? null}
-              commentAndRun={{ workspaceId: workspace?.id ?? null, disabled: !writable }}
-            />
-          </div>
-        }
       />
     </>
   );
@@ -414,9 +422,34 @@ export function IssuePeek({
   const sidebar = (
     <>
       <AgentStatusPanel workspaceSlug={workspaceSlug} issue={issue} refresh={refreshDetail} />
-      <IssuePropertiesSidebar workspaceSlug={workspaceSlug} projectId={projectId} issue={issue} editable={editable} />
+      <IssuePropertiesSidebar
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        issue={issue}
+        editable={editable}
+        canRun={canRunIssue({
+          policy: project?.settings?.issue_run_policy,
+          viewerId: me.data?.id ?? null,
+          creatorId: issue.created_by,
+          assigneeIds: issue.assignee_ids,
+          memberRole: project?.member_role ?? null,
+        })}
+      />
     </>
   );
+
+  const fullGridStyle: React.CSSProperties = narrow
+    ? {
+        gridTemplateAreas: '"main" "sidebar" "activity"',
+        gridTemplateColumns: "minmax(0,1fr)",
+        gap: "var(--space-8)",
+      }
+    : {
+        gridTemplateAreas: '"main sidebar" "activity sidebar"',
+        gridTemplateColumns: "minmax(0,1fr) 20rem",
+        rowGap: "var(--space-6)",
+        columnGap: "var(--space-8)",
+      };
 
   return (
     <>
@@ -480,20 +513,32 @@ export function IssuePeek({
         }
       >
         {mode === "full" ? (
-          <div className="flex min-w-0 flex-1 flex-col gap-(--space-8) md:flex-row">
-            <div className="flex min-w-0 flex-1 flex-col gap-(--space-6)">{main}</div>
-            <aside aria-label="Properties" className="flex min-w-0 flex-col gap-(--space-4) md:w-80 md:shrink-0">
+          <div data-testid="peek-full-layout" className="grid min-w-0 flex-1 gap-(--space-8)" style={fullGridStyle}>
+            <div className="flex min-w-0 flex-col gap-(--space-6)" style={{ gridArea: "main" }}>
+              {titleDesc}
+            </div>
+            <aside
+              aria-label="Properties"
+              className="flex min-w-0 flex-col gap-(--space-4) md:w-80 md:shrink-0"
+              style={{ gridArea: "sidebar" }}
+            >
               <p className="text-meta font-medium text-(--text-muted)">Properties</p>
               {sidebar}
             </aside>
+            <div data-slot="activity" className="min-w-0" style={{ gridArea: "activity" }}>
+              {activityNode}
+            </div>
           </div>
         ) : (
           <div className="flex min-w-0 flex-1 flex-col gap-(--space-6)">
-            {main}
+            {titleDesc}
             <section aria-label="Properties" className="flex min-w-0 flex-col gap-(--space-4)">
               <p className="text-meta font-medium text-(--text-muted)">Properties</p>
               {sidebar}
             </section>
+            <div data-slot="activity" className="min-w-0">
+              {activityNode}
+            </div>
           </div>
         )}
       </PeekChrome>

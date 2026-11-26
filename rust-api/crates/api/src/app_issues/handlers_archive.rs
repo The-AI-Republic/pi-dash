@@ -32,19 +32,23 @@
 //!
 //! # Ported bugs (translate, don't redesign — also listed in the PR)
 //!
-//! * The grouped `count_filter` counts *non*-archived rows
-//!   (`archived_at__isnull=True` inside the archived list).
-//! * `group_by`/`sub_group_by` of `target_date`, `start_date` or
-//!   `created_by` always 500s (archive passes no `queryset` to
-//!   `issue_group_values`, so `None.values_list` raises).
+//! * (fixed by NEWPIDASH-350, DIFF-58) The grouped `count_filter`
+//!   counted *non*-archived rows (`archived_at__isnull=True` inside the
+//!   archived list); the archive grouped path now counts archived rows.
+//! * (fixed by NEWPIDASH-350, DIFF-58) `group_by`/`sub_group_by` of
+//!   `target_date`, `start_date` or `created_by` always 500d (archive
+//!   passes no `queryset` to `issue_group_values`, so `None.values_list`
+//!   raises); the port no longer 500s and buckets over the archived set.
 //! * Bulk-archive enqueues for the issues *before* the first bad one,
 //!   then answers 400 (partial side effects on failure).
 //! * Re-archiving answers 404 (`issue_objects` excludes archived rows).
 //! * Archiving a NULL-state issue 500s (`None.group`); unarchiving one
 //!   assigns the default state instead.
-//! * `save()` recomputes `completed_at` from the state group on every
-//!   archive/unarchive (clobbering it on completed issues) and always
-//!   rewrites `updated_at` + `description_stripped`; `bulk_update`
+//! * (fixed by NEWPIDASH-351, DIFF-62) `save()` recomputed `completed_at`
+//!   from the state group on every archive/unarchive (clobbering it on
+//!   completed issues); archive/unarchive never change state, so the
+//!   stamp is now left untouched, while `updated_at` +
+//!   `description_stripped` are still always rewritten; `bulk_update`
 //!   touches `archived_at` only.
 //! * The bulk response date is recomputed after the loop (this port
 //!   stamps one date; the two differ only across a midnight rollover).
@@ -57,8 +61,9 @@
 //! * FX-ISS-19 says `current_instance` is the 31-key shape; the enqueue
 //!   serializes a bare instance, so DRF omits the 7 annotation keys (24
 //!   keys — the pilot-2 `SERIALIZER_FIELDS` rule, verified live).
-//! * FX-ISS-19 omits the `save()` recomputes (`completed_at`,
-//!   `updated_at`, `description_stripped`, NULL-state default).
+//! * FX-ISS-19 omits the `save()` recomputes (`updated_at`,
+//!   `description_stripped`, NULL-state default; `completed_at` was a
+//!   recompute too before DIFF-62 and is now preserved).
 //!
 //! # Known gaps (precedent: pilot-2 records the same)
 //!
@@ -153,6 +158,14 @@ async fn archive_context(
 ) -> Result<ArchiveContext, Denial> {
     let base = archive_base(state, slug, project_raw, extension).await?;
     archive_allow(&base.pool, &base.slug, &base.project_id, &base.user_id).await?;
+    if let Some(info) = crate::project_archived::archived_by_id(&base.pool, base.project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     archive_tenant(base, false).await
 }
 
@@ -167,6 +180,14 @@ async fn archive_read_context(
 ) -> Result<ArchiveContext, Denial> {
     let base = archive_base(state, slug, project_raw, extension).await?;
     super::allow_project(&base.pool, &base.slug, &base.project_id, &base.user_id).await?;
+    if let Some(info) = crate::project_archived::archived_by_id(&base.pool, base.project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     let guest_scoped =
         scoped_guest(&base.pool, &base.slug, &base.project_id, &base.user_id).await?;
     archive_tenant(base, guest_scoped).await
@@ -398,13 +419,12 @@ pub async fn archived_list(
     };
     let group_by = list_context.params.group_by.clone();
     let sub_group_by = list_context.params.sub_group_by.clone();
-    // Ported crash: archive passes no `queryset` to `issue_group_values`,
-    // so these three group fields raise on `None.values_list` (500).
-    for group in [&group_by, &sub_group_by].into_iter().flatten() {
-        if matches!(group.as_str(), "target_date" | "start_date" | "created_by") {
-            return Err(Denial::ServerError);
-        }
-    }
+    // DIFF-58 (old bug fix): the old archive list 500s on `target_date`,
+    // `start_date` and `created_by` (no `queryset` reaches
+    // `issue_group_values`, so `None.values_list` raises) and counts every
+    // group with `archived_at__isnull=True` (always 0, rendered as 1). The
+    // new list computes those buckets over the archived set like the live
+    // list does and counts archived rows.
     if let Some(group) = group_by.clone() {
         return grouped_response(
             &list_context,
@@ -414,6 +434,7 @@ pub async fn archived_list(
             &key,
             per_page,
             cursor,
+            true,
         )
         .await;
     }
@@ -614,6 +635,7 @@ struct DetailOwned {
     assigned_runner_id: Option<String>,
     assigned_runner_detail: Option<serde_json::Value>,
     agent_executor: Option<String>,
+    work_type: Option<String>,
     created_at: String,
     updated_at: String,
     created_by: Option<String>,
@@ -690,6 +712,7 @@ impl DetailOwned {
             )
             .await?,
             agent_executor: json_str_opt(row, "agent_executor"),
+            work_type: json_str_opt(row, "work_type"),
             created_at: json_drf(row, "created_at")?,
             updated_at: json_drf(row, "updated_at")?,
             created_by: json_str_opt(row, "created_by_id"),
@@ -735,6 +758,7 @@ impl DetailOwned {
             assigned_pod_id: self.assigned_pod_id.as_deref(),
             assigned_runner_id: self.assigned_runner_id.as_deref(),
             agent_executor: self.agent_executor.as_deref(),
+            work_type: self.work_type.as_deref(),
             module_ids: None,
             label_ids: None,
             assignee_ids: None,
@@ -773,8 +797,8 @@ impl DetailOwned {
     }
 }
 
-/// `_issue_is_actively_synced`: no probes without a source; the git probe
-/// first, the github probe only on a git miss (Django's short-circuit).
+/// `_issue_is_actively_synced`: no probes without a source; git-only probe
+/// (PDASHOSS01-354, legacy tables sunset).
 /// `get_is_epic` (`issue.py:1109-1112`): false when the row is untyped,
 /// without a query; otherwise the type row's flag. A missing row is
 /// Django's `DoesNotExist` → the generic 500 (unreachable — the FK
@@ -805,16 +829,7 @@ async fn fetch_is_synced(
     let git_hit = serializers_engage::git_issue_synced(&db, issue_id)
         .await
         .map_err(|_| Denial::ServerError)?;
-    let github_hit = !git_hit
-        && serializers_engage::github_issue_synced(&db, issue_id)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    Ok(issue_is_actively_synced(
-        Some(source),
-        None,
-        || git_hit,
-        || github_hit,
-    ))
+    Ok(issue_is_actively_synced(Some(source), None, || git_hit))
 }
 
 /// `obj.agent_ticker` through `_base_manager` (no soft-delete guard):
@@ -850,7 +865,7 @@ async fn fetch_clock_policy(
     )
     .await
     .map_err(|_| Denial::ServerError)?;
-    let Some((enabled, max_ticks, interval, review_interval, test_interval)) = row else {
+    let Some((enabled, max_ticks, interval, review_interval, test_interval, settings)) = row else {
         return Err(Denial::ServerError);
     };
     Ok(ProjectClockPolicy {
@@ -859,7 +874,9 @@ async fn fetch_clock_policy(
         agent_default_interval_seconds: Some(i64::from(interval)),
         agent_review_default_interval_seconds: Some(i64::from(review_interval)),
         agent_test_default_interval_seconds: Some(i64::from(test_interval)),
-    })
+        ..Default::default()
+    }
+    .with_stages(&settings))
 }
 
 /// One state row through `_base_manager` (no soft-delete guard).
@@ -894,7 +911,8 @@ async fn fetch_blockers(
 // ---------------------------------------------------------------------------
 
 /// One issue row for the write paths: the base scalars plus the state
-/// group for the gate and the save() recomputes.
+/// group for the gate (the save() hooks, not the archive write, own the
+/// DIFF-62 `completed_at` transition rule).
 struct WriteRow {
     id: uuid::Uuid,
     name: String,
@@ -914,6 +932,7 @@ struct WriteRow {
     assigned_pod_id: Option<String>,
     assigned_runner_id: Option<String>,
     agent_executor: Option<String>,
+    work_type: Option<String>,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
     created_by: Option<String>,
@@ -1183,6 +1202,7 @@ fn write_row((issue, state): (issues::Model, Option<states::Model>)) -> WriteRow
         assigned_pod_id: id_text(issue.assigned_pod_id),
         assigned_runner_id: id_text(issue.assigned_runner_id),
         agent_executor: issue.agent_executor,
+        work_type: issue.work_type,
         created_at: at(issue.created_at),
         updated_at: at(issue.updated_at),
         created_by: id_text(issue.created_by_id),
@@ -1225,6 +1245,7 @@ async fn current_instance_json(pool: &sqlx::PgPool, row: &WriteRow) -> Result<St
         assigned_pod_id: row.assigned_pod_id.as_deref(),
         assigned_runner_id: row.assigned_runner_id.as_deref(),
         agent_executor: row.agent_executor.as_deref(),
+        work_type: row.work_type.as_deref(),
         module_ids: None,
         label_ids: None,
         assignee_ids: None,
@@ -1284,10 +1305,11 @@ fn archive_denial(error: domain::DomainError) -> Denial {
 // Bulk archive (`archive.py:306-344`)
 // ---------------------------------------------------------------------------
 
-/// `POST .../bulk-archive-issues/`: the entity gate, the id parse, then
-/// per issue (model `-created_at` order) the literal gate plus the
-/// enqueue — a bad issue answers 400 *after* the earlier enqueues fired
-/// — and one `archived_at`-only `bulk_update`.
+/// `POST .../bulk-archive-issues/`: the entity gate, the allow gate, the
+/// archived-project 409 (DIFF-45), the id parse, then per issue (model
+/// `-created_at` order) the literal gate plus the enqueue — a bad issue
+/// answers 400 *after* the earlier enqueues fired — and one
+/// `archived_at`-only `bulk_update`.
 pub async fn bulk_archive(
     State(state): State<AppState>,
     Path((slug, project_raw)): Path<(String, String)>,
@@ -1303,6 +1325,18 @@ pub async fn bulk_archive(
         return Ok(status_response(StatusCode::FORBIDDEN, ENTITY_DENIED_BODY));
     }
     archive_allow(&base.pool, &base.slug, &base.project_id, &base.user_id).await?;
+    // DIFF-45: the bulk arm 409s on an archived project like
+    // `bulk-operation-issues` and `bulk-subscribe-issues` do — without
+    // this the issues would be archived on a project every other write
+    // refuses.
+    if let Some(info) = crate::project_archived::archived_by_id(&base.pool, base.project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     let context = archive_tenant(base, false).await?;
     // `request.data` through the shared negotiator: empty (by the
     // Content-Length header, whatever the content-type) short-circuits
@@ -1621,7 +1655,7 @@ mod tests {
     }
 
     #[test]
-    fn current_instance_is_25_keys_in_meta_order() {
+    fn current_instance_is_26_keys_in_meta_order() {
         let base = IssueDetailBaseRow {
             id: "id",
             name: "name",
@@ -1642,6 +1676,7 @@ mod tests {
             assigned_pod_id: None,
             assigned_runner_id: None,
             agent_executor: None,
+            work_type: None,
             module_ids: None,
             label_ids: None,
             assignee_ids: None,
@@ -1672,7 +1707,7 @@ mod tests {
         ] {
             expected.retain(|kept| *kept != key);
         }
-        assert_eq!(parsed.len(), 25);
+        assert_eq!(parsed.len(), 26);
         let keys: Vec<&str> = parsed.keys().map(String::as_str).collect();
         assert_eq!(keys, expected);
         assert!(rendered.contains("\"sort_order\": 10000.0"));
@@ -1708,6 +1743,7 @@ mod tests {
             assigned_pod_id: None,
             assigned_runner_id: None,
             agent_executor: None,
+            work_type: None,
             module_ids: None,
             label_ids: None,
             assignee_ids: None,

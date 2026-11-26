@@ -1190,7 +1190,10 @@ struct ProjectRow {
     agent_ticking_enabled: bool,
     default_agent_executor: String,
     dedicated_runner_lost_action: String,
+    default_work_type: String,
     members_can_edit_states: bool,
+    /// `projects.settings` (NEWPIDASH-278), raw stored blob.
+    settings: Value,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     created_by_id: Option<uuid::Uuid>,
@@ -1246,7 +1249,10 @@ struct ProjectRowOrm {
     agent_ticking_enabled: bool,
     default_agent_executor: String,
     dedicated_runner_lost_action: String,
+    default_work_type: String,
     members_can_edit_states: bool,
+    /// `projects.settings` (NEWPIDASH-278), raw stored blob.
+    settings: Value,
     created_at: sea_orm::prelude::DateTimeWithTimeZone,
     updated_at: sea_orm::prelude::DateTimeWithTimeZone,
     created_by_id: Option<uuid::Uuid>,
@@ -1302,7 +1308,9 @@ fn project_row_from(orm: ProjectRowOrm) -> ProjectRow {
         agent_ticking_enabled: orm.agent_ticking_enabled,
         default_agent_executor: orm.default_agent_executor,
         dedicated_runner_lost_action: orm.dedicated_runner_lost_action,
+        default_work_type: orm.default_work_type,
         members_can_edit_states: orm.members_can_edit_states,
+        settings: orm.settings,
         created_at: orm.created_at.with_timezone(&Utc),
         updated_at: orm.updated_at.with_timezone(&Utc),
         created_by_id: orm.created_by_id,
@@ -1383,7 +1391,9 @@ fn project_full_select(user_id: &uuid::Uuid, slug: &str) -> sea_orm::Select<proj
         proj_entity::Column::AgentTickingEnabled,
         proj_entity::Column::DefaultAgentExecutor,
         proj_entity::Column::DedicatedRunnerLostAction,
+        proj_entity::Column::DefaultWorkType,
         proj_entity::Column::MembersCanEditStates,
+        proj_entity::Column::Settings,
         proj_entity::Column::CreatedAt,
         proj_entity::Column::UpdatedAt,
         proj_entity::Column::CreatedById,
@@ -1755,7 +1765,7 @@ enum ManagedPaused {
 /// Managed-runner EXISTS (`ENROLLED_MANAGED_RUNNERS_EXISTS_SQL` /
 /// `ONLINE_MANAGED_RUNNER_SQL` / `ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL`):
 /// a desktop-bundled runner owned by the caller on the project's pod.
-async fn managed_runner_exists(
+async fn pidash_agent_exists(
     db: &sea_orm::DatabaseConnection,
     paused: ManagedPaused,
     online: bool,
@@ -1806,12 +1816,12 @@ async fn managed_runner_exists(
 /// presence bit. Python re-reads the key config per project row; the
 /// verdict cannot change mid-request, so it is read once.
 struct ExecutorUser {
-    flags: pidash_services::dispatch::policy::UserFlags,
+    flags: pidash_services::run_creation::executor_policy::UserFlags,
     llm_has_key: bool,
 }
 
 async fn executor_user(pool: &sqlx::PgPool, user_id: &uuid::Uuid) -> Result<ExecutorUser, Denial> {
-    use pidash_services::dispatch::policy::UserFlags;
+    use pidash_services::run_creation::executor_policy::UserFlags;
     // `resolve_actor` guarantees an authenticated, active row; only the
     // bot bit is still unknown.
     let db = sea_conn(pool);
@@ -1845,7 +1855,7 @@ async fn executor_user(pool: &sqlx::PgPool, user_id: &uuid::Uuid) -> Result<Exec
 /// L1 `project_executor_options`): the cloud leg consults the
 /// `has_usable_llm_config` EE seam only on configured instances; the local
 /// leg is the runners EXISTS; the managed leg is L4's
-/// `managed_runner_availability` with the EE profile seam.
+/// `pidash_agent_availability` with the EE profile seam.
 ///
 /// `viewer` is `None` for renders without request context (the PATCH
 /// `current_instance` dump: `ProjectSerializer(project)` at `base.py:342`
@@ -1860,9 +1870,13 @@ async fn executor_options(
     project_id: &uuid::Uuid,
     workspace_id: &uuid::Uuid,
     viewer: Option<(&uuid::Uuid, &ExecutorUser)>,
-) -> Result<[pidash_services::dispatch::policy::ExecutorOption; 3], Denial> {
-    use pidash_services::dispatch::admission::{managed_runner_availability, HEARTBEAT_GRACE_SECS};
-    use pidash_services::dispatch::policy::{local_runner_available_exists, local_runner_exists};
+) -> Result<[pidash_services::run_creation::executor_policy::ExecutorOption; 3], Denial> {
+    use pidash_services::run_creation::executor_policy::{
+        local_runner_available_exists, local_runner_exists,
+    };
+    use pidash_services::run_creation::pidash_agent_availability::{
+        pidash_agent_availability, HEARTBEAT_GRACE_SECS,
+    };
     // `agent_execution.py:112-121`: the unpaused leg always runs; the
     // online-incl-paused leg runs only when nothing is available (the
     // `elif` distinguishes "paused" from "none"). SeaORM (no raw SQL).
@@ -1893,12 +1907,12 @@ async fn executor_options(
                 .await;
             let seam_profile = state
                 .assistant_seam()
-                .agent_model_profile(*user_id, user.llm_has_key)
+                .pidash_agent_profile(*user_id, user.llm_has_key)
                 .await;
             (
                 Some(&user.flags),
                 llm_usable,
-                pidash_services::dispatch::admission::LlmProfile {
+                pidash_services::run_creation::pidash_agent_availability::LlmProfile {
                     available: seam_profile.available,
                     reason_code: seam_profile.reason_code,
                 },
@@ -1907,7 +1921,7 @@ async fn executor_options(
         None => (
             None,
             false,
-            pidash_services::dispatch::admission::LlmProfile {
+            pidash_services::run_creation::pidash_agent_availability::LlmProfile {
                 available: false,
                 reason_code: String::new(),
             },
@@ -1915,11 +1929,11 @@ async fn executor_options(
     };
     let managed = match viewer {
         Some((user_id, _))
-            if pidash_services::dispatch::policy::managed_runner_is_enabled(
-                &settings.managed_runner,
+            if pidash_services::run_creation::executor_policy::pidash_agent_is_enabled(
+                &settings.pidash_agent,
             ) =>
         {
-            let enrolled = managed_runner_exists(
+            let enrolled = pidash_agent_exists(
                 &sea_db,
                 ManagedPaused::Any,
                 false,
@@ -1932,7 +1946,7 @@ async fn executor_options(
             // `HEARTBEAT_GRACE` (`runner/services/matcher.py:44`): online
             // while the last heartbeat is within 90 seconds.
             let cutoff = Utc::now() - chrono::Duration::seconds(HEARTBEAT_GRACE_SECS);
-            let online = managed_runner_exists(
+            let online = pidash_agent_exists(
                 &sea_db,
                 ManagedPaused::NotPaused,
                 true,
@@ -1946,7 +1960,7 @@ async fn executor_options(
             // only when a runner is enrolled but none is online.
             let mut paused = false;
             if enrolled && !online {
-                paused = managed_runner_exists(
+                paused = pidash_agent_exists(
                     &sea_db,
                     ManagedPaused::Paused,
                     false,
@@ -1957,8 +1971,8 @@ async fn executor_options(
                 )
                 .await?;
             }
-            managed_runner_availability(
-                &settings.managed_runner,
+            pidash_agent_availability(
+                &settings.pidash_agent,
                 flags,
                 || llm_profile,
                 enrolled,
@@ -1966,8 +1980,8 @@ async fn executor_options(
                 paused,
             )
         }
-        _ => managed_runner_availability(
-            &settings.managed_runner,
+        _ => pidash_agent_availability(
+            &settings.pidash_agent,
             flags,
             || llm_profile,
             false,
@@ -1977,7 +1991,6 @@ async fn executor_options(
     };
     Ok(
         pidash_services::app_project::ser_project::project_executor_options(
-            &settings.cloud_agent,
             flags.copied(),
             flags.is_some(),
             || llm_usable,
@@ -2020,6 +2033,10 @@ async fn render_list_row(
     let cover_url =
         cover_image_url(pool, row.cover_image_asset_id, row.cover_image.as_deref()).await?;
     let timezone = actor.timezone;
+    // NEWPIDASH-278: validated settings with defaults filled in.
+    let settings = pidash_services::domain::project_settings::parse_row_settings(&row.settings)
+        .map(|parsed| pidash_services::domain::project_settings::render(&parsed.settings))
+        .map_err(|_| Denial::ServerError)?;
     let read = ProjectListRead {
         id: row.id.to_string(),
         is_favorite: Some(row.is_favorite),
@@ -2075,9 +2092,11 @@ async fn render_list_row(
         agent_ticking_enabled: row.agent_ticking_enabled,
         default_agent_executor: row.default_agent_executor.clone(),
         dedicated_runner_lost_action: row.dedicated_runner_lost_action.clone(),
+        default_work_type: row.default_work_type.clone(),
         agent_executor_options: options.to_vec(),
         next_work_item_sequence: sequence,
         members_can_edit_states: row.members_can_edit_states,
+        settings,
     };
     serde_json::to_string(&read).map_err(|_| Denial::ServerError)
 }
@@ -2140,6 +2159,10 @@ async fn render_current_instance(
     let detail = workspace_detail(pool, &row.workspace_id).await?;
     let options = executor_options(pool, state, &row.id, &row.workspace_id, None).await?;
     let timezone = actor.timezone;
+    // NEWPIDASH-278: validated settings with defaults filled in.
+    let settings = pidash_services::domain::project_settings::parse_row_settings(&row.settings)
+        .map(|parsed| pidash_services::domain::project_settings::render(&parsed.settings))
+        .map_err(|_| Denial::ServerError)?;
     let read = ProjectRead {
         id: row.id.to_string(),
         workspace_detail: detail,
@@ -2191,7 +2214,9 @@ async fn render_current_instance(
         agent_ticking_enabled: row.agent_ticking_enabled,
         default_agent_executor: row.default_agent_executor.clone(),
         dedicated_runner_lost_action: row.dedicated_runner_lost_action.clone(),
+        default_work_type: row.default_work_type.clone(),
         members_can_edit_states: row.members_can_edit_states,
+        settings,
     };
     let value = serde_json::to_value(&read).map_err(|_| Denial::ServerError)?;
     Ok(cpython_dumps(&value))
@@ -3739,6 +3764,7 @@ struct Validated {
     agent_ticking_enabled: Option<bool>,
     default_agent_executor: Option<String>,
     dedicated_runner_lost_action: Option<String>,
+    default_work_type: Option<String>,
     members_can_edit_states: Option<bool>,
     /// Writable on update (`update()` persists it; `save()` overwrites
     /// only `updated_by` — `models/base.py`). On create the crum
@@ -3815,6 +3841,7 @@ const WRITE_FIELDS: &[&str] = &[
     "agent_ticking_enabled",
     "default_agent_executor",
     "dedicated_runner_lost_action",
+    "default_work_type",
     "created_by",
     "updated_by",
     "workspace",
@@ -4232,6 +4259,23 @@ async fn validate_one_field(
                 Err(message) => return fail(message),
             }
         }
+        // `CharField(max_length=32, blank=True)`, then
+        // `validate_default_work_type` — a `ProjectSerializer` method, so
+        // the PUT (`ProjectListSerializer`) skips it (PDASHOSS01-234).
+        "default_work_type" => match validate_char(value, Some(32), true) {
+            Ok(text) => {
+                if mode != ValidateMode::Full
+                    && !text.is_empty()
+                    && !pidash_services::prompting::work_types::is_known(&text)
+                {
+                    return fail(
+                        pidash_services::prompting::work_types::unknown_work_type_message(),
+                    );
+                }
+                out.default_work_type = Some(text);
+            }
+            Err(messages) => return fail_many(messages),
+        },
         "members_can_edit_states" => match validate_bool(value) {
             Ok(flag) => out.members_can_edit_states = Some(flag),
             Err(message) => return fail(message),
@@ -4335,7 +4379,7 @@ fn run_serializer_validate(
     // (deprecated choices become local_runner) — no gate remains.
     // Unknown values pass through to the choice validation (400).
     if let Some(inner) = &validated.default_agent_executor {
-        if let Some(normalized) = pidash_types::dispatch::normalize_executor_write(inner) {
+        if let Some(normalized) = pidash_types::agent_runs::normalize_executor_write(inner) {
             validated.default_agent_executor = Some(normalized.value().to_owned());
         }
     }
@@ -4660,7 +4704,10 @@ async fn insert_project(
         Some(executor) => executor.to_owned(),
         None => {
             let candidate = state.settings().default_agent_executor.clone();
-            if ["local_runner", "cloud_agent", "managed_runner"].contains(&candidate.as_str()) {
+            // P1 (agent naming convention): `DEFAULT_AGENT_EXECUTOR=cloud_agent`
+            // no longer creates a cloud-default project — it falls through
+            // to `local_runner`.
+            if ["local_runner", "managed_runner"].contains(&candidate.as_str()) {
                 candidate
             } else {
                 "local_runner".to_owned()
@@ -4687,6 +4734,14 @@ async fn insert_project(
     // `save()` runs inside `transaction.atomic()`, clearing the previous
     // default *before* the insert — the partial unique index forbids two
     // live defaults even momentarily.
+    // `Project.save()` on create: a blank `default_work_type` resolves from
+    // the repo binding (PDASHOSS01-234).
+    let default_work_type = match validated.default_work_type.as_deref() {
+        Some(work_type) if !work_type.is_empty() => work_type,
+        _ => pidash_services::prompting::work_types::default_for_new_project(
+            validated.repo_url.as_deref(),
+        ),
+    };
     let logo_props = validated
         .logo_props
         .clone()
@@ -4758,6 +4813,7 @@ async fn insert_project(
                 .as_deref()
                 .unwrap_or(pidash_services::domain::projects::DEDICATED_RUNNER_LOST_ACTION_DEFAULT),
             members_can_edit_states: validated.members_can_edit_states.unwrap_or(true),
+            default_work_type,
             created_by: *actor_id,
             created_at: now,
             updated_at: now,
@@ -5075,6 +5131,10 @@ async fn apply_update(
         members_can_edit_states: validated
             .members_can_edit_states
             .unwrap_or(instance.members_can_edit_states),
+        default_work_type: validated
+            .default_work_type
+            .as_deref()
+            .unwrap_or(&instance.default_work_type),
         workspace_id: validated.workspace.unwrap_or(instance.workspace_id),
         deleted_at: validated.deleted_at.unwrap_or(None),
         updated_at: now,
@@ -5695,6 +5755,7 @@ fn paginate_order_column(key: &str) -> Result<proj_entity::Column, Denial> {
         "agent_ticking_enabled" => proj_entity::Column::AgentTickingEnabled,
         "default_agent_executor" => proj_entity::Column::DefaultAgentExecutor,
         "dedicated_runner_lost_action" => proj_entity::Column::DedicatedRunnerLostAction,
+        "default_work_type" => proj_entity::Column::DefaultWorkType,
         "created_by" => proj_entity::Column::CreatedById,
         "updated_by" => proj_entity::Column::UpdatedById,
         _ => return Err(Denial::ServerError),
@@ -5923,6 +5984,7 @@ fn order_column(key: &str) -> Result<&'static str, Denial> {
         "agent_test_default_interval_seconds" => Ok("p.agent_test_default_interval_seconds"),
         "agent_ticking_enabled" => Ok("p.agent_ticking_enabled"),
         "default_agent_executor" => Ok("p.default_agent_executor"),
+        "default_work_type" => Ok("p.default_work_type"),
         "created_by" => Ok("p.created_by_id"),
         "updated_by" => Ok("p.updated_by_id"),
         "is_favorite" => Ok("is_favorite"),
@@ -6244,10 +6306,25 @@ fn python_truthy(value: &Value) -> bool {
     }
 }
 
+/// Resolve a `PATCH projects/<pk>/` intake flag from the request body
+/// (NEWPIDASH-263, DIFF-30). Django reads only `inbox_view`
+/// (`app/views/project/base.py:342`); the canonical write key is the
+/// model field `intake_view` (`api/views/project.py:414`). The fixed
+/// Rust handler prefers `intake_view` and falls back to `inbox_view`
+/// so the old (and new) frontends that PATCH `inbox_view` keep
+/// working while `intake_view` PATCHes stop no-opping.
+fn resolve_patch_intake(data: &Map<String, Value>, stored: bool) -> Value {
+    data.get("intake_view")
+        .or_else(|| data.get("inbox_view"))
+        .cloned()
+        .unwrap_or(Value::Bool(stored))
+}
+
 /// `PATCH projects/<pk>/` (`base.py:314-380`): the admin-guard matrix
 /// (workspace OR project admin, else the decorator-body 403), the bare
-/// gets, the archived 400, the `inbox_view` → `intake_view` alias forced
-/// into the data, partial validation, the default-intake ensure, and the
+/// gets, the archived 400, the intake flag forced into the data
+/// (`intake_view` preferred, `inbox_view` fallback — NEWPIDASH-263,
+/// DIFF-30), partial validation, the default-intake ensure, and the
 /// re-fetch + `model_activity` 200.
 async fn project_patch(
     State(state): State<AppState>,
@@ -6286,13 +6363,14 @@ async fn project_patch(
             ARCHIVED_UPDATE_BODY.to_owned(),
         ));
     }
-    // `intake_view = request.data.get("inbox_view", project.intake_view)`,
-    // forced over any explicit `intake_view` key (`:348-350`); the
-    // intake gate below tests this RAW value's truthiness (`:358`).
-    let intake_raw = data
-        .get("inbox_view")
-        .cloned()
-        .unwrap_or(Value::Bool(instance.intake_view));
+    // Django `intake_view = request.data.get("inbox_view",
+    // project.intake_view)` (`:348-350`) forced over any explicit
+    // `intake_view` key, so `PATCH {intake_view: false}` no-opped.
+    // NEWPIDASH-263 (DIFF-30): prefer the canonical `intake_view`
+    // key and fall back to `inbox_view` for the old/new frontends
+    // that still PATCH it. The intake gate below tests this RAW
+    // value's truthiness (`:358`).
+    let intake_raw = resolve_patch_intake(&data, instance.intake_view);
     let mut aliased = data.clone();
     aliased.insert("intake_view".to_owned(), intake_raw.clone());
     let mut validated = match validate_project_input(
@@ -6314,8 +6392,43 @@ async fn project_patch(
         Err(Ok((status, body))) => return Err(Denial::Raw(status, body)),
         Err(Err(denial)) => return Err(denial),
     }
+    // NEWPIDASH-278: nested `settings` partial update. Not a DRF
+    // field — Django had no settings key — so `validate_project_input`
+    // ignores it and it is handled here: per-key permission (403),
+    // strict validation (400), then the atomic merge after the
+    // column writes below.
+    let settings_merge = match data.get("settings") {
+        None => None,
+        Some(fragment) => {
+            let project_role = i32::from(membership.project_role.unwrap_or(ROLE_GUEST as i16));
+            let workspace_role = i32::from(membership.workspace_role.unwrap_or(ROLE_GUEST as i16));
+            match pidash_services::domain::project_settings::authorize_and_validate(
+                fragment,
+                project_role,
+                workspace_role,
+            ) {
+                Ok(merge) => Some(merge),
+                Err(error) => {
+                    let status =
+                        StatusCode::from_u16(error.status()).unwrap_or(StatusCode::BAD_REQUEST);
+                    return Err(Denial::Raw(status, error.body()));
+                }
+            }
+        }
+    };
     let now = utc_now_micros();
     apply_update(&pool, &validated, &instance, &actor.id, now).await?;
+    if let Some(merge) = &settings_merge {
+        pidash_services::domain::project_settings::apply_settings_merge(
+            &sea_conn(&pool),
+            merge,
+            now,
+            actor.id,
+            project_id,
+        )
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    }
     // Python order (`base.py:356-367`): the intake ensure runs BEFORE the
     // scoped re-fetch, using the post-save in-memory name (DRF `update()`
     // setattr's the instance before `save()`, so that is the validated
@@ -6447,7 +6560,8 @@ async fn project_destroy(
 /// (`ProjectArchiveUnarchiveEndpoint.post`, `base.py:435-442`): stamp
 /// `archived_at`, soft-delete the workspace's favorites for the project
 /// (any entity type — the filter has none), and answer the Python-`str`
-/// timestamp.
+/// timestamp. NEWPIDASH-239: the same transaction also sets
+/// `enabled = false` on every live scheduler binding of the project.
 async fn archive_post(
     State(state): State<AppState>,
     extension: Option<axum::Extension<SessionHandle>>,
@@ -6464,6 +6578,17 @@ async fn archive_post(
         membership.workspace_role,
         membership.project_role,
     )?;
+    // Snapshot the workspace ids before the transaction so the favorites
+    // clear can use the snapshot the old order read after the stamp; the
+    // ids do not change inside the archive transaction.
+    let workspace_ids = ws_entity::Entity::find()
+        .select_only()
+        .column(ws_entity::Column::Id)
+        .filter(ws_entity::Column::Slug.eq(slug.clone()))
+        .into_tuple::<uuid::Uuid>()
+        .all(&sea_conn(&pool))
+        .await
+        .map_err(orm_denial)?;
     let row = proj_entity::Entity::find_by_id(project_id)
         .select_only()
         .column(proj_entity::Column::Id)
@@ -6476,35 +6601,39 @@ async fn archive_post(
         .map_err(orm_denial)?;
     row.ok_or(Denial::ObjectNotFound)?;
     let now = utc_now_micros();
+    let mut tx = pool.begin().await.map_err(db_denial)?;
     pidash_services::domain::projects::archive(
-        &pidash_db::pool::sea_orm_connection(&pool),
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
         project_id,
         now,
         actor.id,
     )
     .await
     .map_err(db_denial)?;
-    let db = sea_conn(&pool);
+    pidash_services::domain::projects::disable_project_bindings(
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
+        project_id,
+        now,
+        actor.id,
+    )
+    .await
+    .map_err(db_denial)?;
     let now_ts: sea_orm::prelude::DateTimeWithTimeZone = now.into();
-    let workspace_ids = ws_entity::Entity::find()
-        .select_only()
-        .column(ws_entity::Column::Id)
-        .filter(ws_entity::Column::Slug.eq(slug))
-        .into_tuple::<uuid::Uuid>()
-        .all(&db)
-        .await
-        .map_err(orm_denial)?;
-    pidash_db::entity::user_favorites::Entity::update_many()
-        .col_expr(
-            pidash_db::entity::user_favorites::Column::DeletedAt,
-            sea_orm::sea_query::Expr::value(now_ts),
-        )
-        .filter(pidash_db::entity::user_favorites::Column::ProjectId.eq(project_id))
-        .filter(pidash_db::entity::user_favorites::Column::DeletedAt.is_null())
-        .filter(pidash_db::entity::user_favorites::Column::WorkspaceId.is_in(workspace_ids))
-        .exec(&db)
-        .await
-        .map_err(orm_denial)?;
+    {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        pidash_db::entity::user_favorites::Entity::update_many()
+            .col_expr(
+                pidash_db::entity::user_favorites::Column::DeletedAt,
+                sea_orm::sea_query::Expr::value(now_ts),
+            )
+            .filter(pidash_db::entity::user_favorites::Column::ProjectId.eq(project_id))
+            .filter(pidash_db::entity::user_favorites::Column::DeletedAt.is_null())
+            .filter(pidash_db::entity::user_favorites::Column::WorkspaceId.is_in(workspace_ids))
+            .exec(&conn)
+            .await
+            .map_err(orm_denial)?;
+    }
+    tx.commit().await.map_err(db_denial)?;
     Ok(json_ok(format!(
         "{{\"archived_at\":{}}}",
         json_string(&django_str_datetime(&now))
@@ -7650,6 +7779,38 @@ mod tests {
         assert!(!python_truthy(&Value::Null));
         assert!(!python_truthy(&json!([])));
         assert!(!python_truthy(&json!({})));
+        // PATCH intake resolution (NEWPIDASH-263, DIFF-30): `intake_view`
+        // wins, `inbox_view` falls back, otherwise the stored value.
+        // `intake_view: false` on a stored `true` must resolve to
+        // `false` (the old `inbox_view`-only read no-opped here).
+        let map_of = |body: Value| body.as_object().unwrap().clone();
+        assert_eq!(
+            resolve_patch_intake(&map_of(json!({"intake_view": false})), true),
+            json!(false)
+        );
+        assert_eq!(
+            resolve_patch_intake(&map_of(json!({"intake_view": true})), false),
+            json!(true)
+        );
+        assert_eq!(
+            resolve_patch_intake(&map_of(json!({"inbox_view": false})), true),
+            json!(false)
+        );
+        assert_eq!(
+            resolve_patch_intake(
+                &map_of(json!({"intake_view": false, "inbox_view": true})),
+                true
+            ),
+            json!(false)
+        );
+        assert_eq!(
+            resolve_patch_intake(&map_of(json!({"name": "x"})), true),
+            json!(true)
+        );
+        assert_eq!(
+            resolve_patch_intake(&map_of(json!({"name": "x"})), false),
+            json!(false)
+        );
     }
 
     #[test]
@@ -7692,10 +7853,10 @@ mod live_tests {
     use std::sync::Arc;
 
     use super::*;
-    use pidash_services::dispatch::policy::UserFlags;
     use pidash_services::extensions::{
-        AgentModelProfile, AssistantModelSeam, SeamFuture, TitleError, TitleRequest,
+        AssistantModelSeam, PidashAgentProfile, SeamFuture, TitleError, TitleRequest,
     };
+    use pidash_services::run_creation::executor_policy::UserFlags;
 
     /// Overlay-shaped seam: a keyless viewer still counts as configured,
     /// and the desktop profile lane is available.
@@ -7712,20 +7873,21 @@ mod live_tests {
             Box::pin(async move { true })
         }
 
-        fn agent_model_profile(
+        fn pidash_agent_profile(
             &self,
             user_id: uuid::Uuid,
             has_api_key: bool,
-        ) -> SeamFuture<'_, AgentModelProfile> {
+        ) -> SeamFuture<'_, PidashAgentProfile> {
             let _ = (user_id, has_api_key);
             Box::pin(async move {
-                AgentModelProfile {
+                PidashAgentProfile {
                     available: true,
                     lane: "openhub".to_owned(),
                     base_url: "https://gateway.example.com".to_owned(),
                     model: "hub-default".to_owned(),
                     reason_code: String::new(),
                     top_up_url: String::new(),
+                    context_window: None,
                 }
             })
         }
@@ -7757,8 +7919,7 @@ mod live_tests {
 
     fn live_state(seam: Option<Arc<dyn AssistantModelSeam>>) -> AppState {
         let mut settings = pidash_db::config::Settings::test_defaults();
-        settings.cloud_agent.enabled = true;
-        settings.managed_runner.enabled = true;
+        settings.pidash_agent.enabled = true;
         let mut state = AppState::with_settings("test", settings);
         if let Some(seam) = seam {
             state = state.with_assistant_seam(seam);

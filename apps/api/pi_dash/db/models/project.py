@@ -188,6 +188,19 @@ class Project(BaseModel):
         choices=DedicatedRunnerLostAction.choices,
         default=DedicatedRunnerLostAction.FAIL_TO_BACKLOG,
     )
+    # Default work type for this project's issues — selects which per-work-type
+    # prompt guidance fills the stage recipes' slots (prompting/work_types.py).
+    # Blank means unset: `save()` resolves it at creation ("software" when a
+    # repo is bound, "general" otherwise), and a data migration stamped
+    # "software" on all pre-existing projects so their prompts are unchanged.
+    # Validated against the work-type registry at the serializer boundary
+    # rather than with model choices, so a new work type needs no migration.
+    default_work_type = models.CharField(max_length=32, blank=True, default="")
+    # Namespaced settings bag owned by the new system (NEWPIDASH-278);
+    # Django never reads or writes it beyond storing it. The constant
+    # default is metadata-only on Postgres 11+ and gives existing rows
+    # ``{}`` with no data migration (mirrors ``Profile.settings``).
+    settings = models.JSONField(default=dict)
 
     def __init__(self, *args, **kwargs):
         # Track if timezone is provided, if so, don't override it with the workspace timezone when saving
@@ -283,6 +296,12 @@ class Project(BaseModel):
         if is_creating and not self.is_timezone_provided:
             workspace = Workspace.objects.get(id=self.workspace_id)
             self.timezone = workspace.timezone
+
+        if is_creating and not self.default_work_type:
+            # Work-type keys are code-owned (prompting/work_types.py); the
+            # literals here avoid importing the prompting registry into the
+            # model layer.
+            self.default_work_type = "software" if self.repo_url else "general"
 
         if is_creating and not self.is_default:
             has_default = Project.objects.filter(

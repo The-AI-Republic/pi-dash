@@ -15,7 +15,6 @@ const deleteAsync = vi.fn(async () => undefined);
 
 const useDevMachineRunners = vi.fn();
 const updateAsync = vi.fn(async (_input: unknown) => undefined);
-const signOutAsync = vi.fn(async (_id: string) => undefined);
 const mergeAsync = vi.fn(async (_input: unknown) => undefined);
 
 vi.mock("../api/devMachines.js", () => ({
@@ -25,7 +24,6 @@ vi.mock("../api/devMachines.js", () => ({
   useRevokeDevMachine: () => ({ mutateAsync: revokeAsync }),
   useDeleteDevMachine: () => ({ mutateAsync: deleteAsync }),
   useUpdateDevMachine: () => ({ mutateAsync: updateAsync }),
-  useSignOutDevMachineEngine: () => ({ mutateAsync: signOutAsync }),
   useMergeDevMachine: () => ({ mutateAsync: mergeAsync }),
 }));
 
@@ -156,14 +154,12 @@ describe("DevMachinesContainer", () => {
     mount([workspace]);
     expect(useDevMachineRunners).toHaveBeenCalledWith("acme", "ws-id");
     fireEvent.click(screen.getAllByRole("button", { name: "Show runners and settings" })[0] as HTMLElement);
-    fireEvent.click(screen.getByRole("button", { name: "Pause the built-in engine" }));
+    fireEvent.click(screen.getByRole("button", { name: "Pause the Pi Dash Agent" }));
     await waitFor(() =>
       expect(updateAsync).toHaveBeenCalledWith({ machineId: "old-id", patch: { engine_paused_by_owner: true } })
     );
-    fireEvent.click(screen.getByRole("button", { name: "Sign out the engine" }));
-    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Sign out the engine" }));
-    await waitFor(() => expect(signOutAsync).toHaveBeenCalledWith("old-id"));
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    // The engine has no sign-in of its own: no button signs it out.
+    expect(screen.queryByRole("button", { name: "Sign out Pi Dash Agent" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Replaced by new box" }));
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Merge" }));
     await waitFor(() => expect(mergeAsync).toHaveBeenCalledWith({ sourceId: "old-id", targetId: "new-id" }));

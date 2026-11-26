@@ -679,21 +679,31 @@ impl PoolPrStore {
 }
 
 /// Map an entity row: the store's shape after the SeaORM conversion.
-fn pr_link_model_row(model: pidash_db::entity::github_pull_request_links::Model) -> PrLinkRow {
+/// PDASHOSS01-355: PR links live in `git_code_review_links`
+/// (provider='github'); `namespace` maps to `repo_owner`,
+/// `external_iid` to `pr_number`, `remote_updated_at` to
+/// `pr_updated_at`, and state `merged` collapses to `closed` for the
+/// GitHub shape.
+fn pr_link_model_row(model: pidash_db::entity::git_code_review_links::Model) -> PrLinkRow {
+    let state = if model.state == "merged" {
+        "closed".to_owned()
+    } else {
+        model.state.clone()
+    };
     PrLinkRow {
         id: model.id,
         project_id: model.project_id,
         issue_id: model.issue_id,
-        repo_owner: model.repo_owner,
-        repo_name: model.repo_name,
-        pr_number: i64::from(model.pr_number),
-        url: model.url,
-        title: model.title,
-        state: model.state,
+        repo_owner: model.namespace.clone(),
+        repo_name: model.repo_name.clone(),
+        pr_number: model.external_iid.parse::<i64>().unwrap_or(0),
+        url: model.url.clone(),
+        title: model.title.clone(),
+        state,
         merged: model.merged,
         draft: model.draft,
         pr_updated_at: model
-            .pr_updated_at
+            .remote_updated_at
             .map(|stamp| stamp.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)),
     }
 }
@@ -752,43 +762,49 @@ impl PrLinksStore for PoolPrStore {
         workspace_slug: &str,
         owner: &str,
     ) -> Result<Option<InstallationRow>, StoreError> {
-        // `INSTALLATION_LOOKUP_SQL`: live installation joined through the
-        // integration to the workspace, case-folded login, newest first.
-        use pidash_db::entity::{github_app_installations, workspace_integrations, workspaces};
+        // `INSTALLATION_LOOKUP_SQL`: live github_app account on the
+        // workspace, case-folded login, newest first (NEWPIDASH-210:
+        // reads git_provider_accounts since the sunset, not the legacy
+        // github_app_installations table).
+        use pidash_db::entity::{git_provider_accounts, workspaces};
         use sea_orm::sea_query::{Expr, Func};
         use sea_orm::{
             ColumnTrait as _, EntityTrait as _, JoinType, QueryFilter as _, QueryOrder as _,
             QuerySelect as _, RelationTrait as _,
         };
         let db = pidash_db::pool::sea_orm_connection(&self.pool);
-        let row: Option<(Uuid, i64)> = github_app_installations::Entity::find()
+        let row: Option<(Uuid, String)> = git_provider_accounts::Entity::find()
             .select_only()
-            .column(github_app_installations::Column::Id)
-            .column(github_app_installations::Column::InstallationId)
+            .column(git_provider_accounts::Column::Id)
+            .column(git_provider_accounts::Column::ExternalAccountId)
             .join(
                 JoinType::InnerJoin,
-                github_app_installations::Relation::WorkspaceIntegrations.def(),
+                git_provider_accounts::Relation::Workspaces.def(),
             )
-            .join(
-                JoinType::InnerJoin,
-                workspace_integrations::Relation::Workspaces.def(),
-            )
-            .filter(github_app_installations::Column::DeletedAt.is_null())
+            .filter(git_provider_accounts::Column::DeletedAt.is_null())
+            .filter(git_provider_accounts::Column::Provider.eq("github"))
+            .filter(git_provider_accounts::Column::HostUrl.eq("https://github.com"))
+            .filter(git_provider_accounts::Column::AuthType.eq("github_app"))
             .filter(workspaces::Column::Slug.eq(workspace_slug))
             .filter(
                 Expr::expr(Func::lower(Expr::col((
-                    github_app_installations::Entity,
-                    github_app_installations::Column::AccountLogin,
+                    git_provider_accounts::Entity,
+                    git_provider_accounts::Column::ExternalAccountLogin,
                 ))))
                 .eq(Func::lower(Expr::value(owner))),
             )
-            .order_by_desc(github_app_installations::Column::CreatedAt)
+            .order_by_desc(git_provider_accounts::Column::CreatedAt)
             .limit(1)
-            .into_tuple::<(Uuid, i64)>()
+            .into_tuple::<(Uuid, String)>()
             .one(&db)
             .await
             .map_err(|error| pr_store_error("installation lookup", error))?;
-        row.map(|(id, installation_id)| {
+        row.map(|(id, external_account_id)| {
+            let installation_id = external_account_id.parse::<i64>().map_err(|_| {
+                StoreError(format!(
+                    "installation lookup: invalid external_account_id {external_account_id:?}"
+                ))
+            })?;
             Ok(InstallationRow {
                 id,
                 installation_id,
@@ -832,22 +848,22 @@ impl PrLinksStore for PoolPrStore {
         name: &str,
         number: i64,
     ) -> Result<Option<PrLinkRow>, StoreError> {
-        let number_i32 = i32::try_from(number).map_err(|_| {
-            StoreError(format!(
-                "pr_number {number} out of range for integer column"
-            ))
-        })?;
-        use pidash_db::entity::github_pull_request_links;
+        // PDASHOSS01-355: generic `git_code_review_links` (provider
+        // 'github') is the source of truth; `external_iid` is the
+        // string form of the PR number.
+        use pidash_db::entity::git_code_review_links;
         use sea_orm::{
             ColumnTrait as _, EntityTrait as _, QueryFilter as _, QueryOrder as _, QuerySelect as _,
         };
         let db = pidash_db::pool::sea_orm_connection(&self.pool);
-        let model = github_pull_request_links::Entity::find()
-            .filter(github_pull_request_links::Column::DeletedAt.is_null())
-            .filter(github_pull_request_links::Column::RepoOwner.eq(owner))
-            .filter(github_pull_request_links::Column::RepoName.eq(name))
-            .filter(github_pull_request_links::Column::PrNumber.eq(number_i32))
-            .order_by_desc(github_pull_request_links::Column::CreatedAt)
+        let model = git_code_review_links::Entity::find()
+            .filter(git_code_review_links::Column::DeletedAt.is_null())
+            .filter(git_code_review_links::Column::Provider.eq("github"))
+            .filter(git_code_review_links::Column::HostUrl.eq("https://github.com"))
+            .filter(git_code_review_links::Column::Namespace.eq(owner))
+            .filter(git_code_review_links::Column::RepoName.eq(name))
+            .filter(git_code_review_links::Column::ExternalIid.eq(number.to_string()))
+            .order_by_desc(git_code_review_links::Column::CreatedAt)
             .limit(1)
             .one(&db)
             .await
@@ -892,17 +908,15 @@ impl PrLinksStore for PoolPrStore {
         actor_id: Option<Uuid>,
     ) -> Result<CreatePrLinkOutcome, StoreError> {
         let workspace_id = self.workspace_of(&new.project_id).await?;
-        let pr_number = i32::try_from(new.pr_number).map_err(|_| {
-            StoreError(format!(
-                "pr_number {} out of range for integer column",
-                new.pr_number
-            ))
-        })?;
-        use pidash_db::entity::github_pull_request_links;
+        // PDASHOSS01-355: insert into generic `git_code_review_links`
+        // (provider='github', namespace, external_iid string).
+        // `repo_external_id` is '' so the namespace conditional unique
+        // applies, matching the raw-SQL `PR_LINK_INSERT_SQL`.
+        use pidash_db::entity::git_code_review_links;
         use sea_orm::ActiveModelTrait as _;
         let db = pidash_db::pool::sea_orm_connection(&self.pool);
-        // `PR_LINK_INSERT_SQL`.
-        let model = github_pull_request_links::ActiveModel {
+        // `PR_LINK_INSERT_SQL` (generic).
+        let model = git_code_review_links::ActiveModel {
             id: sea_orm::Set(new.id),
             created_at: sea_orm::Set((*now).fixed_offset()),
             updated_at: sea_orm::Set((*now).fixed_offset()),
@@ -912,20 +926,25 @@ impl PrLinksStore for PoolPrStore {
             project_id: sea_orm::Set(new.project_id),
             workspace_id: sea_orm::Set(workspace_id),
             issue_id: sea_orm::Set(new.issue_id),
-            repo_owner: sea_orm::Set(new.repo_owner.clone()),
+            provider: sea_orm::Set("github".to_owned()),
+            host_url: sea_orm::Set("https://github.com".to_owned()),
+            namespace: sea_orm::Set(new.repo_owner.clone()),
             repo_name: sea_orm::Set(new.repo_name.clone()),
-            pr_number: sea_orm::Set(pr_number),
+            repo_external_id: sea_orm::Set(String::new()),
+            external_id: sea_orm::Set(String::new()),
+            external_iid: sea_orm::Set(new.pr_number.to_string()),
             url: sea_orm::Set(new.url.clone()),
             title: sea_orm::Set(new.title.clone()),
             state: sea_orm::Set(new.state.clone()),
             merged: sea_orm::Set(new.merged),
             draft: sea_orm::Set(new.draft),
-            pr_updated_at: sea_orm::Set(
+            remote_updated_at: sea_orm::Set(
                 new.pr_updated_at
                     .as_deref()
                     .and_then(parse_snapshot_dt)
                     .map(|stamp| stamp.fixed_offset()),
             ),
+            metadata: sea_orm::Set(serde_json::json!({})),
         };
         match model.insert(&db).await {
             Ok(_) => Ok(CreatePrLinkOutcome::Created(Box::new(PrLinkRow {
@@ -1084,25 +1103,29 @@ impl PrLinksStore for PoolPrStore {
         now: &chrono::DateTime<chrono::Utc>,
         actor_id: Option<Uuid>,
     ) -> Result<(), StoreError> {
-        use pidash_db::entity::github_pull_request_links;
+        // PDASHOSS01-355: soft-delete the generic row (provider
+        // 'github'), matching `PR_LINK_SOFT_DELETE_SQL`.
+        use pidash_db::entity::git_code_review_links;
         use sea_orm::sea_query::Expr;
         use sea_orm::{ColumnTrait as _, EntityTrait as _, QueryFilter as _};
         let db = pidash_db::pool::sea_orm_connection(&self.pool);
-        // `PR_LINK_SOFT_DELETE_SQL`.
-        github_pull_request_links::Entity::update_many()
+        // `PR_LINK_SOFT_DELETE_SQL` (generic).
+        git_code_review_links::Entity::update_many()
             .col_expr(
-                github_pull_request_links::Column::DeletedAt,
+                git_code_review_links::Column::DeletedAt,
                 Expr::value((*now).fixed_offset()),
             )
             .col_expr(
-                github_pull_request_links::Column::UpdatedAt,
+                git_code_review_links::Column::UpdatedAt,
                 Expr::value((*now).fixed_offset()),
             )
             .col_expr(
-                github_pull_request_links::Column::UpdatedById,
+                git_code_review_links::Column::UpdatedById,
                 Expr::value(actor_id),
             )
-            .filter(github_pull_request_links::Column::Id.eq(id))
+            .filter(git_code_review_links::Column::Id.eq(id))
+            .filter(git_code_review_links::Column::Provider.eq("github"))
+            .filter(git_code_review_links::Column::HostUrl.eq("https://github.com"))
             .exec(&db)
             .await
             .map_err(|error| pr_store_error("pr link delete", error))?;
@@ -1157,48 +1180,47 @@ mod tests {
 
     #[test]
     fn installation_lookup_join_shape() {
-        // `INSTALLATION_LOOKUP_SQL`: live installation joined through the
-        // integration to the workspace, case-folded login, newest first.
-        use pidash_db::entity::{github_app_installations, workspace_integrations, workspaces};
+        // `INSTALLATION_LOOKUP_SQL`: live github_app account on the
+        // workspace, case-folded login, newest first (NEWPIDASH-210:
+        // generic table, never the legacy github_app_installations).
+        use pidash_db::entity::{git_provider_accounts, workspaces};
         use sea_orm::sea_query::{Expr, Func};
         use sea_orm::{
             ColumnTrait, DbBackend, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect,
             QueryTrait, RelationTrait,
         };
-        let sql = github_app_installations::Entity::find()
+        let sql = git_provider_accounts::Entity::find()
             .select_only()
-            .column(github_app_installations::Column::Id)
-            .column(github_app_installations::Column::InstallationId)
+            .column(git_provider_accounts::Column::Id)
+            .column(git_provider_accounts::Column::ExternalAccountId)
             .join(
                 JoinType::InnerJoin,
-                github_app_installations::Relation::WorkspaceIntegrations.def(),
+                git_provider_accounts::Relation::Workspaces.def(),
             )
-            .join(
-                JoinType::InnerJoin,
-                workspace_integrations::Relation::Workspaces.def(),
-            )
-            .filter(github_app_installations::Column::DeletedAt.is_null())
+            .filter(git_provider_accounts::Column::DeletedAt.is_null())
+            .filter(git_provider_accounts::Column::Provider.eq("github"))
+            .filter(git_provider_accounts::Column::HostUrl.eq("https://github.com"))
+            .filter(git_provider_accounts::Column::AuthType.eq("github_app"))
             .filter(workspaces::Column::Slug.eq("ws"))
             .filter(
                 Expr::expr(Func::lower(Expr::col((
-                    github_app_installations::Entity,
-                    github_app_installations::Column::AccountLogin,
+                    git_provider_accounts::Entity,
+                    git_provider_accounts::Column::ExternalAccountLogin,
                 ))))
                 .eq(Func::lower(Expr::val("owner"))),
             )
-            .order_by_desc(github_app_installations::Column::CreatedAt)
+            .order_by_desc(git_provider_accounts::Column::CreatedAt)
             .limit(1)
             .build(DbBackend::Postgres)
             .to_string();
         assert!(
             sql.contains(
-                "INNER JOIN \"workspace_integrations\" ON \"github_app_installations\".\"workspace_integration_id\" = \"workspace_integrations\".\"id\""
+                "INNER JOIN \"workspaces\" ON \"git_provider_accounts\".\"workspace_id\" = \"workspaces\".\"id\""
             ) && sql.contains(
-                "INNER JOIN \"workspaces\" ON \"workspace_integrations\".\"workspace_id\" = \"workspaces\".\"id\""
-            ) && sql.contains(
-                "LOWER(\"github_app_installations\".\"account_login\") = LOWER('owner')"
-            ) && sql.contains("ORDER BY \"github_app_installations\".\"created_at\" DESC")
-                && sql.contains("LIMIT 1"),
+                "LOWER(\"git_provider_accounts\".\"external_account_login\") = LOWER('owner')"
+            ) && sql.contains("ORDER BY \"git_provider_accounts\".\"created_at\" DESC")
+                && sql.contains("LIMIT 1")
+                && !sql.contains("github_app_installations"),
             "installation lookup shape: {sql}"
         );
     }
@@ -1230,6 +1252,77 @@ mod tests {
                 && sql.ends_with("LIMIT 1"),
             "issue exists shape: {sql}"
         );
+    }
+
+    #[test]
+    fn pr_link_lookup_shape() {
+        // PDASHOSS01-355: `pr_link_by_pr` queries the generic table
+        // (provider 'github', namespace, external_iid string).
+        use pidash_db::entity::git_code_review_links;
+        use sea_orm::{
+            ColumnTrait, DbBackend, EntityTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
+        };
+        let sql = git_code_review_links::Entity::find()
+            .filter(git_code_review_links::Column::DeletedAt.is_null())
+            .filter(git_code_review_links::Column::Provider.eq("github"))
+            .filter(git_code_review_links::Column::HostUrl.eq("https://github.com"))
+            .filter(git_code_review_links::Column::Namespace.eq("owner"))
+            .filter(git_code_review_links::Column::RepoName.eq("repo"))
+            .filter(git_code_review_links::Column::ExternalIid.eq("7"))
+            .order_by_desc(git_code_review_links::Column::CreatedAt)
+            .limit(1)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.contains("\"provider\" = 'github'")
+                && sql.contains("\"host_url\" = 'https://github.com'")
+                && sql.contains("\"namespace\" = 'owner'")
+                && sql.contains("\"external_iid\" = '7'")
+                && !sql.contains("github_pull_request_links"),
+            "pr link lookup shape: {sql}"
+        );
+    }
+
+    #[test]
+    fn pr_link_model_row_maps_github_shape() {
+        // PDASHOSS01-355: namespace -> repo_owner, external_iid ->
+        // pr_number, merged collapses to closed.
+        use pidash_db::entity::git_code_review_links;
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-02T03:04:05+00:00")
+            .unwrap()
+            .fixed_offset();
+        let model = git_code_review_links::Model {
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+            id: Uuid::nil(),
+            provider: "github".to_owned(),
+            host_url: "https://github.com".to_owned(),
+            namespace: "acme".to_owned(),
+            repo_name: "repo".to_owned(),
+            repo_external_id: String::new(),
+            external_id: String::new(),
+            external_iid: "42".to_owned(),
+            url: "https://github.com/acme/repo/pull/42".to_owned(),
+            title: "T".to_owned(),
+            state: "merged".to_owned(),
+            merged: true,
+            draft: false,
+            remote_updated_at: Some(now),
+            metadata: serde_json::json!({}),
+            created_by_id: None,
+            issue_id: Uuid::nil(),
+            project_id: Uuid::nil(),
+            updated_by_id: None,
+            workspace_id: Uuid::nil(),
+        };
+        let row = pr_link_model_row(model);
+        assert_eq!(row.repo_owner, "acme");
+        assert_eq!(row.repo_name, "repo");
+        assert_eq!(row.pr_number, 42);
+        assert_eq!(row.state, "closed");
+        assert!(row.merged);
+        assert!(row.pr_updated_at.is_some());
     }
 
     #[test]
@@ -1268,7 +1361,8 @@ mod tests {
         let store = PoolPrStore::new(pool.clone(), PrLinksSurface::Relations);
 
         // Chain for `installation_for_account`: integration + api token
-        // + workspace integration + installation (mixed-case login).
+        // + workspace integration + github_app account (mixed-case login,
+        // NEWPIDASH-210: generic git_provider_accounts).
         let integration_id = Uuid::new_v4();
         let token_id = Uuid::new_v4();
         let workspace_integration_id = Uuid::new_v4();
@@ -1329,18 +1423,20 @@ mod tests {
             (hasher.finish() % 1_000_000 + 1).try_into().unwrap()
         };
         sqlx::query(
-            "INSERT INTO github_app_installations (id, created_at, updated_at, \
-             installation_id, account_login, account_type, repository_selection, \
-             repository_count, permissions, events, last_check_error, \
-             workspace_integration_id) VALUES ($1, now(), now(), $3, 'AcMe', 'User', 'all', \
-             1, '{}', '{}', '', $2)",
+            "INSERT INTO git_provider_accounts (id, created_at, updated_at, \
+             workspace_id, provider, host_url, auth_type, external_account_id, \
+             external_account_login, display_name, capabilities, credential_config, \
+             workspace_integration_id, status, verified_at, last_check_error, metadata) \
+             VALUES ($1, now(), now(), $2, 'github', 'https://github.com', 'github_app', \
+             $3, 'AcMe', 'AcMe', '{}', '{}', $4, 'connected', now(), '', '{}')",
         )
         .bind(installation_id)
+        .bind(world.workspace_id)
+        .bind(installation_number.to_string())
         .bind(workspace_integration_id)
-        .bind(installation_number)
         .execute(&pool)
         .await
-        .expect("seed installation");
+        .expect("seed installation account");
 
         let hit = store
             .installation_for_account(&world.workspace_slug, "acme")
@@ -1407,31 +1503,16 @@ mod tests {
             other => panic!("expected Conflict, got {other:?}"),
         }
 
-        let mirror = NewReviewLink {
-            id: Uuid::new_v4(),
-            project_id: world.project_id,
-            issue_id: world.issue_id,
-            namespace: "acme".to_owned(),
-            repo_name: "repo".to_owned(),
-            external_iid: "7".to_owned(),
-            url: "https://github.com/acme/repo/pull/7".to_owned(),
-            title: "Add the thing".to_owned(),
-            state: "open".to_owned(),
-            merged: false,
-            draft: true,
-            remote_updated_at: None,
-            metadata: serde_json::json!({"iid": "7"}),
-        };
-        store
-            .create_review_link(&mirror, &now, Some(world.user_id))
-            .await
-            .expect("review insert");
+        // PDASHOSS01-355: one row in the generic table. The review
+        // lookup finds the PR row itself (same id), not a second
+        // mirror row.
         let row = store
             .review_link_by_pr("acme", "repo", "7")
             .await
             .expect("review lookup")
             .expect("review row");
-        assert_eq!(row.metadata, serde_json::json!({"iid": "7"}));
+        assert_eq!(row.id, new.id);
+        assert_eq!(row.issue_id, world.issue_id);
         let update = ReviewMirrorFields {
             project_id: world.project_id,
             issue_id: world.issue_id,
@@ -1444,11 +1525,11 @@ mod tests {
             metadata: serde_json::json!({"iid": "7", "done": true}),
         };
         store
-            .update_review_link(mirror.id, &update, &now, Some(world.user_id))
+            .update_review_link(new.id, &update, &now, Some(world.user_id))
             .await
             .expect("review update");
         store
-            .delete_review_link(mirror.id, &now, Some(world.user_id))
+            .delete_review_link(new.id, &now, Some(world.user_id))
             .await
             .expect("review delete");
         assert!(store

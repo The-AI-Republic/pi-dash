@@ -26,7 +26,7 @@ use crate::cloud::http::{
     CreateRunnerRequest, MachineClient, PollMessage, SharedHttpTransport, TransportError,
     create_runner,
 };
-use crate::cloud::protocol::{CreateRunnerCmd, MachineMsg};
+use crate::cloud::protocol::{CreateRunnerCmd, MachineMsg, ReconfigureRunnerCmd};
 use crate::cloud::reconnect::{Backoff, jittered};
 use crate::config::schema::AgentKind;
 use crate::daemon::state::StateHandle;
@@ -62,8 +62,8 @@ impl MachineControl {
 
     /// Session lifecycle: pick a live workspace token → open with backoff
     /// → poll until evicted or an auth error → reopen. Uses the same
-    /// schedule as `HttpLoop` (PDASHOSS01-306): opens back off 30 s → 6 h,
-    /// polls 1 s → 6 h, both jittered, reset on success or a reconnect kick
+    /// schedule as `HttpLoop` (PDASHOSS01-306): opens back off 30 s → 5 m,
+    /// polls 1 s → 5 m, both jittered, reset on success or a reconnect kick
     /// (wake, network change, `pidash reconnect`).
     ///
     /// One session per machine, opened with any workspace's token (design
@@ -131,7 +131,10 @@ impl MachineControl {
                     resp.session_id
                 }
                 Err(e) if is_token_fatal(&e) => {
-                    tokens.mark_revoked(client.machine_token());
+                    tokens.mark_fatal(
+                        client.machine_token(),
+                        crate::daemon::workspace_tokens::fatal_reason(&e),
+                    );
                     tracing::warn!(
                         workspace = %workspace_label,
                         "machine session token rejected ({e}); reopening with another workspace's token"
@@ -141,6 +144,7 @@ impl MachineControl {
                 Err(e) => {
                     if is_machine_fatal(&e) {
                         tracing::error!("machine control session unrecoverable: {e}");
+                        tokens.mark_machine_removed();
                         return;
                     }
                     let delay = jittered(open_backoff.next_base());
@@ -195,7 +199,10 @@ impl MachineControl {
                         break 'poll;
                     }
                     Err(e) if is_token_fatal(&e) => {
-                        tokens.mark_revoked(client.machine_token());
+                        tokens.mark_fatal(
+                            client.machine_token(),
+                            crate::daemon::workspace_tokens::fatal_reason(&e),
+                        );
                         tracing::warn!(
                             workspace = %workspace_label,
                             "machine session token revoked ({e}); reopening with another workspace's token"
@@ -205,6 +212,7 @@ impl MachineControl {
                     Err(e) => {
                         if is_machine_fatal(&e) {
                             tracing::error!("machine control session unrecoverable: {e}");
+                            tokens.mark_machine_removed();
                             return;
                         }
                         let delay = jittered(poll_backoff.next_base());
@@ -227,7 +235,7 @@ impl MachineControl {
     /// Cache the engine pause fields a welcome frame carries, if any.
     fn note_welcome(&self, welcome: &serde_json::Value) {
         if let Ok(payload) =
-            serde_json::from_value::<crate::engine::api::MachinePayload>(welcome.clone())
+            serde_json::from_value::<crate::pidash_agent::api::MachinePayload>(welcome.clone())
         {
             self.spawn_ctx.engine.note_machine_payload(&payload);
         }
@@ -239,6 +247,9 @@ impl MachineControl {
         }
         match serde_json::from_value::<MachineMsg>(msg.body) {
             Ok(MachineMsg::CreateRunner(cmd)) => self.handle_create_runner(client, cmd).await,
+            Ok(MachineMsg::ReconfigureRunner(cmd)) => {
+                self.handle_reconfigure_runner(client, cmd).await
+            }
             Ok(MachineMsg::Welcome { .. }) | Ok(MachineMsg::Ping {}) => {}
             Ok(MachineMsg::ConfigPush {}) => {
                 tracing::debug!("config_push received; not implemented yet — acked");
@@ -280,6 +291,54 @@ impl MachineControl {
         }
     }
 
+    async fn handle_reconfigure_runner(&self, client: &MachineClient, cmd: ReconfigureRunnerCmd) {
+        let request_id = cmd.request_id.clone();
+        let runner_id = cmd.runner_id;
+        tracing::info!(%request_id, %runner_id, "cloud-driven reconfigure_runner received");
+        let outcome = self.reconfigure_runner_inner(cmd).await;
+        let body = match &outcome {
+            Ok(name) => serde_json::json!({
+                "status": "ok",
+                "runner_id": runner_id.to_string(),
+                "runner_name": name,
+            }),
+            Err(e) => serde_json::json!({
+                "status": "error",
+                "runner_id": runner_id.to_string(),
+                "error": format!("{e:#}"),
+            }),
+        };
+        if let Err(e) = &outcome {
+            tracing::warn!(%request_id, %runner_id, "reconfigure_runner failed: {e:#}");
+        }
+        if request_id.is_empty() {
+            return;
+        }
+        if let Err(e) = client.post_command_result(&request_id, &body).await {
+            tracing::warn!(%request_id, "posting command result failed: {e}");
+        }
+    }
+
+    /// Apply a cloud edit through the same in-process reconfigure as
+    /// `pidash runner set-working-dir`. Answers the runner's local name.
+    async fn reconfigure_runner_inner(&self, cmd: ReconfigureRunnerCmd) -> Result<String> {
+        let cfg = crate::config::file::load_config(&self.spawn_ctx.paths)?;
+        let current = cfg
+            .runners
+            .iter()
+            .find(|r| r.runner_id == cmd.runner_id)
+            .ok_or_else(|| anyhow::anyhow!("runner {} is not on this machine", cmd.runner_id))?;
+        let changes = reconfigure_changes(&cfg, current, &cmd);
+        if changes.is_empty() {
+            return Ok(current.name.clone());
+        }
+        let block = self
+            .spawn_ctx
+            .reconfigure_runner_by_id(cmd.runner_id, changes)
+            .await?;
+        Ok(block.name)
+    }
+
     async fn create_runner_inner(
         &self,
         session: &MachineClient,
@@ -289,7 +348,7 @@ impl MachineControl {
             anyhow::bail!("create_runner command missing project");
         }
         let agent_kind = parse_agent_kind(&cmd.agent)?;
-        let is_engine = agent_kind == AgentKind::Engine;
+        let is_engine = agent_kind == AgentKind::PidashAgent;
         // Held to the end: the engine reconcile must not see this row
         // before its block is written.
         let _engine_ops = if is_engine {
@@ -301,7 +360,7 @@ impl MachineControl {
         // computer already runs the engine for the project, the command is
         // already satisfied. Answer with that runner instead of creating
         // (and possibly rolling back) another.
-        if agent_kind == AgentKind::Engine
+        if agent_kind == AgentKind::PidashAgent
             && !cmd.workspace_slug.is_empty()
             && let Some(existing) =
                 existing_engine_runner(&self.spawn_ctx.paths, &cmd.workspace_slug, &cmd.project)?
@@ -319,7 +378,7 @@ impl MachineControl {
         }
         if is_engine {
             // Same checks as `EngineRunnerAdd`, before the server is called.
-            crate::engine::provision::ensure_engine_can_run(&self.spawn_ctx.engine.status())?;
+            crate::pidash_agent::provision::ensure_engine_can_run(&self.spawn_ctx.engine.status())?;
         }
         // The per-computer runner limit fails before anything is registered
         // (design §5): a cloud row created first and rolled back on the
@@ -347,7 +406,7 @@ impl MachineControl {
                 // The server names engine runners (design §5 "Naming").
                 name: (!is_engine && !cmd.name.is_empty()).then_some(cmd.name.as_str()),
                 pod: (!cmd.pod.is_empty()).then_some(cmd.pod.as_str()),
-                agent_kind: is_engine.then_some(crate::engine::api::ENGINE_AGENT_KIND),
+                agent_kind: is_engine.then_some(crate::pidash_agent::api::ENGINE_AGENT_KIND),
             },
         )
         .await
@@ -434,7 +493,7 @@ fn create_working_dir(
     if !cmd.working_dir.is_empty() {
         return Ok(Some(PathBuf::from(&cmd.working_dir)));
     }
-    if agent_kind != AgentKind::Engine {
+    if agent_kind != AgentKind::PidashAgent {
         return Ok(None);
     }
     let workspace = if resp.workspace_slug.is_empty() {
@@ -447,7 +506,7 @@ fn create_working_dir(
     } else {
         resp.project_identifier.as_str()
     };
-    crate::engine::workdir::allocate_engine_folder(paths, workspace, project).map(Some)
+    crate::pidash_agent::workdir::allocate_engine_folder(paths, workspace, project).map(Some)
 }
 
 /// The engine runner this computer already has for `workspace`/`project`.
@@ -461,12 +520,54 @@ fn existing_engine_runner(
     }
     let cfg = crate::config::file::load_config(paths)?;
     Ok(cfg.runners.into_iter().find(|r| {
-        r.agent.kind == AgentKind::Engine
+        r.agent.kind == AgentKind::PidashAgent
             && r.workspace_slug.as_deref() == Some(workspace)
             && r.project_slug
                 .as_deref()
                 .is_some_and(|p| p.eq_ignore_ascii_case(project))
     }))
+}
+
+/// The local changes a `reconfigure_runner` command asks for. The cloud
+/// always sends its name; it is applied only when it differs and no other
+/// runner on this machine already uses it (local names must be unique,
+/// and a clash must not block the rest of the edit).
+fn reconfigure_changes(
+    cfg: &crate::config::schema::Config,
+    current: &crate::config::schema::RunnerConfig,
+    cmd: &ReconfigureRunnerCmd,
+) -> crate::ipc::protocol::RunnerChanges {
+    let name = cmd
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && *name != current.name)
+        .filter(|name| {
+            let taken = cfg
+                .runners
+                .iter()
+                .any(|r| r.runner_id != current.runner_id && r.name == *name);
+            if taken {
+                tracing::warn!(
+                    runner = %current.name,
+                    "cloud name {name:?} is already used by another local runner; keeping the local name"
+                );
+            }
+            !taken
+        })
+        .map(str::to_string);
+    crate::ipc::protocol::RunnerChanges {
+        working_dir: cmd
+            .working_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|dir| !dir.is_empty())
+            .map(std::path::PathBuf::from),
+        name,
+        agent: cmd.agent.clone().filter(|agent| !agent.trim().is_empty()),
+        model: cmd.model.clone(),
+        reasoning_effort: cmd.reasoning_effort.clone(),
+    }
 }
 
 /// Kebab-case wire value → AgentKind, via the same clap ValueEnum
@@ -572,6 +673,7 @@ mod tests {
             cursor_agent: CursorAgentSection::default(),
             openclaw: OpenClawSection::default(),
             grok: GrokSection::default(),
+            antigravity: AntigravitySection::default(),
             muse_code: MuseCodeSection::default(),
             approval_policy: ApprovalPolicySection::default(),
         };
@@ -582,6 +684,7 @@ mod tests {
             cli: None,
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
         };
         crate::config::file::write_config(&paths, &cfg).unwrap();
         ensure_below_runner_cap(&paths).expect("one slot left");
@@ -589,6 +692,86 @@ mod tests {
         crate::config::file::write_config(&paths, &cfg).unwrap();
         let err = ensure_below_runner_cap(&paths).unwrap_err().to_string();
         assert!(err.contains("maximum of 50 runners"), "{err}");
+    }
+
+    #[test]
+    fn reconfigure_command_maps_to_local_changes() {
+        use crate::config::schema::*;
+        let tmp = tempfile::tempdir().unwrap();
+        let runner = |name: &str| RunnerConfig {
+            name: name.into(),
+            runner_id: Uuid::new_v4(),
+            workspace_slug: Some("acme".into()),
+            project_slug: Some("WEB".into()),
+            pod_id: None,
+            workspace: WorkspaceSection {
+                working_dir: tmp.path().join(name),
+            },
+            agent: AgentSection::default(),
+            codex: CodexSection::default(),
+            claude_code: ClaudeCodeSection::default(),
+            cursor_agent: CursorAgentSection::default(),
+            openclaw: OpenClawSection::default(),
+            grok: GrokSection::default(),
+            antigravity: AntigravitySection::default(),
+            muse_code: MuseCodeSection::default(),
+            approval_policy: ApprovalPolicySection::default(),
+        };
+        let cfg = Config {
+            version: 2,
+            daemon: Default::default(),
+            runners: vec![runner("alpha"), runner("beta")],
+            cli: None,
+            engine: Default::default(),
+            auth: Default::default(),
+            auth_event: None,
+        };
+        let alpha = &cfg.runners[0];
+        let cmd = |name: &str| ReconfigureRunnerCmd {
+            request_id: "rid".into(),
+            runner_id: alpha.runner_id,
+            name: Some(name.into()),
+            working_dir: Some(" /w ".into()),
+            agent: Some(String::new()),
+            model: Some(String::new()),
+            reasoning_effort: None,
+        };
+
+        // Same name: not a change. Blank agent: unchanged. "" model: default.
+        let changes = reconfigure_changes(&cfg, alpha, &cmd("alpha"));
+        assert_eq!(changes.name, None);
+        assert_eq!(changes.working_dir, Some(std::path::PathBuf::from("/w")));
+        assert_eq!(changes.agent, None);
+        assert_eq!(changes.model.as_deref(), Some(""));
+        assert_eq!(changes.reasoning_effort, None);
+
+        // A cloud rename follows, unless another local runner has the name.
+        assert_eq!(
+            reconfigure_changes(&cfg, alpha, &cmd("gamma"))
+                .name
+                .as_deref(),
+            Some("gamma")
+        );
+        assert_eq!(reconfigure_changes(&cfg, alpha, &cmd("beta")).name, None);
+    }
+
+    #[test]
+    fn reconfigure_message_parses() {
+        let id = Uuid::new_v4();
+        let msg: MachineMsg = serde_json::from_value(serde_json::json!({
+            "type": "reconfigure_runner",
+            "request_id": "rid",
+            "runner_id": id.to_string(),
+            "name": "alpha",
+            "model": "gpt-5.5",
+        }))
+        .unwrap();
+        let MachineMsg::ReconfigureRunner(cmd) = msg else {
+            panic!("wrong variant");
+        };
+        assert_eq!(cmd.runner_id, id);
+        assert_eq!(cmd.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(cmd.agent, None);
     }
 
     #[test]
@@ -604,6 +787,10 @@ mod tests {
         );
         assert_eq!(parse_agent_kind("open-claw").unwrap(), AgentKind::OpenClaw);
         assert_eq!(parse_agent_kind("grok").unwrap(), AgentKind::Grok);
+        assert_eq!(
+            parse_agent_kind("antigravity").unwrap(),
+            AgentKind::Antigravity
+        );
         assert_eq!(parse_agent_kind("muse-code").unwrap(), AgentKind::MuseCode);
         assert_eq!(parse_agent_kind("").unwrap(), AgentKind::default());
         assert!(parse_agent_kind("skynet").is_err());
@@ -794,6 +981,7 @@ mod tests {
         let daemon_state = StateHandle::new(crate::config::schema::Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: Default::default(),
             runners: vec![],
@@ -854,6 +1042,7 @@ mod tests {
         let daemon_state = StateHandle::new(crate::config::schema::Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: Default::default(),
             runners: vec![],
@@ -904,8 +1093,8 @@ mod tests {
     /// clash), not the generic data-dir default, and is named by the server.
     #[tokio::test]
     async fn engine_runners_created_by_machine_control_get_a_task_root_folder() {
-        use crate::config::schema::{Config, DaemonConfig, EngineCredential};
-        use crate::engine::test_server::{self, Handler};
+        use crate::config::schema::{Config, DaemonConfig, PidashAgentCredential};
+        use crate::pidash_agent::test_server::{self, Handler};
         let handler: Handler = Arc::new(|req| {
             if req.path == "/api/v1/runner/runners/" {
                 let body = req.json();
@@ -936,7 +1125,7 @@ mod tests {
         let cli = CliSection {
             token: Some("mt_acme".into()),
             workspace_slug: Some("acme".into()),
-            engine_credential: Some(EngineCredential {
+            engine_credential: Some(PidashAgentCredential {
                 token: "ec_live".into(),
                 expires_at: None,
             }),
@@ -957,6 +1146,7 @@ mod tests {
                 cli: Some(cli.clone()),
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
             },
         )
         .unwrap();
@@ -964,11 +1154,14 @@ mod tests {
         // Runners come up offline: only the mock is contacted.
         let mut ctx =
             RunnerSpawnCtx::for_tests_with_daemon(None, tokens.clone(), &paths, daemon, &[]);
-        ctx.engine = crate::engine::manager::EngineManager::new(
+        let binary = tmp.path().join("engine/0.153.4/pidash-agent-engine");
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, "engine fixture").unwrap();
+        ctx.engine = crate::pidash_agent::manager::PidashAgentManager::new(
             Some(&server.url),
             paths.clone(),
             tokens,
-            Some(tmp.path().join("engine/0.153.4/pidash-agent-engine")),
+            Some(binary),
         );
         let transport = SharedHttpTransport::new(server.url.clone()).unwrap();
         let control = MachineControl::new(
@@ -1067,7 +1260,7 @@ mod tests {
             ..cmd
         };
         assert_eq!(
-            create_working_dir(&paths, &explicit, &resp, AgentKind::Engine).unwrap(),
+            create_working_dir(&paths, &explicit, &resp, AgentKind::PidashAgent).unwrap(),
             Some(PathBuf::from("/srv/web"))
         );
     }
@@ -1130,7 +1323,7 @@ mod tests {
             "https://example.com",
             ApplyEnrollOptions {
                 working_dir: Some(tmp.path().join("wd")),
-                agent_kind: AgentKind::Engine,
+                agent_kind: AgentKind::PidashAgent,
                 model: None,
                 reasoning_effort: None,
             },

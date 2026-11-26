@@ -155,8 +155,11 @@ class Api:
     def get_workpad(self, slug: str, project_id: str, pk: str) -> httpx.Response:
         return self.client.get(self.wi(slug, project_id, pk) + "workpad/")
 
-    def patch_workpad(self, slug: str, project_id: str, pk: str, payload: dict) -> httpx.Response:
-        return self.client.patch(self.wi(slug, project_id, pk) + "workpad/", json=payload)
+    def patch_workpad(
+        self, slug: str, project_id: str, pk: str, payload: dict, run_id: str | None = None
+    ) -> httpx.Response:
+        headers = {"X-Pi-Dash-Run-Id": run_id} if run_id else None
+        return self.client.patch(self.wi(slug, project_id, pk) + "workpad/", json=payload, headers=headers)
 
     # -- relations ---------------------------------------------------------
 

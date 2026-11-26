@@ -16,7 +16,6 @@ const { contractMocks } = vi.hoisted(() => ({
     revokeDevMachine: vi.fn(),
     deleteDevMachine: vi.fn(),
     updateDevMachine: vi.fn(),
-    signOutDevMachineEngine: vi.fn(),
     mergeDevMachineInto: vi.fn(),
     listRunners: vi.fn(),
   },
@@ -38,7 +37,6 @@ const {
   useMergeDevMachine,
   useRevokeDevMachine,
   useRotateDevMachine,
-  useSignOutDevMachineEngine,
   useUpdateDevMachine,
 } = await import("./devMachines.js");
 const { runnersKeys } = await import("./keys.js");
@@ -131,29 +129,25 @@ describe("dev machine writers", () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: runnersKeys.all("acme") });
   });
 
-  it("writes settings, engine sign-out and merges, invalidating the subtree", async () => {
+  it("writes settings and merges, invalidating the subtree", async () => {
     contractMocks.updateDevMachine.mockResolvedValue({ id: "m-1" });
-    contractMocks.signOutDevMachineEngine.mockResolvedValue({ id: "m-1" });
     contractMocks.mergeDevMachineInto.mockResolvedValue({ id: "m-2" });
     const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
     const { result } = renderHook(
       () => ({
         update: useUpdateDevMachine("acme", "ws-id"),
-        signOut: useSignOutDevMachineEngine("acme", "ws-id"),
         merge: useMergeDevMachine("acme"),
       }),
       { wrapper: wrapper(queryClient) }
     );
     await result.current.update.mutateAsync({ machineId: "m-1", patch: { label: "Studio" } });
-    await result.current.signOut.mutateAsync("m-1");
     await result.current.merge.mutateAsync({ sourceId: "m-1", targetId: "m-2" });
     expect(contractMocks.updateDevMachine).toHaveBeenCalledWith(expect.anything(), "m-1", "ws-id", {
       label: "Studio",
     });
-    expect(contractMocks.signOutDevMachineEngine).toHaveBeenCalledWith(expect.anything(), "m-1", "ws-id");
     expect(contractMocks.mergeDevMachineInto).toHaveBeenCalledWith(expect.anything(), "m-1", "m-2");
-    expect(invalidate).toHaveBeenCalledTimes(3);
+    expect(invalidate).toHaveBeenCalledTimes(2);
   });
 
   it("rejects on a failed write so the caller can toast", async () => {

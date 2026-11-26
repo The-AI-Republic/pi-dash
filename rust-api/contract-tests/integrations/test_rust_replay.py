@@ -44,15 +44,17 @@ replay form. Signal-hook firing stays pinned on the source (needs an
 authenticated HTTP state transition); the delayed
 ``post_completion_comment`` tasks are proven executable by this replay.
 
-Ownership split (mirrors the worker registry on rust-dev): all 6 D-05
-task names are Rust-owned — the PIDASHCONV-147/148 ports implement the
-handlers (``crates/jobs/src/integrations/{git_sync,github_sync}.rs``)
-and PIDASHCONV-238 registers them in the ``pidash-api`` binary with
-live providers. Every test below therefore asserts the SAME row-level
-DB diffs as the Django oracle, seed for seed: fan-out attempt set,
-unknown-id no-ops (both providers), completion idempotency, auth
-error-record, setup-ordering pin, redelivery guards, github_app config
-sourcing. No skipped or weakened assertions.
+Ownership split (mirrors the worker registry): all 3 D-05
+git task names are Rust-owned — the PIDASHCONV-147/148 port implements
+the handlers in ``crates/jobs/src/integrations/git_sync.rs`` and
+PIDASHCONV-238 registers them in the ``pidash-api`` binary with live
+providers. Every test below therefore asserts the SAME row-level DB
+diffs as the Django oracle, seed for seed: fan-out attempt set,
+unknown-id no-ops, completion idempotency, auth error-record,
+setup-ordering pin, redelivery guards, github_app config sourcing. No
+skipped or weakened assertions. The legacy ``github_sync_task`` poller
+was deleted from the Rust worker (PDASHOSS01-358); its legs stay with
+the Django oracle (``test_single.py`` / ``test_fanout.py``) until 359.
 
 Residue: settled rows are acked (deleted), so the queue drains to
 zero actionable rows after each test; seeded domain rows are removed
@@ -78,9 +80,6 @@ from . import seed
 SYNC_ALL = "pi_dash.bgtasks.git_sync_task.sync_all_bindings"
 SYNC_ONE = "pi_dash.bgtasks.git_sync_task.sync_one_binding"
 POST_COMMENT = "pi_dash.bgtasks.git_sync_task.post_completion_comment"
-LEGACY_SYNC_ALL = "pi_dash.bgtasks.github_sync_task.sync_all_repos"
-LEGACY_SYNC_ONE = "pi_dash.bgtasks.github_sync_task.sync_one_repo"
-LEGACY_POST_COMMENT = "pi_dash.bgtasks.github_sync_task.post_completion_comment"
 
 
 def _publish_and_drain(task: str, args=None, kwargs=None, celery_id=None) -> str:
@@ -257,7 +256,6 @@ def test_rust_sync_one_unknown_id_is_noop(database_url):
 def test_rust_post_completion_unknown_id_is_noop(database_url):
     before = _counts(database_url)
     _publish_and_drain(POST_COMMENT, args=[str(uuid.uuid4())])
-    _publish_and_drain(LEGACY_POST_COMMENT, args=[str(uuid.uuid4())])
     assert _counts(database_url) == before
 
 
@@ -386,31 +384,6 @@ def test_rust_redelivered_unknown_sync_one_stays_noop(database_url):
     _publish_and_drain(SYNC_ONE, args=[unknown], celery_id=task_id)
     _publish_and_drain(SYNC_ONE, args=[unknown], celery_id=task_id)
     assert _counts(database_url) == before
-
-
-def test_rust_legacy_fanout_without_syncs_is_noop(database_url, chain):
-    # Mirror of test_legacy_fanout_without_syncs_is_noop: the legacy
-    # fan-out runs locally and finds nothing to sync.
-    before = db.fetchone(
-        database_url, "SELECT count(*) AS n FROM github_issue_syncs"
-    )["n"]
-    _publish_and_drain(LEGACY_SYNC_ALL)
-    after = db.fetchone(database_url, "SELECT count(*) AS n FROM github_issue_syncs")[
-        "n"
-    ]
-    assert after == before
-
-
-def test_rust_legacy_sync_one_unknown_id_is_noop(database_url):
-    # Mirror of test_legacy_sync_one_unknown_id_is_noop.
-    before = db.fetchone(
-        database_url, "SELECT count(*) AS n FROM github_issue_syncs"
-    )["n"]
-    _publish_and_drain(LEGACY_SYNC_ONE, args=[str(uuid.uuid4())])
-    after = db.fetchone(database_url, "SELECT count(*) AS n FROM github_issue_syncs")[
-        "n"
-    ]
-    assert after == before
 
 
 GITLAB_PLAIN_PAT = "contract-test-gitlab-pat-1470"

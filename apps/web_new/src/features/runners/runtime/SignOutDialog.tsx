@@ -3,27 +3,20 @@
 // See the LICENSE file for details.
 // The desktop's sign-out confirmation.
 //
-// Signing out of the app signs out only the app (design §4.6): Pi Dash on
-// this computer — the daemon, the built-in engine and every runner — stays
-// signed in, because it does not depend on the app. Two opt-ins, both
-// unticked every time the dialog opens:
-//
-// - "Delete chat history" removes this account's local chats;
-// - "Also sign out Pi Dash on this computer" runs `pidash auth logout`. Shown
-//   only when the computer's daemon is signed in as this account.
+// Signing out of the app signs out Pi Dash on this computer with it
+// (desktop_unified_signin §4): one sign-in, both directions. The only
+// opt-in left is "Also delete chat history" (unticked every time the
+// dialog opens); the computer logout is not optional any more.
 
 import { Button, Dialog, Switch } from "@pidash/kit";
 import * as React from "react";
 
 import type { RuntimeSignOutChoice } from "../../../core/session/index.js";
-import { canSignOutComputer } from "./service.js";
 import { registerSignOutPrompt } from "./signOutPrompt.js";
 
 export function RuntimeSignOutDialog(): React.ReactElement {
   const [isOpen, setIsOpen] = React.useState(false);
   const [deleteChatHistory, setDeleteChatHistory] = React.useState(false);
-  const [signOutComputer, setSignOutComputer] = React.useState(false);
-  const [offerComputer, setOfferComputer] = React.useState(false);
   const pending = React.useRef<((choice: RuntimeSignOutChoice | null) => void) | null>(null);
 
   const settle = React.useCallback((choice: RuntimeSignOutChoice | null): void => {
@@ -40,8 +33,6 @@ export function RuntimeSignOutDialog(): React.ReactElement {
       pending.current?.(null);
       pending.current = resolve;
       setDeleteChatHistory(false);
-      setSignOutComputer(false);
-      setOfferComputer(canSignOutComputer());
       setIsOpen(true);
     });
     return () => {
@@ -53,7 +44,7 @@ export function RuntimeSignOutDialog(): React.ReactElement {
   return (
     <Dialog
       title="Sign out?"
-      description="Signing out removes this account's credentials from this computer. Its chats with the built-in agent stay on this computer, hidden until the account signs in again."
+      description="Signing out removes this account's credentials from this computer. Its chats with the Pi Dash Agent stay on this computer, hidden until the account signs in again."
       open={isOpen}
       onOpenChange={() => settle(null)}
       actions={
@@ -61,10 +52,7 @@ export function RuntimeSignOutDialog(): React.ReactElement {
           <Button variant="ghost" onClick={() => settle(null)}>
             Cancel
           </Button>
-          <Button
-            variant="primary"
-            onClick={() => settle({ deleteChatHistory, signOutComputer: offerComputer && signOutComputer })}
-          >
+          <Button variant="primary" onClick={() => settle({ deleteChatHistory, signOutComputer: false })}>
             Sign out
           </Button>
         </>
@@ -83,22 +71,6 @@ export function RuntimeSignOutDialog(): React.ReactElement {
             <span className="text-caption text-(--text-muted)">Task folders are kept.</span>
           </div>
         </div>
-        {offerComputer ? (
-          <div className="flex items-center gap-(--space-3)">
-            <Switch
-              checked={signOutComputer}
-              onCheckedChange={setSignOutComputer}
-              label="Also sign out Pi Dash on this computer"
-              data-testid="runtime-sign-out-sign-out-computer"
-            />
-            <div className="flex flex-col">
-              <span className="text-body text-(--text)">Also sign out Pi Dash on this computer</span>
-              <span className="text-caption text-(--text-muted)">
-                The runners on this computer stop taking work until you sign in again.
-              </span>
-            </div>
-          </div>
-        ) : null}
       </div>
     </Dialog>
   );

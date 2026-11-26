@@ -27,6 +27,7 @@ import {
   listCommands,
 } from "../../../../shared/commands/index.js";
 import { sessionKeys, setSessionClient } from "../../../../core/session/index.js";
+import { issueKeys } from "../../../../features/issues/api/keys.js";
 import { ASYNC_QUERY_TIMEOUT_MS } from "../../../../testing/testBudget.js";
 import { projectIdentifier, Route } from "./$issueKey.js";
 
@@ -117,7 +118,9 @@ function issueRow() {
     link_count: 0,
     created_at: "2024-01-02T03:04:05Z",
     updated_at: "2024-02-03T04:05:06Z",
-    created_by: null,
+    // NEWPIDASH-261: fixtures model a default-policy project where the
+    // viewer (UUID) is the creator, so run controls are not run-blocked.
+    created_by: UUID,
     updated_by: null,
     is_draft: false,
     archived_at: null,
@@ -300,6 +303,9 @@ function renderBrowse(known: boolean, isEpic?: boolean, extras: BrowseExtras = {
     } else if (init.method === "POST" && url.includes(`/issues/${ISSUE_ID}/archive/`)) {
       status = 200;
       body = JSON.stringify({ archived_at: "2026-03-01" });
+    } else if (init.method === "POST" && url.endsWith("/subscribe/")) {
+      status = 200;
+      body = JSON.stringify({ id: UUID, subscriber: UUID });
     } else if (init.method !== "GET" && url.includes(`/issues/${ISSUE_ID}/`)) {
       status = 204;
       body = "";
@@ -563,7 +569,7 @@ function renderBrowse(known: boolean, isEpic?: boolean, extras: BrowseExtras = {
       <RouterProvider router={router} />
     </QueryClientProvider>
   );
-  return { router, calls };
+  return { router, calls, queryClient };
 }
 
 afterEach(() => {
@@ -966,6 +972,23 @@ describe("browse route", () => {
     expect(screen.queryByTestId("agent-status-panel")).toBeNull();
     expect(screen.queryByRole("button", { name: /re-tick/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /abort run/i })).toBeNull();
+  });
+
+  it("refreshes comments and activity with the detail (ISS-164)", async () => {
+    const user = userEvent.setup();
+    const { queryClient } = renderBrowse(true, undefined, { details: "member", me: true });
+    await findStrip();
+    // The agent-status poll rides this shared refresh, so a comment posted
+    // while a run is active joins the feed without a reload.
+    await screen.findByRole("button", { name: "Subscribe" });
+    const spy = vi.spyOn(queryClient, "invalidateQueries");
+    await user.click(screen.getByRole("button", { name: "Subscribe" }));
+    await waitFor(() => {
+      expect(spy).toHaveBeenCalledWith({ queryKey: issueKeys.comments("acme", PROJECT_ID, ISSUE_ID) });
+    });
+    expect(spy).toHaveBeenCalledWith({ queryKey: issueKeys.activity("acme", PROJECT_ID, ISSUE_ID) });
+    expect(spy).toHaveBeenCalledWith({ queryKey: issueKeys.detail("acme", ISSUE_ID) });
+    spy.mockRestore();
   });
 
   it("mounts the agent panel with its tiles and re-tick where runs exist (ISS-164)", async () => {

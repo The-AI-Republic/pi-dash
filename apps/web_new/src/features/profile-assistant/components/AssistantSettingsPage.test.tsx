@@ -46,6 +46,19 @@ vi.mock("../api/mutations.js", () => ({
   useRemoveToolServer: () => harness.removeServer,
 }));
 
+// Dictation ships hidden (DICTATION_UI_ENABLED); this suite switches it on
+// so the dormant UI stays covered, and pin the hidden default separately.
+const dictationUi = vi.hoisted(() => ({ enabled: true }));
+vi.mock("../../../shared/dictation/index.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../../shared/dictation/index.js")>();
+  return {
+    ...original,
+    get DICTATION_UI_ENABLED() {
+      return dictationUi.enabled;
+    },
+  };
+});
+
 import { AssistantSettingsPage } from "./AssistantSettingsPage.js";
 
 const SERVER_ID = "3f7c1d1e-0d1a-4c59-9f0b-6a2f3e4d5c6b";
@@ -110,6 +123,17 @@ describe("AssistantSettingsPage", () => {
     harness.voice = { data: undefined };
     render(<AssistantSettingsPage />);
     expect(screen.getByTestId("assistant-settings-loading")).toBeInTheDocument();
+  });
+
+  it("leaves the voice section out while dictation is switched off", () => {
+    dictationUi.enabled = false;
+    try {
+      render(<AssistantSettingsPage />);
+      expect(screen.getByTestId("assistant-llm")).toBeInTheDocument();
+      expect(screen.queryByTestId("assistant-voice")).toBeNull();
+    } finally {
+      dictationUi.enabled = true;
+    }
   });
 
   it("seeds every form from the member's reads", () => {

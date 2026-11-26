@@ -735,6 +735,7 @@ describe("desktop CLI tool bindings", () => {
       deviceCode: "device-1",
       cloudUrl: "https://app.example.test",
       workspace: "acme",
+      force: false,
     });
   });
 });

@@ -27,14 +27,19 @@ import * as React from "react";
 
 import { useCreateRunnerModel, useDeleteRunnerModel, useRunnerModels, useUpdateRunnerModel } from "../hooks.js";
 import {
+  OPENHUB_AGENT,
+  OPENHUB_DESCRIPTION,
+  OPENHUB_HEADING,
+  OPENHUB_NOTE,
+  OPENHUB_SLUG_HINT,
   RUNNER_MODEL_AGENTS,
-  RUNNER_MODEL_EFFORTS,
   RUNNER_MODEL_EFFORT_LABELS,
   RUNNER_MODELS_DELETE_NOTE,
   RUNNER_MODELS_DESCRIPTION,
   RUNNER_MODELS_EMPTY_TEXT,
   RUNNER_MODELS_HEADERS,
   RUNNER_MODELS_HEADING,
+  effortsForAgent,
   formatEfforts,
   formErrorMessage,
   nextSortOrder,
@@ -76,6 +81,8 @@ function effortCheckboxId(effort: string): string {
 
 function ModelDialog({
   title,
+  isOpenhub,
+  efforts: effortOptions,
   initial,
   pending,
   error,
@@ -83,6 +90,8 @@ function ModelDialog({
   onClose,
 }: {
   title: string;
+  isOpenhub: boolean;
+  efforts: readonly string[];
   initial: FormValues;
   pending: boolean;
   error: string | null;
@@ -91,7 +100,11 @@ function ModelDialog({
 }): React.ReactElement {
   const [model, setModel] = React.useState(initial.model);
   const [label, setLabel] = React.useState(initial.label);
-  const [efforts, setEfforts] = React.useState(initial.efforts);
+  // Keep only tiers this agent offers, so a stale stored tier is not re-sent
+  // (and refused) by an edit that never shows it.
+  const [efforts, setEfforts] = React.useState(
+    isOpenhub ? [] : initial.efforts.filter((effort) => effortOptions.includes(effort))
+  );
   const [preselected, setPreselected] = React.useState(initial.is_preselected);
 
   function toggleEffort(effort: string, checked: boolean): void {
@@ -109,47 +122,55 @@ function ModelDialog({
       <div data-testid="runner-models-dialog" className="flex flex-col gap-(--space-4)">
         <Input
           id="runner-models-model-input"
-          label="Model"
+          label={isOpenhub ? "Slug" : "Model"}
           data-testid="runner-models-model"
           value={model}
           onChange={(event) => setModel(event.target.value)}
-          placeholder="gpt-5.5"
+          placeholder={isOpenhub ? "openhub_free_llm" : "gpt-5.5"}
         />
+        {isOpenhub ? (
+          <p data-testid="runner-models-slug-hint" className="text-meta text-(--text-muted)">
+            {OPENHUB_SLUG_HINT}
+          </p>
+        ) : null}
         <Input
           id="runner-models-label-input"
           label="Label"
           data-testid="runner-models-label"
           value={label}
           onChange={(event) => setLabel(event.target.value)}
-          placeholder="GPT-5.5"
+          placeholder={isOpenhub ? "OpenHub free model" : "GPT-5.5"}
         />
-        <fieldset className="flex flex-col gap-(--space-2)">
-          <legend className="text-body font-medium text-(--text)">Reasoning efforts</legend>
-          {RUNNER_MODEL_EFFORTS.map((effort) => (
-            <label
-              key={effort}
-              htmlFor={effortCheckboxId(effort)}
-              className="text-body flex items-center gap-(--space-2) text-(--text)"
-            >
-              <input
-                id={effortCheckboxId(effort)}
-                type="checkbox"
-                data-testid={effortCheckboxId(effort)}
-                checked={efforts.includes(effort)}
-                onChange={(event) => toggleEffort(effort, event.target.checked)}
-              />
-              {RUNNER_MODEL_EFFORT_LABELS[effort] ?? effort}
-            </label>
-          ))}
-        </fieldset>
+        {isOpenhub || effortOptions.length === 0 ? null : (
+          <fieldset className="flex flex-col gap-(--space-2)">
+            <legend className="text-body font-medium text-(--text)">Reasoning efforts</legend>
+            {effortOptions.map((effort) => (
+              <label
+                key={effort}
+                htmlFor={effortCheckboxId(effort)}
+                className="text-body flex items-center gap-(--space-2) text-(--text)"
+              >
+                <input
+                  id={effortCheckboxId(effort)}
+                  type="checkbox"
+                  data-testid={effortCheckboxId(effort)}
+                  checked={efforts.includes(effort)}
+                  onChange={(event) => toggleEffort(effort, event.target.checked)}
+                />
+                {RUNNER_MODEL_EFFORT_LABELS[effort] ?? effort}
+              </label>
+            ))}
+          </fieldset>
+        )}
         <label className="text-body flex items-center gap-(--space-2) text-(--text)">
           <input
             type="checkbox"
             data-testid="runner-models-preselected"
+            data-testid-preselect-label={isOpenhub ? "default" : "preselect"}
             checked={preselected}
             onChange={(event) => setPreselected(event.target.checked)}
           />
-          Preselect for this agent
+          {isOpenhub ? "Default model" : "Preselect for this agent"}
         </label>
         {error !== null ? (
           <p data-testid="runner-models-form-error" role="alert" className="text-body text-(--danger)">
@@ -349,6 +370,8 @@ export function AdminRunnerModelsPage(): React.ReactElement {
   const [formError, setFormError] = React.useState<string | null>(null);
   const [pending, setPending] = React.useState(false);
 
+  const isOpenhubDialog = dialog !== null && dialog.agent === OPENHUB_AGENT;
+
   let body: React.ReactElement;
   if (catalog.isPending) {
     body = <ModelsSkeleton />;
@@ -405,6 +428,54 @@ export function AdminRunnerModelsPage(): React.ReactElement {
             }}
           />
         ))}
+        <section data-testid="runner-models-openhub-block" className="flex flex-col gap-(--space-2)">
+          <p data-testid="runner-models-openhub-description" className="text-body text-(--text-muted)">
+            {OPENHUB_DESCRIPTION}
+          </p>
+          <p data-testid="runner-models-openhub-note" className="text-meta text-(--text-muted)">
+            {OPENHUB_NOTE}
+          </p>
+          <AgentSection
+            key={OPENHUB_AGENT}
+            agent={OPENHUB_AGENT}
+            label={OPENHUB_HEADING}
+            rows={rowsForAgent(catalog.data.agents[OPENHUB_AGENT] ?? [], OPENHUB_AGENT)}
+            onAdd={(next) => {
+              setFormError(null);
+              setDialog({ kind: "add", agent: next });
+            }}
+            onEdit={(next, target) => {
+              setFormError(null);
+              setDialog({ kind: "edit", agent: next, row: target });
+            }}
+            onDelete={(target) => {
+              void deleteModel.mutateAsync(target.id);
+            }}
+            onToggle={(target, enabled) => {
+              void updateModel.mutateAsync({ id: target.id, patch: { is_enabled: enabled } });
+            }}
+            onPreselect={(target) => {
+              void updateModel.mutateAsync({ id: target.id, patch: { is_preselected: true } });
+            }}
+            onMove={(rows, index, direction) => {
+              const swap = swapSortOrders(rows, index, direction);
+              if (swap === null) return;
+              const current = rows[index];
+              const neighbour = rows[direction === "up" ? index - 1 : index + 1];
+              if (current === undefined || neighbour === undefined) return;
+              void (async () => {
+                await updateModel.mutateAsync({
+                  id: current.id,
+                  patch: { sort_order: neighbour.sort_order },
+                });
+                await updateModel.mutateAsync({
+                  id: neighbour.id,
+                  patch: { sort_order: current.sort_order },
+                });
+              })();
+            }}
+          />
+        </section>
       </div>
     );
   }
@@ -460,13 +531,15 @@ export function AdminRunnerModelsPage(): React.ReactElement {
       {dialog !== null ? (
         <ModelDialog
           title={dialog.kind === "add" ? "Add model" : "Edit model"}
+          isOpenhub={isOpenhubDialog}
+          efforts={effortsForAgent(dialog.agent)}
           initial={
             dialog.kind === "add"
               ? { model: "", label: "", efforts: [], is_preselected: false }
               : {
                   model: dialog.row.model,
                   label: dialog.row.label,
-                  efforts: [...dialog.row.reasoning_efforts],
+                  efforts: isOpenhubDialog ? [] : [...dialog.row.reasoning_efforts],
                   is_preselected: dialog.row.is_preselected,
                 }
           }

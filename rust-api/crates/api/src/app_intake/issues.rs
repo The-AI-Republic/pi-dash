@@ -88,7 +88,7 @@ use pidash_services::domain::issues::IssueFieldSet;
 use pidash_services::domain::transition::IssueTransitionHook;
 use pidash_services::domain::{self, WriteActor, WriteCtx, WriteScope};
 use pidash_services::orchestration::clock::ProjectClockPolicy;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::orchestration::StateRef;
 
 use super::{
@@ -141,6 +141,7 @@ pub struct IssueRow {
     pub assigned_runner_id: Option<Uuid>,
     pub created_via: Option<String>,
     pub agent_executor: Option<String>,
+    pub work_type: Option<String>,
     pub complexity_score: i32,
     pub workpad: String,
 }
@@ -182,6 +183,7 @@ impl IssueRow {
             assigned_runner_id: row.try_get("assigned_runner_id")?,
             created_via: row.try_get("created_via")?,
             agent_executor: row.try_get("agent_executor")?,
+            work_type: row.try_get("work_type")?,
             complexity_score: row.try_get("complexity_score")?,
             workpad: row.try_get("workpad")?,
         })
@@ -226,6 +228,7 @@ impl IssueRow {
             assigned_pod_id: self.assigned_pod_id,
             assigned_runner_id: self.assigned_runner_id,
             agent_executor: self.agent_executor.clone(),
+            work_type: self.work_type.clone(),
         }
     }
 }
@@ -323,6 +326,7 @@ fn issue_row_from(model: issue_entity::Model) -> IssueRow {
         assigned_runner_id: model.assigned_runner_id,
         created_via: model.created_via,
         agent_executor: model.agent_executor,
+        work_type: model.work_type,
         complexity_score: model.complexity_score,
         workpad: model.workpad,
     }
@@ -454,6 +458,7 @@ struct AnnotatedIssueRow {
     assigned_runner_id: Option<Uuid>,
     created_via: Option<String>,
     agent_executor: Option<String>,
+    work_type: Option<String>,
     complexity_score: i32,
     workpad: String,
     label_ids: Vec<Uuid>,
@@ -499,6 +504,7 @@ impl AnnotatedIssueRow {
                 assigned_runner_id: self.assigned_runner_id,
                 created_via: self.created_via,
                 agent_executor: self.agent_executor,
+                work_type: self.work_type,
                 complexity_score: self.complexity_score,
                 workpad: self.workpad,
             },
@@ -552,6 +558,7 @@ pub async fn fetch_issue_annotated(
             issue_entity::Column::AssignedRunnerId,
             issue_entity::Column::CreatedVia,
             issue_entity::Column::AgentExecutor,
+            issue_entity::Column::WorkType,
             issue_entity::Column::ComplexityScore,
             issue_entity::Column::Workpad,
         ])
@@ -634,6 +641,7 @@ struct DetailRow {
     i_assigned_runner_id: Option<Uuid>,
     i_created_via: Option<String>,
     i_agent_executor: Option<String>,
+    i_work_type: Option<String>,
     i_complexity_score: i32,
     i_workpad: String,
     label_ids: Vec<Uuid>,
@@ -695,6 +703,7 @@ impl DetailRow {
             assigned_runner_id: self.i_assigned_runner_id,
             created_via: self.i_created_via,
             agent_executor: self.i_agent_executor,
+            work_type: self.i_work_type,
             complexity_score: self.i_complexity_score,
             workpad: self.i_workpad,
         };
@@ -765,6 +774,7 @@ pub async fn fetch_detail(
         )
         .column_as(issue_entity::Column::CreatedVia, "i_created_via")
         .column_as(issue_entity::Column::AgentExecutor, "i_agent_executor")
+        .column_as(issue_entity::Column::WorkType, "i_work_type")
         .column_as(issue_entity::Column::ComplexityScore, "i_complexity_score")
         .column_as(issue_entity::Column::Workpad, "i_workpad")
         .column_as(label_ids_annotation(), "label_ids")
@@ -1401,6 +1411,7 @@ pub struct ValidatedIssue {
     pub type_id: Option<Option<Uuid>>,
     pub assigned_pod_id: Option<Option<Uuid>>,
     pub agent_executor: Option<Option<String>>,
+    pub work_type: Option<Option<String>>,
     pub git_work_branch: Option<String>,
     pub created_via: Option<Option<String>>,
     pub assignee_ids: Option<Vec<Uuid>>,
@@ -1556,7 +1567,28 @@ pub async fn validate_issue_fields(
         }
     }
     if let Some(value) = input.get("sequence_id") {
-        out.sequence_id = validate_integer(errors, "sequence_id", value, false);
+        // Model `IntegerField`: DRF adds `Min/MaxValueValidator(±2^31)`
+        // on top of the integer parse, so out-of-int4 input 400s with
+        // the bound message instead of passing through to the write
+        // (where `as i32` used to wrap it — NEWPIDASH-311).
+        match validate_integer(errors, "sequence_id", value, false) {
+            Some(sequence) if sequence > i32::MAX as i64 => {
+                push_error(
+                    errors,
+                    "sequence_id",
+                    "Ensure this value is less than or equal to 2147483647.".to_owned(),
+                );
+            }
+            Some(sequence) if sequence < i32::MIN as i64 => {
+                push_error(
+                    errors,
+                    "sequence_id",
+                    "Ensure this value is greater than or equal to -2147483648.".to_owned(),
+                );
+            }
+            Some(sequence) => out.sequence_id = Some(sequence),
+            None => {}
+        }
     }
     // `""` clears like null on every scalar pk arm below: DRF coerces
     // it to `None` before validation, and each key here is
@@ -1686,6 +1718,13 @@ pub async fn validate_issue_fields(
                     .map(|choice| normalize_executor_write(Some(choice)));
         }
     }
+    if let Some(value) = input.get("work_type") {
+        if value.is_null() {
+            out.work_type = Some(None);
+        } else {
+            out.work_type = validate_char(errors, "work_type", value, 32, true, false).map(Some);
+        }
+    }
     if let Some(value) = input.get("git_work_branch") {
         match validate_char(errors, "git_work_branch", value, 128, true, false) {
             Some(branch)
@@ -1811,7 +1850,7 @@ pub struct IssueObjectValidation {
 
 /// Whether the stored issue is actively synced (`_issue_is_actively_synced`,
 /// `serializers/issue.py:63-76`): empty `external_source` short-circuits
-/// before any query.
+/// before any query. Git-only after PDASHOSS01-354.
 pub async fn is_synced(pool: &PgPool, issue: &IssueRow) -> Result<bool, Denial> {
     let Some(source) = issue.external_source.as_deref() else {
         return Ok(false);
@@ -1819,9 +1858,10 @@ pub async fn is_synced(pool: &PgPool, issue: &IssueRow) -> Result<bool, Denial> 
     if source.is_empty() {
         return Ok(false);
     }
-    // No `is_synced` annotation rides these handlers, so the sync tables
-    // decide.
-    use pidash_db::entity::{git_issue_syncs as git_entity, github_issue_syncs as gh_entity};
+    // No `is_synced` annotation rides these handlers, so the sync table
+    // decides (generic `git_issue_syncs`, provider='github' rows included;
+    // legacy GitHub tables sunset, PDASHOSS01-354).
+    use pidash_db::entity::git_issue_syncs as git_entity;
     let db = sea_conn(pool);
     let git = git_entity::Entity::find()
         .filter(git_entity::Column::IssueId.eq(issue.id))
@@ -1831,18 +1871,7 @@ pub async fn is_synced(pool: &PgPool, issue: &IssueRow) -> Result<bool, Denial> 
         .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-    if git.is_some() {
-        return Ok(true);
-    }
-    let github = gh_entity::Entity::find()
-        .filter(gh_entity::Column::IssueId.eq(issue.id))
-        .select_only()
-        .column(gh_entity::Column::IssueId)
-        .into_tuple::<Uuid>()
-        .one(&db)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    Ok(github.is_some())
+    Ok(git.is_some())
 }
 
 /// Table names for the sync probes above live behind Django model
@@ -1974,6 +2003,19 @@ pub async fn validate_issue_object(
             }
             // Store the normalized value (`attrs["agent_executor"]`).
             translated_executor = translated.stored;
+        }
+    }
+
+    // Work type (PDASHOSS01-234): `""` normalizes to the inherit state
+    // (`None`); a truthy key must be registered.
+    // The `""` → `None` normalization lands at the save.
+    if let Some(Some(work_type)) = validated.work_type.as_ref() {
+        if !work_type.is_empty() && !pidash_services::prompting::work_types::is_known(work_type) {
+            push_error(
+                errors,
+                "work_type",
+                pidash_services::prompting::work_types::unknown_work_type_message(),
+            );
         }
     }
 
@@ -2200,7 +2242,7 @@ async fn validate_executor(
         );
         return Ok(Some(ExecutorTranslation { stored: None }));
     }
-    let normalized = pidash_types::dispatch::normalize_executor_write(&value)
+    let normalized = pidash_types::agent_runs::normalize_executor_write(&value)
         .expect("known value parses")
         .value()
         .to_owned();
@@ -2338,7 +2380,10 @@ pub async fn apply_issue_update(
         .unwrap_or_else(|| issue.external_id.clone());
     fields.sequence_id = validated
         .sequence_id
-        .map(|sequence| sequence as i32)
+        // Validated to int4 above, so the checked conversion cannot
+        // fail; the fallback keeps a corrupt value out even if a new
+        // caller widens the range (NEWPIDASH-311).
+        .map(|sequence| i32::try_from(sequence).unwrap_or(issue.sequence_id))
         .unwrap_or(issue.sequence_id);
     fields.state_id = validated.state_id.unwrap_or(issue.state_id);
     fields.parent_id = validated.parent_id.unwrap_or(issue.parent_id);
@@ -2359,6 +2404,11 @@ pub async fn apply_issue_update(
         .created_via
         .clone()
         .unwrap_or_else(|| issue.created_via.clone());
+    fields.work_type = validated
+        .work_type
+        .clone()
+        .map(|work_type| work_type.filter(|work_type| !work_type.is_empty()))
+        .unwrap_or_else(|| issue.work_type.clone());
     fields.updated_at = now;
     let prev_state = issue.state_id;
     let m2m_audit = (issue.created_by_id, issue.updated_by_id);
@@ -3028,12 +3078,13 @@ async fn fetch_ticker_owned(
         .column(proj_entity::Column::AgentReviewDefaultIntervalSeconds)
         .column(proj_entity::Column::AgentTestDefaultIntervalSeconds)
         .column(proj_entity::Column::AgentTickingEnabled)
-        .into_tuple::<(i32, i32, i32, i32, bool)>()
+        .column(proj_entity::Column::Settings)
+        .into_tuple::<(i32, i32, i32, i32, bool, serde_json::Value)>()
         .one(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-    let (pool_size, impl_interval, review_interval, test_interval, ticking_enabled) =
-        policy_row.unwrap_or((10, 10800, 10800, 10800, true));
+    let (pool_size, impl_interval, review_interval, test_interval, ticking_enabled, settings) =
+        policy_row.unwrap_or((10, 10800, 10800, 10800, true, serde_json::Value::Null));
     let state: Option<(String, String)> = match issue.state_id {
         None => None,
         Some(state_id) => {
@@ -3081,7 +3132,9 @@ async fn fetch_ticker_owned(
             agent_default_interval_seconds: Some(i64::from(impl_interval)),
             agent_review_default_interval_seconds: Some(i64::from(review_interval)),
             agent_test_default_interval_seconds: Some(i64::from(test_interval)),
-        },
+            ..Default::default()
+        }
+        .with_stages(&settings),
         state_group,
         state_name,
     }))
@@ -3278,6 +3331,7 @@ pub async fn render_issue_detail(
         "agent_executor".to_owned(),
         opt_string(&issue.agent_executor),
     );
+    map.insert("work_type".to_owned(), opt_string(&issue.work_type));
     map.insert(
         "label_ids".to_owned(),
         label_ids
@@ -4413,7 +4467,9 @@ pub async fn collection_list(
     // `Project.objects.get(pk=...)` (`:182`) is subsumed by the gate's
     // tenant lookup (same 404 when the row is gone).
     let today = Utc::now().with_timezone(&gate.timezone).date_naive();
-    let compiled = match compile_filter(&query, today) {
+    // Day filters truncate in the actor's zone (Django `TimezoneMixin` +
+    // `TruncDate`), not UTC — NEWPIDASH-310, mirroring NEWPIDASH-211.
+    let compiled = match compile_filter(&query, today, &gate.timezone) {
         Ok(compiled) => compiled,
         Err(response) => return response,
     };
@@ -4508,17 +4564,25 @@ pub async fn collection_list(
     // (`div_ceil` is unstable on this toolchain; the manual form matches
     // `math.ceil` for non-negative inputs.)
     let total_pages = (total + page.limit - 1) / page.limit;
-    let next_cursor = format!("{}:{}:0", page.limit, page.page + 1);
-    let prev_cursor = format!("{}:{}:1", page.limit, page.page - 1);
+    // Cursor arithmetic runs in `i128` and renders decimally: a crafted
+    // `cursor` can carry `i64::MAX`, and Django's unbounded ints keep
+    // counting (`next` becomes `...808:0`). The DB offset itself stays
+    // saturated in `i64` (`list_page`). (`total_pages` needs no guard:
+    // `total` is a real row count, `limit` is within `1..=1000`.)
+    let next_page = i128::from(page.page) + 1;
+    let prev_page = i128::from(page.page) - 1;
+    let next_cursor = format!("{}:{}:0", page.limit, next_page);
+    let prev_cursor = format!("{}:{}:1", page.limit, prev_page);
     // `next.has_results` is `page_results.count() > limit` over the
     // over-fetched window — exactly `total > offset + limit`.
+    let next_page_results = i128::from(total) > i128::from(page.offset) + i128::from(page.limit);
     let body = pidash_services::app_issues::envelope(
         None,
         None,
         total,
         &next_cursor,
         &prev_cursor,
-        total > page.offset + page.limit,
+        next_page_results,
         page.page > 0,
         raw_rows.len(),
         total_pages,
@@ -4674,7 +4738,11 @@ fn through_join(kind: JoinType, table: &'static str) -> FilterJoin {
 /// joins are INNER; an `__isnull` lookup on a relation forces that
 /// relation's join LEFT.
 #[allow(clippy::result_large_err)]
-fn compile_filter(query: &QueryMap, today: chrono::NaiveDate) -> Result<CompiledFilter, Response> {
+fn compile_filter(
+    query: &QueryMap,
+    today: chrono::NaiveDate,
+    timezone: &chrono_tz::Tz,
+) -> Result<CompiledFilter, Response> {
     let mut params = std::collections::HashMap::new();
     for key in ISSUE_FILTER_KEYS {
         if let Some(last) = query_last(query, key) {
@@ -4743,7 +4811,7 @@ fn compile_filter(query: &QueryMap, today: chrono::NaiveDate) -> Result<Compiled
     let mut next = 3usize;
     let mut parts = Vec::new();
     for (name, value) in predicates {
-        match compile_predicate(name, value, &mut binds, &mut next)? {
+        match compile_predicate(name, value, &mut binds, &mut next, timezone)? {
             Some(sql) => parts.push(sql),
             None => return Err(Denial::ServerError.into_response()),
         }
@@ -4768,6 +4836,7 @@ fn compile_predicate(
     value: &FilterValue,
     binds: &mut Vec<OwnedBind>,
     next: &mut usize,
+    timezone: &chrono_tz::Tz,
 ) -> Result<Option<String>, Response> {
     // `__isnull` flags.
     if let Some(path) = name.strip_suffix("__isnull") {
@@ -4852,10 +4921,10 @@ fn compile_predicate(
             }
             Ok(Some(format!("{column} IN ({})", holders.join(","))))
         }
-        FilterValue::Text(text) => compile_text_predicate(name, text, binds, next),
+        FilterValue::Text(text) => compile_text_predicate(name, text, binds, next, timezone),
         FilterValue::Flag(_) => Err(Denial::ServerError.into_response()),
         FilterValue::Day(day) => {
-            let (column, operator) = match day_comparison(name) {
+            let (column, operator) = match day_comparison(name, binds, next, timezone) {
                 Some(pair) => pair,
                 None => return Ok(None),
             };
@@ -4929,15 +4998,38 @@ fn strings_in_column(name: &str) -> Option<&'static str> {
     })
 }
 
+/// A `__date` term truncated in `timezone`: `("issues".<column> AT TIME
+/// ZONE $N)::date` with the zone bound as a parameter (it comes from a
+/// parsed `Tz`, so it is a valid IANA name either way). Django's
+/// `__date` lookup is `TruncDate`, whose `get_tzname()` returns the
+/// `TimezoneMixin`-activated actor zone.
+fn zoned_date_column(
+    binds: &mut Vec<OwnedBind>,
+    next: &mut usize,
+    column: &str,
+    timezone: &chrono_tz::Tz,
+) -> String {
+    let holder = placeholder(next);
+    binds.push(OwnedBind::Text(timezone.name().to_owned()));
+    format!("(\"issues\".\"{column}\" AT TIME ZONE {holder})::date")
+}
+
 /// `(column, operator)` for `Day` predicates (`__gte` / `__lte`).
-fn day_comparison(name: &str) -> Option<(&'static str, &'static str)> {
+/// The `__date` terms truncate in `timezone`; `start_date` /
+/// `target_date` are plain date columns and need no truncation.
+fn day_comparison(
+    name: &str,
+    binds: &mut Vec<OwnedBind>,
+    next: &mut usize,
+    timezone: &chrono_tz::Tz,
+) -> Option<(String, &'static str)> {
     let (term, operator) = name.rsplit_once("__")?;
     let column = match term {
-        "issue__created_at__date" => "\"issues\".\"created_at\"::date",
-        "issue__updated_at__date" => "\"issues\".\"updated_at\"::date",
-        "issue__completed_at__date" => "\"issues\".\"completed_at\"::date",
-        "issue__start_date" => "\"issues\".\"start_date\"",
-        "issue__target_date" => "\"issues\".\"target_date\"",
+        "issue__created_at__date" => zoned_date_column(binds, next, "created_at", timezone),
+        "issue__updated_at__date" => zoned_date_column(binds, next, "updated_at", timezone),
+        "issue__completed_at__date" => zoned_date_column(binds, next, "completed_at", timezone),
+        "issue__start_date" => "\"issues\".\"start_date\"".to_owned(),
+        "issue__target_date" => "\"issues\".\"target_date\"".to_owned(),
         _ => return None,
     };
     let operator = match operator {
@@ -4950,13 +5042,15 @@ fn day_comparison(name: &str) -> Option<(&'static str, &'static str)> {
 
 /// Text predicates: `name__icontains`, explicit date bounds
 /// (`__gte`/`__lte` on a `__date` term or plain date term), and the
-/// single-value `__contains` form.
+/// single-value `__contains` form. The `__date` terms truncate in
+/// `timezone` (Django `TruncDate` under the activated actor zone).
 #[allow(clippy::result_large_err)]
 fn compile_text_predicate(
     name: &str,
     text: &str,
     binds: &mut Vec<OwnedBind>,
     next: &mut usize,
+    timezone: &chrono_tz::Tz,
 ) -> Result<Option<String>, Response> {
     if name == "issue__name__icontains" {
         // Django `icontains`: LIKE with `\`, `%`, `_` escaped.
@@ -4978,21 +5072,17 @@ fn compile_text_predicate(
         _ => return Ok(None),
     };
     let column = match term {
-        "issue__created_at__date" => "\"issues\".\"created_at\"::date",
-        "issue__updated_at__date" => "\"issues\".\"updated_at\"::date",
-        "issue__completed_at__date" => "\"issues\".\"completed_at\"::date",
-        "issue__start_date" => "\"issues\".\"start_date\"",
-        "issue__target_date" => "\"issues\".\"target_date\"",
+        "issue__created_at__date" => zoned_date_column(binds, next, "created_at", timezone),
+        "issue__updated_at__date" => zoned_date_column(binds, next, "updated_at", timezone),
+        "issue__completed_at__date" => zoned_date_column(binds, next, "completed_at", timezone),
+        "issue__start_date" => "\"issues\".\"start_date\"".to_owned(),
+        "issue__target_date" => "\"issues\".\"target_date\"".to_owned(),
         _ => return Ok(None),
     };
-    // Explicit bounds must parse as dates: Django's `get_prep_value`
-    // raises `ValidationError` (400 invalid detail) on garbage.
-    if text.parse::<chrono::NaiveDate>().is_err() && parse_datetime_param(text).is_none() {
-        return Err(Denial::BadError("Please provide valid detail".to_owned()).into_response());
-    }
     if operator == "=" {
-        // Single-value form on a date term: Django's `contains`
-        // lookup, i.e. LIKE with metacharacters escaped.
+        // Bare token: Django __contains is a text LIKE, no date validation
+        // (Django 200 for garbage / partial dates). The single-value form
+        // LIKEs the date text with metacharacters escaped.
         let escaped = text
             .replace('\\', "\\\\")
             .replace('%', "\\%")
@@ -5000,6 +5090,11 @@ fn compile_text_predicate(
         let holder = placeholder(next);
         binds.push(OwnedBind::Text(format!("%{escaped}%")));
         return Ok(Some(format!("{column}::text LIKE {holder}")));
+    }
+    // Explicit bounds must parse as dates: Django's `get_prep_value`
+    // raises `ValidationError` (400 invalid detail) on garbage.
+    if text.parse::<chrono::NaiveDate>().is_err() && parse_datetime_param(text).is_none() {
+        return Err(Denial::BadError("Please provide valid detail".to_owned()).into_response());
     }
     let holder = placeholder(next);
     binds.push(OwnedBind::Text(text.to_owned()));
@@ -5322,6 +5417,7 @@ pub async fn collection_create(
         assigned_pod_id: validated.assigned_pod_id,
         assigned_runner_id: None,
         agent_executor: validated.agent_executor.clone(),
+        work_type: validated.work_type.clone(),
     };
     // The m2m plan resolves pre-save (pure reads of validated input).
     let assignees = validated.assignee_ids.clone().unwrap_or_default();
@@ -5668,6 +5764,7 @@ struct ValidatedCreate {
     git_work_branch: String,
     created_via: Option<String>,
     agent_executor: Option<String>,
+    work_type: Option<String>,
     estimate_point_id: Option<Uuid>,
     type_id: Option<Uuid>,
     deleted_at: Option<DateTime<Utc>>,
@@ -5883,7 +5980,10 @@ async fn validate_issue_create(
             None
         }
     };
-    let sequence_id = match opt_int_field(issue_data, "sequence_id") {
+    // Model `IntegerField` bounds (±2^31): Django answers the bound
+    // message for out-of-int4 integers, not the generic one
+    // (NEWPIDASH-311); `opt_bounded_int_field` recovers that case.
+    let sequence_id = match opt_bounded_int_field(issue_data, "sequence_id") {
         Ok(value) => value,
         Err(message) => {
             field_errors.insert("sequence_id".to_owned(), serde_json::json!([message]));
@@ -6015,7 +6115,7 @@ async fn validate_issue_create(
         {
             // #2903: deprecated writes translate to local_runner.
             Some(
-                pidash_types::dispatch::normalize_executor_write(executor)
+                pidash_types::agent_runs::normalize_executor_write(executor)
                     .expect("choice passes")
                     .value()
                     .to_owned(),
@@ -6033,6 +6133,13 @@ async fn validate_issue_create(
                 "agent_executor".to_owned(),
                 serde_json::json!(["Not a valid string."]),
             );
+            None
+        }
+    };
+    let work_type = match opt_limited_string(issue_data, "work_type", 32) {
+        Ok(value) => value,
+        Err(message) => {
+            field_errors.insert("work_type".to_owned(), serde_json::json!([message]));
             None
         }
     };
@@ -6253,6 +6360,7 @@ async fn validate_issue_create(
         git_work_branch,
         created_via,
         agent_executor,
+        work_type,
         estimate_point_id,
         type_id,
         deleted_at,
@@ -6609,6 +6717,47 @@ fn opt_int_field(
     }
 }
 
+/// Optional model `IntegerField`: [`opt_int_field`] plus the ±2^31
+/// bound messages Django's `Min/MaxValueValidator` produce. Values
+/// [`opt_int_field`] accepts pass through untouched; only a rejection
+/// whose raw value is an integer outside int4 is remapped to the bound
+/// message (NEWPIDASH-311).
+fn opt_bounded_int_field(
+    issue_data: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<Option<i32>, String> {
+    const MAX_MESSAGE: &str = "Ensure this value is less than or equal to 2147483647.";
+    const MIN_MESSAGE: &str = "Ensure this value is greater than or equal to -2147483648.";
+    match opt_int_field(issue_data, key) {
+        Ok(value) => Ok(value),
+        Err(message) => {
+            // Wide re-parse (same coercion as `validate_integer`):
+            // only a genuine out-of-int4 integer earns the bound
+            // message; everything else keeps the generic one.
+            let wide = match issue_data.get(key) {
+                Some(serde_json::Value::Number(number)) => number
+                    .as_i64()
+                    .or_else(|| number.as_u64().and_then(|uint| i64::try_from(uint).ok()))
+                    .or_else(|| {
+                        number.as_f64().and_then(|float| {
+                            (float.fract() == 0.0
+                                && float >= i64::MIN as f64
+                                && float <= i64::MAX as f64)
+                                .then_some(float as i64)
+                        })
+                    }),
+                Some(serde_json::Value::String(text)) => text.trim().parse::<i64>().ok(),
+                _ => None,
+            };
+            match wide {
+                Some(int) if int > i32::MAX as i64 => Err(MAX_MESSAGE.to_owned()),
+                Some(int) if int < i32::MIN as i64 => Err(MIN_MESSAGE.to_owned()),
+                _ => Err(message),
+            }
+        }
+    }
+}
+
 /// Optional `FloatField`: missing/null → `None`.
 fn opt_float_field(
     issue_data: &serde_json::Map<String, serde_json::Value>,
@@ -6732,7 +6881,7 @@ fn opt_limited_string(
 /// * `cloud_agent` needs the instance kill switch
 ///   (`CLOUD_AGENT_ENABLED`); the per-run BYOK question is answered at
 ///   run creation, not here.
-/// * `managed_runner` evaluates `managed_runner_availability` in gate
+/// * `managed_runner` evaluates `pidash_agent_availability` in gate
 ///   order; the desktop-unenrolled case (`NO_RUNNER_FOR_PROJECT`) is
 ///   ACCEPTED (the client self-resolves on open). The deeper gates
 ///   (LLM profile, enrollment, online presence) need the managed-runner
@@ -6872,6 +7021,7 @@ struct CreatedRows {
     assigned_runner_id: Option<Uuid>,
     assigned_runner_detail: Option<serde_json::Value>,
     agent_executor: Option<String>,
+    work_type: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     created_by_id: Option<Uuid>,
@@ -7014,6 +7164,7 @@ async fn render_created_detail(
         .await
         .map_err(|_| Denial::ServerError.into_response())?,
         agent_executor: m.agent_executor,
+        work_type: m.work_type,
         created_at: m.created_at.with_timezone(&Utc),
         updated_at: m.updated_at.with_timezone(&Utc),
         created_by_id: m.created_by_id,
@@ -7113,6 +7264,7 @@ fn render_created_issue(rows: &CreatedRows, timezone: chrono_tz::Tz) -> serde_js
         "agent_executor".to_owned(),
         opt_string(&rows.agent_executor),
     );
+    issue.insert("work_type".to_owned(), opt_string(&rows.work_type));
     issue.insert(
         "label_ids".to_owned(),
         serde_json::Value::Array(rows.label_ids.iter().map(uuid_string).collect()),
@@ -7224,22 +7376,42 @@ mod tests {
 
     #[test]
     fn updated_at_predicates_hit_the_issue_updated_column() {
+        // NEWPIDASH-310: `__date` terms truncate in the actor's zone
+        // (Django `TruncDate`), binding the IANA name as `$N`.
+        let zone = chrono_tz::Tz::Pacific__Kiritimati;
         let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 12).expect("day");
-        let (mut binds, mut next) = (Vec::new(), 1);
+        let (mut binds, mut next) = (Vec::new(), 3usize);
         let sql = compile_predicate(
             "issue__updated_at__date__gte",
             &FilterValue::Day(day),
             &mut binds,
             &mut next,
+            &zone,
         )
         .expect("compiles")
         .expect("known key");
-        assert_eq!(sql, "\"issues\".\"updated_at\"::date >= $1::date");
+        assert_eq!(
+            sql,
+            "(\"issues\".\"updated_at\" AT TIME ZONE $3)::date >= $4::date"
+        );
+        assert!(matches!(
+            binds.as_slice(),
+            [OwnedBind::Text(tz), OwnedBind::Date(_)] if tz == "Pacific/Kiritimati"
+        ));
         let text = FilterValue::Text("2026-01-12".to_owned());
-        let sql = compile_predicate("issue__updated_at__date__lte", &text, &mut binds, &mut next)
-            .expect("compiles")
-            .expect("known key");
-        assert!(sql.starts_with("\"issues\".\"updated_at\"::date"), "{sql}");
+        let sql = compile_predicate(
+            "issue__updated_at__date__lte",
+            &text,
+            &mut binds,
+            &mut next,
+            &zone,
+        )
+        .expect("compiles")
+        .expect("known key");
+        assert!(
+            sql.starts_with("(\"issues\".\"updated_at\" AT TIME ZONE $5)::date"),
+            "{sql}"
+        );
     }
 
     #[test]
@@ -7504,5 +7676,50 @@ mod tests {
             1,
             "fragment narrows the page to one row"
         );
+    }
+
+    /// `opt_bounded_int_field` (NEWPIDASH-311): in-int4 values pass
+    /// through; out-of-int4 integers answer Django's bound messages;
+    /// anything else keeps the generic message.
+    #[test]
+    fn bounded_int_field_answers_django_bound_messages() {
+        use serde_json::Map;
+        fn data(value: serde_json::Value) -> Map<String, serde_json::Value> {
+            let mut map = Map::new();
+            map.insert("sequence_id".to_owned(), value);
+            map
+        }
+        assert_eq!(
+            opt_bounded_int_field(&data(json!(7)), "sequence_id"),
+            Ok(Some(7))
+        );
+        assert_eq!(
+            opt_bounded_int_field(&data(json!(2147483647)), "sequence_id"),
+            Ok(Some(2147483647))
+        );
+        assert_eq!(
+            opt_bounded_int_field(&data(json!(-2147483648)), "sequence_id"),
+            Ok(Some(-2147483648))
+        );
+        assert_eq!(
+            opt_bounded_int_field(&data(json!("42")), "sequence_id"),
+            Ok(Some(42))
+        );
+        assert_eq!(
+            opt_bounded_int_field(&data(json!(4294967297i64)), "sequence_id"),
+            Err("Ensure this value is less than or equal to 2147483647.".to_owned())
+        );
+        assert_eq!(
+            opt_bounded_int_field(&data(json!(-2147483649i64)), "sequence_id"),
+            Err("Ensure this value is greater than or equal to -2147483648.".to_owned())
+        );
+        assert_eq!(
+            opt_bounded_int_field(&data(json!("nope")), "sequence_id"),
+            Err("A valid integer is required.".to_owned())
+        );
+        assert_eq!(opt_bounded_int_field(&Map::new(), "sequence_id"), Ok(None));
+        let mut nulls = Map::new();
+        nulls.insert("sequence_id".to_owned(), serde_json::Value::Null);
+        assert_eq!(opt_bounded_int_field(&nulls, "sequence_id"), Ok(None));
     }
 }

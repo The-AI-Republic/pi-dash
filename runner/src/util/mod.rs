@@ -1,6 +1,7 @@
 pub mod backoff;
 pub mod browser;
 pub mod confirm;
+pub mod containment;
 pub mod fs;
 pub mod hostname;
 pub mod logging;

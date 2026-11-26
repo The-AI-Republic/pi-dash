@@ -12,7 +12,7 @@
 //! `local_runner` is the only executor an issue can have (design rev 2),
 //! so there is no executor arm here; the E6/`executor_not_local` code is
 //! gone with I2. The engine rules this module composes (`runner_may_take`,
-//! `locality_pin_allowed`, `engine_takes_pod_work`, `can_use_runner`) live
+//! `locality_pin_allowed`, `pidash_agent_takes_pod_work`, `can_use_runner`) live
 //! in `pidash_auth::permissions::runner` (NEWPIDASH-49 port of #2903) and
 //! are reused, never re-implemented.
 
@@ -34,7 +34,7 @@ use pidash_auth::permissions::runner::{
 };
 use pidash_db::entity::{
     agent_run, dev_machine, issue_activities, issue_assignees, issue_comments, issues, pod,
-    projects, runner, users,
+    project_members, projects, runner, users,
 };
 use pidash_types::runner_runs::{AgentRunStatus, AgentRunTrigger, HUMAN_TRIGGERS};
 
@@ -58,7 +58,6 @@ pub const PIN_LOCALITY: &str = "locality";
 pub const PIN_DEDICATED: &str = "dedicated";
 
 /// The engine provisioning value (`RunnerProvisioning.DESKTOP_BUNDLED`).
-pub const PROVISIONING_DESKTOP_BUNDLED: &str = "desktop_bundled";
 /// `RunnerPodDispatch.PINNED_ONLY`.
 pub const POD_DISPATCH_PINNED_ONLY: &str = "pinned_only";
 /// `RunnerPodDispatch.POD_MEMBER`.
@@ -135,7 +134,9 @@ pub fn runner_paused_reason<'a>(
     if runner.paused_at.is_some() {
         return Some(Cow::Borrowed("dispatch_paused"));
     }
-    if runner.provisioning == PROVISIONING_DESKTOP_BUNDLED {
+    if runner.provisioning
+        == pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED
+    {
         if let Some(machine) = machine {
             if machine.engine_paused_by_owner {
                 return Some(Cow::Borrowed("owner_paused"));
@@ -330,17 +331,26 @@ pub async fn check_assignment_code(
     Ok(("", ""))
 }
 
+/// E8 blocking statuses: `NON_TERMINAL_STATUSES` minus `QUEUED` and
+/// `PAUSED_AWAITING_INPUT`. Mirrors Django
+/// `apps/api/pi_dash/runner/services/issue_assignment.py:184-197` and `:524-541`.
+pub fn e8_blocking_statuses() -> Vec<&'static str> {
+    crate::runner_sessions::guards::NON_TERMINAL_STATUSES
+        .iter()
+        .filter(|s| **s != AgentRunStatus::Queued && **s != AgentRunStatus::PausedAwaitingInput)
+        .map(|s| s.value())
+        .collect()
+}
+
 /// True when the issue has a run in a non-terminal status other than
-/// QUEUED / PAUSED_AWAITING_INPUT (the E8 blocking set). `paused_awaiting_input`
-/// is not an `AgentRunStatus` member in Rust types; it is read by value.
+/// QUEUED / PAUSED_AWAITING_INPUT (the E8 blocking set).
 pub async fn has_blocking_run(
     db: &impl ConnectionTrait,
     issue_id: Uuid,
 ) -> Result<bool, sea_orm::DbErr> {
-    let blocking = crate::runner_sessions::guards::NON_TERMINAL_STATUSES
-        .iter()
-        .filter(|s| **s != AgentRunStatus::Queued)
-        .map(|s| s.value().to_owned())
+    let blocking = e8_blocking_statuses()
+        .into_iter()
+        .map(str::to_owned)
         .collect::<Vec<_>>();
     let found = agent_run::Entity::find()
         .filter(agent_run::Column::WorkItemId.eq(issue_id))
@@ -827,7 +837,8 @@ pub fn runner_list_row_to_value(row: &RunnerListRow) -> serde_json::Value {
         self, DevMachineMiniRow, LiveStateRow, PodMiniRow, RunnerRow,
     };
 
-    let is_engine = row.runner.provisioning == PROVISIONING_DESKTOP_BUNDLED;
+    let is_pidash_agent = row.runner.provisioning
+        == pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED;
     let dispatch_paused = row.runner.paused_at.is_some();
     // machine display: dev_machine display_name or host_label or name
     let machine_display = match &row.dev_machine {
@@ -851,7 +862,7 @@ pub fn runner_list_row_to_value(row: &RunnerListRow) -> serde_json::Value {
         }
     };
     let engine_paused = match &row.dev_machine {
-        Some(join) if is_engine => {
+        Some(join) if is_pidash_agent => {
             join.dm_engine_paused_by_owner.unwrap_or(false)
                 || !join
                     .dm_engine_auto_pause_reason
@@ -900,7 +911,7 @@ pub fn runner_list_row_to_value(row: &RunnerListRow) -> serde_json::Value {
         .dev_machine
         .as_ref()
         .and_then(|j| j.dm_engine_credential_expires_at);
-    let dm_sign_in = crate::domain::engine_credential::current_engine_sign_in_state(
+    let dm_sign_in = crate::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
         &dm_stored_sign_in,
         dm_expires_at,
         Utc::now(),
@@ -990,7 +1001,7 @@ pub fn runner_list_row_to_value(row: &RunnerListRow) -> serde_json::Value {
         name: &row.runner.name,
         status: &row.runner.status,
         host_label: &row.runner.host_label,
-        is_engine,
+        is_pidash_agent,
         engine_paused,
         dispatch_paused,
         machine_display_name: &machine_display,
@@ -1044,8 +1055,9 @@ pub async fn runner_may_take_run(
 ) -> Result<bool, sea_orm::DbErr> {
     let owner = runner_row.owner_id;
     let created_by_owner = created_by_id == Some(owner);
-    let is_engine = runner_row.provisioning == PROVISIONING_DESKTOP_BUNDLED;
-    let team_runs = if is_engine {
+    let is_pidash_agent = runner_row.provisioning
+        == pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED;
+    let team_runs = if is_pidash_agent {
         match runner_row.dev_machine_id {
             Some(machine_id) => dev_machine::Entity::find_by_id(machine_id)
                 .one(db)
@@ -1072,7 +1084,7 @@ pub async fn runner_may_take_run(
     // authored by the owner. Callers that know the binding pass it through
     // [`runner_may_take_binding`]; this entry has no binding facts.
     Ok(auth_runner_may_take(
-        is_engine,
+        is_pidash_agent,
         team_runs,
         created_by_owner,
         human,
@@ -1102,7 +1114,7 @@ impl ResolvedPin {
 ///
 /// Keeps every rule `_pinned_runner_for` had on main: online, heartbeat-
 /// fresh, not paused, same pod, `locality_pin_allowed` (an engine only
-/// while `engine_takes_pod_work`), and for an engine `runner_may_take`
+/// while `pidash_agent_takes_pod_work`), and for an engine `runner_may_take`
 /// for the new run's creator and trigger.
 pub async fn locality_runner_for(
     db: &impl ConnectionTrait,
@@ -1135,7 +1147,8 @@ pub async fn locality_runner_for(
             return Ok(None);
         }
     }
-    let is_engine = candidate.provisioning == PROVISIONING_DESKTOP_BUNDLED;
+    let is_pidash_agent = candidate.provisioning
+        == pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED;
     let machine = match candidate.dev_machine_id {
         Some(machine_id) => dev_machine::Entity::find_by_id(machine_id).one(db).await?,
         None => None,
@@ -1145,10 +1158,10 @@ pub async fn locality_runner_for(
         .as_ref()
         .map(|m| m.engine_paused_by_owner || !m.engine_auto_pause_reason.is_empty())
         .unwrap_or(false);
-    if !auth_locality_pin_allowed(true, is_engine, pod_member, engine_paused) {
+    if !auth_locality_pin_allowed(true, is_pidash_agent, pod_member, engine_paused) {
         return Ok(None);
     }
-    if is_engine {
+    if is_pidash_agent {
         let human = HUMAN_TRIGGERS.contains(&trigger);
         if !runner_may_take_run(db, &candidate, creator_id, human, issue).await? {
             return Ok(None);
@@ -1675,7 +1688,31 @@ pub async fn dedicated_refusal_body(
     }))
 }
 
+/// Whether `user` may use `pod_once` on `issue` under `policy`.
+/// Pure kernel behind [`pod_once_auth_code`]: mirrors
+/// [`crate::domain::project_settings::can_run_issue_pure`] so the
+/// dedicated-runner one-shot path follows the same `issue_run_policy`
+/// (NEWPIDASH-261 D1). In `creator_and_assignees` only the creator or
+/// a current assignee passes; in `project_members` any active Member
+/// or Admin passes (guests and non-members never do).
+pub fn pod_once_allowed_pure(
+    policy: crate::domain::project_settings::IssueRunPolicy,
+    is_creator: bool,
+    is_assignee: bool,
+    member_role: Option<i32>,
+) -> bool {
+    crate::domain::project_settings::can_run_issue_pure(
+        policy,
+        is_creator,
+        is_assignee,
+        member_role,
+    )
+}
+
 /// The `pod_once` authorization refusal for `user` on `issue` (§23.3).
+/// Follows the project's `issue_run_policy` (NEWPIDASH-261 D1): in
+/// `project_members` mode a non-creator Member/Admin is allowed even
+/// when neither creator nor assignee, matching every other run trigger.
 pub async fn pod_once_auth_code(
     db: &impl ConnectionTrait,
     issue: &issues::Model,
@@ -1687,14 +1724,30 @@ pub async fn pod_once_auth_code(
     let Some(user_id) = user_id else {
         return Ok(Some("pod_once_not_allowed"));
     };
-    if issue.created_by_id == Some(user_id) {
-        return Ok(None);
+    let policy = crate::domain::project_settings::policy_for_project(db, issue.project_id).await?;
+    let is_creator = issue.created_by_id == Some(user_id);
+    let is_assignee = if is_creator {
+        false
+    } else {
+        issue_people(db, issue.id).await?.contains(&user_id)
+    };
+    let member_role = if policy == crate::domain::project_settings::IssueRunPolicy::ProjectMembers {
+        project_members::Entity::find()
+            .filter(project_members::Column::ProjectId.eq(issue.project_id))
+            .filter(project_members::Column::MemberId.eq(user_id))
+            .filter(project_members::Column::IsActive.eq(true))
+            .filter(project_members::Column::DeletedAt.is_null())
+            .one(db)
+            .await?
+            .map(|row| i32::from(row.role))
+    } else {
+        None
+    };
+    if pod_once_allowed_pure(policy, is_creator, is_assignee, member_role) {
+        Ok(None)
+    } else {
+        Ok(Some("pod_once_not_allowed"))
     }
-    let people = issue_people(db, issue.id).await?;
-    if people.contains(&user_id) {
-        return Ok(None);
-    }
-    Ok(Some("pod_once_not_allowed"))
 }
 
 // ---------------------------------------------------------------------------
@@ -2406,6 +2459,14 @@ async fn fail_queued_run(
         status: sea_orm::Set(AgentRunStatus::Failed.value().to_owned()),
         error_details: sea_orm::Set(details),
         ended_at: sea_orm::Set(Some(now.into())),
+        // `finalize_agent_run`'s safety net (PDASHOSS01-183): every FAILED
+        // row carries a canonical `failure_reason`, classified from the
+        // cloud-side error + code like the Django writers these mirror.
+        failure_reason: sea_orm::Set(
+            pidash_types::runner_runs::classify_failure(error, "", error_code)
+                .value()
+                .to_owned(),
+        ),
         ..Default::default()
     };
     if let Some(payload) = done_payload {
@@ -2971,8 +3032,8 @@ async fn post_fall_back_comment(
     Ok(())
 }
 
-/// Ticking-state check for the bounce arms (`is_ticking_state`,
-/// `agent_phases.py:149-162`).
+/// Ticking-state check for the bounce arms: the issue sits in a stage
+/// that runs automatically under its project's stage switches.
 async fn is_ticking_issue(
     db: &impl ConnectionTrait,
     issue: &issues::Model,
@@ -2986,9 +3047,14 @@ async fn is_ticking_issue(
     else {
         return Ok(false);
     };
-    Ok(crate::assistant::tools_runs::is_ticking_state(
-        Some(state.group.as_str()),
-        Some(state.name.as_str()),
+    let switches =
+        crate::domain::project_settings::stage_switches_for_project(db, issue.project_id).await?;
+    Ok(pidash_types::orchestration::stage_runs_automatically(
+        Some(&pidash_types::orchestration::StateRef {
+            group: state.group.as_str(),
+            name: state.name.as_str(),
+        }),
+        switches,
     ))
 }
 
@@ -3058,6 +3124,24 @@ mod tests {
     }
 
     #[test]
+    fn e8_blocking_statuses_matches_django() {
+        // Django apps/api/pi_dash/runner/services/issue_assignment.py:184-197
+        // and :524-541: blocking = NON_TERMINAL minus {QUEUED, PAUSED_AWAITING_INPUT}.
+        // The Django list is pinned in NON_TERMINAL order.
+        assert_eq!(
+            super::e8_blocking_statuses(),
+            vec![
+                "assigned",
+                "waiting_for_worktree",
+                "running",
+                "cancel_requested",
+                "awaiting_approval",
+                "awaiting_reauth",
+            ]
+        );
+    }
+
+    #[test]
     fn paused_reason_operator_pause() {
         let mut runner = runner_fixture();
         runner.paused_at = Some(Utc::now().into());
@@ -3068,7 +3152,9 @@ mod tests {
     #[test]
     fn paused_reason_owner_pause_and_auto() {
         let mut runner = runner_fixture();
-        runner.provisioning = PROVISIONING_DESKTOP_BUNDLED.to_owned();
+        runner.provisioning =
+            pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED
+                .to_owned();
         let mut machine = machine_fixture();
         machine.engine_paused_by_owner = true;
         assert_eq!(
@@ -3481,5 +3567,63 @@ mod tests {
         // The by-id sibling is a thin fetch+delegate over this shape;
         // its JSON fields are covered by the SDK surface test and the
         // live DB wrapper exercised by dedicated_refusal_comment_html.
+    }
+
+    #[test]
+    fn pod_once_pure_follows_issue_run_policy() {
+        use crate::domain::project_settings::IssueRunPolicy;
+        use pidash_auth::permissions::{
+            ROLE_ADMIN as ADMIN, ROLE_GUEST as GUEST, ROLE_MEMBER as MEMBER,
+        };
+        // Default: creator/assignee only (old three-owner rule).
+        assert!(pod_once_allowed_pure(
+            IssueRunPolicy::CreatorAndAssignees,
+            true,
+            false,
+            None
+        ));
+        assert!(pod_once_allowed_pure(
+            IssueRunPolicy::CreatorAndAssignees,
+            false,
+            true,
+            None
+        ));
+        assert!(!pod_once_allowed_pure(
+            IssueRunPolicy::CreatorAndAssignees,
+            false,
+            false,
+            Some(MEMBER)
+        ));
+        assert!(!pod_once_allowed_pure(
+            IssueRunPolicy::CreatorAndAssignees,
+            false,
+            false,
+            Some(ADMIN)
+        ));
+        // project_members: any Member/Admin passes (D1).
+        assert!(pod_once_allowed_pure(
+            IssueRunPolicy::ProjectMembers,
+            false,
+            false,
+            Some(MEMBER)
+        ));
+        assert!(pod_once_allowed_pure(
+            IssueRunPolicy::ProjectMembers,
+            false,
+            false,
+            Some(ADMIN)
+        ));
+        assert!(!pod_once_allowed_pure(
+            IssueRunPolicy::ProjectMembers,
+            false,
+            false,
+            Some(GUEST)
+        ));
+        assert!(!pod_once_allowed_pure(
+            IssueRunPolicy::ProjectMembers,
+            false,
+            false,
+            None
+        ));
     }
 }

@@ -262,6 +262,10 @@ pub enum Denial {
     ValidDetail,
     /// 403, `{"error": ...}` view-inline denials (destroy owner-or-admin).
     ForbiddenError(String),
+    /// 409, archived project (NEWPIDASH-236 shared envelope).
+    ProjectArchived(String),
+    /// 400, move target refusal (cross-workspace or unknown target).
+    BadRequest(String),
     /// 500, generic branch.
     ServerError,
 }
@@ -293,6 +297,11 @@ impl Denial {
             Denial::ValidDetail => (StatusCode::BAD_REQUEST, VALID_DETAIL_BODY.to_owned()),
             Denial::ForbiddenError(message) => (
                 StatusCode::FORBIDDEN,
+                format!("{{\"error\":{}}}", json_string(message)),
+            ),
+            Denial::ProjectArchived(body) => (StatusCode::CONFLICT, body.clone()),
+            Denial::BadRequest(message) => (
+                StatusCode::BAD_REQUEST,
                 format!("{{\"error\":{}}}", json_string(message)),
             ),
             Denial::ServerError => (
@@ -430,6 +439,13 @@ pub fn routes() -> Router<AppState> {
             owned(
                 axum::routing::get(pages_summary),
                 &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+            ),
+        )
+        .route(
+            "/api/workspaces/{slug}/projects/{project_id}/pages/{page_id}/move/",
+            owned(
+                axum::routing::post(page_move),
+                &["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
             ),
         )
 }
@@ -757,12 +773,26 @@ fn label_ids_annotation() -> &'static str {
 }
 
 /// The `project_ids` annotation (`base.py:120-123`): distinct project ids
-/// over the traversal join with the observed nil-plus-one predicate and no
-/// soft-delete predicate (matches the printed Django SQL).
-fn project_ids_annotation() -> String {
+/// over the filtered join — the caller's active-membership, unarchived
+/// projects — with the observed nil-plus-one predicate. Django's `ArrayAgg`
+/// runs over the already-filtered M2M join, so links carry no live-link
+/// predicate (a soft-deleted link to an accessible project stays, verified
+/// against live Django in NEWPIDASH-344); only the membership and archived
+/// legs filter. The archived-project list (NEWPIDASH-240) keeps the URL
+/// project in the array via `url_project`.
+/// Binds: `user`, then `url_project` when `Some`.
+fn project_ids_annotation(user: &str, url_project: Option<&str>) -> String {
+    let archived_leg = match url_project {
+        Some(project) => {
+            format!("AND (p2.archived_at IS NULL OR pp2.project_id = {project})")
+        }
+        None => "AND p2.archived_at IS NULL".to_owned(),
+    };
     format!(
         "COALESCE((SELECT ARRAY_AGG(DISTINCT pp2.project_id) FROM project_pages pp2 \
-         WHERE pp2.page_id = pages.id \
+         JOIN projects p2 ON p2.id = pp2.project_id \
+         JOIN project_members pm2 ON pm2.project_id = p2.id AND pm2.member_id = {user} AND pm2.is_active = TRUE \
+         WHERE pp2.page_id = pages.id {archived_leg} \
          AND NOT (pp2.project_id = '{PROJECT_IDS_NIL_PLUS_ONE}')), '{{}}')"
     )
 }
@@ -782,6 +812,52 @@ fn read_scope_where(slug: &str, user: &str) -> String {
          WHERE pp_scope.page_id = pages.id AND projects.archived_at IS NULL) \
          AND (pages.owned_by_id = {user} OR pages.access = 0)"
     )
+}
+
+/// Archived-project list scope: like [`read_scope_where`] but without
+/// the `projects.archived_at IS NULL` leg, so the archived project's
+/// own pages are visible. It also carries `pp_scope.deleted_at IS NULL`
+/// on the traversal join, which the active scope omits (traversal joins
+/// carry no soft-delete predicate there) — conservative: only live
+/// links list. Only used for the list read of an archived project
+/// (NEWPIDASH-240); every other read returns 409 before fetching, so
+/// this never widens detail access.
+fn read_scope_where_archived(slug: &str, user: &str) -> String {
+    format!(
+        "pages.deleted_at IS NULL \
+         AND pages.workspace_id = (SELECT id FROM workspaces WHERE slug = {slug}) \
+         AND EXISTS (SELECT 1 FROM project_pages pp_scope JOIN projects ON projects.id = pp_scope.project_id \
+         JOIN project_members pm ON pm.project_id = projects.id AND pm.member_id = {user} AND pm.is_active = TRUE \
+         WHERE pp_scope.page_id = pages.id AND pp_scope.deleted_at IS NULL) \
+         AND (pages.owned_by_id = {user} OR pages.access = 0)"
+    )
+}
+
+/// NEWPIDASH-240 archived-project gate: after auth and the role gate,
+/// every non-list page route on an archived project answers 409 with
+/// the shared envelope. Returns the archived info for the list path.
+async fn archived_info_for(
+    pool: &PgPool,
+    project_id: &uuid::Uuid,
+) -> Result<Option<crate::project_archived::ArchivedProject>, Denial> {
+    crate::project_archived::archived_by_id(pool, *project_id)
+        .await
+        .map_err(|_| Denial::ServerError)
+}
+
+/// Return 409 when the URL project is archived (NEWPIDASH-240). The list
+/// path never calls this; it reads the archived info directly to decide
+/// the scope and the `project_status` fields.
+pub(crate) async fn require_not_archived(
+    pool: &PgPool,
+    project_id: &uuid::Uuid,
+) -> Result<(), Denial> {
+    if let Some(info) = archived_info_for(pool, project_id).await? {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
+    Ok(())
 }
 
 /// The `sub_pages_count` annotation (`visible_pages`): live children
@@ -1051,11 +1127,24 @@ fn search_sql(first_bind: u32, terms: &[String]) -> String {
 /// `?search=` name filter `get_queryset` carries (`base.py:88`) on both
 /// paths. `?order_by=` stays ignored: the `:105` `order_by` replaces the
 /// `:103` request one in Django (ported bug, fixture F30-06).
+#[allow(dead_code)]
 fn read_rows_sql(
     guest_only: bool,
     filter: RowFilter,
     guest_count: bool,
     search: &[String],
+) -> String {
+    read_rows_sql_with_archived(guest_only, filter, guest_count, search, false)
+}
+
+/// NEWPIDASH-240: `include_archived` switches to the archived list scope
+/// (list read of an archived project). Every other caller passes false.
+fn read_rows_sql_with_archived(
+    guest_only: bool,
+    filter: RowFilter,
+    guest_count: bool,
+    search: &[String],
+    include_archived: bool,
 ) -> String {
     let annotations = format!(
         "{}, pages.parent_id AS parent_id, {} AS sub_pages_count, {} AS is_favorite, \
@@ -1065,12 +1154,17 @@ fn read_rows_sql(
         favorite_annotation("$2", "$1"),
         project_annotation("$3"),
         label_ids_annotation(),
-        project_ids_annotation(),
+        project_ids_annotation("$2", include_archived.then_some("$3")),
     );
+    let scope = if include_archived {
+        read_scope_where_archived("$1", "$2")
+    } else {
+        read_scope_where("$1", "$2")
+    };
     let mut sql = format!(
         "SELECT row_to_json(__r)::text AS __row FROM (SELECT {annotations} FROM pages \
          WHERE {} AND ({}) = TRUE",
-        read_scope_where("$1", "$2"),
+        scope,
         project_annotation("$3"),
     );
     if guest_only {
@@ -1146,10 +1240,21 @@ fn summary_query(
                 .add(pages::Column::Access.eq(0)),
         )
         .filter(
-            Condition::all().add(
-                sea_orm::sea_query::Expr::col((Alias::new("pp"), project_pages::Column::ProjectId))
+            Condition::all()
+                .add(
+                    sea_orm::sea_query::Expr::col((
+                        Alias::new("pp"),
+                        project_pages::Column::ProjectId,
+                    ))
                     .eq(*project_id),
-            ),
+                )
+                .add(
+                    sea_orm::sea_query::Expr::col((
+                        Alias::new("pp"),
+                        project_pages::Column::DeletedAt,
+                    ))
+                    .is_null(),
+                ),
         );
     query = query
         .filter(workspaces::Column::Slug.eq(slug))
@@ -1253,8 +1358,37 @@ async fn fetch_read_rows(
     guest_count: bool,
     search: &[String],
 ) -> Result<Vec<Map<String, Value>>, Denial> {
+    fetch_read_rows_with_archived(
+        pool,
+        slug,
+        user_id,
+        project_id,
+        filter,
+        id,
+        guest_only,
+        guest_count,
+        search,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn fetch_read_rows_with_archived(
+    pool: &PgPool,
+    slug: &str,
+    user_id: &uuid::Uuid,
+    project_id: &uuid::Uuid,
+    filter: RowFilter,
+    id: Option<&uuid::Uuid>,
+    guest_only: bool,
+    guest_count: bool,
+    search: &[String],
+    include_archived: bool,
+) -> Result<Vec<Map<String, Value>>, Denial> {
     use sqlx::Row as _;
-    let sql = read_rows_sql(guest_only, filter, guest_count, search);
+    let sql =
+        read_rows_sql_with_archived(guest_only, filter, guest_count, search, include_archived);
     let mut query = sqlx::query(&sql) // raw-sql: annotated row_to_json read (keep, see fetch_read_rows note).
         .bind(slug)
         .bind(user_id)
@@ -1337,7 +1471,12 @@ pub async fn list_pages(
     if let Err(denial) = require_live_project(pool, &project_id).await {
         return denial.into_response();
     }
-    let rows = match fetch_read_rows(
+    let archived = match archived_info_for(pool, &project_id).await {
+        Ok(info) => info,
+        Err(denial) => return denial.into_response(),
+    };
+    let include_archived = archived.is_some();
+    let rows = match fetch_read_rows_with_archived(
         pool,
         &slug,
         &user_id,
@@ -1347,18 +1486,41 @@ pub async fn list_pages(
         gate.guest_scoped,
         gate.guest_scoped,
         &search,
+        include_archived,
     )
     .await
     {
         Ok(rows) => rows,
         Err(denial) => return denial.into_response(),
     };
+    let (project_status, project_archived_at) = match &archived {
+        Some(info) => (
+            "archived".to_owned(),
+            Some(crate::project_archived::format_archived_at(
+                &info.archived_at,
+            )),
+        ),
+        None => ("active".to_owned(), None),
+    };
+    let archived_at_json = match &project_archived_at {
+        Some(ts) => serde_json::to_string(ts).expect("json string"),
+        None => "null".to_owned(),
+    };
+    let status_json = serde_json::to_string(&project_status).expect("json string");
     let mut out = String::from("[");
     for (index, row) in rows.iter().enumerate() {
         if index > 0 {
             out.push(',');
         }
-        out.push_str(&shape_row(row, LIST_ROW_ORDER, &timezone));
+        let mut rendered = shape_row(row, LIST_ROW_ORDER, &timezone);
+        // Inject NEWPIDASH-240 status fields after the serializer fields,
+        // keeping LIST_ROW_ORDER serializer-parity for the pin tests.
+        rendered.pop(); // strip trailing }
+        rendered.push_str(&format!(
+            ",\"project_status\":{},\"project_archived_at\":{}}}",
+            status_json, archived_at_json
+        ));
+        out.push_str(&rendered);
     }
     out.push(']');
     json_response(StatusCode::OK, out)
@@ -1403,6 +1565,9 @@ pub async fn retrieve_page(
         Err(denial) => return denial.into_response(),
     };
     if let Err(denial) = require_live_project(pool, &project_id).await {
+        return denial.into_response();
+    }
+    if let Err(denial) = require_not_archived(pool, &project_id).await {
         return denial.into_response();
     }
     // `?search=` rides `get_queryset` (`base.py:88`) before the pk filter,
@@ -1513,6 +1678,9 @@ pub async fn pages_summary(
     if let Err(denial) = require_live_project(pool, &project_id).await {
         return denial.into_response();
     }
+    if let Err(denial) = require_not_archived(pool, &project_id).await {
+        return denial.into_response();
+    }
     // The old aggregate counts conditionally over the deduplicated set
     // (`SELECT DISTINCT id, access, archived_at`): the same three counts
     // over the same distinct rows, computed in memory — one statement.
@@ -1575,6 +1743,9 @@ pub async fn favorite_create(
         Ok(gate) => gate,
         Err(denial) => return denial.into_response(),
     };
+    if let Err(denial) = require_not_archived(pool, &project_id).await {
+        return denial.into_response();
+    }
     // `WorkspaceBaseModel.save` (`db/models/workspace.py:192-195`): the
     // workspace comes from the project row (already resolved above).
     // `UserFavorite.save` (`db/models/favorite.py:40-47`): `sequence` is
@@ -1667,6 +1838,9 @@ pub async fn favorite_destroy(
         Ok(gate) => gate,
         Err(denial) => return denial.into_response(),
     };
+    if let Err(denial) = require_not_archived(pool, &project_id).await {
+        return denial.into_response();
+    }
     let row: Option<uuid::Uuid> = match user_favorites::Entity::find()
         .select_only()
         .column(user_favorites::Column::Id)
@@ -1977,6 +2151,9 @@ pub async fn archive_page(
         Ok(gate) => gate,
         Err(denial) => return denial.into_response(),
     };
+    if let Err(denial) = require_not_archived(pool, &project_id).await {
+        return denial.into_response();
+    }
     let page = match fetch_state_page(pool, &slug, &project_id, &page_id).await {
         Ok(page) => page,
         Err(denial) => return denial.into_response(),
@@ -2064,6 +2241,9 @@ pub async fn unarchive_page(
         Ok(gate) => gate,
         Err(denial) => return denial.into_response(),
     };
+    if let Err(denial) = require_not_archived(pool, &project_id).await {
+        return denial.into_response();
+    }
     let page = match fetch_state_page(pool, &slug, &project_id, &page_id).await {
         Ok(page) => page,
         Err(denial) => return denial.into_response(),
@@ -2217,6 +2397,9 @@ async fn write_lock(
         Ok(gate) => gate,
         Err(denial) => return denial.into_response(),
     };
+    if let Err(denial) = require_not_archived(pool, &project_id).await {
+        return denial.into_response();
+    }
     let page = match fetch_state_page(pool, &slug, &project_id, &page_id).await {
         Ok(page) => page,
         Err(denial) => return denial.into_response(),
@@ -2282,6 +2465,9 @@ pub async fn access_page(
         Ok(gate) => gate,
         Err(denial) => return denial.into_response(),
     };
+    if let Err(denial) = require_not_archived(pool, &project_id).await {
+        return denial.into_response();
+    }
     // `request.data` is read HERE (`base.py:272`, `_base_manager` scoped
     // fetch at `:273-278` follows it): a malformed body is DRF's 400
     // `ParseError` even when the project-scoped page fetch would miss.
@@ -2374,6 +2560,8 @@ pub async fn access_page(
 /// description endpoints fetch (`base.py:502-508` retrieve, `:522-528`
 /// partial_update): workspace slug, project bridge (live rows only), live
 /// page, owner-or-public predicate. A miss is `DoesNotExist` → 404.
+/// `owned_by` rides along for the DIFF-63 guest rule (retrieve's
+/// `base.py:212-229` needs the owner; the PATCH below ignores it).
 async fn fetch_description_page(
     pool: &PgPool,
     slug: &str,
@@ -2385,6 +2573,7 @@ async fn fetch_description_page(
         .select_only()
         .column(pages::Column::IsLocked)
         .column(pages::Column::ArchivedAt)
+        .column(pages::Column::OwnedById)
         .column(pages::Column::DescriptionHtml)
         .column(pages::Column::DescriptionBinary)
         .column(pages::Column::DescriptionJson)
@@ -2407,13 +2596,53 @@ async fn fetch_description_page(
 }
 
 /// One description-scoped page row (`archived_at` is a `DateField`).
+/// `owned_by_id` serves the DIFF-63 guest rule only.
 #[derive(Debug, sea_orm::FromQueryResult)]
 struct DescriptionPage {
     is_locked: bool,
     archived_at: Option<chrono::NaiveDate>,
+    owned_by_id: uuid::Uuid,
     description_html: String,
     description_binary: Option<Vec<u8>>,
     description_json: Option<Value>,
+}
+
+/// DIFF-63 (NEWPIDASH-341): the page-visibility owner lookup the version
+/// reads resolve through — retrieve's project-scoped visibility
+/// (`visible_pages`' URL-project leg plus owner-or-public): workspace slug,
+/// a live `project_pages` link to the URL project, a live page, and
+/// `owned_by = requester OR access = public`. Returns the page owner when
+/// visible, `None` when not. Callers answer what retrieve answers for the
+/// same URL: 404 `"Page not found"` for invisible pages, 400 for restricted
+/// guests reading another member's page. A missing page 404s even for
+/// restricted guests — retrieve's `AttributeError`-into-500 on that edge
+/// (PB-0462) is Django wrongness, not visibility to copy.
+async fn page_visibility_owner(
+    pool: &PgPool,
+    slug: &str,
+    project_id: &uuid::Uuid,
+    page_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+) -> Result<Option<uuid::Uuid>, Denial> {
+    pages::Entity::find()
+        .select_only()
+        .column(pages::Column::OwnedById)
+        .join(JoinType::InnerJoin, pages::Relation::Workspaces.def())
+        .join(JoinType::InnerJoin, pages::Relation::ProjectPages.def())
+        .filter(pages::Column::Id.eq(*page_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(project_pages::Column::ProjectId.eq(*project_id))
+        .filter(project_pages::Column::DeletedAt.is_null())
+        .filter(pages::Column::DeletedAt.is_null())
+        .filter(
+            Condition::any()
+                .add(pages::Column::OwnedById.eq(*user_id))
+                .add(pages::Column::Access.eq(0)),
+        )
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+        .map_err(|_| Denial::ServerError)
 }
 
 /// `GET .../pages/<page_id>/description/` (`PagesDescriptionViewSet.retrieve`,
@@ -2452,6 +2681,9 @@ pub async fn description_retrieve(
         Ok(gate) => gate,
         Err(denial) => return denial.into_response(),
     };
+    if let Err(denial) = require_not_archived(pool, &project_id).await {
+        return denial.into_response();
+    }
     let page = match fetch_description_page(pool, &slug, &project_id, &page_id, &gate.user_id).await
     {
         Ok(page) => page,
@@ -2460,6 +2692,17 @@ pub async fn description_retrieve(
     let Some(page) = page else {
         return Denial::ObjectNotFound.into_response();
     };
+    // DIFF-63 (NEWPIDASH-341): retrieve's restricted-guest rule
+    // (`base.py:212-229`), which Django's description retrieve never
+    // applied: a restricted guest reading another member's page answers
+    // what retrieve answers. The fetch above already 404s invisible pages
+    // with the description miss body, so only found pages reach this rule.
+    if gate.guest_scoped && page.owned_by_id != gate.user_id {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            gate::RETRIEVE_GUEST_BODY.to_owned(),
+        );
+    }
     // `stream_data` (`base.py:509-514`): exactly one chunk either way, so
     // the response is chunked with no content-length like Django's
     // `StreamingHttpResponse` (never a `Body::from` with a fixed length).
@@ -2714,6 +2957,27 @@ pub fn description_page_txn_job(
     ))
 }
 
+/// True when a validated description PATCH would write byte-identical
+/// content to the stored row (DIFF-27, NEWPIDASH-272): the live collab
+/// server's close-store (`apps/live/.../database.ts::storeDocument`) PATCHes
+/// an unchanged document on every disconnect, and both Django
+/// (`BaseModel.save` stamps `updated_by` unconditionally) and the port
+/// stamped the viewer, flipping "Edited by" on reload. Rust now skips the
+/// `UPDATE` — and with it the `updated_by`/`updated_at` bump — when the
+/// final binary/HTML/JSON equal the stored values. Real edits still stamp.
+/// `serde_json::Value` object equality is order-insensitive, so JSON key
+/// order does not count as a change.
+pub fn is_description_noop(
+    final_binary: &Option<Vec<u8>>,
+    final_html: &str,
+    final_json: &Option<Value>,
+    stored_binary: &Option<Vec<u8>>,
+    stored_html: &str,
+    stored_json: &Option<Value>,
+) -> bool {
+    final_binary == stored_binary && final_html == stored_html && final_json == stored_json
+}
+
 /// `PATCH .../pages/<page_id>/description/` (`PagesDescriptionViewSet.partial_update`,
 /// `base.py:521-575`).
 pub async fn description_partial_update(
@@ -2752,6 +3016,9 @@ pub async fn description_partial_update(
         Ok(gate) => gate,
         Err(denial) => return denial.into_response(),
     };
+    if let Err(denial) = require_not_archived(pool, &project_id).await {
+        return denial.into_response();
+    }
     let page = match fetch_description_page(pool, &slug, &project_id, &page_id, &gate.user_id).await
     {
         Ok(page) => page,
@@ -2806,49 +3073,67 @@ pub async fn description_partial_update(
     // when the final HTML is empty, else the MLStripper `strip_tags`).
     // Django's `save()` writes every column, so the UPDATE is static with
     // computed values.
+    let stored_binary = page.description_binary.clone();
+    let stored_html = page.description_html.clone();
+    let stored_json = page.description_json.clone();
     let final_binary = patch.binary.or(page.description_binary);
     let final_html = patch.html.unwrap_or(page.description_html);
     let final_json: Option<Value> = match patch.json {
         Some(value) => value,
-        None => page.description_json,
+        None => stored_json.clone(),
     };
-    let final_stripped: Option<String> =
-        pidash_db::app_pages::strip::sync_description_stripped(Some(final_html.as_str()));
-    let desc_now = chrono::Utc::now();
-    // Django's `save()` writes every column, so the UPDATE carries every
-    // value, static with computed values (as observed). `update_many`
-    // (not an `ActiveModel`) so a NULL `description_json` stays NULL —
-    // the entity field is non-optional, but the column allows NULL.
-    let desc_updated = pages::Entity::update_many()
-        .col_expr(
-            pages::Column::DescriptionBinary,
-            sea_orm::sea_query::Expr::value(final_binary),
-        )
-        .col_expr(
-            pages::Column::DescriptionHtml,
-            sea_orm::sea_query::Expr::value(final_html.as_str()),
-        )
-        .col_expr(
-            pages::Column::DescriptionJson,
-            sea_orm::sea_query::Expr::value(final_json),
-        )
-        .col_expr(
-            pages::Column::DescriptionStripped,
-            sea_orm::sea_query::Expr::value(final_stripped),
-        )
-        .col_expr(
-            pages::Column::UpdatedAt,
-            sea_orm::sea_query::Expr::value(desc_now.fixed_offset()),
-        )
-        .col_expr(
-            pages::Column::UpdatedById,
-            sea_orm::sea_query::Expr::value(Some(gate.user_id)),
-        )
-        .filter(pages::Column::Id.eq(page_id))
-        .exec(&orm(pool))
-        .await;
-    if desc_updated.is_err() {
-        return Denial::ServerError.into_response();
+    // DIFF-27 (NEWPIDASH-272): a PATCH that would store identical content
+    // is a live close-store no-op, not a user edit — skip the UPDATE so
+    // `updated_by`/`updated_at` keep the last real editor. Job publishes
+    // below still run as before (PB-0473); the version body already no-ops
+    // when the HTML is unchanged.
+    let no_op = is_description_noop(
+        &final_binary,
+        final_html.as_str(),
+        &final_json,
+        &stored_binary,
+        stored_html.as_str(),
+        &stored_json,
+    );
+    if !no_op {
+        let final_stripped: Option<String> =
+            pidash_db::app_pages::strip::sync_description_stripped(Some(final_html.as_str()));
+        let desc_now = chrono::Utc::now();
+        // Django's `save()` writes every column, so the UPDATE carries every
+        // value, static with computed values (as observed). `update_many`
+        // (not an `ActiveModel`) so a NULL `description_json` stays NULL —
+        // the entity field is non-optional, but the column allows NULL.
+        let desc_updated = pages::Entity::update_many()
+            .col_expr(
+                pages::Column::DescriptionBinary,
+                sea_orm::sea_query::Expr::value(final_binary),
+            )
+            .col_expr(
+                pages::Column::DescriptionHtml,
+                sea_orm::sea_query::Expr::value(final_html.as_str()),
+            )
+            .col_expr(
+                pages::Column::DescriptionJson,
+                sea_orm::sea_query::Expr::value(final_json),
+            )
+            .col_expr(
+                pages::Column::DescriptionStripped,
+                sea_orm::sea_query::Expr::value(final_stripped),
+            )
+            .col_expr(
+                pages::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(desc_now.fixed_offset()),
+            )
+            .col_expr(
+                pages::Column::UpdatedById,
+                sea_orm::sea_query::Expr::value(Some(gate.user_id)),
+            )
+            .filter(pages::Column::Id.eq(page_id))
+            .exec(&orm(pool))
+            .await;
+        if desc_updated.is_err() {
+            return Denial::ServerError.into_response();
+        }
     }
     // Publishes observe the post-save state (`base.py:556-572`): the
     // conditional `page_transaction`, then the unconditional
@@ -3676,9 +3961,11 @@ struct ScopedPage {
 /// narrowed to one `pk`): the scope predicates that can still miss
 /// (`parent__isnull`, owner-or-public, project bridge) plus the
 /// `is_favorite` / `label_ids` / `project_ids` annotations. `project_ids`
-/// keeps the ported `~Q(projects__id=True)` no-op shape: Django compiles
+/// keeps the ported `~Q(projects__id=True)` no-op shape (Django compiles
 /// the `True` through `UUIDField.get_prep_value` into `UUID(int=1)`, so the
-/// predicate below compares against the zero-`1` UUID, never boolean `TRUE`.
+/// predicate below compares against the zero-`1` UUID, never boolean `TRUE`)
+/// over the filtered join: the caller's active-membership, unarchived
+/// projects (NEWPIDASH-344; no live-link leg, matching Django's join).
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct DetailRow {
     #[sqlx(flatten)]
@@ -3764,9 +4051,10 @@ async fn fetch_detail_row(
                      WHERE pl.page_id = p.id AND pl.label_id IS NOT NULL
                      AND pl.deleted_at IS NULL), '{{}}') AS label_ids,
            COALESCE((SELECT ARRAY_AGG(DISTINCT pp2.project_id) FROM project_pages pp2
-                     WHERE pp2.page_id = p.id
-                     AND NOT (pp2.project_id = '00000000-0000-0000-0000-000000000001')
-                     AND pp2.deleted_at IS NULL), '{{}}') AS project_ids
+                     JOIN projects p2 ON p2.id = pp2.project_id
+                     JOIN project_members pm2 ON pm2.project_id = p2.id AND pm2.member_id = $4 AND pm2.is_active = TRUE
+                     WHERE pp2.page_id = p.id AND p2.archived_at IS NULL
+                     AND NOT (pp2.project_id = '00000000-0000-0000-0000-000000000001')), '{{}}') AS project_ids
            FROM pages p
            JOIN workspaces w ON w.id = p.workspace_id
            JOIN project_pages pp ON pp.page_id = p.id
@@ -4096,6 +4384,9 @@ pub async fn page_create(
     {
         return denial.into_response();
     }
+    if let Err(denial) = require_not_archived(pool, &project_id).await {
+        return denial.into_response();
+    }
     let body = match read_write_body(req).await {
         Ok(body) => body,
         Err(denial) => return denial.into_response(),
@@ -4384,10 +4675,21 @@ fn parent_probe_query(
                 .add(pages::Column::Access.eq(0)),
         )
         .filter(
-            Condition::all().add(
-                sea_orm::sea_query::Expr::col((Alias::new("pp"), project_pages::Column::ProjectId))
+            Condition::all()
+                .add(
+                    sea_orm::sea_query::Expr::col((
+                        Alias::new("pp"),
+                        project_pages::Column::ProjectId,
+                    ))
                     .eq(*project_id),
-            ),
+                )
+                .add(
+                    sea_orm::sea_query::Expr::col((
+                        Alias::new("pp"),
+                        project_pages::Column::DeletedAt,
+                    ))
+                    .is_null(),
+                ),
         )
 }
 
@@ -4513,6 +4815,9 @@ pub async fn page_partial_update(
         Ok(gate) => gate,
         Err(denial) => return denial.into_response(),
     };
+    if let Err(denial) = require_not_archived(pool, &project_id).await {
+        return denial.into_response();
+    }
     let body = match read_write_body(req).await {
         Ok(body) => body,
         Err(denial) => return denial.into_response(),
@@ -4771,6 +5076,9 @@ pub async fn page_destroy(
     {
         return denial.into_response();
     }
+    if let Err(denial) = require_not_archived(pool, &project_id).await {
+        return denial.into_response();
+    }
     // The scoped fetch (`:369-374`): no `try` here, so a miss 404s through
     // `handle_exception` (an unlinked page for a member, or a second
     // DELETE after the soft delete hid the row).
@@ -4898,6 +5206,278 @@ pub async fn page_destroy(
         return Denial::ServerError.into_response();
     }
     StatusCode::NO_CONTENT.into_response()
+}
+
+/// `POST .../pages/<page_id>/move/` — move a page from its project
+/// (archived or active) to an active project in the same workspace
+/// (NEWPIDASH-240). The caller must be able to view the source and to
+/// edit pages in the target. The `pages` row itself never moves: only the
+/// `project_pages` bridge is re-pointed (or soft-deleted when the target
+/// link already exists), so `description_*`, `page_versions` and `page_logs`
+/// are preserved by construction.
+pub async fn page_move(
+    State(state): State<AppState>,
+    Path((slug, project_raw, page_raw)): Path<(String, String, String)>,
+    extension: Option<Extension<SessionHandle>>,
+    req: Request,
+) -> Response {
+    let Ok(page_id) = parse_page_id(&page_raw) else {
+        return crate::edge::proxy(State(state), req).await;
+    };
+    // 401 before the rewrite, like every other state-op.
+    if let Err(denial) = actor_user_id(extension.clone()) {
+        return denial.into_response();
+    }
+    let pool = match pool_of(&state) {
+        Ok(pool) => pool,
+        Err(denial) => return denial.into_response(),
+    };
+    let source_project_id = match resolve_project_id(pool, &slug, &project_raw).await {
+        Ok(id) => id,
+        Err(denial) => return denial.into_response(),
+    };
+    // Source gate: the caller must be able to VIEW the source page. `GET`
+    // with the page id carries the guest/owner matrix (private non-owners
+    // deny). A source archived project still views via this gate — the
+    // archived check is intentionally skipped for move, the one exception.
+    let source_gate = match gate::resolve_gate(
+        &state,
+        "GET",
+        &slug,
+        &source_project_id,
+        Some(page_id),
+        extension.clone(),
+    )
+    .await
+    {
+        Ok(gate) => gate,
+        Err(denial) => return denial.into_response(),
+    };
+    if let Err(denial) = require_live_project(pool, &source_project_id).await {
+        return denial.into_response();
+    }
+    // Read the move body: `{"target_project_id": "<uuid-or-identifier>"}`
+    // (also accepts `target_project`, `to_project`, `project_id`, `project`
+    // for caller ergonomics; the CLI sends `target_project_id`).
+    let (_parts, body) = req.into_parts();
+    let bytes = match body.collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let parsed: Value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        match serde_json::from_slice(&bytes) {
+            Ok(value) => value,
+            Err(_) => {
+                return Denial::BadDetail("JSON parse error".to_owned()).into_response();
+            }
+        }
+    };
+    let target_raw = match parsed.as_object() {
+        Some(map) => map
+            .get("target_project_id")
+            .or_else(|| map.get("new_project_id"))
+            .or_else(|| map.get("target_project"))
+            .or_else(|| map.get("new_project"))
+            .or_else(|| map.get("to_project"))
+            .or_else(|| map.get("project_id"))
+            .or_else(|| map.get("project"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty()),
+        None => None,
+    };
+    let Some(target_raw) = target_raw else {
+        return Denial::BadRequest("Missing target project".to_owned()).into_response();
+    };
+    let target_project_id = match resolve_project_id(pool, &slug, target_raw).await {
+        Ok(id) => id,
+        Err(denial) => return denial.into_response(),
+    };
+    // Target must be live (soft-deleted targets 404 like the source path).
+    if let Err(denial) = require_live_project(pool, &target_project_id).await {
+        return denial.into_response();
+    }
+    // Same-workspace guard (checked before the target gate so a
+    // cross-workspace move is 400, not 403 due to the source slug).
+    let (source_ws_early, target_ws_early): (uuid::Uuid, uuid::Uuid) = {
+        let db = orm(pool);
+        let s: Option<uuid::Uuid> = match projects::Entity::find()
+            .select_only()
+            .column(projects::Column::WorkspaceId)
+            .filter(projects::Column::Id.eq(source_project_id))
+            .into_tuple()
+            .one(&db)
+            .await
+        {
+            Ok(row) => row,
+            Err(_) => return Denial::ServerError.into_response(),
+        };
+        let t: Option<uuid::Uuid> = match projects::Entity::find()
+            .select_only()
+            .column(projects::Column::WorkspaceId)
+            .filter(projects::Column::Id.eq(target_project_id))
+            .into_tuple()
+            .one(&db)
+            .await
+        {
+            Ok(row) => row,
+            Err(_) => return Denial::ServerError.into_response(),
+        };
+        match (s, t) {
+            (Some(s), Some(t)) => (s, t),
+            _ => return Denial::ServerError.into_response(),
+        }
+    };
+    if source_ws_early != target_ws_early {
+        return Denial::BadRequest("Cannot move a page across workspaces".to_owned())
+            .into_response();
+    }
+    // Target edit gate: the caller must be allowed to edit pages there.
+    // `POST` (create) requires ADMIN/MEMBER, mirroring page creation.
+    // Runs before the archived-target check so a caller with no target
+    // membership gets 403, not the 409 that would name the archive.
+    let _target_gate = match gate::resolve_gate(
+        &state,
+        "POST",
+        &slug,
+        &target_project_id,
+        None,
+        extension,
+    )
+    .await
+    {
+        Ok(gate) => gate,
+        Err(denial) => return denial.into_response(),
+    };
+    // Moving to an archived project is refused with the shared envelope.
+    if let Some(info) = match archived_info_for(pool, &target_project_id).await {
+        Ok(info) => info,
+        Err(denial) => return denial.into_response(),
+    } {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
+    }
+    // Source link must be live: the page is in the source project.
+    let source_link: Option<uuid::Uuid> = match project_pages::Entity::find()
+        .select_only()
+        .column(project_pages::Column::Id)
+        .filter(project_pages::Column::PageId.eq(page_id))
+        .filter(project_pages::Column::ProjectId.eq(source_project_id))
+        .filter(project_pages::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+    {
+        Ok(row) => row,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if source_link.is_none() {
+        return Denial::ObjectNotFound.into_response();
+    }
+    // Re-point: if the target link already exists, drop the source row
+    // (soft delete); otherwise update the source row's `project_id` to the
+    // target. The `pages` row, `page_versions` and `page_logs` are
+    // untouched. One conditional `update_many` runs per call, so no
+    // explicit transaction is needed; each statement is atomic on its own.
+    // A self-move (target == source) is a no-op: the page is already
+    // linked, so the write is skipped entirely below — otherwise the
+    // soft-delete branch would unlink the page from its only project
+    // and the read-back would 404.
+    let existing_target: Option<uuid::Uuid> = match project_pages::Entity::find()
+        .select_only()
+        .column(project_pages::Column::Id)
+        .filter(project_pages::Column::PageId.eq(page_id))
+        .filter(project_pages::Column::ProjectId.eq(target_project_id))
+        .filter(project_pages::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&orm(pool))
+        .await
+    {
+        Ok(row) => row,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    let now = chrono::Utc::now().fixed_offset();
+    if target_project_id == source_project_id {
+        // No-op: page stays linked; fall through to the read-back.
+    } else if existing_target.is_some() {
+        if project_pages::Entity::update_many()
+            .col_expr(
+                project_pages::Column::DeletedAt,
+                sea_orm::sea_query::Expr::value(Some(now)),
+            )
+            .col_expr(
+                project_pages::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .col_expr(
+                project_pages::Column::UpdatedById,
+                sea_orm::sea_query::Expr::value(Some(source_gate.user_id)),
+            )
+            .filter(project_pages::Column::PageId.eq(page_id))
+            .filter(project_pages::Column::ProjectId.eq(source_project_id))
+            .filter(project_pages::Column::DeletedAt.is_null())
+            .exec(&orm(pool))
+            .await
+            .is_err()
+        {
+            return Denial::ServerError.into_response();
+        }
+    } else {
+        if project_pages::Entity::update_many()
+            .col_expr(
+                project_pages::Column::ProjectId,
+                sea_orm::sea_query::Expr::value(target_project_id),
+            )
+            .col_expr(
+                project_pages::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
+            .col_expr(
+                project_pages::Column::UpdatedById,
+                sea_orm::sea_query::Expr::value(Some(source_gate.user_id)),
+            )
+            .filter(project_pages::Column::PageId.eq(page_id))
+            .filter(project_pages::Column::ProjectId.eq(source_project_id))
+            .filter(project_pages::Column::DeletedAt.is_null())
+            .exec(&orm(pool))
+            .await
+            .is_err()
+        {
+            return Denial::ServerError.into_response();
+        }
+    }
+    // Read back the moved page in the target project and answer the detail
+    // shape with the active status, so the caller can verify the move.
+    let timezone = match read_timezone(pool, &source_gate.user_id).await {
+        Ok(timezone) => timezone,
+        Err(denial) => return denial.into_response(),
+    };
+    let rows = match fetch_read_rows_with_archived(
+        pool,
+        &slug,
+        &source_gate.user_id,
+        &target_project_id,
+        RowFilter::Page,
+        Some(&page_id),
+        false,
+        false,
+        &[],
+        false,
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(denial) => return denial.into_response(),
+    };
+    let row = match rows.into_iter().next() {
+        Some(row) => row,
+        None => return Denial::ObjectNotFound.into_response(),
+    };
+    let mut rendered = shape_row(&row, DETAIL_ROW_ORDER, &timezone);
+    rendered.pop();
+    rendered.push_str(",\"project_status\":\"active\",\"project_archived_at\":null}");
+    json_response(StatusCode::OK, rendered)
 }
 
 #[cfg(test)]
@@ -6104,6 +6684,21 @@ mod tests {
         bridge(&pool, ws, p7, archived_project).await;
         bridge(&pool, ws, p8, project).await;
         // p9: no bridge.
+        // p10: soft-deleted URL-project link + a live link to the other
+        // project (NEWPIDASH-343: the NEWPIDASH-240 move state). The legacy
+        // scope ignores the soft-deleted bridge, so p10 stays out of the
+        // counts and the probe.
+        let p10 = seed_page(&pool, ws, "p10", user, 0, None, None, false).await;
+        bridge(&pool, ws, p10, project).await;
+        sqlx::query(
+            "UPDATE project_pages SET deleted_at = now() WHERE page_id = $1 AND project_id = $2",
+        )
+        .bind(p10)
+        .bind(project)
+        .execute(&pool)
+        .await
+        .expect("soft-delete bridge");
+        bridge(&pool, ws, p10, other_project).await;
 
         // Legacy summary SQL (pre-conversion form, binds slug/user/project).
         let legacy_summary: String = "SELECT COUNT(CASE WHEN __r.access = 0 AND __r.archived_at IS NULL THEN 1 END) AS public_pages, \
@@ -6146,6 +6741,7 @@ mod tests {
             "converted summary matches legacy"
         );
         // Expected shape: p1 (public) + p5 (public, other) = 2; p2 = 1; p3+p4 archived = 2.
+        // p10 (soft-deleted URL-project link) is excluded.
         assert_eq!(legacy, (2, 1, 2));
 
         // Guest-only view: only owned rows. The owned-by predicate goes
@@ -6184,13 +6780,13 @@ mod tests {
         assert_eq!(legacy_guest, (1, 1, 2));
 
         // Parent probe differential (visible archived parent, visible live
-        // parent, invisible parent p9).
+        // parent, invisible parent p9, soft-deleted-link parent p10).
         let legacy_probe = format!(
             "SELECT pages.archived_at IS NOT NULL FROM pages WHERE {} AND ({}) = TRUE AND pages.id = $4",
             read_scope_where("$1", "$2"),
             project_annotation("$3"),
         );
-        for (target, want) in [(p3, Some(true)), (p1, Some(false)), (p9, None)] {
+        for (target, want) in [(p3, Some(true)), (p1, Some(false)), (p9, None), (p10, None)] {
             let old: Option<(bool,)> = sqlx::query_as(&legacy_probe)
                 .bind(&slug)
                 .bind(user)
@@ -6563,6 +7159,45 @@ mod read_tests {
         assert_eq!(INVALID_PARENT_MESSAGE, "Invalid parent page id");
     }
 
+    /// `project_ids` aggregates the filtered join (NEWPIDASH-344): the
+    /// caller's active-membership, unarchived projects — never the raw
+    /// traversal ids. No live-link leg: Django's M2M join carries no
+    /// `deleted_at` predicate, so a soft-deleted link to an accessible
+    /// project stays. The archived-project list keeps the URL project.
+    #[test]
+    fn project_ids_annotation_filters_join() {
+        let list = project_ids_annotation("$2", None);
+        assert!(
+            list.contains("JOIN projects p2 ON p2.id = pp2.project_id"),
+            "{list}"
+        );
+        assert!(
+            list.contains(
+                "JOIN project_members pm2 ON pm2.project_id = p2.id \
+                 AND pm2.member_id = $2 AND pm2.is_active = TRUE"
+            ),
+            "{list}"
+        );
+        assert!(list.contains("pp2.page_id = pages.id"), "{list}");
+        assert!(list.contains("AND p2.archived_at IS NULL"), "{list}");
+        assert!(!list.contains("pp2.deleted_at"), "{list}");
+        assert!(
+            list.contains(&format!(
+                "NOT (pp2.project_id = '{PROJECT_IDS_NIL_PLUS_ONE}')"
+            )),
+            "{list}"
+        );
+        let archived = project_ids_annotation("$2", Some("$3"));
+        assert!(
+            archived.contains("AND (p2.archived_at IS NULL OR pp2.project_id = $3)"),
+            "{archived}"
+        );
+        let sql = read_rows_sql_with_archived(false, RowFilter::TopLevel, false, &[], true);
+        assert!(sql.contains("OR pp2.project_id = $3"), "{sql}");
+        let live = read_rows_sql_with_archived(false, RowFilter::TopLevel, false, &[], false);
+        assert!(!live.contains("OR pp2.project_id = $3"), "{live}");
+    }
+
     /// Datetime shaping: aware values render in the request zone with the
     /// `Z` rewrite; nulls and dates pass through untouched.
     #[test]
@@ -6594,6 +7229,100 @@ mod read_tests {
         // Missing keys render null (annotation-backed keys on plain rows).
         let empty = shape_row(&Map::new(), &["label_ids"], &utc());
         assert_eq!(empty, r#"{"label_ids":null}"#);
+    }
+}
+
+#[cfg(test)]
+mod description_noop_tests {
+    use super::is_description_noop;
+    use serde_json::json;
+
+    #[test]
+    fn identical_triple_is_noop() {
+        let binary = Some(vec![1u8, 2, 3]);
+        let html = "<p>hi</p>";
+        let json = Some(json!({"ops": []}));
+        assert!(is_description_noop(
+            &binary, html, &json, &binary, html, &json
+        ));
+    }
+
+    #[test]
+    fn empty_and_null_are_noop() {
+        let none_binary: Option<Vec<u8>> = None;
+        let none_json: Option<serde_json::Value> = None;
+        assert!(is_description_noop(
+            &none_binary,
+            "<p></p>",
+            &none_json,
+            &none_binary,
+            "<p></p>",
+            &none_json
+        ));
+    }
+
+    #[test]
+    fn json_key_order_is_not_a_change() {
+        let a = Some(json!({"a": 1, "b": [1, 2]}));
+        let b = Some(json!({"b": [1, 2], "a": 1}));
+        let none_binary: Option<Vec<u8>> = None;
+        assert!(is_description_noop(
+            &none_binary,
+            "<p></p>",
+            &a,
+            &none_binary,
+            "<p></p>",
+            &b
+        ));
+    }
+
+    #[test]
+    fn any_field_differs_is_not_noop() {
+        let binary = Some(vec![1u8]);
+        let other_binary = Some(vec![2u8]);
+        let html = "<p>hi</p>";
+        let json = Some(json!({"ops": []}));
+        assert!(!is_description_noop(
+            &other_binary,
+            html,
+            &json,
+            &binary,
+            html,
+            &json
+        ));
+        assert!(!is_description_noop(
+            &binary,
+            "<p>bye</p>",
+            &json,
+            &binary,
+            html,
+            &json
+        ));
+        assert!(!is_description_noop(
+            &binary,
+            html,
+            &Some(json!({"ops": [1]})),
+            &binary,
+            html,
+            &json
+        ));
+        let none_binary: Option<Vec<u8>> = None;
+        assert!(!is_description_noop(
+            &binary,
+            html,
+            &json,
+            &none_binary,
+            html,
+            &json
+        ));
+        assert!(!is_description_noop(
+            &none_binary,
+            html,
+            &None,
+            &none_binary,
+            html,
+            &Some(json!({}))
+        ));
     }
 }
 

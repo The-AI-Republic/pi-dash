@@ -102,6 +102,22 @@ describe("withIssueFields", () => {
     });
   });
 
+  it("keeps a paginated bucket whose loaded rows run out but whose group still has rows", () => {
+    const grouped = {
+      grouped_by: "priority",
+      results: {
+        high: { results: [row(ISSUE_ID)], total_results: 5 },
+      },
+    };
+    expect(withIssueFields(grouped, ISSUE_ID, { priority: "low" })).toEqual({
+      grouped_by: "priority",
+      results: {
+        high: { results: [], total_results: 4 },
+        low: { results: [{ ...row(ISSUE_ID), priority: "low" }], total_results: 1 },
+      },
+    });
+  });
+
   it("puts null and empty dimension values in the None bucket", () => {
     const grouped = {
       grouped_by: "cycle_id",

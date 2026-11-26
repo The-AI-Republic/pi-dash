@@ -6,6 +6,8 @@ response key set. Value assertions only where the test controls the value.
 
 from psycopg.rows import dict_row
 
+from _harness.diffs import expect
+
 from .conftest import assert_keys
 
 LIST_KEYS = [
@@ -31,7 +33,7 @@ DETAIL_KEYS = [
     "is_time_tracking_enabled", "issue_views_view", "logo_props",
     "member_role", "members", "members_can_edit_states", "module_view",
     "name", "network", "next_work_item_sequence", "page_view",
-    "project_lead", "repo_url", "sort_order", "timezone", "updated_at",
+    "project_lead", "repo_url", "settings", "sort_order", "timezone", "updated_at",
     "updated_by", "workspace",
 ]
 
@@ -171,7 +173,7 @@ def test_create_project_shape_and_side_effects(world, db):
     pid = resp.json()["id"]
     with db.cursor(row_factory=dict_row) as cur:
         cur.execute("SELECT COUNT(*) AS n FROM states WHERE project_id=%s", (pid,))
-        assert cur.fetchone()["n"] == 8
+        assert cur.fetchone()["n"] == 9  # NEWPIDASH-305: +AI Completed
         # Default pod (runner post_save signal): one active row, named
         # {identifier}_pod_1, carrying the signal's description verbatim.
         cur.execute(
@@ -196,7 +198,7 @@ def test_create_project_shape_and_side_effects(world, db):
         cur.execute(
             "SELECT COUNT(*) AS n FROM states WHERE project_id=%s AND \"group\"<>'triage'",
             (pid,))
-        assert cur.fetchone()["n"] == 7
+        assert cur.fetchone()["n"] == 8  # NEWPIDASH-305: +AI Completed
         cur.execute(
             "SELECT role FROM project_members WHERE project_id=%s AND member_id=%s",
             (pid, str(user["id"])))
@@ -264,6 +266,128 @@ def test_partial_update_archived_project_400(world):
                         json={"name": "Nope"})
     assert resp.status_code == 400
     assert resp.json() == {"error": "Archived projects cannot be updated"}
+
+
+def test_project_patch_intake_view_false_flips_off(world, db):
+    """NEWPIDASH-263 (DIFF-30): PATCH {intake_view: false} turns intake off.
+
+    Django's app view reads only ``inbox_view``
+    (``app/views/project/base.py:342``), so ``intake_view`` PATCHes
+    no-op (200, flag stays true). Rust prefers ``intake_view`` and
+    falls back to ``inbox_view`` (DIFF-30), so the stored flag flips
+    to false and both response keys reflect it. The setup PATCH via
+    ``inbox_view`` works on both backends (the old/new frontends
+    send that key).
+    """
+    client, _, ws, project = world.full_stack()
+    url = f"/api/workspaces/{ws['slug']}/projects/{project['id']}/"
+    resp = client.patch(url, json={"inbox_view": True})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["intake_view"] is True
+    assert resp.json()["inbox_view"] is True
+
+    resp = client.patch(url, json={"intake_view": False})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["intake_view"] == expect("DIFF-30", django=True, rust=False)
+    assert resp.json()["inbox_view"] == expect("DIFF-30", django=True, rust=False)
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT intake_view FROM projects WHERE id=%s",
+            (str(project["id"]),),
+        )
+        assert cur.fetchone()["intake_view"] == expect(
+            "DIFF-30", django=True, rust=False
+        )
+
+
+def test_project_patch_intake_view_true_flips_on(world, db):
+    """NEWPIDASH-263 (DIFF-30): PATCH {intake_view: true} turns intake on.
+
+    Django reads only ``inbox_view``, so this no-ops on a disabled
+    project (200, flag stays false, no default intake ensured).
+    Rust honors ``intake_view`` and ensures the default intake
+    (DIFF-30), so the flag and response flip to true and one
+    default intake row exists. Inbox-only PATCHes still work on
+    both backends (see ``test_project_patch_inbox_view_still_works``).
+    """
+    client, _, ws, project = world.full_stack()
+    url = f"/api/workspaces/{ws['slug']}/projects/{project['id']}/"
+    assert project["intake_view"] is False
+    resp = client.patch(url, json={"intake_view": True})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["intake_view"] == expect("DIFF-30", django=False, rust=True)
+    assert resp.json()["inbox_view"] == expect("DIFF-30", django=False, rust=True)
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT intake_view FROM projects WHERE id=%s",
+            (str(project["id"]),),
+        )
+        assert cur.fetchone()["intake_view"] == expect(
+            "DIFF-30", django=False, rust=True
+        )
+        cur.execute(
+            "SELECT count(*) AS n FROM intakes "
+            "WHERE project_id=%s AND is_default=true AND deleted_at IS NULL",
+            (str(project["id"]),),
+        )
+        assert cur.fetchone()["n"] == expect("DIFF-30", django=0, rust=1)
+
+
+def test_project_patch_inbox_view_still_works(world, db):
+    """Old/new frontends PATCH ``inbox_view``; both backends honor it.
+
+    Guards the coexistence fallback of DIFF-30: toggling via the
+    legacy alias must keep working identically on Django and Rust,
+    including the default-intake ensure on enable.
+    """
+    client, _, ws, project = world.full_stack()
+    url = f"/api/workspaces/{ws['slug']}/projects/{project['id']}/"
+    resp = client.patch(url, json={"inbox_view": True})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["intake_view"] is True
+    assert resp.json()["inbox_view"] is True
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT count(*) AS n FROM intakes "
+            "WHERE project_id=%s AND is_default=true AND deleted_at IS NULL",
+            (str(project["id"]),),
+        )
+        assert cur.fetchone()["n"] == 1
+    resp = client.patch(url, json={"inbox_view": False})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["intake_view"] is False
+    assert resp.json()["inbox_view"] is False
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT intake_view FROM projects WHERE id=%s",
+            (str(project["id"]),),
+        )
+        assert cur.fetchone()["intake_view"] is False
+
+
+def test_project_patch_both_keys_intake_view_wins(world, db):
+    """NEWPIDASH-263 (DIFF-30): when both keys are sent, `intake_view` wins.
+
+    Django forces the ``inbox_view`` value over any ``intake_view``
+    key (``base.py:348-350``). Rust prefers ``intake_view``
+    (DIFF-30), so a disagreeing pair resolves to the canonical value.
+    """
+    client, _, ws, project = world.full_stack()
+    url = f"/api/workspaces/{ws['slug']}/projects/{project['id']}/"
+    resp = client.patch(url, json={"inbox_view": True})
+    assert resp.status_code == 200, resp.text
+    resp = client.patch(url, json={"intake_view": False, "inbox_view": True})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["intake_view"] == expect("DIFF-30", django=True, rust=False)
+    assert resp.json()["inbox_view"] == expect("DIFF-30", django=True, rust=False)
+    with db.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT intake_view FROM projects WHERE id=%s",
+            (str(project["id"]),),
+        )
+        assert cur.fetchone()["intake_view"] == expect(
+            "DIFF-30", django=True, rust=False
+        )
 
 
 def test_destroy_project(world, db):

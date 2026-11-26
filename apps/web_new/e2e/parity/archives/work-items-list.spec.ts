@@ -604,7 +604,7 @@ test(
 );
 
 test(
-  specTitle(["ARCH-007"], "peek locks every field and carries the selection in the address"),
+  specTitle(["ARCH-007"], "peek locks every field, offers the archived quick actions, and carries the selection"),
   { tag: specTags(["ARCH-007"]) },
   async ({ driver, seed }) => {
     const tag = `NF222 peek ${Date.now()}`;
@@ -621,6 +621,9 @@ test(
     const issue = await archiveNamedIssue(seed, projectId, `${tag} item`, done.id, session, {
       description_html: `<p>${body}</p>`,
     });
+    // A second archived item for the peek-restore step, so restoring it
+    // cannot disturb the first item's address assertions above.
+    const restoreIssue = await archiveNamedIssue(seed, projectId, `${tag} restore me`, done.id, session);
     try {
       await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
       await driver.archivesOpenIssuesList(seed.workspaceSlug, projectId);
@@ -662,8 +665,45 @@ test(
         expect(params.project).toBeNull();
         expect(params.nesting).toBeNull();
       });
+
+      await test.step("the peek header offers the archived quick actions", async () => {
+        await driver.clickListRow(issue.name);
+        await expect.poll(() => driver.archivesPeekTitle(), LIST_POLL).toBe(issue.name);
+        const entries = await driver.archivesPeekQuickActionNames();
+        // Both apps offer Restore to an editor here. The new app's peek
+        // menu additionally offers Copy link; the old peek offers copy
+        // only through its header control, so the menu assertion stays at
+        // Restore — exact order and the surrounding entries are pinned by
+        // the row-menu scenarios, not here.
+        expect(entries).toContain("Restore");
+      });
+
+      await test.step("copy-link copies the archived address", async () => {
+        // Both editions copy the archived address through the peek header
+        // control (the old peek menu has no copy entry at all).
+        await driver.archivesPeekCopyLink();
+        await expect.poll(() => driver.sawToast("Link copied"), { timeout: 60_000 }).toBe(true);
+        expect(await driver.readClipboard()).toContain(`/archives/issues/${issue.id}`);
+      });
+
+      await test.step("restore from the peek removes the item from the archived list", async () => {
+        await driver.archivesPeekClose();
+        await driver.clickListRow(restoreIssue.name);
+        await expect.poll(() => driver.archivesPeekTitle(), LIST_POLL).toBe(restoreIssue.name);
+        await driver.archivesPeekChoose("Restore");
+        await expect.poll(() => driver.sawToast("Restore success"), { timeout: 60_000 }).toBe(true);
+        // Both apps close the peek once its item leaves the archive.
+        await expect.poll(() => driver.archivesPeekVisible(), LIST_POLL).toBe(false);
+        await expect.poll(() => driver.archivesVisibleIssueNames(), LIST_POLL).not.toContain(restoreIssue.name);
+        expect((await serverIssue(seed.workspaceSlug, projectId, restoreIssue.id, session)).archived_at).toBeNull();
+      });
+
+      // Guest gating (no Restore, copy only) is pinned by the
+      // ArchivedIssuePeek component tests: the server refuses guest
+      // archived reads with 403 (see the PERMISSIONS_GUEST scenario), so a
+      // guest can never open this peek through the UI.
     } finally {
-      await cleanupArchivedFixture(seed, projectId, [issue.id], [done.owned], session);
+      await cleanupArchivedFixture(seed, projectId, [issue.id, restoreIssue.id], [done.owned], session);
     }
   }
 );

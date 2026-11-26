@@ -16,6 +16,7 @@ import type { IssueListItem } from "@pidash/api-client";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { createQueryClient } from "../../../core/query/client.js";
+import { archivesKeys, useArchivedIssuesCount } from "../../archives/index.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { ArchiveWorkItemDialog } from "../lifecycle/ArchiveWorkItemDialog.js";
 import { DeleteWorkItemDialog } from "../lifecycle/DeleteWorkItemDialog.js";
@@ -164,6 +165,20 @@ function transport(stub: Stub = {}) {
       );
     }
     if (url.includes("/members/") && url.includes("/workspaces/")) return json(200, { results: [] });
+    if (url.includes("/archived-issues/")) {
+      return json(200, {
+        grouped_by: null,
+        sub_grouped_by: null,
+        total_count: 10,
+        count: 10,
+        total_results: 10,
+        next_cursor: "",
+        prev_cursor: "",
+        next_page_results: false,
+        prev_page_results: false,
+        results: [],
+      });
+    }
     if (stub.me === true && url.endsWith("/api/users/me/")) {
       return json(200, {
         id: ME,
@@ -457,6 +472,41 @@ describe("useQuickActions", () => {
     const failing = renderMenu({ workspaceSlug: SLUG, target: target({ archived: true }), context: "archived" });
     await act(async () => failing.result.current?.handlers.run("restore"));
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith(RESTORE_FAILED_TITLE, expect.any(String)));
+  });
+
+  it("marks the archived count stale after a restore (ARCH-002)", async () => {
+    transport();
+    const queryClient = createQueryClient();
+    const countKey = archivesKeys.count(SLUG, PROJECT);
+    queryClient.setQueryData(countKey, 11);
+    const shared = function Shared({ children }: { children: React.ReactNode }): React.ReactElement {
+      return <QueryClientProvider client={queryClient}>{children as never}</QueryClientProvider>;
+    };
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const { result } = renderHook(
+      () => useQuickActions({ workspaceSlug: SLUG, target: target({ archived: true }), context: "archived" }),
+      { wrapper: shared }
+    );
+    await act(async () => result.current?.handlers.run("restore"));
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: archivesKeys.all(SLUG, PROJECT) }));
+    expect(queryClient.getQueryCache().find({ queryKey: countKey })?.state.isInvalidated).toBe(true);
+  });
+
+  it("refetches the archived count after a restore so the badge decrements (ARCH-002)", async () => {
+    transport();
+    const queryClient = createQueryClient();
+    queryClient.setQueryData(archivesKeys.count(SLUG, PROJECT), 11);
+    const shared = function Shared({ children }: { children: React.ReactNode }): React.ReactElement {
+      return <QueryClientProvider client={queryClient}>{children as never}</QueryClientProvider>;
+    };
+    const badge = renderHook(() => useArchivedIssuesCount(SLUG, PROJECT), { wrapper: shared });
+    expect(badge.result.current.data).toBe(11);
+    const menu = renderHook(
+      () => useQuickActions({ workspaceSlug: SLUG, target: target({ archived: true }), context: "archived" }),
+      { wrapper: shared }
+    );
+    await act(async () => menu.result.current?.handlers.run("restore"));
+    await waitFor(() => expect(badge.result.current.data).toBe(10));
   });
 });
 

@@ -1005,7 +1005,7 @@ mod tests {
         assert_eq!(mt_cols::COLUMNS, TOKEN_COLS);
         assert_eq!(mt_cols::TABLE, "machine_token");
         assert_eq!(r_cols::TABLE, "runner");
-        // Cross-domain projects list (46 cols, id sixth) comes from the
+        // Cross-domain projects list (47 cols, id sixth) comes from the
         // merged app_project port — spot-pin head, id slot and tail.
         assert_eq!(
             &project_cols::COLUMNS[..6],
@@ -1018,9 +1018,10 @@ mod tests {
                 "id"
             ]
         );
-        assert_eq!(project_cols::COLUMNS.len(), 47);
+        assert_eq!(project_cols::COLUMNS.len(), 48);
         assert_eq!(project_cols::COLUMNS[13], "identifier");
         assert_eq!(project_cols::COLUMNS[46], "default_agent_executor");
+        assert_eq!(project_cols::COLUMNS[47], "default_work_type");
         assert_eq!(project_cols::TABLE, "projects");
         // Own cross-domain table pins.
         assert_eq!(AGENT_RUN_TABLE, "agent_run");

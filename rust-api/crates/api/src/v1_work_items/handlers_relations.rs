@@ -75,10 +75,11 @@
 //!   every full `save()` re-stamps actors from the request user, so
 //!   `relate()` rows land with `updated_by=NULL` (the adding branch
 //!   nulls it, discarding the explicit actor), workpad PATCH stamps
-//!   `updated_by` and recomputes `description_stripped` / `completed_at`
-//!   (untouched when the issue had no state — the recompute is the `else`
-//!   arm), and a workpad PATCH on a stateless issue ASSIGNS a default
-//!   state.
+//!   `updated_by` and recomputes `description_stripped` (and, fixed by
+//!   NEWPIDASH-351, DIFF-62, preserves `completed_at` unless the state
+//!   group changed — untouched when the issue had no state and on every
+//!   stateless save, since the recompute was the `else` arm), and a
+//!   workpad PATCH on a stateless issue ASSIGNS a default state.
 //!
 //! Deliberate edges (all unpinned — no fixture or contract case sends
 //! them):
@@ -190,6 +191,11 @@ pub enum Denial {
     UnsupportedMediaType(String),
     /// 404, view-inline body (unresolvable refs carry `unresolved` too).
     NotFound(String),
+    /// 409, archived project (NEWPIDASH-236, pre-rendered body).
+    ProjectArchived(String),
+    /// 412, workpad stale-write guard (NEWPIDASH-320 §6.1, pre-rendered
+    /// body carrying the current hash).
+    PreconditionFailed(String),
     /// 500, generic branch.
     ServerError,
 }
@@ -227,6 +233,8 @@ impl Denial {
                 format!("{{\"detail\":{}}}", json_string(message)),
             ),
             Denial::NotFound(body) => (StatusCode::NOT_FOUND, body.clone()),
+            Denial::ProjectArchived(body) => (StatusCode::CONFLICT, body.clone()),
+            Denial::PreconditionFailed(body) => (StatusCode::PRECONDITION_FAILED, body.clone()),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 SERVER_ERROR_BODY.to_owned(),
@@ -265,6 +273,8 @@ impl From<crate::v1_projects::handlers_project::Denial> for Denial {
                 Denial::NotFound(format!("{{\"error\":{}}}", json_string(&message)))
             }
             // Unreachable from the reused calls (no 409 arm there).
+            // Unreachable from the reused calls (patch-only lock).
+            D::ForbiddenError(_) => Denial::ServerError,
             D::Conflict(_) => Denial::ServerError,
             D::ServerError => Denial::ServerError,
         }
@@ -300,6 +310,7 @@ impl From<operations::Error> for Denial {
             operations::Error::NotFound => Denial::NotFound(RESOURCE_NOT_FOUND_BODY.to_owned()),
             operations::Error::NotFoundBody(body) => Denial::NotFound(body),
             operations::Error::ServerError => Denial::ServerError,
+            operations::Error::PreconditionFailed(body) => Denial::PreconditionFailed(body),
             operations::Error::Conflict(_)
             | operations::Error::ProjectNotFound
             | operations::Error::Rejection { .. } => Denial::ServerError,
@@ -468,11 +479,18 @@ async fn require_entity_gate(
     let facts = project_base_facts(pool, workspace_id, workspace_slug, user_id, project_id).await?;
     let scope = TenantScope::new(pidash_types::WorkspaceId::from(workspace_slug.to_owned()));
     let gate = gate_for(route, method);
-    if decide(gate, method, &scope, &facts) {
-        Ok(())
-    } else {
-        Err(Denial::Forbidden)
+    if !decide(gate, method, &scope, &facts) {
+        return Err(Denial::Forbidden);
     }
+    if let Some(info) = crate::project_archived::archived_by_id(pool, *project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1536,10 +1554,19 @@ async fn workpad_get_inner(
     };
     let workpad = row.workpad;
     let updated_at = crate::serializer::render_datetime_in(&row.updated_at, &tz);
-    let body = render_workpad(&WorkpadRow {
+    let mut body = render_workpad(&WorkpadRow {
         body: &workpad,
         updated_at: &updated_at,
     });
+    // Stale-write guard read (NEWPIDASH-320 §6.1): additive Rust-only
+    // field — the Django serializer this port mirrors emits `{body,
+    // updated_at}` only, so the hash joins here, not in `render_workpad`.
+    body.insert(
+        "body_sha256".to_owned(),
+        Value::String(pidash_services::orchestration::creation::workpad_sha256(
+            &workpad,
+        )),
+    );
     let body = serde_json::to_string(&body).map_err(|_| Denial::ServerError)?;
     Ok(json_response(StatusCode::OK, body))
 }
@@ -1602,11 +1629,23 @@ async fn workpad_patch_inner(
         transition,
         enqueue,
     };
+    // Stale-write guard (NEWPIDASH-320 §6.1): an optional hex hash of the
+    // body the caller read. Missing or null means unconditional, as
+    // today. A present non-string can never equal a hex digest, so it
+    // 412s exactly like a changed body instead of silently disarming
+    // the guard.
+    let if_body_sha256 = match parsed_body.value.get("if_body_sha256") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(hash)) => Some(hash.clone()),
+        Some(_) => Some(String::new()),
+    };
     let write = operations::workpad::WorkpadWrite {
         slug,
         project_id,
         issue_id: *issue_id,
         body: &parsed_body.value,
+        if_body_sha256,
+        from_run: headers.contains_key(crate::v1_work_items::perms::RUN_ID_HEADER),
     };
     let outcome = operations::workpad::update(&deps, &ctx, &write).await?;
     op_response(outcome)

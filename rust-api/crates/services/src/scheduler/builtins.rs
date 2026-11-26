@@ -1,15 +1,14 @@
 //! Builtin scheduler catalog + per-workspace upsert + creation signal gate.
 //!
-//! Port of `apps/api/pi_dash/scheduler/builtins/__init__.py` (188 lines)
-//! and `apps/api/pi_dash/scheduler/signals.py` (39 lines), scoped to the
+//! Port of `apps/api/pi_dash/scheduler/builtins/__init__.py` and
+//! `apps/api/pi_dash/scheduler/signals.py`, scoped to the
 //! lines this issue owns:
 //!
 //! * `builtins/__init__.py:21-28` (`BuiltinScheduler`) — [`BuiltinScheduler`].
-//! * `builtins/__init__.py:31-59` (`SECURITY_AUDIT_PROMPT`) —
-//!   [`SECURITY_AUDIT_PROMPT`].
-//! * `builtins/__init__.py:62-98` (`FABLE_AUDIT_PROMPT`) —
-//!   [`FABLE_AUDIT_PROMPT`].
-//! * `builtins/__init__.py:101-121` (`BUILTINS`) — [`BUILTINS`].
+//! * `builtins/__init__.py:101-121` (`BUILTINS`) — [`BUILTINS`] (now empty;
+//!   the two outdated audit templates were removed by NEWPIDASH-256, the
+//!   prompt constants are kept only so the port documentation stays
+//!   resolvable and tests can pin the removal).
 //! * `builtins/__init__.py:124-188` (`ensure_builtin_schedulers`) —
 //!   [`decide_ensure`], [`count_touched`], [`ensure_select_statement`],
 //!   [`seed_builtin_schedulers`], [`builtin_repaint_statement`].
@@ -101,7 +100,10 @@ pub struct BuiltinScheduler {
     pub prompt: &'static str,
 }
 
-/// Basic security-scan prompt (`builtins/__init__.py:31-59`).
+/// Former template prompts (NEWPIDASH-256): the `security-audit` /
+/// `fable-security-audit` catalog was removed as outdated. The constants
+/// stay as dead values so the port trace and the test pin can keep
+/// referencing the removal without breaking doc links.
 pub const SECURITY_AUDIT_PROMPT: &str = r#"Scan this project's source code for potential security vulnerabilities
 (injection, auth bypass, secret leakage, unsafe deserialization, SSRF,
 insecure defaults).
@@ -117,7 +119,7 @@ Before creating an issue, list existing open issues with the
 corresponding open issue (de-dupe by file + rule, not by exact title).
 "#;
 
-/// Fable-powered audit prompt (`builtins/__init__.py:62-98`).
+/// Former template prompt — see [`SECURITY_AUDIT_PROMPT`].
 pub const FABLE_AUDIT_PROMPT: &str = r#"You are performing a scheduled, read-only security and correctness audit of this
 repository. Run autonomously to completion — no human is available to answer
 questions, so make reasonable assumptions and note them rather than stopping.
@@ -169,22 +171,10 @@ End with a one-line summary: issues filed, duplicates skipped, breakdown by
 severity. If there are no new findings, file nothing and report "No new findings".
 "#;
 
-/// The catalog — the single source of truth (`builtins/__init__.py:101-121`).
-/// Order is declaration order: `security-audit` first.
-pub const BUILTINS: [BuiltinScheduler; 2] = [
-    BuiltinScheduler {
-        slug: "security-audit",
-        name: "Security Audit",
-        description: "Scans the project for common security vulnerabilities and files Pi Dash issues for any new findings.",
-        prompt: SECURITY_AUDIT_PROMPT,
-    },
-    BuiltinScheduler {
-        slug: "fable-security-audit",
-        name: "Claude Mythos/Fable System Security Audit",
-        description: "Comprehensive Fable-powered audit: scans the project for security vulnerabilities and correctness bugs and files Pi Dash issues for new findings.",
-        prompt: FABLE_AUDIT_PROMPT,
-    },
-];
+/// The catalog — the single source of truth. Empty after NEWPIDASH-256
+/// removed the two outdated audit templates; the mechanism (upsert,
+/// `is_builtin`, reserved slugs) remains for future built-ins.
+pub const BUILTINS: [BuiltinScheduler; 0] = [];
 
 /// What `ensure_builtin_schedulers` does with one catalog entry
 /// (`builtins/__init__.py:158-187`).
@@ -445,28 +435,17 @@ mod tests {
 
     #[test]
     fn catalog_matches_fixture_exactly() {
-        // `FIX-scheduler / catalog.builtins` (2 slugs) + full prompt goldens.
+        // `FIX-scheduler / catalog.builtins` — the catalog is empty after
+        // NEWPIDASH-256 removed the two outdated audit templates. The
+        // prompts stay as dead constants so this test can still pin the
+        // exact removed values (byte-level evidence the removal is the
+        // only change).
         let golden = fixture();
         let catalog = catalog_data(&golden);
-        assert_eq!(catalog["builtin_count"].as_u64().expect("count"), 2);
-        assert_eq!(BUILTINS.len(), 2);
+        assert_eq!(catalog["builtin_count"].as_u64().expect("count"), 0);
+        assert_eq!(BUILTINS.len(), 0);
         let expected = catalog["builtins"].as_array().expect("builtins array");
-        for (builtin, want) in BUILTINS.iter().zip(expected.iter()) {
-            assert_eq!(builtin.slug, want["slug"].as_str().expect("slug"));
-            assert_eq!(builtin.name, want["name"].as_str().expect("name"));
-            assert_eq!(
-                builtin.description,
-                want["description"].as_str().expect("description")
-            );
-            assert_eq!(
-                builtin.prompt.chars().count() as u64,
-                want["prompt_len"].as_u64().expect("prompt_len")
-            );
-            assert_eq!(
-                sha_hex(builtin.prompt),
-                want["prompt_sha256"].as_str().expect("prompt_sha256")
-            );
-        }
+        assert!(expected.is_empty());
         let data = golden.get("data").expect("fixture carries data");
         assert_eq!(
             SECURITY_AUDIT_PROMPT,
@@ -495,12 +474,28 @@ mod tests {
         );
     }
 
+    /// Test-only catalog entry for exercising the ensure/repaint path
+    /// without depending on a real built-in (catalog is empty in prod
+    /// after NEWPIDASH-256). Built from plain values so the loop
+    /// mechanics can be pinned even with no prod rows.
+    const TEST_BUILTIN: BuiltinScheduler = BuiltinScheduler {
+        slug: "test-builtin",
+        name: "Test Builtin",
+        description: "test catalog entry",
+        prompt: "test prompt",
+    };
+
     /// One `ensure` run over a fake store, mirroring the Python loop
     /// (`builtins/__init__.py:158-187`) including the unconditional
-    /// `touched += 1`.
-    fn run_ensure(store: &mut HashMap<String, SchedulerRowView>) -> usize {
-        let mut plans = Vec::with_capacity(BUILTINS.len());
-        for builtin in BUILTINS.iter() {
+    /// `touched += 1`. Takes the catalog to iterate so tests can
+    /// exercise the mechanics with [`TEST_BUILTIN`] while the prod
+    /// catalog is empty.
+    fn run_ensure_with(
+        store: &mut HashMap<String, SchedulerRowView>,
+        catalog: &[BuiltinScheduler],
+    ) -> usize {
+        let mut plans = Vec::with_capacity(catalog.len());
+        for builtin in catalog.iter() {
             let action = decide_ensure(store.get(builtin.slug));
             match action {
                 EnsureAction::Create => {
@@ -527,29 +522,39 @@ mod tests {
         count_touched(&plans)
     }
 
+    fn run_ensure(store: &mut HashMap<String, SchedulerRowView>) -> usize {
+        run_ensure_with(store, &BUILTINS)
+    }
+
     #[test]
     fn ensure_is_idempotent_and_touches_per_builtin() {
-        // `FIX-scheduler / db`: first run creates, second run still
-        // touches 2, count unchanged.
+        // Prod catalog is empty after NEWPIDASH-256: ensure is a no-op
+        // that touches 0. The mechanics are pinned with the test-only
+        // catalog below (create + idempotent repaint on the same store).
+        let mut empty = HashMap::new();
+        assert_eq!(run_ensure(&mut empty), 0);
+        assert_eq!(empty.len(), 0);
+        assert_eq!(run_ensure(&mut empty), 0);
+
         let mut store = HashMap::new();
-        assert_eq!(run_ensure(&mut store), 2);
-        assert_eq!(store.len(), 2);
-        assert_eq!(run_ensure(&mut store), 2);
-        assert_eq!(store.len(), 2);
-        for builtin in BUILTINS.iter() {
-            let row = store.get(builtin.slug).expect("seeded row");
-            assert_eq!(row.source, "builtin");
-            assert_eq!(row.prompt, builtin.prompt);
-        }
+        assert_eq!(run_ensure_with(&mut store, &[TEST_BUILTIN]), 1);
+        assert_eq!(store.len(), 1);
+        assert_eq!(run_ensure_with(&mut store, &[TEST_BUILTIN]), 1);
+        assert_eq!(store.len(), 1);
+        let row = store.get(TEST_BUILTIN.slug).expect("seeded row");
+        assert_eq!(row.source, "builtin");
+        assert_eq!(row.prompt, TEST_BUILTIN.prompt);
     }
 
     #[test]
     fn ensure_repaints_stale_rows() {
-        // `FIX-scheduler / db.ensure_repaints_stale`: a stale row converges
-        // to the catalog and still counts as touched.
+        // A stale row converges to the (test) catalog and still counts
+        // as touched. The prod catalog is empty, so a stale row keyed by
+        // the old `security-audit` slug would no longer be repainted —
+        // it stays as an ordinary scheduler (the NEWPIDASH-256 choice).
         let mut store = HashMap::new();
         store.insert(
-            "security-audit".to_owned(),
+            TEST_BUILTIN.slug.to_owned(),
             SchedulerRowView {
                 name: "Stale name".to_owned(),
                 description: "stale".to_owned(),
@@ -558,17 +563,14 @@ mod tests {
             },
         );
         assert_eq!(
-            decide_ensure(store.get("security-audit")),
+            decide_ensure(store.get(TEST_BUILTIN.slug)),
             EnsureAction::Repaint
         );
-        assert_eq!(
-            decide_ensure(store.get("fable-security-audit")),
-            EnsureAction::Create
-        );
-        assert_eq!(run_ensure(&mut store), 2);
-        let row = store.get("security-audit").expect("repainted row");
-        assert_eq!(row.name, "Security Audit");
-        assert_eq!(row.prompt, SECURITY_AUDIT_PROMPT);
+        assert_eq!(decide_ensure(store.get("missing")), EnsureAction::Create);
+        assert_eq!(run_ensure_with(&mut store, &[TEST_BUILTIN]), 1);
+        let row = store.get(TEST_BUILTIN.slug).expect("repainted row");
+        assert_eq!(row.name, TEST_BUILTIN.name);
+        assert_eq!(row.prompt, TEST_BUILTIN.prompt);
         assert_eq!(row.source, "builtin");
     }
 
@@ -578,8 +580,10 @@ mod tests {
         // `FIX-scheduler / db.ensure_select_sql`: the doubled
         // `deleted_at IS NULL` quirk is one semantic predicate; the
         // slug/workspace scope (in either order — binding order is not
-        // observable) and newest-first limit survive.
-        let select = ensure_select_statement(Uuid::nil(), "security-audit")
+        // observable) and newest-first limit survive. Slug value is
+        // immaterial now that the prod catalog is empty — use the
+        // test-only slug.
+        let select = ensure_select_statement(Uuid::nil(), TEST_BUILTIN.slug)
             .build(DbBackend::Postgres)
             .to_string();
         assert!(select.contains("FROM"), "select from: {select}");

@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! Validation for the runner LLM model catalog (NEWPIDASH-169).
+//! Validation for the runner LLM model catalog (NEWPIDASH-169, NEWPIDASH-302).
 //!
 //! Pure helpers over `serde_json` bodies: no I/O, so the decision shapes
 //! are unit-testable without a database. Handlers layer the row fetching,
@@ -9,32 +9,98 @@
 //!
 //! Validation codes (each answered as `400 {"error":"<code>"}`):
 //! `not_an_object`, `unknown_agent`, `empty_model`, `empty_label`,
-//! `invalid_effort`, `duplicate_effort`, `invalid_type`, `invalid_body`.
+//! `invalid_effort`, `duplicate_effort`, `invalid_type`, `invalid_body`,
+//! `efforts_not_allowed`.
 
 use serde_json::Value;
 
 /// Agents the runner CLI accepts on `--agent` (kept in sync with
 /// `apps/web_new/src/features/runners/addRunner/catalog.ts` `RUNNER_AGENTS`;
-/// the list itself stays in code per NEWPIDASH-169).
-pub const KNOWN_AGENTS: [&str; 6] = [
+/// the list itself stays in code per NEWPIDASH-169). `openhub` is NOT a
+/// runner agent (NEWPIDASH-302) and never appears here; the add-runner
+/// picker reads only this set.
+pub const KNOWN_AGENTS: [&str; 7] = [
     "claude-code",
     "codex",
     "cursor-agent",
     "open-claw",
     "grok",
+    "antigravity",
     "muse-code",
 ];
 
-/// Reasoning-effort values offered by Codex models (the picker crosses
-/// each Codex row's efforts with the model slug).
-pub const KNOWN_EFFORTS: [&str; 4] = ["low", "medium", "high", "xhigh"];
+/// Catalog groups the admin CRUD accepts. This is `KNOWN_AGENTS` plus
+/// the OpenHub assistant group (`openhub`): a catalog group, not a runner
+/// agent. Admin CRUD validates against this; the runner picker never
+/// renders `openhub`.
+pub const CATALOG_AGENTS: [&str; 8] = [
+    "claude-code",
+    "codex",
+    "cursor-agent",
+    "open-claw",
+    "grok",
+    "antigravity",
+    "muse-code",
+    "openhub",
+];
+
+/// The OpenHub assistant-model catalog group (NEWPIDASH-302).
+pub const OPENHUB_AGENT: &str = "openhub";
+
+/// Reasoning-effort tiers Codex accepts on `turn/start` (the runner's
+/// `CODEX_EFFORTS`).
+pub const CODEX_EFFORTS: [&str; 4] = ["low", "medium", "high", "xhigh"];
+
+/// Effort levels `claude --effort` accepts (the runner's
+/// `CLAUDE_CODE_EFFORTS`).
+pub const CLAUDE_CODE_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+/// Reasoning-effort tiers `muse exec --reasoning-effort` accepts (the
+/// runner's `MUSE_CODE_EFFORTS`).
+pub const MUSE_CODE_EFFORTS: [&str; 8] = [
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+];
+
+/// Every effort tier some runner agent accepts: the union of the per-agent
+/// sets. Used where the agent is not known (the agent-agnostic patch and
+/// the reconfigure body before the runner's agent is loaded). Muse's set is
+/// a superset of Codex's and Claude Code's, so it is the union;
+/// `known_efforts_is_the_union` pins that.
+pub const KNOWN_EFFORTS: [&str; 8] = MUSE_CODE_EFFORTS;
+
+/// The effort tiers valid for `agent`, matching the runner's
+/// `efforts_for_agent`: Codex, Claude Code and Muse Code each have their own
+/// set, and every other runner agent (Cursor, OpenClaw, Grok, Antigravity)
+/// takes none.
+/// `None` (agent unknown) is the union. `openhub` is the union too so its
+/// rows fail with the clearer `efforts_not_allowed`, checked afterwards.
+pub fn efforts_for_agent(agent: Option<&str>) -> &'static [&'static str] {
+    match agent {
+        None | Some(OPENHUB_AGENT) => &KNOWN_EFFORTS,
+        Some("codex") => &CODEX_EFFORTS,
+        Some("claude-code") => &CLAUDE_CODE_EFFORTS,
+        Some("muse-code") => &MUSE_CODE_EFFORTS,
+        Some(_) => &[],
+    }
+}
 
 pub fn is_known_agent(agent: &str) -> bool {
     KNOWN_AGENTS.contains(&agent)
 }
 
-pub fn is_known_effort(effort: &str) -> bool {
-    KNOWN_EFFORTS.contains(&effort)
+/// Admin CRUD accepts the runner agents plus the `openhub` catalog group.
+pub fn is_known_catalog_agent(agent: &str) -> bool {
+    CATALOG_AGENTS.contains(&agent)
+}
+
+/// True when the value is the OpenHub catalog group (assistant models).
+pub fn is_openhub(agent: &str) -> bool {
+    agent == OPENHUB_AGENT
+}
+
+/// True when `effort` is a tier `agent` accepts (see [`efforts_for_agent`]).
+pub fn is_effort_for_agent(agent: Option<&str>, effort: &str) -> bool {
+    efforts_for_agent(agent).contains(&effort)
 }
 
 fn trimmed_string(body: &Value, key: &str) -> Result<Option<String>, &'static str> {
@@ -69,7 +135,10 @@ fn optional_sort_order(body: &Value) -> Result<Option<i32>, &'static str> {
     }
 }
 
-fn optional_efforts(body: &Value) -> Result<Option<Vec<String>>, &'static str> {
+fn optional_efforts(
+    agent: Option<&str>,
+    body: &Value,
+) -> Result<Option<Vec<String>>, &'static str> {
     match body.get("reasoning_efforts") {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Array(items)) => {
@@ -82,7 +151,7 @@ fn optional_efforts(body: &Value) -> Result<Option<Vec<String>>, &'static str> {
                 if value.is_empty() {
                     return Err("invalid_type");
                 }
-                if !is_known_effort(value) {
+                if !is_effort_for_agent(agent, value) {
                     return Err("invalid_effort");
                 }
                 if efforts.iter().any(|seen: &String| seen == value) {
@@ -136,7 +205,7 @@ pub fn validate_create(body: &Value) -> Result<NewModel, &'static str> {
     let Some(agent) = agent else {
         return Err("unknown_agent");
     };
-    if !is_known_agent(&agent) {
+    if !is_known_catalog_agent(&agent) {
         return Err("unknown_agent");
     }
     let model = trimmed_string(body, "model")?;
@@ -153,11 +222,15 @@ pub fn validate_create(body: &Value) -> Result<NewModel, &'static str> {
     if label.is_empty() {
         return Err("empty_label");
     }
+    let efforts = optional_efforts(Some(&agent), body)?.unwrap_or_default();
+    if is_openhub(&agent) && !efforts.is_empty() {
+        return Err("efforts_not_allowed");
+    }
     Ok(NewModel {
         agent,
         model,
         label,
-        reasoning_efforts: optional_efforts(body)?.unwrap_or_default(),
+        reasoning_efforts: efforts,
         sort_order: optional_sort_order(body)?,
         is_enabled: optional_bool(body, "is_enabled")?,
         is_preselected: optional_bool(body, "is_preselected")?,
@@ -167,7 +240,21 @@ pub fn validate_create(body: &Value) -> Result<NewModel, &'static str> {
 /// Validate a `PATCH` body. `agent` is never writable (the list stays in
 /// code; a model belongs to one agent for its whole lifetime) — a
 /// different agent in the body is ignored, like other unknown keys.
+///
+/// When `agent` is `openhub`, any non-empty `reasoning_efforts` is
+/// rejected with `efforts_not_allowed` (openhub rows carry no
+/// reasoning efforts). The `PATCH` handler looks up the row's agent and
+/// passes it here; the agent-agnostic overload treats the patch as
+/// runner-agent-shaped and the handler enforces the openhub rule on top.
 pub fn validate_patch(body: &Value) -> Result<PatchModel, &'static str> {
+    validate_patch_for_agent(None, body)
+}
+
+/// Agent-aware patch validation (handler passes the row's agent).
+pub fn validate_patch_for_agent(
+    agent: Option<&str>,
+    body: &Value,
+) -> Result<PatchModel, &'static str> {
     if !body.is_object() {
         return Err("invalid_body");
     }
@@ -181,10 +268,16 @@ pub fn validate_patch(body: &Value) -> Result<PatchModel, &'static str> {
             return Err("empty_label");
         }
     }
+    let efforts = optional_efforts(agent, body)?;
+    if let (Some(agent), Some(efforts)) = (agent, &efforts) {
+        if is_openhub(agent) && !efforts.is_empty() {
+            return Err("efforts_not_allowed");
+        }
+    }
     Ok(PatchModel {
         model: trimmed_string(body, "model")?,
         label: trimmed_string(body, "label")?,
-        reasoning_efforts: optional_efforts(body)?,
+        reasoning_efforts: efforts,
         sort_order: optional_sort_order(body)?,
         is_enabled: optional_bool(body, "is_enabled")?,
         is_preselected: optional_bool(body, "is_preselected")?,
@@ -309,6 +402,146 @@ mod tests {
     fn patch_ignores_agent() {
         let parsed = validate_patch(&json!({"agent": "grok", "label": "X"})).expect("valid");
         assert_eq!(parsed.label, Some("X".to_owned()));
+    }
+
+    #[test]
+    fn create_accepts_openhub_without_efforts() {
+        let parsed = validate_create(&json!({
+            "agent": "openhub", "model": "openhub_free_llm", "label": "Free",
+        }))
+        .expect("openhub create is valid");
+        assert_eq!(parsed.agent, "openhub");
+        assert!(parsed.reasoning_efforts.is_empty());
+    }
+
+    #[test]
+    fn create_rejects_openhub_with_efforts() {
+        assert_eq!(
+            validate_create(&json!({
+                "agent": "openhub", "model": "openhub_free_llm", "label": "Free",
+                "reasoning_efforts": ["low"],
+            }))
+            .err(),
+            Some("efforts_not_allowed")
+        );
+    }
+
+    #[test]
+    fn create_rejects_openhub_empty_slug() {
+        assert_eq!(
+            validate_create(&json!({
+                "agent": "openhub", "model": "   ", "label": "Free",
+            }))
+            .err(),
+            Some("empty_model")
+        );
+    }
+
+    #[test]
+    fn patch_rejects_openhub_with_efforts_via_agent() {
+        assert_eq!(
+            validate_patch_for_agent(Some("openhub"), &json!({"reasoning_efforts": ["high"]}))
+                .err(),
+            Some("efforts_not_allowed")
+        );
+        // Runner rows keep accepting efforts.
+        assert!(
+            validate_patch_for_agent(Some("codex"), &json!({"reasoning_efforts": ["high"]}))
+                .is_ok()
+        );
+        // Agent-agnostic validate_patch does not enforce openhub rule.
+        assert!(validate_patch(&json!({"reasoning_efforts": ["high"]})).is_ok());
+    }
+
+    #[test]
+    fn known_efforts_is_the_union() {
+        for tier in CODEX_EFFORTS
+            .iter()
+            .chain(CLAUDE_CODE_EFFORTS.iter())
+            .chain(MUSE_CODE_EFFORTS.iter())
+        {
+            assert!(
+                KNOWN_EFFORTS.contains(tier),
+                "{tier} missing from KNOWN_EFFORTS"
+            );
+        }
+    }
+
+    #[test]
+    fn muse_code_rows_accept_muse_effort_tiers() {
+        let parsed = validate_create(&json!({
+            "agent": "muse-code", "model": "muse-1", "label": "Muse",
+            "reasoning_efforts": ["minimal", "high", "max", "ultra"],
+        }))
+        .expect("muse tiers are valid on a muse-code row");
+        assert_eq!(
+            parsed.reasoning_efforts,
+            ["minimal", "high", "max", "ultra"]
+        );
+        assert!(validate_patch_for_agent(
+            Some("muse-code"),
+            &json!({"reasoning_efforts": ["none"]})
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn agents_without_an_effort_setting_take_none() {
+        for agent in ["cursor-agent", "open-claw", "grok", "antigravity"] {
+            assert_eq!(
+                validate_create(&json!({
+                    "agent": agent, "model": "m", "label": "M",
+                    "reasoning_efforts": ["high"],
+                }))
+                .err(),
+                Some("invalid_effort"),
+                "{agent}"
+            );
+            assert!(validate_create(&json!({"agent": agent, "model": "m", "label": "M"})).is_ok());
+        }
+    }
+
+    #[test]
+    fn claude_code_rows_take_claude_levels_only() {
+        let parsed = validate_create(&json!({
+            "agent": "claude-code", "model": "claude-opus-4-8", "label": "Opus 4.8",
+            "reasoning_efforts": ["high", "xhigh", "max"],
+        }))
+        .expect("claude levels are valid on a claude-code row");
+        assert_eq!(parsed.reasoning_efforts, ["high", "xhigh", "max"]);
+        assert_eq!(
+            validate_patch_for_agent(
+                Some("claude-code"),
+                &json!({"reasoning_efforts": ["ultra"]})
+            )
+            .err(),
+            Some("invalid_effort")
+        );
+    }
+
+    #[test]
+    fn codex_rows_reject_muse_only_effort_tiers() {
+        assert_eq!(
+            validate_create(&json!({
+                "agent": "codex", "model": "gpt-5.5", "label": "GPT",
+                "reasoning_efforts": ["max"],
+            }))
+            .err(),
+            Some("invalid_effort")
+        );
+        assert_eq!(
+            validate_patch_for_agent(Some("codex"), &json!({"reasoning_efforts": ["minimal"]}))
+                .err(),
+            Some("invalid_effort")
+        );
+    }
+
+    #[test]
+    fn is_openhub_distinguishes_runner_agents() {
+        assert!(is_openhub("openhub"));
+        assert!(!is_openhub("claude-code"));
+        assert!(is_known_catalog_agent("openhub"));
+        assert!(!is_known_agent("openhub"));
     }
 
     #[test]

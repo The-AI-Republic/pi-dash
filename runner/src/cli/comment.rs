@@ -10,10 +10,12 @@ use clap::{Args, Subcommand};
 use serde_json::{Map, Value, json};
 
 use crate::api_client::{
-    ApiClient, CliEnv, CliError, EXIT_INVALID, EXIT_SERVER, EXIT_UNKNOWN, report_error,
+    ApiClient, CliEnv, CliError, EXIT_INVALID, EXIT_SERVER, EXIT_UNKNOWN, agent_name_from_env,
+    report_error,
 };
 
 use super::resolve::resolve_issue;
+use super::state::ISSUE_ENV;
 
 #[derive(Debug, Args)]
 pub struct CommentArgs {
@@ -35,24 +37,48 @@ pub struct CommentBodyArgs {
 #[derive(Debug, Args)]
 pub struct CommentSpeakerArgs {
     /// Mark the comment as spoken by an AI agent with this display name.
+    /// Defaults to `PIDASH_AGENT_NAME` inside an agent run.
     #[arg(long = "as-agent", value_name = "NAME")]
     as_agent: Option<String>,
-    /// Pi Dash agent run UUID that produced this comment.
+    /// Pi Dash agent run UUID that produced this comment. Defaults to
+    /// `PIDASH_RUN_ID` inside an agent run.
     #[arg(long = "agent-run-id", value_name = "UUID")]
     agent_run_id: Option<String>,
+}
+
+impl CommentSpeakerArgs {
+    /// Fill unset flags from the run environment. Explicit flags win;
+    /// outside a run both stay unset and the comment is attributed to the
+    /// human owner, as today. The caller reads the environment so the
+    /// merge itself stays pure and unit-testable.
+    fn with_env_defaults(mut self, run_id: Option<String>, agent_name: Option<String>) -> Self {
+        if self.as_agent.is_none() {
+            self.as_agent = agent_name;
+        }
+        if self.agent_run_id.is_none() {
+            self.agent_run_id = run_id;
+        }
+        self
+    }
 }
 
 #[derive(Debug, Subcommand)]
 pub enum CommentCommand {
     /// List comments on a work item.
     List {
-        /// Work item identifier, e.g. `ENG-42`.
-        identifier: String,
+        /// Work item identifier, e.g. `ENG-42`. Defaults to
+        /// `PIDASH_ISSUE_IDENTIFIER`.
+        identifier: Option<String>,
+        /// Only print comments created after this RFC 3339 timestamp.
+        /// Prints an empty list when there are none.
+        #[arg(long, value_name = "TIME")]
+        since: Option<String>,
     },
     /// Post a new comment on a work item.
     Add {
-        /// Work item identifier, e.g. `ENG-42`.
-        identifier: String,
+        /// Work item identifier, e.g. `ENG-42`. Defaults to
+        /// `PIDASH_ISSUE_IDENTIFIER`.
+        identifier: Option<String>,
         #[command(flatten)]
         comment_body: CommentBodyArgs,
         /// Path to an image to upload and embed in the comment. Repeatable to
@@ -67,6 +93,9 @@ pub enum CommentCommand {
     },
     /// Edit an existing comment owned by this user. Requires the issue
     /// identifier because the REST URL is project-scoped.
+    ///
+    /// Refuses an empty or whitespace-only body unless `--allow-empty` is
+    /// passed, so an accidental empty file cannot wipe the comment.
     Update {
         /// Work item identifier the comment lives on, e.g. `ENG-42`.
         identifier: String,
@@ -74,6 +103,10 @@ pub enum CommentCommand {
         comment_id: String,
         #[command(flatten)]
         comment_body: CommentBodyArgs,
+        /// Allow an empty or whitespace-only body to clear the comment.
+        /// Without this flag an empty body is rejected.
+        #[arg(long = "allow-empty")]
+        allow_empty: bool,
     },
 }
 
@@ -87,20 +120,34 @@ pub async fn run(args: CommentArgs, paths: &crate::util::paths::Paths) -> i32 {
         Err(e) => return report_error(&CliError::new(EXIT_UNKNOWN, format!("{e}"))),
     };
 
+    let run_id = client.env.run_id.clone();
     let result = match args.command {
-        CommentCommand::List { identifier } => cmd_list(&client, &identifier).await,
+        CommentCommand::List { identifier, since } => {
+            cmd_list(&client, identifier.as_deref(), since.as_deref()).await
+        }
         CommentCommand::Add {
             identifier,
             comment_body,
             image,
             speaker,
             fold,
-        } => cmd_add(&client, &identifier, comment_body, image, speaker, fold).await,
+        } => {
+            cmd_add(
+                &client,
+                identifier.as_deref(),
+                comment_body,
+                image,
+                speaker.with_env_defaults(run_id, agent_name_from_env()),
+                fold,
+            )
+            .await
+        }
         CommentCommand::Update {
             identifier,
             comment_id,
             comment_body,
-        } => cmd_update(&client, &identifier, &comment_id, comment_body).await,
+            allow_empty,
+        } => cmd_update(&client, &identifier, &comment_id, comment_body, allow_empty).await,
     };
     match result {
         Ok(()) => 0,
@@ -108,13 +155,36 @@ pub async fn run(args: CommentArgs, paths: &crate::util::paths::Paths) -> i32 {
     }
 }
 
-async fn cmd_list(client: &ApiClient, identifier: &str) -> Result<(), CliError> {
-    let issue = resolve_issue(client, identifier).await?;
+/// Resolve the target issue, defaulting to `PIDASH_ISSUE_IDENTIFIER`.
+fn resolve_target<'a>(
+    explicit: Option<&'a str>,
+    from_env: Option<&'a str>,
+) -> Result<&'a str, CliError> {
+    explicit.or(from_env).ok_or_else(|| {
+        CliError::new(
+            EXIT_INVALID,
+            "comment requires an issue identifier or PIDASH_ISSUE_IDENTIFIER",
+        )
+    })
+}
+
+async fn cmd_list(
+    client: &ApiClient,
+    identifier: Option<&str>,
+    since: Option<&str>,
+) -> Result<(), CliError> {
+    let from_env = std::env::var(ISSUE_ENV).ok();
+    let ident = resolve_target(identifier, from_env.as_deref())?;
+    let issue = resolve_issue(client, ident).await?;
     let path = format!(
         "workspaces/{}/projects/{}/work-items/{}/comments/",
         client.env.workspace_slug, issue.project_id, issue.id
     );
     let resp = client.get(&path).await?;
+    let resp = match since {
+        Some(since) => filter_comments_since(&resp, since)?,
+        None => resp,
+    };
     println!(
         "{}",
         serde_json::to_string(&resp).expect("serialize JSON value")
@@ -122,9 +192,69 @@ async fn cmd_list(client: &ApiClient, identifier: &str) -> Result<(), CliError> 
     Ok(())
 }
 
+/// Keep only comments created after an RFC 3339 timestamp, in the same
+/// JSON shape (the paginated envelope keeps its keys with a filtered
+/// `results` list; a bare list stays a list). An invalid timestamp or a
+/// comment without a parseable `created_at` is an error, not a silent
+/// empty list.
+fn filter_comments_since(resp: &Value, since: &str) -> Result<Value, CliError> {
+    use chrono::{DateTime, FixedOffset};
+    let cutoff: DateTime<FixedOffset> =
+        DateTime::parse_from_rfc3339(since.trim()).map_err(|_| {
+            CliError::new(
+                EXIT_INVALID,
+                format!("--since is not RFC 3339: '{since}' (e.g. 2026-11-20T09:34:00Z)"),
+            )
+        })?;
+    let after = |comment: &Value| -> Result<bool, CliError> {
+        let created = comment
+            .get("created_at")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CliError::new(EXIT_SERVER, "comment response missing 'created_at'"))?;
+        let at = DateTime::parse_from_rfc3339(created).map_err(|_| {
+            CliError::new(
+                EXIT_SERVER,
+                format!("comment has non-RFC 3339 created_at: '{created}'"),
+            )
+        })?;
+        Ok(at > cutoff)
+    };
+    let mut out = resp.clone();
+    if let Some(results) = out.get_mut("results").and_then(Value::as_array_mut) {
+        let mut kept = Vec::with_capacity(results.len());
+        for comment in results.drain(..) {
+            if after(&comment)? {
+                kept.push(comment);
+            }
+        }
+        let count = kept.len();
+        *results = kept;
+        // The filtered view is its own page: `count` describes what is
+        // returned, while the unfiltered totals stay as the server sent
+        // them.
+        if out.get("count").is_some() {
+            out["count"] = json!(count);
+        }
+        return Ok(out);
+    }
+    if let Some(comments) = out.as_array() {
+        let mut kept = Vec::with_capacity(comments.len());
+        for comment in comments {
+            if after(comment)? {
+                kept.push(comment.clone());
+            }
+        }
+        return Ok(Value::Array(kept));
+    }
+    Err(CliError::new(
+        EXIT_SERVER,
+        "comment list response is neither an envelope nor a list",
+    ))
+}
+
 async fn cmd_add(
     client: &ApiClient,
-    identifier: &str,
+    identifier: Option<&str>,
     comment_body: CommentBodyArgs,
     images: Vec<PathBuf>,
     speaker: CommentSpeakerArgs,
@@ -147,7 +277,9 @@ async fn cmd_add(
         .map(|path| PreparedImage::load(path))
         .collect::<Result<Vec<_>, _>>()?;
 
-    let issue = resolve_issue(client, identifier).await?;
+    let from_env = std::env::var(ISSUE_ENV).ok();
+    let ident = resolve_target(identifier, from_env.as_deref())?;
+    let issue = resolve_issue(client, ident).await?;
 
     // Upload each image and collect the embed nodes before posting the comment,
     // so a failed upload aborts without leaving a half-written comment.
@@ -376,8 +508,10 @@ async fn cmd_update(
     identifier: &str,
     comment_id: &str,
     comment_body: CommentBodyArgs,
+    allow_empty: bool,
 ) -> Result<(), CliError> {
     let body = load_comment_body(comment_body)?;
+    check_comment_body(&body, allow_empty)?;
     let issue = resolve_issue(client, identifier).await?;
     let path = format!(
         "workspaces/{}/projects/{}/work-items/{}/comments/{}/",
@@ -424,6 +558,19 @@ fn load_comment_body(args: CommentBodyArgs) -> Result<String, CliError> {
     })
 }
 
+/// Refuse an empty or whitespace-only comment body unless `--allow-empty`.
+/// Mirrors the workpad guard: an accidental empty file must not wipe a
+/// comment.
+fn check_comment_body(body: &str, allow_empty: bool) -> Result<(), CliError> {
+    if !allow_empty && body.trim().is_empty() {
+        return Err(CliError::new(
+            EXIT_INVALID,
+            "comment body is empty (empty or whitespace-only); pass --allow-empty to clear intentionally and do not upload an empty file when a get failed (e.g. 429)",
+        ));
+    }
+    Ok(())
+}
+
 fn display_path(path: &Path) -> String {
     path.display().to_string()
 }
@@ -438,8 +585,8 @@ mod tests {
 
     use super::{
         CommentBodyArgs, CommentSpeakerArgs, PreparedImage, add_fold_label, add_speaker_metadata,
-        compose_comment_html, image_component_html, image_mime_type, load_comment_body,
-        load_comment_body_opt,
+        check_comment_body, compose_comment_html, filter_comments_since, image_component_html,
+        image_mime_type, load_comment_body, load_comment_body_opt, resolve_target,
     };
 
     #[derive(Debug, Parser)]
@@ -515,6 +662,87 @@ mod tests {
         assert_eq!(err.exit_code, crate::api_client::EXIT_INVALID);
         assert!(err.message.contains("--agent-run-id requires --as-agent"));
         assert!(payload.is_empty());
+    }
+
+    fn envelope(comments: Vec<Value>) -> Value {
+        serde_json::json!({
+            "count": comments.len(),
+            "results": comments,
+        })
+    }
+
+    fn comment(id: &str, created_at: &str) -> Value {
+        serde_json::json!({"id": id, "created_at": created_at})
+    }
+
+    #[test]
+    fn since_filters_to_newer_comments_only() {
+        let resp = envelope(vec![
+            comment("a", "2026-11-20T09:30:00Z"),
+            comment("b", "2026-11-20T09:35:00Z"),
+            comment("c", "2026-11-20T09:40:00Z"),
+        ]);
+        let out = filter_comments_since(&resp, "2026-11-20T09:34:00Z").expect("filter");
+        let ids: Vec<&str> = out["results"]
+            .as_array()
+            .expect("results")
+            .iter()
+            .map(|c| c["id"].as_str().expect("id"))
+            .collect();
+        assert_eq!(ids, vec!["b", "c"]);
+        assert_eq!(out["count"], serde_json::json!(2));
+    }
+
+    #[test]
+    fn since_with_nothing_newer_prints_empty_list() {
+        let resp = envelope(vec![comment("a", "2026-11-20T09:30:00Z")]);
+        let out = filter_comments_since(&resp, "2026-11-20T09:40:00Z").expect("filter");
+        assert_eq!(out["results"], Value::Array(vec![]));
+    }
+
+    #[test]
+    fn since_rejects_non_rfc3339() {
+        let resp = envelope(vec![]);
+        let err = filter_comments_since(&resp, "yesterday").expect_err("bad time");
+        assert_eq!(err.exit_code, crate::api_client::EXIT_INVALID);
+        assert!(err.message.contains("--since is not RFC 3339"));
+    }
+
+    #[test]
+    fn speaker_env_defaults_fill_unset_flags_only() {
+        let filled = CommentSpeakerArgs {
+            as_agent: None,
+            agent_run_id: None,
+        }
+        .with_env_defaults(Some("run-1".into()), Some("Claude Code".into()));
+        assert_eq!(filled.as_agent.as_deref(), Some("Claude Code"));
+        assert_eq!(filled.agent_run_id.as_deref(), Some("run-1"));
+
+        let explicit = CommentSpeakerArgs {
+            as_agent: Some("Mine".into()),
+            agent_run_id: None,
+        }
+        .with_env_defaults(Some("run-1".into()), Some("Claude Code".into()));
+        assert_eq!(explicit.as_agent.as_deref(), Some("Mine"));
+        assert_eq!(explicit.agent_run_id.as_deref(), Some("run-1"));
+
+        let outside = CommentSpeakerArgs {
+            as_agent: None,
+            agent_run_id: None,
+        }
+        .with_env_defaults(None, None);
+        assert!(outside.as_agent.is_none());
+        assert!(outside.agent_run_id.is_none());
+    }
+
+    #[test]
+    fn resolve_target_prefers_explicit_over_env() {
+        assert_eq!(
+            resolve_target(Some("ENG-42"), Some("ENG-7")).expect("explicit"),
+            "ENG-42"
+        );
+        assert_eq!(resolve_target(None, Some("ENG-7")).expect("env"), "ENG-7");
+        resolve_target(None, None).expect_err("neither");
     }
 
     #[test]
@@ -641,6 +869,66 @@ mod tests {
                 assert_eq!(image.len(), 2);
             }
             _ => panic!("expected comment add"),
+        }
+    }
+
+    #[test]
+    fn empty_comment_body_is_rejected_without_allow_empty() {
+        use crate::api_client::EXIT_INVALID;
+
+        for body in ["", "   ", "\n\t"] {
+            let err = check_comment_body(body, false).expect_err("empty must be rejected");
+            assert_eq!(err.exit_code, EXIT_INVALID);
+            assert!(err.message.contains("--allow-empty"));
+        }
+    }
+
+    #[test]
+    fn empty_comment_body_is_allowed_with_allow_empty() {
+        for body in ["", "   "] {
+            check_comment_body(body, true).expect("allow-empty passes");
+        }
+    }
+
+    #[test]
+    fn non_empty_comment_body_passes() {
+        check_comment_body("hello", false).expect("non-empty passes");
+    }
+
+    #[test]
+    fn update_parses_allow_empty_flag() {
+        let parsed = TestCli::try_parse_from([
+            "pidash",
+            "update",
+            "ENG-42",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--body",
+            "hi",
+            "--allow-empty",
+        ])
+        .expect("parse update allow-empty");
+
+        match parsed.comments.command {
+            super::CommentCommand::Update { allow_empty, .. } => assert!(allow_empty),
+            _ => panic!("expected comment update"),
+        }
+    }
+
+    #[test]
+    fn update_defaults_to_not_allow_empty() {
+        let parsed = TestCli::try_parse_from([
+            "pidash",
+            "update",
+            "ENG-42",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "--body",
+            "hi",
+        ])
+        .expect("parse update default");
+
+        match parsed.comments.command {
+            super::CommentCommand::Update { allow_empty, .. } => assert!(!allow_empty),
+            _ => panic!("expected comment update"),
         }
     }
 }

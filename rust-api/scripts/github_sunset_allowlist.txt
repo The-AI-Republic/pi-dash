@@ -1,0 +1,7 @@
+# github_sunset_guard.py allowlist: files allowed to keep a legacy github_*
+# table/model mention. Format: `path | reason`. The list only shrinks:
+# remove the entry in the same PR that removes the last hit.
+# Paths are relative to rust-api/.
+crates/api/src/app_issues/handlers_relations.rs | PR-link list/destroy reads reverted to legacy github_pull_request_links by NEWPIDASH-227 to match Django dual-write state; generic-only read breaks contract parity (seed row mismatch, DELETE 404). Removed with PDASHOSS01-359, not PDASHOSS01-358 (which does not touch these reads).
+crates/db/src/tasks_cleanup/deletion_queries.rs | cascade sweep still deletes legacy rows until the drop-tables follow-up (PDASHOSS01-353 out of scope)
+crates/services/src/v1_openapi/doc.rs | OpenAPI schema name GithubPullRequestLink is wire compatibility, not table access

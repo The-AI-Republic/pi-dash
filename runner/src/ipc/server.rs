@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
+#[cfg(windows)]
+use pidash_ipc::windows_pipe::create_owner_only_pipe;
 use std::collections::HashMap;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufStream};
-#[cfg(windows)]
-use pidash_ipc::windows_pipe::create_owner_only_pipe;
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::NamedPipeServer as IpcStream;
 #[cfg(unix)]
@@ -36,6 +36,10 @@ pub struct IpcServer {
     /// ownership.
     pub instances: Arc<std::sync::RwLock<HashMap<Uuid, RunnerInstance>>>,
     pub(crate) spawn_ctx: crate::daemon::supervisor::RunnerSpawnCtx,
+    /// Durable FIFO coordinator (NEWPIDASH-241). None only in unit tests.
+    /// Production sets it from the supervisor's coordinator (same Arc as
+    /// `spawn_ctx.run_coordinator`).
+    pub run_coordinator: Option<Arc<crate::daemon::run_queue::Coordinator>>,
 }
 
 impl IpcServer {
@@ -160,6 +164,53 @@ impl IpcServer {
             Request::CredentialsReload => {
                 self.spawn_ctx.reload_credentials().await?;
                 Ok(Response::Ack)
+            }
+            Request::SessionHandoff { challenge } => {
+                self.spawn_ctx.session_handoff(&challenge).await
+            }
+            Request::MachineRunLimitSet { limit } => {
+                if !(1..=65535).contains(&limit) {
+                    return Ok(Response::Error(crate::ipc::protocol::RpcError {
+                        code: 400,
+                        message: "limit must be 1..=65535".to_string(),
+                    }));
+                }
+                // Live apply: persist to config, then update the coordinator
+                // before replying. On write failure preserve both old values.
+                let mut cfg = crate::config::file::load_config(&self.paths)?;
+                let old_limit = cfg.daemon.max_concurrent_agent_runs;
+                cfg.daemon.max_concurrent_agent_runs = limit;
+                if let Err(e) = crate::config::file::write_config(&self.paths, &cfg) {
+                    crate::config::file::write_config(&self.paths, &{
+                        let mut rolled = crate::config::file::load_config(&self.paths)
+                            .unwrap_or_else(|_| cfg.clone());
+                        rolled.daemon.max_concurrent_agent_runs = old_limit;
+                        rolled
+                    })
+                    .ok();
+                    return Ok(Response::Error(crate::ipc::protocol::RpcError {
+                        code: 500,
+                        message: format!("persist limit failed: {e}"),
+                    }));
+                }
+                self.primary_state.set_config(cfg.clone()).await;
+                if let Some(coord) = self.coordinator() {
+                    if let Err(e) = coord.set_limit(limit) {
+                        return Ok(Response::Error(crate::ipc::protocol::RpcError {
+                            code: 400,
+                            message: e,
+                        }));
+                    }
+                    let revision = coord.counts().revision;
+                    Ok(Response::MachineRunLimitResult { limit, revision })
+                } else {
+                    // No coordinator (storage_blocked or unit test): config
+                    // persisted, next startup uses the persisted value.
+                    Ok(Response::MachineRunLimitResult { limit, revision: 0 })
+                }
+            }
+            Request::RunQueueSnapshot => {
+                Ok(Response::RunQueueSnapshot(self.queue_snapshot().await))
             }
             Request::StatusGet => Ok(Response::Status(self.status_snapshot().await)),
             Request::StatusSubscribe => {
@@ -320,14 +371,16 @@ impl IpcServer {
                 Ok(Response::Ack)
             }
             Request::RunnerDisconnect => {
-                self.primary_state.shutdown();
+                self.primary_state.shutdown_with_reason(
+                    crate::daemon::state::DaemonShutdownTrigger::ControlSocket,
+                );
                 Ok(Response::Ack)
             }
             Request::RunnerRemoveLocal { runner } => {
                 self.remove_local(&runner).await?;
                 Ok(Response::Ack)
             }
-            // ---- Built-in engine (IPC v6, PIDESKAPP-121) ----------------
+            // ---- Pi Dash Agent (IPC v6, PIDESKAPP-121) ----------------
             Request::EngineModelToken => match self.spawn_ctx.engine.model_token().await {
                 Ok(t) => Ok(Response::EngineModelToken {
                     token: t.token,
@@ -358,7 +411,7 @@ impl IpcServer {
             Request::EngineRunnerRemove { runner } => {
                 // Revoke in the cloud first, preserving the runner's row
                 // and history, then remove its local block. The task
-                // folder is kept (built-in engine design §11).
+                // folder is kept (Pi Dash Agent design §11).
                 let (runner_id, token) = self.spawn_ctx.engine_runner_for_removal(&runner)?;
                 crate::cloud::runners::revoke_runner(
                     &self.spawn_ctx.cloud_url(),
@@ -377,7 +430,7 @@ impl IpcServer {
                 self.spawn_ctx.set_engine_settings(task_root).await?,
             )),
             // Local chat (PDASHOSS01-159, IPC v4). The desktop host drives
-            // the built-in engine directly over this socket — never through
+            // the Pi Dash Agent directly over this socket — never through
             // the Pi Dash chat relay. Streamed `Response::Chat*` frames are
             // written onto `buf` mid-call (same pattern as StatusSubscribe);
             // the terminal frame is returned. See `super::chat`. With no
@@ -395,21 +448,39 @@ impl IpcServer {
                 let target = self
                     .chat_target(runner.as_deref(), chat_session_id, cwd.as_deref())
                     .await?;
-                let host = self.chat_host(&target);
                 let mut sink = chat::SocketSink { buf };
-                chat::handle_warm(
-                    &host,
-                    chat::WarmArgs {
-                        chat_session_id,
-                        cwd,
-                        model,
-                        mode,
-                        local_thread_id,
-                        local_session_id,
-                    },
-                    &mut sink,
-                )
-                .await
+                match &target {
+                    ChatTarget::Runner(inst) => {
+                        chat::handle_warm(
+                            &chat::ChatHost::runner(inst),
+                            chat::WarmArgs {
+                                chat_session_id,
+                                cwd,
+                                model,
+                                mode,
+                                local_thread_id,
+                                local_session_id,
+                            },
+                            &mut sink,
+                        )
+                        .await
+                    }
+                    ChatTarget::Engine => {
+                        chat::handle_engine_warm(
+                            &self.engine_ctx(),
+                            chat::WarmArgs {
+                                chat_session_id,
+                                cwd,
+                                model,
+                                mode,
+                                local_thread_id,
+                                local_session_id,
+                            },
+                            &mut sink,
+                        )
+                        .await
+                    }
+                }
             }
             Request::ChatSend {
                 chat_session_id,
@@ -425,23 +496,43 @@ impl IpcServer {
                 let target = self
                     .chat_target(runner.as_deref(), chat_session_id, cwd.as_deref())
                     .await?;
-                let host = self.chat_host(&target);
                 let mut sink = chat::SocketSink { buf };
-                chat::handle_send(
-                    &host,
-                    chat::SendArgs {
-                        chat_session_id,
-                        message_id,
-                        content,
-                        cwd,
-                        model,
-                        mode,
-                        local_thread_id,
-                        local_session_id,
-                    },
-                    &mut sink,
-                )
-                .await
+                match &target {
+                    ChatTarget::Runner(inst) => {
+                        chat::handle_send(
+                            &chat::ChatHost::runner(inst),
+                            chat::SendArgs {
+                                chat_session_id,
+                                message_id,
+                                content,
+                                cwd,
+                                model,
+                                mode,
+                                local_thread_id,
+                                local_session_id,
+                            },
+                            &mut sink,
+                        )
+                        .await
+                    }
+                    ChatTarget::Engine => {
+                        chat::handle_engine_send(
+                            &self.engine_ctx(),
+                            chat::SendArgs {
+                                chat_session_id,
+                                message_id,
+                                content,
+                                cwd,
+                                model,
+                                mode,
+                                local_thread_id,
+                                local_session_id,
+                            },
+                            &mut sink,
+                        )
+                        .await
+                    }
+                }
             }
             Request::ChatCancel {
                 chat_session_id,
@@ -451,7 +542,14 @@ impl IpcServer {
                 let target = self
                     .chat_target(runner.as_deref(), chat_session_id, None)
                     .await?;
-                chat::handle_cancel(&self.chat_host(&target), chat_session_id).await
+                match &target {
+                    ChatTarget::Runner(inst) => {
+                        chat::handle_cancel(&chat::ChatHost::runner(inst), chat_session_id).await
+                    }
+                    ChatTarget::Engine => {
+                        chat::handle_engine_cancel(&self.engine_ctx(), chat_session_id).await
+                    }
+                }
             }
             Request::ChatClose {
                 chat_session_id,
@@ -461,9 +559,21 @@ impl IpcServer {
                 let target = self
                     .chat_target(runner.as_deref(), chat_session_id, None)
                     .await?;
-                let host = self.chat_host(&target);
                 let mut sink = chat::SocketSink { buf };
-                chat::handle_close(&host, chat_session_id, &mut sink).await
+                match &target {
+                    ChatTarget::Runner(inst) => {
+                        chat::handle_close(
+                            &chat::ChatHost::runner(inst),
+                            chat_session_id,
+                            &mut sink,
+                        )
+                        .await
+                    }
+                    ChatTarget::Engine => {
+                        chat::handle_engine_close(&self.engine_ctx(), chat_session_id, &mut sink)
+                            .await
+                    }
+                }
             }
             Request::ChatDecide {
                 chat_session_id,
@@ -474,7 +584,11 @@ impl IpcServer {
                 let target = self
                     .chat_target(runner.as_deref(), chat_session_id, None)
                     .await?;
-                chat::handle_decide(&self.chat_host(&target), &local_approval_id, decision).await
+                let approvals = match &target {
+                    ChatTarget::Runner(inst) => &inst.approvals,
+                    ChatTarget::Engine => &self.spawn_ctx.local_chat.approvals,
+                };
+                chat::handle_decide(approvals, &local_approval_id, decision).await
             }
         }
     }
@@ -504,8 +618,8 @@ impl IpcServer {
         if self
             .spawn_ctx
             .local_chat
-            .sessions
-            .contains(chat_session_id)
+            .server()
+            .contains_session(chat_session_id)
             .await
         {
             return Ok(ChatTarget::Engine);
@@ -535,12 +649,10 @@ impl IpcServer {
         }
     }
 
-    fn chat_host<'a>(&'a self, target: &'a ChatTarget) -> chat::ChatHost<'a> {
-        match target {
-            ChatTarget::Runner(inst) => chat::ChatHost::runner(inst),
-            ChatTarget::Engine => {
-                chat::ChatHost::engine(&self.spawn_ctx.local_chat, self.runner_working_dirs())
-            }
+    fn engine_ctx(&self) -> chat::EngineCtx<'_> {
+        chat::EngineCtx {
+            profile: &self.spawn_ctx.local_chat,
+            runner_dirs: self.runner_working_dirs(),
         }
     }
 
@@ -619,8 +731,41 @@ impl IpcServer {
             .collect()
     }
 
+    /// The machine coordinator: prefer the explicit field, fall back to
+    /// the spawn context (both are the same Arc in production).
+    fn coordinator(&self) -> Option<&Arc<crate::daemon::run_queue::Coordinator>> {
+        let explicit = self.run_coordinator.as_ref();
+        let from_ctx = self.spawn_ctx.run_coordinator.as_ref();
+        explicit.or(from_ctx)
+    }
+
+    /// Live queue snapshot for IPC + Status. No coordinator means the
+    /// store is blocked/unavailable: report `storage_blocked` mode with
+    /// the persisted limit so the TUI never falsely claims "enforced".
+    async fn queue_snapshot(&self) -> pidash_ipc::RunQueueSnapshot {
+        if let Some(coord) = self.coordinator() {
+            coord.snapshot()
+        } else {
+            let limit = crate::config::file::load_config(&self.paths)
+                .map(|c| c.daemon.max_concurrent_agent_runs)
+                .unwrap_or(3);
+            pidash_ipc::RunQueueSnapshot {
+                mode: "storage_blocked".to_string(),
+                limit,
+                active: 0,
+                waiting: 0,
+                held: 0,
+                revision: 0,
+                blocked_reason: Some("run queue store unavailable".to_string()),
+            }
+        }
+    }
+
     async fn status_snapshot(&self) -> StatusSnapshot {
-        let daemon = self.primary_state.daemon_info().await;
+        let mut daemon = self.primary_state.daemon_info().await;
+        // Carry the live machine queue on every Status so the TUI sees
+        // real counts without a second round-trip.
+        daemon.run_queue = Some(self.queue_snapshot().await);
         let instances = self.all_instances();
         let mut runners = Vec::with_capacity(instances.len());
         for inst in instances {
@@ -730,7 +875,7 @@ fn restore_secrets(
     {
         merged_cli
             .engine_credential
-            .get_or_insert_with(crate::config::schema::EngineCredential::default)
+            .get_or_insert_with(crate::config::schema::PidashAgentCredential::default)
             .token = ec.token.clone();
         if merged_cli
             .engine_credential
@@ -791,10 +936,10 @@ fn redact_json_for_ipc(value: &mut serde_json::Value) {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::config::schema::{CliSection, Config, EngineCredential, WorkspaceCredential};
+    use crate::config::schema::{CliSection, Config, PidashAgentCredential, WorkspaceCredential};
     use crate::daemon::supervisor::RunnerSpawnCtx;
     use crate::daemon::workspace_tokens::WorkspaceTokens;
-    use crate::engine::test_server::{self, Handler};
+    use crate::pidash_agent::test_server::{self, Handler};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     async fn daemon_with(
@@ -820,10 +965,12 @@ mod tests {
                 cli: None,
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
             }),
             paths: paths.clone(),
             instances: Arc::new(std::sync::RwLock::new(HashMap::new())),
             spawn_ctx,
+            run_coordinator: None,
         };
         tokio::spawn(async move {
             let _ = server.run().await;
@@ -841,7 +988,7 @@ mod tests {
         CliSection {
             token: Some("mt_acme".into()),
             workspace_slug: Some("acme".into()),
-            engine_credential: engine.then(|| EngineCredential {
+            engine_credential: engine.then(|| PidashAgentCredential {
                 token: "ec_live".into(),
                 expires_at: Some(chrono::Utc::now() + chrono::Duration::days(10)),
             }),
@@ -866,11 +1013,11 @@ mod tests {
         let (_tmp, paths) = daemon_with(cli(true), &server.url).await;
 
         // What `pidash __engine model-token` prints.
-        let token = crate::cli::engine_cmd::fetch_model_token(&paths)
+        let token = crate::cli::pidash_agent_cmd::fetch_model_token(&paths)
             .await
             .unwrap();
         assert_eq!(token, "gw_token");
-        let again = crate::cli::engine_cmd::fetch_model_token(&paths)
+        let again = crate::cli::pidash_agent_cmd::fetch_model_token(&paths)
             .await
             .unwrap();
         assert_eq!(again, "gw_token");
@@ -895,7 +1042,7 @@ mod tests {
         let handler: Handler = Arc::new(|_| (500, String::new()));
         let server = test_server::start(handler).await;
         let (_tmp, paths) = daemon_with(cli(false), &server.url).await;
-        let err = crate::cli::engine_cmd::fetch_model_token(&paths)
+        let err = crate::cli::pidash_agent_cmd::fetch_model_token(&paths)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("engine_sign_in_required"), "{err}");
@@ -905,21 +1052,44 @@ mod tests {
     // ---- Local chat on the daemon's engine profile (design §12.1) -------
 
     use crate::config::schema::{AgentSection, DaemonConfig, RunnerConfig, WorkspaceSection};
-    use crate::ipc::engine_chat::EngineChatProfile;
+    use crate::ipc::pidash_agent_chat::PidashAgentChatProfile;
 
-    /// A fake `pidash-agent-engine app-server`: records the folder it was
-    /// started in under `$CODEX_HOME/cwd`, then answers one turn.
+    /// A fake `pidash-agent-engine app-server` for the shared server: it
+    /// records each thread's `cwd` under `$CODEX_HOME/cwd` (the last one
+    /// wins) and completes every turn. The thread `cwd` is what the
+    /// "runs in the chat folder" assertion checks: the shared child itself
+    /// runs in `CODEX_HOME`, one thread per chat inside it.
     const FAKE_ENGINE: &str = r#"#!/bin/sh
-pwd -P > "$CODEX_HOME/cwd"
-read _
-printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
-read _
-read _
-printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"threadId":"th_engine"}}'
-read _
-printf '%s\n' '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"text":"hi from the engine"}}'
-printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"conclusion":"success","done":{"status":"ok","summary":"done"}}}'
-sleep 1
+rid() { printf '%s' "$1" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p'; }
+tidp() { printf '%s' "$1" | sed -n 's/.*"threadId":"\([^"]*\)".*/\1/p'; }
+cwdp() { printf '%s' "$1" | sed -n 's/.*"cwd":"\([^"]*\)".*/\1/p'; }
+read -r line
+id=$(rid "$line")
+printf '{"jsonrpc":"2.0","id":%s,"result":{"capabilities":{}}}\n' "$id"
+read -r line
+n=0
+while read -r line; do
+  case "$line" in
+    *'"method":"thread/start"'*)
+      n=$((n+1)); id=$(rid "$line")
+      cwdp "$line" > "$CODEX_HOME/thread-cwd"
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"threadId":"th-engine-%s"}}\n' "$id" "$n";;
+    *'"method":"thread/resume"'*)
+      id=$(rid "$line"); t=$(tidp "$line")
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"threadId":"%s"}}\n' "$id" "$t";;
+    *'"method":"turn/start"'*)
+      id=$(rid "$line"); t=$(tidp "$line")
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"turn":{"id":"turn-%s"}}}\n' "$id" "$t"
+      printf '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"threadId":"%s","text":"hi from the engine"}}\n' "$t"
+      printf '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"%s","turn":{"id":"turn-%s","status":"completed"},"done":{"text":"done"}}}\n' "$t" "$t";;
+    *'"method":"turn/interrupt"'*)
+      id=$(rid "$line")
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id";;
+    *'"method":"thread/unsubscribe"'*)
+      id=$(rid "$line")
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"status":"unsubscribed"}}\n' "$id";;
+  esac
+done
 "#;
 
     struct ChatDaemon {
@@ -945,14 +1115,53 @@ sleep 1
             cursor_agent: Default::default(),
             openclaw: Default::default(),
             grok: Default::default(),
+            antigravity: Default::default(),
             muse_code: Default::default(),
             approval_policy: Default::default(),
         }
     }
 
+    /// A fake `pidash-agent-engine app-server` that parks one turn on a
+    /// user approval: it emits a notification-style
+    /// `item/commandExecution/requestApproval`, waits for the
+    /// `approval/response` answer, then completes the turn.
+    const APPROVAL_ENGINE: &str = r#"#!/bin/sh
+rid() { printf '%s' "$1" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p'; }
+tidp() { printf '%s' "$1" | sed -n 's/.*"threadId":"\([^"]*\)".*/\1/p'; }
+read -r line
+id=$(rid "$line")
+printf '{"jsonrpc":"2.0","id":%s,"result":{"capabilities":{}}}\n' "$id"
+read -r line
+while read -r line; do
+  case "$line" in
+    *'"method":"thread/start"'*)
+      id=$(rid "$line")
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"threadId":"th-appr-1"}}\n' "$id";;
+    *'"method":"turn/start"'*)
+      id=$(rid "$line"); t=$(tidp "$line")
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"turn":{"id":"turn-appr-1"}}}\n' "$id" "$t"
+      printf '{"jsonrpc":"2.0","method":"item/commandExecution/requestApproval","params":{"threadId":"%s","approval_id":"appr-1","command":"touch /tmp/engine-chat-approval-probe","reason":"test"}}\n' "$t"
+      read -r ans; echo "$ans" >> "$CODEX_HOME/approval-answers"
+      printf '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"%s","turn":{"id":"turn-appr-1","status":"completed"},"done":{"text":"approved and done"}}}\n' "$t";;
+    *'"method":"turn/interrupt"'*)
+      id=$(rid "$line")
+      printf '{"jsonrpc":"2.0","id":%s,"result":{}}\n' "$id";;
+    *'"method":"thread/unsubscribe"'*)
+      id=$(rid "$line")
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"status":"unsubscribed"}}\n' "$id";;
+  esac
+done
+"#;
+
     /// A daemon hosting `runners` (offline), whose engine profile launches
     /// [`FAKE_ENGINE`]. Nothing outside the temp dir is touched.
     async fn chat_daemon(runners: &[&str]) -> ChatDaemon {
+        chat_daemon_with_engine(runners, FAKE_ENGINE).await
+    }
+
+    /// A daemon hosting `runners` (offline), whose engine profile launches
+    /// `engine_script` instead of [`FAKE_ENGINE`].
+    async fn chat_daemon_with_engine(runners: &[&str], engine_script: &str) -> ChatDaemon {
         use std::os::unix::fs::PermissionsExt as _;
         let tmp = tempfile::tempdir().unwrap();
         let paths = crate::util::paths::Paths {
@@ -972,6 +1181,7 @@ sleep 1
                 cli: None,
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
             },
         )
         .unwrap();
@@ -981,7 +1191,7 @@ sleep 1
             .collect();
         let engine = tmp.path().join("engine/0.153.4/pidash-agent-engine");
         std::fs::create_dir_all(engine.parent().unwrap()).unwrap();
-        std::fs::write(&engine, FAKE_ENGINE).unwrap();
+        std::fs::write(&engine, engine_script).unwrap();
         std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).unwrap();
         let codex_home = tmp.path().join("engine-home");
         std::fs::create_dir_all(&codex_home).unwrap();
@@ -992,7 +1202,10 @@ sleep 1
             &paths,
             &insts.iter().collect::<Vec<_>>(),
         );
-        spawn_ctx.local_chat = Arc::new(EngineChatProfile::for_tests(engine, codex_home.clone()));
+        spawn_ctx.local_chat = Arc::new(PidashAgentChatProfile::for_tests(
+            engine,
+            codex_home.clone(),
+        ));
         let server = IpcServer {
             path: paths.ipc_socket_path(),
             primary_state: crate::daemon::state::StateHandle::new(Config {
@@ -1002,12 +1215,14 @@ sleep 1
                 cli: None,
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
             }),
             paths: paths.clone(),
             instances: Arc::new(std::sync::RwLock::new(
                 insts.iter().map(|i| (i.runner_id, i.clone())).collect(),
             )),
             spawn_ctx,
+            run_coordinator: None,
         };
         tokio::spawn(async move {
             let _ = server.run().await;
@@ -1096,8 +1311,9 @@ sleep 1
         let folder = chat_folder(&d);
         let frames = chat_send(&d, &folder, None).await;
         assert!(completed(&frames), "frames: {frames:?}");
-        // The engine ran in the chat folder with the profile's CODEX_HOME.
-        let ran_in = std::fs::read_to_string(d.codex_home.join("cwd")).unwrap();
+        // The thread ran in the chat folder with the profile's CODEX_HOME
+        // (the shared child itself runs in CODEX_HOME).
+        let ran_in = std::fs::read_to_string(d.codex_home.join("thread-cwd")).unwrap();
         assert_eq!(
             ran_in.trim(),
             std::fs::canonicalize(&folder)
@@ -1127,6 +1343,100 @@ sleep 1
     }
 
     #[tokio::test]
+    async fn engine_chat_inline_approval_decide_completes_the_turn() {
+        // Desktop local chat approvals run through the shared server: the
+        // turn parks, the daemon streams `ChatApprovalRequest`, and a
+        // `ChatDecide` on a second connection unblocks it to completion.
+        // (The approval policy reads the session's stored folder mid-turn;
+        // doing that lookup while the driver holds the session lock
+        // self-deadlocks the turn, so the handler reads it up front.)
+        let d = chat_daemon_with_engine(&[], APPROVAL_ENGINE).await;
+        let folder = chat_folder(&d);
+        let session = Uuid::new_v4();
+        let mut client = crate::ipc::client::Client::connect(d.paths.ipc_socket_path())
+            .await
+            .unwrap();
+        let first = client
+            .call(Request::ChatSend {
+                chat_session_id: session,
+                message_id: Uuid::new_v4(),
+                content: "do it".into(),
+                runner: None,
+                cwd: Some(folder.display().to_string()),
+                model: None,
+                mode: Some(crate::cloud::protocol::ApprovalMode::Ask),
+                local_thread_id: None,
+                local_session_id: None,
+            })
+            .await
+            .unwrap();
+        let mut frames = vec![first];
+        let approval_id = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                match client.read_next().await.unwrap() {
+                    Some(Response::ChatApprovalRequest {
+                        local_approval_id, ..
+                    }) => break local_approval_id,
+                    Some(f) => frames.push(f),
+                    None => panic!("connection closed before the approval request: {frames:?}"),
+                }
+            }
+        })
+        .await
+        .expect("the turn must park on an approval");
+        // Answer from a second connection, as the desktop does.
+        let mut decider = crate::ipc::client::Client::connect(d.paths.ipc_socket_path())
+            .await
+            .unwrap();
+        let decided = decider
+            .call(Request::ChatDecide {
+                chat_session_id: session,
+                local_approval_id: approval_id.clone(),
+                decision: crate::cloud::protocol::ApprovalDecision::Accept,
+                runner: None,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(decided, Response::Ack), "{decided:?}");
+        let terminal = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                match client.read_next().await.unwrap() {
+                    Some(f @ Response::ChatMessageCompleted { .. }) => break f,
+                    Some(f @ Response::ChatFailed { .. }) => break f,
+                    Some(f) => frames.push(f),
+                    None => panic!("connection closed before the terminal frame: {frames:?}"),
+                }
+            }
+        })
+        .await
+        .expect("the approved turn must end");
+        match &terminal {
+            Response::ChatMessageCompleted {
+                status,
+                assistant_message,
+                ..
+            } => {
+                assert_eq!(
+                    status, "completed",
+                    "frames: {frames:?} terminal: {terminal:?}"
+                );
+                assert_eq!(
+                    assistant_message.as_deref(),
+                    Some("approved and done"),
+                    "frames: {frames:?} terminal: {terminal:?}"
+                );
+            }
+            other => panic!("expected completion, got {other:?}; frames: {frames:?}"),
+        }
+        // The accept decision reached the engine as an approval answer.
+        let answers = std::fs::read_to_string(d.codex_home.join("approval-answers")).unwrap();
+        assert!(
+            answers.contains("appr-1") && answers.contains("accept"),
+            "engine never got the approval answer: {answers}"
+        );
+    }
+
+    #[tokio::test]
     async fn engine_chat_refuses_a_folder_inside_a_runner_working_dir() {
         let d = chat_daemon(&["web"]).await;
         let inside = d.insts[0].config.workspace.working_dir.join("src");
@@ -1146,8 +1456,8 @@ sleep 1
             }
         }
         assert!(
-            !d.codex_home.join("cwd").exists(),
-            "the engine never started in a task folder"
+            !d.codex_home.join("thread-cwd").exists(),
+            "no thread ever started in a task folder"
         );
     }
 
@@ -1232,10 +1542,12 @@ sleep 1
                 cli: None,
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
             }),
             paths: paths.clone(),
             instances: Arc::new(std::sync::RwLock::new(HashMap::new())),
             spawn_ctx,
+            run_coordinator: None,
         };
         tokio::spawn(async move {
             let _ = ipc.run().await;
@@ -1273,7 +1585,7 @@ sleep 1
             Response::EngineStatus(st) => assert_eq!(st.paused_by_owner, Some(true)),
             other => panic!("unexpected {other:?}"),
         }
-        let sent = server.requests_to(&crate::engine::api::dev_machine_path(machine_id));
+        let sent = server.requests_to(&crate::pidash_agent::api::dev_machine_path(machine_id));
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].json()["engine_paused_by_owner"], true);
     }
@@ -1299,6 +1611,7 @@ sleep 1
                 cursor_agent: Default::default(),
                 openclaw: Default::default(),
                 grok: Default::default(),
+                antigravity: Default::default(),
                 muse_code: Default::default(),
                 approval_policy: Default::default(),
             }],
@@ -1315,7 +1628,7 @@ sleep 1
                         token: "mt_gamma_secret".into(),
                     },
                 ],
-                engine_credential: Some(EngineCredential {
+                engine_credential: Some(PidashAgentCredential {
                     token: "ec_secret_live".into(),
                     expires_at: Some(chrono::Utc::now() + chrono::Duration::days(10)),
                 }),
@@ -1323,6 +1636,7 @@ sleep 1
             }),
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
         }
     }
 
@@ -1426,10 +1740,12 @@ sleep 1
                 cli: None,
                 engine: Default::default(),
                 auth: Default::default(),
+                auth_event: None,
             }),
             paths: paths.clone(),
             instances: Arc::new(std::sync::RwLock::new(HashMap::new())),
             spawn_ctx,
+            run_coordinator: None,
         };
         tokio::spawn(async move {
             let _ = server.run().await;

@@ -3,7 +3,8 @@
 // See the LICENSE file for details.
 // Runners overview (NEWFRONT-540, RUN-002/RUN-010/RUN-011). One table of the
 // scope's runners with its pod, status, platform, version and heartbeat, plus
-// a Details link and the two destructive row actions behind confirmations,
+// a Details link, the per-runner Pause/Resume toggle and the destructive
+// row actions behind confirmations,
 // plus the pods section above it (NEWFRONT-542) and its three dialogs. The
 // add-runner entry arrives with its own slice.
 
@@ -13,20 +14,22 @@ import * as React from "react";
 
 import type { Pod, Runner, RunnerPatch } from "@pidash/api-client";
 import {
-  BUILT_IN_BADGE,
-  isEngineRunner,
+  PIDASH_AGENT_BADGE,
+  isPidashAgentRunner,
   runnerDisplayName,
   runnerMachineName,
 } from "../../../shared/lib/runnerIdentity.js";
-import { notifyError } from "../../../shared/shell/index.js";
+import { notifyError, notifyInfo } from "../../../shared/shell/index.js";
 import type { PodFilterState } from "../podFilter.js";
 import { runnersBase, type RunnersScopeInput } from "../scope.js";
 import { runnerDisplayStatus } from "../status.js";
 import { CreatePodDialog } from "./CreatePodDialog.js";
 import { DeletePodDialog } from "./DeletePodDialog.js";
+import { EditRunnerDialog } from "./EditRunnerDialog.js";
+import { canEditRunner } from "../edit/model.js";
 import { EditPodDialog } from "./EditPodDialog.js";
 import { PodMembersPanel } from "./PodMembersPanel.js";
-import { REMOVE_ENGINE_LABEL, RunnerConfirmDialog, type RunnerConfirmAction } from "./RunnerConfirmDialog.js";
+import { REMOVE_PIDASH_AGENT_LABEL, RunnerConfirmDialog, type RunnerConfirmAction } from "./RunnerConfirmDialog.js";
 import { RunnerStatusBadge } from "./RunnerStatusBadge.js";
 import { PodFilterBar } from "./RunnersPodFilter.js";
 import { RunnersPods } from "./RunnersPods.js";
@@ -35,7 +38,34 @@ export const RUNNERS_EMPTY_TEXT = "No runners yet. Add a runner to give this sco
 export const RUNNER_ACTION_FAILED_TITLE = "Error!";
 export const DELETE_RUNNER_FAILED = "Failed to delete runner";
 export const REVOKE_RUNNER_FAILED = "Failed to revoke runner";
-export const REMOVE_ENGINE_FAILED = "Failed to remove the built-in engine from the project";
+export const REMOVE_PIDASH_AGENT_FAILED = "Failed to remove the Pi Dash Agent from the project";
+export const PAUSE_RUNNER_FAILED = "Failed to pause runner";
+export const RESUME_RUNNER_FAILED = "Failed to resume runner";
+export const RUNNER_PAUSED_TITLE = "Runner paused";
+export const RUNNER_PAUSED_BADGE = "Paused";
+export const RUNNER_PAUSED_HINT =
+  "Paused: this runner stays connected but takes no new work. Any in-flight run finishes.";
+
+/** The notice after a pause that left work on the runner; null when none did. */
+export function runnerPausedInFlightText(inFlight: number): string | null {
+  if (inFlight <= 0) return null;
+  return inFlight === 1
+    ? "1 run already assigned to this runner will still run."
+    : `${inFlight} runs already assigned to this runner will still run.`;
+}
+
+/**
+ * Pause applies to any runner that is not revoked (resume cannot
+ * un-revoke). An older server without `paused_at` hides the toggle.
+ */
+export function canPauseRunner(runner: Pick<Runner, "status" | "revoked_at" | "paused_at">): boolean {
+  return runner.paused_at !== undefined && runner.revoked_at === null && runner.status !== "revoked";
+}
+
+/** Whether the runner's dispatch is paused right now. */
+export function runnerIsPaused(runner: Pick<Runner, "paused_at">): boolean {
+  return runner.paused_at !== undefined && runner.paused_at !== null;
+}
 
 /** Revoke only makes sense while credentials exist to invalidate. */
 export function canRevokeRunner(runner: Pick<Runner, "status" | "enrolled_at">): boolean {
@@ -65,12 +95,12 @@ export function runnerHeartbeat(
 }
 
 /**
- * Name cell (built-in engine design §11): engines read "Built-in engine ·
- * <machine>" with a Built-in badge; every row names the machine it runs
+ * Name cell (Pi Dash Agent design §11): engines read "Pi Dash Agent ·
+ * <machine>" with a Pi Dash Agent badge; every row names the machine it runs
  * on underneath when one is known.
  */
 export function RunnerNameCell({ runner }: { runner: Runner }): React.ReactElement {
-  const engine = isEngineRunner(runner);
+  const engine = isPidashAgentRunner(runner);
   const machine = runnerMachineName(runner);
   return (
     <div className="flex flex-col gap-(--space-1)">
@@ -80,7 +110,7 @@ export function RunnerNameCell({ runner }: { runner: Runner }): React.ReactEleme
         </span>
         {engine ? (
           <span data-testid="runner-built-in-badge" className="inline-flex">
-            <Badge tone="accent">{BUILT_IN_BADGE}</Badge>
+            <Badge tone="accent">{PIDASH_AGENT_BADGE}</Badge>
           </span>
         ) : null}
       </span>
@@ -101,10 +131,15 @@ export interface RunnersOverviewProps {
   pods: Pod[] | undefined;
   podsLoading: boolean;
   podsFailed: boolean;
-  /** Delete a runner row; built-in engines pass `purgeLocal: false` to keep their folder. */
+  /** Delete a runner row; Pi Dash Agents pass `purgeLocal: false` to keep their folder. */
   onDelete: (runnerId: string, options?: { purgeLocal?: boolean }) => Promise<void>;
-  /** Revoke a runner; also backs a built-in engine's "Remove from project". */
+  /** Revoke a runner; also backs a Pi Dash Agent's "Remove from project". */
   onRevoke: (runnerId: string) => Promise<void>;
+  /**
+   * Pause or resume one runner, answering how many runs it still holds.
+   * Without it the row offers no toggle.
+   */
+  onSetPaused?: ((runnerId: string, paused: boolean) => Promise<{ inFlight: number }>) | undefined;
   /** Header action slot (the add-runner entry mounts here). */
   action?: React.ReactNode;
   /** Every runner of the scope for the pod members panel; the filtered rows when absent. */
@@ -121,13 +156,13 @@ type PendingAction = { action: RunnerConfirmAction; runner: Runner };
 /** Which row actions a runner offers (design §11). */
 export interface RunnerRowActions {
   revoke: boolean;
-  /** A built-in engine's "Remove from project": revoke, folder kept. */
+  /** A Pi Dash Agent's "Remove from project": revoke, folder kept. */
   remove: boolean;
   delete: boolean;
 }
 
 /**
- * Own-agent runners keep Revoke and Delete. A built-in engine is the
+ * Own-agent runners keep Revoke and Delete. A Pi Dash Agent is the
  * app's own runner: while live it offers only "Remove from project",
  * which revokes the row and keeps its folder; once removed, Delete
  * clears the row, still without touching the folder.
@@ -135,7 +170,7 @@ export interface RunnerRowActions {
 export function runnerRowActions(
   runner: Pick<Runner, "status" | "enrolled_at" | "revoked_at" | "provisioning">
 ): RunnerRowActions {
-  if (isEngineRunner(runner)) {
+  if (isPidashAgentRunner(runner)) {
     const removed = runner.revoked_at !== null || runner.status === "revoked";
     return { revoke: false, remove: !removed, delete: removed };
   }
@@ -152,6 +187,7 @@ export function RunnersOverview({
   podsFailed,
   onDelete,
   onRevoke,
+  onSetPaused,
   action,
   allRunners,
   userId = null,
@@ -163,6 +199,31 @@ export function RunnersOverview({
   const [pending, setPending] = React.useState<PendingAction | null>(null);
   const [working, setWorking] = React.useState(false);
   const [podDialog, setPodDialog] = React.useState<PodDialog>(null);
+  // Runners whose pause toggle is in flight; each disables its own button.
+  const [togglingPauseIds, setTogglingPauseIds] = React.useState<ReadonlySet<string>>(() => new Set());
+
+  async function togglePause(runner: Runner): Promise<void> {
+    if (onSetPaused === undefined) return;
+    const pause = !runnerIsPaused(runner);
+    setTogglingPauseIds((ids) => new Set(ids).add(runner.id));
+    try {
+      const { inFlight } = await onSetPaused(runner.id, pause);
+      // Pausing never interrupts work the runner already holds, so say so.
+      const notice = pause ? runnerPausedInFlightText(inFlight) : null;
+      if (notice !== null) notifyInfo(RUNNER_PAUSED_TITLE, notice);
+    } catch {
+      notifyError(RUNNER_ACTION_FAILED_TITLE, pause ? PAUSE_RUNNER_FAILED : RESUME_RUNNER_FAILED);
+    } finally {
+      setTogglingPauseIds((ids) => {
+        const next = new Set(ids);
+        next.delete(runner.id);
+        return next;
+      });
+    }
+  }
+
+  // Held by id so the open dialog follows live status (offline / busy).
+  const [editingId, setEditingId] = React.useState<string | null>(null);
 
   function closePodDialog(): void {
     setPodDialog(null);
@@ -177,8 +238,8 @@ export function RunnersOverview({
     setWorking(true);
     try {
       if (action.action === "delete") {
-        // A built-in engine's folder is kept (design §11): never purge it.
-        await (isEngineRunner(action.runner)
+        // A Pi Dash Agent's folder is kept (design §11): never purge it.
+        await (isPidashAgentRunner(action.runner)
           ? onDelete(action.runner.id, { purgeLocal: false })
           : onDelete(action.runner.id));
       } else {
@@ -192,7 +253,7 @@ export function RunnersOverview({
         action.action === "delete"
           ? DELETE_RUNNER_FAILED
           : action.action === "remove"
-            ? REMOVE_ENGINE_FAILED
+            ? REMOVE_PIDASH_AGENT_FAILED
             : REVOKE_RUNNER_FAILED
       );
     } finally {
@@ -267,7 +328,14 @@ export function RunnersOverview({
                   </td>
                   <td className="px-(--space-3) py-(--space-2)">{runner.pod_detail.name}</td>
                   <td className="px-(--space-3) py-(--space-2)">
-                    <RunnerStatusBadge status={runnerDisplayStatus(runner)} />
+                    <div className="flex flex-wrap items-center gap-(--space-2)">
+                      {runnerIsPaused(runner) ? (
+                        <span data-testid="runner-paused-badge" title={RUNNER_PAUSED_HINT} className="inline-flex">
+                          <Badge tone="warning">{RUNNER_PAUSED_BADGE}</Badge>
+                        </span>
+                      ) : null}
+                      <RunnerStatusBadge status={runnerDisplayStatus(runner)} />
+                    </div>
                   </td>
                   <td className="px-(--space-3) py-(--space-2)">{runnerPlatform(runner)}</td>
                   <td className="px-(--space-3) py-(--space-2)">{runnerVersion(runner)}</td>
@@ -277,6 +345,21 @@ export function RunnersOverview({
                       <Button size="small" onClick={() => void navigate({ to: `${base}/detail/${runner.id}` })}>
                         Details
                       </Button>
+                      {onSetPaused !== undefined && canPauseRunner(runner) ? (
+                        <Button
+                          size="small"
+                          variant="secondary"
+                          disabled={togglingPauseIds.has(runner.id)}
+                          onClick={() => void togglePause(runner)}
+                        >
+                          {runnerIsPaused(runner) ? "Resume" : "Pause"}
+                        </Button>
+                      ) : null}
+                      {canEditRunner(runner, userId) ? (
+                        <Button size="small" variant="secondary" onClick={() => setEditingId(runner.id)}>
+                          Edit
+                        </Button>
+                      ) : null}
                       {actions.revoke ? (
                         <Button size="small" variant="danger" onClick={() => setPending({ action: "revoke", runner })}>
                           Revoke
@@ -284,7 +367,7 @@ export function RunnersOverview({
                       ) : null}
                       {actions.remove ? (
                         <Button size="small" variant="danger" onClick={() => setPending({ action: "remove", runner })}>
-                          {REMOVE_ENGINE_LABEL}
+                          {REMOVE_PIDASH_AGENT_LABEL}
                         </Button>
                       ) : null}
                       {actions.delete ? (
@@ -307,6 +390,11 @@ export function RunnersOverview({
           </tbody>
         </table>
       </div>
+      <EditRunnerDialog
+        workspaceSlug={scope.workspaceSlug}
+        runner={editingId === null ? null : (runners.find((row) => row.id === editingId) ?? null)}
+        onClose={() => setEditingId(null)}
+      />
       <CreatePodDialog
         workspaceSlug={scope.workspaceSlug}
         open={podDialog?.mode === "create"}
@@ -328,7 +416,7 @@ export function RunnersOverview({
           open
           action={pending.action}
           runnerName={runnerDisplayName(pending.runner)}
-          engine={isEngineRunner(pending.runner)}
+          engine={isPidashAgentRunner(pending.runner)}
           pending={working}
           onCancel={() => setPending(null)}
           onConfirm={() => void confirm(pending)}

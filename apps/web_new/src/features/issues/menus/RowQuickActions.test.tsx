@@ -52,6 +52,29 @@ describe("RowMenuButton", () => {
     expect(screen.getByText(ARCHIVE_GATING_NOTE)).toBeInTheDocument();
   });
 
+  it("defers the menu until first interaction, keeping the trigger and overlays", async () => {
+    render(<RowMenuButton state={state()} issueKey="WEB-42" defer />);
+    expect(screen.getByTestId("overlays")).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Actions for WEB-42" }));
+    expect(await screen.findByRole("menuitem", { name: /Edit/ })).toBeInTheDocument();
+  });
+
+  it("opens a deferred menu from the keyboard", async () => {
+    render(<RowMenuButton state={state()} issueKey="WEB-42" defer />);
+    fireEvent.keyDown(screen.getByRole("button", { name: "Actions for WEB-42" }), { key: "Enter" });
+    expect(await screen.findByRole("menuitem", { name: /Edit/ })).toBeInTheDocument();
+  });
+
+  it("mounts a deferred menu closed on hover, then opens it on click", async () => {
+    const user = userEvent.setup();
+    render(<RowMenuButton state={state()} issueKey="WEB-42" defer />);
+    await user.hover(screen.getByRole("button", { name: "Actions for WEB-42" }));
+    expect(screen.queryByRole("menuitem")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Actions for WEB-42" }));
+    expect(await screen.findByRole("menuitem", { name: /Edit/ })).toBeInTheDocument();
+  });
+
   it("renders nothing without entries", () => {
     const { container } = render(<RowMenuButton state={state({ entries: [] })} issueKey="WEB-42" />);
     expect(container).toBeEmptyDOMElement();

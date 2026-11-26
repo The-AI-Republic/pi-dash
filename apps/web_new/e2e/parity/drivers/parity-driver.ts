@@ -3698,13 +3698,20 @@ export interface ParityDriver {
   assistantIsScrolledToBottom(): Promise<boolean>;
   /** Follow a tool-activity deep link. */
   assistantClickToolLink(activityIndex: number, linkIndex: number): Promise<void>;
-  /** Sidebar threads top to bottom with hrefs and the active mark. */
+  /**
+   * History threads top to bottom with hrefs and the active mark: the
+   * oracle's persistent rail reads directly, while the new app opens the
+   * Chat History dialog first (NEWPIDASH-337).
+   */
   assistantSidebarThreads(): Promise<AssistantSidebarThread[]>;
-  /** Whether the sidebar shows the no-conversations placeholder. */
+  /**
+   * Whether the history surface shows the no-conversations placeholder:
+   * the oracle rail or the new app's Chat History dialog.
+   */
   assistantSidebarEmptyVisible(): Promise<boolean>;
-  /** Click the sidebar's New chat entry. */
+  /** Click the New chat entry (the oracle rail or the new app page header). */
   assistantClickNewChat(): Promise<void>;
-  /** Click a sidebar thread by index. */
+  /** Click a history thread by index (oracle rail row or new app dialog row). */
   assistantClickSidebarThread(index: number): Promise<void>;
   /** Whether the dashboard assistant card renders. */
   assistantCardVisible(): Promise<boolean>;
@@ -3797,13 +3804,24 @@ export interface ParityDriver {
     transcribe: number;
     remove: number;
   }>;
-  /** Visible texts of buttons inside the assistant sidebar (negative proofs). */
+  /**
+   * Visible texts of buttons inside the assistant history surface
+   * (negative proofs): the oracle rail or the new app's Chat History
+   * dialog, which is links-only.
+   */
   assistantSidebarButtons(): Promise<string[]>;
   /** Rename/archive/delete-ish controls in the assistant layout (negative proofs). */
   assistantThreadManagementControls(): Promise<string[]>;
-  /** Header text of the assistant sidebar. */
+  /**
+   * Label of the assistant history surface: the oracle rail's brand header
+   * or the new app's Chat History button (NEWPIDASH-337).
+   */
   assistantSidebarHeader(): Promise<string | null>;
-  /** Row element kinds of the sidebar New-chat entry + thread rows. */
+  /**
+   * Row element kinds of the New-chat entry + thread rows: the oracle rail
+   * reads its own links, while the new app reads the header link plus the
+   * Chat History dialog rows (NEWPIDASH-337).
+   */
   assistantSidebarRowKinds(): Promise<{ newChat: string | null; rows: string[] }>;
   /** Links and buttons inside skipped-server notices (negative proofs). */
   assistantSkippedNoticeActions(): Promise<{ kind: string; text: string; href: string | null }[]>;
@@ -4039,6 +4057,8 @@ export interface ParityDriver {
   archivesCyclesGroupHeadings(): Promise<string[]>;
   /** Open the side peek for the named row; waits for the peek to show it. */
   archivesCyclesOpenPeek(name: string): Promise<void>;
+  /** Click the archived row's name/body to open its peek; waits for the peek panel. */
+  archivesCyclesClickRow(name: string): Promise<void>;
   /** Open the tab at a shared peek link without settling (fresh loads never settle). */
   archivesCyclesOpenPeekLink(workspaceSlug: string, projectId: string, cycleId: string): Promise<void>;
   /** Peek panel heading, or null when no peek is open. */
@@ -4659,6 +4679,16 @@ export interface ParityDriver {
   viewsDetailAddClick(): Promise<void>;
   /** Whether the detail body text currently contains `name`. */
   viewsDetailShowsIssue(name: string): Promise<boolean>;
+  /** Open the detail header's view overflow menu; resolves once items show. */
+  viewsDetailMenuOpen(): Promise<void>;
+  /** Visible entries of the open detail header menu in display order. */
+  viewsDetailMenuItems(): Promise<string[]>;
+  /** Pick an entry of the open detail header menu; resolves once it closes. */
+  viewsDetailMenuPick(item: string): Promise<void>;
+  /** Copy the detail view's link; resolves with the clipboard text. */
+  viewsDetailCopyLink(): Promise<string>;
+  /** Follow the detail menu's new-tab entry; resolves with the popup URL. */
+  viewsDetailMenuOpenNewTabHref(): Promise<string>;
   /** Custom workspace view names in list order. */
   wsViewsListNames(): Promise<string[]>;
   /** Static default view names in list order. */
@@ -4798,6 +4828,12 @@ export interface ParityDriver {
   archivesPeekVisible(): Promise<boolean>;
   /** Close the open peek panel. */
   archivesPeekClose(): Promise<void>;
+  /** Names of the open peek `…` menu entries on the archived issues tab. */
+  archivesPeekQuickActionNames(): Promise<string[]>;
+  /** Click the archived peek menu entry whose label contains `entry`. */
+  archivesPeekChoose(entry: string): Promise<void>;
+  /** Click the archived peek header copy control (both editions copy the archived address). */
+  archivesPeekCopyLink(): Promise<void>;
   /** Archived-detail banner text, or null when no banner shows. */
   archivesDetailBannerText(): Promise<string | null>;
   /** Whether a loading skeleton shows in the archives content. */
@@ -6315,6 +6351,8 @@ export interface ParityDriver {
   cyclesHeroTapProgressGroup(group: string): Promise<void>;
   /** Click the indexed breakdown entry; waits for the detail navigation. */
   cyclesHeroClickBreakdownEntry(index: number): Promise<void>;
+  /** Click the breakdown entry carrying the text without waiting for navigation. */
+  cyclesHeroTapBreakdownEntryByText(entryText: string): Promise<void>;
   /** Open the workspace-level active-cycles page; waits until it settles. */
   cyclesHeroOpenWorkspaceActives(workspaceSlug: string): Promise<void>;
   /** Upsell banner heading, benefit-card count, and upgrade-link facts. */

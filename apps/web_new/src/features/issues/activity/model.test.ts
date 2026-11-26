@@ -421,8 +421,8 @@ describe("activity sentences", () => {
     expect(activitySentence({ field: "archived_at", verb: "updated", old_value: "true", new_value: "restore" })).toBe(
       "restored the work item."
     );
-    expect(activitySentence({ field: "agent_wait", verb: "created", old_value: "2", new_value: "PAR-1" })).toBe(
-      "started waiting on PAR-1 (2)."
+    expect(activitySentence({ field: "agent_wait", verb: "created", old_value: "10", new_value: "1" })).toBe(
+      "chose to wait on a blocker (1 of 10)."
     );
     expect(activitySentence({ field: "agent_wake", verb: "created", old_value: "completed", new_value: "PAR-1" })).toBe(
       "resumed after PAR-1 was completed."

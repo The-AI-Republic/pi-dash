@@ -50,11 +50,16 @@ impl Method {
     }
 }
 
-/// A POST value: a JSON array (stored raw) or a JSON string.
+/// A POST value: a JSON array (stored raw), a JSON string, or JSON null.
+/// Null is Python's `None`: the key is present in `query_params`
+/// (`if key in query_params` runs the arm) but every `params.get(...)`
+/// falsy check skips the `__in` while the arm's companion predicates
+/// still emit. `stored_lookup_query` maps JSON null to this variant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PostVal {
     List(Vec<String>),
     Text(String),
+    Null,
 }
 
 /// Why legacy compilation failed. Python lets these escape as 500s
@@ -731,6 +736,11 @@ pub fn issue_filters_post(
                 Some(PostVal::List(items)) if !items.is_empty() => {
                     filter_name_value(&mut out, prefix, FilterValue::Strings(items.clone()));
                 }
+                // Django: `if params.get("name", "") != "": ... = params.get("name")`
+                // — None != "" so a JSON null stores `name__icontains: None`.
+                Some(PostVal::Null) => {
+                    filter_name_value(&mut out, prefix, FilterValue::Null);
+                }
                 _ => {}
             },
             "created_at" => post_date_param(
@@ -826,6 +836,8 @@ pub fn issue_filters_post(
                 let gate = match params.get("intake_status") {
                     Some(PostVal::List(items)) => !items.is_empty(),
                     Some(PostVal::Text(text)) => !text.is_empty() && text != "null",
+                    // JSON null is Python None: falsy, so the gate is false.
+                    Some(PostVal::Null) => false,
                     None => false,
                 };
                 if gate {
@@ -838,6 +850,7 @@ pub fn issue_filters_post(
                         Some(PostVal::Text(text)) => {
                             out.set(field, FilterValue::Text(text.clone()));
                         }
+                        Some(PostVal::Null) => out.set(field, FilterValue::Null),
                         None => out.set(field, FilterValue::Null),
                     }
                 }
@@ -851,6 +864,10 @@ pub fn issue_filters_post(
             "sub_issue" => {
                 let raw = match params.get("sub_issue") {
                     Some(PostVal::Text(text)) => text.clone(),
+                    // Django: `sub_issue = params.get("sub_issue", "false")` —
+                    // a JSON null stays None, which is not "false", so no
+                    // predicate. The fallback would wrongly store one.
+                    Some(PostVal::Null) => "null".to_owned(),
                     _ => "false".to_owned(),
                 };
                 filter_sub_issue_toggle(&mut out, &raw, prefix);
@@ -1169,6 +1186,90 @@ mod tests {
         )
         .unwrap();
         assert!(filter.get("issue_intake__status__in").is_some());
+    }
+
+    #[test]
+    fn post_null_keeps_keys_and_emits_companion_predicates() {
+        // NEWPIDASH-197: JSON null is Python None — the key is present so
+        // `if key in query_params` runs the arm; the falsy `__in` check
+        // skips but companion predicates emit. Oracle:
+        // `issue_filters(nulls, "POST")` on Django.
+        let filter = issue_filters_post(
+            &post_map(&[
+                ("labels", PostVal::Null),
+                ("assignees", PostVal::Null),
+                ("cycle", PostVal::Null),
+                ("module", PostVal::Null),
+                ("subscriber", PostVal::Null),
+                ("type", PostVal::Null),
+                ("name", PostVal::Null),
+                ("state", PostVal::Null),
+                ("sub_issue", PostVal::Null),
+                ("intake_status", PostVal::Null),
+                ("start_target_date", PostVal::Null),
+            ]),
+            "",
+            today(),
+        )
+        .unwrap();
+        assert_eq!(
+            filter.get("label_issue__deleted_at__isnull"),
+            Some(&FilterValue::Flag(true))
+        );
+        assert_eq!(
+            filter.get("issue_assignee__deleted_at__isnull"),
+            Some(&FilterValue::Flag(true))
+        );
+        assert_eq!(
+            filter.get("issue_cycle__deleted_at__isnull"),
+            Some(&FilterValue::Flag(true))
+        );
+        assert_eq!(
+            filter.get("issue_module__deleted_at__isnull"),
+            Some(&FilterValue::Flag(true))
+        );
+        assert_eq!(
+            filter.get("issue_subscribers__deleted_at__isnull"),
+            Some(&FilterValue::Flag(true))
+        );
+        assert_eq!(
+            filter.get("name__icontains"),
+            Some(&FilterValue::Null),
+            "name null stores None (None != \"\")"
+        );
+        match filter.get("state__group__in") {
+            Some(FilterValue::Strings(groups)) => {
+                assert_eq!(groups.len(), 7, "type null takes the full group order");
+            }
+            other => panic!("unexpected state__group__in: {other:?}"),
+        }
+        // Falsy-only arms stay silent for null.
+        assert!(filter.get("state__in").is_none());
+        assert!(filter.get("labels__in").is_none());
+        assert!(
+            filter.get("parent__isnull").is_none(),
+            "sub_issue null != \"false\""
+        );
+        assert!(
+            filter.get("issue_intake__status__in").is_none(),
+            "intake_status null is falsy, so the gate is false"
+        );
+        assert!(filter.get("target_date__isnull").is_none());
+        assert!(filter.get("start_date__isnull").is_none());
+        // A present-but-null inbox_status stores None verbatim.
+        let filter = issue_filters_post(
+            &post_map(&[
+                ("intake_status", PostVal::List(vec!["s".to_owned()])),
+                ("inbox_status", PostVal::Null),
+            ]),
+            "",
+            today(),
+        )
+        .unwrap();
+        assert_eq!(
+            filter.get("issue_intake__status__in"),
+            Some(&FilterValue::Null)
+        );
     }
 
     #[test]

@@ -349,7 +349,8 @@ def create_issue(
     assigned_runner (UUID or name) to dedicate the issue to one runner and
     assigned_pod (UUID or name) to set its pod; eligibility follows the
     shared E-code rules and any E-code is returned to the model. (Assignees/labels:
-    set them afterwards in the UI — not yet supported by this tool.)"""
+    set them afterwards in the UI — not yet supported by this tool.)
+    Write name as a plain-language TL;DR a human understands at a glance."""
     deps = ctx.deps
     project = _scoping.get_project(deps, project_id)
     _scoping.require_project_write(deps, project_id)

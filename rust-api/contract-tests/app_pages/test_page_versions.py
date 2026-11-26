@@ -11,6 +11,8 @@ can verify statically and leaves non-NULL binary encoding unpinned.
 
 import pytest
 
+from _harness.diffs import expect, is_rust
+
 from .conftest import page_url
 
 pytestmark = pytest.mark.contract
@@ -136,3 +138,89 @@ def test_duplicate_requires_auth(anon_client, world):
         401,
         403,
     )
+
+
+# DIFF-63 (NEWPIDASH-341): the version list/detail reads used to skip the
+# page's own visibility — no live-link check to the URL project and no
+# restricted-guest rule — so a page linked only to another project (even a
+# private one) leaked its rows through any project the caller belonged to,
+# and a restricted guest read bodies retrieve refuses with 400. Rust now
+# resolves the page through retrieve's visibility (live link to the URL
+# project, owner-or-public, guest rule) and answers what retrieve answers;
+# Django keeps the old behaviour.
+
+
+def _other_project_page(seeder, world, *, name="Q", html="<p>SECRET-Q body</p>"):
+    """A page linked ONLY to a second project the caller is not a member of."""
+    other = seeder.create_project(world["workspace"]["id"], name="Other project")
+    page = seeder.create_page(
+        world["workspace"]["id"], world["owner"]["id"], name=name, description_html=html
+    )
+    seeder.link_page_project(world["workspace"]["id"], other["id"], page["id"])
+    return other, page
+
+
+def test_versions_list_cross_project_page_refused(member_client, world, seeder):
+    _other, page = _other_project_page(seeder, world)
+    seeder.create_page_version(
+        world["workspace"]["id"], page["id"], world["owner"]["id"],
+        description_html="<p>SECRET-Q body</p>",
+    )
+    # Control: retrieve refuses the same page through the URL project.
+    assert member_client.get(page_url(world, page["id"])).status_code == 404
+    response = member_client.get(_versions_url(world, page["id"]))
+    assert response.status_code == expect("DIFF-63", django=200, rust=404)
+    if is_rust():
+        assert response.json() == {"error": "Page not found"}
+    else:
+        assert len(response.json()) == 1
+
+
+def test_version_detail_cross_project_page_refused(member_client, world, seeder):
+    _other, page = _other_project_page(seeder, world)
+    version = seeder.create_page_version(
+        world["workspace"]["id"], page["id"], world["owner"]["id"],
+        description_html="<p>SECRET-Q body</p>",
+    )
+    # Control: retrieve refuses the same page through the URL project.
+    assert member_client.get(page_url(world, page["id"])).status_code == 404
+    response = member_client.get(_versions_url(world, page["id"], version["id"]))
+    assert response.status_code == expect("DIFF-63", django=200, rust=404)
+    if is_rust():
+        assert response.json() == {"error": "Page not found"}
+    else:
+        assert response.json()["description_html"] == "<p>SECRET-Q body</p>"
+
+
+def test_versions_list_restricted_guest_refused(guest_client, world, seeder):
+    seeder.create_page_version(
+        world["workspace"]["id"], world["page"]["id"], world["owner"]["id"],
+        description_html="<p>A v2 body</p>",
+    )
+    # Control: retrieve refuses the same page for the same guest.
+    denied = guest_client.get(page_url(world, world["page"]["id"]))
+    assert denied.status_code == 400
+    assert denied.json() == {"error": "You are not allowed to view this page"}
+    response = guest_client.get(_versions_url(world, world["page"]["id"]))
+    assert response.status_code == expect("DIFF-63", django=200, rust=400)
+    if is_rust():
+        assert response.json() == {"error": "You are not allowed to view this page"}
+    else:
+        assert len(response.json()) == 1
+
+
+def test_version_detail_restricted_guest_refused(guest_client, world, seeder):
+    version = seeder.create_page_version(
+        world["workspace"]["id"], world["page"]["id"], world["owner"]["id"],
+        description_html="<p>A v2 body</p>",
+    )
+    # Control: retrieve refuses the same page for the same guest.
+    denied = guest_client.get(page_url(world, world["page"]["id"]))
+    assert denied.status_code == 400
+    assert denied.json() == {"error": "You are not allowed to view this page"}
+    response = guest_client.get(_versions_url(world, world["page"]["id"], version["id"]))
+    assert response.status_code == expect("DIFF-63", django=200, rust=400)
+    if is_rust():
+        assert response.json() == {"error": "You are not allowed to view this page"}
+    else:
+        assert response.json()["description_html"] == "<p>A v2 body</p>"

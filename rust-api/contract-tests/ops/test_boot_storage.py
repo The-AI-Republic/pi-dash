@@ -102,11 +102,11 @@ EXPECTED_LEAVES = [
     ("assistant", "0004_usersttconfig"),
     ("auth", "0012_alter_user_first_name_max_length"),
     ("contenttypes", "0002_remove_content_type_name"),
-    ("db", "0174_legacy_creation_defaults"),
+    ("db", "0183_merge_ai_completed_and_project_settings"),
     ("django_celery_beat", "0018_improve_crontab_helptext"),
     ("license", "0006_instance_is_current_version_deprecated"),
     ("prompting", "0007_reseed_directional_relations"),
-    ("runner", "0039_issue_assigned_runner"),
+    ("runner", "0043_desktop_handoff"),
     ("sessions", "0001_initial"),
 ]
 REPO_LEAVES = [leaf for leaf in EXPECTED_LEAVES if leaf[0] in {"assistant", "db", "license", "prompting", "runner"}]
@@ -645,6 +645,85 @@ def test_wait_for_migrations_down_db_exits_1_without_output():
     proc = run_ops(
         "wait_for_migrations",
         env_extra={"DATABASE_URL": "postgresql://127.0.0.1:9/pidash_806_dead"},
+    )
+    assert proc.returncode == 1
+    assert proc.stdout == ""
+    assert proc.stderr != "" and proc.stderr.endswith("\n")
+    assert len(proc.stderr.strip().splitlines()) == 1
+
+
+# --------------------------------------------------------------------------
+# NEWPIDASH-378: check_migrations (fail-fast gate, no polling)
+# --------------------------------------------------------------------------
+
+# The pre-merge heads the stale gate waited for: a database migrated this
+# far still misses db/0183 and runner/0043, so the check must fail on it.
+STALE_LEAVES = [
+    ("assistant", "0004_usersttconfig"),
+    ("auth", "0012_alter_user_first_name_max_length"),
+    ("contenttypes", "0002_remove_content_type_name"),
+    ("db", "0182_project_settings"),
+    ("django_celery_beat", "0018_improve_crontab_helptext"),
+    ("license", "0006_instance_is_current_version_deprecated"),
+    ("prompting", "0007_reseed_directional_relations"),
+    ("runner", "0042_agentrun_work_type"),
+    ("sessions", "0001_initial"),
+]
+
+
+def test_check_migrations_complete():
+    """Fully migrated: exit 0 at once with the success line (no waiting)."""
+    conn = db_connect()
+    try:
+        reset_migrations(conn, EXPECTED_LEAVES + [("db", "0001_initial")])
+    finally:
+        conn.close()
+    proc = run_ops("check_migrations", timeout=30)
+    assert proc.returncode == 0
+    assert proc.stdout == "No migrations Pending. Starting processes ...\n"
+    assert proc.stderr == ""
+
+
+def test_check_migrations_empty_db_exits_1_with_all_leaves():
+    """Fresh database (no ``django_migrations`` table, migrator never ran):
+    exit 1 at once, naming every leaf (nothing is applied)."""
+    conn = db_connect()
+    try:
+        conn.execute("DROP TABLE IF EXISTS django_migrations")
+    finally:
+        conn.close()
+    proc = run_ops("check_migrations", timeout=30)
+    assert proc.returncode == 1
+    assert proc.stdout == ""
+    expected = "Pending migrations: " + ", ".join(f"{app}.{name}" for app, name in EXPECTED_LEAVES) + "\n"
+    assert proc.stderr == expected
+
+
+def test_check_migrations_stale_db_names_missing_leaves():
+    """Migrated only to the pre-merge heads (``db/0182_project_settings``,
+    ``runner/0042_agentrun_work_type``): exit 1 at once naming exactly the
+    two leaves it is missing."""
+    conn = db_connect()
+    try:
+        reset_migrations(conn, STALE_LEAVES)
+    finally:
+        conn.close()
+    proc = run_ops("check_migrations", timeout=30)
+    assert proc.returncode == 1
+    assert proc.stdout == ""
+    assert proc.stderr == (
+        "Pending migrations: db.0183_merge_ai_completed_and_project_settings, "
+        "runner.0043_desktop_handoff\n"
+    )
+
+
+def test_check_migrations_down_db_exits_1_without_output():
+    """Unreachable database: exit 1 at once with one stderr line (the crash
+    path, like the wait gate) — no 10s poll cycle first."""
+    proc = run_ops(
+        "check_migrations",
+        env_extra={"DATABASE_URL": "postgresql://127.0.0.1:9/pidash_806_dead"},
+        timeout=30,
     )
     assert proc.returncode == 1
     assert proc.stdout == ""

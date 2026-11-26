@@ -127,23 +127,25 @@ describe("HomeWidgetStack", () => {
     ]);
     renderStack(queryClient, {
       quicklinks: <section data-testid="quicklinks-widget" data-widget-title="Quicklinks" />,
-      emptyState: <div data-testid="all-off" />,
     });
     expect(screen.queryByTestId("recents-widget")).not.toBeInTheDocument();
     expect(screen.getByTestId("quicklinks-widget")).toBeInTheDocument();
-    expect(screen.queryByTestId("all-off")).not.toBeInTheDocument();
   });
 
-  it("shows the all-off slot when no known section is visible", () => {
+  it("renders no section and no all-off art when no known section is visible, keeping Manage reachable", () => {
     createAppClient("https://api.test", stubTransport());
     const queryClient = testClient();
     queryClient.setQueryData(widgetPrefsKeys.list("acme"), [
       pref("recents", 99, false),
       pref("my_stickies", 101, true),
     ]);
-    renderStack(queryClient, { emptyState: <div data-testid="all-off" /> });
-    expect(screen.getByTestId("all-off")).toBeInTheDocument();
+    renderStack(queryClient, { manageWidgets: (controls) => <ManageDialogStub {...controls} /> });
+    // NEWPIDASH-301: the empty home carries no illustration; the header and
+    // Manage control remain so widgets can be turned back on.
     expect(screen.queryByTestId("recents-widget")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Manage widgets" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Manage widgets" }));
+    expect(screen.getByTestId("manage-dialog")).toHaveAttribute("data-open", "true");
   });
 
   it("renders nothing without known sections or an empty slot", () => {

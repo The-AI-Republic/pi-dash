@@ -42,7 +42,9 @@
 //! * BUG-intake-detail-undecorated (`base.py:56-91`): the DRF-default
 //!   `retrieve` / `partial_update` carry no decorator, so any
 //!   authenticated user passes with no project-membership check.
-//!   [`guards::intake_detail_undecorated`] pins the pass-through.
+//!   [`guards::intake_detail_undecorated`] pins the Django pass-through;
+//!   the handlers below no longer use it — they gate like `list`
+//!   (ADMIN + MEMBER, DIFF-56, NEWPIDASH-309).
 //! * QUIRK-list-null (`base.py:73-75`): with no intake row the view
 //!   serves `IntakeSerializer(None).data` — a null body with 200, not a
 //!   404. Ported as written.
@@ -951,8 +953,10 @@ pub async fn create(
 /// `retrieve` (the DRF-default `ModelViewSet` retrieve — no override in
 /// `IntakeViewSet`): tenant-scoped get plus the full serializer, 200. A
 /// miss answers `get_object`'s `Http404` (`{"detail": "No Intake
-/// matches the given query."}`). Undecorated: any authenticated user
-/// passes (BUG-intake-detail-undecorated).
+/// matches the given query."}`). Django leaves it undecorated, so any
+/// authenticated user passes (BUG-intake-detail-undecorated); the Rust
+/// handler gates it like `list` instead (ADMIN + MEMBER, DIFF-56), denied
+/// before the row lookup so outsiders learn nothing about existence.
 pub async fn retrieve(
     State(state): State<AppState>,
     Path((slug, project_id_raw, pk_raw)): Path<(String, String, String)>,
@@ -974,6 +978,15 @@ pub async fn retrieve(
         Ok(project_id) => project_id,
         Err(denial) => return denial.into_response(),
     };
+    let membership = match load_membership(pool, &slug, &project_id, &actor.id).await {
+        Ok(membership) => membership,
+        Err(denial) => return denial.into_response(),
+    };
+    // Gated like `list` (`base.py:72`): ADMIN + MEMBER (DIFF-56).
+    let gate = guards::intake_list_gate(&membership.as_guard());
+    if gate.is_err() {
+        return guard_denial(gate);
+    }
     let found = match fetch_intake(pool, &slug, &project_id, Some(pk), false).await {
         Ok(found) => found,
         Err(denial) => return denial.into_response(),
@@ -992,8 +1005,11 @@ pub async fn retrieve(
 /// override in `IntakeViewSet`): tenant-scoped get (404 like retrieve),
 /// partial serializer validation, `BaseModel.save` (which stamps
 /// `updated_by` from the request user via crum and `updated_at` via
-/// `auto_now`), then the full serializer, 200. Undecorated: any
-/// authenticated user passes (BUG-intake-detail-undecorated).
+/// `auto_now`), then the full serializer, 200. Django leaves it
+/// undecorated, so any authenticated user passes
+/// (BUG-intake-detail-undecorated); the Rust handler gates it like `list`
+/// instead (ADMIN + MEMBER, DIFF-56), denied before the row lookup so
+/// outsiders cannot write and learn nothing about existence.
 pub async fn partial_update(
     State(state): State<AppState>,
     Path((slug, project_id_raw, pk_raw)): Path<(String, String, String)>,
@@ -1016,6 +1032,15 @@ pub async fn partial_update(
         Ok(project_id) => project_id,
         Err(denial) => return denial.into_response(),
     };
+    let membership = match load_membership(pool, &slug, &project_id, &actor.id).await {
+        Ok(membership) => membership,
+        Err(denial) => return denial.into_response(),
+    };
+    // Gated like `list` (`base.py:72`): ADMIN + MEMBER (DIFF-56).
+    let gate = guards::intake_list_gate(&membership.as_guard());
+    if gate.is_err() {
+        return guard_denial(gate);
+    }
     // `get_object` runs before the body parses: a miss 404s even with a
     // malformed payload.
     let stored = match fetch_intake(pool, &slug, &project_id, Some(pk), false).await {

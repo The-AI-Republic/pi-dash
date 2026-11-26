@@ -13,14 +13,16 @@
 //!   (PIDASHCONV-1041 drives the dispatch tails through
 //!   [`super::dispatch`]); only the parser arms proxy (malformed JSON,
 //!   JSON non-objects).
-//! * `AgentReTickEndpoint.post` (`:517-560`) → [`retick`]: the missing /
-//!   malformed-UUID / not-found arms are owned; the `re_tick_ticker` tail
-//!   (D-12) proxies.
+//! * `AgentReTickEndpoint.post` (`:517-560`) → [`retick`]: fully owned.
+//!   The `re_tick_ticker` tail runs through the shared v1 core
+//!   ([`crate::v1_work_items::handlers_actions::retick_issue`]); the body
+//!   parses through [`super::read_request_data`] (only a non-JSON
+//!   content type proxies).
 //! * `AgentRunDetailEndpoint.get` (`:565-585`) → [`run_detail`], with
 //!   `?include_events=1`.
 //! * `AgentRunCancelEndpoint.post` (`:590-682`) → [`cancel_run`]: the
-//!   cloud fast-path 202, terminal 409, cloud-duplicate stamp and the
-//!   finalize-CANCELLED arm (via the L4 planners) are owned; the two arms
+//!   terminal 409 and the finalize-CANCELLED arm (via the L4 planners)
+//!   are owned (the cloud arms went with the retired plane); the two arms
 //!   that fan a cancel frame out (D-14 `send_to_runner`, PIDASHCONV-553)
 //!   proxy.
 //! * `AgentRunReleasePinEndpoint.post` (`:697-736`) → [`release_pin`]:
@@ -73,7 +75,7 @@ use pidash_services::runner_runs::guards;
 use pidash_services::runner_runs::shape;
 use pidash_services::runner_runs::shape::SchedulerBindingDetailRow;
 use pidash_services::runner_runs::SetValue;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::runner_runs::{AgentRunStatus, ToolCallStatus};
 use pidash_types::WorkspaceId;
 
@@ -110,6 +112,47 @@ pub const SCHEDULER_BINDING_MALFORMED_BODY: &str =
 /// Issue lookup / membership miss on the three issue-bound creates
 /// (`runs.py:367/369/439/441/505/507`).
 pub const ISSUE_NOT_FOUND_BODY: &str = r#"{"error":"issue not found"}"#;
+/// NEWPIDASH-261: gate run control (cancel / release-pin) on a
+/// work-item run by the project's `issue_run_policy`. Scheduler runs
+/// (no work item) are never gated. Returns `Err(response)` with the
+/// already-rendered 403/500 response.
+async fn gate_run_control(
+    pool: &PgPool,
+    actor_id: Uuid,
+    work_item_id: Option<Uuid>,
+) -> Result<(), Response> {
+    let Some(work_item_id) = work_item_id else {
+        return Ok(());
+    };
+    let orm_pool = sea_orm_connection(pool);
+    let issue_entity = orm::issues::Entity::find_by_id(work_item_id)
+        .one(&orm_pool)
+        .await
+        .map_err(|_| server_error())?
+        .ok_or_else(server_error)?;
+    let project_entity = orm::projects::Entity::find_by_id(issue_entity.project_id)
+        .one(&orm_pool)
+        .await
+        .map_err(|_| server_error())?
+        .ok_or_else(server_error)?;
+    let allowed = pidash_services::domain::project_settings::can_run_issue(
+        &orm_pool,
+        actor_id,
+        &issue_entity,
+        &project_entity,
+    )
+    .await
+    .map_err(|_| server_error())?;
+    if allowed {
+        Ok(())
+    } else {
+        Err(json_response(
+            StatusCode::FORBIDDEN,
+            pidash_services::domain::project_settings::not_issue_runner_body(),
+        ))
+    }
+}
+
 /// Cancel on a terminal run (`runs.py:572-576`).
 pub const RUN_ALREADY_TERMINAL_BODY: &str =
     r#"{"error":"run already terminal","code":"run_already_terminal"}"#;
@@ -675,22 +718,6 @@ pub fn run_events_select(run_id: Uuid) -> sea_orm::Select<orm::agent_run_event::
         .limit(500)
 }
 
-/// Cloud fast-path stamp (`runs.py:562-564`): single-statement
-/// first-writer check.
-pub fn cloud_fast_stamp_statement(
-    now: chrono::DateTime<Utc>,
-    reason: &str,
-    run_id: Uuid,
-) -> sea_orm::UpdateMany<orm::agent_run::Entity> {
-    use orm::agent_run::{Column, Entity};
-    Entity::update_many()
-        .col_expr(Column::CancelRequestedAt, Expr::value(now))
-        .col_expr(Column::CancelReason, Expr::value(reason.to_owned()))
-        .filter(Column::Id.eq(run_id))
-        .filter(Column::Status.eq(AgentRunStatus::Running.value()))
-        .filter(Column::CancelRequestedAt.is_null())
-}
-
 /// Row lock for the cancel / release-pin branches
 /// (`select_for_update().filter(id).first()`, `runs.py:569/669`): the
 /// full row.
@@ -700,20 +727,6 @@ pub fn lock_run_select(run_id: Uuid) -> sea_orm::Select<orm::agent_run::Entity> 
         .filter(Column::Id.eq(run_id))
         .limit(1)
         .lock_exclusive()
-}
-
-/// Cloud-duplicate stamp (`locked.save(update_fields=[...])`,
-/// `runs.py:588-591`).
-pub fn cloud_dup_stamp_statement(
-    now: chrono::DateTime<Utc>,
-    reason: &str,
-    run_id: Uuid,
-) -> sea_orm::UpdateMany<orm::agent_run::Entity> {
-    use orm::agent_run::{Column, Entity};
-    Entity::update_many()
-        .col_expr(Column::CancelRequestedAt, Expr::value(now))
-        .col_expr(Column::CancelReason, Expr::value(reason.to_owned()))
-        .filter(Column::Id.eq(run_id))
 }
 
 // ---------------------------------------------------------------------------
@@ -780,6 +793,7 @@ pub(crate) fn run_from_model(model: orm::agent_run::Model) -> Result<AgentRun, R
         trigger: model.trigger,
         prompt_manifest: model.prompt_manifest,
         phase_kind: model.phase_kind,
+        work_type: model.work_type,
         run_config: model.run_config,
         required_capabilities: model.required_capabilities,
         thread_id: model.thread_id,
@@ -790,6 +804,7 @@ pub(crate) fn run_from_model(model: orm::agent_run::Model) -> Result<AgentRun, R
         // The generated column `COALESCE`s to `""`: never NULL on the
         // real table.
         refusal_category: model.refusal_category.unwrap_or_default(),
+        failure_reason: model.failure_reason,
         llm_model: model.llm_model,
         usage: model.usage,
         input_tokens: model.input_tokens,
@@ -799,10 +814,13 @@ pub(crate) fn run_from_model(model: orm::agent_run::Model) -> Result<AgentRun, R
         assigned_at: model.assigned_at.map(utc),
         started_at: model.started_at.map(utc),
         ended_at: model.ended_at.map(utc),
+        assignment_token: model.assignment_token,
+        assignment_protocol: model.assignment_protocol,
+        capacity_wait: model.capacity_wait,
     })
 }
 
-/// Decode the 40-column run image at `base..base+40` into the L2 row.
+/// Decode the 41-column run image at `base..base+41` into the L2 row.
 /// Kept for the `app_scheduler` binding-runs list, whose hand-written
 /// `SELECT` still opens with [`run_select_list`]; every reader here
 /// goes through [`run_from_model`].
@@ -848,23 +866,30 @@ pub fn decode_run(row: &sqlx::postgres::PgRow, base: usize) -> Result<AgentRun, 
         trigger,
         prompt_manifest: row.try_get(base + 21)?,
         phase_kind: row.try_get(base + 22)?,
-        run_config: row.try_get(base + 23)?,
-        required_capabilities: row.try_get(base + 24)?,
-        thread_id: row.try_get(base + 25)?,
-        agent_metadata: row.try_get(base + 26)?,
-        lease_expires_at: row.try_get(base + 27)?,
-        done_payload: row.try_get(base + 28)?,
-        error_details: row.try_get(base + 29)?,
-        refusal_category: row.try_get(base + 30)?,
-        llm_model: row.try_get(base + 31)?,
-        usage: row.try_get(base + 32)?,
-        input_tokens: row.try_get(base + 33)?,
-        output_tokens: row.try_get(base + 34)?,
-        total_tokens: row.try_get(base + 35)?,
-        created_at: row.try_get(base + 36)?,
-        assigned_at: row.try_get(base + 37)?,
-        started_at: row.try_get(base + 38)?,
-        ended_at: row.try_get(base + 39)?,
+        work_type: row.try_get(base + 23)?,
+        run_config: row.try_get(base + 24)?,
+        required_capabilities: row.try_get(base + 25)?,
+        thread_id: row.try_get(base + 26)?,
+        agent_metadata: row.try_get(base + 27)?,
+        lease_expires_at: row.try_get(base + 28)?,
+        done_payload: row.try_get(base + 29)?,
+        error_details: row.try_get(base + 30)?,
+        refusal_category: row.try_get(base + 31)?,
+        failure_reason: row.try_get(base + 32)?,
+        llm_model: row.try_get(base + 32)?,
+        usage: row.try_get(base + 33)?,
+        input_tokens: row.try_get(base + 34)?,
+        output_tokens: row.try_get(base + 35)?,
+        total_tokens: row.try_get(base + 36)?,
+        created_at: row.try_get(base + 37)?,
+        assigned_at: row.try_get(base + 38)?,
+        started_at: row.try_get(base + 39)?,
+        ended_at: row.try_get(base + 40)?,
+        // NEWPIDASH-241 T1: native columns beyond the 41-column baseline
+        // (backward-compatible: missing columns decode as legacy)
+        assignment_token: row.try_get(base + 41).unwrap_or(None),
+        assignment_protocol: row.try_get(base + 42).unwrap_or(0),
+        capacity_wait: row.try_get(base + 43).unwrap_or(None),
     })
 }
 
@@ -1690,8 +1715,8 @@ async fn create_run_inner(
 // `POST /api/runners/re-tick/` — budget grant (`runs.py:482-523`)
 // ---------------------------------------------------------------------------
 
-/// Re-tick: missing / malformed-UUID / not-found arms are owned; the
-/// `re_tick_ticker` tail (D-12) proxies.
+/// Re-tick: fully owned (only a non-JSON content type proxies); the
+/// `re_tick_ticker` tail runs natively.
 pub async fn retick(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
@@ -1708,6 +1733,7 @@ async fn retick_inner(
     extension: Option<Extension<SessionHandle>>,
     req: Request,
 ) -> Response {
+    use crate::v1_work_items::handlers_actions::{fetch_issue_by_id, retick_issue};
     let actor = match request_actor(&state, extension).await {
         Ok(Some(actor)) => actor,
         Ok(None) => return unauthorized(),
@@ -1717,17 +1743,16 @@ async fn retick_inner(
         Ok(pool) => pool,
         Err(response) => return response,
     };
-    let (parts, body) = req.into_parts();
-    let bytes = match collect_body(body).await {
-        Ok(bytes) => bytes,
+    // DRF `request.data`: an empty body is `{}` (the 400 below), bad JSON
+    // is the parser's 400. Proxying these answered 502 on the all-Rust
+    // stack, which has no Django upstream.
+    let parsed = match super::read_request_data(&state, req).await {
+        Ok(parsed) => parsed,
         Err(response) => return response,
     };
-    let parsed: Value = match serde_json::from_slice(&bytes) {
-        Ok(parsed) => parsed,
-        Err(_) => return proxy_with_body(state, parts, bytes).await,
-    };
+    // A non-dict body is the source's `AttributeError` on `.get` (500).
     if !parsed.is_object() {
-        return proxy_with_body(state, parts, bytes).await;
+        return server_error();
     }
     let work_item_id = match classify_retick_work_item(&parsed) {
         WorkItemRef::Missing => {
@@ -1741,21 +1766,31 @@ async fn retick_inner(
         }
         WorkItemRef::Id(id) => id,
     };
-    let row = match issue_lookup(pool, work_item_id).await {
-        Ok(row) => row,
-        Err(response) => return response,
+    // `Issue.all_objects.filter(pk=...).first()`: one read serves both the
+    // membership check and the `re_tick_ticker` tail.
+    let issue = match fetch_issue_by_id(pool, &work_item_id).await {
+        Ok(Some(issue)) => issue,
+        Ok(None) => {
+            return json_response(StatusCode::NOT_FOUND, ISSUE_NOT_FOUND_BODY.to_owned());
+        }
+        Err(_) => return server_error(),
     };
-    let Some((_, workspace_id)) = row else {
-        return json_response(StatusCode::NOT_FOUND, ISSUE_NOT_FOUND_BODY.to_owned());
-    };
-    let role = match workspace_role(pool, workspace_id, actor.id).await {
+    let role = match workspace_role(pool, issue.workspace_id, actor.id).await {
         Ok(role) => role,
         Err(response) => return response,
     };
     if !is_workspace_member(role) {
         return json_response(StatusCode::NOT_FOUND, ISSUE_NOT_FOUND_BODY.to_owned());
     }
-    proxy_with_body(state, parts, bytes).await
+    // `scheduling.re_tick_ticker` tail, natively: the all-Rust stack has no
+    // Django upstream, so proxying it answered 502 to every valid re-tick.
+    match retick_issue(&state, pool, actor.id, &issue).await {
+        Ok((status, body)) => json_response(status, body),
+        Err(_) => {
+            tracing::warn!(issue_id = %issue.id, "web re-tick failed");
+            server_error()
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1763,10 +1798,9 @@ async fn retick_inner(
 // ---------------------------------------------------------------------------
 
 /// Cancel: lookup + guard first (404s), then the reason, then the
-/// cloud fast-path 202 and the locked branches. The two
-/// cancel-requested arms proxy (their `on_commit` fan-out is D-14);
-/// everything else — terminal 409, cloud-duplicate stamp, finalize —
-/// is owned.
+/// locked branches. The two cancel-requested arms proxy (their
+/// `on_commit` fan-out is D-14); everything else — terminal 409,
+/// finalize — is owned.
 pub async fn cancel_run(
     State(state): State<AppState>,
     Path(run_raw): Path<String>,
@@ -1809,8 +1843,29 @@ async fn cancel_run_inner(
         Ok(facts) => facts,
         Err(response) => return response,
     };
-    if !guards::can_cancel_run(&facts) {
+    // NEWPIDASH-261: cancel on a work-item run follows the project's
+    // `issue_run_policy` (a removed assignee loses the right at once).
+    // Gated before can_cancel_run so non-runners get 403 not_issue_runner
+    // (acceptance) rather than the generic 404 visibility hide. For
+    // work-item runs the gate is the permission (project_members admits
+    // any Member, whom can_cancel_run would still 404); for scheduler
+    // runs (no work item) can_cancel_run still applies.
+    let is_work_item_run = guarded.run.work_item_id.is_some();
+    if let Err(response) = gate_run_control(pool, actor.id, guarded.run.work_item_id).await {
+        return response;
+    }
+    if !is_work_item_run && !guards::can_cancel_run(&facts) {
         return not_found();
+    }
+    // For work-item runs the gate is the permission: creator/assignee
+    // in default, any Member/Admin in project_members. The old
+    // can_cancel_run would 404 a project_members Member who is not
+    // creator/assignee/owner, so it is skipped here.
+    if is_work_item_run && !guards::can_cancel_run(&facts) {
+        // Still need workspace membership (gate already ensures it for
+        // project_members; for default the gate ensures creator/assignee
+        // which implies membership in practice). Allow.
+        tracing::debug!("cancel allowed via gate despite can_cancel_run false");
     }
     let (parts, body) = req.into_parts();
     let bytes = match collect_body(body).await {
@@ -1831,23 +1886,6 @@ async fn cancel_run_inner(
             return proxy_with_body(state, parts, bytes).await;
         }
     };
-
-    // Cloud fast-path (`runs.py:561-567`): stamp-only, 202. A lost race
-    // (0 rows) falls through to the locked branches — no early return.
-    if guarded.run.executor_kind == AgentExecutorKind::CloudAgent
-        && guarded.run.status == AgentRunStatus::Running
-    {
-        let stamped = cloud_fast_stamp_statement(Utc::now(), &reason, run_id)
-            .exec(&sea_orm_connection(pool))
-            .await;
-        match stamped {
-            Ok(done) if done.rows_affected == 1 => {
-                return render_cancelled(pool, run_id, StatusCode::ACCEPTED).await;
-            }
-            Ok(_) => {}
-            Err(_) => return server_error(),
-        }
-    }
 
     cancel_locked(pool, &state, parts, bytes, run_id, &reason).await
 }
@@ -1931,28 +1969,7 @@ async fn cancel_locked(
         let _ = tx.rollback().await;
         return proxy_with_body(state.clone(), parts, bytes).await;
     }
-    if locked.executor_kind == AgentExecutorKind::CloudAgent
-        && locked.status == AgentRunStatus::Running
-    {
-        // Cloud duplicate (`runs.py:579-592`): record the request and let
-        // the worker's cancellation poll finalize. 200, never a send
-        // (the status stays RUNNING).
-        if locked.cancel_requested_at.is_none() {
-            let stamped = cloud_dup_stamp_statement(Utc::now(), reason, run_id)
-                .exec(&TxConn::new(&mut tx))
-                .await;
-            if stamped.is_err() {
-                let _ = tx.rollback().await;
-                return server_error();
-            }
-        }
-        if tx.commit().await.is_err() {
-            return server_error();
-        }
-        return render_cancelled(pool, run_id, StatusCode::OK).await;
-    }
-    if locked.executor_kind != AgentExecutorKind::CloudAgent
-        && locked.runner_id.is_some()
+    if locked.runner_id.is_some()
         && !matches!(
             locked.status,
             AgentRunStatus::Queued | AgentRunStatus::PausedAwaitingInput
@@ -2028,17 +2045,6 @@ async fn finalize_cancelled(
     finalization::finalize_update(&conn, &values, locked.id, now)
         .await
         .map_err(|_| server_error())?;
-    if locked.executor_kind == AgentExecutorKind::CloudAgent {
-        finalization::append_terminal_event_once(
-            &conn,
-            locked.id,
-            AgentRunStatus::Cancelled,
-            &finalization::finalize_error_code(&values),
-            now,
-        )
-        .await
-        .map_err(|_| server_error())?;
-    }
     Ok(())
 }
 
@@ -2089,10 +2095,17 @@ async fn release_pin_inner(
         Ok(facts) => facts,
         Err(response) => return response,
     };
-    if !guards::can_cancel_run(&facts) {
+    // NEWPIDASH-261: release-pin on a work-item run follows the
+    // project's `issue_run_policy` (before can_cancel_run for 403).
+    // For work-item runs the gate is the permission (see cancel).
+    let is_work_item_run = guarded.run.work_item_id.is_some();
+    if let Err(response) = gate_run_control(pool, actor.id, guarded.run.work_item_id).await {
+        return response;
+    }
+    if !is_work_item_run && !guards::can_cancel_run(&facts) {
         return not_found();
     }
-    if guarded.run.executor_kind == AgentExecutorKind::CloudAgent {
+    if guarded.run.executor_kind == AgentExecutorKind::RetiredCloudRun {
         return json_response(StatusCode::CONFLICT, EXECUTOR_NOT_LOCAL_BODY.to_owned());
     }
     let mut tx = match pool.begin().await {
@@ -2537,19 +2550,6 @@ mod tests {
     #[test]
     fn cancel_statement_shapes() {
         let now = Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap();
-        assert_eq!(
-            pg_update(cloud_fast_stamp_statement(now, "r", Uuid::nil())),
-            "UPDATE \"agent_run\" SET \"cancel_requested_at\" = '2026-01-02 03:04:05.000000 +00:00', \
-             \"cancel_reason\" = 'r' WHERE \"agent_run\".\"id\" = \
-             '00000000-0000-0000-0000-000000000000' AND \"agent_run\".\"status\" = 'running' AND \
-             \"agent_run\".\"cancel_requested_at\" IS NULL"
-        );
-        assert_eq!(
-            pg_update(cloud_dup_stamp_statement(now, "r", Uuid::nil())),
-            "UPDATE \"agent_run\" SET \"cancel_requested_at\" = '2026-01-02 03:04:05.000000 +00:00', \
-             \"cancel_reason\" = 'r' WHERE \"agent_run\".\"id\" = \
-             '00000000-0000-0000-0000-000000000000'"
-        );
         // The settle-cancel finalize: the L4 base four plus the
         // `runs.py:617-623` extras, folded into one `error_details` merge.
         let values = finalization::plan_finalize_values(
@@ -2584,9 +2584,10 @@ mod tests {
     fn run_select_list_covers_all_columns_once() {
         let list = run_select_list();
         assert_eq!(list.split(", ").count(), agent_run::COLUMNS.len());
-        assert_eq!(agent_run::COLUMNS.len(), 40);
+        // NEWPIDASH-241 T1: +assignment_token/+assignment_protocol/+capacity_wait.
+        assert_eq!(agent_run::COLUMNS.len(), 45);
         assert!(list.starts_with(r#""agent_run"."id""#));
-        assert!(list.ends_with(r#""agent_run"."ended_at""#));
+        assert!(list.ends_with(r#""agent_run"."capacity_wait""#));
     }
 
     #[test]
@@ -2663,7 +2664,7 @@ mod tests {
         }
     }
 
-    /// Temp `agent_run` in [`agent_run::COLUMNS`] order (the 40-column
+    /// Temp `agent_run` in [`agent_run::COLUMNS`] order (the 41-column
     /// positional image [`decode_run`] reads).
     const LIVE_DDL: &str = "CREATE TEMPORARY TABLE agent_run (
         id UUID PRIMARY KEY, workspace_id UUID, owner_id UUID,
@@ -2676,13 +2677,13 @@ mod tests {
         tool_plan JSONB,
         terminal_hooks_applied_at TIMESTAMPTZ,
         terminal_capacity_released_at TIMESTAMPTZ, prompt TEXT,
-        trigger TEXT, prompt_manifest JSONB, phase_kind TEXT,
+        trigger TEXT, prompt_manifest JSONB, phase_kind TEXT, work_type TEXT,
         run_config JSONB, required_capabilities JSONB, thread_id TEXT,
         agent_metadata JSONB, lease_expires_at TIMESTAMPTZ,
         done_payload JSONB, error_details JSONB,
         refusal_category TEXT GENERATED ALWAYS AS
             (COALESCE(error_details ->> 'refusal_category', '')) STORED,
-        llm_model TEXT, usage JSONB, input_tokens BIGINT,
+        failure_reason TEXT NOT NULL DEFAULT '', llm_model TEXT, usage JSONB, input_tokens BIGINT,
         output_tokens BIGINT, total_tokens BIGINT, created_at TIMESTAMPTZ,
         assigned_at TIMESTAMPTZ,
         started_at TIMESTAMPTZ, ended_at TIMESTAMPTZ)";
@@ -2717,9 +2718,9 @@ mod tests {
                  status, executor_kind, dispatch_attempts, cancel_reason,
                  tool_plan, prompt, trigger, phase_kind,
                  run_config, required_capabilities, thread_id, agent_metadata,
-                 error_details, llm_model, usage, created_at)
+                 error_details, failure_reason, llm_model, usage, created_at)
                  VALUES ($1, $2, $3, $4, 'running', 'local_runner', 0, '',
-                 '{}', '', $5, 'work', '{}', '{}', 't', '{}', '{}', '', '{}',
+                 '{}', '', $5, 'work', '{}', '{}', 't', '{}', '{}', '', '', '{}',
                  now())",
             )
             .bind(id)

@@ -82,7 +82,7 @@ export async function listWorkItemTypeOptions(input: {
 }): Promise<WorkItemTypeOption[]> {
   const { listIssueTypes } = await import("@pidash/api-client");
   const rows = await listIssueTypes(getAppClient(), input.workspaceSlug, input.projectId);
-  return rows.map((row) => ({ id: row.id, name: row.name }));
+  return rows.map((row) => ({ id: row.id, name: row.name, isDefault: row.is_default }));
 }
 
 const TransferHopNoteBody = React.lazy(() =>

@@ -811,6 +811,22 @@ describe("IssuePeek loaded", () => {
     });
     expect(await screen.findByRole("button", { name: "Unsubscribe" })).toBeInTheDocument();
   });
+
+  it("refreshes comments and activity with the detail (ISS-164)", async () => {
+    const user = userEvent.setup();
+    const { queryClient } = renderPeek({ details: {} });
+    // The agent-status poll rides this shared refresh, so a comment posted
+    // while a run is active joins the feed without a reload.
+    await screen.findByRole("button", { name: "Subscribe" });
+    const spy = vi.spyOn(queryClient, "invalidateQueries");
+    await user.click(screen.getByRole("button", { name: "Subscribe" }));
+    await waitFor(() => {
+      expect(spy).toHaveBeenCalledWith({ queryKey: issueKeys.comments(SLUG, PROJECT, ISSUE) });
+    });
+    expect(spy).toHaveBeenCalledWith({ queryKey: issueKeys.activity(SLUG, PROJECT, ISSUE) });
+    expect(spy).toHaveBeenCalledWith({ queryKey: issueKeys.detail(SLUG, ISSUE) });
+    spy.mockRestore();
+  });
 });
 
 describe("IssuePeek modes", () => {
@@ -837,6 +853,26 @@ describe("IssuePeek modes", () => {
     await user.click(screen.getByRole("button", { name: "Display mode" }));
     await user.click(await screen.findByRole("menuitem", { name: "Full screen" }));
     expect(await screen.findByRole("complementary", { name: "Properties" })).toBeInTheDocument();
+  });
+
+  it("places Properties above Activity in narrow layout (NEWPIDASH-233)", async () => {
+    vi.stubGlobal("matchMedia", () => ({
+      matches: true,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    const user = userEvent.setup();
+    renderPeek({ details: {} });
+    const properties = await screen.findByRole("region", { name: "Properties" });
+    const activity = document.querySelector('[data-slot="activity"]') as HTMLElement;
+    expect(properties.compareDocumentPosition(activity)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    await user.click(screen.getByRole("button", { name: "Display mode" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Full screen" }));
+    const fullLayout = await screen.findByTestId("peek-full-layout");
+    expect(fullLayout).toHaveStyle({ gridTemplateAreas: '"main" "sidebar" "activity"' });
+    const fullProperties = screen.getByRole("complementary", { name: "Properties" });
+    const fullActivity = document.querySelector('[data-slot="activity"]') as HTMLElement;
+    expect(fullProperties.compareDocumentPosition(fullActivity)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   });
 });
 

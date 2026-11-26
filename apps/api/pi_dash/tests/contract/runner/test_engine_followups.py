@@ -177,8 +177,8 @@ def test_full_logout_without_engine_leaves_it_never_and_is_idempotent(db, create
     mt_raw = _mint_mt(create_user, workspace, machine)
     assert _logout(mt_raw).status_code == 200
     machine.refresh_from_db()
-    # Never turned on: it stays ``never`` (the app offers "Turn on", not
-    # "signed out"); a silent approval is refused for ``never`` all the same.
+    # Never turned on: it stays ``never`` until the next sign-in of the
+    # computer signs the engine in silently (desktop_unified_signin §6.3).
     assert machine.engine_sign_in_state == EngineSignInState.NEVER
     assert machine.engine_auto_pause_reason == ""
     assert not EngineCredential.objects.exists()
@@ -314,13 +314,14 @@ def test_grant_approved_before_full_logout_cannot_be_redeemed_after(
     # The old machine token no longer redeems anything.
     stale = _device_poll(start["device_code"], bearer=mt)
     assert stale.status_code in (401, 403), stale.data
-    # Nor does a fresh machine token: the engine is signed out, and a silent
-    # grant cannot clear that.
+    # A fresh sign-in (a new machine token) signs the engine in again with
+    # no prompt: signed_out next to a live daemon credential is exactly the
+    # pre-change engine-only logout migration (desktop_unified_signin §6.3).
     fresh = _mint_mt(create_user, workspace, machine)
-    refused = _device_poll(start["device_code"], bearer=fresh)
-    assert refused.status_code == 409, refused.data
-    assert refused.data["error"] == "engine_silent_renewal_refused"
-    assert not EngineCredential.objects.filter(revoked_at__isnull=True).exists()
+    redeemed = _device_poll(start["device_code"], bearer=fresh)
+    assert redeemed.status_code == 200, redeemed.data
+    assert redeemed.data["engine_credential"]["token"].startswith("ec_")
+    assert EngineCredential.objects.filter(revoked_at__isnull=True).exists()
 
 
 # --------------------------------------------------------------------------

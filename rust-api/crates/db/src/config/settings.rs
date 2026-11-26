@@ -75,6 +75,8 @@ const DESKTOP_BUNDLE_ORIGINS: &[&str] = &[
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub profile: Profile,
+    /// Edition marker returned in instance configuration. Cloud overlays set this false.
+    pub is_self_managed: bool,
     pub secret_key: String,
     /// True when no `SECRET_KEY` was set and one was generated (sessions do
     /// not survive restarts then — same as Python's random fallback).
@@ -97,8 +99,10 @@ pub struct Settings {
     pub loop_tuning: LoopSettings,
     pub storage: StorageSettings,
     pub runner: RunnerSettings,
-    pub managed_runner: ManagedRunnerSettings,
-    pub cloud_agent: CloudAgentSettings,
+    pub pidash_agent: PidashAgentSettings,
+    /// Desktop session handoff kill switch (desktop_unified_signin §5.1):
+    /// default ON; off refuses the handoff endpoints.
+    pub desktop_session_handoff_enabled: bool,
     pub default_agent_executor: String,
     pub session: SessionSettings,
     pub urls: UrlSettings,
@@ -189,6 +193,12 @@ pub struct StorageSettings {
     pub minio_endpoint_ssl: bool,
     pub access_key_id: String,
     pub secret_access_key: String,
+    /// `AWS_SESSION_TOKEN` for static temporary keys (e.g. STS, instance role
+    /// static copy). Empty for long-lived keys. For instance-role credentials
+    /// the per-request value comes from the credential provider, not this
+    /// boot-time copy; this field keeps the env-provided value for the
+    /// static-key path.
+    pub session_token: String,
     pub bucket_name: String,
     pub region: String,
     pub endpoint_url: Option<String>,
@@ -202,6 +212,7 @@ pub struct RunnerSettings {
     pub offline_threshold_secs: i64,
     pub offline_pin_release_secs: i64,
     pub offline_run_fail_secs: i64,
+    pub pin_auto_release_secs: i64,
     pub offline_stream_ttl_secs: i64,
     pub offline_stream_maxlen: i64,
     pub stream_min_retention_secs: i64,
@@ -215,54 +226,12 @@ pub struct RunnerSettings {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ManagedRunnerSettings {
+pub struct PidashAgentSettings {
     pub enabled: bool,
     pub queued_max_age_secs: i64,
     pub graceful_stop_secs: i64,
     pub sweep_interval_secs: i64,
     pub desktop_min_version: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct CloudAgentSettings {
-    pub enabled: bool,
-    pub writes_enabled: bool,
-    pub github_tools_enabled: bool,
-    pub disabled_tools: Vec<String>,
-    /// Queue every `cloud_agent.run_agent_run` job is enqueued on.
-    /// Default `celery`; set to `cloud_agent` after the dedicated
-    /// agent-worker pool is running (Phase 2 rollout). Kept as the
-    /// string queue label `NewJob` carries / workers claim on.
-    pub job_queue: String,
-    pub reconcile_interval_secs: i64,
-    pub model_request_timeout_secs: i64,
-    pub execution_timeout_secs: i64,
-    pub run_soft_limit_secs: i64,
-    pub run_hard_limit_secs: i64,
-    pub stale_grace_secs: i64,
-    pub dispatch_lease_secs: i64,
-    pub dispatch_backoff_secs: i64,
-    pub dispatch_scan_interval_secs: i64,
-    pub sweep_interval_secs: i64,
-    pub dispatch_scan_batch: i64,
-    pub max_queue_age_secs: i64,
-    pub model_request_limit: i64,
-    pub tool_call_limit: i64,
-    pub write_call_limit: i64,
-    pub input_token_limit: i64,
-    pub output_token_limit: i64,
-    pub total_token_limit: i64,
-    pub max_output_tokens_per_request: i64,
-    pub max_queued_per_workspace: i64,
-    pub max_running_per_workspace: i64,
-    pub user_creation_rate_per_minute: i64,
-    pub workspace_creation_rate_per_minute: i64,
-    pub tool_timeout_secs: i64,
-    pub max_tool_result_bytes: i64,
-    pub max_prompt_bytes: i64,
-    pub max_final_result_bytes: i64,
-    pub max_events: i64,
-    pub block_private_urls: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -378,6 +347,16 @@ impl<'a> Ctx<'a> {
         Ok(matches!(
             self.req_string(key, inline)?.to_ascii_lowercase().as_str(),
             "1" | "true" | "yes"
+        ))
+    }
+
+    /// `value.lower() not in ("0", "false", "no")`: default-on kill
+    /// switches — anything but an explicit off (including `""` and junk
+    /// like `"off"`) is on, exactly as Django reads them.
+    fn flag_not_off(&self, key: &str, inline: &str) -> Result<bool, ConfigError> {
+        Ok(!matches!(
+            self.req_string(key, inline)?.to_lowercase().as_str(),
+            "0" | "false" | "no"
         ))
     }
 
@@ -992,6 +971,7 @@ impl Settings {
 
         Ok(Self {
             profile,
+            is_self_managed: true,
             secret_key,
             secret_key_generated,
             debug,
@@ -1062,17 +1042,33 @@ impl Settings {
                 pr_lookups_per_run: ctx
                     .req_int("LOOP_PR_LOOKUPS_PER_RUN", ConfigValue::from(15))?,
             },
-            storage: StorageSettings {
-                use_minio: ctx.req_int("USE_MINIO", ConfigValue::from(0))? == 1,
-                // `storage.py:48`: `get_config("MINIO_ENDPOINT_SSL", None) == "1"`.
-                minio_endpoint_ssl: ctx.flag_1("MINIO_ENDPOINT_SSL", "")?,
-                access_key_id: ctx.req_string("AWS_ACCESS_KEY_ID", "access-key")?,
-                secret_access_key: ctx.req_string("AWS_SECRET_ACCESS_KEY", "secret-key")?,
-                bucket_name: ctx.req_string("AWS_S3_BUCKET_NAME", "uploads")?,
-                region: ctx.s3_scope_region()?,
-                endpoint_url: s3_or_minio,
-                signed_url_expiration_secs: ctx
-                    .req_int("SIGNED_URL_EXPIRATION", ConfigValue::from("3600"))?,
+            storage: {
+                // `USE_MINIO=1` keeps the local-dev placeholder defaults
+                // (`storage.py` parity); outside MinIO the registry empty
+                // default signals "no static keys" so the S3 clients fall
+                // through to the EC2 instance role (NEWPIDASH-204).
+                let use_minio = ctx.req_int("USE_MINIO", ConfigValue::from(0))? == 1;
+                StorageSettings {
+                    use_minio,
+                    // `storage.py:48`: `get_config("MINIO_ENDPOINT_SSL", None) == "1"`.
+                    minio_endpoint_ssl: ctx.flag_1("MINIO_ENDPOINT_SSL", "")?,
+                    access_key_id: if use_minio {
+                        ctx.req_string("AWS_ACCESS_KEY_ID", "access-key")?
+                    } else {
+                        ctx.req_string("AWS_ACCESS_KEY_ID", "")?
+                    },
+                    secret_access_key: if use_minio {
+                        ctx.req_string("AWS_SECRET_ACCESS_KEY", "secret-key")?
+                    } else {
+                        ctx.req_string("AWS_SECRET_ACCESS_KEY", "")?
+                    },
+                    session_token: ctx.req_string("AWS_SESSION_TOKEN", "")?,
+                    bucket_name: ctx.req_string("AWS_S3_BUCKET_NAME", "uploads")?,
+                    region: ctx.s3_scope_region()?,
+                    endpoint_url: s3_or_minio,
+                    signed_url_expiration_secs: ctx
+                        .req_int("SIGNED_URL_EXPIRATION", ConfigValue::from("3600"))?,
+                }
             },
             runner: RunnerSettings {
                 long_poll_interval_secs: {
@@ -1101,6 +1097,8 @@ impl Settings {
                     .req_int("RUNNER_OFFLINE_PIN_RELEASE_SECS", ConfigValue::from(300))?,
                 offline_run_fail_secs: ctx
                     .req_int("RUNNER_OFFLINE_RUN_FAIL_SECS", ConfigValue::from(3600))?,
+                pin_auto_release_secs: ctx
+                    .req_int("RUNNER_PIN_AUTO_RELEASE_SECS", ConfigValue::from(600))?,
                 offline_stream_ttl_secs: ctx
                     .req_int("OFFLINE_STREAM_TTL_SECS", ConfigValue::from(86400))?,
                 offline_stream_maxlen: ctx
@@ -1122,7 +1120,7 @@ impl Settings {
                     ConfigValue::from(90),
                 )?,
             },
-            managed_runner: ManagedRunnerSettings {
+            pidash_agent: PidashAgentSettings {
                 enabled: ctx.flag_tri("MANAGED_RUNNER_ENABLED", "false")?,
                 queued_max_age_secs: ctx.req_int(
                     "MANAGED_RUNNER_QUEUED_MAX_AGE_SECS",
@@ -1137,93 +1135,8 @@ impl Settings {
                 desktop_min_version: ctx
                     .req_string("DESKTOP_MIN_VERSION_FOR_MANAGED_RUNNER", "")?,
             },
-            cloud_agent: CloudAgentSettings {
-                enabled: ctx.flag_tri("CLOUD_AGENT_ENABLED", "false")?,
-                writes_enabled: ctx.flag_tri("CLOUD_AGENT_WRITES_ENABLED", "false")?,
-                github_tools_enabled: ctx.flag_tri("CLOUD_AGENT_GITHUB_TOOLS_ENABLED", "true")?,
-                disabled_tools: ctx.csv_stripped("CLOUD_AGENT_DISABLED_TOOLS", "")?,
-                job_queue: ctx.req_string("CLOUD_AGENT_JOB_QUEUE", "celery")?,
-                reconcile_interval_secs: ctx.req_int(
-                    "AGENT_RUN_TERMINAL_RECONCILE_INTERVAL_SECONDS",
-                    ConfigValue::from(30),
-                )?,
-                model_request_timeout_secs: ctx.req_int(
-                    "CLOUD_AGENT_MODEL_REQUEST_TIMEOUT_SECONDS",
-                    ConfigValue::from(60),
-                )?,
-                execution_timeout_secs: ctx.req_int(
-                    "CLOUD_AGENT_EXECUTION_TIMEOUT_SECONDS",
-                    ConfigValue::from(285),
-                )?,
-                run_soft_limit_secs: ctx
-                    .req_int("CLOUD_AGENT_RUN_SOFT_LIMIT_SECONDS", ConfigValue::from(300))?,
-                run_hard_limit_secs: ctx
-                    .req_int("CLOUD_AGENT_RUN_HARD_LIMIT_SECONDS", ConfigValue::from(330))?,
-                stale_grace_secs: ctx
-                    .req_int("CLOUD_AGENT_STALE_GRACE_SECONDS", ConfigValue::from(60))?,
-                dispatch_lease_secs: ctx
-                    .req_int("CLOUD_AGENT_DISPATCH_LEASE_SECONDS", ConfigValue::from(60))?,
-                dispatch_backoff_secs: ctx.req_int(
-                    "CLOUD_AGENT_DISPATCH_BACKOFF_SECONDS",
-                    ConfigValue::from(10),
-                )?,
-                dispatch_scan_interval_secs: ctx.req_int(
-                    "CLOUD_AGENT_DISPATCH_SCAN_INTERVAL_SECONDS",
-                    ConfigValue::from(10),
-                )?,
-                sweep_interval_secs: ctx
-                    .req_int("CLOUD_AGENT_SWEEP_INTERVAL_SECONDS", ConfigValue::from(30))?,
-                dispatch_scan_batch: ctx
-                    .req_int("CLOUD_AGENT_DISPATCH_SCAN_BATCH", ConfigValue::from(100))?,
-                max_queue_age_secs: ctx
-                    .req_int("CLOUD_AGENT_MAX_QUEUE_AGE_SECONDS", ConfigValue::from(900))?,
-                model_request_limit: ctx
-                    .req_int("CLOUD_AGENT_MODEL_REQUEST_LIMIT", ConfigValue::from(25))?,
-                tool_call_limit: ctx
-                    .req_int("CLOUD_AGENT_TOOL_CALL_LIMIT", ConfigValue::from(20))?,
-                write_call_limit: ctx
-                    .req_int("CLOUD_AGENT_WRITE_CALL_LIMIT", ConfigValue::from(3))?,
-                input_token_limit: ctx
-                    .req_int("CLOUD_AGENT_INPUT_TOKEN_LIMIT", ConfigValue::from(144000))?,
-                output_token_limit: ctx
-                    .req_int("CLOUD_AGENT_OUTPUT_TOKEN_LIMIT", ConfigValue::from(16000))?,
-                total_token_limit: ctx
-                    .req_int("CLOUD_AGENT_TOTAL_TOKEN_LIMIT", ConfigValue::from(160000))?,
-                max_output_tokens_per_request: ctx.req_int(
-                    "CLOUD_AGENT_MAX_OUTPUT_TOKENS_PER_REQUEST",
-                    ConfigValue::from(4096),
-                )?,
-                max_queued_per_workspace: ctx.req_int(
-                    "CLOUD_AGENT_MAX_QUEUED_PER_WORKSPACE",
-                    ConfigValue::from(20),
-                )?,
-                max_running_per_workspace: ctx.req_int(
-                    "CLOUD_AGENT_MAX_RUNNING_PER_WORKSPACE",
-                    ConfigValue::from(2),
-                )?,
-                user_creation_rate_per_minute: ctx.req_int(
-                    "CLOUD_AGENT_USER_CREATION_RATE_PER_MINUTE",
-                    ConfigValue::from(6),
-                )?,
-                workspace_creation_rate_per_minute: ctx.req_int(
-                    "CLOUD_AGENT_WORKSPACE_CREATION_RATE_PER_MINUTE",
-                    ConfigValue::from(30),
-                )?,
-                tool_timeout_secs: ctx
-                    .req_int("CLOUD_AGENT_TOOL_TIMEOUT_SECONDS", ConfigValue::from(20))?,
-                max_tool_result_bytes: ctx.req_int(
-                    "CLOUD_AGENT_MAX_TOOL_RESULT_BYTES",
-                    ConfigValue::from(65536),
-                )?,
-                max_prompt_bytes: ctx
-                    .req_int("CLOUD_AGENT_MAX_PROMPT_BYTES", ConfigValue::from(262144))?,
-                max_final_result_bytes: ctx.req_int(
-                    "CLOUD_AGENT_MAX_FINAL_RESULT_BYTES",
-                    ConfigValue::from(65536),
-                )?,
-                max_events: ctx.req_int("CLOUD_AGENT_MAX_EVENTS", ConfigValue::from(500))?,
-                block_private_urls: ctx.flag_tri("CLOUD_AGENT_BLOCK_PRIVATE_URLS", "true")?,
-            },
+            desktop_session_handoff_enabled: ctx
+                .flag_not_off("DESKTOP_SESSION_HANDOFF_ENABLED", "true")?,
             default_agent_executor: ctx.req_string("DEFAULT_AGENT_EXECUTOR", "local_runner")?,
             session: SessionSettings {
                 cookie_age_secs: ctx.req_int("SESSION_COOKIE_AGE", ConfigValue::from(604800))?,
@@ -1338,6 +1251,7 @@ impl Settings {
             "RUNNER_OFFLINE_THRESHOLD_SECS",
             "RUNNER_OFFLINE_PIN_RELEASE_SECS",
             "RUNNER_OFFLINE_RUN_FAIL_SECS",
+            "RUNNER_PIN_AUTO_RELEASE_SECS",
             "OFFLINE_STREAM_TTL_SECS",
             "OFFLINE_STREAM_MAXLEN",
             "RUNNER_STREAM_MIN_RETENTION_SECS",
@@ -1353,40 +1267,9 @@ impl Settings {
             "MANAGED_RUNNER_GRACEFUL_STOP_SECS",
             "MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS",
             "DESKTOP_MIN_VERSION_FOR_MANAGED_RUNNER",
+            "DESKTOP_SESSION_HANDOFF_ENABLED",
             "DEFAULT_AGENT_EXECUTOR",
             "AGENT_RUN_TERMINAL_RECONCILE_INTERVAL_SECONDS",
-            "CLOUD_AGENT_ENABLED",
-            "CLOUD_AGENT_WRITES_ENABLED",
-            "CLOUD_AGENT_GITHUB_TOOLS_ENABLED",
-            "CLOUD_AGENT_DISABLED_TOOLS",
-            "CLOUD_AGENT_MODEL_REQUEST_TIMEOUT_SECONDS",
-            "CLOUD_AGENT_EXECUTION_TIMEOUT_SECONDS",
-            "CLOUD_AGENT_RUN_SOFT_LIMIT_SECONDS",
-            "CLOUD_AGENT_RUN_HARD_LIMIT_SECONDS",
-            "CLOUD_AGENT_STALE_GRACE_SECONDS",
-            "CLOUD_AGENT_DISPATCH_LEASE_SECONDS",
-            "CLOUD_AGENT_DISPATCH_BACKOFF_SECONDS",
-            "CLOUD_AGENT_DISPATCH_SCAN_INTERVAL_SECONDS",
-            "CLOUD_AGENT_SWEEP_INTERVAL_SECONDS",
-            "CLOUD_AGENT_DISPATCH_SCAN_BATCH",
-            "CLOUD_AGENT_MAX_QUEUE_AGE_SECONDS",
-            "CLOUD_AGENT_MODEL_REQUEST_LIMIT",
-            "CLOUD_AGENT_TOOL_CALL_LIMIT",
-            "CLOUD_AGENT_WRITE_CALL_LIMIT",
-            "CLOUD_AGENT_INPUT_TOKEN_LIMIT",
-            "CLOUD_AGENT_OUTPUT_TOKEN_LIMIT",
-            "CLOUD_AGENT_TOTAL_TOKEN_LIMIT",
-            "CLOUD_AGENT_MAX_OUTPUT_TOKENS_PER_REQUEST",
-            "CLOUD_AGENT_MAX_QUEUED_PER_WORKSPACE",
-            "CLOUD_AGENT_MAX_RUNNING_PER_WORKSPACE",
-            "CLOUD_AGENT_USER_CREATION_RATE_PER_MINUTE",
-            "CLOUD_AGENT_WORKSPACE_CREATION_RATE_PER_MINUTE",
-            "CLOUD_AGENT_TOOL_TIMEOUT_SECONDS",
-            "CLOUD_AGENT_MAX_TOOL_RESULT_BYTES",
-            "CLOUD_AGENT_MAX_PROMPT_BYTES",
-            "CLOUD_AGENT_MAX_FINAL_RESULT_BYTES",
-            "CLOUD_AGENT_MAX_EVENTS",
-            "CLOUD_AGENT_BLOCK_PRIVATE_URLS",
             "SESSION_COOKIE_AGE",
             "SESSION_COOKIE_NAME",
             "COOKIE_DOMAIN",
@@ -1430,6 +1313,7 @@ mod tests {
     fn empty_map_resolves_to_registry_defaults() {
         let s = Settings::from_map_with(&HashMap::new(), Profile::Common, &NoOverlay)
             .expect("defaults resolve");
+        assert!(s.is_self_managed);
         assert!(s.secret_key_generated);
         assert_eq!(s.secret_key.len(), 64);
         assert!(!s.debug);
@@ -1443,9 +1327,6 @@ mod tests {
         assert_eq!(s.loop_tuning.max_writes, 10);
         assert_eq!(s.file_size_limit, 5242880);
         assert_eq!(s.email_backend, SMTP_BACKEND);
-        // Phase 2 (2.1): the agent job queue defaults to `celery` until
-        // both workers are running.
-        assert_eq!(s.cloud_agent.job_queue, "celery");
         // Non-Local profiles ignore an EMAIL_BACKEND env override, exactly
         // like common.py's hardcoded assignment.
         let s2 = Settings::from_map_with(
@@ -1455,6 +1336,27 @@ mod tests {
         )
         .expect("resolves");
         assert_eq!(s2.email_backend, SMTP_BACKEND);
+    }
+
+    #[test]
+    fn desktop_handoff_switch_is_on_unless_explicitly_off() {
+        // `common.py`: `get_config(..., "true").lower() not in ("0", "false", "no")`.
+        let resolve = |value: Option<&str>| {
+            let map = match value {
+                Some(v) => vars(&[("DESKTOP_SESSION_HANDOFF_ENABLED", v)]),
+                None => HashMap::new(),
+            };
+            Settings::from_map_with(&map, Profile::Common, &NoOverlay)
+                .expect("resolves")
+                .desktop_session_handoff_enabled
+        };
+        assert!(resolve(None), "default on");
+        for on in ["1", "true", "TRUE", "yes", "on", "off", "", "anything"] {
+            assert!(resolve(Some(on)), "{on:?} is on");
+        }
+        for off in ["0", "false", "False", "no", "NO"] {
+            assert!(!resolve(Some(off)), "{off:?} is off");
+        }
     }
 
     #[test]
@@ -1506,17 +1408,6 @@ mod tests {
             s.urls.admin_base_url.as_deref(),
             Some("https://admin.example")
         );
-    }
-
-    #[test]
-    fn cloud_agent_job_queue_overrides_from_env() {
-        let s = Settings::from_map_with(
-            &vars(&[("CLOUD_AGENT_JOB_QUEUE", "cloud_agent")]),
-            Profile::Common,
-            &NoOverlay,
-        )
-        .expect("resolves");
-        assert_eq!(s.cloud_agent.job_queue, "cloud_agent");
     }
 
     #[test]

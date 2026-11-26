@@ -16,6 +16,7 @@ import {
   serverAddIssuesToModule,
   serverAddProjectMembers,
   serverCleanupProject,
+  serverClearProjectEstimate,
   serverCreateEstimate,
   serverCreateIssue,
   serverCreateLabel,
@@ -912,6 +913,18 @@ test.describe("module detail on desktop", () => {
           expect(await driver.modulesDetailSidebarWorkItemsText()).toBe("0/1");
           expect(await driver.modulesDetailSidebarPointsText()).toBe(null);
         });
+
+        await test.step("the disabled-estimates project shows no points row", async () => {
+          // NEWPIDASH-297: disabling estimates nulls project.estimate but
+          // leaves last_used on the system; the points gate reads the
+          // selected system, so a disabled points project hides the row.
+          await serverClearProjectEstimate(seed.workspaceSlug, pointsProjectId, session);
+          await openDetail(driver, seed, pointsProjectId, pointsModuleId, `${tag} module`, session);
+          expect(await driver.modulesDetailSidebarWorkItemsText()).toBe("0/1");
+          expect(await driver.modulesDetailSidebarPointsText()).toBe(null);
+          // The stale system still carries last_used; re-enabling restores points.
+          await serverSetProjectEstimate(seed.workspaceSlug, pointsProjectId, estimate.id, session);
+        });
       } finally {
         await serverCleanupProject(seed.workspaceSlug, pointsProjectId, session);
         await serverCleanupProject(seed.workspaceSlug, timeProjectId, session);
@@ -1071,6 +1084,17 @@ test.describe("module detail on desktop", () => {
           } finally {
             await serverCleanupProject(seed.workspaceSlug, plainProjectId, session);
           }
+        });
+
+        await test.step("no measure dropdown when estimates are disabled", async () => {
+          // NEWPIDASH-297: disabling estimates nulls the project link but
+          // leaves last_used; the measure gate reads the selected system.
+          await serverClearProjectEstimate(seed.workspaceSlug, projectId, session);
+          await openDetail(driver, seed, projectId, moduleId, moduleName, session);
+          await expect.poll(() => driver.modulesDetailProgressOpen(), { timeout: 60_000 }).toBe(true);
+          expect(await driver.modulesDetailProgressMeasureValue()).toBe(null);
+          expect(await driver.modulesDetailProgressMeasureOptions()).toEqual([]);
+          await serverSetProjectEstimate(seed.workspaceSlug, projectId, estimate.id, session);
         });
       } finally {
         await serverCleanupProject(seed.workspaceSlug, projectId, session);

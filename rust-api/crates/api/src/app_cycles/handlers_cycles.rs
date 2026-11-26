@@ -1122,15 +1122,16 @@ fn validate_write(
         Some(Value::Null) => errors.push(err("name", "This field may not be null.".to_owned())),
         Some(Value::String(text)) => {
             out.present.push("name");
-            if text.is_empty() {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
                 errors.push(err("name", "This field may not be blank.".to_owned()));
-            } else if text.chars().count() > 255 {
+            } else if trimmed.chars().count() > 255 {
                 errors.push(err(
                     "name",
                     "Ensure this field has no more than 255 characters.".to_owned(),
                 ));
             } else {
-                out.name = Some(text.clone());
+                out.name = Some(trimmed.to_owned());
             }
         }
         Some(Value::Bool(_)) | Some(Value::Array(_)) | Some(Value::Object(_)) => {
@@ -1154,7 +1155,7 @@ fn validate_write(
         }
         Some(Value::String(text)) => {
             out.present.push("description");
-            out.description = Some(Value::String(text.clone()));
+            out.description = Some(Value::String(text.trim().to_owned()));
         }
         Some(Value::Bool(_)) | Some(Value::Array(_)) | Some(Value::Object(_)) => {
             errors.push(err("description", "Not a valid string.".to_owned()));
@@ -1252,7 +1253,7 @@ fn validate_write(
                 out.present.push(field);
             }
             Some(Value::String(text)) => {
-                if text.chars().count() > 255 {
+                if text.trim().chars().count() > 255 {
                     errors.push(err(
                         field,
                         "Ensure this field has no more than 255 characters.".to_owned(),
@@ -1264,7 +1265,7 @@ fn validate_write(
                     } else {
                         &mut out.external_id
                     };
-                    *target = Some(Value::String(text.clone()));
+                    *target = Some(Value::String(text.trim().to_owned()));
                 }
             }
             Some(Value::Bool(_)) | Some(Value::Array(_)) | Some(Value::Object(_)) => {
@@ -1296,6 +1297,8 @@ fn validate_write(
             // `pytz.common_timezones` membership; `chrono-tz` parses the
             // same IANA names (documented approximation for exotic
             // aliases, never hit by the suite).
+            // ChoiceField does not trim: padded input is rejected with
+            // the raw padded value in the message.
             if text.parse::<Tz>().is_err() {
                 errors.push(err(
                     "timezone",
@@ -1527,8 +1530,10 @@ async fn rewrite_timezone(pool: &sqlx::PgPool, project_id: &uuid::Uuid) -> Resul
 /// `convert_to_utc` for a start date (`timezone_converter.py:69-83`):
 /// local midnight plus one second, shifted to UTC — unless the date is
 /// today in the project zone, when the current instant is returned.
-/// `pytz.localize(is_dst=False)` picks standard time for ambiguous wall
-/// times (the later instant); a DST gap raises (ported as 500).
+/// Django localises midnight with `pytz.localize(..., is_dst=False)` —
+/// never raises (folds take the standard/late side, gaps the
+/// pre-transition offset) — then adds `+1s` on midnight's fixed offset.
+/// We share the date-check helper so create/PATCH and date-check agree.
 fn convert_start(
     project_tz: &Tz,
     date: chrono::NaiveDate,
@@ -1537,32 +1542,23 @@ fn convert_start(
     if date == now.with_timezone(project_tz).date_naive() {
         return Ok(now);
     }
-    let naive = date.and_hms_opt(0, 0, 0).expect("midnight exists");
-    use chrono::{LocalResult, TimeZone as _};
-    match project_tz.from_local_datetime(&naive) {
-        LocalResult::Single(local) => {
-            Ok(local.with_timezone(&chrono::Utc) + chrono::Duration::seconds(1))
-        }
-        LocalResult::Ambiguous(_, later) => {
-            Ok(later.with_timezone(&chrono::Utc) + chrono::Duration::seconds(1))
-        }
-        LocalResult::None => Err(Denial::ServerError),
-    }
+    let midnight_utc = crate::v1_cycles_modules::cycle::project_midnight_utc(project_tz, &date)
+        .map_err(|_| Denial::ServerError)?;
+    Ok(midnight_utc + chrono::Duration::seconds(1))
 }
 
 /// `convert_to_utc` for an end date (`timezone_converter.py:84-94`):
-/// local 23:59:00 shifted to UTC. No same-day branch.
+/// midnight plus `+23:59` on midnight's fixed offset, shifted to UTC.
+/// Django adds the timedelta to the midnight-localised datetime, not to
+/// a separately localised 23:59 (which would take 23:59's own offset and
+/// be one hour off on mid-day transitions). No same-day branch.
 fn convert_end(
     project_tz: &Tz,
     date: chrono::NaiveDate,
 ) -> Result<chrono::DateTime<chrono::Utc>, Denial> {
-    let naive = date.and_hms_opt(23, 59, 0).expect("23:59 exists");
-    use chrono::{LocalResult, TimeZone as _};
-    match project_tz.from_local_datetime(&naive) {
-        LocalResult::Single(local) => Ok(local.with_timezone(&chrono::Utc)),
-        LocalResult::Ambiguous(_, later) => Ok(later.with_timezone(&chrono::Utc)),
-        LocalResult::None => Err(Denial::ServerError),
-    }
+    let midnight_utc = crate::v1_cycles_modules::cycle::project_midnight_utc(project_tz, &date)
+        .map_err(|_| Denial::ServerError)?;
+    Ok(midnight_utc + chrono::Duration::hours(23) + chrono::Duration::minutes(59))
 }
 
 /// The `validate()` tail (`serializers/cycle.py:16-38`): ordering check
@@ -2749,6 +2745,33 @@ mod tests {
         // Same-day start returns now.
         let today = now.with_timezone(&tz).date_naive();
         assert_eq!(convert_start(&tz, today, now).expect("today"), now);
+    }
+
+    #[test]
+    fn convert_boundaries_dst_transition_days() {
+        // NEWPIDASH-212: Django localises midnight (pytz, is_dst=False)
+        // then adds +1s/+23:59 on midnight's fixed offset. Localising
+        // 23:59 directly is one hour off on transition days; a gap
+        // midnight must not 500.
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-30T00:00:00Z")
+            .expect("now")
+            .with_timezone(&chrono::Utc);
+        let ny: Tz = "America/New_York".parse().expect("tz");
+        // Fall-back day: midnight EDT (-04): end = midnight + 23:59.
+        let fall = chrono::NaiveDate::from_ymd_opt(2026, 11, 1).expect("date");
+        let end = convert_end(&ny, fall).expect("end");
+        assert_eq!(end.to_rfc3339(), "2026-11-02T03:59:00+00:00");
+        // Spring-forward day: midnight EST (-05): end = midnight + 23:59.
+        let spring = chrono::NaiveDate::from_ymd_opt(2027, 3, 14).expect("date");
+        let end = convert_end(&ny, spring).expect("end");
+        assert_eq!(end.to_rfc3339(), "2027-03-15T04:59:00+00:00");
+        // Cairo: DST starts at 00:00 on 2026-04-24, so midnight does not
+        // exist; pytz takes the pre-transition offset (+02): midnight is
+        // 2026-04-23T22:00:00Z, +1s is the start.
+        let cairo: Tz = "Africa/Cairo".parse().expect("tz");
+        let gap = chrono::NaiveDate::from_ymd_opt(2026, 4, 24).expect("date");
+        let start = convert_start(&cairo, gap, now).expect("start");
+        assert_eq!(start.to_rfc3339(), "2026-04-23T22:00:01+00:00");
     }
 
     #[test]

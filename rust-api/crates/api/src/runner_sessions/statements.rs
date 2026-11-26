@@ -368,6 +368,8 @@ pub(super) struct RedeliverAssignRow {
     pub work_item_id: Option<Uuid>,
     pub prompt: String,
     pub run_config: Value,
+    pub assignment_token: Option<Uuid>,
+    pub assignment_protocol: i16,
 }
 
 /// Assign redeliver scan (`redeliver_assign_sql`): the oldest
@@ -383,6 +385,8 @@ pub(super) fn redeliver_assign_select(
             agent_run::Column::WorkItemId,
             agent_run::Column::Prompt,
             agent_run::Column::RunConfig,
+            agent_run::Column::AssignmentToken,
+            agent_run::Column::AssignmentProtocol,
         ])
         .filter(agent_run::Column::Status.is_in([
             AgentRunStatus::Assigned.value(),
@@ -645,8 +649,8 @@ mod tests {
                 value: SetValue::Text("linux".to_owned()),
             },
             SetClause {
-                column: "last_heartbeat_at",
-                value: SetValue::Now,
+                column: "dev_metadata",
+                value: SetValue::Json(serde_json::json!({})),
             },
         ];
         let sql = pg_update(hello_update_statement(&clauses, Uuid::nil(), at()).expect("stmt"));
@@ -655,7 +659,8 @@ mod tests {
             "{sql}"
         );
         assert!(sql.contains("\"os\" = 'linux'"), "{sql}");
-        assert!(sql.contains("\"last_heartbeat_at\" = '2026-01-02 03:04:05.000000 +00:00'"));
+        // NEWPIDASH-262: hello must not carry last_heartbeat_at.
+        assert!(!sql.contains("last_heartbeat_at"), "{sql}");
         assert!(sql.ends_with("WHERE \"runner\".\"id\" = '00000000-0000-0000-0000-000000000000'"));
         assert!(hello_update_statement(
             &[SetClause {
@@ -666,6 +671,20 @@ mod tests {
             at()
         )
         .is_err());
+        // A heartbeat clause is still a legal column for the generic
+        // builder (poll path uses `Now`), but hello no longer supplies it.
+        let hb = pg_update(
+            hello_update_statement(
+                &[SetClause {
+                    column: "last_heartbeat_at",
+                    value: SetValue::Now,
+                }],
+                Uuid::nil(),
+                at(),
+            )
+            .expect("hb"),
+        );
+        assert!(hb.contains("\"last_heartbeat_at\" = '2026-01-02 03:04:05.000000 +00:00'"));
     }
 
     #[test]
@@ -795,9 +814,11 @@ mod tests {
         assert!(!cancel.contains("<>"));
         let skip = Uuid::new_v4();
         let assign = pg_selector(redeliver_assign_select(Uuid::nil(), Some(skip)));
+        // NEWPIDASH-241 T1: redelivery carries attempt identity.
         assert!(assign.starts_with(
             "SELECT \"agent_run\".\"id\", \"agent_run\".\"work_item_id\", \"agent_run\".\"prompt\", \
-             \"agent_run\".\"run_config\" FROM \"agent_run\" WHERE"
+             \"agent_run\".\"run_config\", \"agent_run\".\"assignment_token\", \
+             \"agent_run\".\"assignment_protocol\" FROM \"agent_run\" WHERE"
         ));
         assert!(assign.contains(&format!("\"agent_run\".\"id\" <> '{skip}'")));
         assert!(assign.contains("\"agent_run\".\"status\" IN ('assigned', 'waiting_for_worktree')"));

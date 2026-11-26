@@ -140,6 +140,8 @@ pub mod project {
         "agent_test_default_interval_seconds",
         "agent_ticking_enabled",
         "default_agent_executor",
+        "default_work_type",
+        "settings",
     ];
 
     /// Partial unique index names (`Meta.constraints`, `:233-249`).
@@ -272,6 +274,9 @@ pub mod project {
         pub agent_test_default_interval_seconds: i64,
         pub agent_ticking_enabled: bool,
         pub default_agent_executor: String,
+        pub default_work_type: String,
+        /// `projects.settings` (NEWPIDASH-278): the typed settings bag.
+        pub settings: serde_json::Value,
     }
 
     /// Default member role for project membership contexts.
@@ -679,6 +684,7 @@ pub mod state {
         ("In Progress", "#F59E0B", 35000.0, "started", false),
         ("In Review", "#5B5BD6", 40000.0, "review", false),
         ("In Test", "#14B8A6", 42500.0, "test", false),
+        ("AI Completed", "#30A46C", 43750.0, "completed", false),
         ("Done", "#46A758", 45000.0, "completed", false),
         ("Cancelled", "#9AA4BC", 55000.0, "cancelled", false),
         ("Triage", "#4E5355", 65000.0, "triage", false),
@@ -1147,6 +1153,8 @@ mod tests {
                 "agent_test_default_interval_seconds",
                 "agent_ticking_enabled",
                 "default_agent_executor",
+                "default_work_type",
+                "settings",
             ]
         );
         assert_eq!(project::TABLE, "projects");
@@ -1407,7 +1415,7 @@ mod tests {
 
     #[test]
     fn default_states_seed_matches_python() {
-        assert_eq!(state::DEFAULT_STATES.len(), 8);
+        assert_eq!(state::DEFAULT_STATES.len(), 9);
         assert_eq!(
             state::DEFAULT_STATES[0],
             ("Backlog", "#60646C", 15000.0, "backlog", true)
@@ -1417,7 +1425,11 @@ mod tests {
             ("In Test", "#14B8A6", 42500.0, "test", false)
         );
         assert_eq!(
-            state::DEFAULT_STATES[7],
+            state::DEFAULT_STATES[5],
+            ("AI Completed", "#30A46C", 43750.0, "completed", false)
+        );
+        assert_eq!(
+            state::DEFAULT_STATES[8],
             ("Triage", "#4E5355", 65000.0, "triage", false)
         );
         assert_eq!(state::StateGroup::ALL.len(), 8);
@@ -1635,6 +1647,8 @@ mod tests {
             agent_test_default_interval_seconds: project::DEFAULT_AGENT_INTERVAL_SECONDS,
             agent_ticking_enabled: true,
             default_agent_executor: "local_runner".to_string(),
+            default_work_type: "general".to_string(),
+            settings: serde_json::json!({}),
         };
         let value = serde_json::to_value(&project_row).unwrap();
         assert_eq!(value["identifier"], serde_json::json!("ENG"));

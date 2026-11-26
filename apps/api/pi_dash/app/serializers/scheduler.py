@@ -78,6 +78,7 @@ def _validate_iso_datetime_list(values: Iterable, field: str) -> list[str]:
 
 class SchedulerSerializer(BaseSerializer):
     active_binding_count = serializers.SerializerMethodField()
+    is_builtin = serializers.SerializerMethodField()
 
     class Meta:
         model = Scheduler
@@ -90,6 +91,7 @@ class SchedulerSerializer(BaseSerializer):
             "prompt",
             "color",
             "source",
+            "is_builtin",
             "is_enabled",
             "active_binding_count",
             "created_at",
@@ -99,6 +101,7 @@ class SchedulerSerializer(BaseSerializer):
             "id",
             "workspace",
             "source",
+            "is_builtin",
             "active_binding_count",
             "created_at",
             "updated_at",
@@ -111,6 +114,14 @@ class SchedulerSerializer(BaseSerializer):
         if annotated is not None:
             return annotated
         return obj.bindings.filter(deleted_at__isnull=True).count()
+
+    def get_is_builtin(self, obj: Scheduler) -> bool:
+        # Reliable built-in marker: slug-in-catalog, not `source` (which
+        # defaults to `builtin` for user-created rows too, PDASHOSS01-290).
+        # Matches the v1 `SchedulerAPISerializer.is_builtin`.
+        from pi_dash.scheduler.definition_writes import is_builtin
+
+        return is_builtin(obj)
 
     def validate_color(self, value: str) -> str:
         return _validate_color(value)

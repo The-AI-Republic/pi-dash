@@ -1,8 +1,8 @@
 #!/bin/bash
 set -e
 pidash-api ops wait_for_db
-# Wait for migrations
-pidash-api ops wait_for_migrations
+# Fail fast on pending migrations (no waiting: the release migrator owns DDL)
+pidash-api ops check_migrations
 
 # Create the default bucket
 #!/bin/bash

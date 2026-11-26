@@ -8,6 +8,8 @@ template carries the `pidash` CLI instructions (pidash-cli section),
 which installed runners consume verbatim.
 """
 
+from _harness.diffs import is_rust
+
 
 def _compiled_url(tenant, kind, scope=None):
     url = (f"/api/workspaces/{tenant['workspace']['slug']}"
@@ -34,6 +36,11 @@ def test_compiled_runner_wire_compat(api, tenant_a, auth_a):
     template = r.json()["template_body"]
     assert "pidash issue get" in template
     assert "pidash run yield" in template
+    if is_rust():
+        # DIFF-61: the rewritten core points at on-demand `pidash docs`
+        # and quotes the render-time freshness anchor.
+        assert "pidash docs <topic>" in template
+        assert "run.rendered_at" in template
 
 
 def test_compiled_dedicated_runner_block(api, tenant_a, auth_a):
@@ -44,6 +51,13 @@ def test_compiled_dedicated_runner_block(api, tenant_a, auth_a):
     r = api.get(_compiled_url(tenant_a, "coding-task"), headers=auth_a)
     assert r.status_code == 200, r.text
     template = r.json()["template_body"]
+    if is_rust():
+        # DIFF-61: the lean core dropped the long-form pods block; the
+        # generated refusal and `pidash docs` own it now.
+        assert "#### Pods and dedicated runners" not in template
+        assert "--runner <name-or-UUID>" not in template
+        assert "Commands that manage the runner itself are refused inside a run" in template
+        return
     assert "#### Pods and dedicated runners" in template
     for fragment in (
         "--runner <name-or-UUID>",
@@ -62,7 +76,14 @@ def test_compiled_context_md_block(api, tenant_a, auth_a):
     context.md block (Django main e89aba75b, PDASHOSS01-161)."""
     r = api.get(_compiled_url(tenant_a, "coding-task"), headers=auth_a)
     assert r.status_code == 200, r.text
-    assert "### Working context files (`context.md`)" in r.json()["template_body"]
+    template = r.json()["template_body"]
+    if is_rust():
+        # DIFF-61: the `context.md` block moved to `pidash docs`; the
+        # core keeps one index line.
+        assert "### Working context files (`context.md`)" not in template
+        assert "`context`: the `context.md` files" in template
+        return
+    assert "### Working context files (`context.md`)" in template
 
 
 def test_compiled_scheduler_write_commands(api, tenant_a, auth_a):
@@ -72,6 +93,13 @@ def test_compiled_scheduler_write_commands(api, tenant_a, auth_a):
     r = api.get(_compiled_url(tenant_a, "coding-task"), headers=auth_a)
     assert r.status_code == 200, r.text
     template = r.json()["template_body"]
+    if is_rust():
+        # DIFF-61: the scheduler reference moved to `pidash docs`; the
+        # core keeps one index line.
+        assert "#### Schedulers\n" not in template
+        assert "pidash scheduler update" not in template
+        assert "- `scheduler`: view or change scheduled automation" in template
+        return
     assert "#### Schedulers\n" in template
     assert "#### Schedulers (read-only)" not in template
     assert "There is no write access" not in template

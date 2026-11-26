@@ -10,8 +10,12 @@ index (expression: to_tsvector('english', name + description_stripped)).
 The EXPLAIN test below pins the plan; the behavioral tests pin the results.
 """
 
+import json
 import os
+import uuid
 from datetime import datetime, timezone
+
+from _harness.diffs import expect
 
 from .conftest import session_headers
 
@@ -136,6 +140,75 @@ def test_global_search_project_scoped(api, seed, tenant_a, project_a, auth_a):
     )
     assert r.status_code == 200, r.text
     assert r.json()["results"]["issue"] == []
+
+
+def _seed_linked_page(seed, ws_id, project_id, owner_id, name):
+    """A ``pages`` row + its ``project_pages`` link (column set mirrors
+    ``Seeder.create_page`` / ``link_page_project``). Tracked so
+    ``Seed.cleanup`` removes the bridge before the page."""
+    page_id = str(uuid.uuid4())
+    with seed.conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO pages
+               (id, name, description_json, description_binary, description_html,
+                owned_by_id, access, workspace_id, color, parent_id, archived_at,
+                is_locked, view_props, logo_props, is_global, sort_order,
+                created_by_id, created_at, updated_at)
+               VALUES (%s,%s,CAST(%s AS jsonb),%s,%s,%s,%s,%s,'',%s,
+                       NULL,%s,'{"full_width": false}','{}',false,65535,%s,now(),now())""",
+            (
+                page_id, name, json.dumps({}), None, "<p></p>",
+                owner_id, 0, ws_id, None, False, owner_id,
+            ),
+        )
+    seed.track("pages", "id", page_id)
+    bridge_id = str(uuid.uuid4())
+    with seed.conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO project_pages
+               (id, workspace_id, project_id, page_id, created_by_id, updated_by_id,
+                deleted_at, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s,NULL,now(),now())""",
+            (bridge_id, ws_id, str(project_id), page_id, owner_id, owner_id),
+        )
+    seed.track("project_pages", "id", bridge_id)
+    return page_id
+
+
+def test_global_search_project_scoped_page(api, seed, tenant_a, project_a, auth_a):
+    """workspace_search=false + project_id narrows pages to that project.
+
+    NEWPIDASH-349: the Rust page arm bound the narrowing project id as
+    text against a uuid subquery (``operator does not exist: uuid =
+    text``), 500ing every project-scoped search that includes pages.
+    """
+    ws_id = tenant_a["workspace"]["id"]
+    owner_id = tenant_a["user"]["id"]
+    page_id = _seed_linked_page(
+        seed, ws_id, project_a, owner_id, "Probe page scoped narrow",
+    )
+    other_project = seed.project(ws_id)
+    seed.project_member(
+        other_project, ws_id, owner_id, role=20
+    )
+    _seed_linked_page(
+        seed, ws_id, other_project, owner_id, "Probe page other project",
+    )
+    for params in (
+        {"search": "Probe page scoped"},
+        {"search": "Probe page scoped", "entities": "page"},
+    ):
+        r = api.get(
+            _search_url(tenant_a), headers=auth_a,
+            params={
+                **params, "workspace_search": "false",
+                "project_id": str(project_a),
+            },
+        )
+        assert r.status_code == 200, r.text
+        rows = r.json()["results"]["page"]
+        assert [row["id"] for row in rows] == [page_id]
+        assert rows[0]["project_ids"] == [str(project_a)]
 
 
 def test_project_search_shape(api, seed, tenant_a, project_a, auth_a):
@@ -332,6 +405,101 @@ def test_entity_search_without_project(api, seed, tenant_a, auth_a):
 def test_search_requires_auth(api, tenant_a):
     r = api.get(_search_url(tenant_a), params={"search": "x"})
     assert r.status_code == 401, r.text
+
+
+def test_global_search_pages_hide_other_users_private_pages(
+    api, seed, tenant_a, project_a, auth_a
+):
+    """NEWPIDASH-342 (DIFF-59): the global search page section must mirror
+    the pages-list scope — a member sees only pages they own or public
+    ones, and a restricted guest (no ``guest_view_all_features``) sees
+    only pages they own. Django leaks both (frozen); the Rust port fixes
+    it, so the arms diverge via the per-backend expectation."""
+    ws_id = tenant_a["workspace"]["id"]
+    owner = tenant_a["user"]
+    member = seed.user()
+    seed.member(ws_id, member["id"], role=15)
+    seed.project_member(project_a, ws_id, member["id"], role=15)
+    member_headers = session_headers(
+        seed, member, member["password"], os.environ["CONTRACT_SECRET_KEY"]
+    )
+    guest = seed.user()
+    seed.member(ws_id, guest["id"], role=20)
+    seed.project_member(project_a, ws_id, guest["id"], role=5)
+    guest_headers = session_headers(
+        seed, guest, guest["password"], os.environ["CONTRACT_SECRET_KEY"]
+    )
+
+    token = "zq342leak"
+
+    def make_page(owner_id, name, access):
+        # Same row shape as Seeder.create_page/link_page_project; tracked
+        # for cleanup (this suite's Seed has no page helpers).
+        page_id, bridge_id = str(uuid.uuid4()), str(uuid.uuid4())
+        with seed.conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO pages
+                   (id, name, description_json, description_binary,
+                    description_html, owned_by_id, access, workspace_id,
+                    color, parent_id, archived_at, is_locked, view_props,
+                    logo_props, is_global, sort_order, created_by_id,
+                    created_at, updated_at)
+                   VALUES (%s,%s,CAST(%s AS jsonb),%s,%s,%s,%s,%s,'',NULL,
+                           NULL,false,'{}','{}',false,65535,%s,now(),now())""",
+                (
+                    page_id, name, "{}", None, "<p></p>", owner_id, access,
+                    ws_id, owner_id,
+                ),
+            )
+            cur.execute(
+                """INSERT INTO project_pages
+                   (id, workspace_id, project_id, page_id, created_by_id,
+                    updated_by_id, deleted_at, created_at, updated_at)
+                   VALUES (%s,%s,%s,%s,%s,%s,NULL,now(),now())""",
+                (
+                    bridge_id, ws_id, project_a, page_id, owner["id"],
+                    owner["id"],
+                ),
+            )
+        # Tracked in insert order: cleanup deletes in reverse, so the
+        # bridge row goes before the page row (FK).
+        seed.track("pages", "id", page_id)
+        seed.track("project_pages", "id", bridge_id)
+
+    make_page(owner["id"], f"{token} admin private", 1)
+    make_page(member["id"], f"{token} member private", 1)
+    make_page(member["id"], f"{token} member public", 0)
+    make_page(owner["id"], f"{token} admin public", 0)
+    make_page(guest["id"], f"{token} guest private", 1)
+
+    def page_names(headers):
+        r = api.get(
+            _search_url(tenant_a), headers=headers,
+            params={"search": token, "entities": "page"},
+        )
+        assert r.status_code == 200, r.text
+        return sorted(row["name"] for row in r.json()["results"]["page"])
+
+    member_leak = sorted([
+        f"{token} admin private", f"{token} member private",
+        f"{token} member public", f"{token} admin public",
+        f"{token} guest private",
+    ])
+    member_fixed = sorted([
+        f"{token} member private", f"{token} member public",
+        f"{token} admin public",
+    ])
+    guest_fixed = [f"{token} guest private"]
+    # Workspace-wide search only: the project narrow (`workspace_search=false`
+    # + `project_id`) 500s on Rust even without this fix — the narrow
+    # subquery's parameterized LIMIT never executes there (pre-existing
+    # defect, reported as "found:" on NEWPIDASH-1; Django narrows fine).
+    assert page_names(member_headers) == expect(
+        "DIFF-59", django=member_leak, rust=member_fixed
+    )
+    assert page_names(guest_headers) == expect(
+        "DIFF-59", django=member_leak, rust=guest_fixed
+    )
 
 
 def test_search_tenant_isolation(api, seed, tenant_a, tenant_b, project_a, auth_b):

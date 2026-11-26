@@ -127,6 +127,7 @@ impl RunnerInstance {
         let state = StateHandle::new(crate::config::schema::Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon,
             runners: vec![config.clone()],
@@ -197,6 +198,7 @@ mod tests {
             cursor_agent: CursorAgentSection::default(),
             openclaw: Default::default(),
             grok: Default::default(),
+            antigravity: Default::default(),
             muse_code: Default::default(),
             approval_policy: ApprovalPolicySection::default(),
         }
@@ -218,6 +220,7 @@ mod tests {
         let daemon = DaemonConfig {
             cloud_url: "https://cloud.example".into(),
             auto_update: false,
+            max_concurrent_agent_runs: 3,
             ..Default::default()
         };
 

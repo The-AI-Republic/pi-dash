@@ -84,7 +84,9 @@ use crate::issue_transition::AppTransitionHook;
 use crate::state::AppState;
 
 use super::issue_reads;
-use super::perms::{decide, gate_for, resolve_moved_by_run, RunFacts, V1WorkItemsRoute};
+use super::perms::{
+    decide, gate_for, is_own_issue_run, resolve_moved_by_run, RunFacts, V1WorkItemsRoute,
+};
 pub use pidash_compat::response::SERVER_ERROR_BODY;
 
 // ---------------------------------------------------------------------------
@@ -136,6 +138,8 @@ pub enum Denial {
     ForbiddenBody(String),
     /// 409, view-inline body (external duplicate).
     Conflict(String),
+    /// 409, archived project (NEWPIDASH-236, pre-rendered body).
+    ProjectArchived(String),
     /// 500, generic branch.
     ServerError,
 }
@@ -175,6 +179,7 @@ impl Denial {
             Denial::NotFound(body) => (StatusCode::NOT_FOUND, body.clone()),
             Denial::ForbiddenBody(body) => (StatusCode::FORBIDDEN, body.clone()),
             Denial::Conflict(body) => (StatusCode::CONFLICT, body.clone()),
+            Denial::ProjectArchived(body) => (StatusCode::CONFLICT, body.clone()),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 SERVER_ERROR_BODY.to_owned(),
@@ -203,17 +208,21 @@ impl From<operations::Error> for Denial {
             operations::Error::NotFoundBody(body) => Denial::NotFound(body),
             operations::Error::Conflict(body) => Denial::Conflict(body),
             operations::Error::ServerError => Denial::ServerError,
-            operations::Error::ProjectNotFound | operations::Error::Rejection { .. } => {
-                Denial::ServerError
-            }
+            operations::Error::ProjectNotFound
+            | operations::Error::PreconditionFailed(_)
+            | operations::Error::Rejection { .. } => Denial::ServerError,
         }
     }
 }
 
-/// Wrap an operation outcome in the v1 response. A re-pointed QUEUED run
-/// drains its pod on commit (design §13.2), exactly Django's
-/// `transaction.on_commit(_drain)`.
-async fn op_response(state: &AppState, outcome: operations::Outcome) -> Result<Response, Denial> {
+/// Drain a re-pointed QUEUED run's pod on commit (design §13.2), exactly
+/// Django's `transaction.on_commit(_drain)`. Shared by [`op_response`]
+/// and the `finish` endpoint, which applies the issue-update operation
+/// directly (NEWPIDASH-338 item 7) and so drains without rendering.
+pub(super) async fn drain_outcome_pod(
+    state: &AppState,
+    outcome: &operations::Outcome,
+) -> Result<(), Denial> {
     if let Some(pod_id) = outcome.drain_pod {
         let pool = pool_of(state).map_err(|_| Denial::ServerError)?;
         if crate::runner_enroll::teardown::drain_pod_by_id(&pool, state, pod_id)
@@ -223,6 +232,14 @@ async fn op_response(state: &AppState, outcome: operations::Outcome) -> Result<R
             return Err(Denial::ServerError);
         }
     }
+    Ok(())
+}
+
+/// Wrap an operation outcome in the v1 response. A re-pointed QUEUED run
+/// drains its pod on commit (design §13.2), exactly Django's
+/// `transaction.on_commit(_drain)`.
+async fn op_response(state: &AppState, outcome: operations::Outcome) -> Result<Response, Denial> {
+    drain_outcome_pod(state, &outcome).await?;
     let status = StatusCode::from_u16(outcome.status).map_err(|_| Denial::ServerError)?;
     Ok(json_response(status, outcome.body))
 }
@@ -248,7 +265,7 @@ fn db_error<E: std::fmt::Display>(error: E, site: &str) -> Denial {
 /// `timezone.now()` truncated to microseconds: Python datetimes carry no
 /// nanos, and `timestamptz` stores micros — an untruncated `Utc::now()`
 /// would render nanos in the response while the DB row reads back micros.
-fn now_utc() -> DateTime<Utc> {
+pub(super) fn now_utc() -> DateTime<Utc> {
     trunc_micros(Utc::now())
 }
 
@@ -632,7 +649,7 @@ async fn identifier_membership(
 /// `ProjectEntityPermission` (see [`gate_for`]); the by-identifier routes
 /// additionally set the `project_identifier` arm.
 #[allow(clippy::too_many_arguments)]
-async fn require_gate(
+pub(super) async fn require_gate(
     pool: &PgPool,
     workspace_id: &uuid::Uuid,
     workspace_slug: &str,
@@ -701,7 +718,7 @@ async fn render_decoded(
 }
 
 /// Fetch one row for the write paths via the public read service.
-async fn fetch_issue_for_write(
+pub(super) async fn fetch_issue_for_write(
     pool: &PgPool,
     slug: &str,
     project_id: &Uuid,
@@ -722,7 +739,7 @@ async fn fetch_issue_for_write(
 
 /// Render a write response / `current_instance` image via the public
 /// read service.
-async fn render_write_response(
+pub(super) async fn render_write_response(
     pool: &PgPool,
     decoded: &DecodedIssue,
     tz: &Tz,
@@ -740,7 +757,10 @@ async fn render_write_response(
 }
 
 /// Fetch the project row for the write paths via the public read service.
-async fn fetch_project_for_write(pool: &PgPool, project_id: &Uuid) -> Result<WriteProject, Denial> {
+pub(super) async fn fetch_project_for_write(
+    pool: &PgPool,
+    project_id: &Uuid,
+) -> Result<WriteProject, Denial> {
     read::fetch_project_for_write(pool, project_id)
         .await
         .map_err(|error| match error {
@@ -1053,6 +1073,15 @@ async fn by_identifier_inner(
         "GET",
     )
     .await?;
+    if let Some(info) =
+        crate::project_archived::archived_by_identifier(&pre.pool, slug, project_identifier)
+            .await
+            .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     // `sequence_id=issue_identifier` (`:259`): `IntegerField` runs
     // `int()` — whitespace/sign/underscores accepted, anything else a
     // `ValueError` into the 500. Out-of-`i64` magnitudes saturate and
@@ -1213,6 +1242,14 @@ async fn issue_list_inner(
         "GET",
     )
     .await?;
+    if let Some(info) = crate::project_archived::archived_by_id(&pre.pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     let tz = activate_timezone(pre.actor.timezone.as_deref())?;
     let (field_specs, kept, expand) = field_selection(query, shape::FIELDS_IN_ORDER)?;
     let expand_refs: Vec<&str> = expand.iter().map(String::as_str).collect();
@@ -1360,6 +1397,14 @@ async fn issue_detail_inner(
         "GET",
     )
     .await?;
+    if let Some(info) = crate::project_archived::archived_by_id(&pre.pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     let tz = activate_timezone(pre.actor.timezone.as_deref())?;
     let rows = fetch_lookup_rows(
         &pre.pool,
@@ -1406,7 +1451,7 @@ async fn issue_detail_inner(
 /// `model_activity` origin: `APP_BASE_URL`, else `WEB_URL`, else the
 /// `ImproperlyConfigured` 500 (raised after every write lands, so the row
 /// persists and only the response is the 500).
-fn app_origin(urls: &pidash_db::config::UrlSettings) -> Result<String, Denial> {
+pub(super) fn app_origin(urls: &pidash_db::config::UrlSettings) -> Result<String, Denial> {
     if let Some(url) = urls.app_base_url.as_deref().filter(|s| !s.is_empty()) {
         return Ok(url.to_owned());
     }
@@ -1418,7 +1463,7 @@ fn app_origin(urls: &pidash_db::config::UrlSettings) -> Result<String, Denial> {
 
 /// The domain-write context for a v1 work-item request: the API actor
 /// (with their stored time zone name) plus the gated tenant scope.
-fn domain_write_ctx(pre: &Preamble, project_id: &Uuid) -> WriteCtx {
+pub(super) fn domain_write_ctx(pre: &Preamble, project_id: &Uuid) -> WriteCtx {
     WriteCtx::new(WriteActor {
         user_id: pre.actor.id,
         timezone: pre.actor.timezone.clone(),
@@ -1466,6 +1511,14 @@ async fn create_issue_inner(
         "POST",
     )
     .await?;
+    if let Some(info) = crate::project_archived::archived_by_id(&pre.pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     // `TimezoneMixin.initial` precedes the view body: an unknown stored
     // zone 400s here, before the project fetch 404s below.
     activate_timezone(pre.actor.timezone.as_deref())?;
@@ -1544,7 +1597,146 @@ async fn fetch_newest_runs_on_issue(
     .map_err(|error| db_error(error, "fetch-runs"))
 }
 
-async fn patch_issue_inner(
+/// The refusal message for an issue run's move into `requested`, or
+/// `None` when the move is allowed ([`agent_move_refusal`]).
+///
+/// [`agent_move_refusal`]: pidash_types::orchestration::agent_move_refusal
+pub fn agent_move_message(
+    state_name: &str,
+    refusal: pidash_types::orchestration::AgentMoveRefusal,
+) -> String {
+    use pidash_types::orchestration::AgentMoveRefusal;
+    match refusal {
+        // NEWPIDASH-338 item 4: never name "AI Completed" — the project
+        // may not have that state, and the agent would burn retries
+        // re-sending the named state. Staying is always allowed.
+        AgentMoveRefusal::HumanOnly => format!(
+            "\"{state_name}\" is for a person to set; stay where it is and finish with `waiting_on_human`"
+        ),
+        AgentMoveRefusal::StageOff => format!(
+            "\"{state_name}\" does not run an agent in this project; move the issue to a state that does, or stay where it is"
+        ),
+    }
+}
+
+/// [`agent_move_message`] for a state-changing body, reading the target
+/// state and the project's stage switches.
+async fn gate_agent_state_change(
+    pool: &PgPool,
+    project_id: Uuid,
+    current_state: Option<Uuid>,
+    body: &Value,
+    from_form: bool,
+) -> Result<Option<String>, Denial> {
+    let requested = match body.get("state") {
+        Some(Value::String(text)) if !(from_form && text.is_empty()) => {
+            match text.parse::<Uuid>() {
+                Ok(id) => id,
+                Err(_) => return Ok(None),
+            }
+        }
+        _ => return Ok(None),
+    };
+    if Some(requested) == current_state {
+        return Ok(None);
+    }
+    use sea_orm::QuerySelect as _;
+    let orm = pidash_db::pool::sea_orm_connection(pool);
+    let target: Option<(String, String)> = pidash_db::entity::states::Entity::find_by_id(requested)
+        .select_only()
+        .columns([
+            pidash_db::entity::states::Column::Group,
+            pidash_db::entity::states::Column::Name,
+        ])
+        .into_tuple()
+        .one(&orm)
+        .await
+        .map_err(|error| db_error(error, "agent-move-state"))?;
+    let Some((group, name)) = target else {
+        return Ok(None);
+    };
+    let switches =
+        pidash_services::domain::project_settings::stage_switches_for_project(&orm, project_id)
+            .await
+            .map_err(|error| db_error(error, "agent-move-settings"))?;
+    let state = pidash_types::orchestration::StateRef {
+        group: &group,
+        name: &name,
+    };
+    Ok(
+        pidash_types::orchestration::agent_move_refusal(&state, switches)
+            .map(|refusal| agent_move_message(&name, refusal)),
+    )
+}
+
+/// NEWPIDASH-261: the v1 state-change gate. Returns `Some(body)` when
+/// the body attempts a state move the actor may not make under the
+/// project's `issue_run_policy` (the caller answers 403 with the
+/// body, before any write — so a move that would dispatch is refused
+/// as a whole). Agent self-actions (an explicit `X-Pi-Dash-Run-Id`
+/// resolving to a run on this issue, `agent_run` context) are never
+/// gated; the headerless inference still gates as human, exactly like
+/// the work-type lock above. Bodies that do not touch `state`, or
+/// re-state the current value, are not gated; unparseable `state`
+/// values fall through to the operations validation (400).
+#[allow(clippy::too_many_arguments)]
+async fn gate_v1_state_change(
+    pool: &PgPool,
+    actor: Uuid,
+    issue_id: Uuid,
+    project_id: Uuid,
+    current_state: Option<Uuid>,
+    body: &Value,
+    from_form: bool,
+    agent_context: bool,
+) -> Result<Option<String>, Denial> {
+    if agent_context {
+        return Ok(None);
+    }
+    let requested = match body.get("state") {
+        None => return Ok(None),
+        Some(Value::Null) => None,
+        Some(Value::String(text)) => {
+            if from_form && text.is_empty() {
+                None
+            } else {
+                match text.parse::<Uuid>() {
+                    Ok(id) => Some(id),
+                    Err(_) => return Ok(None),
+                }
+            }
+        }
+        Some(_) => return Ok(None),
+    };
+    if requested == current_state {
+        return Ok(None);
+    }
+    use pidash_db::entity::projects as projects_entity;
+    let orm = pidash_db::pool::sea_orm_connection(pool);
+    let issue = issues::Entity::find_by_id(issue_id)
+        .one(&orm)
+        .await
+        .map_err(|error| db_error(error, "run-policy-issue"))?
+        .ok_or(Denial::ServerError)?;
+    let project = projects_entity::Entity::find_by_id(project_id)
+        .one(&orm)
+        .await
+        .map_err(|error| db_error(error, "run-policy-project"))?
+        .ok_or(Denial::ServerError)?;
+    let allowed =
+        pidash_services::domain::project_settings::can_run_issue(&orm, actor, &issue, &project)
+            .await
+            .map_err(|error| db_error(error, "run-policy-check"))?;
+    if allowed {
+        Ok(None)
+    } else {
+        Ok(Some(
+            pidash_services::domain::project_settings::not_issue_runner_body(),
+        ))
+    }
+}
+
+pub(super) async fn patch_issue_inner(
     state: &AppState,
     headers: &HeaderMap,
     slug: &str,
@@ -1566,6 +1758,14 @@ async fn patch_issue_inner(
         "PATCH",
     )
     .await?;
+    if let Some(info) = crate::project_archived::archived_by_id(&pre.pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     let tz = activate_timezone(pre.actor.timezone.as_deref())?;
     // The issue fetch precedes the project fetch (`:792-793`).
     let current = fetch_issue_for_write(&pre.pool, slug, &project_id, pk, &tz).await?;
@@ -1615,6 +1815,85 @@ async fn patch_issue_inner(
         pidash_jobs::tasks_webhooks::activity_dispatch::django_dumps(&current_rendered);
 
     let parsed_body = parse_write_body(headers, raw_body)?;
+
+    // The work-type lock (PDASHOSS01-234): runs right after the run
+    // resolution, before `current_instance` and normalization (both
+    // side-effect free, so checking after the body parse is the same
+    // order). Only an *explicit* run-id header locks — the headerless
+    // inference above still stamps `moved_by_run` but never locks a human.
+    let header_run_id_present = header_ref.map(str::trim).is_some_and(|h| !h.is_empty());
+    if moved_by_run.is_some() && header_run_id_present {
+        if let Some(raw) = parsed_body.value.get("work_type") {
+            // `request.data.get("work_type") or None` vs
+            // `issue.work_type or None`: falsy spells `None`, and only a
+            // string can equal the stored varchar.
+            let unchanged = if raw_truthy(raw) {
+                matches!(raw, Value::String(text)
+                    if current.work_type.as_deref().is_some_and(|stored| stored == text))
+            } else {
+                current.work_type.as_deref().is_none_or(str::is_empty)
+            };
+            let ticking = matches!(
+                current.state_group.as_deref(),
+                Some("started" | "review" | "test")
+            );
+            if !unchanged && ticking {
+                return Err(Denial::ForbiddenBody(
+                    shape::WORK_TYPE_LOCKED_BODY.to_owned(),
+                ));
+            }
+        }
+    }
+    // NEWPIDASH-261: gate human state moves by `issue_run_policy`
+    // before any write (whole-change refusal). Explicit agent
+    // self-actions skip the gate.
+    let agent_context = moved_by_run.is_some() && header_run_id_present;
+    let current_state = current
+        .state
+        .as_deref()
+        .and_then(|raw| raw.parse::<Uuid>().ok());
+    if let Some(body) = gate_v1_state_change(
+        &pre.pool,
+        pre.actor.id,
+        *pk,
+        project_id,
+        current_state,
+        &parsed_body.value,
+        parsed_body.from_form,
+        agent_context,
+    )
+    .await?
+    {
+        return Err(Denial::ForbiddenBody(body));
+    }
+    // Lean agent workflow §6.5 / §7: an issue run moving its own issue may
+    // not close it (Done, Cancelled) or park it in a stage the project
+    // switched off. Shared by `finish` and the `issue patch` fallback.
+    // The gate applies whenever the move is attributed to a run
+    // (`moved_by_run` is set), however that was derived (NEWPIDASH-338
+    // item 3): an explicit header proves it through the header run's own
+    // row, while the headerless inference only ever resolves the caller's
+    // active run on this issue. The work-type lock above stays
+    // header-only on purpose (PDASHOSS01-234).
+    let own_issue_run = is_own_issue_run(
+        moved_by_run,
+        run_by_id.as_ref().and_then(|run| run.work_item_id),
+        header_run_id_present,
+        *pk,
+    );
+    if own_issue_run {
+        if let Some(message) = gate_agent_state_change(
+            &pre.pool,
+            project_id,
+            current_state,
+            &parsed_body.value,
+            parsed_body.from_form,
+        )
+        .await?
+        {
+            return Err(Denial::BadError(message));
+        }
+    }
     let orm = state.orm().ok_or(Denial::ServerError)?;
     let ctx = domain_write_ctx(&pre, &project_id);
     let transition: Arc<dyn IssueTransitionHook> =
@@ -1678,6 +1957,14 @@ async fn delete_issue_inner(
         "DELETE",
     )
     .await?;
+    if let Some(info) = crate::project_archived::archived_by_id(&pre.pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     let tz = activate_timezone(pre.actor.timezone.as_deref())?;
     let current = fetch_issue_for_write(&pre.pool, slug, &project_id, pk, &tz).await?;
 
@@ -1861,6 +2148,27 @@ pub async fn delete_issue_detail(
 // Orchestration signals (explicit): `capture_prior_state` + `fire_state_transition`
 // ---------------------------------------------------------------------------
 
+/// Python truthiness of a raw JSON body value (the work-type lock's
+/// `request.data.get("work_type") or None`).
+fn raw_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(flag) => *flag,
+        Value::Number(number) => {
+            if let Some(int) = number.as_i64() {
+                return int != 0;
+            }
+            if let Some(uint) = number.as_u64() {
+                return uint != 0;
+            }
+            number.as_f64().is_some_and(|float| float != 0.0)
+        }
+        Value::String(text) => !text.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(map) => !map.is_empty(),
+    }
+}
+
 #[cfg(test)]
 mod signal_tests {
     use super::*;
@@ -1929,5 +2237,24 @@ mod signal_tests {
         };
         let outcome = fire_state_transition(&mut seam, &mut preflight, &request).await;
         assert!(outcome.is_err());
+    }
+}
+
+#[cfg(test)]
+mod agent_move_message_tests {
+    use super::*;
+
+    #[test]
+    fn human_only_refusal_names_no_missing_state() {
+        // NEWPIDASH-338 item 4: the project may have no "AI Completed"
+        // state, so the refusal tells the agent to stay and finish with
+        // `waiting_on_human` instead of naming one.
+        use pidash_types::orchestration::AgentMoveRefusal;
+        let message = agent_move_message("Done", AgentMoveRefusal::HumanOnly);
+        assert!(message.contains("stay where it is"), "{message}");
+        assert!(message.contains("waiting_on_human"), "{message}");
+        assert!(!message.contains("AI Completed"), "{message}");
+        let message = agent_move_message("In Review", AgentMoveRefusal::StageOff);
+        assert!(message.contains("does not run an agent"), "{message}");
     }
 }

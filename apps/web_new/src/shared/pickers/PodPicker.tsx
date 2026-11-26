@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Execution-target picker (parity/specs/issues.md §17, ISS-218;
-// built-in engine design §6, §7, §11; dedicated-runner design §14.4,
+// Pi Dash Agent design §6, §7, §11; dedicated-runner design §14.4,
 // §23.6). Single-select over each pod's squad row and its runners
 // ("Specific runner"), with search. There is no executor choice: Runner
-// is the only executor, and built-in engine runners are listed as
-// "Built-in engine · <machine>", so an issue can be dedicated to one
+// is the only executor, and Pi Dash Agent runners are listed as
+// "Pi Dash Agent · <machine>", so an issue can be dedicated to one
 // engine. Runner rows name the runner, its machine and whether it is
 // online; unassignable runners disable with their reason
 // inline; the default pod carries a tag. Picks map onto the issue
@@ -17,7 +17,7 @@ import { Container, Server } from "lucide-react";
 import * as React from "react";
 
 import { useWorkspace } from "../../core/session/hooks.js";
-import { PropertyChip } from "./PropertyChip.js";
+import { describeChip, PropertyChip } from "./PropertyChip.js";
 import {
   buildExecutionTargets,
   executionSelectionId,
@@ -193,7 +193,7 @@ export function PodPicker({
           icon={glyph}
           text={text}
           placeholder={!filled}
-          {...(filled ? { title: fullText } : {})}
+          tooltip={describeChip(label, filled ? fullText : null, "The agent/runner that will execute this work item.")}
           trailing={
             <>
               {podName === null ? null : (

@@ -369,9 +369,8 @@ async fn build_config(
         space_base_url: urls.space_base_url.clone(),
         app_base_url: urls.app_base_url.clone(),
         instance_changelog_url: state.settings().instance_changelog_url.clone(),
-        // `IS_SELF_MANAGED = True` (`settings/common.py:36`); no override
-        // in any settings module, so the port is a literal.
-        is_self_managed: true,
+        // CE defaults true; the installed cloud settings overlay sets false.
+        is_self_managed: state.settings().is_self_managed,
     })
 }
 
