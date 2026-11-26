@@ -20,7 +20,11 @@ def test_retrieve_includes_settings_with_defaults(world):
     assert resp.json()["settings"] == expect(
         "DIFF-53",
         django={},
-        rust={"issue_run_policy": "creator_and_assignees"},
+        rust={
+            "issue_run_policy": "creator_and_assignees",
+            "agent_stages": {"mode": "auto", "review": True, "test": True},
+            "repos": [],
+        },
     )
 
 
@@ -33,7 +37,11 @@ def test_details_list_includes_settings_with_defaults(world):
     assert rows[0]["settings"] == expect(
         "DIFF-53",
         django={},
-        rust={"issue_run_policy": "creator_and_assignees"},
+        rust={
+            "issue_run_policy": "creator_and_assignees",
+            "agent_stages": {"mode": "auto", "review": True, "test": True},
+            "repos": [],
+        },
     )
 
 
@@ -52,7 +60,11 @@ def test_patch_empty_settings_is_noop(world):
     assert resp.json()["settings"] == expect(
         "DIFF-53",
         django={},
-        rust={"issue_run_policy": "creator_and_assignees"},
+        rust={
+            "issue_run_policy": "creator_and_assignees",
+            "agent_stages": {"mode": "auto", "review": True, "test": True},
+            "repos": [],
+        },
     )
 
 
@@ -97,7 +109,11 @@ def test_read_renders_validated_settings_only(world):
     assert resp.json()["settings"] == expect(
         "DIFF-51",
         django={"unknown_key": 1},
-        rust={"issue_run_policy": "creator_and_assignees"},
+        rust={
+            "issue_run_policy": "creator_and_assignees",
+            "agent_stages": {"mode": "auto", "review": True, "test": True},
+            "repos": [],
+        },
     )
 
 
@@ -120,7 +136,11 @@ def test_issue_run_policy_admin_can_change(world):
     assert resp.json()["settings"] == expect(
         "DIFF-51",
         django={"issue_run_policy": "project_members"},
-        rust={"issue_run_policy": "project_members"},
+        rust={
+            "issue_run_policy": "project_members",
+            "agent_stages": {"mode": "auto", "review": True, "test": True},
+            "repos": [],
+        },
     )
 
 
@@ -175,7 +195,11 @@ def test_issue_run_policy_member_cannot_change(world):
     assert client.get(url).json()["settings"] == expect(
         "DIFF-53",
         django={},
-        rust={"issue_run_policy": "creator_and_assignees"},
+        rust={
+            "issue_run_policy": "creator_and_assignees",
+            "agent_stages": {"mode": "auto", "review": True, "test": True},
+            "repos": [],
+        },
     )
 
 
@@ -191,6 +215,12 @@ def test_issue_run_policy_roundtrip_default(world):
         url, json={"settings": {"issue_run_policy": "creator_and_assignees"}}
     )
     assert resp.status_code == 200, resp.text[:500]
-    assert resp.json()["settings"] == {
-        "issue_run_policy": "creator_and_assignees"
-    }
+    assert resp.json()["settings"] == expect(
+        "DIFF-53",
+        django={"issue_run_policy": "creator_and_assignees"},
+        rust={
+            "issue_run_policy": "creator_and_assignees",
+            "agent_stages": {"mode": "auto", "review": True, "test": True},
+            "repos": [],
+        },
+    )

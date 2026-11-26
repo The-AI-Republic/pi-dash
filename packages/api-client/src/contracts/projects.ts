@@ -94,9 +94,35 @@ export const AgentStages = z.object({
 });
 export type AgentStages = z.infer<typeof AgentStages>;
 
+/**
+ * One entry of a project's repository list (NEWPIDASH-409). `id` is
+ * the stable entry id used to edit and remove it; `provider` is
+ * inferred from the URL host when the caller leaves it out
+ * (`github` | `gitlab` | `other`); `base_branch` null (or absent)
+ * means the repo's own default branch.
+ */
+export const ProjectRepo = z.object({
+  id: uuid(),
+  url: z.string(),
+  provider: z.optional(z.string()),
+  base_branch: z.optional(z.nullable(z.string())),
+});
+export type ProjectRepo = z.infer<typeof ProjectRepo>;
+
+/**
+ * The `repos` list a project response carries; absent reads as `[]`
+ * (servers that predate the list, and the compact list projection,
+ * carry no `repos` key).
+ */
+export function projectReposOrDefault(value: unknown): ProjectRepo[] {
+  const parsed = z.array(ProjectRepo).safeParse(value);
+  return parsed.success ? parsed.data : [];
+}
+
 export const ProjectSettings = z.looseObject({
   issue_run_policy: z.optional(IssueRunPolicy),
   agent_stages: z.optional(AgentStages),
+  repos: z.optional(z.array(ProjectRepo)),
 });
 export type ProjectSettings = z.infer<typeof ProjectSettings>;
 
@@ -242,6 +268,13 @@ export const ProjectDetails = z.object({
   external_id: z.nullable(z.string()),
   repo_url: z.string(),
   base_branch: z.string(),
+  /**
+   * Merged repository list (NEWPIDASH-409): `settings.repos` merged
+   * with the legacy columns, providers filled in. Optional so
+   * responses from servers that predate the list still parse; absent
+   * reads as `[]`.
+   */
+  repos: z.optional(z.array(ProjectRepo)),
   is_favorite: z.boolean(),
   sort_order: z.nullable(z.number()),
   member_role: z.nullable(z.number()),

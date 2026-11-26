@@ -136,6 +136,7 @@
 //! Fixture: `rust-api/fixtures/app_project/FX-APROJ-01.serializers_project.json`
 //! (FX-APROJ-01).
 
+use crate::domain::project_repos::RenderedRepo;
 use crate::run_creation::executor_policy::{ExecutorOption, PidashAgentAvailability, UserFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -994,6 +995,7 @@ pub const PROJECT_KEY_ORDER: &[&str] = &[
     "external_id",
     "repo_url",
     "base_branch",
+    "repos",
     "agent_default_interval_seconds",
     "agent_default_max_ticks",
     "agent_review_default_interval_seconds",
@@ -1058,6 +1060,7 @@ pub const PROJECT_LIST_KEY_ORDER: &[&str] = &[
     "external_id",
     "repo_url",
     "base_branch",
+    "repos",
     "agent_default_interval_seconds",
     "agent_default_max_ticks",
     "agent_review_default_interval_seconds",
@@ -1134,6 +1137,7 @@ pub const PROJECT_DETAIL_KEY_ORDER: &[&str] = &[
     "external_id",
     "repo_url",
     "base_branch",
+    "repos",
     "agent_default_interval_seconds",
     "agent_default_max_ticks",
     "agent_review_default_interval_seconds",
@@ -1267,6 +1271,11 @@ pub struct ProjectRead {
     pub repo_url: String,
     /// `CharField(blank=True, default="main")`.
     pub base_branch: String,
+    /// Merged repository list (NEWPIDASH-409): `settings.repos`
+    /// merged with the legacy columns, providers filled in.
+    /// Rust-added key: Django renders no `repos` key.
+    #[serde(default)]
+    pub repos: Vec<RenderedRepo>,
     /// `IntegerField(default=10800)`.
     pub agent_default_interval_seconds: i64,
     /// `IntegerField(default=10)`.
@@ -1404,6 +1413,11 @@ pub struct ProjectListRead {
     pub repo_url: String,
     /// `CharField(blank=True, default="main")`.
     pub base_branch: String,
+    /// Merged repository list (NEWPIDASH-409): `settings.repos`
+    /// merged with the legacy columns, providers filled in.
+    /// Rust-added key: Django renders no `repos` key.
+    #[serde(default)]
+    pub repos: Vec<RenderedRepo>,
     /// `IntegerField(default=10800)`.
     pub agent_default_interval_seconds: i64,
     /// `IntegerField(default=10)`.
@@ -1557,6 +1571,11 @@ pub struct ProjectDetailRead {
     pub repo_url: String,
     /// `CharField(blank=True, default="main")`.
     pub base_branch: String,
+    /// Merged repository list (NEWPIDASH-409): `settings.repos`
+    /// merged with the legacy columns, providers filled in.
+    /// Rust-added key: Django renders no `repos` key.
+    #[serde(default)]
+    pub repos: Vec<RenderedRepo>,
     /// `IntegerField(default=10800)`.
     pub agent_default_interval_seconds: i64,
     /// `IntegerField(default=10)`.
@@ -2586,7 +2605,7 @@ mod tests {
     #[test]
     fn key_order_consts_match_fixture() {
         let fx = fixture();
-        assert_eq!(PROJECT_KEY_ORDER.len(), 52);
+        assert_eq!(PROJECT_KEY_ORDER.len(), 53);
         assert_eq!(
             PROJECT_KEY_ORDER,
             str_list(
@@ -2597,7 +2616,7 @@ mod tests {
             )
             .as_slice()
         );
-        assert_eq!(PROJECT_LIST_KEY_ORDER.len(), 58);
+        assert_eq!(PROJECT_LIST_KEY_ORDER.len(), 59);
         assert_eq!(
             PROJECT_LIST_KEY_ORDER,
             str_list(
@@ -2612,7 +2631,7 @@ mod tests {
             PROJECT_LITE_FIELDS,
             str_list(fx.get("lite").expect("lite").get("key_order").expect("ko")).as_slice()
         );
-        assert_eq!(PROJECT_DETAIL_KEY_ORDER.len(), 54);
+        assert_eq!(PROJECT_DETAIL_KEY_ORDER.len(), 55);
         assert_eq!(
             PROJECT_DETAIL_KEY_ORDER,
             str_list(

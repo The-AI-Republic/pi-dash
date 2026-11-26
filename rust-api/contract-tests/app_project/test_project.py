@@ -6,7 +6,7 @@ response key set. Value assertions only where the test controls the value.
 
 from psycopg.rows import dict_row
 
-from _harness.diffs import expect
+from _harness.diffs import expect, is_rust
 
 from .conftest import assert_keys
 
@@ -35,6 +35,13 @@ DETAIL_KEYS = [
     "project_lead", "repo_url", "settings", "sort_order", "timezone", "updated_at",
     "updated_by", "workspace",
 ]
+# `default_work_type` (PDASHOSS01-234) renders on both backends but was
+# never added to the pinned set.
+DETAIL_KEYS = DETAIL_KEYS + ["default_work_type"]
+if is_rust():
+    # DIFF-69 (NEWPIDASH-409): the merged `settings.repos` + legacy
+    # columns list. Django renders no `repos` key.
+    DETAIL_KEYS = DETAIL_KEYS + ["repos"]
 
 INVITE_KEYS = [
     "accepted", "created_at", "created_by", "deleted_at", "email", "id",

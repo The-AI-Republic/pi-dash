@@ -226,6 +226,19 @@ fn normalize_repo_path(path: &str) -> Option<(String, String)> {
     Some((namespace, name))
 }
 
+/// Whether a project create request carries any repo: a non-empty
+/// `repo_url`, or a non-empty `repos` list in the validated settings
+/// fragment. Drives the `software` default work type (NEWPIDASH-409).
+pub fn create_request_has_repo(repo_url: Option<&str>, settings: Option<&Value>) -> bool {
+    if repo_url.is_some_and(|url| !url.is_empty()) {
+        return true;
+    }
+    settings
+        .and_then(|bag| bag.get(REPOS_KEY))
+        .and_then(Value::as_array)
+        .is_some_and(|entries| !entries.is_empty())
+}
+
 /// The URL identity (dedup) key: one function mapping a URL to the
 /// key used for every comparison — merge, dedup on write, and double
 /// delete. A trailing `.git` or `/`, `https` vs. scp-style ssh
@@ -483,6 +496,115 @@ pub fn sync_columns_after_replace(
     }
 }
 
+/// Outcome of [`plan_repo_sync`]: legacy column overrides plus an
+/// optional `repos` fragment to fold into the settings merge, so the
+/// columns and the list stay consistent in one write path.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RepoSyncPlan {
+    /// Override for the legacy `repo_url` column when the list drives
+    /// it (settings-PATCH replace that follows a rename or a remove).
+    pub repo_url: Option<String>,
+    /// Override for the legacy `base_branch` column, same trigger.
+    pub base_branch: Option<String>,
+    /// `{"repos": [...]}` to fold into the settings merge when the
+    /// legacy PATCH changed the list (replace or remove).
+    pub repos_fragment: Option<Value>,
+}
+
+/// Ways [`plan_repo_sync`] refuses the write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepoSyncError {
+    /// The legacy URL change would duplicate another settings entry:
+    /// the old repo matched one entry while the new URL matches a
+    /// different one, so updating the old entry would leave two
+    /// entries with the same identity key.
+    DuplicateLegacyUrl,
+    /// A validated `repos` fragment failed to parse (unreachable
+    /// through the validated settings path; the writer bug-checks).
+    InvalidFragment,
+}
+
+/// Plan the column/list sync for a project write carrying an optional
+/// validated `repos` fragment (settings PATCH full-list replace) and
+/// optional new legacy column values (PATCH/PUT of `repo_url` /
+/// `base_branch`):
+///
+/// - With a fragment, the list is authoritative: the columns follow a
+///   rename (same id, new identity) or clear when the legacy-matching
+///   entry is gone (double delete).
+/// - With changed legacy columns, the matching list entry is replaced
+///   (or removed when the URL is emptied); a change that would
+///   duplicate another entry is refused.
+/// - With neither, the plan is empty (no write).
+pub fn plan_repo_sync(
+    instance_settings: &Value,
+    instance_repo_url: &str,
+    instance_base_branch: &str,
+    fragment_repos: Option<&Value>,
+    new_repo_url: Option<&str>,
+    new_base_branch: Option<&str>,
+) -> Result<RepoSyncPlan, RepoSyncError> {
+    let old_stored = repos_from_stored(instance_settings);
+    let fragment_list: Option<Vec<ProjectRepo>> = fragment_repos
+        .map(|fragment| serde_json::from_value(fragment.clone()))
+        .transpose()
+        .map_err(|_| RepoSyncError::InvalidFragment)?;
+    let mut base_list: Vec<ProjectRepo> =
+        fragment_list.clone().unwrap_or_else(|| old_stored.clone());
+    let legacy_changed = new_repo_url.is_some_and(|url| url != instance_repo_url)
+        || new_base_branch.is_some_and(|branch| branch != instance_base_branch);
+    if legacy_changed {
+        let new_url = new_repo_url.unwrap_or(instance_repo_url);
+        let new_branch = new_base_branch.unwrap_or(instance_base_branch);
+        if new_url.trim().is_empty() {
+            let updated = sync_entry_after_legacy_patch(&base_list, instance_repo_url, "", "");
+            if updated != base_list {
+                base_list = updated;
+            }
+        } else {
+            if let Some(key) = repo_identity_key(new_url) {
+                let old_key = repo_identity_key(instance_repo_url);
+                let old_match = old_key.as_ref().and_then(|old| {
+                    base_list.iter().find(|entry| {
+                        repo_identity_key(&entry.url).as_deref() == Some(old.as_str())
+                    })
+                });
+                if let Some(matched) = old_match {
+                    if base_list.iter().any(|entry| {
+                        entry.id != matched.id
+                            && repo_identity_key(&entry.url).as_deref() == Some(key.as_str())
+                    }) {
+                        return Err(RepoSyncError::DuplicateLegacyUrl);
+                    }
+                }
+            }
+            let updated =
+                sync_entry_after_legacy_patch(&base_list, instance_repo_url, new_url, new_branch);
+            if updated != base_list {
+                base_list = updated;
+            }
+        }
+    }
+    let mut plan = RepoSyncPlan::default();
+    let baseline: Vec<ProjectRepo> = fragment_list.unwrap_or_else(|| old_stored.clone());
+    if base_list != baseline {
+        plan.repos_fragment =
+            Some(serde_json::to_value(&base_list).map_err(|_| RepoSyncError::InvalidFragment)?);
+    }
+    if fragment_repos.is_some() {
+        if let Some(sync) = sync_columns_after_replace(
+            &old_stored,
+            &base_list,
+            instance_repo_url,
+            instance_base_branch,
+        ) {
+            plan.repo_url = Some(sync.repo_url);
+            plan.base_branch = Some(sync.base_branch);
+        }
+    }
+    Ok(plan)
+}
+
 /// After a legacy `repo_url`/`base_branch` PATCH (with the PATCH's
 /// final column values), update the matching `settings.repos` entry
 /// so the repo is replaced instead of duplicated by the next
@@ -572,6 +694,8 @@ pub async fn copy_legacy_repo_if_missing(
     now: DateTime<Utc>,
 ) -> Result<CopyOutcome, sqlx::Error> {
     let mut tx = pool.begin().await?;
+    // The copy serializes concurrent first reads on this row lock.
+    // raw-sql: SeaORM cannot take SELECT ... FOR UPDATE on the sqlx-pool read path.
     let row: Option<(Value, String, String)> = sqlx::query_as(
         "SELECT settings, repo_url, base_branch FROM projects WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
     )
@@ -602,6 +726,8 @@ pub async fn copy_legacy_repo_if_missing(
                 serde_json::to_value(&repos).map(|repos| serde_json::json!({"repos": repos}));
             match merge {
                 Ok(merge) => {
+                    // Merge under the row lock above, preserving unknown keys.
+                    // raw-sql: SeaORM cannot run the jsonb merge on a sqlx transaction.
                     sqlx::query(
                         "UPDATE projects SET settings = settings || $1::jsonb, updated_at = $2, updated_by_id = $3 WHERE id = $4 AND deleted_at IS NULL",
                     )
@@ -779,6 +905,24 @@ mod tests {
             repo_identity_key("https://github.com/acme/web"),
             repo_identity_key("https://gitlab.com/acme/web")
         );
+    }
+
+    #[test]
+    fn create_request_has_repo_checks_both_sources() {
+        assert!(!create_request_has_repo(None, None));
+        assert!(!create_request_has_repo(Some(""), None));
+        assert!(create_request_has_repo(
+            Some("https://github.com/a/b"),
+            None
+        ));
+        assert!(!create_request_has_repo(None, Some(&json!({}))));
+        assert!(!create_request_has_repo(None, Some(&json!({"repos": []}))));
+        assert!(create_request_has_repo(
+            None,
+            Some(
+                &json!({"repos": [{"id": "11111111-1111-1111-1111-111111111111", "url": "https://github.com/a/b"}]})
+            )
+        ));
     }
 
     #[test]
@@ -1152,6 +1296,102 @@ mod tests {
             "main",
         );
         assert_eq!(updated, old);
+    }
+
+    fn stored_value(urls: &[&str]) -> Value {
+        serde_json::to_value(stored(urls)).expect("serializes")
+    }
+
+    fn settings_with(urls: &[&str]) -> Value {
+        json!({"repos": stored_value(urls)})
+    }
+
+    #[test]
+    fn plan_is_empty_without_inputs() {
+        let settings = settings_with(&["https://github.com/acme/web"]);
+        let plan = plan_repo_sync(
+            &settings,
+            "https://github.com/acme/web",
+            "main",
+            None,
+            None,
+            None,
+        )
+        .expect("plans");
+        assert_eq!(plan, RepoSyncPlan::default());
+    }
+
+    #[test]
+    fn plan_follows_a_fragment_remove_with_column_clear() {
+        let settings = settings_with(&["https://github.com/acme/web"]);
+        let plan = plan_repo_sync(
+            &settings,
+            "https://github.com/acme/web",
+            "main",
+            Some(&Value::Array(vec![])),
+            None,
+            None,
+        )
+        .expect("plans");
+        assert_eq!(plan.repo_url.as_deref(), Some(""));
+        assert_eq!(plan.base_branch.as_deref(), Some(""));
+        assert_eq!(plan.repos_fragment, None);
+    }
+
+    #[test]
+    fn plan_replaces_the_entry_on_legacy_patch() {
+        let settings = settings_with(&["https://github.com/acme/web"]);
+        let plan = plan_repo_sync(
+            &settings,
+            "https://github.com/acme/web",
+            "main",
+            None,
+            Some("https://github.com/acme/site"),
+            Some("trunk"),
+        )
+        .expect("plans");
+        assert_eq!(plan.repo_url, None);
+        assert_eq!(plan.base_branch, None);
+        let fragment = plan.repos_fragment.expect("fragment");
+        let list: Vec<ProjectRepo> = serde_json::from_value(fragment).expect("parses");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].url, "https://github.com/acme/site");
+        assert_eq!(list[0].base_branch.as_deref(), Some("trunk"));
+    }
+
+    #[test]
+    fn plan_refuses_a_legacy_change_that_duplicates_another_entry() {
+        let settings = settings_with(&[
+            "https://github.com/acme/web",
+            "https://github.com/acme/other",
+        ]);
+        let error = plan_repo_sync(
+            &settings,
+            "https://github.com/acme/web",
+            "main",
+            None,
+            Some("git@github.com:acme/other.git"),
+            None,
+        )
+        .expect_err("duplicates");
+        assert_eq!(error, RepoSyncError::DuplicateLegacyUrl);
+    }
+
+    #[test]
+    fn plan_leaves_the_list_alone_when_legacy_matches_nothing() {
+        // A legacy PATCH whose old URL no entry holds leaves the list
+        // alone: the merged read picks the new URL up as a legacy repo.
+        let settings = settings_with(&["https://github.com/acme/other"]);
+        let plan = plan_repo_sync(
+            &settings,
+            "https://github.com/acme/web",
+            "main",
+            None,
+            Some("https://github.com/acme/site"),
+            None,
+        )
+        .expect("plans");
+        assert_eq!(plan, RepoSyncPlan::default());
     }
 
     // -- copy (live scratch DB) -----------------------------------------
