@@ -758,6 +758,49 @@ pub async fn copy_legacy_repo_if_missing(
     Ok(outcome)
 }
 
+/// The merged list for readers that cannot trigger the temporary copy
+/// (NEWPIDASH-414: agent prompt context and run envelope — no actor at
+/// hand, or inside a creation transaction where a settings write does
+/// not belong): `settings.repos` merged with the legacy columns, with
+/// a legacy-only repo resolved to the same entry the copy would append
+/// (fresh id, URL as stored, provider inferred, branch copied as is),
+/// without writing. The project serializers still trigger the real
+/// copy (TEMPORARY, NEWPIDASH-416).
+pub fn merged_repos_in_memory(
+    stored: &[ProjectRepo],
+    repo_url: &str,
+    base_branch: &str,
+) -> Vec<ProjectRepo> {
+    match merge_repos(stored, repo_url) {
+        MergePlan::Merged(repos) => repos,
+        MergePlan::LegacyOnly => {
+            let mut repos = stored.to_vec();
+            repos.push(ProjectRepo {
+                id: Uuid::new_v4(),
+                url: repo_url.to_owned(),
+                provider: Some(infer_provider(repo_url).to_owned()),
+                base_branch: branch_or_none(base_branch),
+            });
+            repos
+        }
+    }
+}
+
+/// The rendered merged list in one call: [`repos_from_stored`] through
+/// [`merged_repos_in_memory`] to [`render_repos`]. The shape agent
+/// readers (prompt context, run envelope) embed.
+pub fn rendered_merged_repos(
+    settings: &Value,
+    repo_url: &str,
+    base_branch: &str,
+) -> Vec<RenderedRepo> {
+    render_repos(&merged_repos_in_memory(
+        &repos_from_stored(settings),
+        repo_url,
+        base_branch,
+    ))
+}
+
 /// The one merged read every reader uses: `settings.repos` merged
 /// with the legacy columns. A legacy-only repo is copied into
 /// `settings.repos` first (TEMPORARY, NEWPIDASH-416); every other
@@ -1186,6 +1229,28 @@ mod tests {
             merge_repos(&[], "https://github.com/acme/web"),
             MergePlan::LegacyOnly
         ));
+    }
+
+    #[test]
+    fn in_memory_merge_matches_the_copy_shape_without_writing() {
+        // Legacy-only: the same entry the copy would append (URL as
+        // stored, provider inferred, branch copied as is).
+        let merged = merged_repos_in_memory(&[], "https://github.com/acme/web", "main");
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].url, "https://github.com/acme/web");
+        assert_eq!(merged[0].provider.as_deref(), Some("github"));
+        assert_eq!(merged[0].base_branch.as_deref(), Some("main"));
+        // Empty branch stays empty, like the copy.
+        let merged = merged_repos_in_memory(&[], "https://github.com/acme/web", "");
+        assert_eq!(merged[0].base_branch, None);
+        // Dedup and stored-only cases mirror `merge_repos`.
+        let list = stored(&["https://github.com/acme/web"]);
+        assert_eq!(
+            merged_repos_in_memory(&list, "git@github.com:acme/web.git", "other"),
+            list
+        );
+        assert_eq!(merged_repos_in_memory(&list, "", ""), list);
+        assert!(merged_repos_in_memory(&[], "", "").is_empty());
     }
 
     #[test]

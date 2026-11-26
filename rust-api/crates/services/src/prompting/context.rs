@@ -130,6 +130,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde_json::{json, Value};
 
 use super::{composer, recipes, work_types};
+use crate::domain::project_repos::RenderedRepo;
 use crate::domain::project_settings::AgentStages;
 
 /// Upper bound on inlined children / related items per group
@@ -759,10 +760,15 @@ pub fn issue_run_kind(template_name: &str) -> &str {
 }
 
 /// Project-level repo fields for the prompt (`context.py:434-469`).
+/// `repos` is the merged repository list (NEWPIDASH-409
+/// `settings.repos` merged with the legacy columns, providers filled);
+/// `url` / `base_branch` stay the legacy column values so single-repo
+/// prompts render as before.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProjectRepoView {
     pub url: Option<String>,
     pub base_branch: Option<String>,
+    pub repos: Vec<RenderedRepo>,
 }
 
 /// The bound remote row (`GitRepositoryBinding.repository`).
@@ -805,6 +811,10 @@ fn python_title(s: &str) -> String {
 
 /// Provider-neutral repository prompt context (`context.py:434-469`).
 /// `issue_work_branch`: the issue's `git_work_branch` (`""` = absent).
+/// `project.repos` is the merged repository list (NEWPIDASH-414), one
+/// entry per repo with its URL, provider and base branch (`null` =
+/// the repo's own default branch). The legacy single-repo keys stay so
+/// older templates keep rendering.
 pub fn repo_context(
     project: &ProjectRepoView,
     issue_work_branch: Option<&str>,
@@ -818,6 +828,7 @@ pub fn repo_context(
     let mut repo = json!({
         "url": project.url.clone().map(Value::String).unwrap_or(Value::Null),
         "base_branch": project.base_branch.clone().map(Value::String).unwrap_or(Value::Null),
+        "repos": project.repos,
         "work_branch": work_branch,
         "provider": Value::Null,
         "provider_display_name": "Git provider",
@@ -1881,6 +1892,7 @@ mod tests {
                 &ProjectRepoView {
                     url: None,
                     base_branch: None,
+                    repos: vec![],
                 },
                 None,
                 None,
@@ -2025,6 +2037,7 @@ mod tests {
             &ProjectRepoView {
                 url: None,
                 base_branch: None,
+                repos: vec![],
             },
             Some(""),
             None,
@@ -2043,6 +2056,7 @@ mod tests {
             &ProjectRepoView {
                 url: Some("https://github.com/org/repo".to_owned()),
                 base_branch: Some("main".to_owned()),
+                repos: vec![],
             },
             Some("pi-dash/x"),
             Some(&remote),
@@ -2054,6 +2068,7 @@ mod tests {
             &ProjectRepoView {
                 url: None,
                 base_branch: None,
+                repos: vec![],
             },
             None,
             Some(&remote),
@@ -2064,6 +2079,73 @@ mod tests {
         );
         assert_eq!(named["provider_display_name"], json!("GitHub"));
         assert_eq!(named["code_review_term"], json!("pull request"));
+    }
+
+    #[test]
+    fn repo_context_lists_every_repo() {
+        use crate::domain::project_repos::RenderedRepo;
+        use uuid::Uuid;
+        // A project with three repos: the prompt lists all three with
+        // their URL, provider and base branch (NEWPIDASH-414).
+        let repos = vec![
+            RenderedRepo {
+                id: Uuid::from_u128(1),
+                url: "https://github.com/acme/web".to_owned(),
+                provider: "github".to_owned(),
+                base_branch: Some("main".to_owned()),
+            },
+            RenderedRepo {
+                id: Uuid::from_u128(2),
+                url: "https://gitlab.com/acme/api".to_owned(),
+                provider: "gitlab".to_owned(),
+                base_branch: None,
+            },
+            RenderedRepo {
+                id: Uuid::from_u128(3),
+                url: "https://example.com/acme/docs.git".to_owned(),
+                provider: "other".to_owned(),
+                base_branch: Some("docs".to_owned()),
+            },
+        ];
+        let ctx = repo_context(
+            &ProjectRepoView {
+                url: Some("https://github.com/acme/web".to_owned()),
+                base_branch: Some("main".to_owned()),
+                repos,
+            },
+            Some("pi-dash/x"),
+            None,
+            None,
+        );
+        let listed = ctx["repos"].as_array().expect("repos array");
+        assert_eq!(listed.len(), 3);
+        assert_eq!(listed[0]["url"], json!("https://github.com/acme/web"));
+        assert_eq!(listed[0]["provider"], json!("github"));
+        assert_eq!(listed[0]["base_branch"], json!("main"));
+        // An empty base branch renders null: the repo's own default.
+        assert_eq!(listed[1]["provider"], json!("gitlab"));
+        assert_eq!(listed[1]["base_branch"], Value::Null);
+        assert_eq!(listed[2]["provider"], json!("other"));
+        assert_eq!(listed[2]["base_branch"], json!("docs"));
+        // The legacy single-repo keys stay for older templates.
+        assert_eq!(ctx["url"], json!("https://github.com/acme/web"));
+        assert_eq!(ctx["base_branch"], json!("main"));
+    }
+
+    #[test]
+    fn repo_context_empty_repos_renders_empty_list() {
+        let ctx = repo_context(
+            &ProjectRepoView {
+                url: None,
+                base_branch: None,
+                repos: vec![],
+            },
+            None,
+            None,
+            None,
+        );
+        assert_eq!(ctx["repos"], json!([]));
+        assert_eq!(ctx["url"], Value::Null);
     }
 
     #[test]

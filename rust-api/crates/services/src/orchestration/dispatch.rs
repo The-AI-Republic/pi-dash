@@ -2111,6 +2111,7 @@ mod tests {
             description: None,
             repo_url: None,
             base_branch: None,
+            repos: vec![],
             default_agent_executor: "local_runner".to_owned(),
             project_lead_id: Some(uid(0x42)),
             default_assignee_id: Some(uid(0x43)),

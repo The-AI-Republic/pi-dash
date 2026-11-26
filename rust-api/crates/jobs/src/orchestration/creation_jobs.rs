@@ -259,6 +259,7 @@ struct ProjectRow {
     description: String,
     repo_url: String,
     base_branch: String,
+    settings: Value,
     default_agent_executor: String,
     default_work_type: String,
     project_lead_id: Option<Uuid>,
@@ -271,6 +272,16 @@ struct ProjectRow {
 
 impl From<ProjectRow> for ProjectView {
     fn from(row: ProjectRow) -> Self {
+        // Every agent-facing repo read goes through the merged read
+        // (NEWPIDASH-409): run creation cannot trigger the temporary
+        // copy (inside the creation transaction), so it resolves the
+        // same list in memory; the project serializers still perform
+        // the copy (TEMPORARY, NEWPIDASH-416).
+        let repos = pidash_services::domain::project_repos::rendered_merged_repos(
+            &row.settings,
+            &row.repo_url,
+            &row.base_branch,
+        );
         Self {
             id: row.id,
             workspace_id: row.workspace_id,
@@ -279,6 +290,7 @@ impl From<ProjectRow> for ProjectView {
             description: Some(row.description),
             repo_url: Some(row.repo_url),
             base_branch: Some(row.base_branch),
+            repos,
             default_agent_executor: row.default_agent_executor,
             default_work_type: row.default_work_type,
             project_lead_id: row.project_lead_id,
@@ -347,6 +359,7 @@ fn project_columns() -> Vec<projects::Column> {
         projects::Column::Description,
         projects::Column::RepoUrl,
         projects::Column::BaseBranch,
+        projects::Column::Settings,
         projects::Column::DefaultAgentExecutor,
         projects::Column::DefaultWorkType,
         projects::Column::ProjectLeadId,

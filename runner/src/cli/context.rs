@@ -60,6 +60,16 @@ pub struct InitArgs {
     pub workspace: Option<PathBuf>,
 }
 
+/// One repository of a project's merged list, as recorded in the
+/// context files (NEWPIDASH-414). Old files with only `repo_url` parse
+/// with an empty list.
+#[derive(Debug, Clone, Default, Serialize)]
+struct ContextRepo {
+    url: String,
+    provider: String,
+    base_branch: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 struct ContextProject {
     id: String,
@@ -67,6 +77,7 @@ struct ContextProject {
     name: String,
     description: String,
     repo_url: String,
+    repos: Vec<ContextRepo>,
     is_default: bool,
 }
 
@@ -260,6 +271,15 @@ impl From<&ProjectRow> for ContextProject {
             name: project.name.clone(),
             description: project.description.clone(),
             repo_url: project.repo_url.clone(),
+            repos: project
+                .repos
+                .iter()
+                .map(|repo| ContextRepo {
+                    url: repo.url.clone(),
+                    provider: repo.provider.clone(),
+                    base_branch: repo.base_branch.clone().unwrap_or_default(),
+                })
+                .collect(),
             is_default: project.is_default,
         }
     }
@@ -348,6 +368,23 @@ fn render_project_block(out: &mut String, project: &ContextProject, item_indent:
         "{field_indent}repo_url: {}\n",
         yaml_string(&project.repo_url)
     ));
+    if !project.repos.is_empty() {
+        out.push_str(&format!("{field_indent}repos:\n"));
+        for repo in &project.repos {
+            out.push_str(&format!(
+                "{field_indent}  - url: {}\n",
+                yaml_string(&repo.url)
+            ));
+            out.push_str(&format!(
+                "{field_indent}    provider: {}\n",
+                yaml_string(&repo.provider)
+            ));
+            out.push_str(&format!(
+                "{field_indent}    base_branch: {}\n",
+                yaml_string(&repo.base_branch)
+            ));
+        }
+    }
     out.push_str(&format!(
         "{field_indent}is_default: {}\n",
         project.is_default
@@ -415,10 +452,17 @@ fn parse_project_context(body: &str) -> ProjectDoc {
     };
     let mut doc = ProjectDoc::default();
     let mut current: Option<ContextProject> = None;
+    let mut repos_track = ReposBlock::default();
 
     for line in lines {
+        // A `repos:` block swallows its own lines; anything else falls
+        // through to the normal arms below.
+        if current.is_some() && repos_track.feed(&line) {
+            continue;
+        }
         if line.is_list_item && line.key == "id" {
-            if let Some(project) = current.take() {
+            if let Some(mut project) = current.take() {
+                project.repos.extend(repos_track.take());
                 doc.projects.push(project);
             }
             current = Some(ContextProject {
@@ -426,6 +470,7 @@ fn parse_project_context(body: &str) -> ProjectDoc {
                 ..Default::default()
             });
         } else if let Some(project) = current.as_mut() {
+            project.repos.extend(repos_track.take());
             apply_project_field(project, &line.key, &line.value);
         } else {
             match line.key.as_str() {
@@ -436,7 +481,8 @@ fn parse_project_context(body: &str) -> ProjectDoc {
             }
         }
     }
-    if let Some(project) = current {
+    if let Some(mut project) = current {
+        project.repos.extend(repos_track.take());
         doc.projects.push(project);
     }
     doc
@@ -449,20 +495,33 @@ fn parse_machine_context(body: &str) -> MachineDoc {
     let mut doc = MachineDoc::default();
     let mut workspace: Option<MachineWorkspace> = None;
     let mut project: Option<ContextProject> = None;
+    let mut repos_track = ReposBlock::default();
 
-    // Close the open project (if any) into the open workspace.
+    // Close the open project (if any) into the open workspace, carrying
+    // its parsed `repos:` entries.
     fn flush_project(
         workspace: &mut Option<MachineWorkspace>,
         project: &mut Option<ContextProject>,
+        repos: Vec<ContextRepo>,
     ) {
-        if let (Some(p), Some(w)) = (project.take(), workspace.as_mut()) {
-            w.projects.push(p);
+        if let Some(p) = project.take() {
+            let mut p = p;
+            p.repos.extend(repos);
+            if let Some(w) = workspace.as_mut() {
+                w.projects.push(p);
+            }
         }
     }
 
     for line in lines {
+        // A `repos:` block swallows its own lines; anything else falls
+        // through to the normal arms below. Only inside a project —
+        // nowhere else may a `repos:` block appear.
+        if project.is_some() && repos_track.feed(&line) {
+            continue;
+        }
         if line.is_list_item && line.key == "slug" {
-            flush_project(&mut workspace, &mut project);
+            flush_project(&mut workspace, &mut project, repos_track.take());
             if let Some(w) = workspace.take() {
                 doc.workspaces.push(w);
             }
@@ -471,12 +530,13 @@ fn parse_machine_context(body: &str) -> MachineDoc {
                 ..Default::default()
             });
         } else if line.is_list_item && line.key == "id" {
-            flush_project(&mut workspace, &mut project);
+            flush_project(&mut workspace, &mut project, repos_track.take());
             project = Some(ContextProject {
                 id: line.value,
                 ..Default::default()
             });
         } else if let Some(p) = project.as_mut() {
+            p.repos.extend(repos_track.take());
             apply_project_field(p, &line.key, &line.value);
         } else if let Some(w) = workspace.as_mut() {
             if line.key == "default_project_id" {
@@ -486,7 +546,7 @@ fn parse_machine_context(body: &str) -> MachineDoc {
             doc.generated_at = line.value;
         }
     }
-    flush_project(&mut workspace, &mut project);
+    flush_project(&mut workspace, &mut project, repos_track.take());
     if let Some(w) = workspace {
         doc.workspaces.push(w);
     }
@@ -503,6 +563,68 @@ fn apply_project_field(project: &mut ContextProject, key: &str, value: &str) {
         "repo_url" => project.repo_url = value.to_string(),
         "is_default" => project.is_default = value.eq_ignore_ascii_case("true"),
         _ => {}
+    }
+}
+
+/// The multi-line `repos:` block inside one project. The scanner is flat
+/// (indentation is ignored), so the block is tracked as state: a `repos:`
+/// line opens it, each `- url:` line starts an entry, `provider:` /
+/// `base_branch:` lines fill the open entry, and any other line closes
+/// it. Files written before the list existed never open the block and
+/// keep parsing with an empty list.
+#[derive(Debug, Default)]
+struct ReposBlock {
+    in_block: bool,
+    pending: Option<ContextRepo>,
+    entries: Vec<ContextRepo>,
+}
+
+impl ReposBlock {
+    /// Fold one scanned line into the block. Returns `true` when the
+    /// line belonged to the block and needs no further handling.
+    fn feed(&mut self, line: &ScanLine) -> bool {
+        if !self.in_block {
+            if !line.is_list_item && line.key == "repos" {
+                self.in_block = true;
+                return true;
+            }
+            return false;
+        }
+        if line.is_list_item && line.key == "url" {
+            self.push_pending();
+            self.pending = Some(ContextRepo {
+                url: line.value.clone(),
+                ..Default::default()
+            });
+            return true;
+        }
+        if !line.is_list_item && (line.key == "provider" || line.key == "base_branch") {
+            if let Some(entry) = self.pending.as_mut() {
+                if line.key == "provider" {
+                    entry.provider = line.value.clone();
+                } else {
+                    entry.base_branch = line.value.clone();
+                }
+                return true;
+            }
+            self.in_block = false;
+            return false;
+        }
+        self.push_pending();
+        self.in_block = false;
+        false
+    }
+
+    fn push_pending(&mut self) {
+        if let Some(entry) = self.pending.take() {
+            self.entries.push(entry);
+        }
+    }
+
+    /// The completed entries, including any open one.
+    fn take(&mut self) -> Vec<ContextRepo> {
+        self.push_pending();
+        std::mem::take(&mut self.entries)
     }
 }
 
@@ -582,6 +704,7 @@ mod tests {
             name: name.to_string(),
             description: String::new(),
             repo_url: format!("https://github.com/acme/{identifier}"),
+            repos: vec![],
             is_default: false,
         }
     }
@@ -669,7 +792,77 @@ mod tests {
         assert_eq!(parsed.projects.len(), 1);
         assert_eq!(parsed.projects[0].identifier, "WEB");
         assert_eq!(parsed.projects[0].repo_url, "");
+        // A file written before the list carries no `repos:` block.
+        assert!(parsed.projects[0].repos.is_empty());
         assert!(parsed.projects[0].is_default);
+    }
+
+    #[test]
+    fn project_doc_round_trips_repos_list() {
+        let mut p = project("p1", "WEB", "Website");
+        p.repos = vec![
+            ContextRepo {
+                url: "https://github.com/acme/web".to_string(),
+                provider: "github".to_string(),
+                base_branch: "main".to_string(),
+            },
+            ContextRepo {
+                url: "https://gitlab.com/acme/api".to_string(),
+                provider: "gitlab".to_string(),
+                base_branch: String::new(),
+            },
+        ];
+        let doc = ProjectDoc {
+            workspace_slug: "acme".to_string(),
+            default_project_id: "p1".to_string(),
+            generated_at: "2026-09-12T20:38:38Z".to_string(),
+            projects: vec![p],
+        };
+
+        let parsed = parse_project_context(&render_project_context(&doc));
+
+        assert_eq!(parsed.projects.len(), 1);
+        assert_eq!(parsed.projects[0].repos.len(), 2);
+        assert_eq!(
+            parsed.projects[0].repos[0].url,
+            "https://github.com/acme/web"
+        );
+        assert_eq!(parsed.projects[0].repos[0].provider, "github");
+        assert_eq!(parsed.projects[0].repos[0].base_branch, "main");
+        assert_eq!(
+            parsed.projects[0].repos[1].url,
+            "https://gitlab.com/acme/api"
+        );
+        assert_eq!(parsed.projects[0].repos[1].base_branch, "");
+        assert_eq!(parsed.projects[0].repo_url, "https://github.com/acme/WEB");
+    }
+
+    #[test]
+    fn machine_doc_round_trips_repos_list() {
+        let mut p = project("p1", "WEB", "Website");
+        p.repos = vec![ContextRepo {
+            url: "https://github.com/acme/web".to_string(),
+            provider: "github".to_string(),
+            base_branch: "main".to_string(),
+        }];
+        let doc = MachineDoc {
+            generated_at: "2026-09-12T20:38:38Z".to_string(),
+            workspaces: vec![MachineWorkspace {
+                slug: "acme".to_string(),
+                default_project_id: "p1".to_string(),
+                projects: vec![p],
+            }],
+        };
+
+        let parsed = parse_machine_context(&render_machine_context(&doc));
+
+        assert_eq!(parsed.workspaces.len(), 1);
+        assert_eq!(parsed.workspaces[0].projects.len(), 1);
+        assert_eq!(parsed.workspaces[0].projects[0].repos.len(), 1);
+        assert_eq!(
+            parsed.workspaces[0].projects[0].repos[0].url,
+            "https://github.com/acme/web"
+        );
     }
 
     #[test]
@@ -713,6 +906,7 @@ mod tests {
             name: "Website".to_string(),
             description: String::new(),
             repo_url: "https://github.com/acme/web".to_string(),
+            repos: vec![],
             is_default: true,
         };
         let row_b = ProjectRow {
@@ -721,6 +915,7 @@ mod tests {
             name: "API".to_string(),
             description: String::new(),
             repo_url: "https://github.com/acme/api".to_string(),
+            repos: vec![],
             is_default: false,
         };
 

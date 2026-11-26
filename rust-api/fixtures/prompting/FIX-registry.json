@@ -250,8 +250,8 @@
           "is_overridable": false,
           "allows_workspace_override": false,
           "allows_personal_override": false,
-          "body_len": 1104,
-          "body_sha256": "e78b63af18a22681c21055a01351b831e35e3df67c2831253609666f112b81cd"
+          "body_len": 1519,
+          "body_sha256": "6e89e217890b4d1d572270bb8009548741bd1b8e07661ea9d4eeca5fbb764d83"
         },
         {
           "key": "software.execute",

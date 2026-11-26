@@ -441,6 +441,7 @@
           "run_config": {
             "repo_ref": "main",
             "repo_url": "https://example.com/fx7.git",
+            "repos": [],
             "git_work_branch": null,
             "issue_identifier": "FX7-10",
             "project_identifier": "FX7",
@@ -576,6 +577,7 @@
           "run_config": {
             "repo_ref": "main",
             "repo_url": "https://example.com/fx7.git",
+            "repos": [],
             "git_work_branch": null,
             "issue_identifier": "FX7-10",
             "project_identifier": "FX7"

@@ -14,8 +14,8 @@ use crate::cloud::http::{
     RunnerCloudClient, RunnerCredentials, SharedHttpTransport, TransportError,
 };
 use crate::cloud::protocol::{
-    ClientMsg, FailureReason, RunnerStatus, ServerMsg, TokenUsage as WireTokenUsage, WIRE_VERSION,
-    WorkspaceState,
+    AssignRepo, ClientMsg, FailureReason, RunnerStatus, ServerMsg, TokenUsage as WireTokenUsage,
+    WIRE_VERSION, WorkspaceState, effective_repos,
 };
 use crate::config::schema::{
     AgentKind, Config, Credentials, DaemonConfig, RunnerConfig, canonical_for_compare,
@@ -2640,7 +2640,7 @@ impl RunnerLoop {
         &mut self,
         run_id: uuid::Uuid,
         prompt: String,
-        repo_url: Option<String>,
+        repos: Vec<AssignRepo>,
         expected_codex_model: Option<String>,
         context: AssignContext,
     ) {
@@ -2683,7 +2683,7 @@ impl RunnerLoop {
                 queue_blocked,
             };
             if let Err(e) = worker
-                .run(run_id, prompt, repo_url, expected_codex_model, context)
+                .run(run_id, prompt, repos, expected_codex_model, context)
                 .await
             {
                 tracing::error!("run {run_id} failed: {e:#}");
@@ -2726,6 +2726,14 @@ impl RunnerLoop {
                         .get("repo_url")
                         .and_then(|r| r.as_str())
                         .map(|s| s.to_string());
+                    // Payloads written before the repos list carry only
+                    // `repo_url` (or nothing at all) — they still load,
+                    // resolving to the legacy one-entry list.
+                    let stored: Vec<AssignRepo> = v
+                        .get("repos")
+                        .and_then(|r| serde_json::from_value(r.clone()).ok())
+                        .unwrap_or_default();
+                    let repos = effective_repos(&stored, repo_url.as_deref());
                     let model = v
                         .get("expected_codex_model")
                         .and_then(|m| m.as_str())
@@ -2740,7 +2748,7 @@ impl RunnerLoop {
                         workpad_body: opt("workpad_body"),
                         workpad_sha256: opt("workpad_sha256"),
                     };
-                    self.reserve_and_spawn(entry.run_id, prompt, repo_url, model, context)
+                    self.reserve_and_spawn(entry.run_id, prompt, repos, model, context)
                         .await;
                 }
                 _ => {
@@ -2866,6 +2874,7 @@ impl RunnerLoop {
                     run_id,
                     prompt,
                     repo_url,
+                    repos,
                     expected_codex_model,
                     assignment_token,
                     issue_identifier,
@@ -2874,6 +2883,9 @@ impl RunnerLoop {
                     workpad_sha256,
                     ..
                 } => {
+                    // The merged repository list, or the legacy one-entry
+                    // list against an old server (NEWPIDASH-414).
+                    let repos = effective_repos(&repos, repo_url.as_deref());
                     // Cross-lane exclusion: a runner has one working dir shared
                     // between chat and issue execution, so the two cannot run
                     // concurrently. A concurrent chat means a second runner, not
@@ -2998,6 +3010,7 @@ impl RunnerLoop {
                         let payload = serde_json::to_vec(&serde_json::json!({
                             "prompt": prompt,
                             "repo_url": repo_url,
+                            "repos": repos,
                             "expected_codex_model": expected_codex_model,
                             "issue_identifier": context.issue_identifier,
                             "project_identifier": context.project_identifier,
@@ -3019,7 +3032,7 @@ impl RunnerLoop {
                             continue;
                         }
                     }
-                    self.reserve_and_spawn(run_id, prompt, repo_url, expected_codex_model, context)
+                    self.reserve_and_spawn(run_id, prompt, repos, expected_codex_model, context)
                         .await;
                 }
                 ServerMsg::Cancel { run_id, reason } => {
@@ -4686,7 +4699,7 @@ impl AssignWorker {
         &mut self,
         run_id: uuid::Uuid,
         prompt: String,
-        repo_url: Option<String>,
+        repos: Vec<AssignRepo>,
         expected_codex_model: Option<String>,
         context: AssignContext,
     ) -> Result<()> {
@@ -4709,7 +4722,7 @@ impl AssignWorker {
                 Err(e) => anyhow::bail!("queue admission failed: {e}"),
             }
         }
-        self.handle_assign(run_id, prompt, repo_url, expected_codex_model, context)
+        self.handle_assign(run_id, prompt, repos, expected_codex_model, context)
             .await
     }
 
@@ -4717,7 +4730,7 @@ impl AssignWorker {
         &mut self,
         run_id: uuid::Uuid,
         prompt: String,
-        repo_url: Option<String>,
+        repos: Vec<AssignRepo>,
         expected_codex_model: Option<String>,
         context: AssignContext,
     ) -> Result<()> {
@@ -4759,7 +4772,7 @@ impl AssignWorker {
             self.handle_assign_inner(
                 run_id,
                 prompt,
-                repo_url,
+                repos,
                 expected_codex_model,
                 context,
                 &mut guard,
@@ -4781,17 +4794,18 @@ impl AssignWorker {
         &mut self,
         run_id: uuid::Uuid,
         prompt: String,
-        repo_url: Option<String>,
+        repos: Vec<AssignRepo>,
         expected_codex_model: Option<String>,
         context: AssignContext,
         guard: &mut RunGroup,
     ) -> Result<()> {
         // Resolve the directory the agent runs in: this runner's single,
-        // exclusive `workspace.working_dir`. Clone-bootstrap it once if a repo
-        // url is provided (`resolve` tolerates a non-git task folder too).
+        // exclusive `workspace.working_dir`. Clone-bootstrap the assign's
+        // repos when the dir is empty (`resolve` tolerates a non-git task
+        // folder too).
         let workspace_path = {
             let wd = self.runner_config.workspace.working_dir.clone();
-            match crate::workspace::resolve(&wd, repo_url.as_deref()).await {
+            match crate::workspace::resolve(&wd, &repos).await {
                 Ok(crate::workspace::Resolution::ExistingRepo(p))
                 | Ok(crate::workspace::Resolution::Cloned(p))
                 | Ok(crate::workspace::Resolution::Directory(p)) => p,
@@ -4888,7 +4902,8 @@ impl AssignWorker {
             work_item_id: None,
             prompt_preview: prompt.chars().take(160).collect(),
             started_at: Utc::now(),
-            repo_url,
+            repo_url: repos.first().map(|repo| repo.url.clone()),
+            repos,
         })
         .await?;
 
@@ -7105,7 +7120,7 @@ mod tests {
                 .run(
                     uuid::Uuid::new_v4(),
                     "Summarize these notes".into(),
-                    None,
+                    vec![],
                     None,
                     AssignContext::default(),
                 )
@@ -7285,7 +7300,7 @@ mod tests {
         assert_eq!(chat_dir, wd);
 
         // The issue-run path resolves the very same directory (non-git folder).
-        let run_dir = match crate::workspace::resolve(&config.workspace.working_dir, None)
+        let run_dir = match crate::workspace::resolve(&config.workspace.working_dir, &[])
             .await
             .unwrap()
         {

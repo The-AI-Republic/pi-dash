@@ -1615,6 +1615,7 @@ mod tests {
             description: None,
             repo_url: Some("https://example.com/fx7.git".to_owned()),
             base_branch: Some("main".to_owned()),
+            repos: vec![],
             default_agent_executor: AgentExecutorKind::LocalRunner.value().to_owned(),
             project_lead_id: Some(uid(0x41)),
             default_assignee_id: None,

@@ -2268,6 +2268,7 @@ struct ProjectRow {
     description: Option<String>,
     repo_url: Option<String>,
     base_branch: Option<String>,
+    settings: Value,
     pool: i64,
     interval_impl: i64,
     interval_review: i64,
@@ -2302,6 +2303,7 @@ async fn load_project(pool: &sqlx::PgPool, project_id: &uuid::Uuid) -> Result<Pr
         } else {
             Some(m.base_branch)
         },
+        settings: serde_json::to_value(&m.settings).map_err(|_| Denial::ServerError)?,
         pool: i64::from(m.agent_default_max_ticks),
         interval_impl: i64::from(m.agent_default_interval_seconds),
         interval_review: i64::from(m.agent_review_default_interval_seconds),
@@ -2775,9 +2777,20 @@ async fn load_repo(
     project: &ProjectRow,
     work_branch: Option<&str>,
 ) -> Result<Value, Denial> {
+    // Every agent-facing repo read goes through the merged read
+    // (NEWPIDASH-409), never through the columns directly. No actor is
+    // at hand here, so the temporary copy cannot trigger; the project
+    // serializers still perform it (TEMPORARY, NEWPIDASH-416).
+    let stored = pidash_services::domain::project_repos::repos_from_stored(&project.settings);
+    let merged = pidash_services::domain::project_repos::merged_repos_in_memory(
+        &stored,
+        project.repo_url.as_deref().unwrap_or(""),
+        project.base_branch.as_deref().unwrap_or(""),
+    );
     let project_view = context::ProjectRepoView {
         url: project.repo_url.clone(),
         base_branch: project.base_branch.clone(),
+        repos: pidash_services::domain::project_repos::render_repos(&merged),
     };
     let proj_uuid = project
         .id

@@ -47,6 +47,20 @@ pub struct RunnersArgs {
     pub assignable_for: Option<String>,
 }
 
+/// One entry of a project's merged repository list (NEWPIDASH-409
+/// `settings.repos` merged with the legacy columns, as served by the
+/// project API). All fields default so responses from servers that do
+/// not serve the list yet (Django, older Rust) still parse.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProjectRepo {
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub base_branch: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectRow {
     pub id: String,
@@ -58,6 +72,10 @@ pub struct ProjectRow {
     /// checkout to a project. Empty when the project has no repository bound.
     #[serde(default)]
     pub repo_url: String,
+    /// Every repository of the project (NEWPIDASH-414). Empty when the
+    /// server does not serve the list yet.
+    #[serde(default)]
+    pub repos: Vec<ProjectRepo>,
     #[serde(default)]
     pub is_default: bool,
 }

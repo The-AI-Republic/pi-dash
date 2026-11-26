@@ -263,6 +263,38 @@ pub enum ClientMsg {
     },
 }
 
+/// One repository entry of an assign's merged repository list
+/// (NEWPIDASH-414). `base_branch` is `None` when the repo uses its own
+/// default branch. Both optionals default so a hand-written payload
+/// with only a URL still parses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssignRepo {
+    pub url: String,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub base_branch: Option<String>,
+}
+
+/// The clone list for an assign: `repos` when the server sent a
+/// non-empty list, else `repo_url` as a one-entry list, else empty.
+/// Old servers (no `repos` key) and old run configs (empty list) both
+/// land on the legacy single-repo behaviour.
+pub fn effective_repos(repos: &[AssignRepo], repo_url: Option<&str>) -> Vec<AssignRepo> {
+    if repos.is_empty() {
+        return repo_url
+            .filter(|url| !url.trim().is_empty())
+            .map(|url| AssignRepo {
+                url: url.to_owned(),
+                provider: None,
+                base_branch: None,
+            })
+            .into_iter()
+            .collect();
+    }
+    repos.to_vec()
+}
+
 /// Messages the cloud sends to the runner.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -303,6 +335,13 @@ pub enum ServerMsg {
         prompt: String,
         repo_url: Option<String>,
         repo_ref: Option<String>,
+        /// The project's merged repository list (NEWPIDASH-414): every
+        /// repo with its URL, provider and base branch. Old servers send
+        /// no `repos` key — it defaults to empty and the runner falls
+        /// back to `repo_url` as a one-entry list; old daemons ignore the
+        /// key and keep using `repo_url` alone.
+        #[serde(default)]
+        repos: Vec<AssignRepo>,
         /// Existing branch for this issue, forwarded to the agent via the
         /// prompt context. The agent checks it out itself; when `None`, the
         /// agent creates a fresh feature branch off the base branch. The
@@ -744,6 +783,11 @@ mod tests {
             prompt: "do the thing".into(),
             repo_url: Some("https://example.invalid/x.git".into()),
             repo_ref: Some("main".into()),
+            repos: vec![AssignRepo {
+                url: "https://example.invalid/x.git".into(),
+                provider: Some("other".into()),
+                base_branch: Some("main".into()),
+            }],
             git_work_branch: Some("feat/existing-branch".into()),
             expected_codex_model: None,
             approval_policy_overrides: None,
@@ -776,14 +820,83 @@ mod tests {
                 project_identifier,
                 workpad_body,
                 workpad_sha256,
+                repos,
                 ..
             } => {
                 assert!(issue_identifier.is_none());
                 assert!(project_identifier.is_none());
                 assert!(workpad_body.is_none());
                 assert!(workpad_sha256.is_none());
+                // No `repos` key: an old server — the list is empty and
+                // the runner falls back to `repo_url`.
+                assert!(repos.is_empty());
             }
             other => panic!("expected assign, got {other:?}"),
+        }
+    }
+
+    /// NEWPIDASH-414: the merged list rides along, and a new runner
+    /// works against an old server (no `repos` key → `repo_url`
+    /// fallback), while an old runner works against a new server
+    /// (unknown `repos` key ignored).
+    #[test]
+    fn effective_repos_prefers_list_over_legacy_url() {
+        // New server: the list wins, even when `repo_url` is also set.
+        let list = vec![
+            AssignRepo {
+                url: "https://github.com/acme/web".into(),
+                provider: Some("github".into()),
+                base_branch: Some("main".into()),
+            },
+            AssignRepo {
+                url: "https://gitlab.com/acme/api".into(),
+                provider: Some("gitlab".into()),
+                base_branch: None,
+            },
+        ];
+        let effective = effective_repos(&list, Some("https://example.invalid/legacy.git"));
+        assert_eq!(effective.len(), 2);
+        assert_eq!(effective[0].url, "https://github.com/acme/web");
+        assert_eq!(effective[1].base_branch, None);
+        // Old server: no list — the legacy URL becomes a one-entry list.
+        let fallback = effective_repos(&[], Some("https://example.invalid/x.git"));
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[0].url, "https://example.invalid/x.git");
+        // Neither: no clones.
+        assert!(effective_repos(&[], None).is_empty());
+        assert!(effective_repos(&[], Some("  ")).is_empty());
+    }
+
+    #[test]
+    fn new_server_assign_parses_on_old_shape() {
+        // An old runner's `ServerMsg` has no `repos` field: unknown keys
+        // are ignored, so a new server's assign still parses there.
+        #[derive(serde::Deserialize)]
+        struct OldAssign {
+            repo_url: Option<String>,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum OldServerMsg {
+            Assign(OldAssign),
+        }
+        let body = serde_json::json!({
+            "type": "assign",
+            "run_id": "11111111-1111-1111-1111-111111111111",
+            "prompt": "do the thing",
+            "repo_url": "https://example.invalid/x.git",
+            "repo_ref": "main",
+            "repos": [{"url": "https://example.invalid/x.git", "provider": "other", "base_branch": "main"}],
+        });
+        let msg: OldServerMsg =
+            serde_json::from_value(body).expect("new assign parses on old shape");
+        match msg {
+            OldServerMsg::Assign(assign) => {
+                assert_eq!(
+                    assign.repo_url.as_deref(),
+                    Some("https://example.invalid/x.git")
+                );
+            }
         }
     }
 

@@ -688,14 +688,20 @@ fn twin_map_project(row: &QueryResult) -> Result<ProjectView, CreationError> {
     let interval_impl: i32 = get(row, "agent_default_interval_seconds")?;
     let interval_review: i32 = get(row, "agent_review_default_interval_seconds")?;
     let interval_test: i32 = get(row, "agent_test_default_interval_seconds")?;
+    let repo_url: String = get(row, "repo_url")?;
+    let base_branch: String = get(row, "base_branch")?;
+    let settings: Value = row.try_get("", "settings").map_err(twin_db)?;
+    let repos =
+        crate::domain::project_repos::rendered_merged_repos(&settings, &repo_url, &base_branch);
     Ok(ProjectView {
         id: get(row, "id")?,
         workspace_id: get(row, "workspace_id")?,
         identifier: get(row, "identifier")?,
         name: get(row, "name")?,
         description: get(row, "description")?,
-        repo_url: get(row, "repo_url")?,
-        base_branch: get(row, "base_branch")?,
+        repo_url: Some(repo_url),
+        base_branch: Some(base_branch),
+        repos,
         default_agent_executor: get(row, "default_agent_executor")?,
         project_lead_id: get(row, "project_lead_id")?,
         default_assignee_id: get(row, "default_assignee_id")?,
