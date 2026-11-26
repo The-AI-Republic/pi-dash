@@ -7,7 +7,7 @@
 // limits and messages, the short-code shaper, the visibility options, the
 // automated-run policy math, the emblem value shapes and the parsed failure
 // codes. There is no executor choice: projects run on runners and the
-// default pod decides who runs the work (built-in engine design §6), so the
+// default pod decides who runs the work (Pi Dash Agent design §6), so the
 // tab neither shows nor writes `default_agent_executor`.
 
 import { isApiError, type ProjectSettingsDetail, type ProjectUpdateInput } from "@pidash/api-client";
@@ -98,6 +98,47 @@ export interface GeneralFormValues {
   /** True while the budget field is blank or uncapped; kept for restore. */
   lastCappedBudget: string;
   cadence: string;
+  /** Which stages run an agent: the agent decides, or the toggles below. */
+  stagesMode: StagesMode;
+  /** In Review runs an agent (read under Customize; kept under Auto). */
+  reviewStage: boolean;
+  /** In Test runs an agent (read under Customize; kept under Auto). */
+  testStage: boolean;
+}
+
+/** The stage-setting modes (`settings.agent_stages.mode`). */
+export type StagesMode = "auto" | "custom";
+
+/** The two choices of the Stages select. */
+export const STAGES_MODE_OPTIONS: ReadonlyArray<{ id: StagesMode; label: string }> = [
+  { id: "auto", label: "Auto — the agent decides which stages a work item needs" },
+  { id: "custom", label: "Customize" },
+];
+
+/** Helper text under the Stages control. */
+export const STAGES_HELP =
+  "A stage that is off is only a label. Work items can still be moved there, but no agent run starts unless you start one.";
+
+/** The stage values the form reads from a stored `settings.agent_stages`; missing reads as Auto, both on. */
+export function stagesFrom(
+  settings: ProjectSettingsDetail["settings"]
+): Pick<GeneralFormValues, "stagesMode" | "reviewStage" | "testStage"> {
+  const stored = settings?.agent_stages;
+  return {
+    stagesMode: stored?.mode === "custom" ? "custom" : "auto",
+    reviewStage: stored?.review ?? true,
+    testStage: stored?.test ?? true,
+  };
+}
+
+/** Whether the form's stage values differ from the stored ones. */
+export function stagesChanged(values: GeneralFormValues, project: Pick<ProjectSettingsDetail, "settings">): boolean {
+  const stored = stagesFrom(project.settings);
+  return (
+    values.stagesMode !== stored.stagesMode ||
+    values.reviewStage !== stored.reviewStage ||
+    values.testStage !== stored.testStage
+  );
 }
 
 export type GeneralField = "name" | "identifier" | "baseBranch" | "budget";
@@ -125,6 +166,7 @@ export function generalFormFrom(project: ProjectSettingsDetail): GeneralFormValu
     noCap: capped === null,
     lastCappedBudget: String(capped ?? DEFAULT_MAX_TICKS),
     cadence: selectCadence(project.agent_default_interval_seconds),
+    ...stagesFrom(project.settings),
   };
 }
 
@@ -246,6 +288,11 @@ export interface BuildPayloadInput {
   values: GeneralFormValues;
   /** True when the cadence picker moved in this form session. */
   cadenceDirty: boolean;
+  /**
+   * True when the stage setting differs from the stored one. The key is
+   * written only then, so an unrelated save never touches it.
+   */
+  stagesDirty?: boolean;
 }
 
 /**
@@ -254,7 +301,11 @@ export interface BuildPayloadInput {
  * columns ride along only when the picker moved, so a rhythm set elsewhere
  * survives an unrelated save.
  */
-export function buildGeneralPayload({ values, cadenceDirty }: BuildPayloadInput): ProjectUpdateInput {
+export function buildGeneralPayload({
+  values,
+  cadenceDirty,
+  stagesDirty = false,
+}: BuildPayloadInput): ProjectUpdateInput {
   const payload: ProjectUpdateInput = {
     name: values.name,
     identifier: values.identifier,
@@ -273,6 +324,11 @@ export function buildGeneralPayload({ values, cadenceDirty }: BuildPayloadInput)
     payload.agent_default_interval_seconds = seconds;
     payload.agent_review_default_interval_seconds = seconds;
     payload.agent_test_default_interval_seconds = seconds;
+  }
+  if (stagesDirty) {
+    payload.settings = {
+      agent_stages: { mode: values.stagesMode, review: values.reviewStage, test: values.testStage },
+    };
   }
   return payload;
 }

@@ -35,8 +35,8 @@ let serial = 0;
 
 /**
  * The remove action's label. The rebuild names it "Remove this computer"
- * (built-in engine design §11): it revokes both credentials and every
- * runner, the built-in engine included. The old app keeps "Delete".
+ * (Pi Dash Agent design §11): it revokes both credentials and every
+ * runner, the Pi Dash Agent included. The old app keeps "Delete".
  */
 function removeLabel(driver: ParityDriver): string {
   return driver.target === "web_new" ? "Remove this computer" : "Delete";
@@ -506,7 +506,7 @@ test(
           // The rebuild's copy names both credentials and the engine.
           expect(modal?.title).toContain("Remove this computer");
           expect(modal?.body).toContain("revokes both");
-          expect(modal?.body).toContain("built-in engine");
+          expect(modal?.body).toContain("Pi Dash Agent");
           expect(modal?.body).toContain("Nothing is uninstalled");
         } else {
           expect(modal?.title).toContain("Delete");

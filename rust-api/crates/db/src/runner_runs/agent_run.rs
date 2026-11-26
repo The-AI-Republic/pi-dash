@@ -3,7 +3,7 @@
 //! Agent run model (D-15, stage 5).
 //!
 //! Ports `AgentRun` (`apps/api/pi_dash/runner/models.py:872-1161`):
-//! all 39 columns/defaults/constraints/indexes (`Meta`,
+//! all 41 columns/defaults/constraints/indexes (`Meta`,
 //! `:1037-1102`), the `save` pod-resolution order + owner→created_by
 //! mirror (`:1104-1134`), the token pseudo-fields as
 //! `(usage->>key)::bigint` reads (`:1024-1026`,
@@ -13,7 +13,7 @@
 //! live on the L1 [`pidash_types::runner_runs::AgentRunStatus`] and
 //! are reused, not re-ported.
 //!
-//! D-11's `db::dispatch::agent_run` keeps its own 22-column read
+//! D-11's `db::agent_runs::agent_run` keeps its own 22-column read
 //! shape for dispatch queries; this is the runner-domain full port.
 //!
 //! Fixture: `rust-api/fixtures/runner_runs/fx-run-02-models-runs.golden.json`
@@ -32,7 +32,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::integrations::OnDelete;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::runner_runs::{AgentRunStatus, AgentRunTrigger};
 
 /// Physical table (`Meta.db_table`, `models.py:1038`).
@@ -69,6 +69,7 @@ pub const COLUMNS: &[&str] = &[
     "trigger",
     "prompt_manifest",
     "phase_kind",
+    "work_type",
     "run_config",
     "required_capabilities",
     "thread_id",
@@ -77,6 +78,7 @@ pub const COLUMNS: &[&str] = &[
     "done_payload",
     "error_details",
     "refusal_category",
+    "failure_reason",
     "llm_model",
     "usage",
     "input_tokens",
@@ -86,6 +88,9 @@ pub const COLUMNS: &[&str] = &[
     "assigned_at",
     "started_at",
     "ended_at",
+    "assignment_token",
+    "assignment_protocol",
+    "capacity_wait",
 ];
 
 /// `status` bound (`models.py:947-952`, `max_length=24`).
@@ -98,8 +103,15 @@ pub const CANCEL_REASON_MAX_LENGTH: usize = 512;
 pub const TRIGGER_MAX_LENGTH: usize = 24;
 /// `phase_kind` bound (`models.py:989`, `max_length=32`).
 pub const PHASE_KIND_MAX_LENGTH: usize = 32;
+/// `work_type` bound (PDASHOSS01-234, `max_length=32`): the effective
+/// work type stamped at run creation.
+pub const WORK_TYPE_MAX_LENGTH: usize = 32;
 /// `thread_id` bound (`models.py:992`, `max_length=128`).
 pub const THREAD_ID_MAX_LENGTH: usize = 128;
+/// `failure_reason` bound (`models.py`, PDASHOSS01-183, `max_length=64`,
+/// `db_index=True`). The canonical taxonomy lives in
+/// `pidash_types::runner_runs::failure`; not declared as `choices`.
+pub const FAILURE_REASON_MAX_LENGTH: usize = 64;
 /// `llm_model` bound (`models.py:1015`, `max_length=128`).
 pub const LLM_MODEL_MAX_LENGTH: usize = 128;
 
@@ -119,7 +131,8 @@ pub const DEFAULT_DISPATCH_ATTEMPTS: i32 = 0;
 pub const DEFAULT_TRIGGER: AgentRunTrigger = AgentRunTrigger::Direct;
 /// Shared `default=""` for `cancel_reason` (`models.py:961`),
 /// `prompt` (`models.py:966`), `phase_kind` (`models.py:989`),
-/// `thread_id` (`models.py:992`) and `llm_model`; also what the
+/// `thread_id` (`models.py:992`), `failure_reason` (PDASHOSS01-183)
+/// and `llm_model` (`models.py:1015`); also what the
 /// `error_code` / `error` / `refusal_category` reads return for an
 /// absent `error_details` key.
 pub const EMPTY_TEXT: &str = "";
@@ -286,7 +299,7 @@ pub fn cloud_assignment_valid(
     if executor_kind.is_machine_executor() {
         return true;
     }
-    executor_kind == AgentExecutorKind::CloudAgent
+    executor_kind == AgentExecutorKind::RetiredCloudRun
         && runner_id.is_none()
         && pinned_runner_id.is_none()
         && owner_id.is_none()
@@ -456,6 +469,7 @@ pub struct AgentRun {
     pub trigger: String,
     pub prompt_manifest: Option<serde_json::Value>,
     pub phase_kind: String,
+    pub work_type: String,
     pub run_config: serde_json::Value,
     pub required_capabilities: serde_json::Value,
     pub thread_id: String,
@@ -464,6 +478,9 @@ pub struct AgentRun {
     pub done_payload: Option<serde_json::Value>,
     pub error_details: serde_json::Value,
     pub refusal_category: String,
+    /// Canonical failure taxonomy value; non-empty exactly when
+    /// `status == FAILED` (PDASHOSS01-183).
+    pub failure_reason: String,
     pub llm_model: String,
     pub usage: serde_json::Value,
     pub input_tokens: Option<i64>,
@@ -473,6 +490,9 @@ pub struct AgentRun {
     pub assigned_at: Option<chrono::DateTime<chrono::Utc>>,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
     pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub assignment_token: Option<uuid::Uuid>,
+    pub assignment_protocol: i16,
+    pub capacity_wait: Option<serde_json::Value>,
 }
 
 impl AgentRun {
@@ -491,7 +511,7 @@ impl AgentRun {
 mod tests {
     use super::*;
     use crate::runner_runs::test_support as ts;
-    use pidash_types::dispatch::MACHINE_EXECUTORS;
+    use pidash_types::agent_runs::MACHINE_EXECUTORS;
 
     fn run_fixture() -> serde_json::Value {
         ts::model(&ts::fx02(), "AgentRun").clone()
@@ -499,8 +519,17 @@ mod tests {
 
     #[test]
     fn columns_match_fixture_in_order() {
-        assert_eq!(ts::owned(COLUMNS), ts::columns(&run_fixture()));
-        assert_eq!(COLUMNS.len(), 40);
+        // NEWPIDASH-241 T1: three native-owned columns added beyond the Django baseline.
+        let fixture_cols = ts::columns(&run_fixture());
+        assert_eq!(
+            &ts::owned(COLUMNS)[..fixture_cols.len()],
+            fixture_cols.as_slice()
+        );
+        assert_eq!(COLUMNS.len(), 45);
+        assert_eq!(
+            &COLUMNS[fixture_cols.len()..],
+            ["assignment_token", "assignment_protocol", "capacity_wait"]
+        );
     }
 
     #[test]
@@ -535,7 +564,7 @@ mod tests {
             MACHINE_EXECUTORS,
             [
                 AgentExecutorKind::LocalRunner,
-                AgentExecutorKind::ManagedRunner
+                AgentExecutorKind::PidashAgent
             ]
         );
         let some_id = Some(uuid::Uuid::nil());
@@ -549,7 +578,7 @@ mod tests {
         }
         // Cloud agent with no local assignment is valid.
         assert!(cloud_assignment_valid(
-            AgentExecutorKind::CloudAgent,
+            AgentExecutorKind::RetiredCloudRun,
             None,
             None,
             None,
@@ -557,28 +586,28 @@ mod tests {
         ));
         // Each local-assignment column alone invalidates a cloud run.
         assert!(!cloud_assignment_valid(
-            AgentExecutorKind::CloudAgent,
+            AgentExecutorKind::RetiredCloudRun,
             some_id,
             None,
             None,
             None
         ));
         assert!(!cloud_assignment_valid(
-            AgentExecutorKind::CloudAgent,
+            AgentExecutorKind::RetiredCloudRun,
             None,
             some_id,
             None,
             None
         ));
         assert!(!cloud_assignment_valid(
-            AgentExecutorKind::CloudAgent,
+            AgentExecutorKind::RetiredCloudRun,
             None,
             None,
             some_id,
             None
         ));
         assert!(!cloud_assignment_valid(
-            AgentExecutorKind::CloudAgent,
+            AgentExecutorKind::RetiredCloudRun,
             None,
             None,
             None,
@@ -685,7 +714,9 @@ mod tests {
             "cancel_reason",
             "prompt",
             "phase_kind",
+            "work_type",
             "thread_id",
+            "failure_reason",
             "llm_model",
         ] {
             assert_eq!(
@@ -700,7 +731,9 @@ mod tests {
             ("cancel_reason", CANCEL_REASON_MAX_LENGTH),
             ("trigger", TRIGGER_MAX_LENGTH),
             ("phase_kind", PHASE_KIND_MAX_LENGTH),
+            ("work_type", WORK_TYPE_MAX_LENGTH),
             ("thread_id", THREAD_ID_MAX_LENGTH),
+            ("failure_reason", FAILURE_REASON_MAX_LENGTH),
             ("llm_model", LLM_MODEL_MAX_LENGTH),
         ] {
             assert_eq!(

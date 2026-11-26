@@ -24,6 +24,24 @@ use super::error::{Error, Outcome};
 pub const WORKPAD_MISSING_BODY: &str =
     r#"{"error":"PATCH requires a `body` field in the request payload."}"#;
 
+/// The workpad size cap, in characters (`.ai_design/unified_workpad/
+/// design.md` U7, §8.5). The workpad is inlined into every issue-run
+/// prompt, so a runaway note costs every later run. Existing longer
+/// workpads are not truncated; the next agent write must fit. Applies to
+/// agent writes only ([`WorkpadWrite::from_run`]).
+pub const WORKPAD_MAX_CHARS: usize = 16_000;
+
+/// The [`WORKPAD_MAX_CHARS`] refusal body.
+pub const WORKPAD_TOO_LONG: &str = r#"{"error":"workpad is longer than 16000 characters: shorten it (drop Keep in mind bullets that are no longer true and keep the last ten Log lines) and retry"}"#;
+
+/// Refuse a workpad body over [`WORKPAD_MAX_CHARS`] characters.
+pub fn check_workpad_size(workpad: &str) -> Result<(), Error> {
+    if workpad.chars().count() > WORKPAD_MAX_CHARS {
+        return Err(Error::FieldErrors(WORKPAD_TOO_LONG.to_owned()));
+    }
+    Ok(())
+}
+
 /// `"body" in request.data` (`:3287`): key membership on objects,
 /// element membership on arrays, substring on strings — and `TypeError`
 /// (500) on numbers/bools/null.
@@ -82,18 +100,24 @@ pub async fn update(
         // and validation only omits it when absent.
         return Err(Error::ServerError);
     };
+    if write.from_run {
+        check_workpad_size(&workpad)?;
+    }
     // The locked read + sparse `save()` (workpad, audit, hook recomputes)
     // run in the domain write; the completion pair when the state moved.
     // No orchestration fire — the port has none.
     let updated_at = now_utc();
     let transition: Arc<dyn IssueTransitionHook> = deps.transition.clone();
     let enqueue: Arc<dyn TaskEnqueueHook> = deps.enqueue.clone();
+    let if_body_sha256 = write.if_body_sha256.clone();
+    let new_sha = crate::orchestration::creation::workpad_sha256(&workpad);
     let outcome = domain::run(ctx, &deps.orm, |txn| {
         let transition = transition.clone();
         let enqueue = enqueue.clone();
         let pool = deps.pool.clone();
         let ctx = ctx.clone();
         let slug = slug.to_owned();
+        let if_body_sha256 = if_body_sha256.clone();
         Box::pin(async move {
             txn.hooks_mut().register(transition);
             txn.hooks_mut().register(enqueue);
@@ -107,6 +131,7 @@ pub async fn update(
                     slug,
                     workpad,
                     updated_at,
+                    if_body_sha256,
                 },
             )
             .await
@@ -114,6 +139,19 @@ pub async fn update(
     })
     .await
     .map_err(|error| {
+        if let Some(current) = domain_issues::stale_workpad_sha(&error) {
+            // 412 with the current hash echo (NEWPIDASH-320 §6.1): the
+            // caller re-reads, re-applies its edit, and retries.
+            let mut out = Map::with_capacity(2);
+            out.insert(
+                "error".to_owned(),
+                Value::String("workpad changed since you read it".to_owned()),
+            );
+            out.insert("body_sha256".to_owned(), Value::String(current.to_owned()));
+            return Error::PreconditionFailed(
+                serde_json::to_string(&out).expect("412 body serializes"),
+            );
+        }
         if error.is_not_found() {
             Error::NotFound
         } else {
@@ -123,8 +161,9 @@ pub async fn update(
     if outcome.stopped().is_some() {
         return Err(Error::ServerError);
     }
-    // The timestamp only — the body just came from the caller (`:3315-3320`).
-    let mut out = Map::with_capacity(1);
+    // The timestamp plus the new body's hash — the body itself just came
+    // from the caller (`:3315-3320`), so it is not repeated.
+    let mut out = Map::with_capacity(2);
     out.insert(
         "updated_at".to_owned(),
         Value::String(pidash_compat::datetime::render_datetime_in(
@@ -132,6 +171,7 @@ pub async fn update(
             &tz,
         )),
     );
+    out.insert("body_sha256".to_owned(), Value::String(new_sha));
     Ok(Outcome::ok(
         serde_json::to_string(&out).map_err(|_| Error::ServerError)?,
     ))
@@ -150,11 +190,31 @@ pub struct WorkpadWrite<'a> {
     pub issue_id: Uuid,
     /// The negotiated payload.
     pub body: &'a Value,
+    /// Stale-write guard (NEWPIDASH-320 §6.1): the caller-read body hash
+    /// the locked row must still match. `None` (old CLI) writes
+    /// unconditionally, as today.
+    pub if_body_sha256: Option<String>,
+    /// The write came from an agent run (the request carries the run
+    /// header). Only these are held to [`WORKPAD_MAX_CHARS`]: the cap keeps
+    /// agent notes short, and a person's edit is never refused for length
+    /// (unified workpad §8.5).
+    pub from_run: bool,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workpad_size_cap_counts_characters() {
+        assert_eq!(check_workpad_size(&"x".repeat(WORKPAD_MAX_CHARS)), Ok(()));
+        assert_eq!(
+            check_workpad_size(&"x".repeat(WORKPAD_MAX_CHARS + 1)),
+            Err(Error::FieldErrors(WORKPAD_TOO_LONG.to_owned()))
+        );
+        // Characters, not bytes: a multi-byte note at the cap still fits.
+        assert_eq!(check_workpad_size(&"é".repeat(WORKPAD_MAX_CHARS)), Ok(()));
+    }
 
     #[test]
     fn workpad_body_membership() {

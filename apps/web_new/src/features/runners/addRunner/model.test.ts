@@ -167,7 +167,7 @@ describe("agent gating", () => {
 
   it("disables unsupported agents and explains the upgrade", () => {
     const gating = agentGating({ id: "m", label: "m", supportedAgents: ["claude-code", "codex"] });
-    expect(gating.disabled).toEqual(["cursor-agent", "open-claw", "grok", "muse-code"]);
+    expect(gating.disabled).toEqual(["cursor-agent", "open-claw", "grok", "antigravity", "muse-code"]);
     expect(gating.hint).toContain("Update pidash");
   });
 
@@ -175,7 +175,7 @@ describe("agent gating", () => {
     const gating = agentGating({
       id: "m",
       label: "m",
-      supportedAgents: ["claude-code", "codex", "cursor-agent", "open-claw", "grok", "muse-code"],
+      supportedAgents: ["claude-code", "codex", "cursor-agent", "open-claw", "grok", "antigravity", "muse-code"],
     });
     expect(gating).toEqual({ disabled: [], hint: null });
   });

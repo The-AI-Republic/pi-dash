@@ -6,7 +6,14 @@
 // confirmation open until the write settles.
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { deleteRunner, revokeRunner, updateRunner, type RunnerPatch } from "@pidash/api-client";
+import {
+  deleteRunner,
+  pauseRunner,
+  resumeRunner,
+  revokeRunner,
+  updateRunner,
+  type RunnerPatch,
+} from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { runnersKeys } from "./keys.js";
@@ -51,5 +58,32 @@ export function useUpdateRunner(workspaceSlug: string) {
     mutationFn: (input: { runnerId: string; patch: RunnerPatch }) =>
       updateRunner(getAppClient(), input.runnerId, input.patch),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: runnersKeys.all(workspaceSlug) }),
+  });
+}
+
+/** One per-runner pause toggle: `paused` is the state to reach. */
+export interface SetRunnerPausedInput {
+  runnerId: string;
+  paused: boolean;
+}
+
+/**
+ * Pause or resume dispatch to one runner (RUN-010). A pause answers the
+ * runs the runner still holds (counted as `inFlight`); a resume holds none.
+ */
+export function useSetRunnerPaused(workspaceSlug: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: SetRunnerPausedInput): Promise<{ inFlight: number }> => {
+      if (!input.paused) {
+        await resumeRunner(getAppClient(), input.runnerId);
+        return { inFlight: 0 };
+      }
+      const paused = await pauseRunner(getAppClient(), input.runnerId);
+      return { inFlight: paused.in_flight_runs.length };
+    },
+    // Settled, not success: a refusal (409 runner_revoked, 403) means the
+    // row is stale, so refetch it either way.
+    onSettled: () => queryClient.invalidateQueries({ queryKey: runnersKeys.all(workspaceSlug) }),
   });
 }

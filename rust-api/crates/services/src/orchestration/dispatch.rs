@@ -22,10 +22,10 @@
 //! [`clock`][crate::orchestration::clock] (`reconcile`, `on_retick` via
 //! the event, `reset_ticker_after_comment_and_run`, `disarm_ticker`,
 //! `compute_next_run_at`, `effective_interval_seconds`), executor policy
-//! from L3/L4 ([`effective_executor_for_issue`][crate::dispatch::effective_executor_for_issue],
-//! [`user_has_llm_config`][crate::dispatch::user_has_llm_config],
-//! [`LlmProfile`][crate::dispatch::LlmProfile],
-//! [`ENROLLED_MANAGED_RUNNERS_EXISTS_SQL`][crate::dispatch::ENROLLED_MANAGED_RUNNERS_EXISTS_SQL])
+//! from L3/L4 ([`effective_executor_for_issue`][crate::run_creation::effective_executor_for_issue],
+//! [`user_has_llm_config`][crate::run_creation::user_has_llm_config],
+//! [`LlmProfile`][crate::run_creation::LlmProfile],
+//! [`ENROLLED_MANAGED_RUNNERS_EXISTS_SQL`][crate::run_creation::ENROLLED_MANAGED_RUNNERS_EXISTS_SQL])
 //! and the role verdict from
 //! [`check_project_role`][pidash_auth::permissions::membership::check_project_role].
 //!
@@ -75,12 +75,11 @@ use pidash_db::tasks_ticker::models::issue_agent_ticker::{
     IssueAgentTicker, COLUMNS as TICKER_COLUMNS,
 };
 use pidash_db::tasks_ticker::{pool_size_or_default, TickerDisarmReason};
-use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::orchestration::{
-    auto_pauses_on_cap, is_ticking_state, ticking_state_names_by_group, MACHINE_TRIGGERS,
-    RUN_AI_ACTIVE_RUN_EXISTS, RUN_AI_NO_ELIGIBLE_RUNNER, RUN_AI_NO_ELIGIBLE_RUNNER_IN_POD,
-    RUN_AI_NO_POD, TRIGGER_RUN_AI, WAIT_CAP_REACHED, WAIT_GRANTED, WAIT_INFINITE_POOL,
-    WAIT_NO_TICKER, WAIT_REARMABLE_DISARMS,
+    auto_pauses_on_cap, phase_config_for, stage_runs_automatically, ticking_state_names_by_group,
+    StageSwitches, MACHINE_TRIGGERS, RUN_AI_ACTIVE_RUN_EXISTS, RUN_AI_NO_ELIGIBLE_RUNNER,
+    RUN_AI_NO_ELIGIBLE_RUNNER_IN_POD, RUN_AI_NO_POD, TRIGGER_RUN_AI, WAIT_CAP_REACHED,
+    WAIT_GRANTED, WAIT_INFINITE_POOL, WAIT_NO_TICKER, WAIT_REARMABLE_DISARMS,
 };
 use pidash_types::orchestration::{StateRef, TickerEvent};
 
@@ -89,7 +88,9 @@ use super::creation::{
     self, ContinuationRequest, CreateDispatchRequest, CreationError, CreationSeam,
     DedicatedPinArgs, FinalizeAgentRunSeam, IssueView, StateView,
 };
-use crate::dispatch::{effective_executor_for_issue, user_has_llm_config, LlmProfile, UserFlags};
+use crate::run_creation::{
+    effective_executor_for_issue, user_has_llm_config, LlmProfile, UserFlags,
+};
 
 // ---------------------------------------------------------------------------
 // Reasons + bodies
@@ -192,7 +193,7 @@ pub const PROJECT_DEFAULT_STATE_SQL: &str = "SELECT default_state_id FROM projec
 /// The project columns the dispatch drivers read for clock policy
 /// (`issue.project` follows in `reconcile` / `wait_ticker`). `$1` is the
 /// project id.
-pub const PROJECT_CLOCK_POLICY_SQL: &str = "SELECT agent_ticking_enabled, agent_default_max_ticks, agent_default_interval_seconds, agent_review_default_interval_seconds, agent_test_default_interval_seconds FROM projects WHERE id = $1";
+pub const PROJECT_CLOCK_POLICY_SQL: &str = "SELECT agent_ticking_enabled, agent_default_max_ticks, agent_default_interval_seconds, agent_review_default_interval_seconds, agent_test_default_interval_seconds, settings FROM projects WHERE id = $1";
 
 /// Wait activity row (`_record_wait_activity`, `:839-852`): full column
 /// list with the Django-side defaults. `$1` now, `$2` now, `$3` id, `$4`
@@ -364,13 +365,14 @@ pub fn wait_rearms(
     pool: i32,
     ticking_enabled: bool,
     state: Option<&StateRef<'_>>,
+    switches: StageSwitches,
 ) -> bool {
     !ticker.enabled
         && WAIT_REARMABLE_DISARMS.contains(&ticker.disarm_reason.as_str())
         && !ticker.cap_reached(pool)
         && !ticker.user_disabled
         && ticking_enabled
-        && is_ticking_state(state)
+        && stage_runs_automatically(state, switches)
 }
 
 /// One cloud/managed creator candidate (`:921-927` head): dedup by id
@@ -444,7 +446,9 @@ pub fn pause_guard_verdict(probe: &PauseProbe<'_>) -> Option<PauseStop> {
     let Some(state) = probe.state else {
         return Some(PauseStop::NoState);
     };
-    if !is_ticking_state(Some(&state)) {
+    // Only In Progress auto-pauses, and In Progress always runs
+    // automatically, so the static registry answers this guard.
+    if phase_config_for(Some(&state)).is_none() {
         return Some(PauseStop::NotTicking);
     }
     if !auto_pauses_on_cap(Some(&state)) {
@@ -577,7 +581,7 @@ pub trait PodRunnerMatcher: Send + Sync {
 /// Sync methods are the D-11 seams (closures the store carries):
 /// `has_usable_llm_config` (`agent_execution.py:78-80`),
 /// `managed_llm_profile` (`managed_runner/policy.py:27-36`), and the
-/// operator kill switch (`managed_runner_is_enabled`, L3).
+/// operator kill switch (`pidash_agent_is_enabled`, L3).
 #[allow(async_fn_in_trait)]
 pub trait DispatchSeam: CreationSeam + FinalizeAgentRunSeam {
     /// The Re-tick issue lock + read ([`RETICK_ISSUE_LOCK_SQL`] then the
@@ -687,7 +691,7 @@ pub trait DispatchSeam: CreationSeam + FinalizeAgentRunSeam {
         workspace_slug: &str,
         project_id: Uuid,
     ) -> Result<RoleVerdict, DispatchError>;
-    /// The operator kill switch (`managed_runner_is_enabled`, L3).
+    /// The operator kill switch (`pidash_agent_is_enabled`, L3).
     fn managed_runner_enabled(&self) -> bool;
     /// `has_usable_llm_config(user)` (`agent_execution.py:78-80`).
     fn has_usable_llm_config(&self, user_id: Uuid) -> bool;
@@ -902,7 +906,7 @@ pub async fn resolve_creator_for_trigger<S: DispatchSeam>(
     let effective = effective_executor(seam, &issue).await?;
     // Every machine executor (including a stale `managed_runner`
     // value, the legacy spelling of one) takes the machine branch.
-    if pidash_types::dispatch::MACHINE_EXECUTORS
+    if pidash_types::agent_runs::MACHINE_EXECUTORS
         .iter()
         .any(|kind| kind.value() == effective)
     {
@@ -1020,35 +1024,6 @@ pub async fn preflight_eligibility_or_bounce<S: DispatchSeam>(
     let issue = CreationSeam::issue(seam, issue_id)
         .await
         .map_err(DispatchError::Store)?;
-    let effective = effective_executor(seam, &issue).await?;
-    if effective == AgentExecutorKind::CloudAgent.value() {
-        if let Some(creator) = run_creator {
-            let flags = CreationSeam::user_flags(seam, creator)
-                .await
-                .map_err(DispatchError::Store)?;
-            if user_has_llm_config(Some(&flags), || seam.has_usable_llm_config(creator)) {
-                return Ok(PreflightOutcome {
-                    proceed: true,
-                    logs: Vec::new(),
-                });
-            }
-        }
-        let bounced = bounce_issue_no_eligible_runner(
-            seam,
-            issue_id,
-            triggered_by,
-            REASON_NO_LLM_CONFIG,
-            "",
-            now,
-            jitter_secs,
-        )
-        .await?;
-        return Ok(PreflightOutcome {
-            proceed: false,
-            logs: bounced.logs,
-        });
-    }
-
     // Every other executor is a runner (built_engine_as_runner §6; a
     // stale `managed_runner` value is the legacy spelling of one).
     // "The runner is offline right now" is never a reason to bounce:
@@ -1136,10 +1111,13 @@ pub async fn bounce_issue_no_eligible_runner<S: DispatchSeam>(
                 .await
                 .map_err(DispatchError::Store)?;
             let safe = fallback.as_ref().is_some_and(|state| {
-                !is_ticking_state(Some(&StateRef {
-                    group: state.group.as_str(),
-                    name: state.name.as_str(),
-                }))
+                !stage_runs_automatically(
+                    Some(&StateRef {
+                        group: state.group.as_str(),
+                        name: state.name.as_str(),
+                    }),
+                    policy.stage_switches(),
+                )
             });
             if safe {
                 target = fallback;
@@ -1178,10 +1156,13 @@ pub async fn bounce_issue_no_eligible_runner<S: DispatchSeam>(
     // this bounce endlessly. Silent when no ticker row exists
     // (`disarm_ticker` returns `None` without logging).
     let still_ticking = current_state.as_ref().is_some_and(|state| {
-        is_ticking_state(Some(&StateRef {
-            group: state.group.as_str(),
-            name: state.name.as_str(),
-        }))
+        stage_runs_automatically(
+            Some(&StateRef {
+                group: state.group.as_str(),
+                name: state.name.as_str(),
+            }),
+            policy.stage_switches(),
+        )
     });
     if still_ticking {
         let mut ticker = seam.lock_ticker_for_issue(issue_id).await?;
@@ -1215,35 +1196,6 @@ pub async fn bounce_issue_no_eligible_runner<S: DispatchSeam>(
     })
     .await?;
     Ok(BounceOutcome { moved_to, logs })
-}
-
-/// The no-creator bounce shared by the continuation and Run AI paths
-/// (`:1173-1185`, `:1283-1290`): cloud bounces loudly, every runner
-/// value stays silent (the run waits in the pod).
-async fn bounce_no_creator<S: DispatchSeam>(
-    seam: &mut S,
-    issue: &IssueView,
-    issue_id: Uuid,
-    triggered_by: &str,
-    now: DateTime<Utc>,
-    jitter_secs: f64,
-    logs: &mut Vec<LogLine>,
-) -> Result<(), DispatchError> {
-    let effective = effective_executor(seam, issue).await?;
-    if effective == AgentExecutorKind::CloudAgent.value() {
-        let bounced = bounce_issue_no_eligible_runner(
-            seam,
-            issue_id,
-            triggered_by,
-            REASON_NO_LLM_CONFIG,
-            "",
-            now,
-            jitter_secs,
-        )
-        .await?;
-        logs.extend(bounced.logs);
-    }
-    Ok(())
 }
 
 /// Public wrapper for tick / Comment & Run dispatch
@@ -1329,19 +1281,6 @@ pub async fn dispatch_continuation_run<S: DispatchSeam>(
             triggered_by,
             "WARNING",
         ));
-        let issue = CreationSeam::issue(seam, issue_id)
-            .await
-            .map_err(DispatchError::Store)?;
-        bounce_no_creator(
-            seam,
-            &issue,
-            issue_id,
-            triggered_by,
-            now,
-            jitter_secs,
-            &mut logs,
-        )
-        .await?;
         return Ok(ContinuationDispatchOutcome { run_id: None, logs });
     };
     let pod = creation::resolve_pod_for_issue(seam, issue_id)
@@ -1507,19 +1446,6 @@ pub async fn dispatch_run_ai_run_with_reason<S: DispatchSeam>(
             TRIGGER_RUN_AI,
             "WARNING",
         ));
-        let issue = CreationSeam::issue(seam, issue_id)
-            .await
-            .map_err(DispatchError::Store)?;
-        bounce_no_creator(
-            seam,
-            &issue,
-            issue_id,
-            TRIGGER_RUN_AI,
-            now,
-            jitter_secs,
-            &mut logs,
-        )
-        .await?;
         return Ok(RunAiOutcome {
             run_id: None,
             reason: Some(RUN_AI_NO_ELIGIBLE_RUNNER.to_owned()),
@@ -1903,6 +1829,7 @@ pub async fn wait_ticker<S: DispatchSeam>(
         pool,
         clock::project_ticking_enabled(&policy),
         state_ref.as_ref(),
+        policy.stage_switches(),
     );
     if rearmed {
         row.enabled = true;
@@ -2085,16 +2012,17 @@ pub async fn maybe_apply_deferred_pause<S: DispatchSeam>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pidash_types::agent_runs::AgentExecutorKind;
     use serde_json::{json, Value};
     use std::cell::RefCell;
     use std::collections::HashMap;
 
-    use pidash_db::dispatch::status::{AgentRunStatus, AgentRunTrigger};
+    use pidash_db::agent_runs::status::{AgentRunStatus, AgentRunTrigger};
     use pidash_types::orchestration::{TRIGGER_COMMENT_AND_RUN, TRIGGER_TICK, WAIT_ACTIVITY_FIELD};
 
     use super::super::creation::{
-        AdmissionError, ExecutionError, ExecutionFields, ExecutionRequest, LockedIssue,
-        NewAgentRun, NewSystemComment, PinOutcome, PodView, RenderBundle, RunView, RunnerView,
+        ExecutionError, ExecutionFields, ExecutionRequest, LockedIssue, NewAgentRun,
+        NewSystemComment, PinOutcome, PodView, RenderBundle, RunView, RunnerView,
     };
 
     static PREFLIGHT: &str =
@@ -2170,6 +2098,7 @@ mod tests {
             priority: Some("none".to_owned()),
             sequence_id: 1,
             target_date: None,
+            work_type: None,
         }
     }
 
@@ -2189,6 +2118,7 @@ mod tests {
             interval_impl: 10800,
             interval_review: 10800,
             interval_test: 10800,
+            default_work_type: "software".to_owned(),
         }
     }
 
@@ -2256,6 +2186,7 @@ mod tests {
             agent_default_interval_seconds: Some(10800),
             agent_review_default_interval_seconds: Some(10800),
             agent_test_default_interval_seconds: Some(10800),
+            ..Default::default()
         }
     }
 
@@ -2455,15 +2386,6 @@ mod tests {
             todo!("builder-success paths replay live in jobs")
         }
 
-        async fn lock_cloud_creation_capacity(
-            &mut self,
-            _workspace_id: Uuid,
-            _executor_kind: AgentExecutorKind,
-            _automatic: bool,
-        ) -> Result<Option<AdmissionError>, CreationError> {
-            todo!("builder-success paths replay live in jobs")
-        }
-
         fn dispatch_after_commit(&mut self, _run_id: Uuid) {
             todo!("builder-success paths replay live in jobs")
         }
@@ -2479,9 +2401,6 @@ mod tests {
             todo!("builder-success paths replay live in jobs")
         }
 
-        fn extra_toolsets_schema_tool(&self) -> String {
-            String::new()
-        }
         async fn dedicated_pin(
             &mut self,
             args: &DedicatedPinArgs<'_>,
@@ -3103,58 +3022,6 @@ mod tests {
     }
 
     // -- preflight (F) -------------------------------------------------------
-
-    #[tokio::test]
-    async fn preflight_f1_cloud_llm_ok() {
-        let mut seam = stocked_as("8101");
-        as_executor(&mut seam, "cloud_agent");
-        let creator = uid(0x41);
-        seam.llm.insert(creator, true);
-        let matcher = FakeMatcher { answer: false };
-        let out = preflight_eligibility_or_bounce(
-            &mut seam,
-            fxid("8101"),
-            Some(creator),
-            uid(0x50),
-            "tick",
-            &matcher,
-            now(),
-            JITTER,
-        )
-        .await
-        .expect("preflight");
-        assert!(out.proceed);
-        assert!(out.logs.is_empty());
-        assert!(seam.comments.is_empty());
-    }
-
-    #[tokio::test]
-    async fn preflight_f2_cloud_no_llm() {
-        let mut seam = stocked_as("8102");
-        as_executor(&mut seam, "cloud_agent");
-        let creator = uid(0x41);
-        seam.llm.insert(creator, false);
-        seam.backlog_target = Some(backlog_hi());
-        seam.ticker = None;
-        let matcher = FakeMatcher { answer: false };
-        let out = preflight_eligibility_or_bounce(
-            &mut seam,
-            fxid("8102"),
-            Some(creator),
-            uid(0x50),
-            "tick",
-            &matcher,
-            now(),
-            JITTER,
-        )
-        .await
-        .expect("preflight");
-        assert!(!out.proceed);
-        assert_eq!(out.logs, fx_logs(PREFLIGHT, "F2_cloud_no_llm"));
-        assert_eq!(seam.issue_states.get(&fxid("8102")), Some(&uid(0x31)));
-        assert_eq!(seam.comments.len(), 1);
-        assert_eq!(seam.comments[0].comment_html, BOUNCE_BODY_NO_LLM_CONFIG);
-    }
 
     #[tokio::test]
     async fn preflight_f3_runner_chain() {
@@ -3884,39 +3751,6 @@ mod tests {
         assert_eq!(out.run_id, None);
         assert_eq!(out.logs, fx_logs(CONTINUATION, "A6_local_no_creator"));
         assert_eq!(seam.comments.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn continuation_a7_cloud_no_creator_bounces() {
-        let mut seam = stocked_as("8133");
-        cloud_executor(&mut seam);
-        with_prior(&mut seam);
-        seam.project.as_mut().expect("project").id = fxid("0809");
-        seam.issue.as_mut().expect("issue").project_id = Some(fxid("0809"));
-        seam.backlog_target = None;
-        seam.default_state_id = None;
-        seam.ticker = None;
-        let matcher = FakeMatcher { answer: false };
-        let out = dispatch_continuation_run(
-            &mut seam,
-            fxid("8133"),
-            "tick",
-            None,
-            false,
-            false,
-            &matcher,
-            now(),
-            JITTER,
-        )
-        .await
-        .expect("dispatch");
-        assert_eq!(out.run_id, None);
-        assert_eq!(
-            out.logs,
-            fx_logs(CONTINUATION, "A7_cloud_no_creator_bounce")
-        );
-        assert_eq!(seam.comments.len(), 1);
-        assert_eq!(seam.comments[0].comment_html, BOUNCE_BODY_NO_LLM_CONFIG);
     }
 
     #[tokio::test]

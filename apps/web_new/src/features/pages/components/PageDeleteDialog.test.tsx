@@ -54,6 +54,30 @@ describe("PageDeleteDialog", () => {
     expect(screen.getByTestId("page-delete-rehomed")).toHaveTextContent("1 sub-page will move to the top level.");
   });
 
+  it("keeps Delete enabled and names the failure when the count read fails", async () => {
+    const user = userEvent.setup();
+    const onRetryCount = vi.fn();
+    const { onConfirm } = renderDialog({ rehomedCount: undefined, countFailed: true, onRetryCount });
+    expect(screen.getByTestId("page-delete-rehomed-error")).toHaveTextContent(
+      "The sub-page count could not be loaded."
+    );
+    expect(screen.queryByTestId("page-delete-rehomed-loading")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("page-delete-rehomed")).not.toBeInTheDocument();
+    const confirm = screen.getByRole("button", { name: "Delete" });
+    expect(confirm).toBeEnabled();
+    await user.click(confirm);
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    expect(onRetryCount).toHaveBeenCalledTimes(1);
+  });
+
+  it("names the failure without a retry when none is offered", () => {
+    renderDialog({ rehomedCount: undefined, countFailed: true });
+    expect(screen.getByTestId("page-delete-rehomed-error")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete" })).toBeEnabled();
+  });
+
   it("keeps Delete disabled and names the pending read while the count is unknown", () => {
     const { onConfirm } = renderDialog({ rehomedCount: undefined });
     expect(screen.getByTestId("page-delete-rehomed-loading")).toHaveTextContent("Counting sub-pages…");

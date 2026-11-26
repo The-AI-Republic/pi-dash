@@ -87,7 +87,7 @@ export interface ListRowProps {
   hrefFor: (issue: IssueListItem) => string;
   /** Row density from the layout search param (list vs compact). */
   compact?: boolean;
-  /** Mount the property pickers on first interaction (virtualized rows). */
+  /** Mount the property pickers and row menu on first interaction (virtualized rows). */
   deferPickers?: boolean;
   /** Show the sub-work-item expander (Display → Show sub-work items). */
   showSubIssues?: boolean;
@@ -346,6 +346,7 @@ function ListRowImpl(props: ListRowProps): React.ReactElement {
         <RowMenuButton
           state={menu}
           issueKey={key}
+          defer={props.deferPickers ?? false}
           className="opacity-0 transition-opacity group-hover/row:opacity-100 focus-within:opacity-100"
         />
       )}

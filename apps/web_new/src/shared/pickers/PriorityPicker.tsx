@@ -8,7 +8,7 @@
 import { Button, Combobox, IconButton, type ButtonVariant, type ComboboxOption } from "@pidash/kit";
 import * as React from "react";
 
-import { PropertyChip } from "./PropertyChip.js";
+import { describeChip, PropertyChip } from "./PropertyChip.js";
 import {
   PRIORITY_ICONS,
   PRIORITY_TONES,
@@ -87,7 +87,7 @@ export function PriorityPicker({
           label={`${label}: ${current.label}`}
           icon={<PriorityGlyph option={current} />}
           text={current.label}
-          title={current.label}
+          tooltip={describeChip(label, current.label, "How urgently this work item needs attention.")}
           {...(tabIndex === undefined ? {} : { tabIndex })}
         />
       );

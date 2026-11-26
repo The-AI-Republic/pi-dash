@@ -326,3 +326,157 @@ def test_web_runner_detail_live_state_keys(
     # Same renderer as last_event_at: equal instants render byte-equal.
     assert live["agent_last_activity_at"] == live["last_event_at"]
     assert live["agent_last_activity_at"] is not None
+
+
+def _error_detail(seeder, run_id):
+    row = seeder.db.fetchone(
+        "SELECT error_details FROM agent_run WHERE id = %s", (run_id,)
+    )
+    return str(row["error_details"]) if row and row["error_details"] else ""
+
+
+# NEWPIDASH-251: pre-start unconfirmed runs (never observed by the
+# runner) must be reaped by the same reconcile_stalled_runs pass.
+# Deliberate difference (DIFF-43): Django's task only selects
+# ASSIGNED/RUNNING with an observed live-state row. Expectations
+# branch via expect(): fixed on Rust, old behaviour on Django.
+
+
+def test_stall_sweep_reaps_stale_worktree_run_never_observed(
+    seeder, daemon_world, machine_flow, broker, live_states
+):
+    """A waiting_for_worktree run past 180s with no observation (DIFF-43).
+
+    Rust fails it with the never-confirmed detail; Django never
+    selects the shape, so it stays waiting_for_worktree. The fresh
+    control is never reaped on either backend.
+    """
+    from _harness.diffs import expect
+
+    stale = seeder.create_daemon_run(
+        daemon_world["owner"]["id"],
+        daemon_world["workspace"]["id"],
+        daemon_world["pod"]["id"],
+        machine_flow["runner_id"],
+        status="waiting_for_worktree",
+    )
+    seeder.db.execute(
+        "UPDATE agent_run SET assigned_at = now() - interval '300 seconds' "
+        "WHERE id = %s",
+        (stale["id"],),
+    )
+    fresh = seeder.create_daemon_run(
+        daemon_world["owner"]["id"],
+        daemon_world["workspace"]["id"],
+        daemon_world["pod"]["id"],
+        machine_flow["runner_id"],
+        status="waiting_for_worktree",
+    )
+    seeder.db.execute(
+        "UPDATE agent_run SET assigned_at = now() WHERE id = %s", (fresh["id"],)
+    )
+    live_states["live"].append(machine_flow["runner_id"])
+    _fire_sweep(broker)
+    assert _run_status(seeder, stale["id"]) == expect(
+        "DIFF-43", django="waiting_for_worktree", rust="failed"
+    )
+    if BACKEND == "rust":
+        assert "runner never confirmed this run" in _error_detail(seeder, stale["id"])
+    assert _run_status(seeder, fresh["id"]) == "waiting_for_worktree"
+
+
+def test_stall_sweep_reaps_running_run_never_observed(
+    seeder, daemon_world, machine_flow, broker, live_states
+):
+    """A running run past 360s with no observation (DIFF-43).
+
+    Rust fails it; Django's watchdog cannot see unobserved runs, so
+    it stays running. The fresh-started control survives either way.
+    """
+    from _harness.diffs import expect
+
+    stale = seeder.create_daemon_run(
+        daemon_world["owner"]["id"],
+        daemon_world["workspace"]["id"],
+        daemon_world["pod"]["id"],
+        machine_flow["runner_id"],
+        status="running",
+    )
+    seeder.db.execute(
+        "UPDATE agent_run SET started_at = now() - interval '600 seconds' "
+        "WHERE id = %s",
+        (stale["id"],),
+    )
+    fresh = seeder.create_daemon_run(
+        daemon_world["owner"]["id"],
+        daemon_world["workspace"]["id"],
+        daemon_world["pod"]["id"],
+        machine_flow["runner_id"],
+        status="running",
+    )
+    seeder.db.execute(
+        "UPDATE agent_run SET started_at = now() WHERE id = %s", (fresh["id"],)
+    )
+    live_states["live"].append(machine_flow["runner_id"])
+    _fire_sweep(broker)
+    assert _run_status(seeder, stale["id"]) == expect(
+        "DIFF-43", django="running", rust="failed"
+    )
+    if BACKEND == "rust":
+        assert "runner never confirmed this run" in _error_detail(seeder, stale["id"])
+    assert _run_status(seeder, fresh["id"]) == "running"
+
+
+def test_stall_sweep_spares_observed_worktree_run(
+    seeder, daemon_world, machine_flow, broker, live_states
+):
+    """An observed waiting_for_worktree run is spared by the new arm.
+
+    The runner confirmed it (live-state row), so the NOT EXISTS gate
+    must spare it even when assigned_at is old — on Rust. Django never
+    selects the shape either way. A fresh unobserved stale run on
+    Rust proves the pass ran (failed); on Django both survive.
+    """
+    from _harness.diffs import expect
+
+    live_states["live"].append(machine_flow["runner_id"])
+    observed = seeder.create_daemon_run(
+        daemon_world["owner"]["id"],
+        daemon_world["workspace"]["id"],
+        daemon_world["pod"]["id"],
+        machine_flow["runner_id"],
+        status="waiting_for_worktree",
+    )
+    seeder.db.execute(
+        "UPDATE agent_run SET assigned_at = now() - interval '300 seconds' "
+        "WHERE id = %s",
+        (observed["id"],),
+    )
+    _seed_live_state(
+        seeder, machine_flow["runner_id"], observed["id"],
+        agent_health=None, stale=False,
+    )
+    other = seeder.enroll_runner(
+        daemon_world["owner"]["id"],
+        daemon_world["workspace"]["id"],
+        daemon_world["pod"]["id"],
+        f"apd_en_{seeder.tag}worktree",
+    )
+    stale = seeder.create_daemon_run(
+        daemon_world["owner"]["id"],
+        daemon_world["workspace"]["id"],
+        daemon_world["pod"]["id"],
+        other["id"],
+        status="waiting_for_worktree",
+    )
+    seeder.db.execute(
+        "UPDATE agent_run SET assigned_at = now() - interval '300 seconds' "
+        "WHERE id = %s",
+        (stale["id"],),
+    )
+    live_states["extra"].append(other["id"])
+    _fire_sweep(broker)
+    assert _run_status(seeder, stale["id"]) == expect(
+        "DIFF-43", django="waiting_for_worktree", rust="failed"
+    )
+    assert _run_status(seeder, observed["id"]) == "waiting_for_worktree"

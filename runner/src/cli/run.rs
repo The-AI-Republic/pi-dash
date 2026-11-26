@@ -127,6 +127,7 @@ mod tests {
         Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://example.com".into(),

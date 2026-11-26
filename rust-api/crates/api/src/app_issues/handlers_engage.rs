@@ -266,6 +266,8 @@ pub(crate) enum Denial {
     UnsupportedMediaType(String),
     /// 502, truncated request-body read (the shared bad-gateway shape).
     TruncatedBody,
+    /// 409, archived project (NEWPIDASH-236, pre-rendered body).
+    ProjectArchived(String),
     /// 500, generic branch.
     ServerError,
 }
@@ -330,6 +332,7 @@ impl Denial {
                 StatusCode::BAD_GATEWAY,
                 crate::edge::BAD_GATEWAY_BODY.to_owned(),
             ),
+            Denial::ProjectArchived(body) => (StatusCode::CONFLICT, body.clone()),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 super::SERVER_ERROR_BODY.to_owned(),
@@ -548,9 +551,26 @@ async fn check_admin_creator(
         .await
         .map_err(db_denial)?;
     if created {
+        if let Some(info) = crate::project_archived::archived_by_id(pool, *project_id)
+            .await
+            .map_err(|_| Denial::ServerError)?
+        {
+            return Err(Denial::ProjectArchived(
+                crate::project_archived::archived_body(&info),
+            ));
+        }
         return Ok(());
     }
-    check_allow(&membership, &[20])
+    check_allow(&membership, &[20])?;
+    if let Some(info) = crate::project_archived::archived_by_id(pool, *project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
+    Ok(())
 }
 
 /// The `model` behind an `allow_permission(creator=True, model=...)`.
@@ -1696,48 +1716,32 @@ struct IntakeSourceDb {
 // ---------------------------------------------------------------------------
 
 /// `_comment_is_actively_synced` (`issue.py:79-87`): native rows
-/// (`external_source` empty) short-circuit before any DB probe.
+/// (`external_source` empty) short-circuit before any DB probe. Git-only
+/// after PDASHOSS01-354.
 async fn comment_is_synced(
     pool: &sqlx::PgPool,
     external_source: Option<&str>,
     comment_id: &uuid::Uuid,
 ) -> Result<bool, Denial> {
-    use pidash_services::app_issues::serializers_engage::{
-        git_comment_synced, github_comment_synced,
-    };
+    use pidash_services::app_issues::serializers_engage::git_comment_synced;
     if external_source.unwrap_or("").is_empty() {
         return Ok(false);
     }
     let db = orm(pool);
-    if git_comment_synced(&db, *comment_id)
-        .await
-        .map_err(db_denial)?
-    {
-        return Ok(true);
-    }
-    github_comment_synced(&db, *comment_id)
+    git_comment_synced(&db, *comment_id)
         .await
         .map_err(db_denial)
 }
 
-/// The destroy guard (`comment.py:158-160`): a raw OR over both sync
-/// tables, with NO `external_source` short-circuit — unlike
-/// [`comment_is_synced`].
+/// The destroy guard (`comment.py:158-160`): git-only sync table, with NO
+/// `external_source` short-circuit — unlike [`comment_is_synced`].
 async fn comment_has_sync_row(
     pool: &sqlx::PgPool,
     comment_id: &uuid::Uuid,
 ) -> Result<bool, Denial> {
-    use pidash_services::app_issues::serializers_engage::{
-        git_comment_synced, github_comment_synced,
-    };
+    use pidash_services::app_issues::serializers_engage::git_comment_synced;
     let db = orm(pool);
-    if git_comment_synced(&db, *comment_id)
-        .await
-        .map_err(db_denial)?
-    {
-        return Ok(true);
-    }
-    github_comment_synced(&db, *comment_id)
+    git_comment_synced(&db, *comment_id)
         .await
         .map_err(db_denial)
 }
@@ -3815,12 +3819,21 @@ async fn history(
         Ok(membership) => membership,
         Err(error) => return error.into_response(),
     };
-    // Class permission first, decorator second — Django's order.
+    // Class permission first, decorator second — Django's order. The
+    // archived check runs once, after both gates (401 → 403 → 409).
     if let Err(error) = check_entity(&membership, true) {
         return error.into_response();
     }
     if let Err(error) = check_allow(&membership, &[20, 15, 5]) {
         return error.into_response();
+    }
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
     }
     let tenant = match tenant_context(&pool, &user_id).await {
         Ok(tenant) => tenant,
@@ -4237,6 +4250,14 @@ async fn read_context(
     let user_id = actor_user_id(&pool, extension).await?;
     let project_id = resolve_project_id(&pool, slug, project_raw).await?;
     let tenant = tenant_context(&pool, &user_id).await?;
+    if let Some(info) = crate::project_archived::archived_by_id(&pool, project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     Ok(ReadContext {
         pool,
         slug: slug.to_owned(),
@@ -4409,6 +4430,14 @@ async fn comment_create(
     };
     if let Err(error) = check_allow(&membership, &[20, 15, 5]) {
         return error.into_response();
+    }
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
     }
     // `Project.objects.get` plus the issue load: default managers
     // (soft-deleted rows 404), unscoped by tenant (the gate scoped).
@@ -5252,6 +5281,14 @@ async fn comment_reaction_list(
         Ok(id) => id,
         Err(error) => return error.into_response(),
     };
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
+    }
     let tenant = match tenant_context(&pool, &user_id).await {
         Ok(tenant) => tenant,
         Err(error) => return error.into_response(),
@@ -5336,6 +5373,14 @@ async fn comment_reaction_create(
     };
     if let Err(error) = check_allow(&membership, &[20, 15, 5]) {
         return error.into_response();
+    }
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
     }
     let tenant = match tenant_context(&pool, &user_id).await {
         Ok(tenant) => tenant,
@@ -5468,6 +5513,14 @@ async fn comment_reaction_destroy(
     if let Err(error) = check_allow(&membership, &[20, 15, 5]) {
         return error.into_response();
     }
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
+    }
     // The body is never read here; drop `req` without parsing.
     let _ = req;
     let row: Option<uuid::Uuid> = match comment_reactions::Entity::find()
@@ -5564,6 +5617,14 @@ async fn issue_reaction_list(
         Ok(id) => id,
         Err(error) => return error.into_response(),
     };
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
+    }
     let tenant = match tenant_context(&pool, &user_id).await {
         Ok(tenant) => tenant,
         Err(error) => return error.into_response(),
@@ -5657,6 +5718,14 @@ async fn issue_reaction_create(
     };
     if let Err(error) = check_allow(&membership, &[20, 15, 5]) {
         return error.into_response();
+    }
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
     }
     let tenant = match tenant_context(&pool, &user_id).await {
         Ok(tenant) => tenant,
@@ -5831,6 +5900,14 @@ async fn issue_reaction_destroy(
     if let Err(error) = check_allow(&membership, &[20, 15, 5]) {
         return error.into_response();
     }
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
+    }
     let _ = req;
     let row: Option<uuid::Uuid> = match issue_reactions::Entity::find()
         .select_only()
@@ -5953,6 +6030,14 @@ async fn subscriber_list(
     };
     if let Err(error) = check_entity(&membership, true) {
         return error.into_response();
+    }
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
     }
     let rows = match subscriber_roster_select(&slug, project_id)
         .into_model::<RosterRow>()
@@ -6137,6 +6222,14 @@ async fn subscriber_create(
     if let Err(error) = check_entity(&membership, false) {
         return error.into_response();
     }
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
+    }
     let tenant = match tenant_context(&pool, &user_id).await {
         Ok(tenant) => tenant,
         Err(error) => return error.into_response(),
@@ -6304,6 +6397,14 @@ async fn subscriber_destroy(
     if let Err(error) = check_entity(&membership, false) {
         return error.into_response();
     }
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
+    }
     let _ = req;
     let pk = match fetch_subscription(&pool, &slug, &project_id, &issue_id, &subscriber_id).await {
         Ok(Some(pk)) => pk,
@@ -6356,6 +6457,14 @@ async fn subscribe(
     };
     if let Err(error) = check_lite(&membership) {
         return error.into_response();
+    }
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
     }
     // DIFF-13: the issue must belong to the URL's project
     // (NEWPIDASH-170), before any subscription read or write;
@@ -6449,6 +6558,14 @@ async fn unsubscribe(
     if let Err(error) = check_lite(&membership) {
         return error.into_response();
     }
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
+    }
     let _ = req;
     let pk = match fetch_subscription(&pool, &slug, &project_id, &issue_id, &user_id).await {
         Ok(Some(pk)) => pk,
@@ -6500,6 +6617,14 @@ async fn subscription_status(
     };
     if let Err(error) = check_lite(&membership) {
         return error.into_response();
+    }
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
     }
     let _ = req;
     match fetch_subscription(&pool, &slug, &project_id, &issue_id, &user_id).await {
@@ -7130,6 +7255,14 @@ async fn worklog_create(
     };
     if let Err(error) = check_allow(&membership, &[20, 15]) {
         return error.into_response();
+    }
+    let archived = match crate::project_archived::archived_by_id(&pool, project_id).await {
+        Ok(info) => info,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
+    if let Some(info) = archived {
+        return Denial::ProjectArchived(crate::project_archived::archived_body(&info))
+            .into_response();
     }
     // `Issue.objects.get(pk=issue_id, project_id=project_id)`: default
     // manager (soft-deleted rows miss), unscoped by workspace slug.
@@ -8894,7 +9027,6 @@ mod orm_tests {
             "issue_assignees",
             "intake_issues",
             "git_comment_syncs",
-            "github_comment_syncs",
             "issue_activities",
         ] {
             exec(
@@ -8993,10 +9125,10 @@ mod orm_tests {
                  (gen_random_uuid(), '{issue}', 1, '{project}', '{ws}', NULL, now(), '{{\"k\":2}}')"
             ),
             format!(
-                "INSERT INTO github_comment_syncs (id, comment_id, deleted_at) VALUES (gen_random_uuid(), '{comment}', NULL)"
+                "INSERT INTO git_comment_syncs (id, comment_id, deleted_at) VALUES (gen_random_uuid(), '{comment}', now())"
             ),
             format!(
-                "INSERT INTO git_comment_syncs (id, comment_id, deleted_at) VALUES (gen_random_uuid(), '{comment}', now())"
+                "INSERT INTO git_comment_syncs (id, comment_id, deleted_at) VALUES (gen_random_uuid(), '{comment}', NULL)"
             ),
         ] {
             exec(&pool, &sql).await;
@@ -9097,7 +9229,7 @@ mod orm_tests {
         assert_eq!((flat.sequence_id, flat.sort_order), (7, 65535.5));
         assert_eq!(flat.description_html.as_deref(), Some("<p>x</p>"));
 
-        // Comments: the scoped get, sync probes (the git row is tombstoned).
+        // Comments: the scoped get, sync probes (git-only after PDASHOSS01-354).
         let stored = fetch_scoped_comment(&pool, "acme", &project, &issue, &comment)
             .await
             .unwrap()

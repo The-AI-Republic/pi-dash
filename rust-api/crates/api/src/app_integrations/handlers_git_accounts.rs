@@ -1169,6 +1169,8 @@ async fn create_account(
         workspace_integration_id: Set(None),
         status: Set("connected".to_owned()),
         verified_at: Set(Some(now.into())),
+        suspended_at: Set(None),
+        last_checked_at: Set(None),
         last_check_error: Set(String::new()),
         metadata: Set(serde_json::Value::Object(metadata)),
     }

@@ -6,8 +6,8 @@
 //! default; the private overlay crate installs its own implementation
 //! (OpenHub/BYOK/Codex routing) without touching any caller.
 //!
-//! The pure decisions (`has_usable_llm_config`, `agent_model_profile`,
-//! `agent_model_credential`) are the trait defaults, which delegate to
+//! The pure decisions (`has_usable_llm_config`, `pidash_agent_profile`,
+//! `pidash_agent_credential`) are the trait defaults, which delegate to
 //! the ported [`pidash_services::assistant::seams`] logic — there is
 //! exactly one CE implementation of each. Only title generation is
 //! spelled out here: it needs decrypt + provider HTTP, which live at
@@ -233,11 +233,11 @@ mod tests {
     #[tokio::test]
     async fn ce_profile_matches_the_ported_matrix() {
         let seam = seam();
-        let with_key = seam.agent_model_profile(user(), true).await;
+        let with_key = seam.pidash_agent_profile(user(), true).await;
         assert!(!with_key.available);
         assert_eq!(with_key.lane, "byok");
         assert_eq!(with_key.reason_code, "byok_not_supported_on_desktop");
-        let without_key = seam.agent_model_profile(user(), false).await;
+        let without_key = seam.pidash_agent_profile(user(), false).await;
         assert!(!without_key.available);
         assert_eq!(without_key.reason_code, "llm_config_missing");
     }
@@ -245,7 +245,7 @@ mod tests {
     #[tokio::test]
     async fn ce_credential_matches_the_ported_refusal() {
         let err = seam()
-            .agent_model_credential(user())
+            .pidash_agent_credential(user())
             .await
             .expect_err("CE has no desktop lane");
         let CredentialError::Unavailable(unavailable) = &err else {

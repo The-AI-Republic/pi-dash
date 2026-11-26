@@ -8,6 +8,15 @@ pub mod launchd;
 pub mod reload;
 #[cfg(target_os = "linux")]
 pub mod systemd;
+/// Non-Linux stub so `supervisor`'s startup read compiles everywhere:
+/// there is no systemd previous-exit to report off Linux (mirrors the
+/// `not(linux)` arm of the Linux implementation).
+#[cfg(not(target_os = "linux"))]
+pub mod systemd {
+    pub async fn previous_exit_result() -> Option<String> {
+        None
+    }
+}
 #[cfg(windows)]
 pub mod windows;
 

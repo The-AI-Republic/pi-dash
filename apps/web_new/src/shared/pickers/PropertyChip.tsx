@@ -7,8 +7,21 @@
 // properties share a height and treatment. Pickers opt in through
 // their `chip` flag; their popups, search and keyboard handling stay
 // untouched.
-import { Button, cn, type ButtonProps } from "@pidash/kit";
+import { Button, Tooltip, cn, type ButtonProps } from "@pidash/kit";
 import * as React from "react";
+
+/** Value text the tooltip names when the property has nothing set. */
+export const CHIP_EMPTY_VALUE = "None";
+
+/**
+ * Tooltip text for a property chip: "Field: Value" plus one short
+ * sentence saying what the property is (NEWPIDASH-361). An unset value
+ * reads as "None".
+ */
+export function describeChip(field: string, value: string | null | undefined, sentence: string): string {
+  const shown = value === null || value === undefined || value.trim() === "" ? CHIP_EMPTY_VALUE : value;
+  return `${field}: ${shown} — ${sentence}`;
+}
 
 export interface PropertyChipProps extends Omit<ButtonProps, "size" | "variant" | "children" | "aria-label"> {
   /** Accessible name, e.g. "State: Backlog" or "Assignees". */
@@ -25,6 +38,12 @@ export interface PropertyChipProps extends Omit<ButtonProps, "size" | "variant" 
   textClassName?: string | undefined;
   /** Trailing nodes after the text (a pod name, a wait badge). */
   trailing?: React.ReactNode;
+  /**
+   * Descriptive hover tooltip ("Field: Value" plus one sentence,
+   * NEWPIDASH-361). When set, the chip shows this rich tooltip instead
+   * of a native `title`, so callers pass one or the other.
+   */
+  tooltip?: React.ReactNode;
 }
 
 /** One property chip: small button, glyph, truncated text, shared by every picker. */
@@ -36,10 +55,11 @@ export function PropertyChip({
   borderless = false,
   textClassName,
   trailing,
+  tooltip,
   className,
   ...rest
 }: PropertyChipProps): React.ReactElement {
-  return (
+  const button = (
     <Button
       size="small"
       variant={borderless ? "ghost" : "secondary"}
@@ -66,4 +86,6 @@ export function PropertyChip({
       {trailing}
     </Button>
   );
+  if (tooltip === undefined) return button;
+  return <Tooltip content={tooltip}>{button}</Tooltip>;
 }

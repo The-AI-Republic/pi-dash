@@ -476,9 +476,9 @@ pub async fn pidash_cli_login<R: Runtime>(
     let Some(cli) = status.path else {
         return Err("The pidash CLI is not installed yet.".to_string());
     };
-    // PO-13 natively, not only in the UI: the daemon may have been signed
-    // in as someone else since the consent screen.
-    crate::daemon::check_login_allowed(force.unwrap_or(false)).await?;
+    // A daemon signed in as another account is switched, not refused
+    // (desktop_unified_signin U-2): the CLI signs the old account out,
+    // parks its identity and restores the new account's own.
     let (args, stdin) = login_invocation(device_code, cloud_url, workspace, force.unwrap_or(false));
     let app_clone = app.clone();
     match tauri::async_runtime::spawn_blocking(move || {

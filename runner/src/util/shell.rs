@@ -51,6 +51,8 @@
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
+use crate::util::containment::BackendKind;
+
 tokio::task_local! {
     /// Per-run identity for the agent process, scoped to the task that
     /// drives one `AgentRun` (see `Supervisor::handle_assign`). Every bridge
@@ -67,15 +69,131 @@ tokio::task_local! {
 #[derive(Debug, Clone)]
 pub struct RunEnv {
     pub run_id: uuid::Uuid,
+    /// Which process-containment backend this run uses (NEWPIDASH-255).
+    /// `login_shell_command` reads it to put the agent in its own process
+    /// group when the backend is [`BackendKind::ProcessGroup`]; the
+    /// cgroup backend needs no command-line help (the supervisor moves
+    /// the spawned pid after spawn).
+    pub backend: BackendKind,
+    /// Directory holding only a `pidash` symlink to the daemon's own binary
+    /// (`<data_dir>/runtime/bin`, NEWPIDASH-363). Prepended to the agent's
+    /// `PATH` after rc files run so the agent always invokes the daemon's
+    /// build, never a shadowing `pidash` from the operator's `PATH`.
+    pub runner_bin_dir: Option<PathBuf>,
+    /// The daemon's own `PIDASH_CONFIG_DIR` / `PIDASH_DATA_DIR`, forwarded
+    /// for every run (not only managed ones) so the agent's `pidash` calls
+    /// land on the same tree the daemon uses.
+    pub config_dir: Option<PathBuf>,
+    pub data_dir: Option<PathBuf>,
+    /// Canonical path of the daemon binary itself; the agent sees it as
+    /// [`RUNNER_EXE_ENV`] so the CLI can warn when it is not that binary.
+    pub runner_exe: Option<PathBuf>,
+    /// Issue identifier for issue runs (NEWPIDASH-320 §6.3). `None` for
+    /// scheduler runs, chat sessions, and assigns from old servers.
+    pub issue_identifier: Option<String>,
+    /// Project identifier for issue and scheduler runs (NEWPIDASH-320
+    /// §6.3). `None` for chat sessions and old servers.
+    pub project_identifier: Option<String>,
+    /// Agent display name plus model, e.g. `Claude Code (claude-opus-4-8)`
+    /// (NEWPIDASH-320 §6.3). `None` for chat sessions.
+    pub agent_name: Option<String>,
 }
 
 /// Environment variable name the agent reads for its run id.
 pub const RUN_ID_ENV: &str = "PIDASH_RUN_ID";
 
+/// Outer (daemon-set) name for the directory holding the daemon's own
+/// `pidash` symlink. Re-exported onto `PATH` by [`SHELL_SCRIPT`] after the
+/// login shell's rc files run, so it wins over anything they prepend.
+pub const RUNNER_BIN_ENV: &str = "PIDASH_RUNNER_BIN";
+
+/// Outer (daemon-set) name for the daemon binary's canonical path.
+/// Re-exported as [`RUNNER_EXE_ENV`] by [`SHELL_SCRIPT`] after rc files run.
+pub const RUNNER_EXE_OUTER_ENV: &str = "PIDASH_AGENT_RUNNER_EXE";
+
+/// Agent-visible name of the daemon binary's canonical path. The CLI warns
+/// on stderr when it runs under [`RUN_ID_ENV`] and its own canonical path
+/// differs from this (NEWPIDASH-363 safety net).
+pub const RUNNER_EXE_ENV: &str = "PIDASH_RUNNER_EXE";
+
+/// Environment variable naming the run's issue (NEWPIDASH-320 §6.3).
+pub const ISSUE_IDENTIFIER_ENV: &str = "PIDASH_ISSUE_IDENTIFIER";
+
+/// Environment variable naming the run's project (NEWPIDASH-320 §6.3).
+pub const PROJECT_ENV: &str = "PIDASH_PROJECT";
+
+/// Environment variable naming the agent (NEWPIDASH-320 §6.3).
+pub const AGENT_NAME_ENV: &str = "PIDASH_AGENT_NAME";
+
 /// Apply the task-scoped per-run environment, when there is one.
+///
+/// The `PIDASH_*` namespacing is the rc-file hardening (see the module
+/// docs): rc files set names like `CODEX_HOME` and `PATH`, never these,
+/// so plain inheritance through the login shell is exactly as safe as
+/// `PIDASH_RUN_ID` has always been.
 fn apply_run_env(cmd: &mut Command) {
     if let Ok(env) = RUN_ENV.try_with(|e| e.clone()) {
         cmd.env(RUN_ID_ENV, env.run_id.to_string());
+        if let Some(issue) = env.issue_identifier {
+            cmd.env(ISSUE_IDENTIFIER_ENV, issue);
+        }
+        if let Some(project) = env.project_identifier {
+            cmd.env(PROJECT_ENV, project);
+        }
+        if let Some(agent) = env.agent_name {
+            cmd.env(AGENT_NAME_ENV, agent);
+        }
+        #[cfg(unix)]
+        if env.backend == BackendKind::ProcessGroup {
+            // Own process group so cleanup can signal the whole group.
+            // A child that `setsid`s escapes it (documented limit of
+            // the process-group backend).
+            cmd.process_group(0);
+        }
+        if let Some(dir) = &env.runner_bin_dir {
+            cmd.env(RUNNER_BIN_ENV, dir.as_os_str());
+        }
+        if let Some(dir) = &env.config_dir {
+            cmd.env("PIDASH_AGENT_CONFIG_DIR", dir.as_os_str());
+        }
+        if let Some(dir) = &env.data_dir {
+            cmd.env("PIDASH_AGENT_DATA_DIR", dir.as_os_str());
+        }
+        if let Some(exe) = &env.runner_exe {
+            cmd.env(RUNNER_EXE_OUTER_ENV, exe.as_os_str());
+        }
+        #[cfg(target_os = "windows")]
+        apply_run_env_windows(cmd, &env);
+    }
+}
+
+/// Windows half of [`apply_run_env`]: there is no shell, so nothing can
+/// clobber what we set — export the real names directly instead of relying
+/// on a re-export script.
+#[cfg(target_os = "windows")]
+fn apply_run_env_windows(cmd: &mut Command, env: &RunEnv) {
+    if let Some(dir) = &env.runner_bin_dir {
+        let existing = cmd
+            .as_std()
+            .get_envs()
+            .find_map(|(k, v)| (k == "PATH").then_some(v).flatten())
+            .map(|v| v.to_os_string())
+            .or_else(|| std::env::var_os("PATH"))
+            .unwrap_or_default();
+        let mut parts = vec![dir.clone()];
+        parts.extend(std::env::split_paths(&existing));
+        if let Ok(joined) = std::env::join_paths(parts) {
+            cmd.env("PATH", joined);
+        }
+    }
+    if let Some(dir) = &env.config_dir {
+        cmd.env("PIDASH_CONFIG_DIR", dir.as_os_str());
+    }
+    if let Some(dir) = &env.data_dir {
+        cmd.env("PIDASH_DATA_DIR", dir.as_os_str());
+    }
+    if let Some(exe) = &env.runner_exe {
+        cmd.env(RUNNER_EXE_ENV, exe.as_os_str());
     }
 }
 
@@ -86,23 +204,27 @@ fn apply_run_env(cmd: &mut Command) {
 /// `export CODEX_HOME=...` or a `PATH` rewrite in their profile would silently
 /// win over the daemon. Passing our values under `PIDASH_*` names and
 /// re-exporting them here is the same trick the working directory has always
-/// used, extended to the managed runner's environment.
+/// used, extended to the Pi Dash Agent's environment and to the per-run
+/// daemon pin (NEWPIDASH-363).
 ///
 /// Every clause is a no-op when its `PIDASH_*` variable is unset, so a
-/// user-enrolled runner produces exactly the command line it always did.
+/// run without that piece of per-run environment produces exactly the
+/// command line it always did.
 #[cfg(not(target_os = "windows"))]
 const SHELL_SCRIPT: &str = r#"[ -n "${PIDASH_AGENT_CWD-}" ] && cd -- "$PIDASH_AGENT_CWD"
 [ -n "${PIDASH_CODEX_HOME-}" ] && export CODEX_HOME="$PIDASH_CODEX_HOME"
 [ -n "${PIDASH_AGENT_PATH_PREPEND-}" ] && export PATH="$PIDASH_AGENT_PATH_PREPEND:$PATH"
+[ -n "${PIDASH_RUNNER_BIN-}" ] && export PATH="$PIDASH_RUNNER_BIN:$PATH"
 [ -n "${PIDASH_AGENT_CONFIG_DIR-}" ] && export PIDASH_CONFIG_DIR="$PIDASH_AGENT_CONFIG_DIR"
 [ -n "${PIDASH_AGENT_DATA_DIR-}" ] && export PIDASH_DATA_DIR="$PIDASH_AGENT_DATA_DIR"
+[ -n "${PIDASH_AGENT_RUNNER_EXE-}" ] && export PIDASH_RUNNER_EXE="$PIDASH_AGENT_RUNNER_EXE"
 [ -n "${PIDASH_MODEL_TOKEN_FILE-}" ] && [ -r "$PIDASH_MODEL_TOKEN_FILE" ] &&   export PIDASH_GATEWAY_TOKEN="$(cat "$PIDASH_MODEL_TOKEN_FILE")"
 exec "$@""#;
 
 /// Pi Dash-controlled environment for a spawned agent process.
 ///
 /// All fields are `None` for a user-enrolled runner, which is what keeps that
-/// path byte-identical. The managed runner fills them from its `CodexSection`
+/// path byte-identical. The Pi Dash Agent fills them from its `CodexSection`
 /// so the bundled engine reads Pi Dash's own config, finds the bundled CLI,
 /// and receives a credential that never touches `config.toml` or a command
 /// line.
@@ -149,6 +271,124 @@ impl AgentEnv {
         if let Some(v) = &self.model_token_file {
             cmd.env("PIDASH_MODEL_TOKEN_FILE", v.as_os_str());
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Daemon-binary pin (NEWPIDASH-363)
+// ---------------------------------------------------------------------------
+
+/// Directory, under the daemon data dir, holding only a `pidash` symlink to
+/// the daemon's own binary. Prepended to every agent run's `PATH` after rc
+/// files run, so the agent's `pidash` invocations always resolve to the
+/// daemon's build. A directory (rather than a bare binary path) is what is
+/// prepended so nothing else on the operator's `PATH` changes.
+pub fn daemon_bin_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("runtime").join("bin")
+}
+
+/// File name of the pinned binary inside [`daemon_bin_dir`].
+pub fn daemon_bin_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "pidash.exe"
+    } else {
+        "pidash"
+    }
+}
+
+/// Canonical path of this process's own binary, falling back to the raw
+/// `current_exe` when the path cannot be canonicalized (e.g. deleted).
+pub fn current_exe_canonical() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .map(|p| p.canonicalize().unwrap_or(p))
+}
+
+/// Create [`daemon_bin_dir`] holding only a `pidash` symlink to this
+/// binary. Recreated on every call so it follows self-updates; a `read_link`
+/// fast-path keeps steady-state calls (one per run) to a single syscall.
+/// Never fails the caller: on any error a warning is logged and the
+/// directory is still returned, leaving resolution exactly as it was before
+/// the pin existed.
+pub fn ensure_daemon_pidash_link(data_dir: &Path) -> PathBuf {
+    let dir = daemon_bin_dir(data_dir);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(dir = ?dir, error = %e, "could not create daemon bin dir");
+        return dir;
+    }
+    let Some(target) = current_exe_canonical() else {
+        tracing::warn!("could not resolve current exe for daemon pidash pin");
+        return dir;
+    };
+    let link = dir.join(daemon_bin_name());
+    if std::fs::read_link(&link).ok().as_deref() == Some(target.as_path()) {
+        return dir;
+    }
+    // Best effort: drop a stale link (e.g. from before a self-update) before
+    // recreating it. Removing a non-symlink that somehow landed here is
+    // deliberate — this directory holds only the pin.
+    let _ = std::fs::remove_file(&link);
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(&target, &link);
+    #[cfg(target_os = "windows")]
+    let made = std::os::windows::fs::symlink_file(&target, &link);
+    #[cfg(not(any(unix, target_os = "windows")))]
+    let made: std::io::Result<()> = Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "no symlink support",
+    ));
+    if let Err(e) = made {
+        tracing::warn!(link = ?link, target = ?target, error = %e, "could not pin daemon pidash");
+    }
+    dir
+}
+
+/// Compare two binary paths by canonical form, falling back to the raw path
+/// when canonicalization fails on either side.
+fn same_binary(a: &Path, b: &Path) -> bool {
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    canon(a) == canon(b)
+}
+
+/// Build the one-line stderr warning for when the running `pidash` is not
+/// the daemon's binary. Returns `None` unless the caller runs inside an
+/// agent run (`run_id_present`, i.e. `PIDASH_RUN_ID` is set) and an expected
+/// daemon path is known yet differs from the running binary. Never fails:
+/// the caller prints the message and carries on with the command.
+pub fn runner_exe_mismatch_message(
+    current_exe: &Path,
+    runner_exe: Option<&Path>,
+    run_id_present: bool,
+) -> Option<String> {
+    if !run_id_present {
+        return None;
+    }
+    let expected = runner_exe?;
+    if same_binary(current_exe, expected) {
+        return None;
+    }
+    Some(format!(
+        "pidash warning: this pidash ({}) is not the runner daemon's binary ({}) (pidash version {}); run commands may fail — use the daemon's binary",
+        current_exe.display(),
+        expected.display(),
+        crate::RUNNER_VERSION,
+    ))
+}
+
+/// Emit the daemon-binary mismatch warning to stderr when it applies. Call
+/// at CLI startup, before dispatch, so even an unknown-subcommand error
+/// (the wrong build lacking the verb) still carries the explanation.
+pub fn warn_if_runner_exe_mismatch() {
+    if std::env::var_os(RUN_ID_ENV).is_none() {
+        return;
+    }
+    let runner_exe = std::env::var_os(RUNNER_EXE_ENV).map(PathBuf::from);
+    if runner_exe.is_none() {
+        return;
+    }
+    let current = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("pidash"));
+    if let Some(msg) = runner_exe_mismatch_message(&current, runner_exe.as_deref(), true) {
+        eprintln!("{msg}");
     }
 }
 
@@ -374,13 +614,81 @@ mod tests {
     async fn run_env_scope_puts_run_id_on_the_child() {
         let run_id = uuid::Uuid::new_v4();
         let cmd = RUN_ENV
-            .scope(RunEnv { run_id }, async {
-                login_shell_command("claude", &[], None)
-            })
+            .scope(
+                RunEnv {
+                    run_id,
+                    backend: BackendKind::None,
+                    runner_bin_dir: None,
+                    config_dir: None,
+                    data_dir: None,
+                    runner_exe: None,
+                    issue_identifier: None,
+                    project_identifier: None,
+                    agent_name: None,
+                },
+                async { login_shell_command("claude", &[], None) },
+            )
             .await;
         assert_eq!(
             env_value(&cmd, RUN_ID_ENV),
             Some(OsString::from(run_id.to_string()))
+        );
+    }
+
+    /// NEWPIDASH-320 §6.3: issue runs export the issue, project and agent
+    /// name; scheduler runs omit the issue; chat (no scope) exports none.
+    #[tokio::test]
+    async fn run_env_scope_exports_run_context() {
+        let run_id = uuid::Uuid::new_v4();
+        let issue_cmd = RUN_ENV
+            .scope(
+                RunEnv {
+                    run_id,
+                    backend: BackendKind::None,
+                    runner_bin_dir: None,
+                    config_dir: None,
+                    data_dir: None,
+                    runner_exe: None,
+                    issue_identifier: Some("FX-7".into()),
+                    project_identifier: Some("FX".into()),
+                    agent_name: Some("Muse Code (muse-spark)".into()),
+                },
+                async { login_shell_command("muse", &[], None) },
+            )
+            .await;
+        assert_eq!(
+            env_value(&issue_cmd, ISSUE_IDENTIFIER_ENV),
+            Some(OsString::from("FX-7"))
+        );
+        assert_eq!(
+            env_value(&issue_cmd, PROJECT_ENV),
+            Some(OsString::from("FX"))
+        );
+        assert_eq!(
+            env_value(&issue_cmd, AGENT_NAME_ENV),
+            Some(OsString::from("Muse Code (muse-spark)"))
+        );
+
+        let sched_cmd = RUN_ENV
+            .scope(
+                RunEnv {
+                    run_id,
+                    backend: BackendKind::None,
+                    runner_bin_dir: None,
+                    config_dir: None,
+                    data_dir: None,
+                    runner_exe: None,
+                    issue_identifier: None,
+                    project_identifier: Some("FX".into()),
+                    agent_name: Some("Codex".into()),
+                },
+                async { login_shell_command("codex", &[], None) },
+            )
+            .await;
+        assert_eq!(env_value(&sched_cmd, ISSUE_IDENTIFIER_ENV), None);
+        assert_eq!(
+            env_value(&sched_cmd, PROJECT_ENV),
+            Some(OsString::from("FX"))
         );
     }
 
@@ -706,6 +1014,303 @@ mod tests {
         assert!(
             path.starts_with("/managed/bin:"),
             "managed PATH prefix lost; PATH={path}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Daemon-binary pin (NEWPIDASH-363)
+    // -----------------------------------------------------------------
+
+    /// Fake HOME whose login shell prepends `decoy_bin` to PATH and exports
+    /// hostile `PIDASH_CONFIG_DIR` / `PIDASH_DATA_DIR` — the operator setup
+    /// from the issue (a released CLI shadowing the daemon's binary).
+    #[cfg(not(target_os = "windows"))]
+    fn hostile_home(decoy_bin: &Path) -> tempfile::TempDir {
+        let home = tempfile::tempdir().expect("tempdir for fake HOME");
+        std::fs::write(
+            home.path().join(".bash_profile"),
+            "[ -f \"$HOME/.bashrc\" ] && . \"$HOME/.bashrc\"\n",
+        )
+        .expect("write .bash_profile");
+        std::fs::write(
+            home.path().join(".bashrc"),
+            format!(
+                "export PATH=\"{}:$PATH\"\nexport PIDASH_CONFIG_DIR=/user/pidash\nexport PIDASH_DATA_DIR=/user/pidash/data\n",
+                decoy_bin.display(),
+            ),
+        )
+        .expect("write .bashrc");
+        home
+    }
+
+    /// Write an executable file named `pidash` into `dir` that prints
+    /// `marker`, standing in for one build of the CLI.
+    #[cfg(not(target_os = "windows"))]
+    fn marker_pidash(dir: &Path, marker: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("pidash");
+        std::fs::write(&path, format!("#!/bin/sh\necho {marker}\n")).expect("write marker pidash");
+        let mut perm = std::fs::metadata(&path).expect("metadata").permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&path, perm).expect("chmod marker pidash");
+        path
+    }
+
+    /// Per-run environment carrying the daemon pin, as the supervisor builds
+    /// it for every agent run regardless of enrollment or agent kind.
+    #[cfg(not(target_os = "windows"))]
+    fn pinned_run_env(bin_dir: &Path, exe: &Path) -> RunEnv {
+        RunEnv {
+            run_id: uuid::Uuid::new_v4(),
+            backend: BackendKind::None,
+            runner_bin_dir: Some(bin_dir.to_path_buf()),
+            config_dir: Some(PathBuf::from("/daemon/pidash")),
+            data_dir: Some(PathBuf::from("/daemon/pidash/data")),
+            runner_exe: Some(exe.to_path_buf()),
+            issue_identifier: None,
+            project_identifier: None,
+            agent_name: None,
+        }
+    }
+
+    /// Run the wrapper to completion and return its full stdout. Callers
+    /// match on the last non-empty lines: system bashrc banners land on
+    /// earlier lines (see `agent_cwd_survives_bashrc_cd`).
+    #[cfg(not(target_os = "windows"))]
+    async fn probe_stdout(cmd: &mut Command) -> String {
+        let out = cmd.output().await.expect("spawn through login shell");
+        assert!(
+            out.status.success(),
+            "probe failed: stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn runner_bin_pin_beats_decoy_with_empty_agent_env() {
+        // User-enrolled runner: AgentEnv is empty (managed-only gate in
+        // `agent_env_for_config`), yet the decoy pidash the operator's rc
+        // files prepend must lose to the daemon pin in RUN_ENV.
+        let decoy_dir = tempfile::tempdir().expect("tempdir for decoy bin");
+        marker_pidash(decoy_dir.path(), "decoy-pidash");
+        let daemon_dir = tempfile::tempdir().expect("tempdir for daemon bin");
+        marker_pidash(daemon_dir.path(), "daemon-pidash");
+        let home = hostile_home(decoy_dir.path());
+        let daemon_exe = daemon_dir.path().join("pidash");
+
+        let stdout = RUN_ENV
+            .scope(pinned_run_env(daemon_dir.path(), &daemon_exe), async {
+                let mut cmd =
+                    login_shell_command_with_env("pidash", &[], None, &AgentEnv::default());
+                cmd.env("HOME", home.path());
+                cmd.env_remove("BASH_ENV");
+                cmd.kill_on_drop(true);
+                probe_stdout(&mut cmd).await
+            })
+            .await;
+        assert!(
+            stdout.lines().any(|l| l.trim() == "daemon-pidash"),
+            "decoy pidash won; full stdout: {stdout}"
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn runner_bin_pin_applies_to_plain_bridge_command() {
+        // Non-Codex bridges (Muse Code, Claude Code, Cursor, OpenClaw, Grok,
+        // Antigravity) call plain `login_shell_command` with no AgentEnv at
+        // all; the RUN_ENV pin must still reach them.
+        let decoy_dir = tempfile::tempdir().expect("tempdir for decoy bin");
+        marker_pidash(decoy_dir.path(), "decoy-pidash");
+        let daemon_dir = tempfile::tempdir().expect("tempdir for daemon bin");
+        marker_pidash(daemon_dir.path(), "daemon-pidash");
+        let home = hostile_home(decoy_dir.path());
+        let daemon_exe = daemon_dir.path().join("pidash");
+
+        let stdout = RUN_ENV
+            .scope(pinned_run_env(daemon_dir.path(), &daemon_exe), async {
+                let mut cmd = login_shell_command("pidash", &[], None);
+                cmd.env("HOME", home.path());
+                cmd.env_remove("BASH_ENV");
+                cmd.kill_on_drop(true);
+                probe_stdout(&mut cmd).await
+            })
+            .await;
+        assert!(
+            stdout.lines().any(|l| l.trim() == "daemon-pidash"),
+            "decoy pidash won on the plain bridge path; full stdout: {stdout}"
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn daemon_config_data_and_exe_survive_hostile_rc() {
+        // The rc files overwrite PIDASH_CONFIG_DIR / PIDASH_DATA_DIR; the
+        // re-export after rc files must restore the daemon's own dirs (for
+        // a user-enrolled runner whose daemon has them set), plus the
+        // daemon exe path for the CLI warning.
+        let decoy_dir = tempfile::tempdir().expect("tempdir for decoy bin");
+        marker_pidash(decoy_dir.path(), "decoy-pidash");
+        let daemon_dir = tempfile::tempdir().expect("tempdir for daemon bin");
+        let daemon_exe = marker_pidash(daemon_dir.path(), "daemon-pidash");
+        let home = hostile_home(decoy_dir.path());
+
+        let stdout = RUN_ENV
+            .scope(
+                pinned_run_env(daemon_dir.path(), &daemon_exe),
+                async {
+                    let mut cmd = login_shell_command(
+                        "sh",
+                        &[
+                            "-c",
+                            "printf '%s\\n%s\\n%s\\n' \"$PIDASH_CONFIG_DIR\" \"$PIDASH_DATA_DIR\" \"$PIDASH_RUNNER_EXE\"",
+                        ],
+                        None,
+                    );
+                    cmd.env("HOME", home.path());
+                    cmd.env_remove("BASH_ENV");
+                    cmd.kill_on_drop(true);
+                    probe_stdout(&mut cmd).await
+                },
+            )
+            .await;
+        let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+        let (config, data, exe) = (
+            lines[lines.len() - 3],
+            lines[lines.len() - 2],
+            lines[lines.len() - 1],
+        );
+        assert_eq!(config, "/daemon/pidash", "rc file's PIDASH_CONFIG_DIR won");
+        assert_eq!(data, "/daemon/pidash/data", "rc file's PIDASH_DATA_DIR won");
+        assert_eq!(
+            exe,
+            daemon_exe.to_string_lossy(),
+            "PIDASH_RUNNER_EXE did not survive rc files"
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn runner_bin_comes_before_managed_prepend() {
+        // A managed run has both the bundled-CLI prepend and the daemon pin;
+        // the daemon's own pidash must resolve first.
+        let decoy_dir = tempfile::tempdir().expect("tempdir for decoy bin");
+        marker_pidash(decoy_dir.path(), "decoy-pidash");
+        let daemon_dir = tempfile::tempdir().expect("tempdir for daemon bin");
+        marker_pidash(daemon_dir.path(), "daemon-pidash");
+        let managed_dir = tempfile::tempdir().expect("tempdir for managed bin");
+        marker_pidash(managed_dir.path(), "managed-pidash");
+        let home = hostile_home(decoy_dir.path());
+        let daemon_exe = daemon_dir.path().join("pidash");
+
+        let env = AgentEnv {
+            path_prepend: Some(managed_dir.path().to_path_buf()),
+            ..AgentEnv::default()
+        };
+        let stdout = RUN_ENV
+            .scope(pinned_run_env(daemon_dir.path(), &daemon_exe), async {
+                let mut cmd = login_shell_command_with_env(
+                    "sh",
+                    &["-c", "command -v pidash; printf '%s\\n' \"$PATH\""],
+                    None,
+                    &env,
+                );
+                cmd.env("HOME", home.path());
+                cmd.env_remove("BASH_ENV");
+                cmd.kill_on_drop(true);
+                probe_stdout(&mut cmd).await
+            })
+            .await;
+        let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+        let resolved = lines[lines.len() - 2];
+        let path = lines[lines.len() - 1];
+        assert_eq!(
+            Path::new(resolved),
+            daemon_exe.as_path(),
+            "daemon pin did not resolve first; full stdout: {stdout}"
+        );
+        assert!(
+            path.starts_with(&format!(
+                "{}:{}:",
+                daemon_dir.path().display(),
+                managed_dir.path().display()
+            )),
+            "expected pin before managed prepend; PATH={path}"
+        );
+    }
+
+    #[test]
+    fn ensure_daemon_pidash_link_creates_and_refreshes_symlink() {
+        let data_dir = tempfile::tempdir().expect("tempdir for data dir");
+        let dir = ensure_daemon_pidash_link(data_dir.path());
+        assert_eq!(dir, daemon_bin_dir(data_dir.path()));
+        let link = dir.join(daemon_bin_name());
+        let target = current_exe_canonical().expect("current exe resolves");
+        assert_eq!(
+            std::fs::read_link(&link).expect("pin symlink exists"),
+            target,
+            "pin does not point at the daemon binary"
+        );
+        // Steady state is a single read_link: no error, same result.
+        let again = ensure_daemon_pidash_link(data_dir.path());
+        assert_eq!(again, dir);
+        assert_eq!(std::fs::read_link(&link).expect("pin still there"), target);
+        // A stale link (e.g. from before a self-update) is replaced.
+        let _ = std::fs::remove_file(&link);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/nonexistent/pidash", &link).expect("stale link");
+        #[cfg(target_os = "windows")]
+        std::os::windows::fs::symlink_file("C:\\nonexistent\\pidash.exe", &link)
+            .expect("stale link");
+        ensure_daemon_pidash_link(data_dir.path());
+        assert_eq!(
+            std::fs::read_link(&link).expect("pin recreated"),
+            target,
+            "stale pin was not refreshed"
+        );
+    }
+
+    #[test]
+    fn mismatch_warning_names_both_paths_and_version() {
+        let running = PathBuf::from("/home/op/.local/bin/pidash");
+        let daemon = PathBuf::from("/home/op/.local/lib/pidash-test/pidash");
+        let msg =
+            runner_exe_mismatch_message(&running, Some(&daemon), true).expect("mismatch warns");
+        assert!(
+            msg.lines().count() == 1,
+            "warning must stay one line: {msg}"
+        );
+        assert!(
+            msg.contains(running.to_str().unwrap()),
+            "must name running binary: {msg}"
+        );
+        assert!(
+            msg.contains(daemon.to_str().unwrap()),
+            "must name daemon binary: {msg}"
+        );
+        assert!(
+            msg.contains(crate::RUNNER_VERSION),
+            "must name its version: {msg}"
+        );
+    }
+
+    #[test]
+    fn mismatch_warning_silent_for_match_unset_or_no_run() {
+        let exe = std::env::current_exe().expect("current exe");
+        // Same binary (canonically) is silent.
+        assert_eq!(runner_exe_mismatch_message(&exe, Some(&exe), true), None);
+        // No expected daemon binary, or no run id, is silent.
+        assert_eq!(
+            runner_exe_mismatch_message(&exe, None, true),
+            None,
+            "unset PIDASH_RUNNER_EXE must print nothing"
+        );
+        assert_eq!(
+            runner_exe_mismatch_message(&PathBuf::from("/elsewhere/pidash"), Some(&exe), false),
+            None,
+            "outside an agent run must print nothing"
         );
     }
 

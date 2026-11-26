@@ -60,11 +60,11 @@ use pidash_db::entity as orm;
 use pidash_db::orm_tx::TxConn;
 use pidash_db::pool::sea_orm_connection;
 use pidash_services::domain::comments as comment_domain;
+use pidash_services::runner_runs::failure_effects;
 use pidash_services::runner_runs::finalization as finalize_kernel;
 use pidash_services::runner_runs::lifecycle as lifecycle_kernel;
 use pidash_services::runner_runs::{LifecycleEffect, LiveStateUsageFacts};
 use pidash_services::runner_sessions::live_drains;
-use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::runner_runs::{
     AgentRunStatus, DevMachineInfo, RunnerInfo, TERMINAL_RUN_STATUSES,
 };
@@ -598,7 +598,8 @@ async fn live_state_facts(
 }
 
 /// `finalize_run_terminal` (`run_lifecycle.py:402-463`) inside the
-/// endpoint transaction: plan, first-writer-wins lock, merge,
+/// endpoint transaction (`runner_failure_reason` is the `RunFailed`
+/// frame's `reason`, `Null` elsewhere): plan, first-writer-wins lock, merge,
 /// update, cloud-only terminal event. Returns the post-commit
 /// effects (`_publish_effects`); a lost race logs and returns none.
 #[allow(clippy::too_many_arguments)]
@@ -612,6 +613,7 @@ pub async fn execute_finalize_terminal(
     refusal_category: &Value,
     tokens: &Value,
     model: &Value,
+    runner_failure_reason: &Value,
 ) -> Result<Vec<LifecycleEffect>, Response> {
     let live = live_state_facts(tx, runner.id, run_id).await?;
     let info = runner_info(runner);
@@ -619,6 +621,7 @@ pub async fn execute_finalize_terminal(
         status,
         done_payload,
         error_detail,
+        runner_failure_reason,
         refusal_category,
         tokens,
         model,
@@ -648,17 +651,6 @@ pub async fn execute_finalize_terminal(
     finalize_kernel::finalize_update(&conn, &values, locked.id, now)
         .await
         .map_err(|_| server_error())?;
-    if locked.executor_kind == AgentExecutorKind::CloudAgent.value() {
-        finalize_kernel::append_terminal_event_once(
-            &conn,
-            run_id,
-            status,
-            &finalize_kernel::finalize_error_code(&values),
-            now,
-        )
-        .await
-        .map_err(|_| server_error())?;
-    }
     Ok(finalize_kernel::plan_publish_effects(run_id).to_vec())
 }
 
@@ -835,6 +827,35 @@ pub async fn execute_assign_rejected_busy(
     execute_requeue(tx, locked).await
 }
 
+/// `apply_agent_auth_missing` (`run_lifecycle.py` recent): same DB effect as
+/// `execute_assign_rejected_busy` (BUSY flip + requeue) for
+/// `agent_auth_missing` NACKs, distinguished by wire name, plus the failure
+/// comment with agent/runner/machine/fix so a credential-less pod is not
+/// silent. The comment is posted synchronously inside the endpoint
+/// transaction (like Django's `_post_failure_comment` inside
+/// `apply_agent_auth_missing`); effects are only the post-commit pod drain.
+pub async fn execute_agent_auth_missing(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    runner_id: Uuid,
+    locked: &LockedRun,
+    ports: &LivePorts,
+    detail: &str,
+    created_by: Option<Uuid>,
+) -> Result<Vec<LifecycleEffect>, Response> {
+    lifecycle_kernel::runner_busy_update(&TxConn::new(tx), runner_id)
+        .await
+        .map_err(|_| server_error())?;
+    let effects = execute_requeue(tx, locked).await?;
+    if !detail.is_empty() {
+        // Posting the failure comment is best-effort here: the run is
+        // already requeued, so a comment failure must not fail the
+        // endpoint's reschedule. Log via the existing terminal-error
+        // path would over-report; instead swallow and continue.
+        let _ = post_failure_comment(tx, ports, locked.id, detail, created_by).await;
+    }
+    Ok(effects)
+}
+
 // ---------------------------------------------------------------------------
 // Terminal effects (`apply_terminal_effects`) + post-commit drain
 // ---------------------------------------------------------------------------
@@ -1006,15 +1027,10 @@ pub async fn execute_terminal_effects(
         ));
     };
     if capacity.terminal_capacity_released_at.is_none() {
-        // Drains and dispatch run *before* the marker write,
-        // unisolated — a failure leaves the marker unset for the
-        // reconciler.
-        if capacity.executor_kind == AgentExecutorKind::CloudAgent.value() {
-            ports
-                .dispatch_waiting(capacity.workspace_id)
-                .await
-                .map_err(|error| TerminalEffectsError::Ports(format!("{error:?}")))?;
-        } else {
+        // Drains run *before* the marker write, unisolated — a
+        // failure leaves the marker unset for the reconciler.
+        // (P4: the cloud dispatch arm died with dispatch_waiting.)
+        {
             if let Some(runner_id) = capacity.runner_id {
                 // `release_runner_if_idle` (PDASHOSS01-231): every
                 // finalization path frees a stale `busy` runner before
@@ -1054,28 +1070,39 @@ async fn post_failure_comment(
 ) -> Result<(), TerminalEffectsError> {
     let db = |error: sqlx::Error| TerminalEffectsError::Database(error.to_string());
     let orm_err = |error: sea_orm::DbErr| TerminalEffectsError::Database(error.to_string());
-    // Suppression returns before any SQL (`finalization.py:136-147`).
-    let Some(plan) = lifecycle_kernel::plan_failure_comment(error, run_id) else {
-        return Ok(());
-    };
-    let (work_item_id, project_id, workspace_id) = {
+    let plan = lifecycle_kernel::plan_failure_comment(error, run_id);
+    let (work_item_id, project_id, workspace_id, failure_reason, runner_identity, clock_stopped) = {
         let conn = TxConn::new(hooks);
-        // `failure_reread`: run + work item (+ project), first row.
+        // `failure_reread`: run + work item (+ project + runner/machine), first row.
         let reread = lifecycle_kernel::failure_reread(&conn, run_id)
             .await
             .map_err(orm_err)?;
-        let ids = match reread {
-            Some(lifecycle_kernel::FailureRereadRow {
+        let Some(reread) = reread else {
+            return Ok(());
+        };
+        let (work_item, project, workspace) = match &reread {
+            lifecycle_kernel::FailureRereadRow {
                 work_item_id: Some(work_item),
                 issue_project_id: Some(project),
                 issue_workspace_id: Some(workspace),
                 ..
-            }) => (work_item, project, workspace),
+            } => (*work_item, *project, *workspace),
             _ => return Ok(()),
+        };
+        let reason = reread.failure_reason.clone();
+        let identity = reread.runner_identity();
+        // Route on the stored canonical reason (PDASHOSS01-183), predicting
+        // the `RUN_ENDED` failure policy that follows on this transaction.
+        let effect = failure_effects::failure_clock_effect(&conn, &reread)
+            .await
+            .map_err(orm_err)?;
+        let clock_stopped = match lifecycle_kernel::failure_comment_gate(&plan, &reason, effect) {
+            lifecycle_kernel::FailureCommentGate::Suppress => return Ok(()),
+            lifecycle_kernel::FailureCommentGate::Post { clock_stopped } => clock_stopped,
         };
         let dupe = lifecycle_kernel::comment_dedupe_exists(
             &conn,
-            ids.0,
+            work_item,
             run_id,
             lifecycle_kernel::CommentSpeaker::System,
         )
@@ -1084,8 +1111,16 @@ async fn post_failure_comment(
         if dupe {
             return Ok(());
         }
-        ids
+        (
+            work_item,
+            project,
+            workspace,
+            reason,
+            identity,
+            clock_stopped,
+        )
     };
+    let rendered = plan.render(&failure_reason, clock_stopped, runner_identity.as_ref());
     let actor_id = ports
         .agent_system_user_id()
         .await
@@ -1104,11 +1139,42 @@ async fn post_failure_comment(
             actor_id: Some(actor_id),
             created_by_id: created_by,
             updated_by_id: None,
-            plan,
+            plan: rendered.comment.clone(),
         },
     )
     .await
     .map_err(db)?;
+    if rendered.clock_stopped {
+        // A stopped clock with nobody told is the failure mode the
+        // taxonomy exists to prevent: notify the issue's creator and the
+        // runner's owner. Isolated like the source's `try/except` — a
+        // notification failure is logged and never drops the comment.
+        // An sqlx nested transaction (savepoint): a notify database
+        // failure aborts only it, leaving the hooks transaction valid.
+        let mut savepoint = hooks.begin().await.map_err(db)?;
+        let notified = failure_effects::notify_clock_stopped(
+            &TxConn::new(&mut savepoint),
+            run_id,
+            work_item_id,
+            &failure_reason,
+            &rendered.label,
+            &rendered.action,
+        )
+        .await;
+        match notified {
+            Ok(_) => {
+                savepoint.commit().await.map_err(db)?;
+            }
+            Err(error) => {
+                savepoint.rollback().await.map_err(db)?;
+                tracing::error!(
+                    ?error,
+                    run_id = %run_id,
+                    "run_lifecycle: clock-stop notification failed"
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1171,8 +1237,8 @@ async fn apply_scheduler_hook(
 ///   runner drain runs unconditionally (`_pause_and_drain`,
 ///   `run_lifecycle.py:230-238`). Both propagate — a 500 with
 ///   committed rows.
-/// * `PostRunOrchestration`, `FireTick`, `DrainRunner`, `DrainPod`,
-///   `DispatchWaiting` propagate (direct `on_commit` registrations
+/// * `PostRunOrchestration`, `FireTick`, `DrainRunner`, `DrainPod`
+///   propagate (direct `on_commit` registrations
 ///   or unisolated inline calls).
 /// * `PublishTerminalEffects` and `ApplyTerminalEffectsInline` are
 ///   isolated with `_publish_effects`' log lines; `DrainTasks`-style
@@ -1235,12 +1301,7 @@ pub async fn drain_lifecycle_effects(
                     .await
                     .map_err(|_| server_error())?;
             }
-            LifecycleEffect::DispatchWaiting { workspace_id } => {
-                ports
-                    .dispatch_waiting(workspace_id)
-                    .await
-                    .map_err(|_| server_error())?;
-            }
+
             LifecycleEffect::CompleteProjectMoveHandoff { run_id } => {
                 if let Err(error) = ports
                     .complete_project_move_handoff(run_id, terminal_created_by)
@@ -1378,10 +1439,18 @@ async fn run_accept_inner(
     Path(run_id): Path<String>,
     req: Request<axum::body::Body>,
 ) -> Response {
-    let (pool, _runner, run_id, key) = match daemon_preamble_nobody(&state, &run_id, req).await {
+    let (pool, preamble) = match daemon_preamble(&state, &run_id, req).await {
         Ok(preamble) => preamble,
         Err(response) => return response,
     };
+    let (pool, _runner, run_id, key) = (
+        pool,
+        preamble.runner.clone(),
+        preamble.run_id,
+        preamble.key.clone(),
+    );
+    let data = preamble.data.clone();
+    // Fencing will be checked inside transaction after locking.
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(_) => return server_error(),
@@ -1411,6 +1480,99 @@ async fn run_accept_inner(
             return server_error();
         }
         return pending;
+    }
+    // NEWPIDASH-241 T2: fence protocol-1 attempts (require_session=True for Accept).
+    // Session/token must match, otherwise 400/409. Legacy skips.
+    {
+        // locked is subset (id/runner/pod/status) — fetch protocol/token for fencing
+        let (protocol, stored_token) = {
+            let conn = TxConn::new(&mut tx);
+            use pidash_db::entity::agent_run;
+            use sea_orm::{ColumnTrait, QueryFilter};
+            let row = agent_run::Entity::find_by_id(locked.id)
+                .select_only()
+                .columns([
+                    agent_run::Column::AssignmentProtocol,
+                    agent_run::Column::AssignmentToken,
+                ])
+                .filter(agent_run::Column::Id.eq(locked.id))
+                .into_tuple::<(i16, Option<Uuid>)>()
+                .one(&conn)
+                .await
+                .ok()
+                .flatten();
+            match row {
+                Some((p, t)) => (p, t),
+                None => (0, None),
+            }
+        };
+        // Parse session/token from body data
+        let data_obj = data.as_object();
+        let session_id = data_obj
+            .and_then(|o| o.get("session_id"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| {
+                pidash_services::runner_runs::capacity::parse_uuid(&serde_json::Value::String(
+                    s.to_owned(),
+                ))
+            });
+        // Active session for runner (already locked runner row? fetch)
+        let active_session_id = {
+            let conn = TxConn::new(&mut tx);
+            use pidash_db::entity::runner_session;
+            use sea_orm::{ColumnTrait, QueryFilter};
+            runner_session::Entity::find()
+                .filter(runner_session::Column::RunnerId.eq(locked.runner_id.unwrap_or(locked.id)))
+                .filter(runner_session::Column::RevokedAt.is_null())
+                .one(&conn)
+                .await
+                .ok()
+                .flatten()
+                .map(|s| s.id)
+        };
+        let provided_token = data_obj
+            .and_then(|o| o.get("assignment_token"))
+            .and_then(|v| {
+                if v.is_null() {
+                    None
+                } else {
+                    pidash_services::runner_runs::capacity::parse_uuid(v)
+                }
+            });
+        if let Err(kind) = pidash_services::runner_runs::capacity::fence_attempt(
+            protocol,
+            session_id,
+            active_session_id,
+            provided_token,
+            stored_token,
+            true,
+        ) {
+            let code = if kind == "session_evicted" || kind == "stale_assignment" {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            let body = format!(r#"{{"error":"{kind}"}}"#);
+            let _ = tx.rollback().await;
+            return json_response(code, body);
+        }
+    }
+    // Clear capacity_wait on Accept (T2): the run is now executing.
+    {
+        let conn = TxConn::new(&mut tx);
+        use sea_orm::ColumnTrait;
+        let _ = orm::agent_run::Entity::update_many()
+            .col_expr(
+                orm::agent_run::Column::Status,
+                sea_orm::sea_query::Expr::val(AgentRunStatus::Running.value()).into(),
+            )
+            .col_expr(
+                orm::agent_run::Column::CapacityWait,
+                sea_orm::sea_query::Expr::val(None::<serde_json::Value>).into(),
+            )
+            .filter(orm::agent_run::Column::Id.eq(locked.id))
+            .exec(&conn)
+            .await;
     }
     if run_status_update(AgentRunStatus::Running, locked.id)
         .exec(&TxConn::new(&mut tx))
@@ -2000,6 +2162,7 @@ async fn run_completed_inner(
             &Value::Null,
             &tokens,
             &model,
+            &Value::Null,
         )
         .await
         {
@@ -2183,6 +2346,15 @@ async fn run_failed_inner(
     if reason_is(&preamble.data, "assign_rejected_busy") {
         return run_failed_requeue(&pool, &ports, tx, runner, run.id, true).await;
     }
+    if reason_is(&preamble.data, "agent_auth_missing") {
+        let detail = preamble
+            .data
+            .get("detail")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        return run_failed_agent_auth_missing(&pool, &ports, tx, runner, run.id, detail).await;
+    }
     let detail = preamble.data.get("detail").cloned().unwrap_or(Value::Null);
     let tokens = frame_tokens(&preamble.data);
     let model = preamble.data.get("model").cloned().unwrap_or(Value::Null);
@@ -2202,6 +2374,7 @@ async fn run_failed_inner(
             &category,
             &tokens,
             &model,
+            &Value::Null,
         )
         .await
         {
@@ -2220,6 +2393,10 @@ async fn run_failed_inner(
         }
         return json_response(StatusCode::OK, r#"{"ok":true,"refused":true}"#.to_owned());
     }
+    // `runner_failure_reason=request.data.get("reason") or ""`
+    // (PDASHOSS01-183): the runner's structured reason feeds the
+    // write-time classification.
+    let reason = preamble.data.get("reason").cloned().unwrap_or(Value::Null);
     let effects = match execute_finalize_terminal(
         &mut tx,
         runner,
@@ -2230,6 +2407,7 @@ async fn run_failed_inner(
         &Value::Null,
         &tokens,
         &model,
+        &reason,
     )
     .await
     {
@@ -2286,6 +2464,7 @@ async fn run_failed_requeue(
             &Value::Null,
             &Value::Null,
             &Value::Null,
+            &Value::Null,
         )
         .await
         {
@@ -2314,6 +2493,88 @@ async fn run_failed_requeue(
             Ok(effects) => effects,
             Err(response) => return response,
         }
+    };
+    if commit_tx(tx).await.is_err() {
+        return server_error();
+    }
+    if !effects.is_empty()
+        && drain_lifecycle_effects(pool, ports, effects, terminal_created_by)
+            .await
+            .is_err()
+    {
+        return server_error();
+    }
+    json_response(
+        StatusCode::OK,
+        r#"{"ok":true,"rescheduled":true}"#.to_owned(),
+    )
+}
+
+/// `agent_auth_missing` NACK path: lock, a pending cancel finalizes
+/// `CANCELLED`, otherwise BUSY-flip + requeue + failure comment with
+/// the detail (agent/runner/machine/fix). The run is re-queued without
+/// tick charge and the comment is posted synchronously, so a pod of
+/// credential-less runners does not loop silently.
+async fn run_failed_agent_auth_missing(
+    pool: &PgPool,
+    ports: &LivePorts,
+    mut tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    runner: &DaemonRunner,
+    run_id: Uuid,
+    detail: String,
+) -> Response {
+    let terminal_created_by = Some(runner.owner_id);
+    let locked = match lock_non_terminal(&mut tx, run_id).await {
+        Ok(locked) => locked,
+        Err(closed) => {
+            if commit_tx(tx).await.is_err() {
+                return server_error();
+            }
+            return closed;
+        }
+    };
+    if locked.status == AgentRunStatus::CancelRequested.value() {
+        let effects = match execute_finalize_terminal(
+            &mut tx,
+            runner,
+            run_id,
+            AgentRunStatus::Cancelled,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+            &Value::Null,
+        )
+        .await
+        {
+            Ok(effects) => effects,
+            Err(response) => return response,
+        };
+        if commit_tx(tx).await.is_err() {
+            return server_error();
+        }
+        if !effects.is_empty()
+            && drain_lifecycle_effects(pool, ports, effects, terminal_created_by)
+                .await
+                .is_err()
+        {
+            return server_error();
+        }
+        return json_response(StatusCode::OK, r#"{"ok":true,"cancelled":true}"#.to_owned());
+    }
+    let effects = match execute_agent_auth_missing(
+        &mut tx,
+        runner.id,
+        &locked,
+        ports,
+        &detail,
+        terminal_created_by,
+    )
+    .await
+    {
+        Ok(effects) => effects,
+        Err(response) => return response,
     };
     if commit_tx(tx).await.is_err() {
         return server_error();
@@ -2391,6 +2652,7 @@ async fn run_cancelled_inner(
             &Value::Null,
             &tokens,
             &model,
+            &Value::Null,
         )
         .await
         {
@@ -2583,6 +2845,10 @@ pub fn routes() -> Router<AppState> {
     use axum::routing::post;
     const UNOWNED: &[&str] = &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"];
     Router::new()
+        .route(
+            "/api/v1/runner/runs/{run_id}/capacity/",
+            owned(post(crate::runner_runs::capacity::run_capacity), UNOWNED),
+        )
         .route(
             "/api/v1/runner/runs/{run_id}/accept/",
             owned(post(run_accept), UNOWNED),

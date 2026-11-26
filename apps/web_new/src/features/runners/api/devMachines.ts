@@ -4,8 +4,9 @@
 // Dev-machine reads and writes (NEWFRONT-555, RUN-037–040). The machines
 // table polls on its own short cadence; every write re-reads the subtree so
 // the row, its counts and the runner list agree once the request settles.
-// Built-in engine design §4.10, §8: rename, engine controls, engine
-// sign-out and the merge of a replaced computer ride the same writer.
+// Pi Dash Agent design §4.10, §8: rename, engine controls and the merge of
+// a replaced computer ride the same writer. There is no engine sign-out any
+// more (desktop_unified_signin U-3).
 
 import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -15,7 +16,6 @@ import {
   mergeDevMachineInto,
   revokeDevMachine,
   rotateDevMachine,
-  signOutDevMachineEngine,
   updateDevMachine,
   type ApiClient,
   type DevMachinePatch,
@@ -91,13 +91,6 @@ export function useUpdateDevMachine(workspaceSlug: string, workspaceId: string) 
   );
 }
 
-/** Revoke the machine's engine credential only. */
-export function useSignOutDevMachineEngine(workspaceSlug: string, workspaceId: string) {
-  return useMachineWrite(workspaceSlug, (client, machineId: string) =>
-    signOutDevMachineEngine(client, machineId, workspaceId)
-  );
-}
-
 /** Which offline machine merges into which live one. */
 export interface DevMachineMergeInput {
   sourceId: string;
@@ -117,7 +110,7 @@ export function devMachineRunnersKey(workspaceSlug: string) {
 }
 
 /**
- * Every runner of the workspace the caller can see, built-in engines
+ * Every runner of the workspace the caller can see, Pi Dash Agents
  * included, for the expanded machine rows. Older servers hide engines
  * unless asked; newer ones list them always.
  */

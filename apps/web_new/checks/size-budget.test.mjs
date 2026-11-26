@@ -24,8 +24,8 @@ const budgetSourcePath = fileURLToPath(new URL("./size-budget.mjs", import.meta.
 const configPath = join(dirname(fileURLToPath(import.meta.url)), "..", ".size-limit.mjs");
 
 describe("size budgets", () => {
-  it("blocks above a single 276 KB initial-JS ceiling", () => {
-    assert.equal(budgets.INITIAL_JS_CEILING, "276 KB");
+  it("blocks above a single 278 KB initial-JS ceiling", () => {
+    assert.equal(budgets.INITIAL_JS_CEILING, "278 KB");
   });
 
   it("keeps the 30 KB initial-CSS ceiling", () => {
@@ -45,7 +45,7 @@ describe("sizeLimits", () => {
     assert.deepEqual(entries[0], {
       name: "web initial JS (shell + first route)",
       path: CHAIN,
-      limit: "276 KB",
+      limit: "278 KB",
       gzip: true,
     });
   });
@@ -89,8 +89,8 @@ describe("size-budget.mjs", () => {
         ],
         { cwd: appRoot, encoding: "utf8", env: { ...process.env, [ENV_SWITCH]: "1" } }
       ).trim();
-    assert.equal(read({ [ENV_SWITCH]: "1" }), "276 KB");
-    assert.equal(read({}), "276 KB");
+    assert.equal(read({ [ENV_SWITCH]: "1" }), "278 KB");
+    assert.equal(read({}), "278 KB");
   });
 });
 

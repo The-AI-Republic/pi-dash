@@ -881,17 +881,18 @@ pub async fn dev_machine_revoke(
     }
     // The engine credential goes with the machine (`:207`, #2910):
     // revoking the machine signs the engine out with it.
-    let revoke_effects = match pidash_services::domain::engine_credential::revoke_engine_credential(
-        &pidash_db::orm_tx::TxConn::new(&mut tx),
-        machine_id,
-        "machine_removed",
-        now,
-    )
-    .await
-    {
-        Ok((_revoked, effects)) => effects,
-        Err(_) => return server_error(),
-    };
+    let revoke_effects =
+        match pidash_services::domain::pidash_agent_credential::revoke_pidash_agent_credential(
+            &pidash_db::orm_tx::TxConn::new(&mut tx),
+            machine_id,
+            "machine_removed",
+            now,
+        )
+        .await
+        {
+            Ok((_revoked, effects)) => effects,
+            Err(_) => return server_error(),
+        };
     // Locked active-runner list (`:199`).
     let runner_rows =
         match manage_reads::lock_live_machine_runners(&TxConn::new(&mut tx), machine_id).await {
@@ -980,202 +981,6 @@ pub async fn dev_machine_revoke(
     match serialize_machine(&pool, &machine, user_id, workspace_id, stamped).await {
         Ok(body) => json_response(StatusCode::OK, body),
         Err(response) => response,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// `POST /api/runners/dev-machines/<mid>/engine-sign-out/`
-// (`machines.py:231-257`, #2910)
-// ---------------------------------------------------------------------------
-
-/// `POST /api/runners/dev-machines/<machine_id>/engine-sign-out/`
-/// (`machines.py:231-257`): revoke the machine's engine credential only
-/// (state `signed_out`). The machine must be the caller's; an optional
-/// workspace must contain it. Both misses answer the same 404. The
-/// answer is the M5 serialization when a workspace is in scope, else
-/// the plain serializer body.
-pub async fn dev_machine_engine_sign_out(
-    State(state): State<AppState>,
-    extension: Option<Extension<SessionHandle>>,
-    Path(raw_id): Path<String>,
-    axum::extract::Query(params): axum::extract::Query<crate::license::QueryMap>,
-    req: Request,
-) -> Response {
-    let Some(machine_id) = strict_uuid(&raw_id) else {
-        return crate::edge::proxy(State(state.clone()), req).await;
-    };
-    let (pool, user_id) = match web_actor(&state, extension).await {
-        Ok(preamble) => preamble,
-        Err(response) => return response,
-    };
-    let data = match read_request_data(&state, req).await {
-        Ok(data) => data,
-        Err(response) => return response,
-    };
-    let body_ws = match body_workspace(&data) {
-        Ok(body_ws) => body_ws,
-        Err(response) => return response,
-    };
-    let query_ws = crate::license::query_last(&params, "workspace");
-    let workspace_raw = manage_reads::request_workspace_id(body_ws.as_deref(), query_ws.as_deref());
-    let mut tx = match pool.begin().await {
-        Ok(tx) => tx,
-        Err(_) => return server_error(),
-    };
-    let machine = match manage_reads::lock_machine(&TxConn::new(&mut tx), machine_id).await {
-        Ok(machine) => machine,
-        Err(_) => return server_error(),
-    };
-    // The machine must be the caller's (`machines.py:244`).
-    let Some(machine) = machine else {
-        return not_found();
-    };
-    if machine.owner_id != user_id {
-        return not_found();
-    }
-    let workspace_id = if workspace_raw.is_empty() {
-        None
-    } else {
-        let workspace_id = match parse_uuid(&workspace_raw) {
-            Ok(workspace_id) => workspace_id,
-            Err(_) => return server_error(),
-        };
-        match machine_in_workspace_scope(&mut tx, &machine, user_id, workspace_id).await {
-            Ok(true) => Some(workspace_id),
-            Ok(false) => return not_found(),
-            Err(response) => return response,
-        }
-    };
-    let revoke_effects = match pidash_services::domain::engine_credential::revoke_engine_credential(
-        &TxConn::new(&mut tx),
-        machine_id,
-        "signed_out",
-        now_micros(),
-    )
-    .await
-    {
-        Ok((_revoked, effects)) => effects,
-        Err(_) => return server_error(),
-    };
-    // `refresh_from_db`: re-read the row so the render sees the
-    // sign-in state's new value.
-    let Some(machine) = (match manage_reads::lock_machine(&TxConn::new(&mut tx), machine_id).await {
-        Ok(machine) => machine,
-        Err(_) => return server_error(),
-    }) else {
-        return not_found();
-    };
-    if tx.commit().await.is_err() {
-        return server_error();
-    }
-    // Post-commit drains for the pause flip.
-    if !revoke_effects.drain_pod_ids.is_empty() || !revoke_effects.drain_runner_ids.is_empty() {
-        let redis = pidash_db::redis::client_from_settings(state.settings());
-        for pod_id in &revoke_effects.drain_pod_ids {
-            let _ = pidash_services::runner_sessions::live_drains::drain_pod_by_id(
-                &pool,
-                redis.as_ref(),
-                &state.settings().runner,
-                *pod_id,
-            )
-            .await;
-        }
-        for runner_id in &revoke_effects.drain_runner_ids {
-            let _ = pidash_services::runner_sessions::live_drains::drain_for_runner_by_id(
-                &pool,
-                redis.as_ref(),
-                &state.settings().runner,
-                *runner_id,
-            )
-            .await;
-        }
-    }
-    // The engine keys ride the serializers (`DevMachineSerializer`'s
-    // `engine_sign_in_state` + `engine_credential_expires_at`, folded
-    // into the shared machine renders by NEWPIDASH-52); the locked
-    // row does not carry them, so a full re-read feeds the fallback
-    // render here.
-    let engine_full = {
-        use pidash_db::entity::dev_machine;
-        let db = pidash_db::pool::sea_orm_connection(&pool);
-        dev_machine::Entity::find_by_id(machine_id)
-            .one(&db)
-            .await
-            .ok()
-            .flatten()
-    };
-    match workspace_id {
-        Some(workspace_id) => {
-            match serialize_machine(&pool, &machine, user_id, workspace_id, None).await {
-                Ok(body) => json_response(StatusCode::OK, body),
-                Err(response) => response,
-            }
-        }
-        None => {
-            // `DevMachineSerializer(machine).data` on the refreshed
-            // instance: the embedded annotations are absent, so the
-            // count/heartbeat keys are omitted (DRF `SkipField`) and
-            // `control_online` defaults false — the fallback render.
-            MachineRender {
-                id: machine.id.to_string(),
-                host_label: machine.host_label.clone(),
-                label: machine.label.clone(),
-                visibility: i64::from(machine.visibility),
-                provisioning: engine_full
-                    .as_ref()
-                    .map(|row| row.provisioning.clone())
-                    .unwrap_or_default(),
-                runner_count: None,
-                online_runner_count: None,
-                control_online: None,
-                engine_paused_by_owner: engine_full
-                    .as_ref()
-                    .map(|row| row.engine_paused_by_owner)
-                    .unwrap_or_default(),
-                engine_auto_pause_reason: engine_full
-                    .as_ref()
-                    .map(|row| row.engine_auto_pause_reason.clone())
-                    .unwrap_or_default(),
-                engine_team_runs: engine_full
-                    .as_ref()
-                    .map(|row| row.engine_team_runs)
-                    .unwrap_or_default(),
-                engine_sign_in_state: engine_full
-                    .as_ref()
-                    .map(|row| row.engine_sign_in_state.clone())
-                    .unwrap_or_default(),
-                engine_credential_expires_at: engine_full
-                    .as_ref()
-                    .and_then(|row| row.engine_credential_expires_at)
-                    .map(|dt| crate::serializer::render_datetime(&dt.with_timezone(&chrono::Utc))),
-                engine_state: engine_full
-                    .as_ref()
-                    .map(|row| row.engine_state.clone())
-                    .unwrap_or_else(|| serde_json::Value::Object(Default::default())),
-                engine_state_reported_at: engine_full
-                    .as_ref()
-                    .and_then(|row| row.engine_state_reported_at)
-                    .map(|dt| crate::serializer::render_datetime(&dt.with_timezone(&chrono::Utc))),
-                merged_into: engine_full
-                    .as_ref()
-                    .and_then(|row| row.merged_into_id)
-                    .map(|id| id.to_string()),
-                last_seen_at: machine
-                    .last_seen_at
-                    .as_ref()
-                    .map(crate::serializer::render_datetime),
-                last_heartbeat_at: None,
-                revoked_at: machine
-                    .revoked_at
-                    .as_ref()
-                    .map(crate::serializer::render_datetime),
-                created_at: crate::serializer::render_datetime(&machine.created_at),
-                updated_at: crate::serializer::render_datetime(&machine.updated_at),
-            }
-            .to_json()
-            .map(|body| json_response(StatusCode::OK, body))
-            .unwrap_or_else(|response| response)
-        }
     }
 }
 
@@ -1507,7 +1312,7 @@ async fn serialize_machine(
             None => (machine.revoked_at, machine.updated_at),
         };
         let fallback_state =
-            pidash_services::domain::engine_credential::current_engine_sign_in_state(
+            pidash_services::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
                 &machine.engine_sign_in_state,
                 machine.engine_credential_expires_at,
                 Utc::now(),
@@ -1546,11 +1351,12 @@ async fn serialize_machine(
         }
         .to_json();
     };
-    let sign_in_state = pidash_services::domain::engine_credential::current_engine_sign_in_state(
-        &row.engine_sign_in_state,
-        row.engine_credential_expires_at,
-        Utc::now(),
-    );
+    let sign_in_state =
+        pidash_services::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
+            &row.engine_sign_in_state,
+            row.engine_credential_expires_at,
+            Utc::now(),
+        );
     MachineRender {
         id: machine.id.to_string(),
         host_label: row.host_label,
@@ -1796,7 +1602,7 @@ impl RunnerRender {
         let dev_machine = match self.dev_machine_detail.as_ref() {
             Some(detail) => {
                 dev_mini_state =
-                    pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                    pidash_services::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
                         &detail.engine_sign_in_state,
                         detail.engine_credential_expires_at,
                         now,
@@ -1838,7 +1644,7 @@ impl RunnerRender {
             name: &self.name,
             status: &self.status,
             host_label: &self.host_label,
-            is_engine: self.is_engine,
+            is_pidash_agent: self.is_engine,
             engine_paused: self.engine_paused,
             dispatch_paused: self.dispatch_paused,
             machine_display_name: &self.machine_display_name,
@@ -2452,7 +2258,7 @@ use pidash_jobs::runner_enroll::{
 use pidash_services::runner_enroll::delete as delete_kernel;
 use pidash_services::runner_runs::LifecycleEffect;
 use pidash_services::runner_sessions::pubsub::PubsubStore;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::runner_runs::AgentRunStatus;
 
 // Executors: the first pool-backed `PubsubStore`s (F8: called, never inlined)
@@ -2999,10 +2805,6 @@ pub fn web_routes() -> Router<AppState> {
     use axum::routing::post;
     const POST_ONLY: &[&str] = &["GET", "PUT", "PATCH", "DELETE", "OPTIONS"];
     Router::new()
-        .route(
-            "/api/runners/dev-machines/{machine_id}/engine-sign-out/",
-            owned(post(dev_machine_engine_sign_out), POST_ONLY),
-        )
         .route(
             "/api/runners/dev-machines/{machine_id}/revoke/",
             owned(post(dev_machine_revoke), POST_ONLY),

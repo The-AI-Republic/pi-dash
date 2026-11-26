@@ -783,7 +783,7 @@ async fn authenticate_access_jwt(
 }
 
 /// Shared MachineToken path (`authentication.py:120-162`), in order: hash →
-/// row → revoked → expired → machine-revoked → membership-or-revoke →
+/// row → machine-revoked → revoked → expired → membership-or-revoke →
 /// runner-id required → runner load → runner/machine revoked → binding →
 /// `last_used_at` bump (plain update, NOT best-effort — a DB error
 /// escapes to 500) → payload.
@@ -803,14 +803,17 @@ async fn authenticate_access_machine_token(
     let Some(token) = token else {
         return Err(bearer_failure_response(CODE_MACHINE_TOKEN_INVALID, allow));
     };
+    // The machine first: removing a computer on the web revokes its tokens
+    // too, and the daemon must read that as removed (`dev_machine_revoked`),
+    // not a plain token revoke (desktop_unified_signin §12 rule 1).
+    if token.dev_machine_id.is_some() && token.dev_machine_revoked {
+        return Err(bearer_failure_response(CODE_DEV_MACHINE_REVOKED, allow));
+    }
     if token.revoked_at.is_some() {
         return Err(bearer_failure_response(CODE_MACHINE_TOKEN_REVOKED, allow));
     }
     if token_expired(token.expires_at) {
         return Err(bearer_failure_response(CODE_MACHINE_TOKEN_EXPIRED, allow));
-    }
-    if token.dev_machine_id.is_some() && token.dev_machine_revoked {
-        return Err(bearer_failure_response(CODE_DEV_MACHINE_REVOKED, allow));
     }
     if !member_or_revoke(pool, &token).await? {
         return Err(bearer_failure_response(CODE_MEMBERSHIP_REVOKED, allow));
@@ -920,14 +923,17 @@ pub async fn authenticate_machine_token(
     let Some(token) = token else {
         return Err(bearer_failure_response(CODE_MACHINE_TOKEN_INVALID, allow));
     };
+    // The machine first: removing a computer on the web revokes its tokens
+    // too, and the daemon must read that as removed (`dev_machine_revoked`),
+    // not a plain token revoke (desktop_unified_signin §12 rule 1).
+    if token.dev_machine_id.is_some() && token.dev_machine_revoked {
+        return Err(bearer_failure_response(CODE_DEV_MACHINE_REVOKED, allow));
+    }
     if token.revoked_at.is_some() {
         return Err(bearer_failure_response(CODE_MACHINE_TOKEN_REVOKED, allow));
     }
     if token_expired(token.expires_at) {
         return Err(bearer_failure_response(CODE_MACHINE_TOKEN_EXPIRED, allow));
-    }
-    if token.dev_machine_id.is_some() && token.dev_machine_revoked {
-        return Err(bearer_failure_response(CODE_DEV_MACHINE_REVOKED, allow));
     }
     if !member_or_revoke(pool, &token).await? {
         return Err(bearer_failure_response(CODE_MEMBERSHIP_REVOKED, allow));

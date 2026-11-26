@@ -193,6 +193,8 @@ pub enum Denial {
     NotFound(String),
     /// 409, view-inline body (external duplicate).
     Conflict(String),
+    /// 409, archived project (NEWPIDASH-236, pre-rendered body).
+    ProjectArchived(String),
     /// 500, generic branch.
     ServerError,
 }
@@ -231,6 +233,7 @@ impl Denial {
             ),
             Denial::NotFound(body) => (StatusCode::NOT_FOUND, body.clone()),
             Denial::Conflict(body) => (StatusCode::CONFLICT, body.clone()),
+            Denial::ProjectArchived(body) => (StatusCode::CONFLICT, body.clone()),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 SERVER_ERROR_BODY.to_owned(),
@@ -277,6 +280,7 @@ impl From<operations::Error> for Denial {
             operations::Error::NotFound
             | operations::Error::NotFoundBody(_)
             | operations::Error::ProjectNotFound
+            | operations::Error::PreconditionFailed(_)
             | operations::Error::Rejection { .. } => Denial::ServerError,
         }
     }
@@ -718,11 +722,18 @@ async fn require_gate(
     let gate = gate_for(route, method);
     let facts = entity_facts(pool, workspace_id, workspace_slug, user_id, project_id).await?;
     let scope = TenantScope::new(pidash_types::WorkspaceId::from(workspace_slug.to_owned()));
-    if decide(gate, method, &scope, &facts) {
-        Ok(())
-    } else {
-        Err(Denial::Forbidden)
+    if !decide(gate, method, &scope, &facts) {
+        return Err(Denial::Forbidden);
     }
+    if let Some(info) = crate::project_archived::archived_by_id(pool, *project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1537,6 +1548,7 @@ async fn expand_issue(
     let git_work_branch: Option<String> = Some(row.git_work_branch);
     let created_via = row.created_via;
     let agent_executor = row.agent_executor;
+    let work_type = row.work_type;
     let created_by = row.created_by_id.map(|id| id.to_string());
     let updated_by = row.updated_by_id.map(|id| id.to_string());
     let project = Some(row.project_id.to_string());
@@ -1603,6 +1615,7 @@ async fn expand_issue(
         git_work_branch: git_work_branch.as_deref().unwrap_or(""),
         created_via: created_via.as_deref(),
         agent_executor: agent_executor.as_deref(),
+        work_type: work_type.as_deref(),
         created_by: created_by.as_deref(),
         updated_by: updated_by.as_deref(),
         project: project.as_deref().unwrap_or(""),
@@ -1654,6 +1667,7 @@ async fn expand_issue(
         expanded_labels: &[],
         blockers: Some(&blockers),
         relations: None,
+        active_run: None,
         expansions: &[],
     })
     .map_err(|_| Denial::ServerError)?;
@@ -4037,7 +4051,7 @@ pub async fn post_comment(
     }
 }
 
-async fn comment_post_inner(
+pub(super) async fn comment_post_inner(
     state: &AppState,
     headers: &HeaderMap,
     slug: &str,

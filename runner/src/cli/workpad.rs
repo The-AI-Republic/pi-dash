@@ -4,7 +4,8 @@
 
 //! `pidash workpad …` subcommands.
 //!
-//! The workpad is the coding agent's durable per-issue scratchpad. It used
+//! The workpad is the shared memory of the agent runs on one issue (In
+//! Progress, review and test; `.ai_design/unified_workpad/design.md`). It used
 //! to live in a dedicated `## Agent Workpad` IssueComment; with the comment
 //! thread now reserved for human ↔ agent conversation, the workpad is a
 //! plain markdown field on the issue itself and these commands are the
@@ -15,9 +16,12 @@ use std::path::{Path, PathBuf};
 use clap::{Args, Subcommand};
 use serde_json::json;
 
-use crate::api_client::{ApiClient, CliEnv, CliError, EXIT_INVALID, EXIT_UNKNOWN, report_error};
+use crate::api_client::{
+    ApiClient, CliEnv, CliError, EXIT_INVALID, EXIT_SERVER, EXIT_UNKNOWN, report_error,
+};
 
 use super::resolve::resolve_issue;
+use super::state::ISSUE_ENV;
 
 #[derive(Debug, Args)]
 pub struct WorkpadArgs {
@@ -35,24 +39,57 @@ pub enum WorkpadCommand {
         /// Work item identifier, e.g. `ENG-42`. Defaults to
         /// `PIDASH_ISSUE_IDENTIFIER`.
         identifier: Option<String>,
+        /// Write the body to this file (default `.pidash/workpad.md`) and
+        /// the hash to its `workpad.sha256` sibling instead of printing
+        /// the body, so a refresh does not load the whole workpad into
+        /// the agent's context. Prints `{updated_at, body_sha256, path}`.
+        /// `--to-file` with no path uses the default.
+        #[arg(long = "to-file", value_name = "PATH", num_args = 0..=1, default_missing_value = DEFAULT_BODY_FILE)]
+        to_file: Option<PathBuf>,
     },
-    /// Overwrite the agent workpad. An empty file clears it.
+    /// Overwrite the agent workpad.
     ///
-    /// On a successful upload the `--body-file` is deleted, so the local
-    /// staging copy can't go stale and clobber newer server content on a
-    /// later run. Pass `--keep` to retain it.
+    /// Refuses an empty or whitespace-only body unless `--allow-empty` is
+    /// passed, to prevent a failed `workpad get` (e.g. 429) that produced an
+    /// empty file from silently wiping the stored workpad. Pass
+    /// `--allow-empty` when a clear is intentional.
+    ///
+    /// Sends the `workpad.sha256` sibling as the `if_body_sha256` guard and
+    /// rewrites it from the response; on a 412 the command fails and tells
+    /// the agent to run `workpad get --to-file`, re-apply its edit, and
+    /// retry. The body file is kept: pass `--remove` for the old delete
+    /// behaviour (`--keep` is accepted as a no-op).
     Update {
         /// Work item identifier, e.g. `ENG-42`. Defaults to
         /// `PIDASH_ISSUE_IDENTIFIER`.
         identifier: Option<String>,
         /// Path to a file containing the workpad body (markdown).
-        #[arg(long = "body-file", value_name = "PATH")]
+        /// Defaults to `.pidash/workpad.md`.
+        #[arg(long = "body-file", value_name = "PATH", default_value = DEFAULT_BODY_FILE)]
         body_file: PathBuf,
+        /// Allow an empty or whitespace-only body to clear the workpad.
+        /// Without this flag an empty body is rejected so an accidental
+        /// empty file cannot wipe the stored workpad.
+        #[arg(long = "allow-empty")]
+        allow_empty: bool,
         /// Keep the body file after a successful upload instead of deleting it.
+        /// Accepted for back-compat; the file is always kept now.
         #[arg(long = "keep")]
         keep: bool,
+        /// Delete the body file after a successful upload (the old default).
+        #[arg(long = "remove")]
+        remove: bool,
     },
 }
+
+/// Default body path: the runner materialises the run's workpad snapshot
+/// here before the agent launches (NEWPIDASH-320 §6.1).
+pub const DEFAULT_BODY_FILE: &str = ".pidash/workpad.md";
+
+/// Hash-file name: `workpad update` sends the sibling file's content as
+/// the `if_body_sha256` guard and rewrites it from the response;
+/// `workpad get --to-file` writes it next to the body.
+pub const HASH_FILE_NAME: &str = "workpad.sha256";
 
 pub async fn run(args: WorkpadArgs, paths: &crate::util::paths::Paths) -> i32 {
     let env = match CliEnv::resolve(paths) {
@@ -65,12 +102,17 @@ pub async fn run(args: WorkpadArgs, paths: &crate::util::paths::Paths) -> i32 {
     };
 
     let result = match args.command {
-        WorkpadCommand::Get { identifier } => cmd_get(&client, identifier).await,
+        WorkpadCommand::Get {
+            identifier,
+            to_file,
+        } => cmd_get(&client, identifier, to_file).await,
         WorkpadCommand::Update {
             identifier,
             body_file,
+            allow_empty,
             keep,
-        } => cmd_update(&client, identifier, body_file, keep).await,
+            remove,
+        } => cmd_update(&client, identifier, body_file, allow_empty, keep, remove).await,
     };
     match result {
         Ok(()) => 0,
@@ -78,8 +120,42 @@ pub async fn run(args: WorkpadArgs, paths: &crate::util::paths::Paths) -> i32 {
     }
 }
 
-async fn cmd_get(client: &ApiClient, identifier: Option<String>) -> Result<(), CliError> {
-    let current_issue = std::env::var("PIDASH_ISSUE_IDENTIFIER").ok();
+/// The hash-file sibling of a body path: `<dir>/workpad.sha256`.
+fn hash_path_for(body_file: &Path) -> PathBuf {
+    match body_file.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(HASH_FILE_NAME),
+        _ => PathBuf::from(HASH_FILE_NAME),
+    }
+}
+
+fn read_guard_hash(body_file: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(hash_path_for(body_file)).ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn write_guard_hash(body_file: &Path, hash: &str) -> Result<(), CliError> {
+    std::fs::write(hash_path_for(body_file), format!("{hash}\n")).map_err(|e| {
+        CliError::new(
+            EXIT_UNKNOWN,
+            format!(
+                "failed writing workpad hash file {}: {e}",
+                hash_path_for(body_file).display()
+            ),
+        )
+    })
+}
+
+async fn cmd_get(
+    client: &ApiClient,
+    identifier: Option<String>,
+    to_file: Option<PathBuf>,
+) -> Result<(), CliError> {
+    let current_issue = std::env::var(ISSUE_ENV).ok();
     let ident = resolve_identifier(identifier.as_deref(), current_issue.as_deref())?;
     let issue = resolve_issue(client, ident).await?;
     let path = format!(
@@ -87,9 +163,58 @@ async fn cmd_get(client: &ApiClient, identifier: Option<String>) -> Result<(), C
         client.env.workspace_slug, issue.project_id, issue.id
     );
     let resp = client.get(&path).await?;
+    let Some(dest) = to_file else {
+        println!(
+            "{}",
+            serde_json::to_string(&resp).expect("serialize JSON value")
+        );
+        return Ok(());
+    };
+    let body = resp
+        .get("body")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| CliError::new(EXIT_SERVER, "workpad response missing 'body'"))?;
+    let hash = resp
+        .get("body_sha256")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            CliError::new(
+                EXIT_SERVER,
+                "workpad response missing 'body_sha256' (old server: needs the new API deploy)",
+            )
+        })?;
+    if let Some(parent) = dest.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            CliError::new(
+                EXIT_UNKNOWN,
+                format!(
+                    "failed creating workpad directory {}: {e}",
+                    parent.display()
+                ),
+            )
+        })?;
+    }
+    std::fs::write(&dest, body).map_err(|e| {
+        CliError::new(
+            EXIT_UNKNOWN,
+            format!("failed writing workpad file {}: {e}", dest.display()),
+        )
+    })?;
+    write_guard_hash(&dest, hash)?;
+    let updated_at = resp
+        .get("updated_at")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     println!(
         "{}",
-        serde_json::to_string(&resp).expect("serialize JSON value")
+        serde_json::to_string(&json!({
+            "updated_at": updated_at,
+            "body_sha256": hash,
+            "path": dest.display().to_string(),
+        }))
+        .expect("serialize JSON value")
     );
     Ok(())
 }
@@ -98,27 +223,52 @@ async fn cmd_update(
     client: &ApiClient,
     identifier: Option<String>,
     body_file: PathBuf,
+    allow_empty: bool,
     keep: bool,
+    remove: bool,
 ) -> Result<(), CliError> {
+    let _ = keep;
     let body = load_workpad_body(&body_file)?;
-    let current_issue = std::env::var("PIDASH_ISSUE_IDENTIFIER").ok();
+    check_workpad_body(&body, allow_empty)?;
+    let current_issue = std::env::var(ISSUE_ENV).ok();
     let ident = resolve_identifier(identifier.as_deref(), current_issue.as_deref())?;
     let issue = resolve_issue(client, ident).await?;
     let path = format!(
         "workspaces/{}/projects/{}/work-items/{}/workpad/",
         client.env.workspace_slug, issue.project_id, issue.id
     );
+    let mut payload = json!({ "body": body });
+    if let Some(guard) = read_guard_hash(&body_file) {
+        payload["if_body_sha256"] = json!(guard);
+    }
     // Any HTTP/network/validation error propagates here and leaves the body
     // file in place, so the agent can retry without losing its edits.
-    let resp = client.patch(&path, &json!({ "body": body })).await?;
+    let resp = match client.patch(&path, &payload).await {
+        Ok(resp) => resp,
+        Err(err) if err.status == Some(412) => {
+            return Err(CliError::new(
+                EXIT_INVALID,
+                "workpad changed since you read it: run `pidash workpad get --to-file`, re-apply your edit, and retry",
+            )
+            .with_detail(err.detail.unwrap_or_default())
+            .with_status(412));
+        }
+        Err(err) => return Err(err),
+    };
+    // Rewrite the guard from the response when the server reports one, so
+    // two consecutive updates succeed without an intervening get.
+    if let Some(hash) = resp.get("body_sha256").and_then(serde_json::Value::as_str) {
+        write_guard_hash(&body_file, hash)?;
+    }
     println!(
         "{}",
         serde_json::to_string(&resp).expect("serialize JSON value")
     );
-    // Only past this point — a confirmed successful upload — do we remove the
-    // local staging copy. A cleanup failure must not turn a successful upload
-    // into a failed command: warn and still exit 0.
-    if let Some(warning) = warn_on_cleanup(cleanup_body_file(&body_file, keep)) {
+    // Only past this point — a confirmed successful upload — does `--remove`
+    // delete the local staging copy (`--keep` is a no-op: the file stays by
+    // default). A cleanup failure must not turn a successful upload into a
+    // failed command: warn and still exit 0.
+    if let Some(warning) = warn_on_cleanup(cleanup_body_file(&body_file, !remove)) {
         eprintln!("{warning}");
     }
     Ok(())
@@ -200,12 +350,26 @@ fn load_workpad_body(path: &Path) -> Result<String, CliError> {
     })
 }
 
+/// Refuse an empty or whitespace-only workpad body unless `--allow-empty`.
+/// This prevents a failed `workpad get` (e.g. 429) that produced an empty
+/// file from silently wiping the stored workpad.
+fn check_workpad_body(body: &str, allow_empty: bool) -> Result<(), CliError> {
+    if !allow_empty && body.trim().is_empty() {
+        return Err(CliError::new(
+            EXIT_INVALID,
+            "workpad body is empty (empty or whitespace-only); pass --allow-empty to clear intentionally and do not upload an empty file when a get failed (e.g. 429)",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
     use super::{
-        Cleanup, cleanup_body_file, load_workpad_body, resolve_identifier, warn_on_cleanup,
+        Cleanup, check_workpad_body, cleanup_body_file, load_workpad_body, resolve_identifier,
+        warn_on_cleanup,
     };
 
     #[test]
@@ -237,6 +401,30 @@ mod tests {
 
         let body = load_workpad_body(&path).expect("body");
         assert!(body.contains("phase: implementing"));
+    }
+
+    #[test]
+    fn empty_workpad_body_is_rejected_without_allow_empty() {
+        use crate::api_client::EXIT_INVALID;
+
+        for body in ["", "   ", "\n\t \n"] {
+            let err = check_workpad_body(body, false).expect_err("empty must be rejected");
+            assert_eq!(err.exit_code, EXIT_INVALID);
+            assert!(err.message.contains("--allow-empty"));
+        }
+    }
+
+    #[test]
+    fn empty_workpad_body_is_allowed_with_allow_empty() {
+        for body in ["", "   ", "\n"] {
+            check_workpad_body(body, true).expect("allow-empty passes");
+        }
+    }
+
+    #[test]
+    fn non_empty_workpad_body_passes() {
+        check_workpad_body("hello", false).expect("non-empty passes");
+        check_workpad_body("  hello  ", false).expect("non-empty with spaces passes");
     }
 
     // --- cleanup after a successful upload ---------------------------------
@@ -328,5 +516,37 @@ mod tests {
             let warning = warn_on_cleanup(outcome).expect("failure warns");
             assert!(warning.starts_with("warning:"));
         }
+    }
+
+    /// A server predating the workpad guard answers no `body_sha256`;
+    /// `--to-file` must fail loudly pointing at the server deploy (not the
+    /// runner) and write nothing, so no unguarded sha file is ever stored.
+    #[tokio::test]
+    async fn get_to_file_blames_the_server_deploy_when_sha_is_absent() {
+        let handler: crate::pidash_agent::test_server::Handler = std::sync::Arc::new(|req| {
+            if req.path.ends_with("/work-items/ENG-7/") {
+                return (200, r#"{"id":"iid-1","project":"pid-1"}"#.to_string());
+            }
+            assert!(req.path.contains("/workpad/"), "unexpected {}", req.path);
+            (
+                200,
+                r#"{"body":"hello","updated_at":"2026-01-01T00:00:00Z"}"#.to_string(),
+            )
+        });
+        let server = crate::pidash_agent::test_server::start(handler).await;
+        let client = crate::api_client::ApiClient::new(crate::api_client::CliEnv {
+            api_url: server.url.clone(),
+            workspace_slug: "ws".to_string(),
+            token: "tok".to_string(),
+            run_id: None,
+        })
+        .expect("client");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dest = dir.path().join("wd.md");
+        let err = super::cmd_get(&client, Some("ENG-7".to_string()), Some(dest.clone()))
+            .await
+            .expect_err("old server must fail --to-file");
+        assert!(err.message.contains("new API deploy"), "{}", err.message);
+        assert!(!dest.exists(), "no body file may be written on failure");
     }
 }

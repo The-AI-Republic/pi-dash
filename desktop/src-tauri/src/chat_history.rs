@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 
-//! Local, on-device storage for direct chats with the built-in agent engine.
+//! Local, on-device storage for direct chats with the Pi Dash Agent engine.
 //!
 //! A direct local chat never travels through the Pi Dash chat relay, and its
 //! transcript is never uploaded or synced. This module owns the on-disk record
@@ -20,7 +20,7 @@
 //! **Why scoped per account.** History is private to the person who created it.
 //! The signed-in account keys the database directory, so a second account
 //! signing in on the same machine sees its own (empty, or previously-kept)
-//! history and never the first account's. The overlay supplies the account
+//! history and never the first account's. The webview supplies the account
 //! identifier the same way it already supplies the workspace slug — this module
 //! is a consumer of the session the webview holds, never a second copy of it.
 //!
@@ -29,7 +29,7 @@
 //! (`<daemon data>/engine/<account>/codex-home`), which the app never deletes
 //! from. Clearing an account's history here removes the app's store and any
 //! engine home a build before the shared daemon left under the app's own data
-//! (`AppPaths::legacy_engine_home`) that the migration has not moved yet.
+//! (`AppPaths::legacy_pidash_agent_home`) that the migration has not moved yet.
 //!
 //! **Why the chat working copy is a separate tree.** A local chat and a managed
 //! issue run must never modify the same working copy at the same time. Rather
@@ -56,7 +56,7 @@ use crate::app_paths::AppPaths;
 const SCHEMA_VERSION: i64 = 1;
 
 // ---------------------------------------------------------------------------
-// Records exchanged with the overlay
+// Records exchanged with the webview
 // ---------------------------------------------------------------------------
 
 /// A chat conversation. The app DB — not the engine's rollout files — is the
@@ -98,7 +98,7 @@ pub struct ChatEvent {
     pub created_at: i64,
 }
 
-/// Fields the overlay supplies to open a new session. The working directory is
+/// Fields the webview supplies to open a new session. The working directory is
 /// resolved by [`chat_working_dir`], not chosen by the caller, so a chat can
 /// never be pointed at a managed run's working copy.
 #[derive(Debug, Clone, Deserialize)]
@@ -113,7 +113,7 @@ pub struct NewChatSession {
     pub engine_version: String,
 }
 
-/// Fields the overlay supplies to append an event.
+/// Fields the webview supplies to append an event.
 #[derive(Debug, Clone, Deserialize)]
 pub struct NewChatEvent {
     pub role: String,
@@ -427,7 +427,7 @@ pub async fn chat_working_dir<R: Runtime>(
 /// behind. Both removals are attempted even if the first fails.
 pub fn clear_account_history(paths: &AppPaths, account: &str) -> Result<(), String> {
     let chat = remove_tree(&account_dir(paths, account)?, "chat history");
-    let engine = remove_tree(&paths.legacy_engine_home(account)?, "engine history");
+    let engine = remove_tree(&paths.legacy_pidash_agent_home(account)?, "engine history");
     chat.and(engine)
 }
 
@@ -558,7 +558,7 @@ fn resolve_chat_working_dir(
 
 /// Turn an account identifier (a user id, or an email) into a single
 /// filesystem-safe, traversal-proof directory name. Shared with
-/// `AppPaths::legacy_engine_home`, so every per-account tree uses one key.
+/// `AppPaths::legacy_pidash_agent_home`, so every per-account tree uses one key.
 ///
 /// The visible prefix is the identifier with anything outside `[A-Za-z0-9_-]`
 /// dropped, so a directory is still recognisable to a human browsing the tree;
@@ -870,7 +870,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let paths = paths(root.path());
         let rollout = |account: &str| {
-            let home = paths.legacy_engine_home(account).unwrap();
+            let home = paths.legacy_pidash_agent_home(account).unwrap();
             let file = home.join("sessions/2026/10/05/rollout.jsonl");
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
             std::fs::write(&file, "transcript").unwrap();
@@ -882,7 +882,7 @@ mod tests {
         clear_history_while_signed_in(&paths, "user-1").unwrap();
         assert_eq!(list_sessions(&paths, "user-1").len(), 0);
         assert!(
-            !paths.legacy_engine_home("user-1").unwrap().exists(),
+            !paths.legacy_pidash_agent_home("user-1").unwrap().exists(),
             "clear all history left the engine's copy at {}",
             first.display()
         );

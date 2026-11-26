@@ -57,7 +57,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal
 # DRF-compatible value rendering (F-07 serializer kernel): aware datetimes in
 # any IANA zone (TimezoneMixin activates the user's zone per request) and
 # Decimal-as-string (DRF COERCE_DECIMAL_TO_STRING).
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde", "clock"] }
 chrono-tz = "0.10"
 rust_decimal = { version = "1", features = ["serde"] }
 sea-query = { version = "0.32", default-features = false, features = ["backend-postgres", "with-uuid", "with-chrono"] }

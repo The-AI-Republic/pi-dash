@@ -60,7 +60,9 @@ use sea_orm::{ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter,
 use serde_json::Value;
 use uuid::Uuid;
 
-use pidash_db::entity::{project_members, project_user_properties, projects, workspaces};
+use pidash_db::entity::{
+    project_members, project_user_properties, projects, scheduler_bindings, workspaces,
+};
 use pidash_db::orm_tx::{into_sqlx, TxConn};
 
 /// Run a sea-query statement on the connection; rows affected.
@@ -146,6 +148,10 @@ pub struct NewProject<'a> {
     pub default_executor: &'a str,
     pub dedicated_runner_lost_action: &'a str,
     pub members_can_edit_states: bool,
+    /// `Project.default_work_type` (PDASHOSS01-234), already resolved
+    /// by the caller (`Project.save()` fills a blank one from the repo
+    /// binding via `work_types::default_for_new_project`).
+    pub default_work_type: &'a str,
     pub created_by: Uuid,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -221,6 +227,11 @@ fn project_row(id: Uuid, p: &NewProject<'_>) -> projects::ActiveModel {
         // Django field default (db 0173 drops the DB default); the
         // writable project serializers may override it on create.
         dedicated_runner_lost_action: Set(p.dedicated_runner_lost_action.to_owned()),
+        default_work_type: Set(p.default_work_type.to_owned()),
+        // New projects start with the all-defaults bag (the DB default
+        // would fill `{}` too; named explicitly like every other
+        // column — NEWPIDASH-278).
+        settings: Set(Value::Object(Default::default())),
     }
 }
 
@@ -557,6 +568,8 @@ pub struct ProjectUpdate<'a> {
     pub default_executor: &'a str,
     pub dedicated_runner_lost_action: &'a str,
     pub members_can_edit_states: bool,
+    /// `Project.default_work_type` (PDASHOSS01-234).
+    pub default_work_type: &'a str,
     pub workspace_id: Uuid,
     pub deleted_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
@@ -729,6 +742,35 @@ pub async fn unarchive(
     stamp_archived_at(db, project_id, None, now, actor_id).await
 }
 
+/// NEWPIDASH-239: disable every live scheduler binding of a project
+/// (`scheduler_bindings.enabled = false` plus the save stamps). Runs in
+/// the caller's transaction beside the `archived_at` stamp, so the two
+/// commit or roll back together. Bindings stay installed (no uninstall
+/// or delete) and the workspace-level `schedulers` definitions are
+/// untouched. Already-disabled rows are left alone (no `updated_at`
+/// bump). Returns the rows disabled.
+pub async fn disable_project_bindings(
+    db: &impl ConnectionTrait,
+    project_id: Uuid,
+    now: DateTime<Utc>,
+    actor_id: Uuid,
+) -> Result<u64, sqlx::Error> {
+    scheduler_bindings::Entity::update_many()
+        .col_expr(scheduler_bindings::Column::Enabled, Expr::value(false))
+        .col_expr(scheduler_bindings::Column::UpdatedAt, Expr::value(now))
+        .col_expr(
+            scheduler_bindings::Column::UpdatedById,
+            Expr::value(Some(actor_id)),
+        )
+        .filter(scheduler_bindings::Column::ProjectId.eq(project_id))
+        .filter(scheduler_bindings::Column::Enabled.eq(true))
+        .filter(scheduler_bindings::Column::DeletedAt.is_null())
+        .exec(db)
+        .await
+        .map(|done| done.rows_affected)
+        .map_err(into_sqlx)
+}
+
 /// `WorkspaceFileAssetEndpoint.entity_asset_save`
 /// (`v2.py:247-284`): the cover link plus the full
 /// `project.save()` stamps (`auto_now` `updated_at`, crum
@@ -885,6 +927,11 @@ fn seed_project_row(id: Uuid, p: &SeedProject<'_>) -> projects::ActiveModel {
         default_agent_executor: Set(p.default_agent_executor.to_owned()),
         members_can_edit_states: Set(true),
         dedicated_runner_lost_action: Set(DEDICATED_RUNNER_LOST_ACTION_DEFAULT.to_owned()),
+        // `Project.save()` fills a blank one from the repo binding; the
+        // seed's repo_url is empty, so `general`.
+        default_work_type: Set("general".to_owned()),
+        // All-defaults bag (NEWPIDASH-278).
+        settings: Set(Value::Object(Default::default())),
     }
 }
 
@@ -970,6 +1017,11 @@ fn demo_project_row(id: Uuid, p: &DemoProject<'_>) -> projects::ActiveModel {
         agent_ticking_enabled: Set(true),
         default_agent_executor: Set(p.default_agent_executor.to_owned()),
         dedicated_runner_lost_action: Set(DEDICATED_RUNNER_LOST_ACTION_DEFAULT.to_owned()),
+        // `Project.save()` fills a blank one from the repo binding; the
+        // dummy project has no repo_url, so `general`.
+        default_work_type: Set("general".to_owned()),
+        // All-defaults bag (NEWPIDASH-278).
+        settings: Set(Value::Object(Default::default())),
         ..Default::default()
     }
 }
@@ -2706,13 +2758,14 @@ mod tests {
             "\"members_can_edit_states\"",
             "\"agent_test_default_interval_seconds\"",
             "\"dedicated_runner_lost_action\"",
+            "\"settings\"",
         ] {
             assert!(insert.contains(column), "{column} named in {insert}");
         }
         assert_eq!(
             insert.matches(", ").count(),
-            2 * 46,
-            "47 columns, 47 values"
+            2 * 48,
+            "49 columns, 49 values"
         );
     }
 
@@ -2818,6 +2871,7 @@ mod tests {
             default_executor: "x",
             dedicated_runner_lost_action: "fail_to_backlog",
             members_can_edit_states: false,
+            default_work_type: "software",
             workspace_id: ws,
             deleted_at: None,
             updated_at: now,
@@ -3141,10 +3195,11 @@ mod tests {
              guest_view_all_features, archive_in, close_in, logo_props, is_default, timezone, \
              repo_url, base_branch, agent_default_interval_seconds, agent_default_max_ticks, \
              agent_review_default_interval_seconds, agent_test_default_interval_seconds, \
-             agent_ticking_enabled, default_agent_executor, members_can_edit_states) \
+             agent_ticking_enabled, default_agent_executor, members_can_edit_states, \
+             dedicated_runner_lost_action, default_work_type, settings) \
              VALUES ($1, $2, $2, 'Bind', '', 2, $3, 'BIND', false, false, false, true, false, \
              false, false, false, 30, 30, '{}', false, 'UTC', $4, $5, 60, 10, 60, 60, true, \
-             'local_runner', true)",
+             'local_runner', true, 'fail_to_backlog', 'general', '{}')",
         )
         .bind(id)
         .bind(t0)
@@ -3252,7 +3307,9 @@ mod tests {
         agent_review_default_interval_seconds INTEGER NOT NULL,
         agent_test_default_interval_seconds INTEGER NOT NULL,
         agent_ticking_enabled BOOLEAN NOT NULL, default_agent_executor TEXT NOT NULL,
-        members_can_edit_states BOOLEAN NOT NULL)";
+        members_can_edit_states BOOLEAN NOT NULL,
+        dedicated_runner_lost_action TEXT NOT NULL, default_work_type TEXT NOT NULL,
+        settings JSONB NOT NULL)";
 
     const WORKSPACES_DDL: &str = "CREATE TEMPORARY TABLE workspaces (
         id UUID PRIMARY KEY, slug TEXT NOT NULL)";
@@ -3339,6 +3396,7 @@ mod tests {
             default_executor: "local_runner",
             dedicated_runner_lost_action: "fail_to_backlog",
             members_can_edit_states: true,
+            default_work_type: "software",
             created_by: actor,
             created_at: now,
             updated_at: now,
@@ -3469,6 +3527,7 @@ mod tests {
             default_executor: "x",
             dedicated_runner_lost_action: "fail_to_backlog",
             members_can_edit_states: false,
+            default_work_type: "software",
             workspace_id: ws,
             deleted_at: None,
             updated_at: now,

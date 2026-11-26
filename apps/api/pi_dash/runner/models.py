@@ -995,6 +995,11 @@ class RunnerSession(models.Model):
     last_seen_at = models.DateTimeField(null=True, blank=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
     revoked_reason = models.CharField(max_length=32, blank=True, default="")
+    # Negotiated daemon capabilities (NEWPIDASH-241, dev-machine run queue):
+    # ``machine_run_queue_v1`` means the daemon supports protocol 1.
+    # Non-null JSONB default '[]' (database default keeps older writers
+    # that omit the column working).
+    capabilities = models.JSONField(default=list, blank=True)
 
     class Meta:
         db_table = "runner_session"
@@ -1248,6 +1253,67 @@ class EngineCredential(models.Model):
         return self.expires_at <= (now or timezone.now())
 
 
+class DesktopHandoffCode(models.Model):
+    """Single-use code that turns a daemon credential into a desktop session.
+
+    desktop_unified_signin §5. The daemon asks for a code over its local
+    socket with a ``challenge`` — base64url(SHA-256(verifier)) — and hands
+    the code to the app; the app redeems it with the verifier, which never
+    leaves the app's process. Only the code's hash is stored: the raw code
+    is shown once, to the daemon that asked for it, and is useless without
+    the verifier. Bound to one user and one machine, valid 60 seconds, and
+    consumed on the first redeem attempt whatever the outcome — so a leaked
+    code cannot be replayed. The server keeps only the challenge, never the
+    verifier.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    code_hash = models.CharField(max_length=128, unique=True, db_index=True)
+    fingerprint = models.CharField(max_length=16, blank=True, default="")
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="desktop_handoff_codes",
+    )
+    dev_machine = models.ForeignKey(
+        DevMachine,
+        on_delete=models.CASCADE,
+        related_name="desktop_handoff_codes",
+    )
+    #: The daemon credential the code was issued with (design §5.1): a code
+    #: is refused once that credential is revoked or expired. Nullable only
+    #: for the schema; issue always sets it and redeem refuses a code
+    #: without one.
+    machine_token = models.ForeignKey(
+        MachineToken,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="desktop_handoff_codes",
+    )
+    #: base64url(SHA-256(verifier)) from the app that asked for the code.
+    challenge = models.CharField(max_length=128)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    consumed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "desktop_handoff_code"
+        ordering = ("-created_at",)
+        indexes = [
+            models.Index(fields=["user", "dev_machine", "created_at"], name="handoff_user_machine_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"desktop handoff {self.fingerprint} ({self.dev_machine_id})"
+
+    def is_expired(self, now=None) -> bool:
+        return self.expires_at <= (now or timezone.now())
+
+    def is_live(self, now=None) -> bool:
+        return self.consumed_at is None and not self.is_expired(now)
+
+
 class AgentRun(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False, db_index=True)
     workspace = models.ForeignKey(
@@ -1374,6 +1440,11 @@ class AgentRun(models.Model):
     # a ``done`` reported by a run whose stage the issue has already left
     # must not touch the clock.
     phase_kind = models.CharField(max_length=32, blank=True, default="", db_index=True)
+    # The effective work type (prompting/work_types.py) this run's prompt was
+    # composed with — stamped at creation alongside ``phase_kind`` so "which
+    # guidance did this run actually get" survives later project/issue
+    # setting changes. Audit metadata only; nothing routes on it.
+    work_type = models.CharField(max_length=32, blank=True, default="")
     run_config = models.JSONField(default=dict, blank=True)
     required_capabilities = models.JSONField(default=list, blank=True)
     thread_id = models.CharField(max_length=128, blank=True, default="")
@@ -1412,6 +1483,23 @@ class AgentRun(models.Model):
     # ``RefusalCategory``; ``run_lifecycle._normalize_refusal_category``
     # is what constrains them on the way in.
     refusal_category = JSONKeyTextField(source="error_details", key="refusal_category")
+    # Canonical failure taxonomy value (``pi_dash.runner.failure.
+    # RunFailureReason``), classified at write time from the runner's
+    # ``FailureReason`` plus the error text. Non-empty exactly when
+    # ``status == FAILED``. The stored string is a wire contract for
+    # dashboards and the ticker's per-reason retry policy; not declared as
+    # ``choices`` so adding a taxonomy value never needs a migration.
+    failure_reason = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    # Dev-machine run queue attempt identity (NEWPIDASH-241 / NEWPIDASH-372):
+    # minted per fresh assignment, preserved on redelivery. Nullable so
+    # existing rows stay legacy. Matches cloud native_runner_0040 exactly.
+    assignment_token = models.UUIDField(null=True, blank=True)
+    # 0 legacy, 1 machine queue, immutable per attempt. NOT NULL with a
+    # persistent database default 0 plus the IN (0, 1) check below, so older
+    # writers that omit the column keep working.
+    assignment_protocol = models.SmallIntegerField(default=0)
+    # Daemon-reported capacity phase JSON, or NULL when not waiting.
+    capacity_wait = models.JSONField(null=True, blank=True)
     llm_model = models.CharField(max_length=128, blank=True, default="")
     # Token usage as one bag of counters in the canonical shape documented in
     # ``pi_dash.runner.services.usage`` — input / output / total, the cache
@@ -1518,6 +1606,12 @@ class AgentRun(models.Model):
             models.CheckConstraint(
                 check=models.Q(pin_kind=PinKind.LOCALITY) | models.Q(executor_kind=AgentExecutorKind.LOCAL_RUNNER),
                 name="agent_run_dedicated_pin_is_local",
+            ),
+            # Dev-machine run queue (NEWPIDASH-241): 0 legacy, 1 machine
+            # queue. Same name and predicate as cloud native_runner_0040.
+            models.CheckConstraint(
+                check=models.Q(assignment_protocol__in=[0, 1]),
+                name="agent_run_assignment_protocol_check",
             ),
         ]
 

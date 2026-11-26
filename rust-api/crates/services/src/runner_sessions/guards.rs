@@ -33,7 +33,7 @@
 //!   → `pidash_db::runner_enroll::columns::{enums, runner}`; the SQL
 //!   consts inline the same literals and the tests pin them against
 //!   those consts so the two cannot drift.
-//! * `effective_executor_for_issue` → [`crate::dispatch`] (D-11);
+//! * `effective_executor_for_issue` → [`crate::run_creation`] (D-11);
 //!   [`is_managed_runner_issue`] is the `:416` comparison only.
 //!
 //! # Translation notes

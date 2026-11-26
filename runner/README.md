@@ -258,6 +258,48 @@ and the agent drives Git itself. Files are always preserved, and the runner
 never initializes Git for you. Branch checkout is the agent's job, not the
 platform's (PDASHOSS01-136).
 
+## Process containment
+
+Every run starts in its own unit of containment, so whatever the agent
+starts — backgrounded or detached via `setsid`/`nohup` — is found and
+stopped when the run ends. At run end the runner sends SIGTERM to
+everything in the unit, waits 10 seconds, then SIGKILLs what is left,
+and logs one line per run with the count and the names of the processes
+stopped. If the daemon crashes, the start-up sweep empties the units the
+previous daemon left behind. The systemd unit pins `KillMode=control-group`
+so stopping the daemon reaps every run's processes as well.
+
+Backends (picked once per daemon, override with `PIDASH_CONTAINMENT`):
+
+| Value            | Behaviour                                                                                                               |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `auto` (default) | cgroup on Linux; process group elsewhere on Unix                                                                        |
+| `cgroup`         | Child cgroup `pidash-run-<run_id>` under the daemon's cgroup (cgroup v2). Membership survives `setsid` and reparenting. |
+| `process-group`  | Own process group per run, signalled via the group.                                                                     |
+| `off`            | No containment (diagnosis escape hatch only; leaks apply).                                                              |
+
+Limits, documented by design:
+
+- The **process-group** backend cannot see a child that `setsid`s away,
+  and cannot sweep after a crash (a dead PGID can be reused by the OS,
+  so PGIDs are never persisted). On the **cgroup** backend
+  `setsid`-detached children are still contained, and the sweep
+  recovers them.
+- **Windows** gets `kill_on_drop` only (direct child killed at run
+  end); nothing there catches detached grandchildren.
+- **Docker containers** the run started are not child processes; their
+  teardown stays with the stack that started them (the parity stack
+  handles its own). Memory/CPU limits per run are out of scope.
+- A run that needs something to **outlive it** must opt in explicitly
+  by writing a shell script to `<workspace>/.pidash/run-end-hook`. The
+  runner executes it — outside the run's unit, in the daemon's own
+  context — after the unit is emptied, then deletes it. A hook left
+  behind by a crashed daemon is run by the start-up sweep; a stale
+  hook from a previous run is discarded when a fresh run starts. The
+  parity stack's teardown uses this (`parity-reaper.sh arm` writes the
+  hook; the standalone `setsid` watcher is no longer the in-run
+  teardown path).
+
 ## Built-in engine
 
 Each release ships the built-in agent engine — the open-source
@@ -280,7 +322,13 @@ After a bare `pidash-installer.sh` / `.ps1` install, run it yourself. The MSI
 installs the engine itself. `pidash engine path` prints the engine the daemon
 would use.
 
-The daemon resolves the engine once at start and keeps that path.
+The daemon looks for the engine at start. If it is missing, it checks again
+every second and on status/chat requests, so an engine installed later by the
+desktop or another installer becomes usable without a daemon restart. This
+discovery does not require a cargo-dist install receipt. Once found, the
+daemon keeps that path for its lifetime. Availability checks still validate
+the file: removing it reports `engine_not_installed`, and restoring it clears
+that reason without a restart or a switch to a different engine version.
 `pidash update` installs the new release's engine version directory beside the
 old one before replacing `pidash`, so runs in flight keep their binary. It
 skips the download when the new release pins an engine version already
@@ -306,7 +354,6 @@ pidash engine status                   # available / signed out / expiring / una
 pidash engine pause                    # this computer's engine takes no new work …
 pidash engine resume                   # … until resumed
 pidash login --engine                  # renew the engine's 14-day credential alone
-pidash auth logout --engine            # sign the engine out; the daemon stays signed in
 pidash auth status                     # both credentials, expiry, engine sign-in state
 pidash config set engine-task-root ~/pidash-tasks   # or `default`
 ```
@@ -318,6 +365,16 @@ pidash config set engine-task-root ~/pidash-tasks   # or `default`
   those **in memory only**, refreshes them when under 60 s remain, and hands
   them to the engine through its auth helper `pidash __engine model-token`
   (over the local socket). Nothing short-lived is written to disk.
+- **One sign-in.** There is no engine-only sign-out: `pidash auth logout`
+  signs the daemon and the engine out together, and the next sign-in on
+  either side signs both in again. The engine credential is renewed silently
+  by a signed-in desktop app (from `never` and `signed_out` too), and on a
+  computer with no app `pidash login --engine` renews it alone.
+  Signing in as another account parks the previous account's machine
+  identity (machine id + runner blocks, under
+  `<config dir>/parked/<cloud>/<account>.toml`) and restores the new
+  account's own, restarting the daemon — nothing is deleted
+  (`.ai_design/desktop_unified_signin/design.md` §6.4).
 - **An engine runner** is `[runner.agent] kind = "engine"` with no paths: the
   daemon supplies the engine binary, a private `CODEX_HOME` at
   `<data dir>/engine/<account>/codex-home` (never `~/.codex`) and the Codex
@@ -403,10 +460,10 @@ Stable runner releases set `LATEST_RUNNER_VERSION` in Cloud SSM automatically (`
 
 ## Reconnecting and deleted runners
 
-When a runner can't reach Pi Dash (connection refused, DNS failure, timeout, any 5xx, a proxy error page, or 429), the daemon retries with exponential backoff: 30 s, 1 m, 2 m, … up to a 6-hour cap, with ±20% jitter on every wait so runners don't all reconnect at once. A server outage never removes a runner. `pidash status` shows why a runner is offline and when it will try again:
+When a runner can't reach Pi Dash (connection refused, DNS failure, timeout, any 5xx, a proxy error page, or 429), the daemon retries with exponential backoff: 30 s, 1 m, 2 m, 4 m, up to a 5-minute cap, with ±20% jitter on every wait so runners don't all reconnect at once. The cap is deliberately short so CLI-only machines (no desktop app to kick them) recover within minutes after the cloud returns instead of hours. A server outage never removes a runner. `pidash status` shows why a runner is offline and when it will try again:
 
 ```
-  laptop — DISCONNECTED project=WEB (server unreachable; next retry in 1h 52m; last connected 3h ago; 9 failed attempts)
+  laptop — DISCONNECTED project=WEB (server unreachable; next retry in 4m 12s; last connected 3h ago; 9 failed attempts)
 ```
 
 These retry immediately and start the backoff over:

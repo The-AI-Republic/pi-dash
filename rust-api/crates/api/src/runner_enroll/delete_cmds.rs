@@ -600,6 +600,7 @@ pub const VALID_AGENTS: &[&str] = &[
     "cursor-agent",
     "open-claw",
     "grok",
+    "antigravity",
     "muse-code",
 ];
 
@@ -1497,6 +1498,360 @@ pub async fn machine_command_result(
 }
 
 // ---------------------------------------------------------------------------
+// Runner reconfigure (edit a runner's local settings through its machine)
+// ---------------------------------------------------------------------------
+
+/// A reconfigure field that is present but not a string.
+pub const INVALID_FIELD_BODY: &str = r#"{"error":"invalid_field"}"#;
+/// `reasoning_effort` outside [`REASONING_EFFORTS`].
+pub const INVALID_REASONING_EFFORT_BODY: &str = r#"{"error":"invalid_reasoning_effort"}"#;
+/// The runner is revoked: there is no live daemon block to change.
+pub const RECONFIGURE_REVOKED_BODY: &str = r#"{"error":"runner_revoked"}"#;
+/// A legacy enrollment with no dev machine: no control channel reaches it.
+pub const NO_DEV_MACHINE_BODY: &str = r#"{"error":"no_dev_machine"}"#;
+/// The Pi Dash Agent's settings come from Pi Dash, not the runner block.
+pub const PIDASH_AGENT_NOT_EDITABLE_BODY: &str = r#"{"error":"pidash_agent_not_editable"}"#;
+/// A run is in flight or queued for the runner.
+pub const RECONFIGURE_BUSY_BODY: &str = r#"{"error":"runner_busy"}"#;
+
+/// Every reasoning-effort tier some agent accepts (Codex's and Muse Code's,
+/// see `runner_models::guards`); `""` clears back to the model default. The
+/// body need not name the agent, so the daemon re-checks the tier against
+/// the runner's agent and drops one that agent does not accept.
+pub const REASONING_EFFORTS: &[&str] = &crate::runner_models::guards::KNOWN_EFFORTS;
+
+/// The daemon-side settings a reconfigure may change. Absent means
+/// unchanged; `model` / `reasoning_effort` `""` means the agent default.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunnerReconfigure {
+    pub working_dir: Option<String>,
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+}
+
+impl RunnerReconfigure {
+    pub fn is_empty(&self) -> bool {
+        self.working_dir.is_none()
+            && self.agent.is_none()
+            && self.model.is_none()
+            && self.reasoning_effort.is_none()
+    }
+}
+
+/// The `reconfigure_runner` control message. Only the changed settings
+/// are sent; `name` always carries the cloud's current name so the
+/// daemon's local block follows a rename made through PATCH.
+pub fn reconfigure_runner_message(
+    request_id: &str,
+    runner_id: &str,
+    name: &str,
+    changes: &RunnerReconfigure,
+) -> Map<String, Value> {
+    let mut message = Map::with_capacity(7);
+    message.insert(
+        "type".to_string(),
+        Value::String("reconfigure_runner".to_string()),
+    );
+    message.insert(
+        "request_id".to_string(),
+        Value::String(request_id.to_string()),
+    );
+    message.insert(
+        "runner_id".to_string(),
+        Value::String(runner_id.to_string()),
+    );
+    message.insert("name".to_string(), Value::String(name.to_string()));
+    let fields = [
+        ("working_dir", &changes.working_dir),
+        ("agent", &changes.agent),
+        ("model", &changes.model),
+        ("reasoning_effort", &changes.reasoning_effort),
+    ];
+    for (key, value) in fields {
+        if let Some(value) = value {
+            message.insert(key.to_string(), Value::String(value.clone()));
+        }
+    }
+    message
+}
+
+/// A reconfigure field: missing or `null` is "unchanged", a string is
+/// stripped, anything else is a 400.
+fn reconfigure_field(data: &JVal, key: &str) -> Result<Option<String>, Response> {
+    match data_get(data, key)? {
+        None | Some(JVal::Null) => Ok(None),
+        Some(JVal::Str(text)) => Ok(Some(py_strip(&text.to_lossy_string()).to_owned())),
+        Some(_) => Err(bad_request(INVALID_FIELD_BODY)),
+    }
+}
+
+/// Validate the body into a [`RunnerReconfigure`]. A blank `working_dir`
+/// or `agent` is "unchanged" (neither has a default to fall back to). An
+/// empty result only syncs the runner's name to its machine.
+pub fn parse_reconfigure(data: &JVal) -> Result<RunnerReconfigure, Response> {
+    let blank_is_none = |value: Option<String>| value.filter(|v| !v.is_empty());
+    let working_dir = blank_is_none(reconfigure_field(data, "working_dir")?).map(|dir| {
+        pidash_services::runner_enroll::queries::catalog_reads::truncate_chars(&dir, 1024)
+    });
+    let agent = blank_is_none(reconfigure_field(data, "agent")?);
+    if agent
+        .as_deref()
+        .is_some_and(|agent| !VALID_AGENTS.contains(&agent))
+    {
+        return Err(bad_request(INVALID_AGENT_BODY));
+    }
+    let model = reconfigure_field(data, "model")?.map(|model| {
+        pidash_services::runner_enroll::queries::catalog_reads::truncate_chars(&model, 128)
+    });
+    let reasoning_effort = reconfigure_field(data, "reasoning_effort")?;
+    if reasoning_effort
+        .as_deref()
+        .is_some_and(|effort| !effort.is_empty() && !REASONING_EFFORTS.contains(&effort))
+    {
+        return Err(bad_request(INVALID_REASONING_EFFORT_BODY));
+    }
+    let changes = RunnerReconfigure {
+        working_dir,
+        agent,
+        model,
+        reasoning_effort,
+    };
+    // An empty body is valid: it pushes the cloud's current name to the
+    // machine (the message always carries it), so a rename made through
+    // PATCH reaches the daemon's local block.
+    Ok(changes)
+}
+
+/// The columns a reconfigure needs beyond the gate row.
+struct ReconfigureTarget {
+    name: String,
+    provisioning: String,
+    dev_machine_id: Option<Uuid>,
+    /// The agent the runner reports through its `agent:<kind>` capability,
+    /// in `--agent` spelling (`muse-code`); `None` for a daemon too old to
+    /// report one.
+    agent: Option<String>,
+}
+
+/// The `--agent` spelling of the runner's `agent:<kind>` capability. The
+/// column is an array of strings or, on older rows, an object keyed by
+/// capability (the same two shapes `machine_identity` reads).
+fn reported_agent(capabilities: &serde_json::Value) -> Option<String> {
+    let kind = match capabilities {
+        serde_json::Value::Array(caps) => caps
+            .iter()
+            .find_map(|cap| cap.as_str()?.strip_prefix("agent:")),
+        serde_json::Value::Object(map) => map.keys().find_map(|key| key.strip_prefix("agent:")),
+        _ => None,
+    }?;
+    let kind = kind.trim();
+    (!kind.is_empty()).then(|| kind.replace('_', "-"))
+}
+
+/// Whether `effort` is a tier the agent the runner will run accepts: the
+/// body's new `agent` when it switches, else the runner's reported agent.
+/// An unknown agent (old daemon) falls back to the union; the daemon
+/// re-checks either way.
+fn effort_fits_agent(changes: &RunnerReconfigure, reported: Option<&str>) -> bool {
+    let Some(effort) = changes
+        .reasoning_effort
+        .as_deref()
+        .filter(|e| !e.is_empty())
+    else {
+        return true;
+    };
+    let agent = changes.agent.as_deref().or(reported);
+    crate::runner_models::guards::is_effort_for_agent(agent, effort)
+}
+
+async fn reconfigure_target(pool: &PgPool, runner_id: Uuid) -> Result<ReconfigureTarget, Response> {
+    use pidash_db::entity::runner;
+    use sea_orm::EntityTrait;
+    let row = runner::Entity::find_by_id(runner_id)
+        .one(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+        .map_err(|_| server_error())?
+        .ok_or_else(not_found)?;
+    Ok(ReconfigureTarget {
+        name: row.name,
+        provisioning: row.provisioning,
+        dev_machine_id: row.dev_machine_id,
+        agent: reported_agent(&row.capabilities),
+    })
+}
+
+/// `POST /api/runners/<runner_id>/reconfigure/`: change a runner's
+/// working dir, agent, model or reasoning effort. These live only in the
+/// daemon's `config.toml`, so the change is sent to the runner's machine
+/// over its control channel and answered asynchronously: 202 with a
+/// `request_id` to poll at `GET .../reconfigure/<request_id>/`. The
+/// project is never changeable. Refused (409) while the machine is
+/// offline or the runner is busy, revoked or machine-less; the Pi Dash
+/// Agent's settings are not editable here (400).
+pub async fn runner_reconfigure(
+    State(state): State<AppState>,
+    extension: Option<Extension<SessionHandle>>,
+    Path(raw_id): Path<String>,
+    req: Request,
+) -> Response {
+    let Some(runner_id) = strict_uuid(&raw_id) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
+    let (pool, user_id) = match web_actor(&state, extension).await {
+        Ok(preamble) => preamble,
+        Err(response) => return response,
+    };
+    let (gate, role) = match get_runner(&pool, user_id, runner_id).await {
+        Ok(hit) => hit,
+        Err(response) => return response,
+    };
+    if !can_manage_gate(&gate, user_id, role) {
+        return forbidden();
+    }
+    if gate.revoked_at.is_some() {
+        return conflict(RECONFIGURE_REVOKED_BODY);
+    }
+    let data = match read_request_data(&state, req).await {
+        Ok(data) => data,
+        Err(response) => return response,
+    };
+    let changes = match parse_reconfigure(&data) {
+        Ok(changes) => changes,
+        Err(response) => return response,
+    };
+    let target = match reconfigure_target(&pool, runner_id).await {
+        Ok(target) => target,
+        Err(response) => return response,
+    };
+    if target.provisioning == "desktop_bundled" {
+        return bad_request(PIDASH_AGENT_NOT_EDITABLE_BODY);
+    }
+    if !effort_fits_agent(&changes, target.agent.as_deref()) {
+        return bad_request(INVALID_REASONING_EFFORT_BODY);
+    }
+    let Some(machine_id) = target.dev_machine_id else {
+        return conflict(NO_DEV_MACHINE_BODY);
+    };
+    match manage_reads::runner_is_busy(&pidash_db::pool::sea_orm_connection(&pool), runner_id).await
+    {
+        Ok(false) => {}
+        Ok(true) => return conflict(RECONFIGURE_BUSY_BODY),
+        Err(_) => return server_error(),
+    }
+    let request_id = Uuid::new_v4();
+    let machine_id_str = machine_id.to_string();
+    let message = reconfigure_runner_message(
+        &request_id.to_string(),
+        &runner_id.to_string(),
+        &target.name,
+        &changes,
+    );
+    let redis = client_from_settings(state.settings());
+    let pending = pending_marker(&machine_id_str, &django_isoformat(now_micros()));
+    if machine_outbox::set_command_result(redis.as_ref(), &request_id.to_string(), &pending)
+        .await
+        .is_err()
+    {
+        return server_error();
+    }
+    let shared = PoolPubsub {
+        pool: &pool,
+        redis: redis.as_ref(),
+        runner: &state.settings().runner,
+    };
+    let delivered = match pubsub_svc::send_to_machine(&shared, machine_id, &message).await {
+        Err(MachineOutboxError::MachineOffline { .. }) => {
+            let marker = error_marker("machine_offline", &machine_id_str);
+            if machine_outbox::set_command_result(redis.as_ref(), &request_id.to_string(), &marker)
+                .await
+                .is_err()
+            {
+                return server_error();
+            }
+            return conflict(MACHINE_OFFLINE_BODY);
+        }
+        Ok(delivered) => delivered,
+        Err(other) => {
+            tracing::error!(
+                machine_id = %machine_id_str,
+                error = %other,
+                "reconfigure_runner enqueue failed",
+            );
+            None
+        }
+    };
+    if delivered.is_none() {
+        let marker = error_marker("delivery_failed", &machine_id_str);
+        if machine_outbox::set_command_result(redis.as_ref(), &request_id.to_string(), &marker)
+            .await
+            .is_err()
+        {
+            return server_error();
+        }
+        return unavailable(DELIVERY_FAILED_BODY);
+    }
+    json_response(
+        StatusCode::ACCEPTED,
+        format!("{{\"request_id\":\"{request_id}\"}}"),
+    )
+}
+
+/// `GET /api/runners/<runner_id>/reconfigure/<request_id>/`: the
+/// command's marker (`pending`, then the daemon's `ok` / `error`), bound
+/// to the runner's machine. Anyone who can view the runner may read it.
+pub async fn runner_reconfigure_status(
+    State(state): State<AppState>,
+    extension: Option<Extension<SessionHandle>>,
+    Path((raw_id, raw_rid)): Path<(String, String)>,
+    req: Request,
+) -> Response {
+    let (Some(runner_id), Some(request_id)) = (strict_uuid(&raw_id), strict_uuid(&raw_rid)) else {
+        return crate::edge::proxy(State(state.clone()), req).await;
+    };
+    let (pool, user_id) = match web_actor(&state, extension).await {
+        Ok(preamble) => preamble,
+        Err(response) => return response,
+    };
+    if let Err(response) = get_runner(&pool, user_id, runner_id).await {
+        return response;
+    }
+    let target = match reconfigure_target(&pool, runner_id).await {
+        Ok(target) => target,
+        Err(response) => return response,
+    };
+    let Some(machine_id) = target.dev_machine_id else {
+        return json_response(StatusCode::NOT_FOUND, UNKNOWN_REQUEST_BODY.to_owned());
+    };
+    let redis = client_from_settings(state.settings());
+    let stored =
+        match machine_outbox::get_command_result(redis.as_ref(), &request_id.to_string()).await {
+            Ok(stored) => stored,
+            Err(_) => return server_error(),
+        };
+    let Some(stored) = stored else {
+        return json_response(StatusCode::NOT_FOUND, UNKNOWN_REQUEST_BODY.to_owned());
+    };
+    let marker = match marker_map(stored) {
+        Ok(marker) => marker,
+        Err(response) => return response,
+    };
+    // A marker from another machine is not this runner's (and a daemon
+    // result for a different runner on the same machine is refused too).
+    if !marker_bound_to(&marker, &machine_id.to_string()) {
+        return json_response(StatusCode::NOT_FOUND, UNKNOWN_REQUEST_BODY.to_owned());
+    }
+    let other_runner = match marker.get("runner_id") {
+        Some(Value::String(reported)) => !reported.is_empty() && reported != &runner_id.to_string(),
+        _ => false,
+    };
+    if other_runner {
+        return json_response(StatusCode::NOT_FOUND, UNKNOWN_REQUEST_BODY.to_owned());
+    }
+    json_response(StatusCode::OK, status_body(&request_id, marker))
+}
+
+// ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
 
@@ -1550,6 +1905,14 @@ pub fn web_routes() -> Router<AppState> {
             "/api/runners/dev-machines/{machine_id}/create-runner/{request_id}/",
             owned(get(machine_create_runner_status), GET_ONLY),
         )
+        .route(
+            "/api/runners/{runner_id}/reconfigure/",
+            owned(post(runner_reconfigure), POST_ONLY),
+        )
+        .route(
+            "/api/runners/{runner_id}/reconfigure/{request_id}/",
+            owned(get(runner_reconfigure_status), GET_ONLY),
+        )
 }
 
 /// Register the daemon result route (`runner/urls.py`: the
@@ -1572,6 +1935,138 @@ mod tests {
     use tower::ServiceExt as _;
 
     use crate::edge::EdgeHandle;
+
+    // -- runner reconfigure --
+
+    fn body(raw: &str) -> JVal {
+        json::parse_request_data(raw.as_bytes()).expect("json")
+    }
+
+    fn status_of(response: Response) -> u16 {
+        response.status().as_u16()
+    }
+
+    #[test]
+    fn reconfigure_parses_changed_fields_only() {
+        let changes = parse_reconfigure(&body(
+            r#"{"working_dir":" /w ","agent":"codex","model":"","reasoning_effort":null}"#,
+        ))
+        .expect("valid");
+        assert_eq!(changes.working_dir.as_deref(), Some("/w"));
+        assert_eq!(changes.agent.as_deref(), Some("codex"));
+        // "" is "back to the agent default"; null is "unchanged".
+        assert_eq!(changes.model.as_deref(), Some(""));
+        assert_eq!(changes.reasoning_effort, None);
+    }
+
+    #[test]
+    fn reconfigure_effort_is_checked_against_the_runner_agent() {
+        let caps = serde_json::json!(["os:linux", "agent:muse_code"]);
+        assert_eq!(reported_agent(&caps).as_deref(), Some("muse-code"));
+        assert_eq!(reported_agent(&serde_json::json!(["os:linux"])), None);
+        assert_eq!(
+            reported_agent(&serde_json::json!({"os:linux": true, "agent:codex": true})).as_deref(),
+            Some("codex")
+        );
+
+        let effort = |agent: Option<&str>, effort: &str| RunnerReconfigure {
+            agent: agent.map(str::to_string),
+            reasoning_effort: Some(effort.to_string()),
+            ..Default::default()
+        };
+        // A Codex runner refuses a Muse-only tier; a Muse runner takes it.
+        assert!(!effort_fits_agent(&effort(None, "max"), Some("codex")));
+        assert!(effort_fits_agent(&effort(None, "max"), Some("muse-code")));
+        // Switching agents checks against the new one.
+        assert!(!effort_fits_agent(
+            &effort(Some("codex"), "minimal"),
+            Some("muse-code")
+        ));
+        assert!(effort_fits_agent(
+            &effort(Some("muse-code"), "ultra"),
+            Some("codex")
+        ));
+        // Agents without an effort setting take none.
+        assert!(!effort_fits_agent(&effort(None, "high"), Some("grok")));
+        assert!(!effort_fits_agent(
+            &effort(None, "high"),
+            Some("antigravity")
+        ));
+        // Claude Code takes `max` but not Muse's `ultra`.
+        assert!(effort_fits_agent(&effort(None, "max"), Some("claude-code")));
+        assert!(!effort_fits_agent(
+            &effort(None, "ultra"),
+            Some("claude-code")
+        ));
+        // Unknown agent (old daemon): the union; "" always clears.
+        assert!(effort_fits_agent(&effort(None, "max"), None));
+        assert!(effort_fits_agent(&effort(None, ""), Some("codex")));
+    }
+
+    #[test]
+    fn reconfigure_treats_blank_dir_and_agent_as_unchanged() {
+        let changes = parse_reconfigure(&body(r#"{"working_dir":"  ","agent":"","model":"m"}"#))
+            .expect("valid");
+        assert_eq!(changes.working_dir, None);
+        assert_eq!(changes.agent, None);
+        assert_eq!(changes.model.as_deref(), Some("m"));
+    }
+
+    #[test]
+    fn reconfigure_refuses_bad_bodies() {
+        assert!(
+            parse_reconfigure(&body("{}")).unwrap().is_empty(),
+            "an empty body only syncs the name"
+        );
+        assert!(
+            parse_reconfigure(&body(r#"{"project":"OTHER"}"#))
+                .unwrap()
+                .is_empty(),
+            "the project is not a reconfigurable field; it is ignored"
+        );
+        assert_eq!(
+            status_of(parse_reconfigure(&body(r#"{"agent":"emacs"}"#)).unwrap_err()),
+            400
+        );
+        assert_eq!(
+            status_of(parse_reconfigure(&body(r#"{"reasoning_effort":"turbo"}"#)).unwrap_err()),
+            400
+        );
+        // Muse Code's tiers pass the body check; the handler then checks the
+        // tier against the runner's agent (`effort_fits_agent`).
+        assert_eq!(
+            parse_reconfigure(&body(r#"{"agent":"muse-code","reasoning_effort":"max"}"#))
+                .unwrap()
+                .reasoning_effort
+                .as_deref(),
+            Some("max")
+        );
+        assert_eq!(
+            status_of(parse_reconfigure(&body(r#"{"model":7}"#)).unwrap_err()),
+            400
+        );
+    }
+
+    #[test]
+    fn reconfigure_message_carries_name_and_changed_fields() {
+        let changes = RunnerReconfigure {
+            model: Some("gpt-5.5".to_string()),
+            reasoning_effort: Some("high".to_string()),
+            ..Default::default()
+        };
+        let message = reconfigure_runner_message("rid", "runner-1", "alpha", &changes);
+        assert_eq!(
+            Value::Object(message),
+            serde_json::json!({
+                "type": "reconfigure_runner",
+                "request_id": "rid",
+                "runner_id": "runner-1",
+                "name": "alpha",
+                "model": "gpt-5.5",
+                "reasoning_effort": "high",
+            })
+        );
+    }
 
     // -- UUID path gating (PIDASHCONV-798) --
 
@@ -1773,7 +2268,14 @@ mod tests {
             .map(|agent| agent.as_str().expect("agent str"))
             .collect();
         theirs.sort_unstable();
-        assert_eq!(ours, theirs);
+        // NEWPIDASH-396: Antigravity is new-system-only — Django's
+        // allow-list (frozen) has no such agent. Parity holds for every
+        // agent Django knows; see DIFF-65 in
+        // .ai_design/validation/differences.md.
+        let mut ours_without_new = ours.clone();
+        ours_without_new.retain(|agent| *agent != "antigravity");
+        assert_eq!(ours_without_new, theirs);
+        assert!(ours.contains(&"antigravity"));
         assert_eq!(DEFAULT_AGENT, "claude-code");
         let mut statuses = RESULT_STATUSES.to_vec();
         statuses.sort_unstable();

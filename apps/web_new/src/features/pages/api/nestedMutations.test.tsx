@@ -30,6 +30,7 @@ vi.mock("@pidash/api-client", async (importOriginal) => ({
 vi.mock("../../../shared/shell/toaster.js", () => shell);
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { sidebarKeys } from "../../sidebar/index.js";
 import { pageKeys } from "./keys.js";
 import {
   moveFailureMessage,
@@ -186,6 +187,24 @@ describe("usePageSubtreeArchive", () => {
     expect(shell.notifySuccess).toHaveBeenCalledWith(PAGE_ARCHIVED_TITLE);
     expect(onChange).toHaveBeenCalledWith(true);
     expect(invalidate).toHaveBeenCalledWith({ queryKey: pageKeys.all(SLUG) });
+    // Shelving clears the favourite, so the sidebar favourites the old app
+    // drops at once must be re-read too (NEWPIDASH-347).
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: sidebarKeys.favorites(SLUG) });
+  });
+
+  it("leaves the sidebar favourites alone when restoring", async () => {
+    const client = newClient();
+    contracts.restorePage.mockResolvedValue(undefined);
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const hook = renderHook(() => usePageSubtreeArchive(SLUG, PAGES_PROJECT_ID, [archivedParent, child]), {
+      wrapper: wrapper(client),
+    });
+    await act(async () => {
+      hook.result.current.mutate({ pageId: child.id, row: child, archived: false });
+      await settle();
+    });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: pageKeys.all(SLUG) });
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: sidebarKeys.favorites(SLUG) });
   });
 
   it("says a restore went to the top level when the parent is still archived", async () => {

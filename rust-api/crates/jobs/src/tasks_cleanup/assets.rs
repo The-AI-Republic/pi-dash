@@ -326,16 +326,21 @@ impl LiveS3ObjectStore {
     /// I/O); [`ObjectStore::head_object`] executes it. Scheme/host are
     /// dummy: both arms resolve without them (the endpoint arm rides
     /// the EndpointUrl branch, the regional arm the Region branch).
-    fn signed_head_for(
+    async fn signed_head_for(
         &self,
         key: &str,
         amz_date: &str,
         date_stamp: &str,
     ) -> Result<pidash_storage::SignedRequest, String> {
         let storage = self.signing_storage();
-        pidash_storage::validate_storage(&storage)
+        let creds = pidash_storage::resolve_storage_credentials(&storage)
+            .await
             .map_err(|error| format!("s3 misconfigured: {error}"))?;
-        pidash_storage::sign_head(&storage, "", "", key, amz_date, date_stamp)
+        let mut resolved = storage.clone();
+        resolved.access_key_id = creds.access_key.clone();
+        resolved.secret_access_key = creds.secret_key.clone();
+        resolved.session_token = creds.session_token.clone();
+        pidash_storage::sign_head(&resolved, "", "", key, amz_date, date_stamp)
             .map_err(|error| format!("s3 head {key}: {error}"))
     }
 
@@ -343,7 +348,7 @@ impl LiveS3ObjectStore {
     /// mirrors the duplicate-path `copy_auth_headers`
     /// (`handlers_v2_project.rs`): empty-body PUT, signed headers
     /// `host;x-amz-content-sha256;x-amz-copy-source;x-amz-date`.
-    fn signed_copy_for(
+    async fn signed_copy_for(
         &self,
         src_key: &str,
         dst_key: &str,
@@ -351,9 +356,14 @@ impl LiveS3ObjectStore {
         date_stamp: &str,
     ) -> Result<SignedCopyRequest, String> {
         let storage = self.signing_storage();
-        pidash_storage::validate_storage(&storage)
+        let creds = pidash_storage::resolve_storage_credentials(&storage)
+            .await
             .map_err(|error| format!("s3 misconfigured: {error}"))?;
-        sign_copy_request(&storage, src_key, dst_key, amz_date, date_stamp)
+        let mut resolved = storage.clone();
+        resolved.access_key_id = creds.access_key.clone();
+        resolved.secret_access_key = creds.secret_key.clone();
+        resolved.session_token = creds.session_token.clone();
+        sign_copy_request(&resolved, src_key, dst_key, amz_date, date_stamp)
             .map_err(|error| format!("s3 copy {src_key}: {error}"))
     }
 
@@ -364,7 +374,7 @@ impl LiveS3ObjectStore {
         let now = Utc::now();
         let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
         let date_stamp = now.format("%Y%m%d").to_string();
-        let signed = match self.signed_head_for(key, &amz_date, &date_stamp) {
+        let signed = match self.signed_head_for(key, &amz_date, &date_stamp).await {
             Ok(signed) => signed,
             Err(error) => return HeadAttempt::Config(error),
         };
@@ -374,14 +384,15 @@ impl LiveS3ObjectStore {
                 return HeadAttempt::Config(format!("s3 head {key}: transport failure: no client"))
             }
         };
-        let response = match client
+        let mut head_req = client
             .head(&signed.url)
             .header("Authorization", signed.authorization)
             .header("x-amz-date", signed.amz_date)
-            .header("x-amz-content-sha256", signed.content_sha256)
-            .send()
-            .await
-        {
+            .header("x-amz-content-sha256", signed.content_sha256);
+        if let Some(token) = &signed.security_token {
+            head_req = head_req.header("x-amz-security-token", token);
+        }
+        let response = match head_req.send().await {
             Ok(response) => response,
             Err(error) => {
                 return HeadAttempt::Transport(format!("s3 head {key}: transport failure: {error}"))
@@ -405,7 +416,10 @@ impl LiveS3ObjectStore {
         let now = Utc::now();
         let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
         let date_stamp = now.format("%Y%m%d").to_string();
-        let signed = match self.signed_copy_for(src_key, dst_key, &amz_date, &date_stamp) {
+        let signed = match self
+            .signed_copy_for(src_key, dst_key, &amz_date, &date_stamp)
+            .await
+        {
             Ok(signed) => signed,
             Err(error) => return CopyAttempt::Config(error),
         };
@@ -728,11 +742,23 @@ fn sign_copy_request(
     };
     let copy_source = format!("/{}/{}", storage.bucket_name, uri_encode_path(src_key));
     let payload_hash = pidash_storage::sha256_hex(&[]);
-    let signed_headers = "host;x-amz-content-sha256;x-amz-copy-source;x-amz-date";
-    let canonical = format!(
-        "PUT\n{dst_path}\n\nhost:{}\nx-amz-content-sha256:{payload_hash}\nx-amz-copy-source:{copy_source}\nx-amz-date:{amz_datetime}\n\n{signed_headers}\n{payload_hash}",
-        endpoint.signed_host,
-    );
+    let has_token = !storage.session_token.is_empty();
+    let (signed_headers, canonical) = if has_token {
+        let signed = "host;x-amz-content-sha256;x-amz-copy-source;x-amz-date;x-amz-security-token";
+        let canonical = format!(
+            "PUT\n{dst_path}\n\nhost:{}\nx-amz-content-sha256:{payload_hash}\nx-amz-copy-source:{copy_source}\nx-amz-date:{amz_datetime}\nx-amz-security-token:{}\n\n{signed}\n{payload_hash}",
+            endpoint.signed_host,
+            storage.session_token,
+        );
+        (signed.to_owned(), canonical)
+    } else {
+        let signed = "host;x-amz-content-sha256;x-amz-copy-source;x-amz-date".to_owned();
+        let canonical = format!(
+            "PUT\n{dst_path}\n\nhost:{}\nx-amz-content-sha256:{payload_hash}\nx-amz-copy-source:{copy_source}\nx-amz-date:{amz_datetime}\n\n{signed}\n{payload_hash}",
+            endpoint.signed_host,
+        );
+        (signed, canonical)
+    };
     let scope = format!("{date_stamp}/{}/s3/aws4_request", storage.region);
     let string_to_sign = format!(
         "AWS4-HMAC-SHA256\n{amz_datetime}\n{scope}\n{}",
@@ -746,14 +772,21 @@ fn sign_copy_request(
         "AWS4-HMAC-SHA256 Credential={}/{scope}, SignedHeaders={signed_headers}, Signature={signature}",
         storage.access_key_id,
     );
+    let mut headers = vec![
+        ("x-amz-content-sha256".to_owned(), payload_hash),
+        ("x-amz-copy-source".to_owned(), copy_source),
+        ("x-amz-date".to_owned(), amz_datetime.to_owned()),
+        ("authorization".to_owned(), authorization),
+    ];
+    if has_token {
+        headers.push((
+            "x-amz-security-token".to_owned(),
+            storage.session_token.clone(),
+        ));
+    }
     Ok(SignedCopyRequest {
         url: format!("{}{dst_path}", endpoint.url_base),
-        headers: vec![
-            ("x-amz-content-sha256".to_owned(), payload_hash),
-            ("x-amz-copy-source".to_owned(), copy_source),
-            ("x-amz-date".to_owned(), amz_datetime.to_owned()),
-            ("authorization".to_owned(), authorization),
-        ],
+        headers,
     })
 }
 
@@ -2697,6 +2730,7 @@ mod tests {
             minio_endpoint_ssl: false,
             access_key_id: "AKIDEXAMPLE".to_owned(),
             secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".to_owned(),
+            session_token: String::new(),
             bucket_name: "examplebucket".to_owned(),
             region: "us-east-1".to_owned(),
             endpoint_url: Some("http://localhost:4566".to_owned()),

@@ -323,12 +323,17 @@ pub fn mentioned_clause(param_present: bool) -> &'static str {
 /// `subscribed` type subquery (list, `base.py:107-115`): the subscriber's
 /// issue ids minus issues they created or are assigned to. `$slug` /
 /// `$user` bind the workspace slug / user id.
+///
+/// Old-bug fix (NEWPIDASH-270, DIFF-31): Django's `pk=OuterRef("issue_id")`
+/// compares the assignee row's own PK to the issue id and is almost never
+/// true, so assigned issues leak into subscribed. The Rust port follows the
+/// intended behaviour — excluding via `issue_id`.
 pub fn list_subscribed_issue_ids_sql(slug_param: &str, user_param: &str) -> String {
     format!(
         "SELECT U0.\"issue_id\" FROM \"{ISSUE_SUBSCRIBER_TABLE}\" U0 \
          WHERE (U0.\"workspace_id\" = {slug_param} AND U0.\"subscriber_id\" = {user_param} \
          AND NOT EXISTS (SELECT 1 FROM \"{ISSUE_TABLE}\" WHERE created_by_id = {user_param} AND id = U0.\"issue_id\") \
-         AND NOT EXISTS (SELECT 1 FROM \"{ISSUE_ASSIGNEE_TABLE}\" WHERE id = U0.\"issue_id\" AND assignee_id = {user_param}))"
+         AND NOT EXISTS (SELECT 1 FROM \"{ISSUE_ASSIGNEE_TABLE}\" WHERE issue_id = U0.\"issue_id\" AND assignee_id = {user_param}))"
     )
 }
 
@@ -765,7 +770,7 @@ mod tests {
         };
         for needle in [
             "NOT EXISTS (SELECT 1 FROM \"issues\" WHERE created_by_id = $2",
-            "NOT EXISTS (SELECT 1 FROM \"issue_assignees\" WHERE id = U0.\"issue_id\" AND assignee_id = $2)",
+            "NOT EXISTS (SELECT 1 FROM \"issue_assignees\" WHERE issue_id = U0.\"issue_id\" AND assignee_id = $2)",
         ] {
             assert!(sub.contains(needle), "missing {needle}");
         }

@@ -62,9 +62,9 @@ use sqlx::{Connection as _, Transaction};
 use uuid::Uuid;
 
 use pidash_db::runner_enroll::columns::enums;
-use pidash_services::domain::engine_credential as engine_cred;
+use pidash_services::domain::pidash_agent_credential as engine_cred;
 use pidash_services::domain::tokens::cli_token::deactivate_api_token;
-use pidash_services::runner_enroll::engine_naming;
+use pidash_services::runner_enroll::pidash_agent_naming;
 use pidash_services::runner_enroll::queries::enroll_reads as enroll_sql;
 use pidash_services::runner_enroll::serializers::shapes as enroll_shapes;
 use pidash_services::runner_enroll::tokens as enroll_tokens;
@@ -355,7 +355,9 @@ pub fn ensure_ascii(compact_json: &str) -> String {
 /// `user_id`, `workspace_id`, `host_label`.
 pub fn ticket_payload_bytes(user_id: &Uuid, workspace_id: &Uuid, host_label: &str) -> String {
     let host = ensure_ascii(&serde_json::to_string(host_label).expect("host label serializes"));
-    format!("{{\"user_id\": \"{user_id}\", \"workspace_id\": \"{workspace_id}\", \"host_label\": {host}}}")
+    format!(
+        "{{\"user_id\": \"{user_id}\", \"workspace_id\": \"{workspace_id}\", \"host_label\": {host}}}"
+    )
 }
 
 /// The ticket cache key (`:837`).
@@ -1055,7 +1057,7 @@ pub async fn count_pod_runners(pool: &sqlx::PgPool, pod_id: Uuid) -> Result<i64,
 
 #[allow(dead_code)]
 /// E7 reuse probe (`:709-720`): kept for back-compat; create now uses
-/// `live_engine_runner_for` (#2910).
+/// `live_pidash_agent_runner_for` (#2910).
 pub async fn desktop_reuse_probe(
     tx: &mut Transaction<'_, Postgres>,
     dev_machine_id: Uuid,
@@ -1528,35 +1530,26 @@ struct AttemptDone {
     created: bool,
 }
 
-/// `_engine_refusal` (`enrollment.py:813-843`): `None` when the engine may
-/// be created, else the 409 response. OSS CE has no gateway lane, so the
-/// profile is always unavailable (mirrors N51); the pause reason follows
-/// the managed-runner kill switch.
-async fn engine_refusal(
-    tx: &mut Transaction<'_, Postgres>,
-    user_id: Uuid,
-    _dev_machine: &pidash_db::entity::dev_machine::Model,
-    settings: &pidash_db::config::Settings,
+/// Refuse native-agent enrollment when the installed edition cannot serve
+/// this account. A cloud profile must not be gated by the CE-only defaults.
+/// The profile is resolved by the caller *before* the enrollment
+/// transaction opens: the lookup takes its own pool connection and may call
+/// the edition seam, neither of which may happen while `tx` holds one.
+fn engine_refusal_for_profile(
+    enabled: bool,
+    profile: &pidash_services::extensions::PidashAgentProfile,
 ) -> Option<Response> {
-    let (_available, pause_reason) = engine_cred::engine_profile_for_user_available(settings);
-    // `profile.reason_code` follows the caller's BYOK key
-    // (`agent_model_profile_for_user`, `model_provider.py:110-113`).
-    let conn = TxConn::new(&mut *tx);
-    let profile_reason_code =
-        match engine_cred::engine_profile_reason_code_for_user(&conn, user_id).await {
-            Ok(code) => code,
-            Err(err) => {
-                tracing::warn!("engine_refusal byok lookup failed: {err}");
-                return Some(server_error());
-            }
-        };
+    let (available, pause_reason) = engine_cred::pidash_agent_profile_for_user(enabled, profile);
+    if available {
+        return None;
+    }
     Some(json_response(
         StatusCode::CONFLICT,
         serde_json::json!({
             "error": "engine_unavailable",
             "reason_code": pause_reason,
-            "profile_reason_code": profile_reason_code,
-            "error_description": "This Pi Dash instance cannot serve the built-in engine for this account.",
+            "profile_reason_code": profile.reason_code,
+            "error_description": "This Pi Dash instance cannot serve the Pi Dash Agent for this account.",
         })
         .to_string(),
     ))
@@ -1566,6 +1559,7 @@ async fn engine_refusal(
 /// attach, engine/manual branch, live-engine dedupe, runner insert,
 /// APIToken-path rotate + `deactivate_api_token`.
 async fn create_attempt(
+    engine_profile: Option<&pidash_services::extensions::PidashAgentProfile>,
     tx: &mut Transaction<'_, Postgres>,
     params: &CreateAttempt<'_>,
     settings: &pidash_db::config::Settings,
@@ -1586,9 +1580,9 @@ async fn create_attempt(
     let legacy_machine = dev_machine
         .as_ref()
         .is_some_and(|dev| dev.provisioning == enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED);
-    let wants_engine =
+    let wants_pidash_agent =
         params.agent_kind == "engine" || (params.agent_kind.is_empty() && legacy_machine);
-    let (provisioning, name, engine_named) = if !wants_engine {
+    let (provisioning, name, pidash_agent_named) = if !wants_pidash_agent {
         (
             enums::RUNNER_PROVISIONING_MANUAL.to_owned(),
             None::<String>,
@@ -1603,10 +1597,13 @@ async fn create_attempt(
         }
         let machine_id = dev_machine_id.unwrap();
         if !legacy_machine {
-            let Some(machine_full) = fetch_dev_machine_full(tx, machine_id).await else {
+            // `agent_kind == "engine"` here (an empty kind only wants the
+            // agent on a legacy machine), so the caller resolved a profile.
+            let Some(profile) = engine_profile else {
                 return Attempt::Server;
             };
-            if let Some(refusal) = engine_refusal(tx, params.user_id, &machine_full, settings).await
+            if let Some(refusal) =
+                engine_refusal_for_profile(settings.pidash_agent.enabled, profile)
             {
                 return Attempt::Refusal(refusal);
             }
@@ -1615,7 +1612,7 @@ async fn create_attempt(
                 let Some(stored) = fetch_dev_machine_full(tx, machine_id).await else {
                     return Attempt::Server;
                 };
-                let state = engine_cred::current_engine_sign_in_state(
+                let state = engine_cred::current_pidash_agent_sign_in_state(
                     &stored.engine_sign_in_state,
                     stored
                         .engine_credential_expires_at
@@ -1635,7 +1632,7 @@ async fn create_attempt(
             }
         }
         // At most one live engine runner per (machine, project).
-        match enroll_sql::live_engine_runner_for(
+        match enroll_sql::live_pidash_agent_runner_for(
             &pidash_db::orm_tx::TxConn::new(&mut *tx),
             machine_id,
             params.project_id,
@@ -1660,7 +1657,7 @@ async fn create_attempt(
                         Ok(taken) => taken,
                         Err(_) => return Attempt::Server,
                     };
-                    let base = engine_naming::engine_runner_base_name(
+                    let base = pidash_agent_naming::pidash_agent_runner_base_name(
                         machine_id,
                         &machine.host_label,
                         &machine.label,
@@ -1716,7 +1713,7 @@ async fn create_attempt(
             let Some(machine) = fetch_dev_machine_full(tx, machine_id).await else {
                 return Attempt::Server;
             };
-            let base = engine_naming::engine_runner_base_name(
+            let base = pidash_agent_naming::pidash_agent_runner_base_name(
                 machine_id,
                 &machine.host_label,
                 &machine.label,
@@ -1770,7 +1767,7 @@ async fn create_attempt(
     .await
     {
         Ok(id) => id,
-        Err(RunnerInsertOutcome::Collision) => return Attempt::Collision(engine_named),
+        Err(RunnerInsertOutcome::Collision) => return Attempt::Collision(pidash_agent_named),
         Err(RunnerInsertOutcome::Server) => return Attempt::Server,
     };
     let pod_dispatch = if provisioning == enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED {
@@ -1791,7 +1788,7 @@ async fn create_attempt(
         .await
         {
             Ok(rotated) => minted = Some(rotated),
-            Err(RotateOutcome::Collision) => return Attempt::Collision(engine_named),
+            Err(RotateOutcome::Collision) => return Attempt::Collision(pidash_agent_named),
             Err(RotateOutcome::Server) => return Attempt::Server,
         }
         if deactivate_api_token(
@@ -1852,7 +1849,7 @@ async fn has_live_credential(
     let Some(machine) = fetch_dev_machine_full(tx, machine_id).await else {
         return false;
     };
-    engine_cred::has_live_engine_credential(
+    engine_cred::has_live_pidash_agent_credential(
         &machine.engine_sign_in_state,
         machine
             .engine_credential_expires_at
@@ -1925,7 +1922,7 @@ async fn create_runner_inner(
         Err(response) => return response,
     };
     // `agent_kind` (CLI field; `agent` alias): `engine` asks for the
-    // built-in engine runner. Never read from the body as provisioning.
+    // Pi Dash Agent runner. Never read from the body as provisioning.
     // Python `or` chain: the first *truthy* leg wins, then `str()`
     // coercion (`enrollment.py:575`): `agent_kind=""` falls through to
     // `agent`, while a truthy non-string renders via `py_str`.
@@ -2057,6 +2054,17 @@ async fn create_runner_inner(
     };
 
     let settings = state.settings().clone();
+    // Resolve the installed edition's agent profile before any enrollment
+    // transaction: it needs its own pool connection (and may call the
+    // edition seam), which must not be acquired while `tx` holds one.
+    let engine_profile = if agent_kind == "engine" {
+        match crate::pidash_agent::endpoints::account_agent_profile(&state, user_id).await {
+            Ok(profile) => Some(profile),
+            Err(response) => return response,
+        }
+    } else {
+        None
+    };
     let mut attempts = 0u32;
     let mut finished: Option<AttemptDone> = None;
     while attempts < MAX_AUTO_NAME_RETRIES {
@@ -2066,6 +2074,7 @@ async fn create_runner_inner(
             Err(_) => return server_error(),
         };
         let attempt = create_attempt(
+            engine_profile.as_ref(),
             &mut tx,
             &CreateAttempt {
                 user_id,
@@ -2093,9 +2102,9 @@ async fn create_runner_inner(
                 finished = Some(done);
                 break;
             }
-            Attempt::Collision(engine_named) => {
+            Attempt::Collision(pidash_agent_named) => {
                 let _ = tx.rollback().await;
-                if !body_name.is_empty() && !engine_named {
+                if !body_name.is_empty() && !pidash_agent_named {
                     return json_response(StatusCode::CONFLICT, error_body("runner_name_taken"));
                 }
             }
@@ -2565,6 +2574,33 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn agent_enrollment_uses_installed_profile_and_kill_switch() {
+        let mut profile = pidash_services::extensions::PidashAgentProfile {
+            available: true,
+            lane: "openhub".into(),
+            base_url: "https://gateway.example.test/v1".into(),
+            model: "free-model".into(),
+            reason_code: String::new(),
+            top_up_url: String::new(),
+            context_window: Some(128000),
+        };
+        assert!(engine_refusal_for_profile(true, &profile).is_none());
+        for (enabled, available, expected) in [
+            (false, true, "engine_disabled"),
+            (true, false, "profile_unavailable"),
+        ] {
+            profile.available = available;
+            profile.reason_code = "profile_reason".into();
+            let response = engine_refusal_for_profile(enabled, &profile).expect("refusal");
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let body: serde_json::Value =
+                serde_json::from_slice(&body_bytes(response).await).unwrap();
+            assert_eq!(body["reason_code"], expected);
+            assert_eq!(body["profile_reason_code"], "profile_reason");
+        }
+    }
 
     /// Read a response body into bytes (1MB cap).
     async fn body_bytes(response: Response) -> Vec<u8> {

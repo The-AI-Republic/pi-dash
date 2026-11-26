@@ -33,8 +33,8 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
-use pidash_db::dispatch::status::AgentRunStatus;
+use pidash_db::agent_runs::status::AgentRunStatus;
+use pidash_db::config::{PidashAgentSettings, RunnerSettings};
 use pidash_db::entity::{
     agent_run, issue_agent_ticker, issues, pod, scheduler_bindings, schedulers, workspaces,
 };
@@ -43,13 +43,13 @@ use pidash_db::orchestration::querysets::{
 };
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_db::tx::Transaction;
-use pidash_services::dispatch::admission::AdmissionCache;
-use pidash_services::dispatch::LlmProfile;
 use pidash_services::domain::clock::apply_clock_write;
 use pidash_services::domain::identity::{get_agent_system_user, GetAgentUserError};
-use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
+use pidash_services::extensions::AssistantModelSeam;
 use pidash_services::orchestration::clock::{ClockWrite, ProjectClockPolicy};
-use pidash_services::orchestration::creation::{CreationError, PodView, RenderedTurn, RunView};
+use pidash_services::orchestration::creation::{
+    stamp_run_context, CreationError, PodView, RenderedTurn, RunView,
+};
 use pidash_services::orchestration::dispatch::DispatchError;
 use pidash_services::orchestration::entries::{
     dispatch_scheduler_run as services_dispatch_scheduler_run, BindingView, EntriesError,
@@ -57,16 +57,16 @@ use pidash_services::orchestration::entries::{
     SchedulerView, WorkspaceView, SCHEDULER_ALLOWED_ROLES,
 };
 use pidash_services::prompting::{composer, context};
+use pidash_services::run_creation::LlmProfile;
 use pidash_services::runner_sessions::live_drains::drain_pod_by_id;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 
 use super::creation_jobs::{bundle_overrides, LiveCreationStore, StoreDeps};
 use super::fire_tick_seam::{drain_dispatch, DispatchJobsError, DispatchOutcome};
 use super::live_inputs::{
     fetch_presence, gate_fn, gate_verdicts, order_universe, profile_fn, project_leads,
 };
-use crate::admission::RedisAdmissionCache;
-use crate::dispatch::DispatchDecision;
+use crate::run_dispatch::DispatchDecision;
 use crate::tasks_ticker::fire_binding::{
     BindingForDispatch, DispatchRun, SchedulerDispatch, SchedulerDispatchResult,
 };
@@ -167,9 +167,8 @@ fn run_view_row_from_model(model: agent_run::Model) -> RunViewRow {
     }
 }
 
-impl<C, H, P> EntriesSeam for LiveCreationStore<'_, C, H, P>
+impl<H, P> EntriesSeam for LiveCreationStore<'_, H, P>
 where
-    C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
@@ -289,7 +288,8 @@ where
                 .await
                 .map_err(db_err)?
         };
-        let Some((ticking_enabled, max_ticks, interval, interval_review, interval_test)) = row
+        let Some((ticking_enabled, max_ticks, interval, interval_review, interval_test, settings)) =
+            row
         else {
             return Err(CreationError::MissingRow(format!(
                 "no clock policy {project_id}"
@@ -301,7 +301,9 @@ where
             agent_default_interval_seconds: Some(i64::from(interval)),
             agent_review_default_interval_seconds: Some(i64::from(interval_review)),
             agent_test_default_interval_seconds: Some(i64::from(interval_test)),
-        })
+            ..Default::default()
+        }
+        .with_stages(&settings))
     }
 
     async fn binding(&mut self, binding_id: Uuid) -> Result<BindingView, CreationError> {
@@ -555,13 +557,23 @@ where
                 pin_kind: Set("locality".to_owned()),
                 prompt_manifest: Set(None),
                 phase_kind: Set(String::new()),
-                run_config: Set(serde_json::json!({})),
+                // No stamp on scheduler runs (the model default).
+                work_type: Set(String::new()),
+                // Runner context (NEWPIDASH-320 §6.3): the scheduler's
+                // project identifier, so the runner defaults PIDASH_PROJECT.
+                run_config: Set(stamp_run_context(
+                    serde_json::json!({}),
+                    None,
+                    Some(&row.project_identifier),
+                    None,
+                )),
                 required_capabilities: Set(serde_json::json!([])),
                 thread_id: Set(String::new()),
                 agent_metadata: Set(serde_json::json!({})),
                 lease_expires_at: Set(None),
                 done_payload: Set(None),
                 error_details: Set(row.error_details.clone()),
+                failure_reason: Set(String::new()),
                 llm_model: Set(String::new()),
                 usage: Set(serde_json::json!({})),
                 created_at: Set(row
@@ -635,18 +647,16 @@ fn map_entries(error: EntriesError) -> DispatchJobsError {
 /// commit, then drain post-commit dispatch. The `dispatch_driver!`
 /// discipline, written out because the services call takes
 /// `(seam, req)` instead of the continuation argument shape.
-pub async fn dispatch_scheduler_run<C, H, P>(
+pub async fn dispatch_scheduler_run<H, P>(
     pool: &PgPool,
-    deps: StoreDeps<C, H, P>,
+    deps: StoreDeps<H, P>,
     binding_id: Uuid,
     now: DateTime<Utc>,
 ) -> Result<DispatchOutcome<SchedulerOutcome>, DispatchJobsError>
 where
-    C: AdmissionCache,
     H: Fn(Uuid) -> bool + Clone + Send + Sync,
     P: Fn(Option<Uuid>) -> LlmProfile + Clone + Send + Sync,
 {
-    let cloud = deps.cloud.clone();
     let tx = Transaction::begin(pool).await?;
     let mut store = LiveCreationStore::new(tx, pool, deps);
     let outcome =
@@ -654,7 +664,7 @@ where
             .await
             .map_err(map_entries)?;
     if store.dispatch_rollback_requested() {
-        let (tx, _, _, _, _, _) = store.into_parts();
+        let (tx, _, _, _) = store.into_parts();
         tx.rollback().await?;
         return Ok(DispatchOutcome {
             outcome,
@@ -666,10 +676,9 @@ where
     if let Some(run_id) = outcome.run {
         tracing::info!(%run_id, %binding_id, "scheduler.dispatch: created run");
     }
-    let (tx, pool, cache, dispatches, deferred, terminal_effects) = store.into_parts();
+    let (tx, pool, dispatches, terminal_effects) = store.into_parts();
     tx.commit().await?;
-    let dispatch_decisions =
-        drain_dispatch(pool, &cloud, &cache, dispatches, deferred, now).await?;
+    let dispatch_decisions = drain_dispatch(pool, dispatches, now).await?;
     let dispatched = dispatch_decisions.iter().map(|(id, _)| *id).collect();
     Ok(DispatchOutcome {
         outcome,
@@ -728,20 +737,16 @@ fn to_dispatch_result(
 /// outside the `(run, fail_reason)` contract is `Err` (task failure).
 pub fn live_scheduler_dispatch(
     pool: PgPool,
-    cloud: CloudAgentSettings,
-    managed: ManagedRunnerSettings,
+    managed: PidashAgentSettings,
     redis: Option<redis::Client>,
     runner: RunnerSettings,
-    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     assistant_seam: Arc<dyn AssistantModelSeam>,
 ) -> SchedulerDispatch {
     Arc::new(move |binding: BindingForDispatch| {
         let pool = pool.clone();
-        let cloud = cloud.clone();
         let managed = managed.clone();
         let redis = redis.clone();
         let runner = runner.clone();
-        let toolsets = toolsets.clone();
         let assistant_seam = assistant_seam.clone();
         Box::pin(async move {
             let now = Utc::now();
@@ -759,13 +764,9 @@ pub fn live_scheduler_dispatch(
             );
             let verdicts = Arc::new(gate_verdicts(&assistant_seam, &presence).await);
             let deps = StoreDeps {
-                cloud,
                 managed,
-                cache: RedisAdmissionCache::from_env(),
                 has_usable_llm_config: gate_fn(verdicts),
-                toolsets,
                 llm_profile: profile_fn(presence),
-                now_unix_secs: now.timestamp(),
             };
             let outcome = dispatch_scheduler_run(&pool, deps, binding.binding_id, now)
                 .await
@@ -908,50 +909,18 @@ mod tests {
     // through `TxConn`, exactly as production does. Skipped when
     // `DATABASE_URL` is unset.
 
-    use pidash_services::dispatch::admission::AdmissionCache;
-    use pidash_services::dispatch::LlmProfile;
-    use pidash_services::extensions::NoExtraToolsets;
-
-    #[derive(Debug)]
-    struct StubCacheError(String);
-
-    impl std::fmt::Display for StubCacheError {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "{}", self.0)
-        }
-    }
-
-    impl std::error::Error for StubCacheError {}
-
-    #[derive(Debug, Default)]
-    struct StubCache;
-
-    impl AdmissionCache for StubCache {
-        type Error = StubCacheError;
-
-        fn bucket_count(&self, _key: &str) -> Result<Option<i64>, Self::Error> {
-            Ok(None)
-        }
-
-        fn add_or_incr(&self, _key: &str, _timeout_secs: i64) -> Result<(), Self::Error> {
-            Ok(())
-        }
-    }
+    use pidash_services::run_creation::LlmProfile;
 
     #[allow(clippy::type_complexity)]
-    fn test_deps() -> StoreDeps<StubCache, fn(Uuid) -> bool, fn(Option<Uuid>) -> LlmProfile> {
+    fn test_deps() -> StoreDeps<fn(Uuid) -> bool, fn(Option<Uuid>) -> LlmProfile> {
         let settings = pidash_db::config::Settings::test_defaults();
         StoreDeps {
-            cloud: settings.cloud_agent,
-            managed: settings.managed_runner,
-            cache: StubCache,
+            managed: settings.pidash_agent,
             has_usable_llm_config: |_| false,
-            toolsets: Arc::new(NoExtraToolsets),
             llm_profile: |_| LlmProfile {
                 available: false,
                 reason_code: "test".to_owned(),
             },
-            now_unix_secs: 0,
         }
     }
 
@@ -1149,7 +1118,7 @@ mod tests {
         assert_eq!(follow_up.id, run_id);
         assert_eq!(follow_up.status, AgentRunStatus::Queued);
         assert_eq!(follow_up.trigger, "scheduler");
-        assert_eq!(follow_up.executor_kind, AgentExecutorKind::CloudAgent);
+        assert_eq!(follow_up.executor_kind, AgentExecutorKind::RetiredCloudRun);
 
         let ticker = store
             .lock_ticker(issue_id)
@@ -1170,9 +1139,10 @@ mod tests {
             pod_id,
             pinned_runner_id: None,
             binding_id,
-            executor_kind: AgentExecutorKind::CloudAgent,
+            executor_kind: AgentExecutorKind::RetiredCloudRun,
             error_details: serde_json::json!({}),
             tool_plan: serde_json::json!([]),
+            project_identifier: "FX7".to_owned(),
             now,
         };
         let new_run_id = new_run.id;
@@ -1190,7 +1160,10 @@ mod tests {
         assert_eq!(view.pinned_runner_id, None);
         assert_eq!(view.parent_run_id, None);
         assert_eq!(view.work_item_id, None);
-        assert_eq!(view.run_config, serde_json::json!({}));
+        assert_eq!(
+            view.run_config,
+            serde_json::json!({"project_identifier": "FX7"})
+        );
         assert_eq!(view.tool_plan, serde_json::json!([]));
         assert_eq!(view.error_details, serde_json::json!({}));
         assert_eq!(view.prompt, "");

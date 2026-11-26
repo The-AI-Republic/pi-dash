@@ -373,9 +373,10 @@ fn is_unique_violation_db(err: &sea_orm::DbErr) -> bool {
 
 fn silent_refusal_description(state: &str) -> &'static str {
     match state {
-        "never" => "The built-in engine is not turned on for this computer; turn it on explicitly.",
+        "revoked" => "The built-in engine was revoked on this computer; sign it in again.",
         "active" => "The built-in engine credential on this computer is not due for renewal yet.",
-        _ => "The built-in engine was signed out on this computer; sign it in explicitly.",
+        "signed_out" => "The built-in engine was signed out on this computer and this computer holds no daemon credential; sign in on this computer first.",
+        _ => "The built-in engine is not signed in for this computer; sign in on this computer first.",
     }
 }
 
@@ -909,7 +910,7 @@ async fn post_approve(
             // Interactive or no machine passes; otherwise check silent.
             if !interactive {
                 let state =
-                    pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                    pidash_services::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
                         &machine.engine_sign_in_state,
                         machine.engine_credential_expires_at.as_ref().map(
                             |dt: &sea_orm::prelude::DateTimeWithTimeZone| {
@@ -918,17 +919,18 @@ async fn post_approve(
                         ),
                         now,
                     );
-                let allowed = pidash_services::domain::engine_credential::silent_issue_allowed(
-                    &db, machine.id, now,
-                )
-                .await
-                .unwrap_or(false);
+                let allowed =
+                    pidash_services::domain::pidash_agent_credential::silent_issue_allowed(
+                        &db, machine.id, now, "engine",
+                    )
+                    .await
+                    .unwrap_or(false);
                 if !allowed {
                     let desc = silent_refusal_description(&state);
                     return Denial::Error(
                         StatusCode::CONFLICT,
                         serde_json::json!({
-                            "error": pidash_services::domain::engine_credential::SILENT_RENEWAL_REFUSED,
+                            "error": pidash_services::domain::pidash_agent_credential::SILENT_RENEWAL_REFUSED,
                             "engine_sign_in_state": state,
                             "error_description": desc,
                         })
@@ -939,7 +941,7 @@ async fn post_approve(
                 machine_state = Some(state);
             } else {
                 machine_state = Some(
-                    pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                    pidash_services::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
                         &machine.engine_sign_in_state,
                         machine.engine_credential_expires_at.as_ref().map(
                             |dt: &sea_orm::prelude::DateTimeWithTimeZone| {
@@ -1224,15 +1226,15 @@ async fn post_token(State(state): State<AppState>, headers: HeaderMap, body: Byt
         // Silent grant with !silent_issue_allowed => 409.
         let db_conn = pidash_db::pool::sea_orm_connection(&pool);
         if !row_interactive {
-            let state = pidash_services::domain::engine_credential::current_engine_sign_in_state(
+            let state = pidash_services::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
                 &machine.engine_sign_in_state,
                 machine.engine_credential_expires_at.as_ref().map(
                     |dt: &sea_orm::prelude::DateTimeWithTimeZone| dt.with_timezone(&chrono::Utc),
                 ),
                 now,
             );
-            let allowed = pidash_services::domain::engine_credential::silent_issue_allowed(
-                &db_conn, machine.id, now,
+            let allowed = pidash_services::domain::pidash_agent_credential::silent_issue_allowed(
+                &db_conn, machine.id, now, "engine",
             )
             .await
             .unwrap_or(false);
@@ -1241,7 +1243,7 @@ async fn post_token(State(state): State<AppState>, headers: HeaderMap, body: Byt
                 return Denial::Error(
                     StatusCode::CONFLICT,
                     serde_json::json!({
-                        "error": pidash_services::domain::engine_credential::SILENT_RENEWAL_REFUSED,
+                        "error": pidash_services::domain::pidash_agent_credential::SILENT_RENEWAL_REFUSED,
                         "engine_sign_in_state": state,
                         "error_description": desc,
                     })
@@ -1252,11 +1254,12 @@ async fn post_token(State(state): State<AppState>, headers: HeaderMap, body: Byt
         }
         // Engine profile unavailable => 409 engine_unavailable.
         let (available, pause_reason) =
-            pidash_services::domain::engine_credential::engine_profile_for_user_available(
-                state.settings(),
-            );
+            match crate::pidash_agent::endpoints::device_grant_availability(&state, user_id).await {
+                Ok(availability) => availability,
+                Err(response) => return response,
+            };
         if !available {
-            let state = pidash_services::domain::engine_credential::current_engine_sign_in_state(
+            let state = pidash_services::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
                 &machine.engine_sign_in_state,
                 machine.engine_credential_expires_at.as_ref().map(
                     |dt: &sea_orm::prelude::DateTimeWithTimeZone| dt.with_timezone(&chrono::Utc),
@@ -1277,18 +1280,22 @@ async fn post_token(State(state): State<AppState>, headers: HeaderMap, body: Byt
         }
         // Issue engine credential (silent = !interactive).
         let secret = state.settings().secret_key.clone();
-        let issued = pidash_services::domain::engine_credential::issue_engine_credential(
-            &db_conn,
-            secret.as_bytes(),
-            user_id,
-            machine_id,
-            !row_interactive,
-            now,
-        )
-        .await;
+        let issued =
+            pidash_services::domain::pidash_agent_credential::issue_pidash_agent_credential(
+                &db_conn,
+                secret.as_bytes(),
+                user_id,
+                machine_id,
+                !row_interactive,
+                "engine",
+                now,
+            )
+            .await;
         let issued = match issued {
             Ok(i) => i,
-            Err(pidash_services::domain::engine_credential::IssueError::SilentRenewalRefused) => {
+            Err(
+                pidash_services::domain::pidash_agent_credential::IssueError::SilentRenewalRefused,
+            ) => {
                 // Lost race: reuse silent-refused body with fresh state.
                 let fresh = {
                     use sea_orm::EntityTrait;
@@ -1299,7 +1306,7 @@ async fn post_token(State(state): State<AppState>, headers: HeaderMap, body: Byt
                 };
                 let state = fresh
                     .map(|m| {
-                        pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                        pidash_services::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
                             &m.engine_sign_in_state,
                             m.engine_credential_expires_at.as_ref().map(
                                 |dt: &sea_orm::prelude::DateTimeWithTimeZone| {
@@ -1314,7 +1321,7 @@ async fn post_token(State(state): State<AppState>, headers: HeaderMap, body: Byt
                 return Denial::Error(
                     StatusCode::CONFLICT,
                     serde_json::json!({
-                        "error": pidash_services::domain::engine_credential::SILENT_RENEWAL_REFUSED,
+                        "error": pidash_services::domain::pidash_agent_credential::SILENT_RENEWAL_REFUSED,
                         "engine_sign_in_state": state,
                         "error_description": desc,
                     })
@@ -1358,7 +1365,7 @@ async fn post_token(State(state): State<AppState>, headers: HeaderMap, body: Byt
                 .await
                 .unwrap_or(None);
             m.map(|m| {
-                pidash_services::domain::engine_credential::current_engine_sign_in_state(
+                pidash_services::domain::pidash_agent_credential::current_pidash_agent_sign_in_state(
                     &m.engine_sign_in_state,
                     m.engine_credential_expires_at.as_ref().map(
                         |dt: &sea_orm::prelude::DateTimeWithTimeZone| {
@@ -1545,14 +1552,9 @@ async fn resolve_machine_token_for_engine(
     let Some(token_row) = row else {
         return Err(invalid_client("machine_token_invalid"));
     };
-    if token_row.revoked_at.is_some() {
-        return Err(invalid_client("machine_token_revoked"));
-    }
-    if let Some(exp) = token_row.expires_at {
-        if exp.with_timezone(&chrono::Utc) <= now {
-            return Err(invalid_client("machine_token_expired"));
-        }
-    }
+    // The machine first: removing a computer on the web revokes its tokens
+    // too, and the daemon must read that as removed (`dev_machine_revoked`),
+    // not a plain token revoke (desktop_unified_signin §12 rule 1).
     // Revoked (or missing) dev machine -> dev_machine_revoked. Unbound
     // (NULL) skips this gate; redemption 403s below (device.py:258-262).
     if let Some(mid) = token_row.dev_machine_id {
@@ -1565,6 +1567,14 @@ async fn resolve_machine_token_for_engine(
         };
         if machine.revoked_at.is_some() {
             return Err(invalid_client("dev_machine_revoked"));
+        }
+    }
+    if token_row.revoked_at.is_some() {
+        return Err(invalid_client("machine_token_revoked"));
+    }
+    if let Some(exp) = token_row.expires_at {
+        if exp.with_timezone(&chrono::Utc) <= now {
+            return Err(invalid_client("machine_token_expired"));
         }
     }
     // Workspace membership (`is_workspace_member`): a lapsed token is

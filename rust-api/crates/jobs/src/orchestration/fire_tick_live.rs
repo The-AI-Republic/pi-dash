@@ -23,24 +23,23 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
+use pidash_db::config::{PidashAgentSettings, RunnerSettings};
 use pidash_db::entity::agent_run;
 use pidash_db::orchestration::runs::ACTIVE_STATUSES;
 use pidash_db::orm_tx::into_sqlx;
 use pidash_db::pool::sea_orm_connection;
-use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
+use pidash_services::extensions::AssistantModelSeam;
 use pidash_services::runner_sessions::live_drains::{drain_pod_by_id, DrainError};
 
 use super::creation_jobs::StoreDeps;
 use super::fire_tick_seam::{
-    dispatch_continuation_run, emit_logs, shim_is_ticking_state, shim_tick_interval_seconds,
-    DispatchJobsError, StateView,
+    dispatch_continuation_run, emit_logs, shim_stage_runs_automatically,
+    shim_tick_interval_seconds, DispatchJobsError, StateView,
 };
 use super::live_inputs::{
     creator_universe, fetch_presence, gate_fn, gate_verdicts, profile_fn, JobsMatcher,
 };
-use crate::admission::RedisAdmissionCache;
-use crate::dispatch::DispatchDecision;
+use crate::run_dispatch::DispatchDecision;
 use crate::tasks_ticker::fire_tick::{FireTickSeam, ProjectTickCols};
 
 /// Live [`FireTickSeam`]: pool + dispatch settings + the injected
@@ -51,39 +50,37 @@ use crate::tasks_ticker::fire_tick::{FireTickSeam, ProjectTickCols};
 /// is passed in from the claim read (live, never cached).
 pub struct LiveFireTickSeam {
     pool: PgPool,
-    cloud: CloudAgentSettings,
-    managed: ManagedRunnerSettings,
+    managed: PidashAgentSettings,
     redis: Option<redis::Client>,
     runner: RunnerSettings,
-    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     assistant_seam: Arc<dyn AssistantModelSeam>,
 }
 
 impl LiveFireTickSeam {
     pub fn new(
         pool: PgPool,
-        cloud: CloudAgentSettings,
-        managed: ManagedRunnerSettings,
+        managed: PidashAgentSettings,
         redis: Option<redis::Client>,
         runner: RunnerSettings,
-        toolsets: Arc<dyn CloudAgentToolsetsSeam>,
         assistant_seam: Arc<dyn AssistantModelSeam>,
     ) -> Self {
         Self {
             pool,
-            cloud,
             managed,
             redis,
             runner,
-            toolsets,
             assistant_seam,
         }
     }
 }
 
 impl FireTickSeam for LiveFireTickSeam {
-    fn is_ticking_state(&self, state: Option<&StateView>) -> bool {
-        shim_is_ticking_state(state)
+    fn stage_runs_automatically(
+        &self,
+        state: Option<&StateView>,
+        project: &ProjectTickCols,
+    ) -> bool {
+        shim_stage_runs_automatically(state, project)
     }
 
     fn tick_interval_seconds(&self, state: Option<&StateView>, project: &ProjectTickCols) -> i64 {
@@ -142,11 +139,9 @@ impl FireTickSeam for LiveFireTickSeam {
         actor: Option<Uuid>,
     ) -> Pin<Box<dyn Future<Output = Result<Option<Uuid>, sqlx::Error>> + Send + '_>> {
         let pool = self.pool.clone();
-        let cloud = self.cloud.clone();
         let managed = self.managed.clone();
         let redis = self.redis.clone();
         let runner = self.runner.clone();
-        let toolsets = self.toolsets.clone();
         let assistant_seam = self.assistant_seam.clone();
         let matcher = JobsMatcher::new(pool.clone());
         let triggered_by = triggered_by.to_owned();
@@ -155,13 +150,9 @@ impl FireTickSeam for LiveFireTickSeam {
             let presence = Arc::new(fetch_presence(&pool, &universe).await?);
             let verdicts = Arc::new(gate_verdicts(&assistant_seam, &presence).await);
             let deps = StoreDeps {
-                cloud,
                 managed,
-                cache: RedisAdmissionCache::from_env(),
                 has_usable_llm_config: gate_fn(verdicts),
-                toolsets,
                 llm_profile: profile_fn(presence),
-                now_unix_secs: Utc::now().timestamp(),
             };
             let now = Utc::now();
             // Continuation never retimes a clock (a bounce only
@@ -206,7 +197,6 @@ impl FireTickSeam for LiveFireTickSeam {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pidash_services::extensions::NoExtraToolsets;
 
     fn state(id: u128, name: &str, group: &str) -> StateView {
         StateView {
@@ -240,11 +230,9 @@ mod tests {
         let settings = pidash_db::config::Settings::test_defaults();
         LiveFireTickSeam::new(
             pool,
-            settings.cloud_agent,
-            settings.managed_runner,
+            settings.pidash_agent,
             None,
             settings.runner,
-            Arc::new(NoExtraToolsets),
             Arc::new(DefaultSeam),
         )
     }
@@ -256,17 +244,18 @@ mod tests {
         let review = state(2, "In Review", "review");
         let done = state(3, "Done", "completed");
         let unknown = state(9, "Renamed", "started");
-        assert!(seam.is_ticking_state(Some(&started)));
-        assert!(seam.is_ticking_state(Some(&review)));
-        assert!(!seam.is_ticking_state(Some(&done)));
-        assert!(!seam.is_ticking_state(Some(&unknown)));
-        assert!(!seam.is_ticking_state(None));
+        assert!(seam.stage_runs_automatically(Some(&started), &ProjectTickCols::default()));
+        assert!(seam.stage_runs_automatically(Some(&review), &ProjectTickCols::default()));
+        assert!(!seam.stage_runs_automatically(Some(&done), &ProjectTickCols::default()));
+        assert!(!seam.stage_runs_automatically(Some(&unknown), &ProjectTickCols::default()));
+        assert!(!seam.stage_runs_automatically(None, &ProjectTickCols::default()));
         let project = ProjectTickCols {
             pool: Some(10),
             ticking_enabled: Some(true),
             interval_default: Some(10800),
             interval_review: Some(7200),
             interval_test: Some(3600),
+            ..Default::default()
         };
         assert_eq!(seam.tick_interval_seconds(Some(&started), &project), 10800);
         assert_eq!(seam.tick_interval_seconds(Some(&review), &project), 7200);

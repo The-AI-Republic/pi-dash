@@ -10,8 +10,10 @@
 //! network I/O lives with the wiring), so this handler-layer struct is the
 //! first production transport.
 //!
-//! Credential chain is the container standard (`AWS_ACCESS_KEY_ID`,
-//! `AWS_SECRET_ACCESS_KEY`, optional `AWS_SESSION_TOKEN`, `AWS_REGION`);
+//! Credentials follow boto3's chain for the steps the deployments use
+//! (see [`super::aws_credentials`]): `AWS_ACCESS_KEY_ID` /
+//! `AWS_SECRET_ACCESS_KEY` / optional `AWS_SESSION_TOKEN` first, then the
+//! EC2 instance role over IMDSv2. `AWS_REGION` names the region;
 //! `ASSISTANT_KMS_ENDPOINT_URL` overrides the endpoint (e.g. LocalStack)
 //! exactly like `boto3.client("kms", endpoint_url=...)`. Missing
 //! credentials or region surface as transport-level failures (empty
@@ -37,6 +39,7 @@
 //! `pidash-api`.
 
 use pidash_services::assistant::crypto::{CryptoConfig, KmsTransport, KmsTransportError};
+use pidash_storage::aws_credentials::CredentialSource;
 
 /// KMS JSON protocol version header (`application/x-amz-json-1.1`).
 const KMS_JSON_VERSION: &str = "application/x-amz-json-1.1";
@@ -49,9 +52,7 @@ pub struct HttpKmsTransport {
     client: reqwest::Client,
     endpoint: String,
     region: String,
-    access_key: String,
-    secret_key: String,
-    session_token: String,
+    credentials: CredentialSource,
 }
 
 impl HttpKmsTransport {
@@ -69,18 +70,14 @@ impl HttpKmsTransport {
             client: reqwest::Client::new(),
             endpoint,
             region,
-            access_key: std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_default(),
-            secret_key: std::env::var("AWS_SECRET_ACCESS_KEY").unwrap_or_default(),
-            session_token: std::env::var("AWS_SESSION_TOKEN").unwrap_or_default(),
+            credentials: CredentialSource::from_env(),
         }
     }
 
     fn require_setup(&self) -> Result<(), KmsTransportError> {
-        if self.access_key.is_empty() || self.secret_key.is_empty() {
-            return Err(KmsTransportError::transport(
-                "AWS credentials are not configured (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY).",
-            ));
-        }
+        self.credentials
+            .check_static()
+            .map_err(KmsTransportError::transport)?;
         if self.region.is_empty() {
             return Err(KmsTransportError::transport(
                 "AWS_REGION is not set; KMS calls cannot be signed.",
@@ -115,11 +112,16 @@ impl HttpKmsTransport {
                 self.endpoint
             ))
         })?;
+        let credentials = self
+            .credentials
+            .resolve()
+            .await
+            .map_err(KmsTransportError::transport)?;
         let payload_hash = sha256_hex(body.as_bytes());
         let headers = signed_headers(
-            &self.access_key,
-            &self.secret_key,
-            self.session_token.as_str(),
+            &credentials.access_key,
+            &credentials.secret_key,
+            credentials.session_token.as_str(),
             &self.region,
             &host,
             &amz_date,
@@ -395,14 +397,63 @@ mod tests {
             client: reqwest::Client::new(),
             endpoint: "https://kms.us-east-1.amazonaws.com/".to_owned(),
             region: "us-east-1".to_owned(),
-            access_key: String::new(),
-            secret_key: String::new(),
-            session_token: String::new(),
+            credentials: CredentialSource::Unavailable,
         };
         let _ = config;
         let err = transport
             .encrypt("alias/x", b"secret")
             .expect_err("no creds");
         assert_eq!(err.code, "");
+    }
+
+    /// No static keys: the transport signs with the instance-role
+    /// credentials from IMDS and sends their session token.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn signs_with_instance_role_credentials() {
+        use axum::http::HeaderMap;
+        use base64::Engine as _;
+        use pidash_storage::aws_credentials::tests::{imds_router, serve, FakeImds};
+        use pidash_storage::aws_credentials::InstanceRoleProvider;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::{Arc, Mutex};
+
+        let seen: Arc<Mutex<Option<HeaderMap>>> = Arc::new(Mutex::new(None));
+        let captured = seen.clone();
+        let kms = axum::Router::new().route(
+            "/",
+            axum::routing::post(move |headers: HeaderMap| {
+                let captured = captured.clone();
+                async move {
+                    *captured.lock().unwrap() = Some(headers);
+                    let blob = base64::engine::general_purpose::STANDARD.encode(b"cipher");
+                    serde_json::json!({ "CiphertextBlob": blob }).to_string()
+                }
+            }),
+        );
+        let imds = FakeImds {
+            fetches: Arc::new(AtomicUsize::new(0)),
+            tokens: Arc::new(AtomicUsize::new(0)),
+            lifetime_secs: 3600,
+            with_role: true,
+        };
+        let base = serve(imds_router(imds).merge(kms)).await;
+
+        let transport = HttpKmsTransport {
+            client: reqwest::Client::new(),
+            endpoint: format!("{base}/"),
+            region: "us-west-2".to_owned(),
+            credentials: CredentialSource::InstanceRole(Arc::new(InstanceRoleProvider::new(&base))),
+        };
+        let out = transport.encrypt("alias/x", b"secret").expect("encrypt");
+        assert_eq!(out, b"cipher");
+
+        let headers = seen.lock().unwrap().take().expect("kms called");
+        let auth = headers["authorization"].to_str().unwrap();
+        assert!(
+            auth.starts_with("AWS4-HMAC-SHA256 Credential=ASIAFAKE1/"),
+            "{auth}"
+        );
+        assert!(auth.contains("/us-west-2/kms/aws4_request"), "{auth}");
+        assert_eq!(headers["x-amz-security-token"], "fake-session-1");
     }
 }

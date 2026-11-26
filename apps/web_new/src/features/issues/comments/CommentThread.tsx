@@ -19,6 +19,7 @@ import * as React from "react";
 import { useMe } from "../../../core/session/index.js";
 import { useTriggerAgentRun } from "../../runners/index.js";
 import { ActivityFeed } from "../activity/ActivityFeed.js";
+import type { TimelinePosition } from "../activity/TimelineRow.js";
 import { issueKeys } from "../api/keys.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { canLogWorklog } from "../detail/widgets/worklog/eligibility.js";
@@ -86,7 +87,7 @@ export interface CommentThreadProps {
    * run. Undefined hides the action; a null workspace id (the workspace
    * read still landing) hides it too.
    */
-  commentAndRun?: { workspaceId: string | null; disabled: boolean } | undefined;
+  commentAndRun?: { workspaceId: string | null; disabled: boolean; disabledReason?: string | undefined } | undefined;
 }
 
 function useCommentHighlight(comments: IssueComment[]): string | null {
@@ -161,6 +162,7 @@ export function CommentThread({
       : {
           submit: (input: ComposerPost) => postCommentAndRun(runWorkspaceId, input),
           disabled: runDisabled,
+          ...(commentAndRun?.disabledReason === undefined ? {} : { disabledReason: commentAndRun.disabledReason }),
         };
 
   const copyLink = async (comment: IssueComment): Promise<void> => {
@@ -177,7 +179,7 @@ export function CommentThread({
     }
   };
 
-  const renderComment = (comment: IssueComment): React.ReactNode => (
+  const renderComment = (comment: IssueComment, position?: TimelinePosition): React.ReactNode => (
     <div
       className={cn(
         "rounded-(--radius-control) p-(--space-2) transition-colors duration-500",
@@ -190,6 +192,7 @@ export function CommentThread({
         comment={comment}
         viewerId={viewerId}
         readOnly={archived}
+        position={position}
         access={{ toggle: flags.accessToggle, copyLink: flags.copyLink }}
         onEdit={(commentId, html) => update.mutateAsync({ commentId, patch: { comment_html: html } })}
         onDelete={(commentId) => remove.mutate(commentId)}

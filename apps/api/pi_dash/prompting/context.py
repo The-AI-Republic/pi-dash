@@ -268,7 +268,7 @@ def _actor_label(actor) -> str:
 def _comment_author_label(comment) -> str:
     """Render an audience-friendly speaker label for a comment.
 
-    Bot comments are flattened to a single ``Pi Dash Agent`` label so the
+    Bot comments are flattened to a single ``Pi Dash Bot`` label so the
     agent reading its own prior posts immediately recognizes them as
     self-authored. Explicit speaker metadata wins over the authenticated
     actor because agent CLI comments may be submitted with a human token.
@@ -290,7 +290,7 @@ def _comment_author_label(comment) -> str:
     if actor is None:
         return "Unknown"
     if getattr(actor, "is_bot", False):
-        return "AI agent: Pi Dash Agent"
+        return "AI agent: Pi Dash Bot"
     return f"Human: {actor_label}"
 
 
@@ -518,6 +518,14 @@ def extra_toolsets_vars(run) -> Dict[str, Any]:
     }
 
 
+def _work_type_context(issue: Issue) -> Dict[str, Any]:
+    """``{key, title}`` of the issue's effective work type."""
+    from pi_dash.prompting.work_types import effective_work_type, get_work_type
+
+    work_type = get_work_type(effective_work_type(issue))
+    return {"key": work_type.key, "title": work_type.title}
+
+
 def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
     """Build the dict passed into Jinja.
 
@@ -575,6 +583,9 @@ def build_context(issue: Issue, run: AgentRun) -> Dict[str, Any]:
             "description": project.description or "",
             "context": project.context or "",
         },
+        # The effective work type composed with (PDASHOSS01-234) — exposed so
+        # sections can name it ("work type: software") without re-deriving it.
+        "work_type": _work_type_context(issue),
         "repo": _repo_context(project, issue),
         # Git PRs / code reviews already attached to this issue (empty list
         # when none). Lets the template tell the agent about associated PRs so

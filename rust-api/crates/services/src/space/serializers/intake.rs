@@ -257,7 +257,7 @@ pub fn intake_issue_lite_to_representation<'a>(
 /// `workpad` (the agent's per-issue scratchpad, `issue.py:198`) must never
 /// leak into the public/guest Space app (`intake.py:45-46`), so it has no
 /// view field.
-pub const ISSUE_STATE_INTAKE_MODEL_FIELDS: [&str; 35] = [
+pub const ISSUE_STATE_INTAKE_MODEL_FIELDS: [&str; 36] = [
     "id",
     "created_at",
     "updated_at",
@@ -282,6 +282,7 @@ pub const ISSUE_STATE_INTAKE_MODEL_FIELDS: [&str; 35] = [
     "git_work_branch",
     "created_via",
     "agent_executor",
+    "work_type",
     "created_by",
     "updated_by",
     "project",
@@ -337,6 +338,7 @@ pub struct IssueStateIntakeRow<'a> {
     pub git_work_branch: &'a str,
     pub created_via: Option<&'a str>,
     pub agent_executor: Option<&'a str>,
+    pub work_type: Option<&'a str>,
     pub created_by: Option<&'a str>,
     pub updated_by: Option<&'a str>,
     pub project: &'a str,
@@ -389,6 +391,7 @@ pub struct IssueStateIntakeView<'a> {
     pub git_work_branch: &'a str,
     pub created_via: Option<&'a str>,
     pub agent_executor: Option<&'a str>,
+    pub work_type: Option<&'a str>,
     pub created_by: Option<&'a str>,
     pub updated_by: Option<&'a str>,
     pub project: &'a str,
@@ -439,6 +442,7 @@ pub fn issue_state_intake_to_representation<'a>(
         git_work_branch: row.git_work_branch,
         created_via: row.created_via,
         agent_executor: row.agent_executor,
+        work_type: row.work_type,
         created_by: row.created_by,
         updated_by: row.updated_by,
         project: row.project,
@@ -808,6 +812,7 @@ mod tests {
             created_via: None,
             assigned_pod: None,
             agent_executor: None,
+            work_type: None,
             state_detail: Some(StateLiteView {
                 id: "44444444-4444-4444-4444-444444444444",
                 name: "In Progress",

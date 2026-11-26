@@ -49,7 +49,7 @@ djangorestframework 3.15.2, Django 4.2.30.
 
 ## FX-OPENAPI-03 annotation-vocab inventory
 
-- `FX-OPENAPI-03.vocab.json` — `pi_dash/utils/openapi/parameters.py:17-607`
+- `FX-OPENAPI-03.vocab.json` — `pi_dash/utils/openapi/parameters.py:17-610`
   (38 `OpenApiParameter` constants: 18 path / 20 query; UUID 16, STR 18,
   BOOL 1, INT 3), `responses.py:17-490` (39 `OpenApiResponse` constants +
   `create_paginated_response` `:358-405`: 12-key envelope shape and example
@@ -161,6 +161,11 @@ djangorestframework 3.15.2, Django 4.2.30.
   (`COMPONENT_SCHEMAS_JSON`) so no `$ref` dangles. Guarded by the Rust
   unit tests in `doc.rs` and the contract test
   `rust-api/contract-tests/v1_openapi/test_refs_resolve.py`.
+- PDASHOSS01-234: `Project`, `ProjectCreateRequest` and
+  `PatchedProjectUpdateRequest` re-copied verbatim from the live document
+  of branch `pi-dash/pdashoss01-234-part2` (adds `default_work_type`,
+  `{"type": "string", "maxLength": 32}`); the provenance hash above still
+  describes the original capture.
 
 PDASHOSS01-331 refresh (pytz 2024.1 -> 2025.2): only the seven `timezone`
 properties changed (`Asia/Choibalsan` out, `America/Coyhaique` in, in `enum`

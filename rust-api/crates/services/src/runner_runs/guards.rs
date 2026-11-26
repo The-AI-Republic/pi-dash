@@ -378,6 +378,46 @@ pub fn runner_visible_scheduler_exists(owner_id: Uuid, run_alias: &str) -> Simpl
     Expr::exists(sub)
 }
 
+/// Whether a run's triggerer qualifies as an eligible runner owner
+/// under the issue's project policy (NEWPIDASH-261): scheduler runs
+/// (no work item) always qualify; issue runs qualify only in
+/// `project_members` mode (a missing `issue_run_policy` key reads as
+/// the default `creator_and_assignees`, i.e. excluded). Join aliases
+/// `U0` / `U1` (issues / projects) do not collide with the
+/// `U0` / `U2` aliases in [`runner_visible_issue_exists`] because
+/// each EXISTS subquery scopes its own aliases.
+fn issue_triggerer_admitted(run_alias: &str) -> Condition {
+    let sub = Query::select()
+        .expr_as(
+            SimpleExpr::Value(sea_query::Value::Int(Some(1))),
+            Alias::new("a"),
+        )
+        .from_as(Alias::new("issues"), Alias::new("U0"))
+        .join_as(
+            JoinType::InnerJoin,
+            Alias::new("projects"),
+            Alias::new("U1"),
+            Expr::col((Alias::new("U0"), "project_id")).eq(Expr::col((Alias::new("U1"), "id"))),
+        )
+        .and_where(Expr::col((Alias::new("U0"), "deleted_at")).is_null())
+        .and_where(Expr::col((Alias::new("U1"), "deleted_at")).is_null())
+        .and_where(
+            Expr::col((Alias::new("U0"), "id"))
+                .eq(Expr::col((Alias::new(run_alias), "work_item_id"))),
+        )
+        .and_where(Expr::cust_with_values(
+            "\"U1\".\"settings\" ->> 'issue_run_policy' = $1",
+            [sea_query::Value::String(Some(Box::new(
+                "project_members".to_owned(),
+            )))],
+        ))
+        .limit(1u64)
+        .to_owned();
+    Condition::any()
+        .add(Expr::col((Alias::new(run_alias), "work_item_id")).is_null())
+        .add(Expr::exists(sub))
+}
+
 /// `filter_runs_usable_by_runner` (`permissions.py:83-146`): the `OR`
 /// over the usability arms for the runner owner's id (a
 /// [`sea_query::Condition`], embedded with `.and_where_condition`).
@@ -385,9 +425,13 @@ pub fn runner_visible_scheduler_exists(owner_id: Uuid, run_alias: &str) -> Simpl
 /// Private runners consume work created by their owner, billed to their
 /// owner, involving their owner (issue created by, or assigned through a
 /// live `IssueAssignee` row), or scheduler work authored by their owner.
+/// The created-by / owner arms are triggerer arms: for issue-bound runs
+/// they apply only in `project_members` mode (NEWPIDASH-261); scheduler
+/// runs (no work item) keep the current rule.
 ///
-/// Built-in engine runners without `engine_team_runs` use the narrower
-/// PO-3 rule (#2903): owner-created runs, plus *automatic* runs
+/// Pi Dash Agent runners without `engine_team_runs` use the narrower
+/// PO-3 rule (#2903): owner-created runs (in default mode only on an
+/// issue the owner created or is assigned to), plus *automatic* runs
 /// (`trigger NOT IN HUMAN_TRIGGERS`) on owner issues or from
 /// owner-authored bindings — the `owner_id` arm is dropped.
 ///
@@ -401,7 +445,7 @@ pub fn runs_usable_by_runner_predicate(
     visibility: i32,
     owner_id: Uuid,
     run_alias: &str,
-    is_engine: bool,
+    is_pidash_agent: bool,
     team_runs: bool,
 ) -> Option<Condition> {
     if visibility != pidash_auth::permissions::runner::VISIBILITY_PRIVATE {
@@ -409,25 +453,47 @@ pub fn runs_usable_by_runner_predicate(
     }
     let issue = runner_visible_issue_exists(owner_id, run_alias);
     let sched = runner_visible_scheduler_exists(owner_id, run_alias);
-    if is_engine && !team_runs {
+    let triggerer = issue_triggerer_admitted(run_alias);
+    if is_pidash_agent && !team_runs {
         let triggers: Vec<SimpleExpr> = pidash_types::runner_runs::enums::HUMAN_TRIGGERS
             .iter()
             .map(|trigger| trigger.value().into())
             .collect();
+        // The owner-created arm follows the project's `issue_run_policy`:
+        // in `project_members` mode the owner may run any project issue
+        // (`triggerer`); in the default `creator_and_assignees` mode only
+        // one they created or are assigned to (`issue`). Without the
+        // `issue` half the default mode stranded every run a Pi Dash Agent
+        // owner started on their own issue (it queued forever, while
+        // `runner_may_take` reported it dispatchable). The arms are
+        // grouped so the `issue` EXISTS subquery appears once:
+        // `(created AND triggerer) OR (issue AND (created OR automatic))
+        // OR (sched AND automatic)`.
+        let created = Expr::col((Alias::new(run_alias), "created_by_id")).eq(owner_id);
+        let automatic = Expr::col((Alias::new(run_alias), "trigger")).is_not_in(triggers);
         return Some(
             Condition::any()
-                .add(Expr::col((Alias::new(run_alias), "created_by_id")).eq(owner_id))
+                .add(Condition::all().add(created.clone()).add(triggerer))
                 .add(
                     Condition::all()
-                        .add(Expr::col((Alias::new(run_alias), "trigger")).is_not_in(triggers))
-                        .add(Condition::any().add(issue).add(sched)),
-                ),
+                        .add(issue)
+                        .add(Condition::any().add(created).add(automatic.clone())),
+                )
+                .add(Condition::all().add(sched).add(automatic)),
         );
     }
     Some(
         Condition::any()
-            .add(Expr::col((Alias::new(run_alias), "created_by_id")).eq(owner_id))
-            .add(Expr::col((Alias::new(run_alias), "owner_id")).eq(owner_id))
+            .add(
+                Condition::all()
+                    .add(Expr::col((Alias::new(run_alias), "created_by_id")).eq(owner_id))
+                    .add(triggerer.clone()),
+            )
+            .add(
+                Condition::all()
+                    .add(Expr::col((Alias::new(run_alias), "owner_id")).eq(owner_id))
+                    .add(triggerer),
+            )
             .add(issue)
             .add(sched),
     )
@@ -905,6 +971,13 @@ mod tests {
         }
         assert!(ours.contains("U2"));
         assert!(ours.contains("\"deleted_at\" IS NULL"));
+        // NEWPIDASH-261: the triggerer arms follow the project
+        // `issue_run_policy` (scheduler runs qualify unconditionally).
+        assert!(ours.contains("'issue_run_policy'"), "policy gate present");
+        assert!(
+            ours.contains("\"work_item_id\" IS NULL"),
+            "scheduler arm present"
+        );
         // Engine branch (PO-3): owner arm dropped, trigger gate added.
         let engine = Query::select()
             .from(Alias::new("agent_run"))
@@ -943,6 +1016,152 @@ mod tests {
             .as_array()
             .expect("rows")
             .is_empty());
+    }
+
+    /// The PO-3 Pi Dash Agent predicate executed against Postgres (only the
+    /// five tables it reads). A Pi Dash Agent owner's own click on their own issue
+    /// in default `issue_run_policy` mode is takable; the cases
+    /// NEWPIDASH-261 meant to exclude stay excluded.
+    #[tokio::test]
+    #[ignore = "needs a scratch Postgres via DATABASE_URL"]
+    async fn live_pidash_agent_owner_click_on_own_issue_default_policy() {
+        use sea_query::PostgresQueryBuilder;
+        let url = std::env::var("DATABASE_URL").expect("export DATABASE_URL");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("pool");
+        let schema = format!("po3_{}", Uuid::new_v4().simple());
+        for stmt in [
+            format!("CREATE SCHEMA {schema}"),
+            format!("SET search_path TO {schema}"),
+            "CREATE TABLE projects (id uuid PRIMARY KEY, deleted_at timestamptz, settings jsonb NOT NULL DEFAULT '{}')".to_owned(),
+            "CREATE TABLE issues (id uuid PRIMARY KEY, project_id uuid, created_by_id uuid, deleted_at timestamptz)".to_owned(),
+            "CREATE TABLE issue_assignees (issue_id uuid, assignee_id uuid, deleted_at timestamptz)".to_owned(),
+            "CREATE TABLE scheduler_bindings (id uuid PRIMARY KEY, actor_id uuid, deleted_at timestamptz)".to_owned(),
+            "CREATE TABLE agent_run (id uuid PRIMARY KEY, created_by_id uuid, owner_id uuid, trigger text, work_item_id uuid, scheduler_binding_id uuid)".to_owned(),
+        ] {
+            sqlx::query(&stmt).execute(&pool).await.expect("setup");
+        }
+        let owner = Uuid::new_v4();
+        let mate = Uuid::new_v4();
+        let default_project = Uuid::new_v4();
+        let members_project = Uuid::new_v4();
+        sqlx::query("INSERT INTO projects (id, settings) VALUES ($1, '{}'), ($2, '{\"issue_run_policy\": \"project_members\"}')")
+            .bind(default_project)
+            .bind(members_project)
+            .execute(&pool)
+            .await
+            .unwrap();
+        // (label, project, issue creator, owner assigned, run creator, trigger, takable)
+        let cases = [
+            (
+                "owner click, own issue, default",
+                default_project,
+                owner,
+                false,
+                owner,
+                "state_transition",
+                true,
+            ),
+            (
+                "owner click, assigned issue, default",
+                default_project,
+                mate,
+                true,
+                owner,
+                "run_ai",
+                true,
+            ),
+            (
+                "owner click, foreign issue, default",
+                default_project,
+                mate,
+                false,
+                owner,
+                "state_transition",
+                false,
+            ),
+            (
+                "owner click, foreign issue, members",
+                members_project,
+                mate,
+                false,
+                owner,
+                "state_transition",
+                true,
+            ),
+            (
+                "teammate click, owner issue, default",
+                default_project,
+                owner,
+                false,
+                mate,
+                "state_transition",
+                false,
+            ),
+            (
+                "tick, owner issue, default",
+                default_project,
+                owner,
+                false,
+                mate,
+                "tick",
+                true,
+            ),
+        ];
+        let predicate = runs_usable_by_runner_predicate(0, owner, "agent_run", true, false)
+            .expect("private Pi Dash Agent");
+        // Collect mismatches and drop the scratch schema before asserting,
+        // so a failing case does not leak the schema into the database.
+        let mut mismatches = Vec::new();
+        for (label, project, creator, assigned, run_creator, trigger, takable) in cases {
+            let issue = Uuid::new_v4();
+            let run = Uuid::new_v4();
+            sqlx::query("INSERT INTO issues (id, project_id, created_by_id) VALUES ($1, $2, $3)")
+                .bind(issue)
+                .bind(project)
+                .bind(creator)
+                .execute(&pool)
+                .await
+                .unwrap();
+            if assigned {
+                sqlx::query("INSERT INTO issue_assignees (issue_id, assignee_id) VALUES ($1, $2)")
+                    .bind(issue)
+                    .bind(owner)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            sqlx::query("INSERT INTO agent_run (id, created_by_id, trigger, work_item_id) VALUES ($1, $2, $3, $4)")
+                .bind(run)
+                .bind(run_creator)
+                .bind(trigger)
+                .bind(issue)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let query = Query::select()
+                .column((Alias::new("agent_run"), Alias::new("id")))
+                .from(Alias::new("agent_run"))
+                .and_where(Expr::col((Alias::new("agent_run"), Alias::new("id"))).eq(run))
+                .cond_where(predicate.clone())
+                .to_owned()
+                .to_string(PostgresQueryBuilder);
+            let found = sqlx::query(&query)
+                .fetch_optional(&pool)
+                .await
+                .expect(label);
+            if found.is_some() != takable {
+                mismatches.push(label);
+            }
+        }
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(mismatches.is_empty(), "wrong takability: {mismatches:?}");
     }
 
     // -- denial bodies ------------------------------------------------------

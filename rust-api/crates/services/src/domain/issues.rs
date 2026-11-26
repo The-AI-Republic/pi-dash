@@ -67,8 +67,8 @@ use super::transition::IssueTransitionHook;
 use super::txn::WriteTxn;
 
 pub use super::issues_move::{
-    move_to_project, CreationDeps, MoveAdmissionCache, MoveDomainOutcome, MoveDrainError,
-    MoveInput, MovePostCommitHook, MoveRejection,
+    move_to_project, CreationDeps, MoveDomainOutcome, MoveDrainError, MoveInput,
+    MovePostCommitHook, MoveRejection,
 };
 use crate::app_issues::issue_move::{
     issue_activity_kwargs as move_issue_activity_kwargs, move_model_activity_kwargs,
@@ -196,6 +196,9 @@ pub struct IssueFieldSet {
     pub assigned_pod_id: Option<Uuid>,
     pub assigned_runner_id: Option<Uuid>,
     pub agent_executor: Option<String>,
+    /// `Issue.work_type` (PDASHOSS01-234): the per-issue work-type
+    /// override; NULL inherits the project default.
+    pub work_type: Option<String>,
 }
 
 impl IssueFieldSet {
@@ -240,6 +243,7 @@ impl IssueFieldSet {
             assigned_pod_id: Set(self.assigned_pod_id),
             assigned_runner_id: Set(self.assigned_runner_id),
             agent_executor: Set(self.agent_executor),
+            work_type: Set(self.work_type),
         }
     }
 
@@ -284,6 +288,7 @@ impl IssueFieldSet {
             assigned_pod_id: Set(self.assigned_pod_id),
             assigned_runner_id: Set(self.assigned_runner_id),
             agent_executor: Set(self.agent_executor),
+            work_type: Set(self.work_type),
         }
     }
 }
@@ -326,6 +331,7 @@ impl From<&issues::Model> for IssueFieldSet {
             assigned_pod_id: model.assigned_pod_id,
             assigned_runner_id: model.assigned_runner_id,
             agent_executor: model.agent_executor.clone(),
+            work_type: model.work_type.clone(),
         }
     }
 }
@@ -1697,6 +1703,11 @@ pub fn workpad_select(issue_id: Uuid, project_id: Uuid, slug: &str) -> SelectSta
         .column((issues::Entity, issues::Column::DescriptionHtml))
         .column((issues::Entity, issues::Column::StateId))
         .column((issues::Entity, issues::Column::CompletedAt))
+        // The current workpad body for the stale-write guard: read under
+        // the same `FOR UPDATE` lock as the write below (NEWPIDASH-320
+        // §6.1). `updated_at` is the issue row's stamp — the agent's own
+        // state moves change it — so the guard hashes the body instead.
+        .column((issues::Entity, issues::Column::Workpad))
         .expr_as(state_group.clone(), Alias::new("state_group"))
         .from(issues::Entity)
         .left_join(
@@ -1742,6 +1753,25 @@ pub struct SetWorkpad {
     pub slug: String,
     pub workpad: String,
     pub updated_at: DateTime<Utc>,
+    /// Stale-write guard (NEWPIDASH-320 §6.1): when `Some`, the locked
+    /// read's body hash must match, else the write declines with
+    /// [`STALE_WORKPAD_PREFIX`] + the current hash. `None` (old CLI)
+    /// writes unconditionally, as today.
+    pub if_body_sha256: Option<String>,
+}
+
+/// [`DomainError::Work`] payload prefix for a declined stale workpad
+/// write: the remainder is the locked row's current body SHA-256 hex, so
+/// the driver can echo it in the 412 without re-reading.
+pub const STALE_WORKPAD_PREFIX: &str = "stale_workpad:";
+
+/// The current body hash from a [`STALE_WORKPAD_PREFIX`] decline, if
+/// `error` is one.
+pub fn stale_workpad_sha(error: &DomainError) -> Option<&str> {
+    match error {
+        DomainError::Work(message) => message.strip_prefix(STALE_WORKPAD_PREFIX),
+        _ => None,
+    }
 }
 
 /// `PATCH .../issues/<pk>/workpad/` (`api/views/issue.py:3287-3320`): the
@@ -1768,15 +1798,28 @@ pub async fn set_workpad(
         )))
         .await?
         .ok_or_else(|| DomainError::Db(DbErr::RecordNotFound("workpad issue".to_owned())))?;
+    // Stale-write guard (NEWPIDASH-320 §6.1): the row is locked, so this
+    // read is the write's own snapshot — no re-read, no race.
+    if let Some(expected) = input.if_body_sha256.as_deref() {
+        let current_body: String = row.try_get("", "workpad")?;
+        let current = crate::orchestration::creation::workpad_sha256(&current_body);
+        if current != expected {
+            return Err(DomainError::Work(format!(
+                "{STALE_WORKPAD_PREFIX}{current}"
+            )));
+        }
+    }
     let description_html: String = row.try_get("", "description_html")?;
     let prev_state: Option<Uuid> = row.try_get("", "state_id")?;
     let completed_at: Option<sea_orm::prelude::DateTimeWithTimeZone> =
         row.try_get("", "completed_at")?;
     // The sparse save: only the workpad, audit and hook recomputes move —
     // current values ride `Unchanged` for the hook reads (the archive
-    // shape). Hook-`Set` fields join the `UPDATE`, so `completed_at` /
+    // shape). Hook-`Set` fields join the `UPDATE`, so
     // `description_stripped` (and the default state on the NULL leg) land
-    // exactly the ported columns.
+    // exactly the ported columns; `completed_at` stays `Unchanged`
+    // (DIFF-62: a workpad write never changes state, so the stamp is
+    // preserved).
     let model = issues::ActiveModel {
         id: sea_orm::Unchanged(input.issue_id),
         project_id: sea_orm::Unchanged(input.project_id),
@@ -2013,6 +2056,7 @@ fn mirror_issue_row(insert: &MirrorIssueInsert) -> Result<issues::ActiveModel, s
         assigned_pod_id: Set(insert.pod_id),
         assigned_runner_id: sea_orm::NotSet,
         agent_executor: Set(None),
+        work_type: sea_orm::NotSet,
     })
 }
 
@@ -2250,6 +2294,7 @@ fn tool_issue_row(insert: &ToolIssueInsert<'_>) -> Result<issues::ActiveModel, s
         type_id: Set(None),
         assigned_pod_id: Set(insert.pod_id),
         assigned_runner_id: Set(insert.runner_id),
+        work_type: sea_orm::NotSet,
     })
 }
 
@@ -2473,6 +2518,7 @@ fn seed_issue_row(id: Uuid, issue: &SeedIssue<'_>) -> Result<issues::ActiveModel
         created_via: Set(None),
         agent_executor: Set(None),
         complexity_score: Set(0),
+        work_type: sea_orm::NotSet,
     })
 }
 
@@ -3161,9 +3207,10 @@ async fn archive_driver(
         .await;
     // The sparse save: only the archived flag, audit and hook recomputes
     // are `Set` — current values ride `Unchanged` for the hook reads.
-    // Hook-`Set` fields join the `UPDATE`, so `completed_at` /
-    // `description_stripped` (and the default state on the NULL leg) land
-    // exactly the ported columns.
+    // Hook-`Set` fields join the `UPDATE`, so `description_stripped`
+    // (and the default state on the NULL leg) land exactly the ported
+    // columns; `completed_at` stays `Unchanged` (DIFF-62: archiving never
+    // changes state, so the stamp is preserved).
     let am = issues::ActiveModel {
         id: sea_orm::Unchanged(issue_id),
         project_id: sea_orm::Unchanged(project_id),
@@ -3853,7 +3900,7 @@ mod tests {
         assert_eq!(
             render(DbBackend::Postgres.build(&workpad_select(uid(1), uid(2), "ws"))),
             format!(
-                r#"SELECT "issues"."description_html", "issues"."state_id", "issues"."completed_at", "states"."group" AS "state_group" FROM "issues" LEFT JOIN "states" ON "issues"."state_id" = "states"."id" INNER JOIN "projects" ON "issues"."project_id" = "projects"."id" INNER JOIN "workspaces" ON "issues"."workspace_id" = "workspaces"."id" WHERE "issues"."deleted_at" IS NULL AND (NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL)) AND "issues"."archived_at" IS NULL AND "projects"."archived_at" IS NULL AND (NOT "issues"."is_draft") AND "issues"."id" = '{}' AND "issues"."project_id" = '{}' AND "workspaces"."slug" = 'ws' LIMIT 21 FOR UPDATE OF "issues""#,
+                r#"SELECT "issues"."description_html", "issues"."state_id", "issues"."completed_at", "issues"."workpad", "states"."group" AS "state_group" FROM "issues" LEFT JOIN "states" ON "issues"."state_id" = "states"."id" INNER JOIN "projects" ON "issues"."project_id" = "projects"."id" INNER JOIN "workspaces" ON "issues"."workspace_id" = "workspaces"."id" WHERE "issues"."deleted_at" IS NULL AND (NOT ("states"."group" = 'triage' AND "states"."group" IS NOT NULL)) AND "issues"."archived_at" IS NULL AND "projects"."archived_at" IS NULL AND (NOT "issues"."is_draft") AND "issues"."id" = '{}' AND "issues"."project_id" = '{}' AND "workspaces"."slug" = 'ws' LIMIT 21 FOR UPDATE OF "issues""#,
                 uid(1),
                 uid(2)
             )
@@ -4371,6 +4418,7 @@ mod tests {
             assigned_pod_id: None,
             assigned_runner_id: None,
             agent_executor: None,
+            work_type: None,
         };
         let issue_id = fields.id;
         let created = super::super::run(&ctx, &db, |txn| {
@@ -4939,6 +4987,7 @@ mod tests {
                                     assigned_pod_id: None,
                                     assigned_runner_id: None,
                                     agent_executor: None,
+                                    work_type: None,
                                 },
                                 assignees: Some(vec![new_link]),
                                 labels: None,
@@ -5161,6 +5210,7 @@ mod tests {
                                 slug,
                                 workpad,
                                 updated_at: stamp,
+                                if_body_sha256: None,
                             },
                         )
                         .await

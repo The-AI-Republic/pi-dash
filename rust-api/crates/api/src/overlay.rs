@@ -301,7 +301,9 @@ pub(crate) fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
             .merge(crate::auth_oauth::oauth_github::routes())
             .merge(crate::auth_oauth::oauth_gitlab::routes())
             .merge(crate::auth_oauth::oauth_google::routes())
-            .merge(crate::auth_session::routes()),
+            .merge(crate::auth_session::routes())
+            // The desktop handoff redeem the app posts to (desktop_unified_signin §5).
+            .merge(crate::auth_oauth::handoff::auth_routes()),
         // Runner handlers merge their routers here (D-15 L7 runs +
         // approvals + metrics, PIDASHCONV-542; L8 run endpoints + chat
         // web/daemon/SSE, PIDASHCONV-543; D-13 web runners/machines/pods,
@@ -331,7 +333,7 @@ pub(crate) fn oss_group_routes(group: RouteGroup) -> Router<AppState> {
             .merge(crate::runner_runs::daemon_routes())
             .merge(crate::runner_enroll::teardown::daemon_routes())
             .merge(crate::runner_sessions::routes())
-            .merge(crate::runner_engine::routes())
+            .merge(crate::pidash_agent::routes())
             .merge(crate::runner_enroll::enroll::daemon_routes())
             .merge(crate::runner_enroll::delete_cmds::daemon_routes())
             .merge(crate::runner_enroll::desktop::routes())

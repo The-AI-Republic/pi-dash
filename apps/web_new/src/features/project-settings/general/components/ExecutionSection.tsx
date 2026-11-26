@@ -4,14 +4,16 @@
 // Execution target and automated-run policy
 // (parity/specs/project-settings-general.md §PSET-009). There is no
 // executor picker: projects run on runners and the default pod decides who
-// runs the work (built-in engine design §6), so the section only says so.
+// runs the work (Pi Dash Agent design §6), so the section only says so.
 // The master switch leaves the budget and cadence visible but inert while off.
 // The budget keeps whole numbers with a native floor of one and a no-cap
 // toggle that remembers the typed cap; the cadence picker lists the presets
-// and marks an out-of-band rhythm as custom.
+// and marks an out-of-band rhythm as custom. The Stages block picks which
+// stages run an agent: Auto lets the agent decide per work item; Customize
+// toggles In Review and In Test (In Progress always runs).
 
-import { Button, Combobox, Input, Switch } from "@pidash/kit";
-import { ChevronDown } from "lucide-react";
+import { Button, Combobox, Input, Menu, Switch } from "@pidash/kit";
+import { Check, ChevronDown } from "lucide-react";
 import * as React from "react";
 
 import {
@@ -22,6 +24,9 @@ import {
   type GeneralFieldErrors,
   type GeneralFormValues,
   shapeBudget,
+  STAGES_HELP,
+  STAGES_MODE_OPTIONS,
+  type StagesMode,
 } from "../rules.js";
 
 export interface ExecutionSectionProps {
@@ -38,6 +43,87 @@ export interface ExecutionSectionProps {
  */
 export function cadenceChoices(): Array<{ id: string; label: string }> {
   return CADENCE_OPTIONS.map((option) => ({ id: String(option.seconds), label: option.label }));
+}
+
+/** Short label for the stage-toggle trigger: the stages that run. */
+export function enabledStagesLabel(values: Pick<GeneralFormValues, "reviewStage" | "testStage">): string {
+  const names = ["In Progress"];
+  if (values.reviewStage) names.push("In Review");
+  if (values.testStage) names.push("In Test");
+  return names.join(", ");
+}
+
+function StagesBlock({
+  values,
+  disabled,
+  onChange,
+}: Pick<ExecutionSectionProps, "values" | "disabled" | "onChange">): React.ReactElement {
+  const modeLabel = STAGES_MODE_OPTIONS.find((option) => option.id === values.stagesMode)?.label ?? "";
+  const mark = (checked: boolean): React.ReactNode =>
+    checked ? <Check size={16} strokeWidth={1.5} /> : <span className="inline-block w-4" />;
+  return (
+    <div className="flex flex-col gap-(--space-2)" data-testid="general-stages">
+      <span className="text-body font-medium text-(--text)">Stages</span>
+      <Combobox
+        trigger={
+          <Button
+            variant="secondary"
+            disabled={disabled}
+            data-testid="general-stages-mode-trigger"
+            className="w-full justify-between"
+          >
+            <span data-testid="general-stages-mode">{modeLabel}</span>
+            <ChevronDown size={16} strokeWidth={1.5} aria-hidden="true" />
+          </Button>
+        }
+        options={STAGES_MODE_OPTIONS.map((option) => ({ id: option.id, label: option.label }))}
+        value={values.stagesMode}
+        onSelect={(choice) => onChange({ stagesMode: choice as StagesMode })}
+        listLabel="Stages"
+        searchEnabled={false}
+        emptyText="No stage options"
+        disabled={disabled}
+      />
+      {values.stagesMode === "custom" ? (
+        <Menu
+          trigger={
+            <Button
+              variant="secondary"
+              disabled={disabled}
+              aria-label="Stages that run an agent"
+              data-testid="general-stages-toggle-trigger"
+              className="w-full justify-between"
+            >
+              <span data-testid="general-stages-enabled">{enabledStagesLabel(values)}</span>
+              <ChevronDown size={16} strokeWidth={1.5} aria-hidden="true" />
+            </Button>
+          }
+          items={[
+            {
+              label: "In Progress",
+              description: "Always runs",
+              icon: mark(true),
+              disabled: true,
+              onSelect: () => undefined,
+            },
+            {
+              label: "In Review",
+              icon: mark(values.reviewStage),
+              closeOnClick: false,
+              onSelect: () => onChange({ reviewStage: !values.reviewStage }),
+            },
+            {
+              label: "In Test",
+              icon: mark(values.testStage),
+              closeOnClick: false,
+              onSelect: () => onChange({ testStage: !values.testStage }),
+            },
+          ]}
+        />
+      ) : null}
+      <p className="text-meta text-(--text-muted)">{STAGES_HELP}</p>
+    </div>
+  );
 }
 
 export function ExecutionSection({ values, errors, disabled, onChange }: ExecutionSectionProps): React.ReactElement {
@@ -135,6 +221,11 @@ export function ExecutionSection({ values, errors, disabled, onChange }: Executi
           </p>
         </div>
       </div>
+
+      {/* Not tied to the master switch: with automated runs off, a person
+          moving a work item into a stage still starts one run there, so
+          which stages run an agent still matters. */}
+      <StagesBlock values={values} disabled={disabled} onChange={onChange} />
     </section>
   );
 }

@@ -38,6 +38,24 @@ EXCLUDED = {}
 MISSING_FIX = {}
 
 OWNED_UNCOVERED = {
+    ("/api/v1/auth/desktop-handoff/", "POST"): (
+        "desktop_unified_signin §5: the handoff issue landed without a replay "
+        "session (a code is single-use and lives 60s, so a recorded replay "
+        "cannot redeem it); covered by Django's "
+        "tests/contract/runner/test_desktop_handoff.py and the services "
+        "live-db test instead."
+    ),
+    ("/api/v1/auth/desktop-handoff/redeem/", "POST"): (
+        "desktop_unified_signin §5: the handoff redeem landed without a replay "
+        "session (single-use 60s code + app-held verifier); covered by "
+        "Django's tests/contract/runner/test_desktop_handoff.py and the "
+        "services live-db test instead."
+    ),
+    ("/auth/desktop-handoff/redeem/", "POST"): (
+        "desktop_unified_signin §5: the redeem path the desktop app posts to, "
+        "same handler as /api/v1/auth/desktop-handoff/redeem/; covered by "
+        "Django's test_redeem_also_answers_on_the_auth_path instead."
+    ),
     ("/api/v1/runner/dev-machines/{}/", "PATCH"): (
         "NEWPIDASH-52: daemon machine PATCH landed without a replay session; "
         "covered by runner/test_engine_machine.py contract tests on both "

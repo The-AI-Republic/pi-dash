@@ -39,6 +39,10 @@ import type { DictationHandle } from "../../../shared/dictation/index.js";
 import type { ComposerDictation } from "../lib/dictation.js";
 import { Composer } from "./Composer.js";
 
+// The Tiptap input is covered in shared/editor/ChatInput.test.tsx; here a
+// textarea with the same contract keeps the focus on this surface's logic.
+vi.mock("../../../shared/editor/ChatInput.js", () => import("../../../testSupport/chatInputStub.js"));
+
 function renderComposer(props: Partial<React.ComponentProps<typeof Composer>> = {}) {
   const onSubmit = vi.fn();
   const onDraftChange = vi.fn();
@@ -163,6 +167,23 @@ describe("Composer", () => {
     const { onDraftChange } = renderComposer();
     fireEvent.change(screen.getByRole("textbox", { name: "Message the assistant" }), { target: { value: "typed" } });
     expect(onDraftChange).toHaveBeenCalledWith("typed");
+  });
+
+  it("renders the model picker in the bottom bar next to send without changing the send path", () => {
+    const { onSubmit } = renderComposer({
+      draft: "hi",
+      modelPicker: <span data-testid="assistant-model-picker">model</span>,
+    });
+    const picker = screen.getByTestId("assistant-model-picker");
+    const send = screen.getByRole("button", { name: "Send message" });
+    expect(picker.parentElement?.contains(send)).toBe(true);
+    // The slot is display only: Enter in the box still sends, and a
+    // keyboard gesture on the slot itself never submits the form.
+    const box = screen.getByRole("textbox", { name: "Message the assistant" });
+    fireEvent.keyDown(picker, { key: "Enter" });
+    expect(onSubmit).not.toHaveBeenCalled();
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(onSubmit).toHaveBeenCalledWith("hi");
   });
 });
 

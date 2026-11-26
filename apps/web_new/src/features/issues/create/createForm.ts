@@ -69,7 +69,7 @@ export function emptyCreateForm(projectId: string | null, descriptionHtml = ""):
  * first pod, else nothing. A pod pick also pins the local executor, so
  * the create stores the same execution target the old form wrote and the
  * "Runs on" field names it before the first run. Runner is the only
- * executor (built-in engine design §6), so a project's legacy default
+ * executor (Pi Dash Agent design §6), so a project's legacy default
  * executor never changes the pick.
  */
 export function defaultExecutionSelection(

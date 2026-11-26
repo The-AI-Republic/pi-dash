@@ -14,7 +14,7 @@ import { decideWorkspaceRunnersAccess } from "./access.js";
 import { buildRunnersAreaValue, RunnersAreaProvider } from "./area.js";
 import { useRunnersRail } from "./api/queries.js";
 import { RunnersAreaShell } from "./components/RunnersAreaShell.js";
-import { useLocalContact } from "./chat/localContact.js";
+import { usePidashAgentContact } from "./chat/localContact.js";
 
 export interface RunnersWorkspaceShellProps {
   workspaceSlug: string;
@@ -31,7 +31,7 @@ export function RunnersWorkspaceShell({
   const permissions = usePermissions(workspaceSlug);
   const access = decideWorkspaceRunnersAccess({ role: permissions.role, isLoading: permissions.isLoading });
   const { pathname } = useLocation();
-  const localContacts = useLocalContact();
+  const localContacts = usePidashAgentContact();
   // Access first: a denied viewer never starts the rail read.
   const rail = useRunnersRail(workspaceSlug, workspaceId, null, access === "allowed");
   const area = buildRunnersAreaValue({ workspaceSlug }, workspaceId, access);

@@ -13,6 +13,8 @@ const harness = vi.hoisted(() => ({
   unsubscribe: vi.fn(),
   resume: vi.fn(),
   refresh: vi.fn(),
+  ensure: vi.fn(),
+  missing: false,
   migrate: vi.fn(),
   offerReplace: vi.fn(),
 }));
@@ -44,8 +46,10 @@ vi.mock("../../../core/session/index.js", async (importOriginal) => {
 vi.mock("./service.js", () => ({
   resumeRuntime: (...args: Array<unknown>) => harness.resume(...args),
   refreshRuntime: (...args: Array<unknown>) => harness.refresh(...args),
+  ensureDaemon: (...args: Array<unknown>) => harness.ensure(...args),
   compatibleHello: () => harness.hello,
-  currentDiscovery: () => (harness.hello ? { kind: "compatible", hello: harness.hello } : null),
+  currentDiscovery: () =>
+    harness.missing ? { kind: "no_daemon" } : harness.hello ? { kind: "compatible", hello: harness.hello } : null,
   signInWorkspace: vi.fn(),
 }));
 
@@ -77,6 +81,8 @@ beforeEach(() => {
   harness.me = { data: { id: "u1", email: "u1@test.dev" } };
   harness.desktop = true;
   harness.hello = null;
+  harness.missing = false;
+  harness.ensure.mockResolvedValue(undefined);
   harness.focusListeners = [];
   harness.refresh.mockResolvedValue(undefined);
   harness.migrate.mockResolvedValue({ status: "nothing_to_do" });
@@ -93,7 +99,8 @@ function renderSupervisor(props: { registerChatTransport?: () => void } = {}) {
   return render(
     <RuntimeSupervisor
       registerChatTransport={props.registerChatTransport ?? vi.fn()}
-      setupDialog={SetupStub}
+      workspaceSlug="ws"
+      setupStatus={SetupStub}
       noticesDialog={NoticesStub}
       replaceDialog={ReplaceStub}
     />
@@ -113,7 +120,7 @@ describe("RuntimeSupervisor", () => {
     expect(harness.refresh).not.toHaveBeenCalled();
   });
 
-  it("resumes for the signed account against the app's cloud and hosts the set-up dialog", async () => {
+  it("resumes for the signed account against the app's cloud and hosts setup progress", async () => {
     const register = vi.fn();
     renderSupervisor({ registerChatTransport: register });
     expect(await screen.findByTestId("setup-host")).toBeInTheDocument();
@@ -123,6 +130,21 @@ describe("RuntimeSupervisor", () => {
     );
     expect(register).toHaveBeenCalledTimes(1);
     expect(harness.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts setup on signed-in launch before any chat request", async () => {
+    harness.missing = true;
+    renderSupervisor();
+    await act(async () => undefined);
+    expect(harness.ensure).toHaveBeenCalledTimes(1);
+    expect(harness.ensure).toHaveBeenCalledWith("ws", expect.objectContaining({ runtime: expect.anything() }));
+  });
+
+  it("does not install again when the daemon already exists", async () => {
+    harness.hello = { machine_id: "existing" };
+    renderSupervisor();
+    await act(async () => undefined);
+    expect(harness.ensure).not.toHaveBeenCalled();
   });
 
   it("shows no project notice: opening a project enrols nothing", async () => {
@@ -144,6 +166,16 @@ describe("RuntimeSupervisor", () => {
     expect(harness.refresh).toHaveBeenCalledTimes(2);
     act(() => focusApp(true));
     expect(harness.refresh).toHaveBeenCalledTimes(3);
+  });
+
+  it("re-checks on network recovery", async () => {
+    renderSupervisor();
+    await act(async () => undefined);
+    expect(harness.refresh).toHaveBeenCalledTimes(1);
+    act(() => {
+      globalThis.window.dispatchEvent(new Event("online"));
+    });
+    expect(harness.refresh).toHaveBeenCalledTimes(2);
   });
 
   it("swallows a failed re-check", async () => {

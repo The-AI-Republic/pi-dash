@@ -38,6 +38,7 @@ import { DetailTypeProperties } from "../../edition/DetailTypeSlots.js";
 import { selectCreator } from "./creator.js";
 import { isWorklogEnabled } from "../widgets/worklog/worklog.js";
 import { WorklogSidebarSection } from "../widgets/worklog/WorklogSidebarSection.js";
+import { RUN_POLICY_BLOCKED_REASON } from "../../runPolicy.js";
 import type { SidebarProject } from "./IssuePropertiesSidebar.js";
 import { SIDEBAR_ROW_CLASS, SIDEBAR_ROW_LABEL_CLASS, SidebarRow } from "./SidebarRow.js";
 import { SidebarPropertiesB } from "./SidebarPropertiesB.js";
@@ -50,7 +51,7 @@ const ROW_VARIANT: ButtonVariant = "ghost";
 
 /**
  * The issue's current execution target. Runner is the only executor
- * (built-in engine design §6), so a legacy executor value on the issue
+ * (Pi Dash Agent design §6), so a legacy executor value on the issue
  * or the project never renders as an agent: the row shows the pinned
  * runner, else the pinned pod, and no pin means the project's default
  * pod.
@@ -72,6 +73,8 @@ export interface SidebarPropertiesProps {
   project: SidebarProject;
   /** Project member/admin on a live project. Archived items always read. */
   editable: boolean;
+  /** May move the issue's state under the project's run policy. */
+  canRun: boolean;
 }
 
 export function SidebarProperties({
@@ -80,6 +83,7 @@ export function SidebarProperties({
   issue,
   project,
   editable,
+  canRun,
 }: SidebarPropertiesProps): React.ReactElement {
   const disabled = !editable || issue.archived_at !== null;
   const update = useUpdateIssue({
@@ -107,17 +111,19 @@ export function SidebarProperties({
   return (
     <div className="flex flex-col gap-(--space-1)">
       <SidebarRow label="State">
-        <StatePicker
-          workspaceSlug={workspaceSlug}
-          projectId={projectId}
-          value={issue.state_id}
-          disabled={disabled}
-          variant={ROW_VARIANT}
-          placeholder="Set state"
-          preload={issue.state_id !== null}
-          optionGate={stateOptionGate(projectId, issue.state_id)}
-          onChange={(stateId) => update.mutate({ state_id: stateId })}
-        />
+        <span {...(canRun ? {} : { title: RUN_POLICY_BLOCKED_REASON })}>
+          <StatePicker
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            value={issue.state_id}
+            disabled={disabled || !canRun}
+            variant={ROW_VARIANT}
+            placeholder="Set state"
+            preload={issue.state_id !== null}
+            optionGate={stateOptionGate(projectId, issue.state_id)}
+            onChange={(stateId) => update.mutate({ state_id: stateId })}
+          />
+        </span>
       </SidebarRow>
       <SidebarRow label="Assignees">
         <MemberPicker

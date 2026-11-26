@@ -138,6 +138,14 @@ pub async fn bulk_operation(
         return Ok(status_response(StatusCode::FORBIDDEN, ENTITY_DENIED_BODY));
     }
     archive_allow(&base.pool, &base.slug, &base.project_id, &base.user_id).await?;
+    if let Some(info) = crate::project_archived::archived_by_id(&base.pool, base.project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
+    }
     let (data, is_html) = request_data(&headers, &body)?;
     let (ids, properties) = match validate_operation_body(&data, is_html) {
         Ok(valid) => valid,
@@ -151,6 +159,38 @@ pub async fn bulk_operation(
     };
     let issues = fetch_bulk_issues(&base.pool, &slug, &base.project_id, &ids).await?;
     let batch = check_batch(&base.pool, &slug, &base.project_id, &properties, &issues).await?;
+    // NEWPIDASH-261: a bulk `state_id` move is gated by the project's
+    // `issue_run_policy` per issue (whole-batch refusal: no issue
+    // moves when any one is denied).
+    if let Some(requested_state) = properties.state_id {
+        let orm = orm(&base.pool);
+        let project_row = projects::Entity::find_by_id(base.project_id)
+            .one(&orm)
+            .await
+            .map_err(|_| Denial::ServerError)?
+            .ok_or(Denial::ServerError)?;
+        for row in &issues {
+            if row.state_id == requested_state {
+                continue;
+            }
+            let issue = issues::Entity::find_by_id(row.id)
+                .one(&orm)
+                .await
+                .map_err(|_| Denial::ServerError)?
+                .ok_or(Denial::ServerError)?;
+            let allowed = pidash_services::domain::project_settings::can_run_issue(
+                &orm,
+                base.user_id,
+                &issue,
+                &project_row,
+            )
+            .await
+            .map_err(|_| Denial::ServerError)?;
+            if !allowed {
+                return Err(Denial::NotIssueRunner);
+            }
+        }
+    }
     apply_bulk_operation(&state, &base, &project, &properties, &issues, &batch).await
 }
 
@@ -167,6 +207,14 @@ pub async fn bulk_subscribe(
     let base = bulk_base(&state, &slug, &project_raw, extension).await?;
     if !lite_allowed(&base.pool, &slug, &base.project_id, &base.user_id).await? {
         return Ok(status_response(StatusCode::FORBIDDEN, ENTITY_DENIED_BODY));
+    }
+    if let Some(info) = crate::project_archived::archived_by_id(&base.pool, base.project_id)
+        .await
+        .map_err(|_| Denial::ServerError)?
+    {
+        return Err(Denial::ProjectArchived(
+            crate::project_archived::archived_body(&info),
+        ));
     }
     let (data, _) = request_data(&headers, &body)?;
     let ids = match validate_subscribe_body(&data) {

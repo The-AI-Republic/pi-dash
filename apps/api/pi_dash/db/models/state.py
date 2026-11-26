@@ -56,6 +56,12 @@ DEFAULT_STATES = [
         "group": StateGroup.TEST.value,
     },
     {
+        "name": "AI Completed",
+        "color": "#30A46C",
+        "sequence": 43750,
+        "group": StateGroup.COMPLETED.value,
+    },
+    {
         "name": "Done",
         "color": "#46A758",
         "sequence": 45000,

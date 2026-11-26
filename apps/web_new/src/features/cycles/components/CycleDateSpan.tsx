@@ -10,14 +10,15 @@
 import { Tooltip } from "@pidash/kit";
 import * as React from "react";
 
-import { cycleSpanModel } from "../lib/cycleDates.js";
+import { useMe } from "../../../core/session/index.js";
+import { cycleSpanModel, resolveViewerTimeZone } from "../lib/cycleDates.js";
 
 export interface CycleDateSpanProps {
   startDate: string | null;
   endDate: string | null;
   /** IANA name of the project's timezone. */
   projectTimeZone: string;
-  /** Viewer zone override; defaults to the browser zone. Tests inject. */
+  /** Viewer zone override; defaults to the profile's timezone. Tests inject. */
   viewerTimeZone?: string | undefined;
 }
 
@@ -27,7 +28,9 @@ export function CycleDateSpan({
   projectTimeZone,
   viewerTimeZone,
 }: CycleDateSpanProps): React.ReactElement | null {
-  const model = cycleSpanModel(startDate, endDate, projectTimeZone, viewerTimeZone);
+  const me = useMe();
+  const resolvedViewer = viewerTimeZone ?? resolveViewerTimeZone(me.data?.user_timezone);
+  const model = cycleSpanModel(startDate, endDate, projectTimeZone, resolvedViewer);
   if (model.text === null) return null;
   const body = (
     <span data-testid="cycle-date-span" className="inline-flex flex-wrap items-center gap-(--space-2)">

@@ -9,7 +9,7 @@
 // assets. While it is shut, the heading preview sits at the canvas edge in
 // its place. An edition may swap the whole pane for its own panels.
 
-import { IconButton } from "@pidash/kit";
+import { Button, IconButton } from "@pidash/kit";
 import { Link } from "@tanstack/react-router";
 import { X } from "lucide-react";
 import * as React from "react";
@@ -37,6 +37,9 @@ import { PageDocumentStats } from "./PageDocumentStats.js";
 import { PageOutlinePanel } from "./PageOutlinePanel.js";
 
 export const PAGE_PANE_CLOSE = "Close navigation pane";
+/** A failed history read keeps the live row and names the failure. */
+export const PAGE_VERSIONS_ERROR = "Version history could not be loaded.";
+export const PAGE_VERSIONS_RETRY = "Try again";
 export { PAGE_CURRENT_VERSION_LABEL };
 export const PAGE_NAVIGATION_LABEL = "Navigation pane";
 
@@ -51,6 +54,13 @@ export interface PageNavigationPaneProps {
   actors: readonly PageActorRow[];
   /** Version history, newest first; undefined while the read is in flight. */
   versions: readonly PageVersion[] | undefined;
+  /**
+   * The history read failed. The timeline keeps the live row, drops the
+   * skeleton and names the failure instead of loading forever.
+   */
+  versionsFailed?: boolean | undefined;
+  /** Ask for the history again after a failed read. */
+  onRetryVersions?: (() => void) | undefined;
   /** Directory-resolved authors for the timeline rows (PAGE-051). */
   versionMembers: readonly PageActorMember[] | undefined;
   onSelectTab: (tab: PagePaneTab) => void;
@@ -126,11 +136,26 @@ interface VersionTimelineProps {
   pageId: string;
   search: PageDetailSearch;
   versions: readonly PageVersion[] | undefined;
+  /** The history read failed; the live row stays and the skeleton goes. */
+  failed: boolean;
+  /** Ask for the history again after a failed read. */
+  onRetry?: (() => void) | undefined;
   /** Directory-resolved authors for the dated rows (PAGE-051). */
   members: readonly PageActorMember[] | undefined;
   onSelectVersion: (versionId: string) => void;
   /** The live row's own action: close any snapshot the address names. */
   onSelectCurrent: () => void;
+}
+
+/** The live row while the history is unknown: plain text, never a link. */
+function CurrentVersionRow(): React.ReactElement {
+  return (
+    <li className="min-w-0">
+      <p className="text-body flex items-center justify-between rounded-(--radius-control) bg-(--subtle) px-(--space-2) py-(--space-1) text-(--text)">
+        {PAGE_CURRENT_VERSION_LABEL}
+      </p>
+    </li>
+  );
 }
 
 /** Loading placeholders for a history read that has not answered yet. */
@@ -188,6 +213,8 @@ function VersionTimeline({
   pageId,
   search,
   versions,
+  failed,
+  onRetry,
   members,
   onSelectVersion,
   onSelectCurrent,
@@ -202,14 +229,24 @@ function VersionTimeline({
       <h3 className="text-caption mb-(--space-2) tracking-wide text-(--text-muted) uppercase">Version history</h3>
       <ul className="flex flex-col gap-(--space-1)">
         {versions === undefined ? (
-          <>
-            <li className="min-w-0">
-              <p className="text-body flex items-center justify-between rounded-(--radius-control) bg-(--subtle) px-(--space-2) py-(--space-1) text-(--text)">
-                {PAGE_CURRENT_VERSION_LABEL}
-              </p>
-            </li>
-            <VersionTimelineSkeleton />
-          </>
+          failed ? (
+            <>
+              <CurrentVersionRow />
+              <li data-testid="page-versions-error" className="min-w-0">
+                <p className="text-body px-(--space-2) py-(--space-1) text-(--text-muted)">{PAGE_VERSIONS_ERROR}</p>
+                {onRetry === undefined ? null : (
+                  <Button variant="secondary" size="small" type="button" onClick={onRetry}>
+                    {PAGE_VERSIONS_RETRY}
+                  </Button>
+                )}
+              </li>
+            </>
+          ) : (
+            <>
+              <CurrentVersionRow />
+              <VersionTimelineSkeleton />
+            </>
+          )
         ) : (
           entries.map((entry) =>
             entry.id === null ? (
@@ -264,6 +301,8 @@ export function PageNavigationPane(props: PageNavigationPaneProps): React.ReactE
     document,
     actors,
     versions,
+    versionsFailed,
+    onRetryVersions,
     versionMembers,
     onSelectTab,
     onClose,
@@ -339,6 +378,8 @@ export function PageNavigationPane(props: PageNavigationPaneProps): React.ReactE
                 pageId={pageId}
                 search={search}
                 versions={versions}
+                failed={versionsFailed === true}
+                {...(onRetryVersions === undefined ? {} : { onRetry: onRetryVersions })}
                 members={versionMembers}
                 onSelectVersion={onSelectVersion}
                 onSelectCurrent={onSelectCurrentVersion}

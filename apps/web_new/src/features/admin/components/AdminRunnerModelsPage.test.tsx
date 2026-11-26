@@ -15,7 +15,15 @@ import * as React from "react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
-import { RUNNER_MODELS_DELETE_NOTE, RUNNER_MODELS_DESCRIPTION, RUNNER_MODELS_HEADING } from "../runnerModels.js";
+import {
+  OPENHUB_DESCRIPTION,
+  OPENHUB_HEADING,
+  OPENHUB_NOTE,
+  OPENHUB_SLUG_HINT,
+  RUNNER_MODELS_DELETE_NOTE,
+  RUNNER_MODELS_DESCRIPTION,
+  RUNNER_MODELS_HEADING,
+} from "../runnerModels.js";
 import { AdminRunnerModelsPage } from "./AdminRunnerModelsPage.js";
 
 interface ModelRow {
@@ -341,5 +349,72 @@ describe("AdminRunnerModelsPage", () => {
     expect(alert.className).toContain("text-(--danger)");
     expect(alert.className.split(" ")).toEqual(["text-body", "text-(--danger)"]);
     expect(screen.getByTestId("runner-models-dialog")).toBeInTheDocument();
+  });
+
+  it("renders the OpenHub assistant-models section with its copy and table", async () => {
+    await renderPage({
+      agents: {
+        codex: [modelRow({})],
+        openhub: [
+          modelRow({
+            id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            agent: "openhub",
+            model: "openhub_free_llm",
+            label: "OpenHub free model",
+            reasoning_efforts: [],
+            sort_order: 2,
+            is_preselected: true,
+          }),
+        ],
+      },
+    });
+    expect(screen.getByRole("heading", { name: OPENHUB_HEADING })).toBeInTheDocument();
+    expect(screen.getByTestId("runner-models-openhub-description")).toHaveTextContent(OPENHUB_DESCRIPTION);
+    expect(screen.getByTestId("runner-models-openhub-note")).toHaveTextContent(OPENHUB_NOTE);
+    expect(screen.getByTestId("runner-models-section-openhub")).toBeInTheDocument();
+    expect(screen.getByTestId("runner-models-table-openhub")).toBeInTheDocument();
+    expect(screen.getByTestId("runner-models-heading-openhub")).toBeInTheDocument();
+    expect(screen.getByTestId("runner-models-add-openhub")).toBeInTheDocument();
+    expect(screen.getByTestId("runner-models-row-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")).toHaveTextContent(
+      "openhub_free_llm"
+    );
+  });
+
+  it("adds an OpenHub model through the dialog with slug hint and no efforts field", async () => {
+    const user = userEvent.setup();
+    const harness = await renderPage({ agents: { openhub: [] } });
+    await user.click(screen.getByTestId("runner-models-add-openhub"));
+    const dialog = await screen.findByTestId("runner-models-dialog");
+    expect(dialog).toBeInTheDocument();
+    // Slug hint must be present and efforts fieldset hidden.
+    expect(screen.getByTestId("runner-models-slug-hint")).toHaveTextContent(OPENHUB_SLUG_HINT);
+    expect(screen.queryByTestId("runner-models-effort-low")).not.toBeInTheDocument();
+    // The preselect label reads as the default for openhub.
+    expect(screen.getByTestId("runner-models-preselected")).toBeInTheDocument();
+    await user.type(screen.getByTestId("runner-models-model"), "moonshotai/kimi-k3");
+    await user.type(screen.getByTestId("runner-models-label"), "Kimi K3");
+    await user.click(screen.getByTestId("runner-models-save"));
+    await waitFor(() => {
+      expect(harness.requests.some((request) => request.method === "POST")).toBe(true);
+    });
+    const post = harness.requests.find((request) => request.method === "POST");
+    expect(post?.body).toMatchObject({
+      agent: "openhub",
+      model: "moonshotai/kimi-k3",
+      label: "Kimi K3",
+      reasoning_efforts: [],
+    });
+  });
+
+  it("shows the OpenHub efforts_not_allowed error when the server rejects efforts", async () => {
+    const user = userEvent.setup();
+    await renderPage({ agents: { openhub: [] }, postErrorCode: "efforts_not_allowed" });
+    await user.click(screen.getByTestId("runner-models-add-openhub"));
+    await screen.findByTestId("runner-models-dialog");
+    await user.type(screen.getByTestId("runner-models-model"), "openhub-bad");
+    await user.type(screen.getByTestId("runner-models-label"), "Bad");
+    await user.click(screen.getByTestId("runner-models-save"));
+    const alert = await screen.findByTestId("runner-models-form-error");
+    expect(alert).toHaveTextContent("OpenHub models have no reasoning efforts.");
   });
 });

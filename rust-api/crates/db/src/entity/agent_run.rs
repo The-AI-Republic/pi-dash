@@ -56,6 +56,10 @@ pub struct Model {
     pub terminal_hooks_applied_at: Option<DateTimeWithTimeZone>,
     pub terminal_capacity_released_at: Option<DateTimeWithTimeZone>,
     pub phase_kind: String,
+    // `AgentRun.work_type` (PDASHOSS01-234): NOT NULL, Django default "";
+    // the creation paths stamp the effective work type, scheduler and
+    // direct runs keep the default.
+    pub work_type: String,
     #[sea_orm(column_type = "JsonBinary")]
     pub agent_metadata: Json,
     #[sea_orm(column_type = "JsonBinary")]
@@ -67,6 +71,17 @@ pub struct Model {
     pub error_details: Json,
     #[sea_orm(column_type = "Text", nullable)]
     pub refusal_category: Option<String>,
+    // Canonical failure taxonomy (PDASHOSS01-183, runner 0040):
+    // `RunFailureReason` string, blank for non-failed runs.
+    pub failure_reason: String,
+    // Dev-machine run queue T1 (NEWPIDASH-241, implementation.md §3):
+    // per-attempt identity, additive and nullable. Existing rows stay
+    // legacy (protocol 0, no token). Native SeaORM migration DB
+    // assignment_protocol SMALLINT NOT NULL DEFAULT 0 CHECK 0/1.
+    pub assignment_token: Option<Uuid>,
+    pub assignment_protocol: i16,
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub capacity_wait: Option<Json>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

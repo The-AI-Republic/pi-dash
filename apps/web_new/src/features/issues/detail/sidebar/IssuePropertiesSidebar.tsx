@@ -41,6 +41,8 @@ export interface IssuePropertiesSidebarProps {
   issue: Issue;
   /** Project member/admin on a live project. */
   editable: boolean;
+  /** May move the issue's state under the project's run policy. */
+  canRun: boolean;
   /** Test seam; the app client by default. */
   client?: ApiClient;
 }
@@ -50,6 +52,7 @@ export function IssuePropertiesSidebar({
   projectId,
   issue,
   editable,
+  canRun,
   client = getAppClient(),
 }: IssuePropertiesSidebarProps): React.ReactElement {
   const project = useQuery(pickerProjectQueryOptions(client, workspaceSlug, projectId));
@@ -73,6 +76,7 @@ export function IssuePropertiesSidebar({
       issue={issue}
       project={project.data}
       editable={editable}
+      canRun={canRun}
     />
   );
 }

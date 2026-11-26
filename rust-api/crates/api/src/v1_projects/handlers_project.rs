@@ -114,6 +114,19 @@ pub const NOT_FOUND_BODY: &str = r#"{"error":"The requested resource does not ex
 /// (`db/models/project.py:213-218`).
 pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
 
+/// Map a settings PATCH failure to the v1 denial shapes: 400s are
+/// the serializer field-errors body, 403s the `{"error": ...}` view
+/// body, a corrupt stored blob the generic 500.
+pub fn settings_patch_denial(
+    error: pidash_services::domain::project_settings::SettingsError,
+) -> Denial {
+    match error.status() {
+        403 => Denial::ForbiddenError("You don't have the required permissions.".to_owned()),
+        500 => Denial::ServerError,
+        _ => Denial::FieldErrors(error.body()),
+    }
+}
+
 /// Handler failure with its exact status + body.
 #[derive(Debug)]
 pub enum Denial {
@@ -139,6 +152,9 @@ pub enum Denial {
     FieldErrors(String),
     /// 404, view-inline `{"error": ...}` with a custom message.
     NotFoundError(String),
+    /// 403, view-inline `{"error": ...}` (the agent-run
+    /// `default_work_type` lock).
+    ForbiddenError(String),
     /// 409, `{"name": ...}` / `{"identifier": ...}` (pre-rendered bytes).
     Conflict(String),
     /// 500, generic branch.
@@ -177,6 +193,10 @@ impl Denial {
             }
             Denial::NotFoundError(message) => (
                 StatusCode::NOT_FOUND,
+                format!("{{\"error\":{}}}", json_string(message)),
+            ),
+            Denial::ForbiddenError(message) => (
+                StatusCode::FORBIDDEN,
                 format!("{{\"error\":{}}}", json_string(message)),
             ),
             Denial::ServerError => (
@@ -814,6 +834,8 @@ const READ_FIELD_ORDER: &[&str] = &[
     "agent_ticking_enabled",
     "default_agent_executor",
     "dedicated_runner_lost_action",
+    "default_work_type",
+    "settings",
     "created_by",
     "updated_by",
     "workspace",
@@ -1151,6 +1173,22 @@ pub async fn render_project(
         "dedicated_runner_lost_action",
         Value::String(row_string(row, "dedicated_runner_lost_action")?),
     );
+    // PDASHOSS01-234: the resolved work-type key (`ProjectSerializer`
+    // `fields="__all__"` renders the model column verbatim, right after
+    // `dedicated_runner_lost_action` in model definition order).
+    put(
+        &mut map,
+        "default_work_type",
+        Value::String(row_string(row, "default_work_type")?),
+    );
+    // NEWPIDASH-278: validated settings with defaults filled in.
+    let settings_raw: Value = row
+        .try_get("", "settings")
+        .map_err(|_| Denial::ServerError)?;
+    let settings = pidash_services::domain::project_settings::parse_row_settings(&settings_raw)
+        .map(|parsed| pidash_services::domain::project_settings::render(&parsed.settings))
+        .map_err(|_| Denial::ServerError)?;
+    put(&mut map, "settings", settings);
     put(
         &mut map,
         "created_by",
@@ -1446,6 +1484,7 @@ const PROJECT_LIST_FIELDS: &[&str] = &[
     "repo_url",
     "base_branch",
     "default_agent_executor",
+    "default_work_type",
     "default_state",
     "estimate",
 ];
@@ -1830,6 +1869,7 @@ pub const CREATE_FIELD_ORDER: &[&str] = &[
     "base_branch",
     "default_agent_executor",
     "dedicated_runner_lost_action",
+    "default_work_type",
 ];
 
 /// `ProjectUpdateSerializer` extra writable fields
@@ -1907,6 +1947,10 @@ async fn coerce_field(
         "dedicated_runner_lost_action" => {
             FieldValue::Str(coerce_choice(value, &["fail_to_backlog", "fall_back"])?)
         }
+        // PDASHOSS01-234: blank passes (`Project.save` resolves it on
+        // create); overlong answers the field `max_length` message before
+        // `validate()` runs the registry check, exactly like DRF.
+        "default_work_type" => FieldValue::Str(coerce_char(value, true, Some(32))?),
         _ => return Ok(None),
     }))
 }
@@ -2038,6 +2082,9 @@ pub async fn enqueue_best_effort(
 /// `POST .../<project_id>/archive/` (`views/project.py:528-538`): stamp
 /// `archived_at`, soft-delete the workspace's project favorites, answer
 /// 204. Misses raise `DoesNotExist` into the base-handler 404.
+/// NEWPIDASH-239: the same transaction also sets `enabled = false` on
+/// every live scheduler binding of the project (the ticker and
+/// `run-now` guards cover re-enabled or pre-existing archives).
 pub async fn archive_project_inner(
     state: &AppState,
     headers: &HeaderMap,
@@ -2061,8 +2108,9 @@ pub async fn archive_project_inner(
     // runs after permissions; an unknown zone 400s only for survivors).
     activate_timezone(pre.actor.timezone.as_deref())?;
     let now = chrono::Utc::now();
+    let mut tx = pre.pool.begin().await.map_err(|_| Denial::ServerError)?;
     let updated: u64 = pidash_services::domain::projects::archive_v1_project(
-        &pidash_db::pool::sea_orm_connection(&pre.pool),
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
         project_id,
         workspace_id,
         pre.actor.id,
@@ -2073,19 +2121,31 @@ pub async fn archive_project_inner(
     if updated == 0 {
         return Err(Denial::NotFound);
     }
+    pidash_services::domain::projects::disable_project_bindings(
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
+        project_id,
+        now,
+        pre.actor.id,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
     // `UserFavorite` cleanup (`views/project.py:537`): every favorite of
     // the project in this workspace soft-deletes (no `entity_type`
     // predicate on this path, exactly as written).
     // `user_favorites` is not a write-guard covered table, so the write
     // goes directly through SeaORM.
-    user_favorites::Entity::update_many()
-        .col_expr(user_favorites::Column::DeletedAt, Expr::value(now))
-        .filter(user_favorites::Column::WorkspaceId.eq(workspace_id))
-        .filter(user_favorites::Column::ProjectId.eq(project_id))
-        .filter(user_favorites::Column::DeletedAt.is_null())
-        .exec(&orm(&pre.pool))
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    {
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        user_favorites::Entity::update_many()
+            .col_expr(user_favorites::Column::DeletedAt, Expr::value(now))
+            .filter(user_favorites::Column::WorkspaceId.eq(workspace_id))
+            .filter(user_favorites::Column::ProjectId.eq(project_id))
+            .filter(user_favorites::Column::DeletedAt.is_null())
+            .exec(&conn)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+    }
+    tx.commit().await.map_err(|_| Denial::ServerError)?;
     Ok(no_content())
 }
 
@@ -2924,6 +2984,7 @@ pub async fn create_project_inner(
     let name = field_str(&data, "name");
     let identifier_raw = field_str(&data, "identifier");
     let executor = field_str(&data, "default_agent_executor");
+    let work_type = field_str(&data, "default_work_type");
     let lead = field_fk(&data, "project_lead").unwrap_or(None);
     let assignee = field_fk(&data, "default_assignee").unwrap_or(None);
     let lead_member = match lead {
@@ -2936,8 +2997,8 @@ pub async fn create_project_inner(
     };
     let shared = ser::SharedChecks {
         executor: executor.as_deref(),
-        cloud_configured: state.settings().cloud_agent.enabled,
-        managed_enabled: state.settings().managed_runner.enabled,
+        work_type: work_type.as_deref(),
+        managed_enabled: state.settings().pidash_agent.enabled,
         name: name.as_deref(),
         identifier: identifier_raw.as_deref(),
         project_lead_is_member: lead_member,
@@ -2980,14 +3041,22 @@ pub async fn create_project_inner(
         // (deprecated choices become local_runner). An absent key falls
         // back to the instance default (always local_runner since #2903).
         match field_str(&data, "default_agent_executor") {
-            Some(written) => match pidash_types::dispatch::normalize_executor_write(&written) {
+            Some(written) => match pidash_types::agent_runs::normalize_executor_write(&written) {
                 Some(kind) => kind.value().to_owned(),
                 None => "local_runner".to_owned(),
             },
-            None => pidash_types::dispatch::get_default_agent_executor()
+            None => pidash_types::agent_runs::get_default_agent_executor()
                 .value()
                 .to_owned(),
         }
+    };
+    // `Project.save()` on create: a blank `default_work_type` resolves from
+    // the repo binding (`db/models/project.py`, PDASHOSS01-234).
+    let repo_url = field_str(&data, "repo_url").unwrap_or_default();
+    let default_work_type = match work_type.as_deref() {
+        Some(wt) if !wt.is_empty() => wt.to_owned(),
+        _ => pidash_services::prompting::work_types::default_for_new_project(Some(&repo_url))
+            .to_owned(),
     };
     // `save()` auto-default (`db/models/project.py:261-270`): the first
     // project of a workspace becomes default.
@@ -3016,7 +3085,6 @@ pub async fn create_project_inner(
     let v1_cover = field_opt_str(&data, "cover_image").unwrap_or(None);
     let v1_ext_source = field_opt_str(&data, "external_source").unwrap_or(None);
     let v1_ext_id = field_opt_str(&data, "external_id").unwrap_or(None);
-    let v1_repo = field_str(&data, "repo_url").unwrap_or_default();
     let v1_branch = field_str(&data, "base_branch").unwrap_or_else(|| "main".to_owned());
     let v1_lost_action = field_str(&data, "dedicated_runner_lost_action").unwrap_or_else(|| {
         pidash_services::domain::projects::DEDICATED_RUNNER_LOST_ACTION_DEFAULT.to_owned()
@@ -3057,7 +3125,7 @@ pub async fn create_project_inner(
             timezone: &timezone,
             external_source: v1_ext_source.as_deref(),
             external_id: v1_ext_id.as_deref(),
-            repo_url: &v1_repo,
+            repo_url: &repo_url,
             base_branch: &v1_branch,
             agent_interval: 10800,
             agent_max_ticks: 10,
@@ -3067,6 +3135,7 @@ pub async fn create_project_inner(
             default_executor: &default_executor,
             dedicated_runner_lost_action: &v1_lost_action,
             members_can_edit_states: field_bool(&data, "members_can_edit_states").unwrap_or(true),
+            default_work_type: &default_work_type,
             created_by: pre.actor.id,
             created_at: now,
             updated_at: now,
@@ -3124,7 +3193,7 @@ pub async fn create_project_inner(
     if lead.is_some() {
         return Err(Denial::BadError("Please provide valid detail".to_owned()));
     }
-    // The 8 `DEFAULT_STATES` (`views/project.py:240-254`): `bulk_create`
+    // The 9 `DEFAULT_STATES` (`views/project.py:240-254`): `bulk_create`
     // calls no `save()`, so every row keeps `slug ""`.
     for (name, color, sequence, group, default) in
         pidash_db::v1_projects::models::state::DEFAULT_STATES.iter()
@@ -3279,6 +3348,58 @@ pub async fn retrieve_project_inner(
     Ok(json_ok(text))
 }
 
+/// `RUN_ID_HEADER` (`api/views/issue.py`): the agent run-id header.
+pub const RUN_ID_HEADER: &str = "X-Pi-Dash-Run-Id";
+/// 403 message of the agent-run `default_work_type` lock
+/// (`views/project.py` patch, PDASHOSS01-234).
+pub const DEFAULT_WORK_TYPE_LOCKED_MESSAGE: &str =
+    "default_work_type is locked for agent runs; only a human can change it";
+
+/// Python truthiness of a JSON value (`x or ""`).
+fn json_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
+        Value::String(s) => !s.is_empty(),
+        Value::Array(a) => !a.is_empty(),
+        Value::Object(o) => !o.is_empty(),
+    }
+}
+
+/// Ports the patch view's lock: a non-blank `X-Pi-Dash-Run-Id` header plus
+/// a `default_work_type` key whose `request.data.get(...) or ""` differs
+/// from the stored value. A form body's `QueryDict.get` reads the last raw
+/// value; any truthy non-string never equals the stored string.
+fn default_work_type_locked(
+    headers: &HeaderMap,
+    input: &serde_json::Map<String, Value>,
+    from_form: bool,
+    stored: &str,
+) -> bool {
+    let run_id = headers
+        .get(RUN_ID_HEADER)
+        .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+        .unwrap_or_default();
+    if run_id.trim().is_empty() {
+        return false;
+    }
+    let Some(raw) = input.get("default_work_type") else {
+        return false;
+    };
+    let value = match raw {
+        Value::Array(items) if from_form => items.last().cloned().unwrap_or(Value::Null),
+        other => other.clone(),
+    };
+    if !json_truthy(&value) {
+        return !stored.is_empty();
+    }
+    match value {
+        Value::String(s) => s != stored,
+        _ => true,
+    }
+}
+
 /// `PATCH workspaces/<slug>/projects/<pk>/` (`views/project.py:403-467`).
 pub async fn patch_project_inner(
     state: &AppState,
@@ -3371,11 +3492,53 @@ pub async fn patch_project_inner(
             "Archived project cannot be updated".to_owned(),
         ));
     }
+    // Agent-run lock on the project's default work type
+    // (`views/project.py` patch, PDASHOSS01-234): after the archived guard,
+    // before the serializer.
+    let stored_work_type: String = plain
+        .try_get("", "default_work_type")
+        .map_err(|_| Denial::ServerError)?;
+    if default_work_type_locked(headers, &input, from_form, &stored_work_type) {
+        return Err(Denial::ForbiddenError(
+            DEFAULT_WORK_TYPE_LOCKED_MESSAGE.to_owned(),
+        ));
+    }
+    // NEWPIDASH-278: nested `settings` partial update. Not a v1
+    // serializer field — `coerce_write` ignores the key — so it is
+    // handled here: per-key permission (403), strict validation
+    // (400), then the atomic merge after the update write below.
+    let settings_merge = match merged.get("settings") {
+        None => None,
+        Some(fragment) => {
+            let facts =
+                project_base_facts(&pre.pool, &workspace_id, slug, &pre.actor.id, &project_id)
+                    .await?;
+            let project_role = if facts.is_project_admin {
+                pidash_auth::permissions::ROLE_ADMIN
+            } else {
+                pidash_auth::permissions::ROLE_GUEST
+            };
+            let workspace_role = if facts.is_workspace_admin {
+                pidash_auth::permissions::ROLE_ADMIN
+            } else {
+                pidash_auth::permissions::ROLE_GUEST
+            };
+            match pidash_services::domain::project_settings::authorize_and_validate(
+                fragment,
+                project_role,
+                workspace_role,
+            ) {
+                Ok(merge) => Some(merge),
+                Err(error) => return Err(settings_patch_denial(error)),
+            }
+        }
+    };
     let data = coerce_write(&pre.pool, &merged, true, true).await?;
     // Inherited `validate()` first (`ProjectCreateSerializer.validate`).
     let name = field_str(&data, "name");
     let identifier_raw = field_str(&data, "identifier");
     let executor = field_str(&data, "default_agent_executor");
+    let work_type = field_str(&data, "default_work_type");
     let lead = field_fk(&data, "project_lead").unwrap_or(None);
     let assignee = field_fk(&data, "default_assignee").unwrap_or(None);
     let lead_member = match lead {
@@ -3388,8 +3551,8 @@ pub async fn patch_project_inner(
     };
     let shared = ser::SharedChecks {
         executor: executor.as_deref(),
-        cloud_configured: state.settings().cloud_agent.enabled,
-        managed_enabled: state.settings().managed_runner.enabled,
+        work_type: work_type.as_deref(),
+        managed_enabled: state.settings().pidash_agent.enabled,
         name: name.as_deref(),
         identifier: identifier_raw.as_deref(),
         project_lead_is_member: lead_member,
@@ -3437,6 +3600,17 @@ pub async fn patch_project_inner(
         was_default,
     )
     .await?;
+    if let Some(merge) = &settings_merge {
+        pidash_services::domain::project_settings::apply_settings_merge(
+            &orm(&pre.pool),
+            merge,
+            chrono::Utc::now(),
+            pre.actor.id,
+            project_id,
+        )
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    }
     // `intake_view` newly truthy + no default `Intake` → create it
     // (`views/project.py:431-438`, pre-save name in the title).
     let intake_view_now: bool = {
@@ -3626,7 +3800,7 @@ pub async fn apply_project_update(
     }
     if let Some(v) = field_str(data, "default_agent_executor") {
         // #2903: deprecated choices translate to local_runner on write.
-        let stored = match pidash_types::dispatch::normalize_executor_write(&v) {
+        let stored = match pidash_types::agent_runs::normalize_executor_write(&v) {
             Some(kind) => kind.value().to_owned(),
             None => v,
         };
@@ -3642,6 +3816,9 @@ pub async fn apply_project_update(
             "dedicated_runner_lost_action",
             ProjectPatchBind::Str(v),
         );
+    }
+    if let Some(v) = field_str(data, "default_work_type") {
+        push(&mut sets, "default_work_type", ProjectPatchBind::Str(v));
     }
     // New `is_default` value (or the stored one when untouched).
     let new_default: bool = field_bool(data, "is_default").unwrap_or(was_default);
@@ -4259,6 +4436,23 @@ mod tests {
                 "default_state",
             ]
         );
+        // `settings` (NEWPIDASH-278): Django renders it after
+        // `default_work_type`, which follows `dedicated_runner_lost_action`
+        // (NEWPIDASH-313: model definition order).
+        let dedicated_at = READ_FIELD_ORDER
+            .iter()
+            .position(|key| *key == "dedicated_runner_lost_action")
+            .expect("dedicated_runner_lost_action");
+        let work_type_at = READ_FIELD_ORDER
+            .iter()
+            .position(|key| *key == "default_work_type")
+            .expect("default_work_type");
+        assert_eq!(work_type_at, dedicated_at + 1);
+        let settings_at = READ_FIELD_ORDER
+            .iter()
+            .position(|key| *key == "settings")
+            .expect("settings");
+        assert_eq!(READ_FIELD_ORDER[settings_at - 1], "default_work_type");
         assert_eq!(ALLOWED_SUMMARY_FIELDS.len(), 8);
     }
 
@@ -4393,6 +4587,11 @@ mod live_tests {
         );
         sel.expr_as(Expr::value(true), Alias::new("agent_ticking_enabled"));
         sel.expr_as(Expr::value("codex"), Alias::new("default_agent_executor"));
+        sel.expr_as(
+            Expr::value("fail_to_backlog"),
+            Alias::new("dedicated_runner_lost_action"),
+        );
+        sel.expr_as(Expr::value("general"), Alias::new("default_work_type"));
         sel.expr_as(Expr::value(None::<uuid::Uuid>), Alias::new("created_by_id"));
         sel.expr_as(Expr::value(None::<uuid::Uuid>), Alias::new("updated_by_id"));
         sel.expr_as(Expr::value(ws_id), Alias::new("workspace_id"));
@@ -4409,6 +4608,7 @@ mod live_tests {
             Expr::value(None::<uuid::Uuid>),
             Alias::new("default_state_id"),
         );
+        sel.expr_as(Expr::value(serde_json::json!({})), Alias::new("settings"));
         let row: Row =
             sea_orm::ConnectionTrait::query_one(&orm(&pool), DbBackend::Postgres.build(&sel))
                 .await

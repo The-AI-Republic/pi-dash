@@ -4,12 +4,16 @@
 //! Mirrors the eligibility set of
 //! `filter_runs_usable_by_runner` for private runners — the only
 //! visibility. A runner counts as potentially serviceable when its
-//! owner is the run's creator, the issue's creator, or a live
-//! assignee. Transient status is deliberately ignored — OFFLINE /
-//! BUSY / paused runners still count; REVOKED runners (permanent)
-//! and `pinned_only` runners (never take unpinned work) never count.
+//! owner is the issue's creator or a live assignee, or (only in
+//! `project_members` mode) the run's triggerer — the triggerer-only
+//! runner never takes an issue run in default mode (NEWPIDASH-261);
+//! an owner who is also the issue's creator or assignee is not
+//! "triggerer-only" and keeps their own runs.
+//! Transient status is deliberately ignored — OFFLINE / BUSY /
+//! paused runners still count; REVOKED runners (permanent) and
+//! `pinned_only` runners (never take unpinned work) never count.
 //!
-//! Built-in engines count only for their owner's work: runs the
+//! Pi Dash Agents count only for their owner's work: runs the
 //! owner starts, automatic runs (`human == false`) on the owner's
 //! issues, or any such run when the machine opted into teammates'
 //! runs (`engine_team_runs`). An offline or paused pod-member
@@ -57,13 +61,20 @@ pub async fn pod_has_runner_for_issue_principal(
         issue_people.insert(row.assignee_id);
     }
 
-    let mut eligible_owner_ids: HashSet<Uuid> = issue_people.clone();
-    if let Some(creator) = creator_id {
-        eligible_owner_ids.insert(creator);
-    }
+    // NEWPIDASH-261: the triggerer qualifies only in
+    // `project_members` mode; the shared helper encodes that.
+    let policy = crate::domain::project_settings::policy_for_project(db, issue.project_id).await?;
+    let eligible_owner_ids = crate::domain::project_settings::eligible_owner_ids(
+        issue.created_by_id,
+        &issue_people,
+        creator_id,
+        policy,
+    );
     if eligible_owner_ids.is_empty() {
         return Ok(false);
     }
+    let triggerer_admitted =
+        policy == crate::domain::project_settings::IssueRunPolicy::ProjectMembers;
 
     // Dedicated issue (§9.4): served only by the assigned runner —
     // in the run's pod, non-revoked, of an eligible owner, and the
@@ -142,6 +153,7 @@ pub async fn pod_has_runner_for_issue_principal(
                 runner
                     .dev_machine_id
                     .is_some_and(|machine| team_machines.contains(&machine)),
+                triggerer_admitted,
             )
     }))
 }
@@ -149,14 +161,26 @@ pub async fn pod_has_runner_for_issue_principal(
 /// The PO-3 engine gate (§8): does this engine's owner serve the
 /// run? The owner starts it, or the run is automatic on one of the
 /// owner's issues, or the machine opted into teammates' runs.
+///
+/// An owner-started run counts when the owner may run this issue under
+/// the project's `issue_run_policy` (NEWPIDASH-261): in
+/// `project_members` mode always (`triggerer_admitted`), in the default
+/// `creator_and_assignees` mode when the owner created the issue or is
+/// assigned to it (`in_issue_people`). Without the second half the
+/// default mode stranded every run a Pi Dash Agent owner started on
+/// their own issue.
+#[allow(clippy::too_many_arguments)]
 fn engine_counts(
     owner_id: Uuid,
     creator_id: Option<Uuid>,
     human: bool,
     in_issue_people: bool,
     team_runs: bool,
+    triggerer_admitted: bool,
 ) -> bool {
-    Some(owner_id) == creator_id || (!human && in_issue_people) || team_runs
+    (Some(owner_id) == creator_id && (triggerer_admitted || in_issue_people))
+        || (!human && in_issue_people)
+        || team_runs
 }
 
 /// The single live [`PodRunnerMatcher`]: SeaORM over the caller's
@@ -260,11 +284,27 @@ mod tests {
         ];
         for (label, creator, human, in_people, team) in cases {
             assert_eq!(
-                engine_counts(owner, *creator, *human, *in_people, *team),
+                engine_counts(owner, *creator, *human, *in_people, *team, true),
                 ph[label]["value"].as_bool().expect("value"),
                 "{label}"
             );
         }
+        // NEWPIDASH-261 default mode: the engine owner's own click
+        // stops counting (triggerer not admitted); the automatic
+        // and team arms are unchanged.
+        assert!(!engine_counts(
+            owner,
+            Some(owner),
+            true,
+            false,
+            false,
+            false
+        ));
+        assert!(engine_counts(owner, Some(mate), false, true, false, false));
+        assert!(engine_counts(owner, Some(owner), true, false, true, false));
+        // Default mode, the owner's own click on an issue they created or
+        // are assigned to: the policy lets them run it, so it counts.
+        assert!(engine_counts(owner, Some(owner), true, true, false, false));
         // Own-agent candidates count for every principal; the
         // pinned-only and stranger cases never reach the gate.
         assert_eq!(ph["own_agent_human"]["value"].as_bool(), Some(true));

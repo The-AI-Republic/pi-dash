@@ -462,7 +462,7 @@ pub fn plan_update_issue(
             }
             "estimate_point" => {
                 if let Some(row) =
-                    plan_track_estimate_points(&requested, current, frame, resolvers.estimate)?
+                    plan_track_estimate_points(&requested, current, frame, resolvers.estimate)
                 {
                     out.rows.push(row);
                 }
@@ -1193,6 +1193,71 @@ mod tests {
         assert_eq!(outcome.rows.len(), 1);
         assert_eq!(outcome.rows[0].field, "assigned_pod");
         assert_eq!(outcome.rows[0].comment, "updated the execution pod to");
+    }
+
+    #[test]
+    fn update_issue_estimate_clear_and_move() {
+        // NEWPIDASH-273 (DIFF-22): clearing the estimate emits a `removed`
+        // row through the update dispatcher instead of aborting the batch.
+        let f = frame();
+        const OLD_ID: &str = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+        const NEW_ID: &str = "99999999-9999-4999-8999-999999999999";
+        let parent = |_: &str| None;
+        let state = |_: &str| None;
+        let label = |_: &str| None;
+        let user = |_: &str| None;
+        let runner = |_: &str| None;
+        let pod = |_: &str| None;
+        let estimate = |id: &str| match id {
+            x if x == OLD_ID => Some(EstimatePointRef {
+                value: "1".to_owned(),
+                estimate_type: "points".to_owned(),
+            }),
+            x if x == NEW_ID => Some(EstimatePointRef {
+                value: "3".to_owned(),
+                estimate_type: "points".to_owned(),
+            }),
+            _ => None,
+        };
+        let r = UpdateResolvers {
+            parent: &parent,
+            state: &state,
+            label: &label,
+            user: &user,
+            estimate: &estimate,
+            runner: &runner,
+            pod: &pod,
+            description_latest: None,
+        };
+        // Move: `updated` with the new value.
+        let moved = plan_update_issue(
+            Some(&format!(r#"{{"estimate_point": "{NEW_ID}"}}"#)),
+            Some(&format!(r#"{{"estimate_point": "{OLD_ID}"}}"#)),
+            &f,
+            &r,
+        )
+        .unwrap();
+        assert_eq!(moved.rows.len(), 1);
+        assert_eq!(moved.rows[0].field, "estimate_points");
+        assert_eq!(moved.rows[0].verb, "updated");
+        assert_eq!(moved.rows[0].old_value.as_deref(), Some("1"));
+        assert_eq!(moved.rows[0].new_value.as_deref(), Some("3"));
+        // Clear: `removed` with no new value (previously
+        // `Track(EstimateRemovedField)` aborted the whole batch).
+        let cleared = plan_update_issue(
+            Some(r#"{"estimate_point": null}"#),
+            Some(&format!(r#"{{"estimate_point": "{OLD_ID}"}}"#)),
+            &f,
+            &r,
+        )
+        .unwrap();
+        assert_eq!(cleared.rows.len(), 1);
+        assert_eq!(cleared.rows[0].field, "estimate_points");
+        assert_eq!(cleared.rows[0].verb, "removed");
+        assert_eq!(cleared.rows[0].old_value.as_deref(), Some("1"));
+        assert_eq!(cleared.rows[0].new_value, None);
+        assert_eq!(cleared.rows[0].old_identifier.as_deref(), Some(OLD_ID));
+        assert_eq!(cleared.rows[0].new_identifier, None);
     }
 
     // FX-ACT-02 · issue delete.

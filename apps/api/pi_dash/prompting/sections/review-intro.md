@@ -26,5 +26,5 @@ authoritative record of what was produced):
 
 If there is no prior run output above and no workpad, a human moved the
 issue straight into this stage: the work product is what the issue links
-to — an attached PR, a document, the description — and you create the
-workpad's `### Path to done` block yourself (see "Workpad").
+to — an attached deliverable, a document, the description — and you create
+the workpad's `### Path to done` block yourself (see "Workpad").

@@ -1400,7 +1400,9 @@ There is no socket, event stream, or poll in the issue layer
 reload or refetch. The only refresh-without-reload is self-initiated
 after a mutation (parent stats plus the activity feed) alongside
 in-memory optimistic list and count updates; the agent-status
-panel's fifteen-second poll (ISS-164) is the one exception. Oracle:
+panel's fifteen-second poll plus its scheduled next-tick refresh
+(ISS-164) is the one exception, and while either runs it also reloads
+the issue's comments and activity. Oracle:
 `cross-cutting-realtime.spec.ts`.
 
 Permissions (ISS-222): project admins and members can create, edit,
@@ -1732,10 +1734,13 @@ shows zero, never blank, when nothing was ever reported, carries a
 tooltip explaining the figure is a floor rather than a billing total
 because runs that died before reporting count as nothing, and hides
 only when the payload has no token figure at all (neither a stored
-total nor live usage). Refresh reads through the issue retrieve
-(including the agent-status token total); the panel polls every
-fifteen seconds while a run is active plus a scheduled refresh at the
-next tick. Endpoints: issue retrieve for refresh, `POST
+total nor live usage). Refresh re-reads the issue retrieve
+(including the agent-status token total) together with the issue's
+comments and activity (sibling keys, refetched incrementally through
+the `created_at__gt` cursor); the panel polls every fifteen seconds
+while a run is active plus a scheduled refresh at the next tick, so a
+comment posted while a run is active appears without a reload and no
+comment/activity polling happens with no active run. Endpoints: issue retrieve for refresh, `POST
 /api/runners/re-tick/` for re-tick, `POST
 /api/runners/runs/{runId}/cancel/` for abort. Oracle:
 `issue-detail-core.spec.ts` (today pins only the absent-without-runs

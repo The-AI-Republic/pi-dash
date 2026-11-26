@@ -11,7 +11,7 @@
 import type { IntakeStatus } from "@pidash/api-client";
 
 import type { IntakeListFilters } from "../api/keys.js";
-import { intakeDateToken, todayUtcIsoDay, type IntakeDatePresetId, type IntakeDateValue } from "./dates.js";
+import { intakeDateToken, todayLocalIsoDay, type IntakeDatePresetId, type IntakeDateValue } from "./dates.js";
 import { orderStatusesForTab } from "./statuses.js";
 import type { IntakeTab } from "./tabs.js";
 import { INTAKE_TAB_STATUSES } from "./tabsModel.js";
@@ -193,7 +193,7 @@ export function filterActivity(selection: IntakeFilterSelection, tab: IntakeTab)
 export function selectionToListFilters(
   tab: IntakeTab,
   selection: IntakeFilterSelection,
-  today: string = todayUtcIsoDay()
+  today: string = todayLocalIsoDay()
 ): IntakeListFilters {
   return {
     statuses: orderStatusesForTab(tab, selection.statuses),

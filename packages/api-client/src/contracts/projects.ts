@@ -51,6 +51,55 @@ export type Project = z.infer<typeof Project>;
 export const ProjectList = z.array(Project);
 export type ProjectList = z.infer<typeof ProjectList>;
 
+/** Who may move an issue's state or run it (NEWPIDASH-261). */
+export const ISSUE_RUN_POLICY_CREATOR_AND_ASSIGNEES = "creator_and_assignees";
+export const ISSUE_RUN_POLICY_PROJECT_MEMBERS = "project_members";
+export const IssueRunPolicy = z.enum([ISSUE_RUN_POLICY_CREATOR_AND_ASSIGNEES, ISSUE_RUN_POLICY_PROJECT_MEMBERS]);
+export type IssueRunPolicy = z.infer<typeof IssueRunPolicy>;
+
+/**
+ * The `issue_run_policy` a stored bag behaves by. Anything but the
+ * known `project_members` value reads as the default
+ * `creator_and_assignees`, so older rows and unknown values never
+ * strand readers.
+ */
+export function issueRunPolicyOrDefault(value: string | undefined): IssueRunPolicy {
+  return value === ISSUE_RUN_POLICY_PROJECT_MEMBERS
+    ? ISSUE_RUN_POLICY_PROJECT_MEMBERS
+    : ISSUE_RUN_POLICY_CREATOR_AND_ASSIGNEES;
+}
+
+/**
+ * The typed per-project settings bag (`projects.settings`, NEWPIDASH-278):
+ * a nested JSON object the server validates against the registered keys
+ * and renders with defaults filled in. Optional on the row schemas so
+ * backends that predate the column still parse; absent reads as `{}`.
+ * Unknown keys pass through (`looseObject`) so future keys survive a
+ * read from this build, as the server preserves them.
+ */
+/**
+ * Which optional agent stages run in a project (lean agent workflow).
+ * `auto` lets the agent pick the path per work item; `custom` reads the
+ * `review` / `test` toggles. In Progress always runs. A missing key reads
+ * as auto with both stages on.
+ */
+export const AGENT_STAGES_MODE_AUTO = "auto";
+export const AGENT_STAGES_MODE_CUSTOM = "custom";
+export const AgentStagesMode = z.enum([AGENT_STAGES_MODE_AUTO, AGENT_STAGES_MODE_CUSTOM]);
+export type AgentStagesMode = z.infer<typeof AgentStagesMode>;
+export const AgentStages = z.object({
+  mode: AgentStagesMode,
+  review: z.optional(z.boolean()),
+  test: z.optional(z.boolean()),
+});
+export type AgentStages = z.infer<typeof AgentStages>;
+
+export const ProjectSettings = z.looseObject({
+  issue_run_policy: z.optional(IssueRunPolicy),
+  agent_stages: z.optional(AgentStages),
+});
+export type ProjectSettings = z.infer<typeof ProjectSettings>;
+
 export async function listProjects(client: ApiClient, slug: string): Promise<ProjectList> {
   const body = await client.getJson<unknown>(`/api/workspaces/${slug}/projects/`);
   return client.parse(ProjectList, body, `GET /api/workspaces/${slug}/projects/`);
@@ -118,6 +167,8 @@ export const ProjectDetail = z.object({
    * the setting still parse; absent reads as the default.
    */
   dedicated_runner_lost_action: z.optional(z.string()),
+  /** Typed settings bag (NEWPIDASH-278); absent reads as `{}`. */
+  settings: z.optional(ProjectSettings),
 });
 export type ProjectDetail = z.infer<typeof ProjectDetail>;
 
@@ -200,6 +251,8 @@ export const ProjectDetails = z.object({
   agent_executor_options: z.array(AgentExecutorOption),
   default_agent_executor: z.string(),
   dedicated_runner_lost_action: z.optional(z.string()),
+  /** Typed settings bag (NEWPIDASH-278); absent reads as `{}`. */
+  settings: z.optional(ProjectSettings),
 });
 export type ProjectDetails = z.infer<typeof ProjectDetails>;
 

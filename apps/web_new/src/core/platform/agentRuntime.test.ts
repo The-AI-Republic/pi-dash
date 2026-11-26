@@ -74,8 +74,8 @@ describe("desktop agent runtime", () => {
       working_dir: "/t",
     }));
     installBridge(invoke);
-    await platform.agentRuntime?.addEngineRunner({ workspace: "ws", project: "P" });
-    await platform.agentRuntime?.addEngineRunner({ workspace: "ws", project: "P", workingDir: "/w" });
+    await platform.agentRuntime?.addPidashAgentRunner({ workspace: "ws", project: "P" });
+    await platform.agentRuntime?.addPidashAgentRunner({ workspace: "ws", project: "P", workingDir: "/w" });
     expect(invoke).toHaveBeenCalledWith("daemon_engine_runner_add", {
       workspace: "ws",
       project: "P",
@@ -92,8 +92,8 @@ describe("desktop agent runtime", () => {
     const invoke = vi.fn(async () => undefined);
     installBridge(invoke);
     await platform.agentRuntime?.installService();
-    await platform.agentRuntime?.ensureEngine();
-    await platform.agentRuntime?.engineLogin("dev-code");
+    await platform.agentRuntime?.ensurePidashAgent();
+    await platform.agentRuntime?.pidashAgentLogin("dev-code");
     await platform.agentRuntime?.reloadCredentials();
     expect(invoke.mock.calls).toEqual([
       ["daemon_install_service", undefined],
@@ -117,6 +117,13 @@ describe("desktop agent runtime", () => {
   it("reads a missing mode stash as empty", async () => {
     installBridge(vi.fn(async () => null));
     await expect(platform.agentRuntime?.loadApprovalModes("u1")).resolves.toEqual({});
+  });
+
+  it("asks the daemon to reconnect its cloud connections", async () => {
+    const invoke = vi.fn(async () => undefined);
+    installBridge(invoke);
+    await platform.agentRuntime?.requestReconnect();
+    expect(invoke).toHaveBeenCalledWith("daemon_reconnect", undefined);
   });
 
   it("runs the migration and notices commands", async () => {
@@ -147,16 +154,48 @@ describe("desktop agent runtime", () => {
       notices: { legacy_folders: [], pod_member_projects: [] },
     });
     expect(invoke).toHaveBeenCalledWith("desktop_notices_dismiss", { account: "u1", keys: ["folder:/t"] });
-    expect(invoke).toHaveBeenCalledWith("pidash_cli_logout", { engine: false });
+    expect(invoke).toHaveBeenCalledWith("pidash_cli_logout", { localOnly: false });
+  });
+
+  it("runs the handoff and sync record commands", async () => {
+    const invoke = vi.fn(async (command: string) => {
+      if (command === "daemon_hello") return { daemon_version: "1.0.0", ipc_version: 7, cloud_url: "https://c.test" };
+      if (command === "daemon_active_runs") return 2;
+      if (command === "desktop_session_handoff") return { user_id: "u1", email: "u1@test" };
+      if (command === "auth_sync_get") return { own_event: null, last_seen_seq: 3 };
+      return undefined;
+    });
+    installBridge(invoke);
+    await expect(platform.agentRuntime?.daemonHello()).resolves.toMatchObject({ daemon_version: "1.0.0" });
+    await expect(platform.agentRuntime?.daemonActiveRuns()).resolves.toBe(2);
+    await expect(platform.agentRuntime?.desktopSessionHandoff("u1")).resolves.toEqual({
+      user_id: "u1",
+      email: "u1@test",
+    });
+    await expect(platform.agentRuntime?.getAuthSyncRecord()).resolves.toEqual({
+      own_event: null,
+      last_seen_seq: 3,
+    });
+    await platform.agentRuntime?.setAuthSyncRecord({ own_event: null, last_seen_seq: 4 });
+    await platform.agentRuntime?.markFreshSignIn();
+    await platform.agentRuntime?.signOutComputer({ localOnly: true });
+    expect(invoke).toHaveBeenCalledWith("daemon_hello", undefined);
+    expect(invoke).toHaveBeenCalledWith("daemon_active_runs", undefined);
+    expect(invoke).toHaveBeenCalledWith("desktop_session_handoff", { expectedUserId: "u1" });
+    expect(invoke).toHaveBeenCalledWith("auth_sync_get", undefined);
+    expect(invoke).toHaveBeenCalledWith("auth_sync_set", { record: { own_event: null, last_seen_seq: 4 } });
+    expect(invoke).toHaveBeenCalledWith("auth_sync_mark_sign_in", undefined);
+    expect(invoke).toHaveBeenCalledWith("pidash_cli_logout", { localOnly: true });
   });
 
   it("rejects runtime calls without the bridge", async () => {
     await expect(platform.agentRuntime?.discover({ userId: "u1", cloudUrl: "https://c.test" })).rejects.toThrow(
       "daemon_discover needs the native bridge"
     );
-    await expect(platform.agentRuntime?.engineLogin("d")).rejects.toThrow(
+    await expect(platform.agentRuntime?.pidashAgentLogin("d")).rejects.toThrow(
       "pidash_cli_engine_login needs the native bridge"
     );
+    await expect(platform.agentRuntime?.requestReconnect()).rejects.toThrow("daemon_reconnect needs the native bridge");
     await expect(platform.agentRuntime?.signOutComputer()).rejects.toThrow("pidash_cli_logout needs the native bridge");
   });
 });

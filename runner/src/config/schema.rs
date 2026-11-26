@@ -20,20 +20,98 @@ pub struct Config {
     /// missing means "fall back to environment variables".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli: Option<CliSection>,
-    /// `[engine]`: the built-in agent engine. Empty (and not written) unless
+    /// `[engine]`: the Pi Dash Agent engine. Empty (and not written) unless
     /// a developer overrides the engine binary.
-    #[serde(default, skip_serializing_if = "EngineSection::is_default")]
-    pub engine: EngineSection,
+    #[serde(default, skip_serializing_if = "PidashAgentSection::is_default")]
+    pub engine: PidashAgentSection,
     /// `[auth]`: where the daemon and engine credentials are stored
     /// (`config::secrets`). Not written while it holds only defaults.
     #[serde(default, skip_serializing_if = "AuthSection::is_default")]
     pub auth: AuthSection,
+    /// `[auth_event]`: the persisted record of the last sign-in event on
+    /// this computer (desktop_unified_signin §6.1). Written by every
+    /// `pidash auth login` and `pidash auth logout` in the same config
+    /// write as the credentials, and reported by the IPC `Hello` whether
+    /// or not an account is live, so the desktop app can follow the newest
+    /// event. Absent on installs from before this change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_event: Option<AuthEvent>,
+}
+
+/// One persisted sign-in event (desktop_unified_signin §6.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthEvent {
+    /// A counter that only increases on this computer.
+    pub seq: u64,
+    pub kind: AuthEventKind,
+    /// For `signed_out`: why this computer was signed out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<AuthEventReason>,
+    /// Whose sign-in (or sign-out) this was, also for `signed_out`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<AuthEventAccount>,
+    /// Wall-clock time, for display and the newest-wins tie-break.
+    pub at: DateTime<Utc>,
+}
+
+/// The persisted form of a sign-in event, as `Hello` reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthEventKind {
+    SignedIn,
+    SignedOut,
+}
+
+/// Why a `signed_out` event happened (design §6.1). `logout` and
+/// `last_workspace_logout` are written by `pidash auth logout` itself;
+/// `removed`, `revoked` and `expired` describe server-side losses of the
+/// daemon credential. Only a sign-out the user made can sign the app out
+/// (design §12 rule 1): `expired` and `revoked` never win.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthEventReason {
+    Logout,
+    LastWorkspaceLogout,
+    Removed,
+    Revoked,
+    Expired,
+}
+
+/// The account a sign-in event names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthEventAccount {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    pub cloud_url: String,
+}
+
+impl AuthEventKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuthEventKind::SignedIn => "signed_in",
+            AuthEventKind::SignedOut => "signed_out",
+        }
+    }
+}
+
+impl AuthEventReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuthEventReason::Logout => "logout",
+            AuthEventReason::LastWorkspaceLogout => "last_workspace_logout",
+            AuthEventReason::Removed => "removed",
+            AuthEventReason::Revoked => "revoked",
+            AuthEventReason::Expired => "expired",
+        }
+    }
 }
 
 /// Top-level `[engine]` table (`src/engine/locate.rs`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EngineSection {
-    /// Development override for the built-in engine executable, e.g. a local
+pub struct PidashAgentSection {
+    /// Development override for the Pi Dash Agent executable, e.g. a local
     /// Codex build. When set it must exist; the installed
     /// `engine/<version>/` layouts next to `pidash` are then not searched.
     /// A leading `~/` is expanded.
@@ -122,7 +200,7 @@ pub const SECRETS_IN_KEYRING: &str = "keyring";
 /// The engine credential (`ec_…`, design §4.3): one per machine, 14 days
 /// from issue. Its only use is `POST /api/v1/runner/engine/model-token/`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EngineCredential {
+pub struct PidashAgentCredential {
     /// The raw `ec_` value. Empty in the file when the secret is in the
     /// keychain.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -131,7 +209,7 @@ pub struct EngineCredential {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
-impl EngineSection {
+impl PidashAgentSection {
     pub fn is_default(&self) -> bool {
         self == &Self::default()
     }
@@ -200,7 +278,7 @@ pub struct CliSection {
     /// The machine's engine credential (design §4.3), issued by `pidash
     /// auth login` or `pidash login --engine`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub engine_credential: Option<EngineCredential>,
+    pub engine_credential: Option<PidashAgentCredential>,
 
     /// Local mirror of the server's engine sign-in state for this machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -362,6 +440,11 @@ pub struct DaemonConfig {
     /// run `pidash update --restart` (or `pidash update` to defer restart).
     #[serde(default = "default_auto_update")]
     pub auto_update: bool,
+    /// Machine-level limit of concurrent issue runs (NEWPIDASH-241 T3/T7).
+    /// Default 3, range 1-65535, applied live via IPC without daemon restart.
+    /// `u16` mirrors the server limit validation (1..=65535).
+    #[serde(default = "default_max_concurrent_agent_runs")]
+    pub max_concurrent_agent_runs: u16,
 }
 
 fn default_auto_update() -> bool {
@@ -439,6 +522,23 @@ impl Default for DaemonConfig {
             agent_observability_v1: false,
             agent_watchdog: AgentWatchdogConfig::default(),
             auto_update: default_auto_update(),
+            max_concurrent_agent_runs: default_max_concurrent_agent_runs(),
+        }
+    }
+}
+
+fn default_max_concurrent_agent_runs() -> u16 {
+    3
+}
+
+impl DaemonConfig {
+    pub fn validate_max_concurrent_agent_runs(v: u16) -> Result<(), String> {
+        if (1..=65535).contains(&v) {
+            Ok(())
+        } else {
+            Err(format!(
+                "max_concurrent_agent_runs must be 1..=65535, got {v}"
+            ))
         }
     }
 }
@@ -498,6 +598,12 @@ pub struct RunnerConfig {
     /// parse. Only consulted when `agent.kind == grok`.
     #[serde(default)]
     pub grok: GrokSection,
+    /// Antigravity settings. Missing section falls back to
+    /// `AntigravitySection::default()` so existing `config.toml` files
+    /// (written before Antigravity support) still parse. Only consulted when
+    /// `agent.kind == antigravity`.
+    #[serde(default)]
+    pub antigravity: AntigravitySection,
     /// Muse Code settings. Missing section falls back to
     /// `MuseCodeSection::default()` so existing `config.toml` files (written
     /// before Muse Code support) still parse. Only consulted when
@@ -508,6 +614,59 @@ pub struct RunnerConfig {
     /// a minimal `config.toml` doesn't have to spell out every knob.
     #[serde(default)]
     pub approval_policy: ApprovalPolicySection,
+}
+
+impl RunnerConfig {
+    /// The default model configured for this runner's agent, if any. The
+    /// Pi Dash Agent's model comes from Pi Dash, so it has none here.
+    pub fn configured_model(&self) -> Option<&str> {
+        match self.agent.kind {
+            AgentKind::Codex => self.codex.model_default.as_deref(),
+            AgentKind::ClaudeCode => self.claude_code.model_default.as_deref(),
+            AgentKind::CursorAgent => self.cursor_agent.model_default.as_deref(),
+            AgentKind::OpenClaw => self.openclaw.model_default.as_deref(),
+            AgentKind::Grok => self.grok.model_default.as_deref(),
+            AgentKind::Antigravity => self.antigravity.model_default.as_deref(),
+            AgentKind::MuseCode => self.muse_code.model_default.as_deref(),
+            AgentKind::PidashAgent => None,
+        }
+    }
+
+    /// The configured reasoning effort; `None` for agents without one
+    /// (only Codex, Claude Code and Muse Code take an effort tier).
+    pub fn configured_reasoning_effort(&self) -> Option<&str> {
+        match self.agent.kind {
+            AgentKind::Codex => self.codex.effort_default.as_deref(),
+            AgentKind::ClaudeCode => self.claude_code.effort_default.as_deref(),
+            AgentKind::MuseCode => self.muse_code.effort_default.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// The reasoning-effort slot of `kind`'s section; `None` for agents
+    /// without an effort knob (only Codex, Claude Code and Muse Code have one).
+    pub fn effort_slot_mut(&mut self, kind: AgentKind) -> Option<&mut Option<String>> {
+        match kind {
+            AgentKind::Codex => Some(&mut self.codex.effort_default),
+            AgentKind::ClaudeCode => Some(&mut self.claude_code.effort_default),
+            AgentKind::MuseCode => Some(&mut self.muse_code.effort_default),
+            _ => None,
+        }
+    }
+
+    /// The model slot of `kind`'s section (the Pi Dash Agent has none).
+    pub fn model_slot_mut(&mut self, kind: AgentKind) -> Option<&mut Option<String>> {
+        match kind {
+            AgentKind::Codex => Some(&mut self.codex.model_default),
+            AgentKind::ClaudeCode => Some(&mut self.claude_code.model_default),
+            AgentKind::CursorAgent => Some(&mut self.cursor_agent.model_default),
+            AgentKind::OpenClaw => Some(&mut self.openclaw.model_default),
+            AgentKind::Grok => Some(&mut self.grok.model_default),
+            AgentKind::Antigravity => Some(&mut self.antigravity.model_default),
+            AgentKind::MuseCode => Some(&mut self.muse_code.model_default),
+            AgentKind::PidashAgent => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -599,15 +758,23 @@ pub enum AgentKind {
     /// xAI Grok via its native ACP server (`grok agent stdio`), which the
     /// runner drives directly over the Agent Client Protocol.
     Grok,
+    /// Google Antigravity via its native ACP server (`agy acp`), which the
+    /// runner drives directly over the Agent Client Protocol (shared driver
+    /// with Grok, `crate::acp`).
+    Antigravity,
     /// Meta Muse Code via its headless one-shot mode
     /// (`muse exec --json --prompt-file <PATH>`), whose JSONL event stream the
     /// runner drives one turn per subprocess.
     MuseCode,
-    /// The built-in engine (`pidash-agent-engine`, the open-source Codex
+    /// Pi Dash Agent (`pidash-agent-engine`, the open-source Codex
     /// shipped with the CLI; design §5). Driven by the Codex driver; the
     /// daemon supplies the binary, a private `CODEX_HOME` and the model
-    /// token itself, so the block holds no paths.
-    Engine,
+    /// token itself, so the block holds no paths. Pinned (P6): the
+    /// serialized value stays `engine` (section 8); only the Rust name
+    /// changed.
+    #[serde(rename = "engine")]
+    #[value(name = "engine")]
+    PidashAgent,
 }
 
 impl AgentKind {
@@ -620,8 +787,9 @@ impl AgentKind {
             AgentKind::CursorAgent => "Cursor",
             AgentKind::OpenClaw => "OpenClaw",
             AgentKind::Grok => "Grok",
+            AgentKind::Antigravity => "Antigravity",
             AgentKind::MuseCode => "Muse Code",
-            AgentKind::Engine => "Built-in engine",
+            AgentKind::PidashAgent => "Pi Dash Agent",
         }
     }
 
@@ -640,9 +808,28 @@ impl AgentKind {
             // Grok is its own ACP server (`grok agent stdio`), so the runner
             // invokes `grok` directly.
             AgentKind::Grok => "grok",
+            // Antigravity is its own ACP server (`agy acp`), so the runner
+            // invokes `agy` directly.
+            AgentKind::Antigravity => "agy",
             // Muse Code ships as the `muse` CLI; the runner drives `muse exec`.
             AgentKind::MuseCode => "muse",
-            AgentKind::Engine => crate::engine::ENGINE_BINARY_NAME,
+            AgentKind::PidashAgent => crate::pidash_agent::ENGINE_BINARY_NAME,
+        }
+    }
+
+    /// The `agent_versions` map key (wire: `engine` for the Pi Dash
+    /// Agent, section 8). Replaces the `format!("{:?}", kind)` probe
+    /// so the key stays `engine` after the variant rename.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentKind::Codex => "codex",
+            AgentKind::ClaudeCode => "claudecode",
+            AgentKind::CursorAgent => "cursoragent",
+            AgentKind::OpenClaw => "openclaw",
+            AgentKind::Grok => "grok",
+            AgentKind::Antigravity => "antigravity",
+            AgentKind::MuseCode => "musecode",
+            AgentKind::PidashAgent => "engine",
         }
     }
 
@@ -656,8 +843,9 @@ impl AgentKind {
             AgentKind::CursorAgent => "https://cursor.com/download",
             AgentKind::OpenClaw => "https://github.com/openclaw/acpx",
             AgentKind::Grok => "https://x.ai/cli",
+            AgentKind::Antigravity => "https://antigravity.google/docs/getting-started/",
             AgentKind::MuseCode => "https://developer.meta.com/ai/products/muse-code/",
-            AgentKind::Engine => "https://github.com/The-AI-Republic/pi-dash",
+            AgentKind::PidashAgent => "https://github.com/The-AI-Republic/pi-dash",
         }
     }
 
@@ -697,6 +885,16 @@ impl AgentKind {
                 windows: Some("irm 'https://cursor.com/install?win32=true' | iex"),
                 doc_url: "https://cursor.com/docs/cli/installation",
             }),
+            // Antigravity CLI — https://antigravity.google/docs/getting-started/
+            // (CLI tab). The unix installer was verified by running it on the
+            // dev box (installs `agy` 1.5.15 to `~/.local/bin`); the Windows
+            // `install.cmd` variant is documented on the same page but was not
+            // executed here, so Windows keeps the open-install-page fallback.
+            AgentKind::Antigravity => Some(AgentInstaller {
+                unix: Some("curl -fsSL https://antigravity.google/cli/install.sh | bash"),
+                windows: None,
+                doc_url: "https://antigravity.google/docs/getting-started/",
+            }),
             // OpenClaw (acpx), Grok, and Muse Code do not (yet) publish a
             // verified official one-line installer, so we keep the
             // open-install-page fallback for these agents rather than guess a
@@ -704,7 +902,7 @@ impl AgentKind {
             AgentKind::OpenClaw | AgentKind::Grok | AgentKind::MuseCode => None,
             // Ships with pidash (`pidash engine install`), never fetched
             // from a vendor.
-            AgentKind::Engine => None,
+            AgentKind::PidashAgent => None,
         }
     }
 
@@ -720,8 +918,11 @@ impl AgentKind {
             AgentKind::CursorAgent => Some("cursor-agent login  (or set CURSOR_API_KEY)"),
             AgentKind::OpenClaw => None,
             AgentKind::Grok => Some("set XAI_API_KEY  (or run `grok` and log in)"),
+            AgentKind::Antigravity => {
+                Some("run `agy` and sign in  (or `agy acp --login` over SSH)")
+            }
             AgentKind::MuseCode => Some("set META_API_KEY"),
-            AgentKind::Engine => Some("pidash login --engine"),
+            AgentKind::PidashAgent => Some("pidash login --engine"),
         }
     }
 }
@@ -765,6 +966,12 @@ pub struct ClaudeCodeSection {
     pub binary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_default: Option<String>,
+    /// `claude --effort` level (`low` / `medium` / `high` / `xhigh` /
+    /// `max`). `None` omits the flag so Claude Code applies its own default.
+    /// Only meaningful alongside `model_default` (the web picker pairs
+    /// levels with models).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_default: Option<String>,
 }
 
 fn default_claude_binary() -> String {
@@ -776,6 +983,7 @@ impl Default for ClaudeCodeSection {
         Self {
             binary: default_claude_binary(),
             model_default: None,
+            effort_default: None,
         }
     }
 }
@@ -853,6 +1061,31 @@ impl Default for GrokSection {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AntigravitySection {
+    /// The `agy` CLI binary the runner spawns as an ACP server (`agy acp`
+    /// with the Antigravity flags). Per-field default so a partial
+    /// `[antigravity]` block (e.g. only `model_default`) still parses
+    /// without spelling out `binary = "agy"`.
+    #[serde(default = "default_agy_binary")]
+    pub binary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_default: Option<String>,
+}
+
+fn default_agy_binary() -> String {
+    "agy".to_string()
+}
+
+impl Default for AntigravitySection {
+    fn default() -> Self {
+        Self {
+            binary: default_agy_binary(),
+            model_default: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MuseCodeSection {
     /// The `muse` CLI binary the runner drives as `muse exec --json`. Per-field
     /// default so a partial `[muse_code]` block (e.g. only `model_default`)
@@ -861,6 +1094,12 @@ pub struct MuseCodeSection {
     pub binary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_default: Option<String>,
+    /// `muse exec --reasoning-effort` tier (`none` / `minimal` / `low` /
+    /// `medium` / `high` / `xhigh` / `max` / `ultra`). `None` omits the flag
+    /// so Muse applies its own default. Like Codex's, only meaningful
+    /// alongside `model_default` (the web picker pairs tiers with models).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort_default: Option<String>,
 }
 
 fn default_muse_binary() -> String {
@@ -872,6 +1111,7 @@ impl Default for MuseCodeSection {
         Self {
             binary: default_muse_binary(),
             model_default: None,
+            effort_default: None,
         }
     }
 }
@@ -1250,6 +1490,7 @@ mod tests {
             cursor_agent: Default::default(),
             openclaw: Default::default(),
             grok: Default::default(),
+            antigravity: Default::default(),
             muse_code: Default::default(),
             approval_policy: Default::default(),
         }
@@ -1259,6 +1500,7 @@ mod tests {
         Config {
             engine: Default::default(),
             auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://x".into(),
@@ -1268,6 +1510,7 @@ mod tests {
                 agent_observability_v1: false,
                 agent_watchdog: Default::default(),
                 auto_update: true,
+                max_concurrent_agent_runs: 3,
             },
             runners,
             cli: None,
@@ -1280,7 +1523,7 @@ mod tests {
         let text = toml::to_string_pretty(&cfg).unwrap();
         assert!(!text.contains("[engine]"), "{text}");
         let back: Config = toml::from_str(&text).unwrap();
-        assert_eq!(back.engine, EngineSection::default());
+        assert_eq!(back.engine, PidashAgentSection::default());
 
         let mut cfg = config_with(vec![]);
         cfg.engine.binary = Some(PathBuf::from("/opt/codex/bin/codex"));
@@ -1291,6 +1534,31 @@ mod tests {
             back.engine.binary,
             Some(PathBuf::from("/opt/codex/bin/codex"))
         );
+    }
+
+    #[test]
+    fn agent_kind_engine_serializes_as_engine_and_reads_back() {
+        // §6.3 pin (section 8): existing configs say `kind = "engine"`.
+        let text = serde_json::to_string(&AgentKind::PidashAgent).unwrap();
+        assert_eq!(text, "\"engine\"");
+        let kind: AgentKind = serde_json::from_str("\"engine\"").unwrap();
+        assert_eq!(kind, AgentKind::PidashAgent);
+        // Other kinds keep their spellings.
+        assert_eq!(
+            serde_json::to_string(&AgentKind::Codex).unwrap(),
+            "\"codex\""
+        );
+        assert_eq!(AgentKind::PidashAgent.as_str(), "engine");
+        assert_eq!(AgentKind::Codex.as_str(), "codex");
+        assert_eq!(AgentKind::ClaudeCode.as_str(), "claudecode");
+        assert_eq!(AgentKind::MuseCode.as_str(), "musecode");
+    }
+
+    #[test]
+    fn agent_kind_engine_parses_from_the_agent_flag() {
+        use clap::ValueEnum;
+        let kind = AgentKind::from_str("engine", false).unwrap();
+        assert_eq!(kind, AgentKind::PidashAgent);
     }
 
     #[test]
@@ -1506,6 +1774,10 @@ mod tests {
             GrokSection::default().binary
         );
         assert_eq!(
+            AgentKind::Antigravity.default_binary(),
+            AntigravitySection::default().binary
+        );
+        assert_eq!(
             AgentKind::MuseCode.default_binary(),
             MuseCodeSection::default().binary
         );
@@ -1521,6 +1793,7 @@ mod tests {
             AgentKind::CursorAgent,
             AgentKind::OpenClaw,
             AgentKind::Grok,
+            AgentKind::Antigravity,
             AgentKind::MuseCode,
         ] {
             let url = kind.install_page_url();
@@ -1541,6 +1814,7 @@ mod tests {
             "chatgpt.com",
             "learn.chatgpt.com",
             "cursor.com",
+            "antigravity.google",
             "@openai/codex", // npm package name, not a URL host
         ];
         for kind in [
@@ -1549,6 +1823,7 @@ mod tests {
             AgentKind::CursorAgent,
             AgentKind::OpenClaw,
             AgentKind::Grok,
+            AgentKind::Antigravity,
             AgentKind::MuseCode,
         ] {
             let Some(installer) = kind.official_installer() else {
@@ -1580,12 +1855,13 @@ mod tests {
 
     #[test]
     fn agents_with_verified_installers_have_them_others_fall_back() {
-        // The three agents whose vendor scripts we verified must expose an
+        // The agents whose vendor scripts we verified must expose an
         // installer; the rest deliberately return None so `runner add` keeps
         // the open-install-page fallback.
         assert!(AgentKind::ClaudeCode.official_installer().is_some());
         assert!(AgentKind::Codex.official_installer().is_some());
         assert!(AgentKind::CursorAgent.official_installer().is_some());
+        assert!(AgentKind::Antigravity.official_installer().is_some());
         assert!(AgentKind::OpenClaw.official_installer().is_none());
         assert!(AgentKind::Grok.official_installer().is_none());
         assert!(AgentKind::MuseCode.official_installer().is_none());
@@ -1614,6 +1890,7 @@ mod tests {
             AgentKind::ClaudeCode,
             AgentKind::Codex,
             AgentKind::CursorAgent,
+            AgentKind::Antigravity,
         ] {
             assert!(
                 kind.post_install_login_hint().is_some(),

@@ -366,9 +366,11 @@ pub async fn list(
         }
     };
     page_size = page_size.min(1000);
-    // `page_size <= 0` divides by zero (`ceil(total / 0)`); a negative
-    // page negative-indexes the slice — both are 500s in Django.
-    if page_size <= 0 || page < 0 {
+    // `page_size <= 0` divides by zero (`ceil(total / 0)`) — a 500 in
+    // Django. A negative `page` is not: `paginate` only multiplies when
+    // `current_page > 0`, so a negative page reads from the start,
+    // and this endpoint answers that first page with 200.
+    if page_size <= 0 {
         return Denial::ServerError.into_response();
     }
     let db = pidash_db::pool::sea_orm_connection(&context.pool);
@@ -389,8 +391,18 @@ pub async fn list(
     };
     let total: i64 = i64::try_from(total_count).unwrap_or(i64::MAX);
     let total_pages = (total + page_size - 1) / page_size;
-    let start: i64 = page * page_size;
-    let end: i64 = (start + page_size).min(total);
+    // Cursor arithmetic runs in `i128` like Django's unbounded ints: a
+    // crafted `cursor` can carry `i64::MAX`, and a negative `page`
+    // reads from the start (`paginate` only multiplies when
+    // `current_page > 0`). The DB offset stays clamped to `i64` — a
+    // huge page reads an empty slice either way.
+    let start_128 = if page > 0 {
+        i128::from(page) * i128::from(page_size)
+    } else {
+        0
+    };
+    let start: i64 = start_128.min(i128::from(i64::MAX)) as i64;
+    let end: i64 = (i128::from(start) + i128::from(page_size)).min(i128::from(total)) as i64;
     let rows_result = version_entity::Entity::find()
         .select_only()
         .columns([
@@ -488,12 +500,12 @@ pub async fn list(
         results.push(serde_json::Value::Object(item));
     }
     let next_cursor: Option<String> = if end < total {
-        Some(format!("{page_size}:{}:0", page + 1))
+        Some(format!("{page_size}:{}:0", i128::from(page) + 1))
     } else {
         None
     };
     let envelope = serde_json::json!({
-        "prev_cursor": format!("{page_size}:{}:0", page - 1),
+        "prev_cursor": format!("{page_size}:{}:0", i128::from(page) - 1),
         "cursor": format!("{page_size}:{page}:0"),
         "next_cursor": next_cursor,
         "prev_page_results": page > 0,

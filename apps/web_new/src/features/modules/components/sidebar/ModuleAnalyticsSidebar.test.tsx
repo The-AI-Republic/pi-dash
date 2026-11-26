@@ -56,6 +56,7 @@ const ARCHIVED_PATH = `/api/workspaces/${SLUG}/projects/${PROJECT}/archived-modu
 const ESTIMATES_PATH = `/api/workspaces/${SLUG}/projects/${PROJECT}/estimates/`;
 const ROLES_PATH = `/api/users/me/workspaces/${SLUG}/project-roles/`;
 const LINKS_PATH = `/api/workspaces/${SLUG}/projects/${PROJECT}/modules/${MODULE}/module-links/`;
+const PROJECT_PATH = `/api/workspaces/${SLUG}/projects/${PROJECT}/`;
 
 function detailFixture(overrides: Partial<ModuleDetail> = {}): ModuleDetail {
   return {
@@ -128,9 +129,11 @@ function archivedFixture(overrides: Partial<ArchivedModuleDetail> = {}): Archive
   };
 }
 
+const ESTIMATE_ID = "423e4567-e89b-12d3-a456-426614174003";
+
 function estimate(type: string, lastUsed = true) {
   return {
-    id: "423e4567-e89b-12d3-a456-426614174003",
+    id: ESTIMATE_ID,
     workspace: "123e4567-e89b-12d3-a456-426614174000",
     project: PROJECT,
     name: "Estimate",
@@ -145,6 +148,61 @@ function estimate(type: string, lastUsed = true) {
   };
 }
 
+function projectFixture(estimateId: string | null): Record<string, unknown> {
+  return {
+    id: PROJECT,
+    name: "Project",
+    identifier: "WEB",
+    logo_props: {},
+    estimate: estimateId,
+    workspace: "123e4567-e89b-12d3-a456-426614174000",
+    created_at: "2026-01-02T03:04:05Z",
+    updated_at: "2026-02-03T04:05:06Z",
+    created_by: null,
+    updated_by: null,
+    deleted_at: null,
+    description: "",
+    description_text: null,
+    description_html: null,
+    network: 2,
+    default_assignee: null,
+    project_lead: null,
+    emoji: null,
+    icon_prop: null,
+    module_view: true,
+    cycle_view: true,
+    issue_views_view: true,
+    page_view: true,
+    intake_view: true,
+    inbox_view: true,
+    is_time_tracking_enabled: false,
+    is_issue_type_enabled: true,
+    is_default: false,
+    guest_view_all_features: false,
+    members_can_edit_states: true,
+    cover_image: null,
+    cover_image_asset: null,
+    cover_image_url: null,
+    archive_in: 0,
+    close_in: 0,
+    default_state: null,
+    archived_at: null,
+    timezone: "UTC",
+    external_source: null,
+    external_id: null,
+    repo_url: "",
+    base_branch: "",
+    is_favorite: false,
+    sort_order: null,
+    member_role: null,
+    anchor: null,
+    members: [],
+    next_work_item_sequence: 1,
+    agent_executor_options: [],
+    default_agent_executor: "",
+  };
+}
+
 interface Harness {
   detail: ModuleDetail | ArchivedModuleDetail;
   detailStatus: number;
@@ -156,6 +214,7 @@ interface Harness {
   detailCalls: number;
   roles: Record<string, number>;
   linkPosts: Array<Record<string, unknown>>;
+  projectEstimate: string | null;
 }
 
 let harness: Harness;
@@ -173,6 +232,7 @@ beforeEach(() => {
     detailCalls: 0,
     roles: {},
     linkPosts: [],
+    projectEstimate: null,
   };
   createAppClient("https://api.test", (async (url: string, init?: RequestInit) => {
     if (url.endsWith(DETAIL_PATH) || url.endsWith(ARCHIVED_PATH)) {
@@ -196,6 +256,14 @@ beforeEach(() => {
         url,
         headers: { get: () => null },
         text: async () => JSON.stringify(harness.detailStatus === 200 ? harness.detail : { detail: "boom" }),
+      } as never;
+    }
+    if (url.endsWith(PROJECT_PATH)) {
+      return {
+        status: 200,
+        url,
+        headers: { get: () => null },
+        text: async () => JSON.stringify(projectFixture(harness.projectEstimate)),
       } as never;
     }
     if (url.endsWith(ESTIMATES_PATH)) {
@@ -505,11 +573,20 @@ describe("ModuleAnalyticsSidebarContent", () => {
 describe("ModuleAnalyticsSidebar", () => {
   it("loads the detail, renders the counts, and fetches points gating", async () => {
     harness.estimates = [estimate("points")];
+    harness.projectEstimate = ESTIMATE_ID;
     renderSidebar();
     expect(screen.getByTestId("modules-analytics-sidebar-skeleton")).toBeInTheDocument();
     expect(await screen.findByTestId("modules-analytics-sidebar")).toBeInTheDocument();
     expect(screen.getByLabelText("Module name")).toHaveValue("Delivery");
     expect(screen.getByText("Points")).toBeInTheDocument();
+  });
+
+  it("hides the points row when the project has disabled estimates (NEWPIDASH-297)", async () => {
+    harness.estimates = [estimate("points")];
+    harness.projectEstimate = null;
+    renderSidebar();
+    expect(await screen.findByTestId("modules-analytics-sidebar")).toBeInTheDocument();
+    expect(screen.queryByText("Points")).not.toBeInTheDocument();
   });
 
   it("shows a loader on a slow fetch", async () => {
@@ -540,6 +617,7 @@ describe("ModuleAnalyticsSidebar", () => {
 
   it("does not offer a points row for a time estimate system", async () => {
     harness.estimates = [estimate("time")];
+    harness.projectEstimate = ESTIMATE_ID;
     renderSidebar();
     expect(await screen.findByTestId("modules-analytics-sidebar")).toBeInTheDocument();
     expect(screen.queryByText("Points")).not.toBeInTheDocument();

@@ -4,7 +4,7 @@
 //! (`apps/api/pi_dash/app/serializers/issue.py:136-520`):
 //!
 //! * `to_representation` (`:185-191`) → [`issue_create_to_representation`]:
-//!   the 41-key wire shape ([`ISSUE_CREATE_FIELDS`], order verified live on
+//!   the 43-key wire shape ([`ISSUE_CREATE_FIELDS`], order verified live on
 //!   the pinned Django 4.2.30 + DRF 3.15.2) with the `assignee_ids` /
 //!   `label_ids` `initial_data` echo appended last. The create view
 //!   re-queries instead of returning this (FX-ISS-14 owns that shape), but
@@ -23,8 +23,8 @@
 //!
 //! Reuse (merged, called not copied): [`super::serializers_engage`]'s
 //! [`issue_is_actively_synced`](super::serializers_engage::issue_is_actively_synced)
-//! for the sync lock; [`AgentExecutorKind`], [`ManagedRunnerReason`],
-//! [`cloud_agent_is_configured`], [`managed_runner_availability`] for the
+//! for the sync lock; [`AgentExecutorKind`], [`PidashAgentReason`],
+//! [`cloud_agent_is_configured`], [`pidash_agent_availability`] for the
 //! executor branch; [`sticky_kernel`] for the HTML/binary arms (the same
 //! `nh3.clean` transcription as `api::space::sanitize`, which this crate
 //! cannot depend on without a dependency cycle — verified byte-identical
@@ -82,12 +82,12 @@ use std::borrow::Cow;
 use base64::Engine as _;
 use serde::Serialize;
 
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings};
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_db::config::PidashAgentSettings;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::v1_assets::sticky as sticky_kernel;
 
 use super::serializers_engage::issue_is_actively_synced;
-use crate::dispatch::{LlmProfile, UserFlags};
+use crate::run_creation::{LlmProfile, UserFlags};
 use crate::tasks_cleanup::versions::chunk_ranges;
 
 // ---------------------------------------------------------------------------
@@ -95,12 +95,12 @@ use crate::tasks_cleanup::versions::chunk_ranges;
 // ---------------------------------------------------------------------------
 
 /// `IssueCreateSerializer.to_representation` wire keys in output order
-/// (verified live on the pinned Django + DRF): the 39 readable fields in
+/// (verified live on the pinned Django + DRF): the 40 readable fields in
 /// `get_fields()` order, then the `to_representation` echo appends
 /// `assignee_ids` first and `label_ids` second (`:187-190`). The write-only
 /// pair is absent from `super().to_representation` — the echo keys sit at
 /// the END, not in declared position.
-pub const ISSUE_CREATE_FIELDS: [&str; 42] = [
+pub const ISSUE_CREATE_FIELDS: [&str; 43] = [
     "id",
     "state_id",
     "parent_id",
@@ -131,6 +131,7 @@ pub const ISSUE_CREATE_FIELDS: [&str; 42] = [
     "git_work_branch",
     "created_via",
     "agent_executor",
+    "work_type",
     "created_by",
     "updated_by",
     "project",
@@ -184,6 +185,7 @@ pub struct IssueCreateRow<'a> {
     pub git_work_branch: &'a str,
     pub created_via: Option<&'a str>,
     pub agent_executor: Option<&'a str>,
+    pub work_type: Option<&'a str>,
     pub created_by: Option<&'a str>,
     pub updated_by: Option<&'a str>,
     pub project: &'a str,
@@ -234,6 +236,7 @@ pub struct IssueCreateView {
     pub git_work_branch: String,
     pub created_via: Option<String>,
     pub agent_executor: Option<String>,
+    pub work_type: Option<String>,
     pub created_by: Option<String>,
     pub updated_by: Option<String>,
     pub project: String,
@@ -316,6 +319,7 @@ pub fn issue_create_to_representation(
         git_work_branch: row.git_work_branch.to_owned(),
         created_via: row.created_via.map(str::to_owned),
         agent_executor: row.agent_executor.map(str::to_owned),
+        work_type: row.work_type.map(str::to_owned),
         created_by: row.created_by.map(str::to_owned),
         updated_by: row.updated_by.map(str::to_owned),
         project: row.project.to_owned(),
@@ -569,6 +573,10 @@ pub struct ValidateAttrs<'a> {
     /// `attrs["agent_executor"]` (step 4): outer `None` = key absent,
     /// `Some(None)` = clear the override, `Some(Some)` = pinned value.
     pub agent_executor: Option<Option<&'a str>>,
+    /// `attrs["work_type"]` (step 4b, PDASHOSS01-234): outer `None` = key
+    /// absent, `Some(None)` = explicit null, `Some(Some)` = the string
+    /// (`""` normalizes to `None`).
+    pub work_type: Option<Option<&'a str>>,
     /// `attrs["description_html"]` (step 5; truthy inputs only).
     pub description_html: Option<&'a str>,
     /// `attrs["description_binary"]` base64 (step 6; dead through DRF).
@@ -629,10 +637,8 @@ pub struct ValidateInstance<'a> {
 /// kernel.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExecutorPolicy<'a> {
-    /// `CLOUD_AGENT_ENABLED` for [`cloud_agent_is_configured`].
-    pub cloud: &'a CloudAgentSettings,
-    /// `MANAGED_RUNNER_ENABLED` for [`managed_runner_availability`].
-    pub managed: &'a ManagedRunnerSettings,
+    /// `MANAGED_RUNNER_ENABLED` for [`pidash_agent_availability`](crate::run_creation::pidash_agent_availability::pidash_agent_availability).
+    pub managed: &'a PidashAgentSettings,
     /// `request.user` flags (`None` = anonymous / absent request).
     pub viewer: Option<&'a UserFlags>,
 }
@@ -647,11 +653,8 @@ pub struct ExecutorPolicy<'a> {
 #[derive(Clone, Copy)]
 pub struct ValidateProbes<'a> {
     /// [`GIT_ISSUE_SYNC_PROBE_SQL`](super::serializers_engage::GIT_ISSUE_SYNC_PROBE_SQL)
-    /// verdict.
+    /// verdict (git-only after PDASHOSS01-354).
     pub git_sync_exists: &'a dyn Fn() -> bool,
-    /// [`GITHUB_ISSUE_SYNC_PROBE_SQL`](super::serializers_engage::GITHUB_ISSUE_SYNC_PROBE_SQL)
-    /// verdict.
-    pub github_sync_exists: &'a dyn Fn() -> bool,
     /// [`HAS_ACTIVE_RUN_SQL`] verdict. Called up to twice (pod + executor
     /// mid-flight checks), exactly like the `has_active_run` property.
     pub has_active_run: &'a dyn Fn() -> bool,
@@ -674,15 +677,15 @@ pub struct ValidateProbes<'a> {
     /// runs only when neither the instance nor attrs resolved a project.
     pub fetch_project: &'a dyn Fn() -> Option<ResolvedProject>,
     /// The `managed_llm_profile` seam input to
-    /// [`managed_runner_availability`].
+    /// [`pidash_agent_availability`].
     pub llm_profile: &'a dyn Fn() -> LlmProfile,
-    /// [`ENROLLED_MANAGED_RUNNERS_EXISTS_SQL`](crate::dispatch::ENROLLED_MANAGED_RUNNERS_EXISTS_SQL)
+    /// [`ENROLLED_MANAGED_RUNNERS_EXISTS_SQL`](crate::run_creation::ENROLLED_MANAGED_RUNNERS_EXISTS_SQL)
     /// verdict.
     pub enrolled_exists: &'a dyn Fn() -> bool,
-    /// [`ONLINE_MANAGED_RUNNER_SQL`](crate::dispatch::ONLINE_MANAGED_RUNNER_SQL)
+    /// [`ONLINE_MANAGED_RUNNER_SQL`](crate::run_creation::ONLINE_MANAGED_RUNNER_SQL)
     /// verdict.
     pub online_exists: &'a dyn Fn() -> bool,
-    /// [`ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL`](crate::dispatch::ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL)
+    /// [`ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL`](crate::run_creation::ENROLLED_PAUSED_MANAGED_RUNNERS_EXISTS_SQL)
     /// verdict (`09738d222`): consulted only when a runner is enrolled
     /// but none is online, exactly as Python's `if` runs the paused
     /// probe last.
@@ -701,6 +704,10 @@ pub struct ValidateProbes<'a> {
 pub struct ValidatedAttrs {
     /// Cleaned HTML when the input key was present and truthy.
     pub description_html: Option<String>,
+    /// Normalized `work_type` when the input key was present: `Some(None)`
+    /// for null / `""` (inherit the project default), `Some(Some(key))` for
+    /// a registered work type.
+    pub work_type: Option<Option<String>>,
     /// Surviving member ids when the input was present and non-empty.
     pub assignee_ids: Option<Vec<uuid::Uuid>>,
     /// Surviving label ids when the input was present and non-empty.
@@ -757,12 +764,9 @@ pub fn issue_create_validate(
 ) -> Result<ValidatedAttrs, CreateValidateError> {
     // Step 1. Sync lock (:216-229).
     if let Some(current) = instance {
-        if issue_is_actively_synced(
-            current.external_source,
-            current.annotated_is_synced,
-            || (probes.git_sync_exists)(),
-            || (probes.github_sync_exists)(),
-        ) {
+        if issue_is_actively_synced(current.external_source, current.annotated_is_synced, || {
+            (probes.git_sync_exists)()
+        }) {
             let blocked = sync_locked_blocked(&attrs.locked, &current.locked);
             if !blocked.is_empty() {
                 return Err(CreateValidateError::Fields(
@@ -819,6 +823,7 @@ pub fn issue_create_validate(
 
     let mut validated = ValidatedAttrs {
         description_html: None,
+        work_type: None,
         assignee_ids: None,
         label_ids: None,
         agent_executor: None,
@@ -851,7 +856,7 @@ pub fn issue_create_validate(
                     message: Cow::Borrowed(EXECUTOR_UNKNOWN_MESSAGE),
                 });
             }
-            let normalized = pidash_types::dispatch::normalize_executor_write(executor)
+            let normalized = pidash_types::agent_runs::normalize_executor_write(executor)
                 .expect("known value parses")
                 .value()
                 .to_owned();
@@ -880,6 +885,22 @@ pub fn issue_create_validate(
             validated.agent_executor = Some(None);
         }
     }
+
+    // Step 4b. work_type (PDASHOSS01-234): key presence; falsy normalizes
+    // to the inherit state, a truthy key must be registered.
+    validated.work_type = match attrs.work_type {
+        None => None,
+        Some(None) | Some(Some("")) => Some(None),
+        Some(Some(key)) => {
+            if !crate::prompting::work_types::is_known(key) {
+                return Err(CreateValidateError::Field {
+                    field: "work_type",
+                    message: Cow::Owned(crate::prompting::work_types::unknown_work_type_message()),
+                });
+            }
+            Some(Some(key.to_owned()))
+        }
+    };
 
     // Step 5. description_html sanitize (:324-330): truthy inputs only; the
     // cleaned output always replaces the input (`nh3.clean` never returns
@@ -1010,7 +1031,7 @@ pub const ESTIMATE_EXISTS_SQL: &str =
 /// `Project.objects.filter(pk).first()` for the managed arm (`:296-299`):
 /// default soft-delete guard; `.first()` applies the model ordering
 /// (`-created_at`, `db/models/project.py:254`). Projection covers exactly
-/// the consumed columns (`managed_runner_availability` reads `id` +
+/// the consumed columns (`pidash_agent_availability` reads `id` +
 /// `workspace_id`). Params: `$1` project id (uuid). A `None` context
 /// project renders `IS NULL` (no row: a PK is never null).
 pub const PROJECT_FETCH_SQL: &str = "SELECT id, workspace_id FROM projects WHERE id = $1 \
@@ -1454,6 +1475,7 @@ mod tests {
             assigned_pod: None,
             assigned_runner: None,
             agent_executor: None,
+            work_type: None,
             description_html: None,
             description_binary: None,
             assignee_ids: None,
@@ -1493,7 +1515,6 @@ mod tests {
     /// Owned probe closures with a borrowing [`ValidateProbes`] view.
     struct ProbeBank {
         git_sync_exists: Box<dyn Fn() -> bool>,
-        github_sync_exists: Box<dyn Fn() -> bool>,
         has_active_run: Box<dyn Fn() -> bool>,
         filter_assignees: IdFilter,
         filter_labels: IdFilter,
@@ -1515,7 +1536,6 @@ mod tests {
             let resolved = project();
             Self {
                 git_sync_exists: Box::new(|| false),
-                github_sync_exists: Box::new(|| false),
                 has_active_run: Box::new(|| false),
                 filter_assignees: Box::new(|ids| ids.to_vec()),
                 filter_labels: Box::new(|ids| ids.to_vec()),
@@ -1538,7 +1558,6 @@ mod tests {
         fn probes(&self) -> ValidateProbes<'_> {
             ValidateProbes {
                 git_sync_exists: &self.git_sync_exists,
-                github_sync_exists: &self.github_sync_exists,
                 has_active_run: &self.has_active_run,
                 filter_assignees: &self.filter_assignees,
                 filter_labels: &self.filter_labels,
@@ -1556,47 +1575,8 @@ mod tests {
         }
     }
 
-    fn cloud_settings(enabled: bool) -> CloudAgentSettings {
-        CloudAgentSettings {
-            enabled,
-            writes_enabled: false,
-            github_tools_enabled: true,
-            disabled_tools: Vec::new(),
-            job_queue: "celery".to_string(),
-            reconcile_interval_secs: 30,
-            model_request_timeout_secs: 60,
-            execution_timeout_secs: 285,
-            run_soft_limit_secs: 300,
-            run_hard_limit_secs: 330,
-            stale_grace_secs: 60,
-            dispatch_lease_secs: 60,
-            dispatch_backoff_secs: 10,
-            dispatch_scan_interval_secs: 10,
-            sweep_interval_secs: 30,
-            dispatch_scan_batch: 100,
-            max_queue_age_secs: 900,
-            model_request_limit: 25,
-            tool_call_limit: 20,
-            write_call_limit: 3,
-            input_token_limit: 144_000,
-            output_token_limit: 16_000,
-            total_token_limit: 160_000,
-            max_output_tokens_per_request: 4096,
-            max_queued_per_workspace: 20,
-            max_running_per_workspace: 2,
-            user_creation_rate_per_minute: 6,
-            workspace_creation_rate_per_minute: 30,
-            tool_timeout_secs: 20,
-            max_tool_result_bytes: 65536,
-            max_prompt_bytes: 262_144,
-            max_final_result_bytes: 65536,
-            max_events: 500,
-            block_private_urls: true,
-        }
-    }
-
-    fn managed_settings(enabled: bool) -> ManagedRunnerSettings {
-        ManagedRunnerSettings {
+    fn managed_settings(enabled: bool) -> PidashAgentSettings {
+        PidashAgentSettings {
             enabled,
             queued_max_age_secs: 43200,
             graceful_stop_secs: 30,
@@ -1671,14 +1651,44 @@ mod tests {
         }
     }
 
-    /// The 11-step chain (`validate_order`): every step armed to fail at
+    /// PDASHOSS01-234 step 4b: key absent passes through, null / `""`
+    /// normalize to `None` (inherit), a registered key survives.
+    #[test]
+    fn work_type_normalizes_on_create() {
+        let bank = ProbeBank::permissive();
+        let probes = bank.probes();
+        let managed = managed_settings(false);
+        let policy = ExecutorPolicy {
+            managed: &managed,
+            viewer: None,
+        };
+        let ctx = ValidateContext {
+            project_id: Some(uid(1)),
+            allow_triage_state: false,
+        };
+        let mut attrs = base_attrs();
+        let run = |attrs: &ValidateAttrs<'_>| {
+            issue_create_validate(attrs, &ctx, None, &policy, &probes)
+                .expect("valid")
+                .work_type
+        };
+        assert_eq!(run(&attrs), None);
+        attrs.work_type = Some(None);
+        assert_eq!(run(&attrs), Some(None));
+        attrs.work_type = Some(Some(""));
+        assert_eq!(run(&attrs), Some(None));
+        attrs.work_type = Some(Some("software"));
+        assert_eq!(run(&attrs), Some(Some("software".to_owned())));
+    }
+
+    /// The 12-step chain (`validate_order`): every step armed to fail at
     /// once, then earlier failures lifted one by one — each step wins
     /// exactly when every step before it passes.
     #[test]
     fn validate_steps_run_in_fixture_order() {
         let golden = fixture();
         let order = golden["validate_order"].as_array().expect("order array");
-        assert_eq!(order.len(), 11, "eleven ordered steps");
+        assert_eq!(order.len(), 12, "twelve ordered steps");
 
         let instance_json = serde_json::json!({"a": 1});
         let attrs_json = serde_json::json!({"b": 2});
@@ -1705,10 +1715,8 @@ mod tests {
         }
         let probes = bank.probes();
 
-        let cloud = cloud_settings(false);
         let managed = managed_settings(false);
         let policy = ExecutorPolicy {
-            cloud: &cloud,
             managed: &managed,
             viewer: None,
         };
@@ -1737,6 +1745,7 @@ mod tests {
             deleted: false,
         }));
         attrs.agent_executor = Some(Some("bogus"));
+        attrs.work_type = Some(Some("bogus"));
         attrs.description_html = Some(&huge);
         attrs.description_binary = Some("!!!!");
         attrs.assignee_ids = Some(&assignees);
@@ -1802,8 +1811,19 @@ mod tests {
             serde_json::json!({ "agent_executor": EXECUTOR_UNKNOWN_MESSAGE }),
         );
 
-        // Step 5 wins once the executor key is absent.
+        // Step 4b wins once the executor key is absent.
         attrs.agent_executor = None;
+        let err = issue_create_validate(&attrs, &ctx, Some(&current), &policy, &probes)
+            .expect_err("work type wins");
+        assert_eq!(
+            err.wire_body().expect("wire"),
+            serde_json::json!({
+                "work_type": ["unknown work type; expected one of ['general', 'software']"]
+            }),
+        );
+
+        // Step 5 wins once the work type is registered.
+        attrs.work_type = Some(Some("general"));
         let err = issue_create_validate(&attrs, &ctx, Some(&current), &policy, &probes)
             .expect_err("html wins");
         assert_eq!(
@@ -1873,6 +1893,7 @@ mod tests {
             validated,
             ValidatedAttrs {
                 description_html: None,
+                work_type: Some(Some("general".to_owned())),
                 assignee_ids: None,
                 label_ids: Some(vec![uid(6)]),
                 agent_executor: None,
@@ -1904,10 +1925,8 @@ mod tests {
 
         let bank = ProbeBank::permissive();
         let probes = bank.probes();
-        let cloud = cloud_settings(false);
         let managed = managed_settings(false);
         let policy = ExecutorPolicy {
-            cloud: &cloud,
             managed: &managed,
             viewer: None,
         };
@@ -1970,21 +1989,13 @@ mod tests {
         // Create path (no instance) skips the lock entirely.
         issue_create_validate(&attrs, &ctx, None, &policy, &probes).expect("create skips lock");
 
-        // Unsynced instance skips the lock; the git probe short-circuits.
+        // Unsynced instance skips the lock; the git probe decides (git-only after the sunset).
         current.annotated_is_synced = None;
         let git_calls = Rc::new(Cell::new(0u32));
-        let github_calls = Rc::new(Cell::new(0u32));
         let mut counting = ProbeBank::permissive();
         {
             let calls = Rc::clone(&git_calls);
             counting.git_sync_exists = Box::new(move || {
-                calls.set(calls.get() + 1);
-                true
-            });
-        }
-        {
-            let calls = Rc::clone(&github_calls);
-            counting.github_sync_exists = Box::new(move || {
                 calls.set(calls.get() + 1);
                 true
             });
@@ -1994,7 +2005,6 @@ mod tests {
             .expect_err("git probe hit locks");
         assert!(matches!(err, CreateValidateError::Fields(_)));
         assert_eq!(git_calls.get(), 1);
-        assert_eq!(github_calls.get(), 0, "git hit short-circuits github");
     }
 
     #[test]
@@ -2022,10 +2032,8 @@ mod tests {
 
         let bank = ProbeBank::permissive();
         let probes = bank.probes();
-        let cloud = cloud_settings(false);
         let managed = managed_settings(false);
         let policy = ExecutorPolicy {
-            cloud: &cloud,
             managed: &managed,
             viewer: None,
         };
@@ -2157,10 +2165,8 @@ mod tests {
         // Unknown executor (fires only for values past the ChoiceField).
         let bank = ProbeBank::permissive();
         let probes = bank.probes();
-        let cloud = cloud_settings(false);
         let managed = managed_settings(false);
         let policy = ExecutorPolicy {
-            cloud: &cloud,
             managed: &managed,
             viewer: None,
         };
@@ -2238,10 +2244,8 @@ mod tests {
 
         let bank = ProbeBank::permissive();
         let probes = bank.probes();
-        let cloud = cloud_settings(false);
         let managed = managed_settings(false);
         let policy = ExecutorPolicy {
-            cloud: &cloud,
             managed: &managed,
             viewer: None,
         };
@@ -2290,10 +2294,8 @@ mod tests {
     fn assignee_label_filters_silently_drop() {
         let bank = ProbeBank::permissive();
         let probes = bank.probes();
-        let cloud = cloud_settings(false);
         let managed = managed_settings(false);
         let policy = ExecutorPolicy {
-            cloud: &cloud,
             managed: &managed,
             viewer: None,
         };
@@ -2377,10 +2379,8 @@ mod tests {
                 .expect("estimate message")
         );
 
-        let cloud = cloud_settings(false);
         let managed = managed_settings(false);
         let policy = ExecutorPolicy {
-            cloud: &cloud,
             managed: &managed,
             viewer: None,
         };
@@ -2464,7 +2464,6 @@ mod tests {
         };
         // Each closure owns its counter; probes must stay silent on empty attrs.
         let git = bump(0);
-        let github = bump(1);
         let active = bump(2);
         let assignees = bump(3);
         let labels = bump(4);
@@ -2478,10 +2477,6 @@ mod tests {
         let bank = ProbeBank {
             git_sync_exists: Box::new(move || {
                 git();
-                false
-            }),
-            github_sync_exists: Box::new(move || {
-                github();
                 false
             }),
             has_active_run: Box::new(move || {
@@ -2541,10 +2536,8 @@ mod tests {
             runner_error: Box::new(|| None),
         };
         let probes = bank.probes();
-        let cloud = cloud_settings(false);
         let managed = managed_settings(false);
         let policy = ExecutorPolicy {
-            cloud: &cloud,
             managed: &managed,
             viewer: None,
         };
@@ -2561,6 +2554,7 @@ mod tests {
             validated,
             ValidatedAttrs {
                 description_html: None,
+                work_type: None,
                 assignee_ids: None,
                 label_ids: None,
                 agent_executor: None,
@@ -2589,8 +2583,8 @@ mod tests {
         let sent = serde_json::json!(["a", "b"]);
         assert_eq!(echo_initial_ids(Some(&sent)), sent);
 
-        // 42 wire keys with the echo pair appended last (:187-190).
-        assert_eq!(ISSUE_CREATE_FIELDS.len(), 42);
+        // 43 wire keys with the echo pair appended last (:187-190).
+        assert_eq!(ISSUE_CREATE_FIELDS.len(), 43);
         assert_eq!(ISSUE_CREATE_FIELDS[0], "id");
         assert_eq!(
             &ISSUE_CREATE_FIELDS[ISSUE_CREATE_FIELDS.len() - 2..],
@@ -2632,6 +2626,7 @@ mod tests {
             git_work_branch: "",
             created_via: None,
             agent_executor: Some("local_runner"),
+            work_type: Some("software"),
             created_by: Some("55555555-5555-5555-5555-555555555555"),
             updated_by: None,
             project: "33333333-3333-3333-3333-333333333333",

@@ -1,10 +1,14 @@
-//! Boot-gate commands: `wait_for_db`, `wait_for_migrations`, `clear_cache`.
+//! Boot-gate commands: `wait_for_db`, `wait_for_migrations`, `check_migrations`,
+//! `clear_cache`.
 //!
 //! Ports of `apps/api/pi_dash/db/management/commands/wait_for_db.py:11-24`,
 //! `wait_for_migrations.py:12-26` and `clear_cache.py:10-30` (fixture F37-01
-//! and the first branch of F37-02). Each `run_*` function streams the exact
-//! stdout lines through the `out` callback (one call per line, no trailing
-//! newline — the caller prints); all commands exit 0 on every handled path.
+//! and the first branch of F37-02), plus the new-system-only fail-fast
+//! `check_migrations` gate (NEWPIDASH-378, no Django counterpart). Each
+//! `run_*` function streams the exact stdout lines through the `out`
+//! callback (one call per line, no trailing newline — the caller prints);
+//! the wait/clear commands exit 0 on every handled path, while the check
+//! command reports pending migrations as an error (exit 1).
 //!
 //! Documented translations (also listed in the PR):
 //!
@@ -58,8 +62,24 @@ pub const CACHE_FAILED: &str = "Failed to clear cache";
 /// runner 0038→0039 (PDASHOSS01-297 dedicated-runner assignment, `42f93b62b`),
 /// then db 0173→0174 (PR #3144, `ea5db8e3d`): `db/0174` depends on
 /// `runner/0039` across apps, but Django's `leaf_nodes()` only counts
-/// same-app children, so `runner/0039` stays a leaf — Django (4.2 loader,
-/// verified live) still reports the same nine leaves with `db/0174`:
+/// same-app children, so `runner/0039` stays a leaf, then db 0174→0177
+/// (PDASHOSS01-356 github_* sunset 3/6 `45ab58e04`: `db/0177` on top of
+/// `db/0176` `e82eb916e` on top of `db/0175` `9361acbff` on top of
+/// `db/0174`): the linear db chain keeps one leaf, so Django (4.2 loader,
+/// verified live) still reports the same nine leaves with `db/0177`:
+/// PDASHOSS01-183 then adds `db/0178` (on top of `main`'s
+/// `db/0177_git_provider_app_columns`) and `runner/0040`→`0041`, so the leaves
+/// become `db/0178` and `runner/0041`; PDASHOSS01-234 adds
+/// `db/0179_work_type` and `runner/0042_agentrun_work_type`, and P6a's
+/// data-only `db/0180_rename_comment_bot` sits on top of `db/0179`, then
+/// `db/0181_work_type_writer_defaults` on top of `db/0180` (it also depends
+/// on `runner/0042` across apps, which stays a leaf for the same reason),
+/// then `db/0182_project_settings` and the data-only
+/// `db/0182_ai_completed_default_state` (NEWPIDASH-305 backfill) both on top
+/// of `db/0181` (two 0182 heads), merged by
+/// `db/0183_merge_ai_completed_and_project_settings`, and
+/// `runner/0043_desktop_handoff` on top of `runner/0042`, so the leaves
+/// become `db/0183` and `runner/0043`:
 /// no `run_before`, `replaces`, `__first__` or `__latest__` markers exist in
 /// any `pi_dash` migration, so the five first-party leaves are also exactly
 /// what an `ast` parse of the `dependencies` lists in `apps/api` yields
@@ -68,11 +88,11 @@ pub const LEAF_MIGRATIONS: &[(&str, &str)] = &[
     ("assistant", "0004_usersttconfig"),
     ("auth", "0012_alter_user_first_name_max_length"),
     ("contenttypes", "0002_remove_content_type_name"),
-    ("db", "0174_legacy_creation_defaults"),
+    ("db", "0183_merge_ai_completed_and_project_settings"),
     ("django_celery_beat", "0018_improve_crontab_helptext"),
     ("license", "0006_instance_is_current_version_deprecated"),
     ("prompting", "0007_reseed_directional_relations"),
-    ("runner", "0039_issue_assigned_runner"),
+    ("runner", "0043_desktop_handoff"),
     ("sessions", "0001_initial"),
 ];
 
@@ -90,16 +110,32 @@ pub enum BootError {
     /// crash-path class.
     #[error("database unavailable: {0}")]
     DatabaseUnavailable(String),
+    /// The fail-fast gate found unapplied leaf migrations: the missing
+    /// `app.name` entries, comma-separated, in [`LEAF_MIGRATIONS`] order.
+    /// Rendered on stderr with exit 1 (a release/install failure, never
+    /// a wait — entrypoints run the check under `set -e`).
+    #[error("Pending migrations: {0}")]
+    MigrationsPending(String),
+}
+
+/// Leaf migrations in [`LEAF_MIGRATIONS`] order absent from the applied
+/// `(app, name)` set — the fail-fast gate's payload. Extra applied rows
+/// (migrations deleted from disk) are ignored, matching the plan check,
+/// which only requires the targets' closure to be applied.
+pub fn missing_migrations_from_applied(
+    applied: &HashSet<(String, String)>,
+) -> Vec<(&'static str, &'static str)> {
+    LEAF_MIGRATIONS
+        .iter()
+        .copied()
+        .filter(|(app, name)| !applied.contains(&(app.to_string(), name.to_string())))
+        .collect()
 }
 
 /// True while any leaf migration in [`LEAF_MIGRATIONS`] is absent from the
 /// applied `(app, name)` set — the `bool(migration_plan(targets))` port.
-/// Extra applied rows (migrations deleted from disk) are ignored, matching
-/// the plan check, which only requires the targets' closure to be applied.
 pub fn migrations_pending_from_applied(applied: &HashSet<(String, String)>) -> bool {
-    LEAF_MIGRATIONS
-        .iter()
-        .any(|(app, name)| !applied.contains(&(app.to_string(), name.to_string())))
+    !missing_migrations_from_applied(applied).is_empty()
 }
 
 /// The `django_migrations` applied-set read, as a sea-query select
@@ -211,6 +247,50 @@ async fn migrations_pending_probe(
         .map_err(|error| BootError::DatabaseUnavailable(error.to_string()))?;
     let _ = connection.close().await;
     Ok(pending)
+}
+
+/// One fail-fast probe over a fresh single connection: the applied-set
+/// leaves that are still missing. A missing table counts as every leaf
+/// missing (fresh database, migrator not run yet); any other query
+/// failure — like an unreachable database — is fatal (the same crash
+/// path as the wait gate).
+async fn missing_migrations_probe(
+    options: &sqlx::postgres::PgConnectOptions,
+) -> Result<Vec<(&'static str, &'static str)>, BootError> {
+    let mut connection = probe_connection(options)
+        .await
+        .map_err(|error| BootError::DatabaseUnavailable(error.to_string()))?;
+    let missing = match fetch_applied_migrations(&mut connection).await {
+        Ok(applied) => missing_migrations_from_applied(&applied),
+        Err(error) if is_missing_table(&error) => LEAF_MIGRATIONS.to_vec(),
+        Err(error) => return Err(BootError::DatabaseUnavailable(error.to_string())),
+    };
+    let _ = connection.close().await;
+    Ok(missing)
+}
+
+/// `check_migrations` (NEWPIDASH-378): one probe, no polling, no sleeps.
+/// Prints the success line and exits 0 when every leaf is applied;
+/// otherwise exits 1 with the missing `app.name` entries on stderr (a
+/// missing table or an unreachable database also exits nonzero). Services
+/// run this at startup under `set -e` instead of waiting, so a failed or
+/// unfinished release fails the container instead of hanging it.
+pub async fn run_check_migrations(
+    database_url: &str,
+    out: &mut dyn FnMut(&str),
+) -> Result<u64, BootError> {
+    let options = parse_database_url(database_url)?;
+    let missing = missing_migrations_probe(&options).await?;
+    if missing.is_empty() {
+        out(WAIT_MIGRATIONS_OK);
+        return Ok(1);
+    }
+    let list = missing
+        .iter()
+        .map(|(app, name)| format!("{app}.{name}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(BootError::MigrationsPending(list))
 }
 
 /// `wait_for_db`: print the start line, perform the one-shot check, print
@@ -335,11 +415,11 @@ mod tests {
                 ("assistant", "0004_usersttconfig"),
                 ("auth", "0012_alter_user_first_name_max_length"),
                 ("contenttypes", "0002_remove_content_type_name"),
-                ("db", "0174_legacy_creation_defaults"),
+                ("db", "0183_merge_ai_completed_and_project_settings"),
                 ("django_celery_beat", "0018_improve_crontab_helptext"),
                 ("license", "0006_instance_is_current_version_deprecated"),
                 ("prompting", "0007_reseed_directional_relations"),
-                ("runner", "0039_issue_assigned_runner"),
+                ("runner", "0043_desktop_handoff"),
                 ("sessions", "0001_initial"),
             ]
         );
@@ -429,6 +509,65 @@ mod tests {
             Some(2),
         )
         .await;
+        assert!(matches!(result, Err(BootError::DatabaseUnavailable(_))));
+        assert!(lines.is_empty());
+    }
+
+    /// The fail-fast payload: absent leaves in [`LEAF_MIGRATIONS`] order —
+    /// a database migrated only to the pre-merge heads names exactly the
+    /// two leaves it is missing.
+    #[test]
+    fn missing_migrations_lists_absent_leaves_in_order() {
+        // Fresh database (migrator not run): every leaf is missing.
+        assert_eq!(
+            missing_migrations_from_applied(&applied_set(&[])),
+            LEAF_MIGRATIONS.to_vec()
+        );
+        // Fully migrated: nothing missing.
+        assert!(missing_migrations_from_applied(&applied_set(LEAF_MIGRATIONS)).is_empty());
+        // Migrated only to the stale heads: exactly the two new leaves.
+        let stale: Vec<(&str, &str)> = LEAF_MIGRATIONS
+            .iter()
+            .copied()
+            .map(|(app, name)| {
+                (
+                    app,
+                    match (app, name) {
+                        ("db", _) => "0182_project_settings",
+                        ("runner", _) => "0042_agentrun_work_type",
+                        _ => name,
+                    },
+                )
+            })
+            .collect();
+        assert_eq!(
+            missing_migrations_from_applied(&applied_set(&stale)),
+            vec![
+                ("db", "0183_merge_ai_completed_and_project_settings"),
+                ("runner", "0043_desktop_handoff"),
+            ]
+        );
+    }
+
+    /// A bad URL fails fast without probing (config error, before any output).
+    #[tokio::test]
+    async fn check_migrations_bad_url_fails_fast_without_probing() {
+        let mut lines = Vec::new();
+        let mut out = |line: &str| lines.push(line.to_string());
+        let result = run_check_migrations("not a database url %%", &mut out).await;
+        assert!(matches!(result, Err(BootError::BadDatabaseUrl(_))));
+        assert!(lines.is_empty());
+    }
+
+    /// A down database is fatal with no stdout (the crash path, like the
+    /// wait gate) — and, unlike the wait gate, it returns instead of
+    /// looping: one probe, no sleep.
+    #[tokio::test]
+    async fn check_migrations_down_db_fails_without_output() {
+        let mut lines = Vec::new();
+        let mut out = |line: &str| lines.push(line.to_string());
+        let result =
+            run_check_migrations("postgresql://127.0.0.1:9/pidash_806_nonexistent", &mut out).await;
         assert!(matches!(result, Err(BootError::DatabaseUnavailable(_))));
         assert!(lines.is_empty());
     }
