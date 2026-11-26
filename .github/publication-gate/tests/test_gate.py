@@ -550,6 +550,24 @@ class PublisherOrdering(unittest.TestCase):
         bad = self.GOOD.replace(" --expect-digest \"$D\"", "")
         self.assertTrue(any("expect-digest" in p for p in self.problems(bad)))
 
+    def test_job_level_secret_reaches_steps_before_verify(self):
+        # Job env is visible to every step, including those before the check.
+        bad = self.GOOD.replace(
+            "    environment: release-publisher\n",
+            "    environment: release-publisher\n    env:\n      T: ${{ secrets.DOCKERHUB_TOKEN }}\n",
+        )
+        self.assertTrue(any("before verify-manifest" in p for p in self.problems(bad)))
+
+    def test_verify_step_cannot_be_skipped_or_allowed_to_fail(self):
+        verify = "      - run: python3 gate.py verify-manifest candidate --expect-digest \"$D\"\n"
+        for extra in ("        continue-on-error: true\n", "        if: ${{ false }}\n"):
+            with self.subTest(extra=extra):
+                bad = self.GOOD.replace(verify, verify + extra)
+                self.assertTrue(any("verify-manifest" in p for p in self.problems(bad)))
+        bad = self.GOOD.replace("    environment: release-publisher\n",
+                                "    environment: release-publisher\n    continue-on-error: true\n")
+        self.assertTrue(any("continue-on-error" in p for p in self.problems(bad)))
+
 
 class MorePublishingCommands(unittest.TestCase):
     """S3: other ways to publish are caught outside the publisher."""
