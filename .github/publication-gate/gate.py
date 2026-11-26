@@ -111,7 +111,14 @@ def trigger_problems(name, doc):
         if event in on:
             problems.append(f"{name}: starts on '{event}' events, so creating a ref or release could publish")
     push = on.get("push")
-    if isinstance(push, dict) and ("tags" in push or "tags-ignore" in push):
+    # A push trigger that does not filter on branches also fires on tag
+    # pushes; path filters are not evaluated for tags.
+    if "push" in on and (
+        not isinstance(push, dict)
+        or "tags" in push
+        or "tags-ignore" in push
+        or not ("branches" in push or "branches-ignore" in push)
+    ):
         problems.append(f"{name}: starts on tag pushes, so creating a tag could publish")
     return problems
 

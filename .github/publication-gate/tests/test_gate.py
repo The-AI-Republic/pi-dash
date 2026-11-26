@@ -107,6 +107,16 @@ jobs:
         bad = self.GOOD.replace("  workflow_dispatch:\n", "  push:\n    tags: ['v*']\n")
         self.assertTrue(any("tag" in p for p in self.problems(bad)))
 
+    def test_push_without_branch_filter_is_rejected(self):
+        # A push trigger with no branch filter also fires on tag pushes
+        # (path filters are not evaluated for tags).
+        for trigger in ("  push:\n", "  push:\n    paths: ['src/**']\n"):
+            with self.subTest(trigger=trigger):
+                bad = self.GOOD.replace("  workflow_dispatch:\n", trigger)
+                self.assertTrue(any("tag" in p for p in self.problems(bad)))
+        ok = self.GOOD.replace("  workflow_dispatch:\n", "  push:\n    branches: [main]\n")
+        self.assertFalse([p for p in self.problems(ok) if "tag" in p])
+
     def test_release_and_create_triggers_are_rejected(self):
         for event in ("release", "create"):
             with self.subTest(event=event):
