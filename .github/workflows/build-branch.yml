@@ -423,6 +423,21 @@ jobs:
       - name: Publish only what was scanned
         run: python3 source/.github/publication-gate/gate.py verify-manifest candidate --expect-digest "${{ needs.branch_build_scan.outputs.manifest-digest }}"
 
+      - id: app-token
+        if: ${{ env.BUILD_RELEASE == 'true' }}
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.PUBLISHER_APP_ID }}
+          private-key: ${{ secrets.PUBLISHER_APP_PRIVATE_KEY }}
+
+      # Before anything is pushed: a release must not reach the registry
+      # unless the live ruleset still lets only the publisher create its tag.
+      - name: Tag ruleset is live
+        if: ${{ env.BUILD_RELEASE == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: python3 source/.github/publication-gate/gate.py check-live-ruleset --repo "$GITHUB_REPOSITORY" --app-id "${{ vars.PUBLISHER_APP_ID }}"
+
       - name: Push the scanned images
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -447,19 +462,6 @@ jobs:
             done
           done
           skopeo logout docker.io
-
-      - id: app-token
-        if: ${{ env.BUILD_RELEASE == 'true' }}
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ vars.PUBLISHER_APP_ID }}
-          private-key: ${{ secrets.PUBLISHER_APP_PRIVATE_KEY }}
-
-      - name: Tag ruleset is live
-        if: ${{ env.BUILD_RELEASE == 'true' }}
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: python3 source/.github/publication-gate/gate.py check-live-ruleset --repo "$GITHUB_REPOSITORY" --app-id "${{ vars.PUBLISHER_APP_ID }}"
 
       - name: Create the release tag and the GitHub Release
         if: ${{ env.BUILD_RELEASE == 'true' }}
