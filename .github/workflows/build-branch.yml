@@ -102,22 +102,24 @@ jobs:
           set -euo pipefail
           # Multi-arch on releases (or when asked) via QEMU emulation on the
           # local docker-container driver.
-          if [ "${{ env.ARM64_BUILD }}" == "true" ] || [ "${{ env.BUILD_TYPE }}" == "Release" ]; then
+          if [ "$ARM64_BUILD" == "true" ] || [ "$BUILD_TYPE" == "Release" ]; then
             echo "BUILDX_PLATFORMS=linux/amd64,linux/arm64" >> $GITHUB_OUTPUT
           else
             echo "BUILDX_PLATFORMS=linux/amd64" >> $GITHUB_OUTPUT
           fi
-          BR_NAME=$( echo "${{ env.TARGET_BRANCH }}" |sed 's/[^a-zA-Z0-9.-]//g')
+          BR_NAME=$(printf '%s' "$TARGET_BRANCH" | sed 's/[^a-zA-Z0-9.-]//g')
           echo "TARGET_BRANCH=$BR_NAME" >> $GITHUB_OUTPUT
 
-          echo "BUILD_TYPE=${{env.BUILD_TYPE}}" >> $GITHUB_OUTPUT
+          case "$BUILD_TYPE" in Build|Release) ;; *) echo "::error::unknown build_type"; exit 1 ;; esac
+          echo "BUILD_TYPE=$BUILD_TYPE" >> $GITHUB_OUTPUT
           BUILD_RELEASE=false
           BUILD_PRERELEASE=false
           RELVERSION="latest"
-          BUILD_AIO=${{ env.AIO_BUILD }}
+          BUILD_AIO=false
+          if [ "$AIO_BUILD" == "true" ]; then BUILD_AIO=true; fi
 
-          if [ "${{ env.BUILD_TYPE }}" == "Release" ]; then
-            FLAT_RELEASE_VERSION=$(echo "${{ env.RELEASE_VERSION }}" | sed 's/[^a-zA-Z0-9.-]//g')
+          if [ "$BUILD_TYPE" == "Release" ]; then
+            FLAT_RELEASE_VERSION=$(printf '%s' "$RELEASE_VERSION" | sed 's/[^a-zA-Z0-9.-]//g')
 
             semver_regex="^v([0-9]+)\.([0-9]+)\.([0-9]+)(-[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*)?$"
             if [[ ! $FLAT_RELEASE_VERSION =~ $semver_regex ]]; then
@@ -133,7 +135,7 @@ jobs:
             BUILD_RELEASE=true
             RELVERSION=$FLAT_RELEASE_VERSION
 
-            if [ "${{ env.IS_PRERELEASE }}" == "true" ] || [[ "$FLAT_RELEASE_VERSION" =~ -[a-zA-Z] ]]; then
+            if [ "$IS_PRERELEASE" == "true" ] || [[ "$FLAT_RELEASE_VERSION" =~ -[a-zA-Z] ]]; then
               BUILD_PRERELEASE=true
             fi
 
@@ -270,6 +272,8 @@ jobs:
       - branch_build_setup
       - branch_build_images
       - branch_build_aio
+    outputs:
+      manifest-digest: ${{ steps.record.outputs.digest }}
     env:
       SHA: ${{ needs.branch_build_setup.outputs.sha }}
       BUILD_RELEASE: ${{ needs.branch_build_setup.outputs.build_release }}
@@ -333,11 +337,14 @@ jobs:
             } > candidate/release/notes.md
           fi
 
-      - name: Record the candidate
+      - id: record
+        name: Record the candidate
         run: |
+          set -euo pipefail
           tag=""
           if [ "$BUILD_RELEASE" = "true" ]; then tag="$RELEASE_VERSION"; fi
-          python3 .github/publication-gate/gate.py build-manifest candidate --tag "$tag" --sha "$SHA"
+          digest="$(python3 .github/publication-gate/gate.py build-manifest candidate --tag "$tag" --sha "$SHA")"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Upload candidate
         uses: actions/upload-artifact@v7
@@ -361,7 +368,7 @@ jobs:
       manifest-digest: ${{ steps.approve.outputs.digest }}
     env:
       SHA: ${{ needs.branch_build_setup.outputs.sha }}
-      PUBLICATION_DENYLIST: ${{ secrets.PUBLICATION_DENYLIST }}
+      CANDIDATE_DIGEST: ${{ needs.branch_build_candidate.outputs.manifest-digest }}
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - name: Checkout Files
@@ -374,10 +381,15 @@ jobs:
           name: platform-candidate
           path: candidate
       - name: Candidate is intact
-        run: python3 source/.github/publication-gate/gate.py verify-manifest candidate
+        run: python3 source/.github/publication-gate/gate.py verify-manifest candidate --expect-digest "$CANDIDATE_DIGEST"
+      # The denylist is visible only to the two steps that need it.
       - name: Scanner rejects a planted leak
+        env:
+          PUBLICATION_DENYLIST: ${{ secrets.PUBLICATION_DENYLIST }}
         run: python3 source/.github/publication-gate/gate.py self-test --denylist-env PUBLICATION_DENYLIST --require-denylist
       - name: Scan the candidate and its source tree
+        env:
+          PUBLICATION_DENYLIST: ${{ secrets.PUBLICATION_DENYLIST }}
         run: |
           set -euo pipefail
           mkdir tree
@@ -399,7 +411,7 @@ jobs:
     name: Publish
     runs-on: ubuntu-22.04
     environment: release-publisher
-    if: ${{ always() && needs.branch_build_scan.result == 'success' }}
+    if: ${{ !cancelled() && needs.branch_build_scan.result == 'success' }}
     needs:
       - branch_build_setup
       - branch_build_scan
@@ -409,6 +421,8 @@ jobs:
       SHA: ${{ needs.branch_build_setup.outputs.sha }}
       BUILD_RELEASE: ${{ needs.branch_build_setup.outputs.build_release }}
       RELEASE_VERSION: ${{ needs.branch_build_setup.outputs.release_version }}
+      APPROVED_DIGEST: ${{ needs.branch_build_scan.outputs.manifest-digest }}
+      PUBLISHER_APP_ID: ${{ vars.PUBLISHER_APP_ID }}
       IMAGE_OWNER: airepublic
     steps:
       - name: Checkout Files
@@ -421,11 +435,11 @@ jobs:
           name: platform-candidate
           path: candidate
       - name: Publish only what was scanned
-        run: python3 source/.github/publication-gate/gate.py verify-manifest candidate --expect-digest "${{ needs.branch_build_scan.outputs.manifest-digest }}"
+        run: python3 source/.github/publication-gate/gate.py verify-manifest candidate --expect-digest "$APPROVED_DIGEST"
 
       - id: app-token
         if: ${{ env.BUILD_RELEASE == 'true' }}
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
         with:
           app-id: ${{ vars.PUBLISHER_APP_ID }}
           private-key: ${{ secrets.PUBLISHER_APP_PRIVATE_KEY }}
@@ -436,7 +450,20 @@ jobs:
         if: ${{ env.BUILD_RELEASE == 'true' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: python3 source/.github/publication-gate/gate.py check-live-ruleset --repo "$GITHUB_REPOSITORY" --app-id "${{ vars.PUBLISHER_APP_ID }}"
+        run: python3 source/.github/publication-gate/gate.py check-live-ruleset --repo "$GITHUB_REPOSITORY" --app-id "$PUBLISHER_APP_ID"
+
+      # The release tag comes first, so no image is public under a version
+      # whose tag does not exist yet. A failed push after this leaves a tag
+      # with no Release; the version is then burned and the next one is cut.
+      - name: Create the release tag
+        if: ${{ env.BUILD_RELEASE == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          # The tag is created here, by the publisher, at the scanned commit.
+          # No workflow starts on tag creation, so this does not publish twice.
+          gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$RELEASE_VERSION" -f sha="$SHA" >/dev/null
 
       - name: Push the scanned images
         env:
@@ -445,11 +472,14 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s' "$DOCKERHUB_TOKEN" | skopeo login docker.io -u "$DOCKERHUB_USERNAME" --password-stdin
+          # image-tags.txt lists the version tag first and :stable / :latest
+          # last, so every image has its version tag before any floating tag
+          # moves to the new release.
           read -r -a tags < candidate/release/image-tags.txt
-          for archive in candidate/images/*.tar; do
-            name="$(basename "$archive" .tar)"
-            digest="$(cat "${archive%.tar}.digest")"
-            for tag in "${tags[@]}"; do
+          for tag in "${tags[@]}"; do
+            for archive in candidate/images/*.tar; do
+              name="$(basename "$archive" .tar)"
+              digest="$(cat "${archive%.tar}.digest")"
               ref="docker://docker.io/${IMAGE_OWNER}/${name}:${tag}"
               # --preserve-digests refuses any conversion, so the registry
               # holds the scanned bytes or the push fails.
@@ -463,15 +493,12 @@ jobs:
           done
           skopeo logout docker.io
 
-      - name: Create the release tag and the GitHub Release
+      - name: Create the GitHub Release
         if: ${{ env.BUILD_RELEASE == 'true' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
-          # The tag is created here, by the publisher, at the scanned commit.
-          # No workflow starts on tag creation, so this does not publish twice.
-          gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$RELEASE_VERSION" -f sha="$SHA" >/dev/null
           flags=()
           if [ "$(cat candidate/release/prerelease.txt)" = "true" ]; then flags+=(--prerelease); fi
           gh release create "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag "${flags[@]}" \

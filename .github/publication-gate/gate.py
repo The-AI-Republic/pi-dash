@@ -16,7 +16,7 @@ Subcommands (all exit non-zero on failure):
   scan [--denylist-env VAR] PATH..  reject secrets and denylisted markers
   self-test [--denylist-env VAR]    prove the scanner rejects a planted leak
   build-manifest DIR --tag --sha    write DIR's file list and digests
-  verify-manifest DIR [--expect-digest D]
+  verify-manifest DIR --expect-digest D
                                     DIR holds exactly the manifest's files
   check-live-ruleset --repo --app-id
                                     the live tag ruleset matches the policy
@@ -56,29 +56,56 @@ PUBLISHING_WORKFLOWS = ("release.yml", "build-branch.yml")
 
 PUBLISHER_ENVIRONMENT = "release-publisher"
 SCAN_ENVIRONMENT = "publication-scan"
+PROTECTED_ENVIRONMENTS = (PUBLISHER_ENVIRONMENT, SCAN_ENVIRONMENT)
 # Secrets a job may read, by the environment it runs in. GITHUB_TOKEN is
 # always allowed: every non-publisher job holds it read-only.
 SECRETS_BY_ENVIRONMENT = {
     None: {"GITHUB_TOKEN"},
     SCAN_ENVIRONMENT: {"GITHUB_TOKEN", "PUBLICATION_DENYLIST"},
 }
+# Secrets that publish or guard publication. Workflows other than the
+# publishing ones may read their own test secrets, never these.
+PUBLISH_SECRETS = {
+    "DOCKERHUB_USERNAME",
+    "DOCKERHUB_TOKEN",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "PUBLISHER_APP_PRIVATE_KEY",
+    "PUBLICATION_DENYLIST",
+}
+# Token scopes that can publish (refs, releases, packages, deployments, OIDC
+# into a cloud). Other workflows may write checks, statuses, pull request
+# comments or code-scanning results.
+PUBLISH_SCOPES = {"contents", "packages", "id-token", "actions", "deployments", "pages", "attestations"}
 
 # Shell fragments and actions that create refs, releases or public images.
 PUBLISHING_COMMANDS = [
     (re.compile(r"\bgit\s+push\b"), "git push"),
     (re.compile(r"\bgit\s+tag\b(?!\s+(?:--list|-l)\b)"), "git tag"),
-    (re.compile(r"\bgh\s+release\s+(create|upload|edit)\b"), "gh release"),
+    (re.compile(r"\bgh\s+release\s+(create|upload|edit|delete)\b"), "gh release"),
+    (re.compile(r"\bgh\s+api\b[^\n]*/releases\b"), "gh api releases"),
+    (re.compile(r"uploads\.github\.com"), "release asset upload"),
     (re.compile(r"/git/(refs|tags)\b"), "git refs API"),
     (re.compile(r"\bskopeo\s+copy\b"), "skopeo copy"),
     (re.compile(r"\bdocker\s+(image\s+)?push\b"), "docker push"),
+    (re.compile(r"\bdocker\s+buildx\s+(?:build|bake)\b[^\n]*\s--push\b"), "docker buildx --push"),
+    (re.compile(r"\bimagetools\s+create\b"), "buildx imagetools create"),
+    (re.compile(r"\bpush=true\b"), "registry output"),
     (re.compile(r"\bcrane\s+(push|copy)\b"), "crane push"),
+    (re.compile(r"\boras\s+(push|copy|cp|attach|tag)\b"), "oras push"),
+    (re.compile(r"\baws\s+s3(api)?\b"), "aws s3"),
     (re.compile(r"\bput-parameter\b"), "ssm put-parameter"),
 ]
 PUBLISHING_ACTIONS = ("softprops/action-gh-release", "docker/login-action", "aws-actions/configure-aws-credentials")
+# The only actions the publisher may run before it has verified the candidate.
+PRE_VERIFY_ACTIONS = ("actions/checkout@", "actions/download-artifact@")
+# Expression contexts an outside party can influence. In a publishing
+# workflow they reach a script through env, never pasted into `run`.
+UNTRUSTED_IN_RUN = re.compile(r"\b(github\.event|inputs\.|github\.ref_name|github\.head_ref|env\.)")
 
-# Tag ruleset: every release tag shape, and the rules that stop anyone but
-# the publisher from creating, moving or deleting one.
-REQUIRED_TAG_PATTERNS = ("refs/tags/pidash-v*", "refs/tags/platform-v*", "refs/tags/v*")
+# Tag ruleset: every tag, and the rules that stop anyone but the publisher
+# from creating, moving or deleting one.
+ALL_REFS = "~ALL"
 REQUIRED_RULES = {"creation", "update", "deletion", "non_fast_forward"}
 
 
@@ -104,12 +131,16 @@ def _triggers(doc):
 
 
 def trigger_problems(name, doc):
-    """A workflow must not start on a tag push, ref creation or release."""
+    """A workflow must not start on a tag push, ref creation or release,
+    nor run with secrets on behalf of untrusted code."""
     problems = []
     on = _triggers(doc)
     for event in ("create", "release", "registry_package"):
         if event in on:
             problems.append(f"{name}: starts on '{event}' events, so creating a ref or release could publish")
+    for event in ("pull_request_target", "workflow_run"):
+        if event in on:
+            problems.append(f"{name}: starts on '{event}', which runs with the base repo's secrets and write token")
     push = on.get("push")
     # A push trigger that does not filter on branches also fires on tag
     # pushes; path filters are not evaluated for tags.
@@ -130,16 +161,41 @@ def _environment(job):
     return env
 
 
-def _strings(node):
+def _keyed_strings(node, key=None):
+    """(key, string) for every string in a YAML tree."""
     if isinstance(node, str):
-        yield node
+        yield key, node
     elif isinstance(node, dict):
         for k, v in node.items():
-            yield from _strings(k)
-            yield from _strings(v)
+            yield from _keyed_strings(k, key)
+            yield from _keyed_strings(v, k)
     elif isinstance(node, list):
         for v in node:
-            yield from _strings(v)
+            yield from _keyed_strings(v, key)
+
+
+def _strings(node):
+    for _, text in _keyed_strings(node):
+        yield text
+
+
+_EXPRESSION = re.compile(r"\$\{\{(.*?)\}\}", re.S)
+_SECRET_REF = re.compile(r"\bsecrets\b(?:\s*\.\s*([A-Za-z_][A-Za-z0-9_-]*))?")
+
+
+def _expressions(node):
+    """Every expression body; `if:` values are expressions without ${{ }}."""
+    for key, text in _keyed_strings(node):
+        if key == "if" and "${{" not in text:
+            yield text
+        yield from _EXPRESSION.findall(text)
+
+
+def secret_refs(node):
+    """Names of the secrets a YAML tree reads; None for the whole context."""
+    for expr in _expressions(node):
+        for match in _SECRET_REF.finditer(expr):
+            yield match.group(1)
 
 
 def _expand_steps(steps, repo_root, seen=()):
@@ -166,68 +222,120 @@ def _writes(perms):
     return []
 
 
-def policy_problems(name, doc, repo_root=REPO_ROOT):
-    """Check one publishing workflow against the gate."""
+def _publish_writes(perms):
+    return [w for w in _writes(perms) if w == "write-all" or w in PUBLISH_SCOPES]
+
+
+def _pinned(uses):
+    return uses.startswith(("./", "actions/", "docker://")) or re.search(r"@[0-9a-f]{40}$", uses) is not None
+
+
+def _step_publishes(where, step, after=""):
+    problems = []
+    uses = step.get("uses", "") or ""
+    if any(uses.startswith(a) for a in PUBLISHING_ACTIONS):
+        problems.append(f"{where}: uses {uses} {after or 'outside the protected publisher'}")
+    push = (step.get("with") or {}).get("push")
+    if push is not None and str(push).strip().lower() not in ("false", ""):
+        problems.append(f"{where}: pushes an image {after or 'outside the protected publisher'}")
+    run = step.get("run", "") or ""
+    for pattern, label in PUBLISHING_COMMANDS:
+        if pattern.search(run):
+            problems.append(f"{where}: runs '{label}' {after or 'outside the protected publisher'}")
+    return problems
+
+
+def _publisher_problems(where, job, steps, scanners):
+    problems = []
+    needs = job.get("needs") or []
+    needs = [needs] if isinstance(needs, str) else needs
+    needed_scans = set(needs) & set(scanners)
+    if not needed_scans:
+        problems.append(f"{where}: the publisher does not need the scan job")
+    # The publisher runs only on a successful scan: no always(), no `||`
+    # that could make the condition true some other way.
+    cond = str(job.get("if") or "")
+    succeeded = set(re.findall(r"needs\.([A-Za-z0-9_-]+)\.result\s*==\s*'success'", cond))
+    if not cond or "always()" in cond or "||" in cond or not (succeeded & needed_scans):
+        problems.append(f"{where}: the publisher's if: must require needs.<scan>.result == 'success', without always() or ||")
+    verify_at = next(
+        (i for i, s in enumerate(steps) if isinstance(s, dict) and "gate.py verify-manifest" in (s.get("run") or "")), None
+    )
+    if verify_at is None:
+        problems.append(f"{where}: the publisher never runs gate.py verify-manifest")
+        return problems
+    if "--expect-digest" not in steps[verify_at]["run"]:
+        problems.append(f"{where}: the publisher runs verify-manifest without --expect-digest")
+    for step in steps[:verify_at]:
+        if not isinstance(step, dict):
+            continue
+        uses = step.get("uses", "") or ""
+        if uses and not uses.startswith(PRE_VERIFY_ACTIONS):
+            problems.append(f"{where}: uses {uses} before verify-manifest")
+        if list(secret_refs(step)):
+            problems.append(f"{where}: reads a secret before verify-manifest")
+        problems += _step_publishes(where, step, after="before verify-manifest")
+    return problems
+
+
+def policy_problems(name, doc, repo_root=REPO_ROOT, publishing=True):
+    """Check one workflow against the gate.
+
+    A publishing workflow (release.yml, build-branch.yml) may have one
+    protected publisher job; everything else in it is read-only and holds no
+    secret beyond its environment's. Any other workflow may not publish at
+    all, but may read its own test secrets and write non-publishing scopes.
+    """
     problems = list(trigger_problems(name, doc))
     top_perms = doc.get("permissions")
-    if top_perms is None:
+    if publishing and top_perms is None:
         problems.append(f"{name}: no top-level permissions; the token default may be write")
-    elif _writes(top_perms):
+    elif (_writes if publishing else _publish_writes)(top_perms):
         problems.append(f"{name}: top-level permissions grant write ({', '.join(_writes(top_perms))})")
-    for text in _strings(doc.get("env") or {}):
-        if "secrets." in text:
-            problems.append(f"{name}: workflow-level env reads a secret")
+    for secret in secret_refs(doc.get("env") or {}):
+        problems.append(f"{name}: workflow-level env reads a secret")
 
     jobs = doc.get("jobs") or {}
-    publishers = [j for j, job in jobs.items() if _environment(job) == PUBLISHER_ENVIRONMENT]
+    publishers = [j for j, job in jobs.items() if _environment(job) == PUBLISHER_ENVIRONMENT] if publishing else []
     scanners = [j for j, job in jobs.items() if any(" scan" in s and "gate.py" in s for s in _strings(job.get("steps")))]
 
     for job_name, job in jobs.items():
         env = _environment(job)
-        is_publisher = env == PUBLISHER_ENVIRONMENT
+        is_publisher = job_name in publishers
         where = f"{name}: job '{job_name}'"
+        if not publishing and env in PROTECTED_ENVIRONMENTS:
+            problems.append(f"{where}: runs in the '{env}' environment outside {' and '.join(PUBLISHING_WORKFLOWS)}")
         if "uses" in job and not is_publisher and job.get("secrets"):
             problems.append(f"{where}: passes secrets to a reusable workflow")
         steps = _expand_steps(job.get("steps"), repo_root)
-        texts = list(_strings({k: v for k, v in job.items() if k != "steps"})) + list(_strings(steps))
-        if not is_publisher:
-            allowed = SECRETS_BY_ENVIRONMENT.get(env, SECRETS_BY_ENVIRONMENT[None])
-            for text in texts:
-                for secret in re.findall(r"secrets\.([A-Za-z_][A-Za-z0-9_]*)", text):
-                    if secret not in allowed:
-                        problems.append(f"{where}: reads secret {secret} outside the protected publisher")
-                if re.search(r"secrets\s*\[", text):
-                    problems.append(f"{where}: reads a secret by index outside the protected publisher")
-            if _writes(job.get("permissions")):
-                problems.append(f"{where}: write permissions outside the protected publisher")
-            for step in steps:
-                if not isinstance(step, dict):
-                    continue
-                uses = step.get("uses", "")
-                if any(uses.startswith(a) for a in PUBLISHING_ACTIONS):
-                    problems.append(f"{where}: uses {uses} outside the protected publisher")
-                with_ = step.get("with") or {}
-                if str(with_.get("push", "")).lower() == "true":
-                    problems.append(f"{where}: pushes an image outside the protected publisher")
-                run = step.get("run", "") or ""
-                for pattern, label in PUBLISHING_COMMANDS:
-                    if pattern.search(run):
-                        problems.append(f"{where}: runs '{label}' outside the protected publisher")
-        else:
-            needs = job.get("needs") or []
-            needs = [needs] if isinstance(needs, str) else needs
-            if not set(needs) & set(scanners):
-                problems.append(f"{where}: the publisher does not need the scan job")
-            runs = [s.get("run", "") or "" for s in steps if isinstance(s, dict)]
-            verify_at = next((i for i, r in enumerate(runs) if "gate.py verify-manifest" in r), None)
-            if verify_at is None:
-                problems.append(f"{where}: the publisher never runs gate.py verify-manifest")
-            else:
-                for r in runs[:verify_at]:
-                    for pattern, label in PUBLISHING_COMMANDS:
-                        if pattern.search(r):
-                            problems.append(f"{where}: runs '{label}' before verify-manifest")
-    if not publishers and any(
+        body = [{k: v for k, v in job.items() if k != "steps"}, steps]
+        for secret in secret_refs(body):
+            if secret is None:
+                problems.append(f"{where}: reads the whole secrets context")
+            elif is_publisher:
+                continue
+            elif publishing and secret not in SECRETS_BY_ENVIRONMENT.get(env, SECRETS_BY_ENVIRONMENT[None]):
+                problems.append(f"{where}: reads secret {secret} outside the protected publisher")
+            elif not publishing and secret in PUBLISH_SECRETS:
+                problems.append(f"{where}: reads secret {secret} outside the protected publisher")
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            uses = step.get("uses", "") or ""
+            if publishing and uses and not _pinned(uses):
+                problems.append(f"{where}: third-party action {uses} is not pinned to a commit SHA")
+            if publishing and any(UNTRUSTED_IN_RUN.search(e) for e in _EXPRESSION.findall(step.get("run", "") or "")):
+                problems.append(f"{where}: puts an inputs/env/event expression straight into a run script; pass it through env")
+        if is_publisher:
+            problems += _publisher_problems(where, job, steps, scanners)
+            continue
+        writes = (_writes if publishing else _publish_writes)(job.get("permissions"))
+        if writes:
+            problems.append(f"{where}: write permissions outside the protected publisher ({', '.join(writes)})")
+        for step in steps:
+            if isinstance(step, dict):
+                problems += _step_publishes(where, step)
+    if publishing and not publishers and any(
         pattern.search(t) for job in jobs.values() for t in _strings(job) for pattern, _ in PUBLISHING_COMMANDS
     ):
         problems.append(f"{name}: publishes without a '{PUBLISHER_ENVIRONMENT}' job")
@@ -245,6 +353,8 @@ def workflow_problems(path, repo_root=REPO_ROOT):
 
 
 def _ref_glob_match(pattern, ref):
+    if pattern == ALL_REFS:
+        return ref.startswith("refs/tags/")
     # GitHub ref patterns use fnmatch-style globs where * stops at '/'.
     regex = re.escape(pattern).replace(r"\*\*", ".*").replace(r"\*", "[^/]*")
     return re.fullmatch(regex, ref) is not None
@@ -264,9 +374,8 @@ def ruleset_problems(ruleset, app_id=None):
     if ruleset.get("enforcement") != "active":
         problems.append("ruleset enforcement must be 'active'")
     cond = (ruleset.get("conditions") or {}).get("ref_name") or {}
-    for pattern in REQUIRED_TAG_PATTERNS:
-        if pattern not in (cond.get("include") or []):
-            problems.append(f"ruleset does not include {pattern}")
+    if ALL_REFS not in (cond.get("include") or []):
+        problems.append(f"ruleset must include every tag ({ALL_REFS})")
     if cond.get("exclude"):
         problems.append("ruleset must not exclude any tag")
     types = {r.get("type") for r in ruleset.get("rules") or []}
@@ -339,8 +448,22 @@ SECRET_RULES = [
 PUBLIC_EXAMPLES = {b"AKIAIOSFODNN7EXAMPLE"}
 # Vendored third-party trees carry their own test keys. Generic secret rules
 # skip them; the denylist still applies everywhere.
-THIRD_PARTY_PARTS = ("node_modules", "site-packages", "dist-packages", ".cargo", "vendor")
-THIRD_PARTY_PREFIXES = ("usr/lib/", "usr/share/", "usr/local/lib/", "lib/", "etc/ssl/")
+# Only real package-manager trees: everything else in an image (web bundles
+# under usr/share/nginx/html, app code under lib/ or usr/local/lib/) is
+# first-party output and gets every rule.
+THIRD_PARTY_PARTS = ("node_modules", "site-packages", "dist-packages", ".cargo")
+# Compressed or archive formats the scanner cannot open. A blob in one of
+# them is reported as unreadable, never passed as clean.
+UNREADABLE_MAGIC = {
+    b"\x28\xb5\x2f\xfd": "zstd",
+    b"\x04\x22\x4d\x18": "lz4",
+    b"\x02\x21\x4c\x18": "lz4",
+    b"7z\xbc\xaf\x27\x1c": "7z",
+    b"Rar!\x1a\x07": "rar",
+    b"\x1f\x9d": "compress",
+    b"\x1f\xa0": "compress",
+    b"LZIP": "lzip",
+}
 
 MAX_DEPTH = 8
 # Zip members need random access, so a zip is read into memory; cap it.
@@ -353,11 +476,12 @@ OVERLAP = 4096
 class Finding:
     rule: str
     location: str
-    fingerprint: str
+    detail: str
 
     def __str__(self):
-        # Never print the matched value: the report itself is public CI output.
-        return f"{self.rule}: {self.location} (fingerprint {self.fingerprint})"
+        # Never print the matched value, nor anything derived from a denylist
+        # marker: the report itself is public CI output.
+        return f"{self.rule}: {self.location} ({self.detail})"
 
 
 def parse_allowlist(text):
@@ -389,9 +513,8 @@ def denylist_from_env(var):
 
 
 def _is_third_party(path):
-    parts = path.replace("\\", "/").split("/")
-    inner = path.replace("\\", "/").rsplit("!/", 1)[-1].lstrip("/")
-    return any(p in THIRD_PARTY_PARTS for p in parts) or inner.startswith(THIRD_PARTY_PREFIXES)
+    parts = re.split(r"/|!/", path.replace("\\", "/"))
+    return any(p in THIRD_PARTY_PARTS for p in parts)
 
 
 def _allowed(rule, location, allowlist):
@@ -437,6 +560,18 @@ def _read_full(fh, n):
     return out
 
 
+def _needles(ctx):
+    return [m.encode("utf-8").lower() for m in ctx["denylist"] if m]
+
+
+def _scan_name(name, location, ctx):
+    """A denylisted marker in a file or member path is a leak too."""
+    lowered = name.encode("utf-8", "surrogateescape").lower()
+    for i, needle in enumerate(_needles(ctx)):
+        if needle in lowered:
+            ctx["findings"].append(Finding("denylist", location, f"marker #{i + 1} in the path"))
+
+
 def _scan_stream(fh, location, ctx, depth=0):
     """Scan a stream, recursing into compressed data and archives.
 
@@ -444,7 +579,7 @@ def _scan_stream(fh, location, ctx, depth=0):
     their layers are never held in memory whole.
     """
     if depth > MAX_DEPTH:
-        ctx["findings"].append(Finding("too-deep", location, "-"))
+        ctx["findings"].append(Finding("too-deep", location, f"nested more than {MAX_DEPTH} levels"))
         return
     head = _read_full(fh, 512)
     stream = io.BufferedReader(_Chain(head, fh), buffer_size=1 << 20)
@@ -460,18 +595,24 @@ def _scan_stream(fh, location, ctx, depth=0):
             _scan_stream(inner, location, ctx, depth + 1)
             return
         except (OSError, EOFError, lzma.LZMAError, ValueError):
-            # Not really compressed data (or truncated): scan the raw bytes.
-            ctx["findings"].append(Finding("unreadable", location, "-"))
+            # Truncated or corrupt: what it holds is unknown, so not clean.
+            ctx["findings"].append(Finding("unreadable", location, "corrupt compressed data"))
+            return
+
+    for magic, fmt in UNREADABLE_MAGIC.items():
+        if head.startswith(magic):
+            ctx["findings"].append(Finding("unreadable", location, f"{fmt} data the scanner cannot open"))
             return
 
     if head[:4] == b"PK\x03\x04":
         data = head + _read_full(stream, MAX_ZIP_BYTES)
         if len(data) > MAX_ZIP_BYTES:
-            ctx["findings"].append(Finding("too-large", location, "-"))
+            ctx["findings"].append(Finding("too-large", location, "zip over the size cap"))
             return
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as zf:
                 for info in zf.infolist():
+                    _scan_name(info.filename, f"{location}!/{info.filename}", ctx)
                     if not info.is_dir():
                         with zf.open(info) as member:
                             _scan_stream(member, f"{location}!/{info.filename}", ctx, depth + 1)
@@ -483,27 +624,33 @@ def _scan_stream(fh, location, ctx, depth=0):
         try:
             with tarfile.open(fileobj=stream, mode="r|") as tar:
                 for member in tar:
+                    _scan_name(member.name, f"{location}!/{member.name}", ctx)
                     if member.isfile():
                         _scan_stream(tar.extractfile(member), f"{location}!/{member.name}", ctx, depth + 1)
             return
         except tarfile.TarError:
-            ctx["findings"].append(Finding("unreadable", location, "-"))
+            ctx["findings"].append(Finding("unreadable", location, "corrupt tar"))
             return
 
     _scan_content(stream, location, ctx)
 
 
 def _scan_content(stream, location, ctx):
-    denylist, allowlist, findings = ctx["denylist"], ctx["allowlist"], ctx["findings"]
+    allowlist, findings = ctx["allowlist"], ctx["findings"]
     third_party = _is_third_party(location)
     hit = set()
-    needles = [m.encode("utf-8").lower() for m in denylist if m]
+    needles = _needles(ctx)
     tail = b""
+    lines_before = 0  # newlines before the start of `window`
     while True:
         chunk = stream.read(CHUNK)
         if not chunk:
             break
         window = tail + chunk
+
+        def line(pos):
+            return lines_before + window.count(b"\n", 0, pos) + 1
+
         if not third_party:
             for rule, pattern in SECRET_RULES:
                 if rule in hit:
@@ -512,22 +659,54 @@ def _scan_content(stream, location, ctx):
                     value = match.group(0)
                     if value in PUBLIC_EXAMPLES or _allowed(rule, location, allowlist):
                         continue
-                    findings.append(Finding(rule, location, _fingerprint(rule, value)))
+                    detail = f"fingerprint {_fingerprint(rule, value)}, line {line(match.start())}"
+                    findings.append(Finding(rule, location, detail))
                     hit.add(rule)
                     break
         if needles:
             lowered = window.lower()
-            for needle in needles:
+            for i, needle in enumerate(needles):
                 key = b"denylist:" + needle
-                if key not in hit and needle in lowered:
-                    findings.append(Finding("denylist", location, _fingerprint("denylist", needle)))
+                at = lowered.find(needle) if key not in hit else -1
+                if at >= 0:
+                    # Only the marker's position in the private list, never a
+                    # hash of it: a short marker's hash is easy to reverse.
+                    findings.append(Finding("denylist", location, f"marker #{i + 1}, line {line(at)}"))
                     hit.add(key)
         tail = window[-OVERLAP:]
+        lines_before += window.count(b"\n", 0, len(window) - len(tail))
 
 
 def _scan_bytes(data, location, denylist, allowlist, findings, depth=0):
     ctx = {"denylist": denylist, "allowlist": allowlist, "findings": findings}
     _scan_stream(io.BytesIO(data), location, ctx, depth)
+
+
+def _walk(root, skip_git=False):
+    """Regular files under root, and every entry that is not one.
+
+    Nothing is followed: a symlink (to a file or a directory) could point
+    outside the candidate, so it is reported, never read.
+    """
+    root = pathlib.Path(root)
+    files, others = [], []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        here = pathlib.Path(dirpath)
+        for d in list(dirnames):
+            if (here / d).is_symlink():
+                others.append(here / d)
+                dirnames.remove(d)
+            elif skip_git and d == ".git":
+                dirnames.remove(d)
+        for f in filenames:
+            p = here / f
+            (files if p.is_file() and not p.is_symlink() else others).append(p)
+    rel = lambda ps: sorted(p.relative_to(root).as_posix() for p in ps)  # noqa: E731
+    return rel(files), rel(others)
+
+
+def _kind(path):
+    return "symlink" if pathlib.Path(path).is_symlink() else "special-file"
 
 
 def scan_paths(paths, denylist, allowlist):
@@ -536,16 +715,19 @@ def scan_paths(paths, denylist, allowlist):
     ctx = {"denylist": denylist, "allowlist": allowlist, "findings": findings}
     for root in paths:
         root = pathlib.Path(root)
+        if root.is_symlink() or not (root.is_file() or root.is_dir()):
+            findings.append(Finding(_kind(root), root.name, "not a regular file or directory; not followed"))
+            continue
         if root.is_file():
-            files = [(root, root.name)]
+            files, others, base = [root.name], [], root.parent
         else:
-            files = [
-                (p, p.relative_to(root).as_posix())
-                for p in sorted(root.rglob("*"))
-                if p.is_file() and not p.is_symlink() and ".git" not in p.relative_to(root).parts
-            ]
-        for path, rel in files:
-            with open(path, "rb") as fh:
+            (files, others), base = _walk(root, skip_git=True), root
+        for rel in others:
+            findings.append(Finding(_kind(base / rel), rel, "not a regular file; not followed"))
+        for rel in files:
+            _scan_name(rel, rel, ctx)
+            fd = os.open(base / rel, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(fd, "rb") as fh:
                 _scan_stream(fh, rel, ctx)
     return findings
 
@@ -583,23 +765,28 @@ def self_test(denylist):
 
 def _sha256_file(path):
     h = hashlib.sha256()
-    with open(path, "rb") as fh:
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "rb") as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
 
 
 def _candidate_files(directory):
-    directory = pathlib.Path(directory)
-    return sorted(p.relative_to(directory).as_posix() for p in directory.rglob("*") if p.is_file() and p.name != MANIFEST_NAME)
+    """(regular files, symlinks and other non-regular entries)."""
+    files, others = _walk(directory)
+    return [f for f in files if f != MANIFEST_NAME], others
 
 
 def build_manifest(directory, tag, sha, extra=None):
     directory = pathlib.Path(directory)
+    files, others = _candidate_files(directory)
+    if others:
+        raise ValueError(f"not regular files, refusing to record them: {', '.join(others)}")
     manifest = {
         "tag": tag,
         "sha": sha,
-        "files": {rel: _sha256_file(directory / rel) for rel in _candidate_files(directory)},
+        "files": {rel: _sha256_file(directory / rel) for rel in files},
     }
     if extra:
         manifest.update(extra)
@@ -614,7 +801,10 @@ def verify_manifest(directory, manifest):
     directory = pathlib.Path(directory)
     problems = []
     expected = manifest.get("files") or {}
-    present = set(_candidate_files(directory))
+    files, others = _candidate_files(directory)
+    present = set(files)
+    for rel in others:
+        problems.append(f"{_kind(directory / rel)}: {rel} (only regular files are published)")
     for rel in sorted(present - set(expected)):
         problems.append(f"unscanned file: {rel}")
     for rel, digest in sorted(expected.items()):
@@ -634,19 +824,7 @@ def check_policy(repo_root=REPO_ROOT):
     repo_root = pathlib.Path(repo_root)
     problems = []
     for path in sorted((repo_root / ".github" / "workflows").glob("*.y*ml")):
-        doc = load_yaml(path)
-        if path.name in PUBLISHING_WORKFLOWS:
-            problems += policy_problems(path.name, doc, repo_root)
-        else:
-            problems += trigger_problems(path.name, doc)
-            for job_name, job in (doc.get("jobs") or {}).items():
-                for step in _expand_steps(job.get("steps"), repo_root):
-                    run = (step.get("run", "") if isinstance(step, dict) else "") or ""
-                    uses = (step.get("uses", "") if isinstance(step, dict) else "") or ""
-                    if any(uses.startswith(a) for a in PUBLISHING_ACTIONS[:1]) or re.search(r"\bgh\s+release\s+create\b", run):
-                        problems.append(f"{path.name}: job '{job_name}' publishes a release outside the gate")
-                    if re.search(r"\bgit\s+push\b[^\n]*\b(--tags|refs/tags|tag)\b", run):
-                        problems.append(f"{path.name}: job '{job_name}' pushes a tag outside the gate")
+        problems += policy_problems(path.name, load_yaml(path), repo_root, publishing=path.name in PUBLISHING_WORKFLOWS)
     ruleset_file = repo_root / RULESET_PATH
     if not ruleset_file.exists():
         problems.append(f"{RULESET_PATH} is missing")
@@ -658,7 +836,8 @@ def check_policy(repo_root=REPO_ROOT):
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="gate.py", description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("check-policy")
+    p_policy = sub.add_parser("check-policy")
+    p_policy.add_argument("--repo-root", default=str(REPO_ROOT), help="checkout whose workflows to check")
     p_scan = sub.add_parser("scan")
     p_scan.add_argument("--denylist-env")
     p_scan.add_argument("--require-denylist", action="store_true")
@@ -680,7 +859,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     if args.cmd == "check-policy":
-        problems = check_policy()
+        problems = check_policy(args.repo_root)
         for p in problems:
             print(f"::error::{p}")
         print("policy ok" if not problems else f"{len(problems)} policy problem(s)")
@@ -703,7 +882,11 @@ def main(argv=None):
 
     if args.cmd == "build-manifest":
         extra = json.loads(args.extra_json) if args.extra_json else None
-        manifest = build_manifest(args.directory, args.tag, args.sha, extra)
+        try:
+            manifest = build_manifest(args.directory, args.tag, args.sha, extra)
+        except ValueError as err:
+            print(f"::error::{err}")
+            return 1
         (pathlib.Path(args.directory) / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
         print(manifest_digest(manifest))
         return 0
@@ -712,7 +895,9 @@ def main(argv=None):
         manifest = json.loads((pathlib.Path(args.directory) / MANIFEST_NAME).read_text())
         problems = verify_manifest(args.directory, manifest)
         digest = manifest_digest(manifest)
-        if args.expect_digest and digest != args.expect_digest:
+        if not args.expect_digest:
+            problems.append("no --expect-digest given; the candidate must match an approved manifest digest")
+        elif digest != args.expect_digest:
             problems.append("manifest digest differs from the one the scan job approved")
         for p in problems:
             print(f"::error::{p}")
@@ -721,6 +906,9 @@ def main(argv=None):
 
     if args.cmd == "check-live-ruleset":
         token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
+        if not token:
+            print("::error::no GH_TOKEN; cannot read the live ruleset, refusing to publish")
+            return 1
         problems = live_ruleset_problems(fetch_live_rulesets(args.repo, token), args.app_id)
         for p in problems:
             print(f"::error::{p}")

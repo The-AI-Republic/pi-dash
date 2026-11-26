@@ -1,10 +1,10 @@
 {
-  "name": "publication-gate: release tags",
+  "name": "publication-gate: all tags",
   "target": "tag",
   "enforcement": "active",
   "conditions": {
     "ref_name": {
-      "include": ["refs/tags/pidash-v*", "refs/tags/platform-v*", "refs/tags/v*"],
+      "include": ["~ALL"],
       "exclude": []
     }
   },

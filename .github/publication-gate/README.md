@@ -16,7 +16,9 @@ installers, the self-host assets and the Docker images.
 3. **Finish.** Every transformation happens before the scan: the install
    wrappers are pinned to the release, `docker-compose.yml` is pinned to the
    image tag, and the release title and notes are written to files.
-   `gate.py build-manifest` records the SHA-256 of every file.
+   `gate.py build-manifest` records the SHA-256 of every file and prints the
+   manifest digest, which the scan job checks. A symlink or other non-regular
+   file in the candidate is refused, since it could point outside it.
 4. **Scan and test.** The `publication-scan` job checks the manifest, runs a
    self-test that plants a synthetic leak and fails unless the scanner
    rejects it, then scans the candidate (opening archives, compressed blobs
@@ -29,7 +31,9 @@ installers, the self-host assets and the Docker images.
    unless the downloaded candidate matches the approved manifest digest file
    for file, then checks that the live tag ruleset still enforces the gate,
    then creates the release tag at the scanned SHA and publishes exactly the
-   scanned files and image digests.
+   scanned files and image digests. Images get their version tag first and
+   `:stable` / `:latest` last. Its `if:` requires the scan job's success and
+   never uses `always()`.
 
 No workflow starts on a tag push, a ref creation or a release event, so
 creating a release tag, by the publisher or anyone else, publishes nothing.
@@ -38,15 +42,25 @@ creating a release tag, by the publisher or anyone else, publishes nothing.
 
 | Promise | Enforced by |
 | --- | --- |
-| Ordinary identities cannot create, move or delete a release tag | The tag ruleset in `ruleset.json` (tags `pidash-v*`, `platform-v*`, `v*`), whose only bypass actor is the publisher GitHub App |
+| Ordinary identities cannot create, move or delete a tag | The tag ruleset in `ruleset.json` (every tag, `~ALL`), whose only bypass actor is the publisher GitHub App |
 | Publish credentials exist only in the publisher | Registry, cloud and App credentials are secrets of the `release-publisher` environment; no repository-level publish secrets |
 | An unscanned ref or artifact cannot be published | The publisher needs the scan job and verifies the approved manifest digest before any publishing step |
-| Workflows cannot drift from the above | `gate.py check-policy`, run on every pull request by `publication-gate.yml` using the base branch's checker |
+| Workflows cannot drift from the above | `gate.py check-policy`, run on every pull request by `publication-gate.yml`: the base branch's checker, checked out into its own directory and run with `python -I`, with no pull request code run in that job |
+| The checker and workflows cannot be changed quietly | `CODEOWNERS` covers this directory, every workflow and the image build action |
 
-`gate.py check-policy` fails a pull request that adds a tag or release
-trigger, reads a publish secret outside the publisher, grants write
-permissions outside it, runs a publishing command (`git push`, `gh release`,
-`skopeo copy`, `docker push`, ...) outside it, or weakens the ruleset.
+`gate.py check-policy` checks every workflow. It fails a pull request that
+adds a tag, release, `pull_request_target` or `workflow_run` trigger, reads
+a publish secret (or the whole `secrets` context) outside the publisher,
+grants publishing write scopes outside it, runs a publishing action or
+command (`git push`, `gh release`, `gh api .../releases`, `skopeo copy`,
+`docker push`, `docker buildx --push`, `oras push`, `aws s3`, ...) outside
+it, uses a protected environment outside `release.yml` and
+`build-branch.yml`, or weakens the ruleset. In those two workflows it also
+requires third-party actions pinned to a commit SHA, keeps `inputs`, `env`
+and event expressions out of `run` scripts, and checks that the publisher
+runs nothing but checkout and download before `verify-manifest
+--expect-digest`. Other workflows may keep their own test secrets and write
+non-publishing scopes (checks, pull request comments, code scanning).
 
 ## One-time setup (repository admin)
 
@@ -80,17 +94,31 @@ credentials and the live ruleset check fails.
      | gh api -X POST repos/The-AI-Republic/pi-dash/rulesets --input -
    ```
 
-   Then confirm an ordinary push is refused:
+   The ruleset covers every tag (`~ALL`), not only the release shapes, so a
+   new tag shape cannot slip past it. Then confirm an ordinary push is
+   refused:
    `git push origin <any-sha>:refs/tags/v0.0.0-gate-check` must fail.
-5. **Make the policy check required** on `main` (`publication gate policy`).
+5. **Make the checks required** on `main` (`publication gate policy` and
+   `publication gate tests`), and turn on *Require review from Code Owners*
+   so the `CODEOWNERS` entries for the gate and the workflows apply.
+6. **Default workflow permissions**: *Read repository contents* (Settings →
+   Actions → General), since workflows other than the publishing ones need
+   not declare top-level permissions.
 
 ## Scanner allowlist
 
 `allowlist.txt` lists `<rule> <path-glob>` pairs the generic credential rules
-skip, each with a reason. It never applies to the denylist. Vendored
-third-party trees inside images (`node_modules`, `site-packages`, system
-library paths) are skipped by the generic rules for the same reason, and are
-still checked against the denylist.
+skip, each with a reason. It never applies to the denylist. Package-manager
+trees inside images (`node_modules`, `site-packages`, `dist-packages`,
+`.cargo`) are skipped by the generic rules for the same reason, and are still
+checked against the denylist. Nothing else is skipped: web bundles under
+`usr/share/nginx/html` and application code under `lib/` get every rule.
+
+A finding names the rule, the path and the line. A denylist finding gives
+only the marker's position in the private list (`marker #3`), never a hash
+of it. File and archive member paths are checked against the denylist too.
+A blob the scanner cannot open (zstd, lz4, 7z, rar, ...) or a corrupt one is
+reported as `unreadable`, never passed as clean.
 
 ## Running it locally
 

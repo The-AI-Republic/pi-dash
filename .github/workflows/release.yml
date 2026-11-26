@@ -396,6 +396,8 @@ jobs:
     # Only when publishing, and only if local and global didn't fail (skipped is fine)
     if: ${{ always() && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
     runs-on: "ubuntu-22.04"
+    outputs:
+      manifest-digest: ${{ steps.record.outputs.digest }}
     env:
       TAG: ${{ needs.plan.outputs.tag }}
       SHA: ${{ needs.plan.outputs.sha }}
@@ -450,8 +452,13 @@ jobs:
           printf '%s\n' "$ANNOUNCEMENT_TITLE" > candidate/release/title.txt
           printf '%s\n' "$ANNOUNCEMENT_BODY" > candidate/release/notes.md
           printf '%s\n' "$PRERELEASE" > candidate/release/prerelease.txt
-      - name: Record the candidate
-        run: python3 .github/publication-gate/gate.py build-manifest candidate --tag "$TAG" --sha "$SHA"
+      - id: record
+        name: Record the candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest="$(python3 .github/publication-gate/gate.py build-manifest candidate --tag "$TAG" --sha "$SHA")"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
           name: release-candidate
@@ -471,7 +478,7 @@ jobs:
     env:
       TAG: ${{ needs.plan.outputs.tag }}
       SHA: ${{ needs.plan.outputs.sha }}
-      PUBLICATION_DENYLIST: ${{ secrets.PUBLICATION_DENYLIST }}
+      CANDIDATE_DIGEST: ${{ needs.candidate.outputs.manifest-digest }}
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - uses: actions/checkout@v4
@@ -483,10 +490,15 @@ jobs:
           name: release-candidate
           path: candidate
       - name: Candidate is intact
-        run: python3 source/.github/publication-gate/gate.py verify-manifest candidate
+        run: python3 source/.github/publication-gate/gate.py verify-manifest candidate --expect-digest "$CANDIDATE_DIGEST"
+      # The denylist is visible only to the two steps that need it.
       - name: Scanner rejects a planted leak
+        env:
+          PUBLICATION_DENYLIST: ${{ secrets.PUBLICATION_DENYLIST }}
         run: python3 source/.github/publication-gate/gate.py self-test --denylist-env PUBLICATION_DENYLIST --require-denylist
       - name: Scan the candidate and its source tree
+        env:
+          PUBLICATION_DENYLIST: ${{ secrets.PUBLICATION_DENYLIST }}
         shell: bash
         run: |
           set -euo pipefail
@@ -528,12 +540,15 @@ jobs:
       - plan
       - scan
     environment: release-publisher
+    if: ${{ !cancelled() && needs.scan.result == 'success' }}
     runs-on: "ubuntu-22.04"
     permissions:
       contents: read
     env:
       TAG: ${{ needs.plan.outputs.tag }}
       SHA: ${{ needs.plan.outputs.sha }}
+      APPROVED_DIGEST: ${{ needs.scan.outputs.manifest-digest }}
+      PUBLISHER_APP_ID: ${{ vars.PUBLISHER_APP_ID }}
       AWS_REGION: us-west-2
     steps:
       - uses: actions/checkout@v4
@@ -545,16 +560,16 @@ jobs:
           name: release-candidate
           path: candidate
       - name: Publish only what was scanned
-        run: python3 source/.github/publication-gate/gate.py verify-manifest candidate --expect-digest "${{ needs.scan.outputs.manifest-digest }}"
+        run: python3 source/.github/publication-gate/gate.py verify-manifest candidate --expect-digest "$APPROVED_DIGEST"
       - id: app-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
         with:
           app-id: ${{ vars.PUBLISHER_APP_ID }}
           private-key: ${{ secrets.PUBLISHER_APP_PRIVATE_KEY }}
       - name: Tag ruleset is live
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: python3 source/.github/publication-gate/gate.py check-live-ruleset --repo "$GITHUB_REPOSITORY" --app-id "${{ vars.PUBLISHER_APP_ID }}"
+        run: python3 source/.github/publication-gate/gate.py check-live-ruleset --repo "$GITHUB_REPOSITORY" --app-id "$PUBLISHER_APP_ID"
       - name: Create the release tag and publish the candidate
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -574,7 +589,7 @@ jobs:
       # redeploy the API, or mutate MIN_RUNNER_VERSION from a normal release.
       - name: Configure AWS credentials
         if: ${{ fromJson(needs.plan.outputs.val).announcement_is_prerelease == false }}
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}

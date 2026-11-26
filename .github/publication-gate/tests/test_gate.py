@@ -87,11 +87,12 @@ jobs:
   publish:
     needs: [scan]
     environment: release-publisher
+    if: ${{ !cancelled() && needs.scan.result == 'success' }}
     permissions:
       contents: write
     runs-on: ubuntu-22.04
     steps:
-      - run: python3 gate.py verify-manifest candidate
+      - run: python3 gate.py verify-manifest candidate --expect-digest "$D"
       - run: gh release create v1.0.0 candidate/*
         env:
           GH_TOKEN: ${{ secrets.PUBLISHER_TOKEN }}
@@ -152,7 +153,7 @@ jobs:
         self.assertTrue(any("scan" in p for p in self.problems(bad)))
 
     def test_publisher_without_manifest_check_is_rejected(self):
-        bad = self.GOOD.replace("      - run: python3 gate.py verify-manifest candidate\n", "")
+        bad = self.GOOD.replace("      - run: python3 gate.py verify-manifest candidate --expect-digest \"$D\"\n", "")
         self.assertTrue(any("verify-manifest" in p for p in self.problems(bad)))
 
     def test_publisher_without_protected_environment_is_rejected(self):
@@ -521,10 +522,7 @@ class SecretExpressions(unittest.TestCase):
 class PublisherOrdering(unittest.TestCase):
     """S2: the publisher runs only after a successful scan, verifying first."""
 
-    GOOD = WorkflowPolicyCatchesViolations.GOOD.replace(
-        "    environment: release-publisher\n",
-        "    environment: release-publisher\n    if: ${{ !cancelled() && needs.scan.result == 'success' }}\n",
-    ).replace("verify-manifest candidate\n", "verify-manifest candidate --expect-digest \"$D\"\n")
+    GOOD = WorkflowPolicyCatchesViolations.GOOD
 
     def problems(self, text):
         return gate.policy_problems("wf.yml", _workflow(text), REPO)

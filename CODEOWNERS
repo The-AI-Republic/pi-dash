@@ -18,9 +18,14 @@
 # Release infrastructure — extra care; see RELEASING.md for the tag scheme.
 # ---------------------------------------------------------------------------
 /RELEASING.md                      @irichard00
-/.github/workflows/release.yml     @irichard00
-/.github/workflows/build-branch.yml @irichard00
-/.github/actions/build-push/       @irichard00
+/CODEOWNERS                        @irichard00
+
+# Publication gate: the checker, every workflow (a new one could publish or
+# relax the policy check itself) and the image build action the release
+# workflows run. See .github/publication-gate/README.md.
+/.github/publication-gate/         @irichard00
+/.github/workflows/                @irichard00
+/.github/actions/build-image/      @irichard00
 
 # ---------------------------------------------------------------------------
 # License + attribution. Per AGPL-3.0 these must remain intact, so changes

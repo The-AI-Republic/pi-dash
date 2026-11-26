@@ -51,15 +51,15 @@ runs:
         path: ${{ inputs.additional-assets-dir }}
 
     - name: Set up QEMU
-      uses: docker/setup-qemu-action@v3
+      uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
 
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v4
+      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       with:
         driver: docker-container
 
     - name: Build image into an OCI archive
-      uses: docker/build-push-action@v7
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
       with:
         context: ${{ inputs.build-context }}
         file: ${{ inputs.dockerfile-path }}
@@ -74,13 +74,14 @@ runs:
       shell: bash
       env:
         ARCHIVE: ${{ runner.temp }}/image-candidate/${{ inputs.image-name }}.tar
+        IMAGE_NAME: ${{ inputs.image-name }}
       run: |
         set -euo pipefail
         digest="$(tar -xOf "$ARCHIVE" index.json | jq -r '.manifests[0].digest')"
         case "$digest" in sha256:*) ;; *) echo "::error::no image digest in $ARCHIVE"; exit 1 ;; esac
         echo "$digest" > "${ARCHIVE%.tar}.digest"
         echo "digest=$digest" >> "$GITHUB_OUTPUT"
-        echo "${{ inputs.image-name }} $digest"
+        echo "$IMAGE_NAME $digest"
 
     - name: Upload the image archive
       uses: actions/upload-artifact@v7
