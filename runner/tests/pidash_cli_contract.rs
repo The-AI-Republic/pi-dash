@@ -1385,6 +1385,14 @@ async fn page_get_rejects_a_non_uuid_page_id_before_any_request() {
 const PAGE_ID: &str = "00000000-0000-0000-0000-0000000000f1";
 const PARENT_PAGE_ID: &str = "00000000-0000-0000-0000-0000000000f2";
 
+fn not_found() -> CannedResponse {
+    CannedResponse {
+        status: 404,
+        status_text: "Not Found",
+        body: r#"{"error":"Not found."}"#.into(),
+    }
+}
+
 fn created(body: &str) -> CannedResponse {
     CannedResponse {
         status: 201,
@@ -1831,6 +1839,75 @@ async fn page_update_non_uuid_page_id_exits_2_without_a_request() {
 const ISSUE_ID: &str = "00000000-0000-0000-0000-000000000001";
 const ISSUE_PROJECT_ID: &str = "00000000-0000-0000-0000-0000000000aa";
 const ISSUE_DETAIL: &str = r#"{"id":"00000000-0000-0000-0000-000000000001","project":"00000000-0000-0000-0000-0000000000aa","name":"demo"}"#;
+/// What the server answers a work-item POST with: the issue serializer,
+/// which carries `sequence_id` and (when the deployment has a web base URL)
+/// `url`, but no `identifier`.
+const ISSUE_CREATED: &str = r#"{"id":"00000000-0000-0000-0000-000000000001","project":"00000000-0000-0000-0000-0000000000aa","name":"demo","sequence_id":123,"url":"https://app.example/acme/browse/ENG-123"}"#;
+const ISSUE_PROJECTS: &str =
+    r#"[{"id":"00000000-0000-0000-0000-0000000000aa","identifier":"ENG","name":"Engineering"}]"#;
+
+const ISSUE_PROJECT_DETAIL: &str =
+    r#"{"id":"00000000-0000-0000-0000-0000000000aa","identifier":"ENG","name":"Engineering"}"#;
+
+/// A work-item POST answer without `url`, as from a deployment that has no
+/// web base URL configured.
+const ISSUE_CREATED_NO_URL: &str = r#"{"id":"00000000-0000-0000-0000-000000000001","project":"00000000-0000-0000-0000-0000000000aa","name":"demo","sequence_id":123}"#;
+
+/// Whether `reference` names the fake's one project the way the server
+/// resolves a project ref: the identifier in any case, or the UUID in any
+/// spelling.
+fn names_issue_project(reference: &str) -> bool {
+    reference.to_lowercase().replace('-', "") == ISSUE_PROJECT_ID.replace('-', "")
+        || reference.eq_ignore_ascii_case("ENG")
+}
+
+/// The project ref in a `/api/v1/workspaces/acme/projects/{ref}/...` path.
+fn project_ref_of(path: &str) -> &str {
+    path.strip_prefix("/api/v1/workspaces/acme/projects/")
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or_default()
+}
+
+/// A server-like fake for `issue create`: the work-item POST answers
+/// `created_body` for the known project and 404s any other ref, and the
+/// project detail route answers `detail` (or 404 for an unknown ref).
+fn issue_create_fake(created_body: &'static str, detail: CannedResponse) -> Handler {
+    Box::new(move |req| {
+        if req.method == "GET" && req.path == "/api/v1/workspaces/acme/projects/" {
+            return CannedResponse::ok(ISSUE_PROJECTS);
+        }
+        if !names_issue_project(project_ref_of(&req.path)) {
+            return not_found();
+        }
+        if req.method == "POST" {
+            return created(created_body);
+        }
+        CannedResponse {
+            status: detail.status,
+            status_text: detail.status_text,
+            body: detail.body.clone(),
+        }
+    })
+}
+
+fn forbidden() -> CannedResponse {
+    CannedResponse {
+        status: 403,
+        status_text: "Forbidden",
+        body: r#"{"error":"You don't have the required permissions."}"#.into(),
+    }
+}
+
+fn issue_create_handler() -> Handler {
+    issue_create_fake(ISSUE_CREATED, CannedResponse::ok(ISSUE_PROJECT_DETAIL))
+}
+
+/// The single work-item POST among the recorded requests.
+fn the_create_post(recorded: &[RecordedRequest]) -> RecordedRequest {
+    let posts: Vec<_> = recorded.iter().filter(|r| r.method == "POST").collect();
+    assert_eq!(posts.len(), 1, "exactly one POST: {recorded:?}");
+    posts[0].clone()
+}
 const LONG_BODY: &str = "# Cold start\n\n- [ ] fixtures\n  - nested\n\n```rust\nfn main() {}\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
 
 /// An issue patch makes the by-identifier GET, then the PATCH; both can be
@@ -1841,7 +1918,7 @@ fn issue_patch_handler() -> Handler {
 
 #[tokio::test]
 async fn issue_create_description_file_sends_the_file_as_markdown() {
-    let fake = start_fake(Box::new(|_req| created(ISSUE_DETAIL))).await;
+    let fake = start_fake(issue_create_handler()).await;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("body.md");
     std::fs::write(&path, LONG_BODY).unwrap();
@@ -1864,21 +1941,20 @@ async fn issue_create_description_file_sends_the_file_as_markdown() {
 
     assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
     let recorded = fake.recorded.lock().unwrap();
-    assert_eq!(recorded.len(), 1);
-    assert_eq!(recorded[0].method, "POST");
+    let post = the_create_post(&recorded);
     assert_eq!(
-        recorded[0].path,
+        post.path,
         "/api/v1/workspaces/acme/projects/ENG/work-items/"
     );
     assert_eq!(
-        body_json(&recorded[0]),
+        body_json(&post),
         serde_json::json!({"name": "X", "description_markdown": LONG_BODY})
     );
 }
 
 #[tokio::test]
 async fn issue_create_description_file_dash_reads_stdin() {
-    let fake = start_fake(Box::new(|_req| created(ISSUE_DETAIL))).await;
+    let fake = start_fake(issue_create_handler()).await;
 
     let out = run_pidash(
         &fake,
@@ -1899,14 +1975,14 @@ async fn issue_create_description_file_dash_reads_stdin() {
     assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
     let recorded = fake.recorded.lock().unwrap();
     assert_eq!(
-        body_json(&recorded[0]),
+        body_json(&the_create_post(&recorded)),
         serde_json::json!({"name": "X", "description_markdown": LONG_BODY})
     );
 }
 
 #[tokio::test]
 async fn issue_create_inline_description_is_sent_as_markdown() {
-    let fake = start_fake(Box::new(|_req| created(ISSUE_DETAIL))).await;
+    let fake = start_fake(issue_create_handler()).await;
 
     let out = run_pidash(
         &fake,
@@ -1927,9 +2003,246 @@ async fn issue_create_inline_description_is_sent_as_markdown() {
     assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
     let recorded = fake.recorded.lock().unwrap();
     assert_eq!(
-        body_json(&recorded[0]),
+        body_json(&the_create_post(&recorded)),
         serde_json::json!({"name": "X", "description_markdown": "## Hi"})
     );
+}
+
+// ---- issue create output (PDASHOSS01-408) -------------------------------
+//
+// The JSON `issue create` prints is the server payload plus a CLI-built
+// `identifier` (`PROJ-123`); `--output id` prints only that identifier, for
+// scripts that file follow-ups and need the new key.
+
+#[tokio::test]
+async fn issue_create_prints_identifier_sequence_id_and_url() {
+    let fake = start_fake(issue_create_handler()).await;
+
+    let out = run_pidash(
+        &fake,
+        &["issue", "create", "--project", "eng", "--title", "X"],
+        "",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let printed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(printed["identifier"], "ENG-123");
+    assert_eq!(printed["sequence_id"], 123);
+    assert_eq!(printed["url"], "https://app.example/acme/browse/ENG-123");
+    assert_eq!(printed["id"], ISSUE_ID);
+    assert_eq!(printed["project"], ISSUE_PROJECT_ID);
+}
+
+#[tokio::test]
+async fn issue_create_output_id_prints_only_the_identifier() {
+    let fake = start_fake(issue_create_handler()).await;
+
+    let out = run_pidash(
+        &fake,
+        &[
+            "issue",
+            "create",
+            "--project",
+            "ENG",
+            "--title",
+            "X",
+            "--output",
+            "id",
+        ],
+        "",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    assert_eq!(out.stdout, "ENG-123\n");
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(
+        body_json(&the_create_post(&recorded)),
+        serde_json::json!({"name": "X"})
+    );
+}
+
+#[tokio::test]
+async fn issue_create_accepts_an_uppercase_project_uuid() {
+    let fake = start_fake(issue_create_handler()).await;
+    let upper = ISSUE_PROJECT_ID.to_uppercase();
+
+    let out = run_pidash(
+        &fake,
+        &[
+            "issue",
+            "create",
+            "--project",
+            &upper,
+            "--title",
+            "X",
+            "--output",
+            "id",
+        ],
+        "",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    assert_eq!(out.stdout, "ENG-123\n");
+}
+
+#[tokio::test]
+async fn issue_create_unknown_project_exits_not_found() {
+    let fake = start_fake(issue_create_handler()).await;
+
+    let out = run_pidash(
+        &fake,
+        &["issue", "create", "--project", "NOPE", "--title", "X"],
+        "",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(EXIT_NOT_FOUND), "stderr: {}", out.stderr);
+    assert!(out.stdout.is_empty(), "stdout: {}", out.stdout);
+}
+
+/// The key comes from the created work item's own `url`, so create needs
+/// no project read: a caller the project-detail route refuses (403), but
+/// who may create work items, still gets the identifier.
+#[tokio::test]
+async fn issue_create_does_not_need_project_read_access() {
+    let fake = start_fake(issue_create_fake(ISSUE_CREATED, forbidden())).await;
+
+    let out = run_pidash(
+        &fake,
+        &[
+            "issue",
+            "create",
+            "--project",
+            "ENG",
+            "--title",
+            "X",
+            "--output",
+            "id",
+        ],
+        "",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    assert_eq!(out.stdout, "ENG-123\n");
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(recorded.len(), 1, "only the POST: {recorded:?}");
+}
+
+/// The identifier matches the created item's `url`, never an older
+/// snapshot of the project identifier (here the detail route reports a
+/// different one, as after a rename).
+#[tokio::test]
+async fn issue_create_identifier_agrees_with_the_created_url() {
+    let renamed =
+        r#"{"id":"00000000-0000-0000-0000-0000000000aa","identifier":"OPS","name":"Engineering"}"#;
+    let fake = start_fake(issue_create_fake(
+        ISSUE_CREATED,
+        CannedResponse::ok(renamed),
+    ))
+    .await;
+
+    let out = run_pidash(
+        &fake,
+        &[
+            "issue",
+            "create",
+            "--project",
+            ISSUE_PROJECT_ID,
+            "--title",
+            "X",
+        ],
+        "",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let printed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(printed["identifier"], "ENG-123");
+    assert_eq!(printed["url"], "https://app.example/acme/browse/ENG-123");
+}
+
+/// Without a `url` (no web base URL configured), create reads the created
+/// item's project after the POST, by the UUID the POST returned.
+#[tokio::test]
+async fn issue_create_without_url_reads_the_project_after_creating() {
+    let fake = start_fake(issue_create_fake(
+        ISSUE_CREATED_NO_URL,
+        CannedResponse::ok(ISSUE_PROJECT_DETAIL),
+    ))
+    .await;
+
+    let out = run_pidash(
+        &fake,
+        &["issue", "create", "--project", "eng", "--title", "X"],
+        "",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let printed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(printed["identifier"], "ENG-123");
+    assert_eq!(printed["sequence_id"], 123);
+    assert!(printed.get("url").is_none());
+    let recorded = fake.recorded.lock().unwrap();
+    let methods: Vec<_> = recorded
+        .iter()
+        .map(|r| (r.method.as_str(), r.path.as_str()))
+        .collect();
+    assert_eq!(
+        methods,
+        vec![
+            ("POST", "/api/v1/workspaces/acme/projects/eng/work-items/"),
+            (
+                "GET",
+                "/api/v1/workspaces/acme/projects/00000000-0000-0000-0000-0000000000aa/"
+            ),
+        ]
+    );
+}
+
+/// Without a `url` and without project read access the item is still
+/// created: the JSON omits `identifier` and exits 0 (the server payload
+/// is still printed), while `--output id` cannot print a key and says the
+/// item was created.
+#[tokio::test]
+async fn issue_create_without_url_or_project_read_still_reports_the_created_item() {
+    let fake = start_fake(issue_create_fake(ISSUE_CREATED_NO_URL, forbidden())).await;
+    let out = run_pidash(
+        &fake,
+        &["issue", "create", "--project", "ENG", "--title", "X"],
+        "",
+    )
+    .await;
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let printed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert_eq!(printed["id"], ISSUE_ID);
+    assert_eq!(printed["sequence_id"], 123);
+    assert!(printed.get("identifier").is_none());
+
+    let fake = start_fake(issue_create_fake(ISSUE_CREATED_NO_URL, forbidden())).await;
+    let out = run_pidash(
+        &fake,
+        &[
+            "issue",
+            "create",
+            "--project",
+            "ENG",
+            "--title",
+            "X",
+            "--output",
+            "id",
+        ],
+        "",
+    )
+    .await;
+    assert_eq!(out.code, Some(EXIT_SERVER), "stderr: {}", out.stderr);
+    assert!(out.stdout.is_empty(), "stdout: {}", out.stdout);
+    assert!(out.stderr.contains(ISSUE_ID), "stderr: {}", out.stderr);
+    assert!(out.stderr.contains("was created"), "stderr: {}", out.stderr);
 }
 
 #[tokio::test]

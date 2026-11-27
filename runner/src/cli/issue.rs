@@ -10,7 +10,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use serde_json::{Map, Value};
 
 use crate::api_client::{
@@ -45,7 +45,11 @@ pub enum IssueCommand {
     },
     /// Create a new work item under a project. If `--project` is omitted,
     /// the CLI uses PIDASH_PROJECT_ID, local config default_project, or
-    /// the workspace default project from Pi Dash cloud.
+    /// the workspace default project from Pi Dash cloud. Prints the created
+    /// work item as JSON: the server payload (`id`, `project`, `sequence_id`,
+    /// `name`, `state`, …, and `url` when the deployment has a web base URL)
+    /// plus `identifier` (`PROJ-123`). `--output id` prints only the
+    /// identifier, for scripts.
     Create(CreateArgs),
     /// List work items in a project. Returns the server's paginated envelope
     /// (`{grouped_by, sub_grouped_by, total_count, next_cursor, prev_cursor,
@@ -275,6 +279,19 @@ pub struct CreateArgs {
     /// `<name>`); without `--runner` this clears any dedicated runner.
     #[arg(long)]
     pub pod: Option<String>,
+
+    /// What to print: `json` (default) — the created work item, including
+    /// `identifier`, `sequence_id` and `url`; `id` — only the identifier
+    /// (`PROJ-123`) and a newline, for scripts.
+    #[arg(long, value_enum, default_value_t = CreateOutput::Json)]
+    pub output: CreateOutput,
+}
+
+/// Output shape of `pidash issue create`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CreateOutput {
+    Json,
+    Id,
 }
 
 /// The description source shared by `create` and `patch`: inline or from a
@@ -618,12 +635,98 @@ async fn cmd_create(
         "workspaces/{}/projects/{}/work-items/",
         client.env.workspace_slug, project_ref
     );
+    // The POST alone gates creation (an unknown project is its 404), so
+    // create needs no permission beyond the one the server checks for it.
     let resp = client.post(&path, &Value::Object(body)).await?;
-    println!(
-        "{}",
-        serde_json::to_string(&resp).expect("serialize JSON value")
-    );
+    let created = add_identifier(client, resp).await;
+    match args.output {
+        CreateOutput::Json => println!(
+            "{}",
+            serde_json::to_string(&created).expect("serialize JSON value")
+        ),
+        CreateOutput::Id => {
+            let identifier = created
+                .get("identifier")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    let id = created.get("id").and_then(Value::as_str).unwrap_or("?");
+                    CliError::new(
+                        EXIT_SERVER,
+                        format!(
+                            "work item {id} was created, but its identifier could not be \
+                             determined from the response; do not retry the create"
+                        ),
+                    )
+                })?;
+            println!("{identifier}");
+        }
+    }
     Ok(())
+}
+
+/// Add the `PROJ-123` `identifier` to a created work item's payload. The key
+/// is taken, in order, from a server-sent `identifier`, from the item's own
+/// `url` (`.../browse/PROJ-123`), or, when the deployment sends no `url`,
+/// from a read of the item's project after the POST. Taking it from the
+/// created item keeps it in step with the `url` even if the project's
+/// identifier changes around the write. If none of these is available the
+/// payload is returned without an `identifier` and a note goes to stderr:
+/// the item exists, so this is not a failure of the create.
+async fn add_identifier(client: &ApiClient, created: Value) -> Value {
+    if created.get("identifier").is_some() {
+        return created;
+    }
+    let Some(seq) = created.get("sequence_id").and_then(Value::as_u64) else {
+        return created;
+    };
+    if let Some(prefix) = created
+        .get("url")
+        .and_then(Value::as_str)
+        .and_then(|url| project_identifier_from_url(url, seq))
+    {
+        let prefix = prefix.to_string();
+        return with_identifier(created, &prefix);
+    }
+    let project_ref = created
+        .get("project")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if let Some(project_ref) = project_ref {
+        match project::get_project(client, &project_ref).await {
+            Ok(project) => return with_identifier(created, &project.identifier),
+            Err(e) => eprintln!(
+                "note: the work item was created, but its identifier could not be \
+                 built: reading project {project_ref} failed: {}",
+                e.message
+            ),
+        }
+    }
+    created
+}
+
+/// The `PROJ` in a created item's browse `url` (`.../browse/PROJ-123`),
+/// provided the key there ends in the item's own `sequence_id`.
+fn project_identifier_from_url(url: &str, sequence_id: u64) -> Option<&str> {
+    let key = url.trim_end_matches('/').rsplit_once("/browse/")?.1;
+    let (prefix, seq) = key.rsplit_once('-')?;
+    (!prefix.is_empty() && !prefix.contains('/') && seq == sequence_id.to_string())
+        .then_some(prefix)
+}
+
+/// Add `identifier` = `<project_identifier>-<sequence_id>` to a created work
+/// item's payload. A payload that already has an `identifier`, or has no
+/// `sequence_id`, is returned unchanged.
+fn with_identifier(mut created: Value, project_identifier: &str) -> Value {
+    if let Some(obj) = created.as_object_mut()
+        && !obj.contains_key("identifier")
+        && let Some(seq) = obj.get("sequence_id").and_then(Value::as_u64)
+    {
+        obj.insert(
+            "identifier".into(),
+            Value::String(format!("{project_identifier}-{seq}")),
+        );
+    }
+    created
 }
 
 /// Assemble the `work-items` POST body from already-resolved values. Kept pure
@@ -2222,6 +2325,79 @@ mod tests {
         ])
         .expect_err("--description and --description-file are mutually exclusive");
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn create_output_defaults_to_json_and_accepts_id() {
+        let parsed = CreateArgsHarness::try_parse_from(["create", "--title", "T"]).unwrap();
+        assert_eq!(parsed.args.output, CreateOutput::Json);
+        let parsed =
+            CreateArgsHarness::try_parse_from(["create", "--title", "T", "--output", "id"])
+                .unwrap();
+        assert_eq!(parsed.args.output, CreateOutput::Id);
+        let err = CreateArgsHarness::try_parse_from(["create", "--title", "T", "--output", "yaml"])
+            .expect_err("unknown output");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn project_identifier_from_url_reads_the_browse_key() {
+        let url = "https://app.example/acme/browse/ENG-123";
+        assert_eq!(project_identifier_from_url(url, 123), Some("ENG"));
+        assert_eq!(
+            project_identifier_from_url(&format!("{url}/"), 123),
+            Some("ENG")
+        );
+        assert_eq!(
+            project_identifier_from_url("https://x/acme/browse/ÉQUIPE-7", 7),
+            Some("ÉQUIPE")
+        );
+    }
+
+    #[test]
+    fn project_identifier_from_url_rejects_other_shapes() {
+        // Key for a different sequence, no browse segment, no prefix.
+        assert_eq!(
+            project_identifier_from_url("https://x/acme/browse/ENG-12", 123),
+            None
+        );
+        assert_eq!(
+            project_identifier_from_url("https://x/acme/ENG-123", 123),
+            None
+        );
+        assert_eq!(
+            project_identifier_from_url("https://x/acme/browse/-123", 123),
+            None
+        );
+        assert_eq!(
+            project_identifier_from_url("https://x/acme/browse/ENG/-123", 123),
+            None
+        );
+    }
+
+    #[test]
+    fn with_identifier_builds_proj_seq_and_keeps_the_payload() {
+        let created = with_identifier(
+            serde_json::json!({"id": "u", "sequence_id": 7, "url": "https://x/a/browse/ENG-7"}),
+            "ENG",
+        );
+        assert_eq!(
+            created,
+            serde_json::json!({
+                "id": "u",
+                "sequence_id": 7,
+                "url": "https://x/a/browse/ENG-7",
+                "identifier": "ENG-7",
+            })
+        );
+    }
+
+    #[test]
+    fn with_identifier_leaves_server_identifier_and_missing_sequence_alone() {
+        let server = serde_json::json!({"sequence_id": 7, "identifier": "OPS-7"});
+        assert_eq!(with_identifier(server.clone(), "ENG"), server);
+        let no_seq = serde_json::json!({"id": "u"});
+        assert_eq!(with_identifier(no_seq.clone(), "ENG"), no_seq);
     }
 
     #[test]
