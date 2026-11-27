@@ -93,31 +93,52 @@ def test_run_ai_active_refusal_names_blocking_run(api, world, seeder):
         assert set(body) == {"error", "reason"}
 
 
+ACTIVE_RUN_KEYS = [
+    "id",
+    "status",
+    "runner_id",
+    "created_at",
+    "assigned_at",
+    "started_at",
+    "age_seconds",
+    "runner_last_heartbeat_at",
+    "branch",
+]
+
+
+def by_identifier_url(world):
+    identifier = world["issue"]["url"].rsplit("/", 1)[-1]
+    return f"/api/v1/workspaces/{world['workspace']['slug']}/work-items/{identifier}/"
+
+
 def test_issue_detail_carries_active_run(api, world, seeder):
-    """Issue detail carries the blocking run + heartbeat (DIFF-44)."""
+    """Issue detail carries the blocking run + heartbeat (DIFF-44,
+    PDASHOSS01-407): same block on both backends, detail and
+    by-identifier."""
     pod = seeder.create_pod(world["workspace"]["id"], world["project"]["id"])
     run = seeder.create_agent_run(
         world["workspace"]["id"], world["owner"]["id"], pod["id"], world["issue"]["id"]
     )
-    response = api.get(issue_url(world, world["issue"]["id"]))
-    assert response.status_code == 200, response.text
-    detail = response.json()
-    if is_rust():
-        block = detail["active_run"]
+    for url in (issue_url(world, world["issue"]["id"]), by_identifier_url(world)):
+        response = api.get(url)
+        assert response.status_code == 200, response.text
+        block = response.json()["active_run"]
+        assert list(block) == ACTIVE_RUN_KEYS
         assert block["id"] == run["id"]
         assert block["status"] == "running"
         assert block["age_seconds"] >= 0
         # No branch recorded on the issue or pinned on the run yet.
         assert block["branch"] is None
-    else:
-        assert "active_run" not in detail
+    listed = api.get(issue_url(world, "").rstrip("/") + "/")
+    assert listed.status_code == 200, listed.text
+    assert all("active_run" not in row for row in listed.json()["results"])
 
 
 def test_issue_detail_active_run_names_its_branch(api, world, seeder):
-    """The active run reports its working branch (PDASHOSS01-407, DIFF-44).
+    """The active run reports its working branch (PDASHOSS01-407).
 
-    Rust: the issue's git_work_branch when set, else the branch pinned in
-    the run's run_config. Django has no active_run block.
+    The issue's git_work_branch when set, else the branch pinned in the
+    run's run_config, on both backends.
     """
     pod = seeder.create_pod(world["workspace"]["id"], world["project"]["id"])
     run = seeder.create_agent_run(
@@ -131,11 +152,8 @@ def test_issue_detail_active_run_names_its_branch(api, world, seeder):
     response = api.get(url)
     assert response.status_code == 200, response.text
     detail = response.json()
-    if is_rust():
-        assert detail["active_run"]["id"] == run["id"]
-        assert detail["active_run"]["branch"] == "feat/pinned"
-    else:
-        assert "active_run" not in detail
+    assert detail["active_run"]["id"] == run["id"]
+    assert detail["active_run"]["branch"] == "feat/pinned"
 
     patched = api.patch(url, json={"git_work_branch": "pi-dash/eng-7"})
     assert patched.status_code == 200, patched.text
@@ -143,13 +161,10 @@ def test_issue_detail_active_run_names_its_branch(api, world, seeder):
     assert response.status_code == 200, response.text
     detail = response.json()
     assert detail["git_work_branch"] == "pi-dash/eng-7"
-    if is_rust():
-        block = detail["active_run"]
-        assert block["id"] == run["id"]
-        assert block["status"] == "running"
-        assert block["branch"] == "pi-dash/eng-7"
-    else:
-        assert "active_run" not in detail
+    block = detail["active_run"]
+    assert block["id"] == run["id"]
+    assert block["status"] == "running"
+    assert block["branch"] == "pi-dash/eng-7"
 
 
 def test_run_ai_unknown_issue_is_404(api, world):
