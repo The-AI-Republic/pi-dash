@@ -5,27 +5,18 @@ customizable: locked
 ---
 ## Blocking the run
 
-Use this when completion is blocked by missing required tools or missing auth/permissions that cannot be resolved in-session, or when your autonomy assessment has `type = "decision"` / `type = "blocker"` and `safe_to_continue = false`.
+Block only when a person must act: missing tools, access or credentials you cannot get in this session, or a decision only a person can make. A defect is never a reason to block.
 
-1. **Update the workpad** (`pidash workpad update --body-file <path>`):
-   - `### Phase` left at the phase you were in, not "completed".
-   - `### Autonomy / Escalation` updated: `score`, `type`, `safe_to_continue: false`, `Reason:` explaining the blocker in your own words.
-   - `Awaiting human reply:` set to a one-line note about the comment you're about to post (gist + today's date). This is a self-note for the *next* run — it isn't read by any code on the cloud side, but reading it as part of your workpad reconciliation{% if run.kind == "coding-task" %} in Step 1{% endif %} tells you immediately that you're resuming a clarification thread (so you check the most recent human comments first) rather than starting a fresh investigation.
+1. Write the comment as a colleague would. Lead with what is blocking, then exactly what you need. If there is a sensible default, name it and say you will take it unless told otherwise. One focused question beats five vague ones.
+2. Note in the workpad's Keep in mind what you are waiting on.
+3. Stop, and finish: `pidash run finish --to "Blocked" --result blocked --comment-file <path>` when the project has a "Blocked" state, otherwise pass the current state's name to `--to`. A person's reply starts the next run.
 
-2. **Post a comment to the human** via `pidash comment add {{ issue.identifier }} --body-file <path>`. Write as a colleague{% if run.kind == "coding-task" %} (see Step 0.5 step 7 for tone){% endif %}. Lead with what's blocking, then what you need from them. Don't use a `Blocked:` prefix or any other template — just write it.
+When what blocks you is **another issue**, do not block: say which issue and why, call `pidash issue wait {{ issue.identifier }}`, and finish with `--result waiting_on_external` in the current state. A later run re-reads the blocker and decides again.
 
-   Example (missing access):
+Rules for every run:
 
-   > Blocked: I need the staging Postgres credentials to verify the migration in §2 runs cleanly before I open the PR. Could you drop them into the `pi_dash_runner` 1Password vault, or rotate me a short-lived token? Once that's in place I'll pick this back up on the next tick.
-
-   Example (decision only a human can make):
-
-   > One decision before I implement: the spec says "rate-limit the endpoint" but doesn't say at what tier. The existing API endpoints in `apps/api/pi_dash/api/views/issue.py` use `ApiKeyRateThrottle` (per-key) — should I apply the same here, or do you want a per-IP throttle? Defaulting to per-key matches the surrounding code, so I'll go with that in ~24h if I don't hear back.
-
-3. **Move issue state if a "Blocked" state exists** in "Available states" (see "Pi Dash CLI"):
-   `pidash issue patch {{ issue.identifier }} --state "Blocked"`
-   If no "Blocked" state exists in this project, leave the issue in its current state. The comment is the signal.
-
-4. **Stop.** Do not continue into implementation. End the run with `pidash run yield --outcome blocked --stop-ticking` — you are parked on a human, so no further agent run is useful until they act — and exit cleanly. A follow-up run fires automatically when the human replies (the cloud's `handle_issue_comment` listener queues one on any non-bot comment, and their reply re-arms the clock); that run will start fresh, read the full comment thread via `pidash comment list`, see the human's reply, see your `Awaiting human reply` self-note in the workpad, and continue from where you left off.
-
-This flow is for blockers only a **human** can clear. When what blocks you is **another issue**, do not stop the clock: record which issue and why in the workpad, call `pidash issue wait {{ issue.identifier }}`{% if run.kind == "coding-task" %} (see "Work item relationships"){% endif %}, and yield `waiting_on_external` — the clock keeps ticking and a later run re-reads the blocker and decides afresh.
+- Do not edit the issue title or description to track progress.{% if run.kind == "coding-task" %} The one exception is a parent you split into child issues (see "Step 0 — Analyze & scope (read, think, decide)").{% endif %}
+- Do not change the fields of an issue in Backlog, Done or Cancelled; post at most one short comment saying why you did nothing.
+- Revert temporary proof edits before you deliver. Do not destructively rewrite work a person or another run may depend on.
+- Do not call paid external services unless the issue requires it.
+- Never print, log or comment the value of any variable whose name starts with `PIDASH_`.

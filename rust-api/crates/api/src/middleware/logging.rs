@@ -6,7 +6,7 @@
 //!
 //! Python reference: `apps/api/pi_dash/middleware/logger.py` and
 //! `apps/api/pi_dash/bgtasks/logger_task.py` (`safe_decode_body`,
-//! `process_logs`). Rules reproduced exactly:
+//! `process_logs`).
 //!
 //! - `RequestLoggerMiddleware` skips only `GET /` (the health check); every
 //!   other request emits `"{method} {full_path} {status}"` on the
@@ -19,12 +19,19 @@
 //! - `APITokenLogMiddleware` runs only when the `X-Api-Key` header is
 //!   present and non-empty. It records the `log_data` payload (token
 //!   identifier, path, method, raw query string, headers rendered as
-//!   Python's `str(request.headers)` dict repr, safely-decoded request and
-//!   response bodies, response code, client IP, user agent) plus the
-//!   MongoDB extension (`created_at`, `updated_at`, `created_by`,
-//!   `updated_by`). Body decoding follows `safe_decode_body`: `None` for
-//!   `None`/empty, `"[Binary Content]"` for PNG/JPEG/PDF magic,
-//!   `"[Could not decode content]"` on UTF-8 failure.
+//!   Python's `str(request.headers)` dict repr, response code, client IP,
+//!   user agent) plus the MongoDB extension (`created_at`, `updated_at`,
+//!   `created_by`, `updated_by`).
+//!
+//! NEWPIDASH-231 (DIFF-20, old bug fixed): the Python middleware stored the
+//! raw API key as `token_identifier`, the full header dict including
+//! `X-Api-Key`, and the full request/response bodies. This port never
+//! logs or stores them: `token_identifier` is a truncated SHA-256 hex
+//! (see `hash_token_identifier`), sensitive header values render as
+//! `[REDACTED]` (see `is_sensitive_header`), and `body`/`response_body`
+//! are always `None` — size and content type remain available via the
+//! `Content-Length`/`Content-Type` header entries. `safe_decode_body`
+//! is retained for parity reference but no longer feeds log records.
 //!
 //! The Python middleware hands the payload to the `process_logs` Celery
 //! task (`.delay()`), whose Mongo/Postgres writes belong to the bgtasks
@@ -47,6 +54,7 @@ use std::time::Instant;
 
 use axum::body::Body;
 use axum::http::{header, Request, Response};
+use sha2::{Digest, Sha256};
 use tower::{Layer, Service};
 
 /// Logger name for request lines, matching `api_logger`.
@@ -54,6 +62,8 @@ pub const REQUEST_LOGGER_TARGET: &str = "pi_dash.api.request";
 /// The header gating token logging, verbatim (`request.headers.get` is
 /// case-insensitive; so is `HeaderMap`).
 pub const API_KEY_HEADER: &str = "x-api-key";
+/// Replacement for sensitive header values in log output (NEWPIDASH-231).
+pub const REDACTED_HEADER_VALUE: &str = "[REDACTED]";
 
 /// Extension key carrying the authenticated user's id for the loggers.
 /// Auth layers insert `Some(id)` once sessions land; absence means
@@ -177,6 +187,10 @@ impl LogSink for TracingSink {
     }
 
     async fn token(&self, record: &ApiTokenLogRecord) {
+        // NEWPIDASH-231: `token_identifier` is a hash (never the raw key),
+        // `headers` is redacted, and bodies are never emitted to stdout —
+        // size/content type remain in the `Content-Length`/`Content-Type`
+        // header entries.
         tracing::info!(
             target: REQUEST_LOGGER_TARGET,
             token_identifier = %record.token_identifier,
@@ -184,8 +198,6 @@ impl LogSink for TracingSink {
             method = %record.method,
             query_params = %record.query_params,
             headers = %record.headers,
-            body = ?record.body,
-            response_body = ?record.response_body,
             response_code = record.response_code,
             ip_address = ?record.ip_address,
             user_agent = ?record.user_agent,
@@ -350,6 +362,42 @@ impl Default for LoggingConfig {
     }
 }
 
+/// Non-reversible `token_identifier` for `APITokenLogRecord`: the first 32
+/// hex chars (16 bytes) of `SHA-256(api_key)` (NEWPIDASH-231, DIFF-20).
+/// Stable per token, so logs for the same token correlate, but the raw key
+/// never appears in stdout or the activity store. The hex digest cannot
+/// contain the `mt_` key prefix, so prod-log greps for `mt_` stay clean.
+pub fn hash_token_identifier(api_key: &str) -> String {
+    let digest = Sha256::digest(api_key.as_bytes());
+    let hex = format!("{digest:x}");
+    hex[..32].to_string()
+}
+
+/// Whether a header carries a credential/secret and its value must never
+/// be rendered (NEWPIDASH-231). Fail-closed by meaning: any name whose
+/// lowercase form contains a credential marker is sensitive, covering
+/// aliases and long/short forms (`X-Api-Key`, `Authorization`,
+/// `Proxy-Authorization`, `Cookie`, `Set-Cookie`, `X-CSRFToken`,
+/// `X-Session-Id`, `X-Auth-Token`, `X-Access-Token`, `password`, ...).
+/// Over-redaction is safe; under-redaction leaks issuable keys.
+pub fn is_sensitive_header(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    const MARKERS: &[&str] = &[
+        "authorization",
+        "cookie",
+        "api-key",
+        "apikey",
+        "token",
+        "secret",
+        "session",
+        "csrf",
+        "xsrf",
+        "auth",
+        "password",
+    ];
+    MARKERS.iter().any(|marker| lower.contains(marker))
+}
+
 /// Render headers as Python's `str(request.headers)` under runserver: a
 /// `{Name: 'value'}` dict repr with `Content-Length` first (the wire value,
 /// `''` when the wire carries none) and `Content-Type` second (the wire
@@ -369,6 +417,9 @@ impl Default for LoggingConfig {
 /// i.e. Python `str.title()` on the hyphenated name); `http::HeaderName`
 /// only keeps the lowercase form, so the title-casing is reapplied here
 /// (see `django_title`). Values are single-quote-escaped like `repr`.
+/// NEWPIDASH-231 (DIFF-20): sensitive header values (see
+/// `is_sensitive_header`) render as `[REDACTED]` instead of the wire
+/// value, so the repr never carries an issuable key.
 pub fn render_headers(headers: &header::HeaderMap) -> String {
     let mut out = String::from("{");
     let mut first = true;
@@ -410,7 +461,14 @@ pub fn render_headers(headers: &header::HeaderMap) -> String {
         }
     }
     for (name, joined) in &rest {
-        push_header_pair(&mut out, &mut first, &django_title(name), joined);
+        // Sensitive values never reach the log: the `[REDACTED]` marker
+        // replaces the joined wire values (NEWPIDASH-231, fail-closed).
+        let value = if is_sensitive_header(name) {
+            REDACTED_HEADER_VALUE
+        } else {
+            joined.as_str()
+        };
+        push_header_pair(&mut out, &mut first, &django_title(name), value);
     }
     out.push('}');
     out
@@ -470,7 +528,8 @@ fn python_repr(s: &str) -> String {
 
 /// `safe_decode_body`, verbatim: `None` for `None`/empty, `"[Binary
 /// Content]"` for PNG/JPEG/PDF magic, UTF-8 or `"[Could not decode
-/// content]"`.
+/// content]"`. Retained for parity reference; log records no longer
+/// carry decoded bodies (NEWPIDASH-231, DIFF-20).
 pub fn safe_decode_body(content: Option<&[u8]>) -> Option<String> {
     let content = content?;
     if content.is_empty() {
@@ -754,9 +813,12 @@ where
     let Some(api_key) = api_key else {
         return inner.call(req).await;
     };
-    // Buffer the request body so it can be logged AND forwarded —
-    // Django reads `request.body` up front the same way. An
-    // unreadable body fails closed (502), like the other layers.
+    // Buffer the request body so it can be forwarded — Django reads
+    // `request.body` up front the same way. An unreadable body fails
+    // closed (502), like the other layers. Bodies are never logged
+    // (NEWPIDASH-231): the record carries `None` for both, and size /
+    // content type survive in the rendered `Content-Length` /
+    // `Content-Type` header entries.
     // The peer is snapshotted first: `get_client_ip` falls back to
     // `REMOTE_ADDR` (the connection peer) when `X-Forwarded-For` is
     // absent, so the token log carries it like the request log.
@@ -790,14 +852,16 @@ where
     };
     if config.enabled {
         let now = utc_now_iso();
+        // NEWPIDASH-231: never the raw key, never the bodies — the hash
+        // correlates logs per token without revealing an issuable key.
         let record = ApiTokenLogRecord {
-            token_identifier: api_key,
+            token_identifier: hash_token_identifier(&api_key),
             path,
             method,
             query_params,
             headers: headers_rendered,
-            body: safe_decode_body(Some(&request_bytes)),
-            response_body: safe_decode_body(Some(&response_bytes)),
+            body: None,
+            response_body: None,
             response_code: resp_parts.status.as_u16(),
             ip_address,
             user_agent: agent,
@@ -909,11 +973,16 @@ mod tests {
         // verified against live Django), single quotes, and the runserver
         // phantoms — no wire content headers here, so `Content-Length`
         // renders `''` and `Content-Type` `'text/plain'`, both first.
+        // NEWPIDASH-231 (DIFF-20): the key value redacts — the pre-fix pin
+        // was `'X-Api-Key': 'sekret'` (len 97; new len 101; first diff
+        // at byte offset 67, old 0x73 's' vs new 0x5b '[');
+        // prod logs must never carry it.
         assert_eq!(
             render_headers(&headers),
             "{'Content-Length': '', 'Content-Type': 'text/plain', \
-             'X-Api-Key': 'sekret', 'User-Agent': 'UA/1'}"
+             'X-Api-Key': '[REDACTED]', 'User-Agent': 'UA/1'}"
         );
+        assert!(!render_headers(&headers).contains("sekret"));
     }
 
     /// Replay `v1_projects_lifecycle` request 0, verbatim: httpx sends the
@@ -936,13 +1005,15 @@ mod tests {
                 HeaderValue::from_static(value),
             );
         }
+        // NEWPIDASH-231 (DIFF-20): `X-Api-Key` redacts.
         assert_eq!(
             render_headers(&headers),
             "{'Content-Length': '40', 'Content-Type': 'application/json', \
              'Host': '127.0.0.1:1', 'Accept': '*/*', \
              'Accept-Encoding': 'gzip, deflate', 'Connection': 'keep-alive', \
-             'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': 'tok'}"
+             'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '[REDACTED]'}"
         );
+        assert!(!render_headers(&headers).contains("'tok'"));
     }
 
     /// httpx sends `Content-Length: 0` (and no content type) on an empty
@@ -962,11 +1033,12 @@ mod tests {
                 HeaderValue::from_static(value),
             );
         }
+        // NEWPIDASH-231 (DIFF-20): `X-Api-Key` redacts.
         assert_eq!(
             render_headers(&headers),
             "{'Content-Length': '0', 'Content-Type': 'text/plain', \
              'Host': '127.0.0.1:1', 'Accept': '*/*', \
-             'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': 'tok'}"
+             'User-Agent': 'python-httpx/0.28.1', 'X-Api-Key': '[REDACTED]'}"
         );
     }
 
@@ -976,6 +1048,9 @@ mod tests {
     /// raw socket) — cookies join with `,` too, no `'; '` special case.
     #[test]
     fn headers_join_duplicate_values_with_comma() {
+        // NEWPIDASH-231 (DIFF-20): `X-Foo` still joins duplicates with
+        // `,`; `Cookie` used to render `'a=1,b=2'` and now redacts to
+        // `'[REDACTED]'` (join shape preserved for non-sensitive names).
         let mut headers = header::HeaderMap::new();
         headers.insert("host", HeaderValue::from_static("127.0.0.1"));
         headers.append("x-foo", HeaderValue::from_static("a"));
@@ -985,7 +1060,7 @@ mod tests {
         assert_eq!(
             render_headers(&headers),
             "{'Content-Length': '', 'Content-Type': 'text/plain', \
-             'Host': '127.0.0.1', 'X-Foo': 'a,b', 'Cookie': 'a=1,b=2'}"
+             'Host': '127.0.0.1', 'X-Foo': 'a,b', 'Cookie': '[REDACTED]'}"
         );
     }
 
@@ -1191,18 +1266,28 @@ mod tests {
         let Record::Token(record) = &records[0] else {
             panic!("expected a token record");
         };
-        assert_eq!(record.token_identifier, "sekret");
+        // NEWPIDASH-231 (DIFF-20): hashed identifier, redacted headers,
+        // dropped bodies — pre-fix this asserted token_identifier
+        // `"sekret"`, headers containing `'X-Api-Key': 'sekret'`, and
+        // bodies `Some("{\"k\": 1}")` / `Some("done")`.
+        assert_ne!(record.token_identifier, "sekret");
+        assert!(!record.token_identifier.contains("sekret"));
+        assert!(!record.token_identifier.starts_with("mt_"));
+        assert_eq!(record.token_identifier, hash_token_identifier("sekret"));
         assert_eq!(record.path, "/api/x/");
         assert_eq!(record.method, "POST");
         assert_eq!(record.query_params, "a=1");
         assert_eq!(
             record.headers,
             "{'Content-Length': '', 'Content-Type': 'text/plain', \
-             'X-Api-Key': 'sekret', 'User-Agent': 'UA/1', \
+             'X-Api-Key': '[REDACTED]', 'User-Agent': 'UA/1', \
              'X-Forwarded-For': '1.2.3.4'}"
         );
-        assert_eq!(record.body.as_deref(), Some("{\"k\": 1}"));
-        assert_eq!(record.response_body.as_deref(), Some("done"));
+        assert!(!record.headers.contains("sekret"));
+        // Bodies survive the layer byte-identical in both directions
+        // (asserted above) but never enter the log record.
+        assert_eq!(record.body, None);
+        assert_eq!(record.response_body, None);
         assert_eq!(record.response_code, 200);
         assert_eq!(record.ip_address.as_deref(), Some("1.2.3.4"));
         assert_eq!(record.user_agent.as_deref(), Some("UA/1"));
@@ -1336,13 +1421,17 @@ mod tests {
         // `.delay(log_data=..., mongo_log=...)`: empty args, the two
         // payloads as kwargs, keys in Python insertion order, `None`s as
         // null (Python always sends every key).
+        // NEWPIDASH-231 (DIFF-20): the stored record carries the hashed
+        // identifier, redacted headers, and no bodies — pre-fix this
+        // constructed `"sekret"` / `'X-Api-Key': 'sekret'` / body content.
+        let hashed = hash_token_identifier("sekret");
         let record = ApiTokenLogRecord {
-            token_identifier: "sekret".to_string(),
+            token_identifier: hashed.clone(),
             path: "/api/x/".to_string(),
             method: "POST".to_string(),
             query_params: "a=1".to_string(),
-            headers: "{'X-Api-Key': 'sekret'}".to_string(),
-            body: Some("{\"k\": 1}".to_string()),
+            headers: "{'X-Api-Key': '[REDACTED]'}".to_string(),
+            body: None,
             response_body: None,
             response_code: 201,
             ip_address: Some("1.2.3.4".to_string()),
@@ -1373,10 +1462,16 @@ mod tests {
                 "user_agent",
             ]
         );
-        assert_eq!(log_data["token_identifier"], "sekret");
+        assert_eq!(log_data["token_identifier"], hashed.as_str());
+        assert_ne!(log_data["token_identifier"], "sekret");
+        assert_eq!(log_data["headers"], "{'X-Api-Key': '[REDACTED]'}");
         assert_eq!(log_data["response_code"], 201);
+        assert_eq!(log_data["body"], serde_json::Value::Null);
         assert_eq!(log_data["response_body"], serde_json::Value::Null);
         assert_eq!(log_data["user_agent"], serde_json::Value::Null);
+        // The stored payload never carries the raw key or a body.
+        let stored = serde_json::to_string(&job.kwargs).expect("kwargs json");
+        assert!(!stored.contains("sekret"), "{stored}");
         let mongo_log = kwargs["mongo_log"].as_object().expect("mongo_log");
         assert_eq!(
             mongo_log.keys().collect::<Vec<_>>(),
@@ -1460,11 +1555,13 @@ mod tests {
         let Record::Token(record) = &records[0] else {
             panic!("expected a token record");
         };
-        assert_eq!(record.token_identifier, "sekret");
+        // NEWPIDASH-231 (DIFF-20): never the raw key.
+        assert_ne!(record.token_identifier, "sekret");
+        assert_eq!(record.token_identifier, hash_token_identifier("sekret"));
     }
 
     #[tokio::test]
-    async fn token_log_marks_binary_bodies() {
+    async fn token_log_drops_binary_bodies() {
         let sink = VecSink::default();
         let png = [b"\x89PNG\r\n".as_slice(), &[0u8; 64]].concat();
         let response = TokenLogLayer::new(LoggingConfig::enabled(), sink.clone())
@@ -1485,6 +1582,138 @@ mod tests {
         let Record::Token(record) = &records[0] else {
             panic!("expected a token record");
         };
-        assert_eq!(record.body.as_deref(), Some("[Binary Content]"));
+        // NEWPIDASH-231 (DIFF-20): binary bodies never enter the record
+        // either — pre-fix this asserted `Some("[Binary Content]")`.
+        assert_eq!(record.body, None);
+        assert_eq!(record.response_body, None);
+    }
+
+    // --- NEWPIDASH-231: redaction + hashed identifier ---
+
+    #[test]
+    fn hash_token_identifier_is_stable_hex_without_raw_key() {
+        let hashed = hash_token_identifier("mt_live_secret!");
+        assert_eq!(hashed.len(), 32);
+        assert!(hashed.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(!hashed.contains("mt_live_secret!"));
+        assert!(!hashed.starts_with("mt_"));
+        assert!(!hashed.contains("mt_"));
+        // Stable per token, distinct across tokens.
+        assert_eq!(hashed, hash_token_identifier("mt_live_secret!"));
+        assert_ne!(hashed, hash_token_identifier("mt_other_secret!"));
+        // Short keys still hash (never echoed).
+        assert!(!hash_token_identifier("sekret").contains("sekret"));
+    }
+
+    #[test]
+    fn sensitive_header_names_are_rejected_by_meaning() {
+        for name in [
+            "x-api-key",
+            "X-Api-Key",
+            "authorization",
+            "Authorization",
+            "proxy-authorization",
+            "cookie",
+            "Cookie",
+            "set-cookie",
+            "Set-Cookie",
+            "x-csrftoken",
+            "csrftoken",
+            "x-session-id",
+            "sessionid",
+            "x-auth-token",
+            "x-access-token",
+            "x-password",
+            "password",
+        ] {
+            assert!(is_sensitive_header(name), "{name}");
+        }
+        for name in [
+            "host",
+            "content-length",
+            "content-type",
+            "accept",
+            "accept-encoding",
+            "connection",
+            "user-agent",
+            "x-forwarded-for",
+            "x-foo",
+            "x-pad",
+        ] {
+            assert!(!is_sensitive_header(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn sensitive_header_values_all_redact() {
+        let mut headers = header::HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("127.0.0.1"));
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer live-secret"),
+        );
+        headers.append("cookie", HeaderValue::from_static("sessionid=live"));
+        headers.insert("set-cookie", HeaderValue::from_static("django=live"));
+        headers.insert("x-csrftoken", HeaderValue::from_static("csrf-live"));
+        headers.insert(header::USER_AGENT, HeaderValue::from_static("UA/1"));
+        headers.insert("x-foo", HeaderValue::from_static("visible"));
+        let rendered = render_headers(&headers);
+        assert_eq!(
+            rendered,
+            "{'Content-Length': '', 'Content-Type': 'text/plain', \
+             'Host': '127.0.0.1', 'Authorization': '[REDACTED]', \
+             'Cookie': '[REDACTED]', 'Set-Cookie': '[REDACTED]', \
+             'X-Csrftoken': '[REDACTED]', 'User-Agent': 'UA/1', \
+             'X-Foo': 'visible'}"
+        );
+        for secret in ["live-secret", "sessionid=live", "django=live", "csrf-live"] {
+            assert!(!rendered.contains(secret), "{rendered}");
+        }
+        // Non-sensitive values still render verbatim.
+        assert!(rendered.contains("'X-Foo': 'visible'"));
+    }
+
+    #[tokio::test]
+    async fn token_log_record_and_store_carry_no_raw_key() {
+        // End to end through the middleware: the record (stdout + stored
+        // payload) holds neither the raw `mt_` key nor a sensitive header
+        // value nor any body content.
+        let raw = "mt_live_supersecret123";
+        let sink = VecSink::default();
+        let response = TokenLogLayer::new(LoggingConfig::enabled(), sink.clone())
+            .layer(ok_router())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/x/?a=1")
+                    .header("x-api-key", raw)
+                    .header("authorization", "Bearer live-secret")
+                    .header("cookie", "sessionid=live")
+                    .header(header::USER_AGENT, "UA/1")
+                    .body(Body::from("{\"password\": \"body-secret\"}"))
+                    .expect("request"),
+            )
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::OK);
+        let records = sink.take();
+        assert_eq!(records.len(), 1);
+        let Record::Token(record) = &records[0] else {
+            panic!("expected a token record");
+        };
+        // Stdout-facing fields: hashed id, redacted headers, no bodies.
+        assert_eq!(record.token_identifier, hash_token_identifier(raw));
+        assert!(!record.token_identifier.contains(raw));
+        assert!(!record.headers.contains(raw));
+        assert!(!record.headers.contains("live-secret"));
+        assert!(!record.headers.contains("sessionid=live"));
+        assert_eq!(record.body, None);
+        assert_eq!(record.response_body, None);
+        // Stored payload (process_logs kwargs) is likewise clean.
+        let stored = serde_json::to_string(&record.process_logs_job().kwargs).expect("kwargs json");
+        for secret in [raw, "live-secret", "sessionid=live", "body-secret"] {
+            assert!(!stored.contains(secret), "{stored}");
+        }
+        assert!(!stored.contains("mt_live"));
     }
 }

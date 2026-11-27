@@ -1322,7 +1322,7 @@ def _asset_row(conn, asset_id):
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             'SELECT id, asset, is_uploaded, storage_metadata,'
-            ' created_by_id, updated_by_id FROM "file_assets"'
+            ' created_by_id, updated_by_id, updated_at FROM "file_assets"'
             " WHERE id = %s::uuid AND deleted_at IS NULL",
             (str(asset_id),),
         )
@@ -1556,6 +1556,62 @@ def test_metadata_task_stores_head_dict(db_conn, broker_url):
     assert meta["LastModified"].endswith("+00:00"), meta["LastModified"]
 
 
+def test_metadata_task_leaves_updated_at_unchanged(db_conn, broker_url):
+    """Metadata task: save(update_fields) writes storage_metadata only.
+
+    PIDASHCONV-1731 oracle. Django (``storage_metadata_task.py:24``)
+    runs ``asset.save(update_fields=["storage_metadata"])``: the UPDATE
+    sets only that column — the ``auto_now`` ``updated_at`` is neither
+    recomputed nor written. Seeds an asset with a known old
+    ``updated_at``, publishes ``get_asset_object_metadata``, and asserts
+    ``storage_metadata`` is written while ``updated_at`` stays put. The
+    Rust replay pins the identical assertion (red while the Rust save
+    also stamps ``updated_at``).
+    """
+    tag = uuid.uuid4().hex[:8]
+    chain = seed_helpers.issue_chain(db_conn, f"meta1731-{tag}")
+    ws_id = str(chain["workspace"]["id"])
+    bucket = s3_helpers.contract_bucket()
+    s3_helpers.s3_setup_bucket(bucket)
+    body = b"1731-metadata-updated-at-probe!"
+    key = f"{ws_id}/meta1731-{tag}.png"
+    s3_helpers.s3_put_key(bucket, key, body)
+    assert s3_helpers.s3_key_exists(bucket, key)
+    seeded_updated_at = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    asset = insert_row(
+        db_conn,
+        "file_assets",
+        {
+            "asset": key,
+            "attributes": {"name": f"meta1731-{tag}.png", "type": "png", "size": len(body)},
+            "size": float(len(body)),
+            "workspace_id": ws_id,
+            "project_id": str(chain["project"]["id"]),
+            "created_by_id": str(chain["owner"]["id"]),
+            "entity_type": "PAGE_DESCRIPTION",
+            "is_uploaded": True,
+            "is_deleted": False,
+            "is_archived": False,
+            "storage_metadata": {},
+            "updated_at": seeded_updated_at.isoformat(),
+        },
+    )
+    asset_id = str(asset["id"])
+    assert _asset_row(db_conn, asset_id)["updated_at"] == seeded_updated_at
+    celery_wire.publish(METADATA_TASK, kwargs={"asset_id": asset_id})
+    assert wait_for(
+        lambda: (_asset_row(db_conn, asset_id) or {}).get("storage_metadata") != {},
+        what="metadata task saved storage_metadata",
+    )
+    row = _asset_row(db_conn, asset_id)
+    assert row["storage_metadata"] is not None and row["storage_metadata"] != {}, (
+        "storage_metadata was not written"
+    )
+    assert row["updated_at"] == seeded_updated_at, (
+        f"updated_at moved from {seeded_updated_at} to {row['updated_at']}"
+    )
+
+
 def test_soft_delete_draftissue_cascades(db_conn, broker_url):
     """PIDASHCONV-1293 oracle: ("db", "draftissue") resolves and the walk
     stamps the CASCADE children — assignees, labels, modules, cycles
@@ -1612,6 +1668,110 @@ def test_soft_delete_entry_models_ack(
         assert _column_is_null(
             db_conn, "agent_run", extra["agent_run_id"], "scheduler_binding_id"
         ), "SET_NULL broken: agent_run still points at the stamped binding"
+
+
+def test_soft_delete_issue_nulls_agent_run_work_item(db_conn, broker_url):
+    """NEWPIDASH-135 oracle: soft-deleting an issue nulls its
+    ``agent_run.work_item_id`` (SET_NULL) and cascades ``issue_links``.
+
+    Django binds a typed NULL via ``related_queryset.update(fk=None)``
+    (``deletion_task.py``); the Rust port must emit the same. The Rust
+    port previously bound ``None::<&str>`` (text) and Postgres rejected
+    it for uuid columns, so the job failed and every child stayed live.
+    This case pins the parity on both backends — children get
+    ``deleted_at`` and ``agent_run.work_item_id`` is nulled.
+    """
+    tag = uuid.uuid4().hex[:8]
+    chain = seed_helpers.issue_chain(db_conn, f"135issue{tag}")
+    issue_id = chain["issue"]["id"]
+    owner_id = chain["owner"]["id"]
+    project_id = chain["project"]["id"]
+    workspace_id = chain["workspace"]["id"]
+
+    link1 = insert_row(
+        db_conn,
+        "issue_links",
+        {
+            "title": "NEWPIDASH-135 link 1",
+            "url": f"https://example.com/{tag}/1",
+            "issue_id": str(issue_id),
+            "project_id": str(project_id),
+            "workspace_id": str(workspace_id),
+            "created_by_id": str(owner_id),
+            "updated_by_id": str(owner_id),
+            "metadata": {},
+        },
+    )
+    link2 = insert_row(
+        db_conn,
+        "issue_links",
+        {
+            "title": "NEWPIDASH-135 link 2",
+            "url": f"https://example.com/{tag}/2",
+            "issue_id": str(issue_id),
+            "project_id": str(project_id),
+            "workspace_id": str(workspace_id),
+            "created_by_id": str(owner_id),
+            "updated_by_id": str(owner_id),
+            "metadata": {},
+        },
+    )
+    pod = insert_row(
+        db_conn,
+        "pod",
+        {
+            "workspace_id": str(workspace_id),
+            "project_id": str(project_id),
+            "name": f"135-pod-{tag}",
+            "description": "",
+            "is_default": False,
+        },
+    )
+    run = insert_row(
+        db_conn,
+        "agent_run",
+        {
+            "status": "queued",
+            "prompt": "135 probe",
+            "run_config": {},
+            "required_capabilities": [],
+            "thread_id": uuid.uuid4().hex,
+            "error_details": {},
+            "workspace_id": str(workspace_id),
+            "pod_id": str(pod["id"]),
+            "created_by_id": str(owner_id),
+            "llm_model": "",
+            "trigger": "manual",
+            "executor_kind": "local_runner",
+            "dispatch_attempts": 0,
+            "cancel_reason": "",
+            "tool_plan": {},
+            "phase_kind": "",
+            "agent_metadata": {},
+            "usage": {},
+            "pin_kind": "locality",
+            "work_item_id": str(issue_id),
+        },
+    )
+
+    celery_wire.publish(
+        f"{M}.deletion_task.soft_delete_related_objects",
+        args=["db", "issue", str(issue_id)],
+        kwargs={"using": None},
+    )
+    wait_for(
+        lambda: _soft_deleted(db_conn, "issues", issue_id),
+        what="issue row stamped by django worker",
+    )
+    assert _soft_deleted(db_conn, "issue_links", link1["id"]), (
+        "cascade broken: live issue_links row under a stamped issue"
+    )
+    assert _soft_deleted(db_conn, "issue_links", link2["id"]), (
+        "cascade broken: live issue_links row under a stamped issue"
+    )
+    assert _column_is_null(db_conn, "agent_run", run["id"], "work_item_id"), (
+        "SET_NULL broken: agent_run still points at the stamped issue"
+    )
 
 
 def test_sync_description_version_large_workspace(db_conn, broker_url):

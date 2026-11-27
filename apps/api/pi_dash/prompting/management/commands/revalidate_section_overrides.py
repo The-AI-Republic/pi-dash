@@ -9,6 +9,13 @@ Run this in the same PR as any change that removes/renames a context variable
 customizability. It re-runs the save-time validation over every active
 override and sets ``needs_attention=True`` on the ones that would now fail at
 render time — it never deletes or deactivates a row.
+
+It also flags overrides of **core** stage sections that carry software/git/PR
+wording (``prompting/neutrality.py``). Since PDASHOSS01-234 those sections are
+shared by every work type, so such an override — typically one written before
+the git/PR steps moved into ``software.*`` sections — would leak into
+``general`` prompts and duplicate the ``software`` guidance. Run it after
+deploying the work-type change.
 """
 
 from __future__ import annotations
@@ -16,6 +23,7 @@ from __future__ import annotations
 from django.core.management.base import BaseCommand
 
 from pi_dash.prompting import registry
+from pi_dash.prompting.neutrality import override_neutrality_issue
 from pi_dash.prompting.models import PromptSectionOverride
 from pi_dash.prompting.validation import OverrideValidationError, validate_override
 
@@ -50,6 +58,11 @@ class Command(BaseCommand):
                 except OverrideValidationError as exc:
                     broken = True
                     detail = str(exc)
+                else:
+                    neutrality = override_neutrality_issue(row.section_key, row.body)
+                    if neutrality is not None:
+                        broken = True
+                        detail = neutrality
 
             if broken and not row.needs_attention:
                 row.needs_attention = True

@@ -248,6 +248,47 @@ test(
 );
 
 test(
+  specTitle(["ISS-028"], "state columns follow the workflow order"),
+  { tag: specTags(["ISS-028"]) },
+  async ({ driver, seed }) => {
+    // NEWPIDASH-46: columns read in workflow order (state group, then
+    // sequence), whatever order the grouped response lists its buckets in.
+    const owner = await signInFreshUser(seed.email, seed.password);
+    const suffix = uniqueSuffix().slice(0, 6).toUpperCase();
+    const projectId = await serverCreateProject(seed.workspaceSlug, owner.cookie, `KB order ${suffix}`, `KO${suffix}`);
+    try {
+      // Created in reverse workflow order so creation order cannot pass for workflow order.
+      const doneName = `KB Shipped ${suffix}`;
+      const startedName = `KB Doing ${suffix}`;
+      const backlogName = `KB Someday ${suffix}`;
+      const doneId = await serverCreateState(seed.workspaceSlug, projectId, doneName, "completed", owner.cookie);
+      const startedId = await serverCreateState(seed.workspaceSlug, projectId, startedName, "started", owner.cookie);
+      const backlogId = await serverCreateState(seed.workspaceSlug, projectId, backlogName, "backlog", owner.cookie);
+      await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, `KB done card ${suffix}`, doneId);
+      await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, `KB doing card ${suffix}`, startedId);
+      await serverCreateIssue(seed.workspaceSlug, projectId, owner.cookie, `KB backlog card ${suffix}`, backlogId);
+      await openBoard(driver, seed, projectId, { group_by: "state" });
+      // The three created states sit in distinct groups, so group rank
+      // alone decides their relative order on both apps.
+      await expect
+        .poll(
+          async () => {
+            const names = (await driver.kanbanColumns()).map((column) => column.name);
+            const backlogAt = names.indexOf(backlogName);
+            const startedAt = names.indexOf(startedName);
+            const doneAt = names.indexOf(doneName);
+            return backlogAt !== -1 && backlogAt < startedAt && startedAt < doneAt;
+          },
+          { timeout: 120_000 }
+        )
+        .toBe(true);
+    } finally {
+      await serverDeleteProject(seed.workspaceSlug, projectId, owner.cookie).catch(() => {});
+    }
+  }
+);
+
+test(
   specTitle(["ISS-028"], "grouped column count equals the cards it renders (NEWFRONT-153)"),
   { tag: specTags(["ISS-028"]) },
   async ({ driver, seed }) => {

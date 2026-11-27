@@ -3,10 +3,13 @@
 //! Port of `apps/api/pi_dash/prompting/registry.py` (178 lines):
 //!
 //! * `registry.py:26` (`SECTIONS_DIR`) — here the catalog is baked in at
-//!   compile time: byte-identical mirrors of `prompting/sections/*.md` live
-//!   under `src/prompting/sections/` and are embedded with `include_str!`,
-//!   so the server has no runtime path dependency. A contract test asserts
-//!   every mirror is byte-identical to its Python source.
+//!   compile time: the section files live under `src/prompting/sections/`
+//!   and are embedded with `include_str!`, so the server has no runtime
+//!   path dependency. Since the lean agent workflow change (design
+//!   `.ai_design/lean_agent_workflow/design.md`, D13) these files are the
+//!   source of truth and no longer mirror the Django
+//!   `prompting/sections/*.md`; the byte-identical mirror contract test
+//!   was removed with that change.
 //! * `registry.py:28-56` (tier constants + `tier_allows_workspace_override` /
 //!   `tier_allows_personal_override`).
 //! * `registry.py:62-66` (`MAX_SECTION_BODY_LENGTH`).
@@ -14,6 +17,13 @@
 //!   [`parse_front_matter`]; error strings are byte-identical to Python.
 //! * `registry.py:150-161` (`_load_registry`), `166` (`REGISTRY`),
 //!   `169-178` (`get_section`, `all_sections`).
+//!
+//! * Work-type sections (PDASHOSS01-234): `prompting/work_types/<key>/<slot>.md`
+//!   are mirrored under `src/prompting/work_types/` and loaded as ordinary
+//!   registry sections with namespaced keys (`software.execute`), so
+//!   overrides, tiers, validation and the manifest treat them like core
+//!   sections. The `work_type.md` metadata file in each folder is *not* a
+//!   section; [`super::work_types`] parses it.
 //!
 //! Fail-loud like Python's import-time `REGISTRY = _load_registry()`: a
 //! malformed mirror panics on first registry access with the same message
@@ -111,6 +121,18 @@ pub fn parse_front_matter<'a>(
     file_name: &str,
     text: &'a str,
 ) -> Result<PromptSection<'a>, PromptRegistryError> {
+    parse_front_matter_with_key(file_name, text, None)
+}
+
+/// [`parse_front_matter`] with Python's `expected_key` argument:
+/// `Some(key)` replaces the filename-stem check — work-type sections carry
+/// namespaced keys (`software.execute`) that cannot equal the stem of
+/// `work_types/software/execute.md`.
+pub fn parse_front_matter_with_key<'a>(
+    file_name: &str,
+    text: &'a str,
+    expected_key: Option<&str>,
+) -> Result<PromptSection<'a>, PromptRegistryError> {
     if !text.starts_with("---") {
         return Err(PromptRegistryError::new(format!(
             "section '{file_name}' is missing the leading '---' front-matter block"
@@ -165,7 +187,14 @@ pub fn parse_front_matter<'a>(
     }
     let key = meta["key"];
     let stem = file_name.strip_suffix(".md").unwrap_or(file_name);
-    if stem != key {
+    if let Some(expected_key) = expected_key {
+        if key != expected_key {
+            return Err(PromptRegistryError::new(format!(
+                "section file '{file_name}' must carry key='{expected_key}' \
+                 (its folder + filename), got key='{key}'"
+            )));
+        }
+    } else if stem != key {
         return Err(PromptRegistryError::new(format!(
             "section file '{file_name}' does not match its front-matter key='{key}' \
              (filename stem must equal the key)"
@@ -193,78 +222,24 @@ const SECTION_FILES: &[(&str, &str)] = &[
     ("autonomy.md", include_str!("sections/autonomy.md")),
     ("blocking.md", include_str!("sections/blocking.md")),
     (
-        "cloud-capabilities.md",
-        include_str!("sections/cloud-capabilities.md"),
-    ),
-    (
-        "cloud-direct-task.md",
-        include_str!("sections/cloud-direct-task.md"),
-    ),
-    ("cloud-ending.md", include_str!("sections/cloud-ending.md")),
-    (
-        "cloud-execution-loop.md",
-        include_str!("sections/cloud-execution-loop.md"),
-    ),
-    ("cloud-intro.md", include_str!("sections/cloud-intro.md")),
-    (
-        "cloud-issue-context.md",
-        include_str!("sections/cloud-issue-context.md"),
-    ),
-    (
-        "cloud-project-context.md",
-        include_str!("sections/cloud-project-context.md"),
-    ),
-    (
-        "cloud-review-intro.md",
-        include_str!("sections/cloud-review-intro.md"),
-    ),
-    (
-        "cloud-review-loop.md",
-        include_str!("sections/cloud-review-loop.md"),
-    ),
-    (
-        "cloud-scheduler-intro.md",
-        include_str!("sections/cloud-scheduler-intro.md"),
-    ),
-    (
-        "cloud-scheduler-loop.md",
-        include_str!("sections/cloud-scheduler-loop.md"),
-    ),
-    (
-        "cloud-scheduler-task.md",
-        include_str!("sections/cloud-scheduler-task.md"),
-    ),
-    (
-        "cloud-test-intro.md",
-        include_str!("sections/cloud-test-intro.md"),
-    ),
-    (
-        "cloud-test-loop.md",
-        include_str!("sections/cloud-test-loop.md"),
-    ),
-    (
-        "cloud-write-policy.md",
-        include_str!("sections/cloud-write-policy.md"),
-    ),
-    (
         "default-posture.md",
         include_str!("sections/default-posture.md"),
     ),
-    ("ending-run.md", include_str!("sections/ending-run.md")),
     ("guardrails.md", include_str!("sections/guardrails.md")),
     (
         "implementation.md",
         include_str!("sections/implementation.md"),
     ),
     ("intro.md", include_str!("sections/intro.md")),
+    ("lifecycle.md", include_str!("sections/lifecycle.md")),
     ("pidash-cli.md", include_str!("sections/pidash-cli.md")),
     (
         "relationships.md",
         include_str!("sections/relationships.md"),
     ),
-    ("repo-context.md", include_str!("sections/repo-context.md")),
-    ("review-cycle.md", include_str!("sections/review-cycle.md")),
+    ("review.md", include_str!("sections/review.md")),
     ("review-intro.md", include_str!("sections/review-intro.md")),
+    ("run-framing.md", include_str!("sections/run-framing.md")),
     (
         "scheduler-ending.md",
         include_str!("sections/scheduler-ending.md"),
@@ -281,27 +256,65 @@ const SECTION_FILES: &[(&str, &str)] = &[
         "session-framing.md",
         include_str!("sections/session-framing.md"),
     ),
-    (
-        "state-routing.md",
-        include_str!("sections/state-routing.md"),
-    ),
-    (
-        "task-lifecycle.md",
-        include_str!("sections/task-lifecycle.md"),
-    ),
-    ("test-cycle.md", include_str!("sections/test-cycle.md")),
+    ("test.md", include_str!("sections/test.md")),
     ("test-intro.md", include_str!("sections/test-intro.md")),
+    ("this-run.md", include_str!("sections/this-run.md")),
+    ("workpad.md", include_str!("sections/workpad.md")),
+];
+
+/// Filename reserved for work-type metadata inside a work-type folder
+/// (`registry.py` `WORK_TYPE_META_FILENAME`).
+pub const WORK_TYPE_META_FILENAME: &str = "work_type.md";
+
+/// Embedded work-type folders: `(work_type_key, file_name, file_bytes)` for
+/// every `work_types/<key>/*.md`, sorted by folder then filename (the load
+/// order of `_load_registry`). Includes each folder's `work_type.md`
+/// metadata file, which the registry skips and [`super::work_types`] parses.
+pub(crate) const WORK_TYPE_FILES: &[(&str, &str, &str)] = &[
     (
-        "workpad-context.md",
-        include_str!("sections/workpad-context.md"),
+        "general",
+        "execute.md",
+        include_str!("work_types/general/execute.md"),
     ),
     (
-        "workpad-setup.md",
-        include_str!("sections/workpad-setup.md"),
+        "general",
+        "review.md",
+        include_str!("work_types/general/review.md"),
     ),
     (
-        "workpad-template.md",
-        include_str!("sections/workpad-template.md"),
+        "general",
+        "test.md",
+        include_str!("work_types/general/test.md"),
+    ),
+    (
+        "general",
+        "work_type.md",
+        include_str!("work_types/general/work_type.md"),
+    ),
+    (
+        "software",
+        "context.md",
+        include_str!("work_types/software/context.md"),
+    ),
+    (
+        "software",
+        "execute.md",
+        include_str!("work_types/software/execute.md"),
+    ),
+    (
+        "software",
+        "review.md",
+        include_str!("work_types/software/review.md"),
+    ),
+    (
+        "software",
+        "test.md",
+        include_str!("work_types/software/test.md"),
+    ),
+    (
+        "software",
+        "work_type.md",
+        include_str!("work_types/software/work_type.md"),
     ),
 ];
 
@@ -323,6 +336,28 @@ static REGISTRY: LazyLock<BTreeMap<&'static str, PromptSection<'static>>> = Lazy
     }
     if registry.is_empty() {
         panic!("prompt registry is malformed: no sections found");
+    }
+    // Work-type sections: work_types/<key>/<slot>.md → section key
+    // "<key>.<slot>". Slot-name and metadata validation is work_types.rs's
+    // job; here they are just sections with enforced namespaced keys (the
+    // key itself still borrows the embedded front-matter).
+    for (work_type, file_name, text) in WORK_TYPE_FILES {
+        if *file_name == WORK_TYPE_META_FILENAME {
+            continue;
+        }
+        let stem = file_name.strip_suffix(".md").unwrap_or(file_name);
+        let expected_key = format!("{work_type}.{stem}");
+        let section = parse_front_matter_with_key(file_name, text, Some(&expected_key))
+            .unwrap_or_else(|err| {
+                panic!("prompt registry is malformed: {}", err.message());
+            });
+        if registry.contains_key(section.key) {
+            panic!(
+                "prompt registry is malformed: duplicate section key: '{}'",
+                section.key
+            );
+        }
+        registry.insert(section.key, section);
     }
     registry
 });

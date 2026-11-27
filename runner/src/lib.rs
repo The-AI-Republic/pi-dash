@@ -1,9 +1,12 @@
 #![forbid(unsafe_code)]
 #![deny(rust_2018_idioms)]
 
+pub mod acp;
 pub mod agent;
+pub mod antigravity;
 pub mod api_client;
 pub mod approval;
+pub mod chat_guidance;
 pub mod claude_code;
 pub mod cli;
 pub mod cloud;
@@ -11,6 +14,7 @@ pub mod codex;
 pub mod config;
 pub mod cursor_agent;
 pub mod daemon;
+pub mod pidash_agent;
 pub mod grok;
 pub mod history;
 pub mod ipc;

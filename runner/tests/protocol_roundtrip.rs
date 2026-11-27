@@ -6,8 +6,8 @@ use pidash::approval::{
     router::{ApprovalRecord, ApprovalRouter, ApprovalStatus, DecisionSource},
 };
 use pidash::cloud::protocol::{
-    ApprovalDecision, ApprovalKind, ApprovalMode, ClientMsg, Envelope, RunEventRecord, RunnerStatus,
-    ServerMsg, WIRE_VERSION,
+    ApprovalDecision, ApprovalKind, ApprovalMode, ClientMsg, Envelope, RunEventRecord,
+    RunnerStatus, ServerMsg, WIRE_VERSION,
 };
 use pidash::config::schema::ApprovalPolicySection;
 use std::path::Path;
@@ -70,6 +70,10 @@ fn envelope_roundtrips_all_server_variants() {
         ServerMsg::Assign {
             run_id: Uuid::new_v4(),
             work_item_id: None,
+            issue_identifier: None,
+            project_identifier: None,
+            workpad_body: None,
+            workpad_sha256: None,
             prompt: "x".into(),
             repo_url: None,
             repo_ref: None,
@@ -77,10 +81,16 @@ fn envelope_roundtrips_all_server_variants() {
             expected_codex_model: None,
             approval_policy_overrides: None,
             deadline: None,
+            assignment_token: None,
+            assignment_protocol: None,
         },
         ServerMsg::Assign {
             run_id: Uuid::new_v4(),
             work_item_id: None,
+            issue_identifier: Some("FX-7".into()),
+            project_identifier: Some("FX".into()),
+            workpad_body: Some("# plan".into()),
+            workpad_sha256: Some("abc123".into()),
             prompt: "y".into(),
             repo_url: Some("https://example.invalid/x.git".into()),
             repo_ref: Some("develop".into()),
@@ -88,6 +98,8 @@ fn envelope_roundtrips_all_server_variants() {
             expected_codex_model: None,
             approval_policy_overrides: None,
             deadline: None,
+            assignment_token: None,
+            assignment_protocol: None,
         },
         ServerMsg::Cancel {
             run_id: Uuid::new_v4(),

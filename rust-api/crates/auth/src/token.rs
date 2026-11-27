@@ -113,16 +113,20 @@ pub fn validate_api_token(
 }
 
 /// The `machine_token` columns the validator reads, plus whether the linked
-/// dev-machine row is revoked (`dev_machine.revoked_at IS NOT NULL`).
+/// dev-machine row is revoked (`dev_machine.revoked_at IS NOT NULL`) and
+/// the 60-day idle expiry (`expires_at`; `None` means never expires,
+/// `MachineToken.is_expired`).
 #[derive(Debug, Clone)]
 pub struct MachineTokenRow {
     pub token_hash: String,
     pub revoked_at_unix: Option<i64>,
     pub dev_machine_revoked: bool,
+    pub expires_at_unix: Option<i64>,
 }
 
 /// Static half of the machine-token check: hash match, token unrevoked,
-/// dev-machine unrevoked.
+/// not past its 60-day idle expiry (`expires_at <= now`, #2910), dev-
+/// machine unrevoked.
 ///
 /// The remaining half — `is_workspace_member(user, workspace_id)` — needs a
 /// DB read, so the caller performs it after this returns `Ok`. A `false`
@@ -131,6 +135,7 @@ pub struct MachineTokenRow {
 pub fn validate_machine_token_static(
     row: Option<&MachineTokenRow>,
     presented_hash: &str,
+    now_unix: i64,
 ) -> Result<(), TokenError> {
     let row = row.ok_or(TokenError::Invalid)?;
     if !bool::from(row.token_hash.as_bytes().ct_eq(presented_hash.as_bytes())) {
@@ -138,6 +143,11 @@ pub fn validate_machine_token_static(
     }
     if row.revoked_at_unix.is_some() {
         return Err(TokenError::Revoked);
+    }
+    if let Some(expires) = row.expires_at_unix {
+        if expires <= now_unix {
+            return Err(TokenError::Expired);
+        }
     }
     if row.dev_machine_revoked {
         return Err(TokenError::Invalid);
@@ -231,24 +241,25 @@ mod tests {
             token_hash: hash_token("mt_testrawtoken123", SECRET),
             revoked_at_unix: None,
             dev_machine_revoked: false,
+            expires_at_unix: None,
         }
     }
 
     #[test]
     fn machine_token_happy_path() {
         let presented = hash_token("mt_testrawtoken123", SECRET);
-        assert!(validate_machine_token_static(Some(&machine_row()), &presented).is_ok());
+        assert!(validate_machine_token_static(Some(&machine_row()), &presented, 0).is_ok());
     }
 
     #[test]
     fn machine_token_predicates() {
         let good = hash_token("mt_testrawtoken123", SECRET);
         assert_eq!(
-            validate_machine_token_static(None, &good).unwrap_err(),
+            validate_machine_token_static(None, &good, 0).unwrap_err(),
             TokenError::Invalid
         );
         assert_eq!(
-            validate_machine_token_static(Some(&machine_row()), "0badhash").unwrap_err(),
+            validate_machine_token_static(Some(&machine_row()), "0badhash", 0).unwrap_err(),
             TokenError::Invalid
         );
         let row = MachineTokenRow {
@@ -256,7 +267,7 @@ mod tests {
             ..machine_row()
         };
         assert_eq!(
-            validate_machine_token_static(Some(&row), &good).unwrap_err(),
+            validate_machine_token_static(Some(&row), &good, 0).unwrap_err(),
             TokenError::Revoked
         );
         let row = MachineTokenRow {
@@ -264,8 +275,40 @@ mod tests {
             ..machine_row()
         };
         assert_eq!(
-            validate_machine_token_static(Some(&row), &good).unwrap_err(),
+            validate_machine_token_static(Some(&row), &good, 0).unwrap_err(),
             TokenError::Invalid
+        );
+    }
+
+    #[test]
+    fn machine_token_idle_expiry() {
+        let good = hash_token("mt_testrawtoken123", SECRET);
+        // Future expiry validates; at-or-past expiry is `Expired`
+        // (`MachineToken.is_expired`, #2910).
+        let row = MachineTokenRow {
+            expires_at_unix: Some(2000),
+            ..machine_row()
+        };
+        assert!(validate_machine_token_static(Some(&row), &good, 1999).is_ok());
+        assert_eq!(
+            validate_machine_token_static(Some(&row), &good, 2000).unwrap_err(),
+            TokenError::Expired
+        );
+        assert_eq!(
+            validate_machine_token_static(Some(&row), &good, 3000).unwrap_err(),
+            TokenError::Expired
+        );
+        // No expiry (legacy rows) never expires.
+        assert!(validate_machine_token_static(Some(&machine_row()), &good, i64::MAX).is_ok());
+        // Revoked still wins over expired (Django's check order).
+        let row = MachineTokenRow {
+            revoked_at_unix: Some(1000),
+            expires_at_unix: Some(500),
+            ..machine_row()
+        };
+        assert_eq!(
+            validate_machine_token_static(Some(&row), &good, 1000).unwrap_err(),
+            TokenError::Revoked
         );
     }
 }

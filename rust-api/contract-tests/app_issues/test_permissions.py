@@ -101,6 +101,8 @@ def test_guest_allowed_reads(clients, seed):
         f"{_base(ws, pid)}/v2/issues/",
         f"{_base(ws, pid)}/issues/{i1}/meta/",
         f"/api/workspaces/{ws}/work-items/IS-1/",
+        f"{_base(ws, pid)}/archived-issues/",
+        f"{_base(ws, pid)}/issues/{seed['issue5']}/archive/",
     ):
         assert guest.get(url).status_code == 200, url
 
@@ -114,7 +116,6 @@ def test_guest_denied_writes(clients, seed):
          FORBIDDEN),
         ("post", f"{_base(ws, pid)}/work-items/{i1}/move/",
          {"project": "IS"}, FORBIDDEN),
-        ("get", f"{_base(ws, pid)}/archived-issues/", None, FORBIDDEN),
         # Bulk-archive also carries ProjectEntityPermission, which denies
         # first with the viewset body.
         ("post", f"{_base(ws, pid)}/bulk-archive-issues/",

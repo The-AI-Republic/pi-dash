@@ -1,7 +1,7 @@
 //! `pidash reconnect [<runner>]` — retry the cloud connection now.
 //!
-//! While the cloud is unreachable each runner backs off up to 6 hours
-//! between attempts (PDASHOSS01-306). This cuts the current wait short and
+//! While the cloud is unreachable each runner backs off up to 5 minutes
+//! between attempts (PDASHOSS01-306, NEWPIDASH-244). This cuts the current wait short and
 //! starts the backoff schedule over, for one runner or for all of them.
 
 use anyhow::{Context, Result};

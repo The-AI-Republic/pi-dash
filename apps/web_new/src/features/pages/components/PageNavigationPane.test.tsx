@@ -222,6 +222,24 @@ describe("PageNavigationPane", () => {
     expect(document.querySelector("[data-version-id]")).toBeNull();
   });
 
+  it("keeps the live row and names the failure when the history read fails", () => {
+    const onRetryVersions = vi.fn();
+    renderPane({ search: { paneTab: "info" }, versionsFailed: true, onRetryVersions }, null);
+    expect(screen.getByText(PAGE_CURRENT_VERSION_LABEL)).toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: "Loading versions" })).not.toBeInTheDocument();
+    expect(document.querySelector("[data-version-id]")).toBeNull();
+    expect(screen.getByTestId("page-versions-error")).toHaveTextContent("Version history could not be loaded.");
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(onRetryVersions).toHaveBeenCalledTimes(1);
+  });
+
+  it("names the failure without a retry when none is offered", () => {
+    renderPane({ search: { paneTab: "info" }, versionsFailed: true }, null);
+    expect(screen.getByTestId("page-versions-error")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+    expect(screen.getByText(PAGE_CURRENT_VERSION_LABEL)).toBeInTheDocument();
+  });
+
   it("shows no timeline outside the info tab", () => {
     renderPane({ search: { paneTab: "outline" } });
     expect(screen.queryByText(PAGE_CURRENT_VERSION_LABEL)).not.toBeInTheDocument();

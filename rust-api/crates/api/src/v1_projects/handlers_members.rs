@@ -38,7 +38,7 @@
 //! * Reads reuse `pidash_db::v1_projects::queries_projmem` wherever its
 //!   columns suffice. Three shapes need columns that layer doesn't carry,
 //!   so they are fetched here with the same JOIN/WHERE semantics (no fork —
-//!   the predicates are quoted per statement): invite `created_at` /
+//!   the predicates are spelled out per statement): invite `created_at` /
 //!   `updated_at` (the layer pins the 5-column serialize shape only),
 //!   `users.avatar_asset_id` for `avatar_url`, and all writes.
 //! * Writes mirror the model `save()` side effects: member POST sets
@@ -85,14 +85,21 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use chrono_tz::Tz;
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder, QuerySelect, Set,
+};
 use serde_json::Value;
-use sqlx::Row;
 
 use crate::state::AppState;
 use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 use pidash_auth::permissions::{project, workspace};
 use pidash_auth::scope::TenantScope as AuthScope;
 use pidash_auth::token as auth_token;
+use pidash_db::entity::{
+    api_tokens, dev_machine, file_assets, machine_token, project_members, project_user_properties,
+    projects, users, workspace_member_invites, workspace_members, workspaces,
+};
 use pidash_db::v1_projects::queries_projmem::{self, TenantScope as QueryScope};
 use pidash_types::{ProjectId, WorkspaceId};
 
@@ -230,6 +237,10 @@ pub enum Denial {
     Unauthorized,
     InvalidToken,
     Forbidden,
+    /// 403 `{"error":...}` inline guard denial (NEWPIDASH-264, app
+    /// `partial_update` matrix: workspace-admin target, admin-only,
+    /// equal-or-higher). Distinct from the gate's CLASS_DENIAL 403.
+    ForbiddenError(String),
     ProjectNotFound,
     MemberNotFound,
     InviteNotFound,
@@ -248,6 +259,10 @@ impl Denial {
             Denial::Unauthorized => (StatusCode::UNAUTHORIZED, Some(UNAUTHENTICATED_BODY.into())),
             Denial::InvalidToken => (StatusCode::FORBIDDEN, Some(INVALID_TOKEN_BODY.into())),
             Denial::Forbidden => (StatusCode::FORBIDDEN, Some(CLASS_DENIAL_BODY.into())),
+            Denial::ForbiddenError(message) => (
+                StatusCode::FORBIDDEN,
+                Some(format!("{{\"error\":{}}}", json_string(message))),
+            ),
             Denial::ProjectNotFound => (StatusCode::NOT_FOUND, Some(PROJECT_NOT_FOUND_BODY.into())),
             Denial::MemberNotFound => (StatusCode::NOT_FOUND, Some(MEMBER_NOT_FOUND_BODY.into())),
             Denial::InviteNotFound => (StatusCode::NOT_FOUND, Some(INVITE_NOT_FOUND_BODY.into())),
@@ -324,6 +339,137 @@ pub struct Actor {
     pub timezone: Option<String>,
 }
 
+/// SeaORM over the request pool (a wrapper, no I/O).
+fn orm(pool: &sqlx::PgPool) -> sea_orm::DatabaseConnection {
+    pidash_db::pool::sea_orm_connection(pool)
+}
+
+/// The `api_tokens` columns the validator reads (liveness, expiry).
+/// `token` is the presented value, not read back.
+#[derive(Debug, FromQueryResult)]
+struct ApiTokenLookup {
+    is_active: bool,
+    expired_at: Option<chrono::DateTime<chrono::Utc>>,
+    user_id: uuid::Uuid,
+}
+
+/// The live `api_tokens` row with exactly this token (`deleted_at IS NULL`,
+/// the `SoftDeletionManager` scope, `db/mixins.py:56-66`: a soft-deleted
+/// token 403s instead of authenticating).
+async fn live_api_token(
+    pool: &sqlx::PgPool,
+    presented: &str,
+) -> Result<Option<ApiTokenLookup>, Denial> {
+    let db = orm(pool);
+    api_tokens::Entity::find()
+        .select_only()
+        .columns([
+            api_tokens::Column::IsActive,
+            api_tokens::Column::ExpiredAt,
+            api_tokens::Column::UserId,
+        ])
+        .filter(api_tokens::Column::Token.eq(presented))
+        .filter(api_tokens::Column::DeletedAt.is_null())
+        .into_model::<ApiTokenLookup>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)
+}
+
+/// A `machine_token` row by hash plus the revocation bit of its device.
+#[derive(Debug, FromQueryResult)]
+struct MachineTokenLookup {
+    id: uuid::Uuid,
+    user_id: uuid::Uuid,
+    workspace_id: uuid::Uuid,
+    revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// 60-day idle expiry (#2910); `None` never expires.
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    dev_machine_id: Option<uuid::Uuid>,
+    /// `dev_machine.revoked_at IS NOT NULL` over the LEFT JOIN: `false`
+    /// when the token has no device.
+    dev_revoked: Option<bool>,
+}
+
+/// `machine_token` by hash, LEFT JOIN `dev_machine` for its revocation
+/// (`api_authentication.py:47-70`). No liveness scope: the table has no
+/// soft delete.
+async fn machine_token_with_device(
+    pool: &sqlx::PgPool,
+    token_hash: &str,
+) -> Result<Option<MachineTokenLookup>, Denial> {
+    let db = orm(pool);
+    machine_token::Entity::find()
+        .select_only()
+        .columns([
+            machine_token::Column::Id,
+            machine_token::Column::UserId,
+            machine_token::Column::WorkspaceId,
+            machine_token::Column::RevokedAt,
+            machine_token::Column::ExpiresAt,
+            machine_token::Column::DevMachineId,
+        ])
+        .column_as(
+            Expr::col((dev_machine::Entity, dev_machine::Column::RevokedAt)).is_not_null(),
+            "dev_revoked",
+        )
+        .join(
+            JoinType::LeftJoin,
+            machine_token::Entity::belongs_to(dev_machine::Entity)
+                .from(machine_token::Column::DevMachineId)
+                .to(dev_machine::Column::Id)
+                .into(),
+        )
+        .filter(machine_token::Column::TokenHash.eq(token_hash))
+        .into_model::<MachineTokenLookup>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)
+}
+
+/// `is_workspace_member(user, workspace_id)` (`core/permissions.py:28`):
+/// an active, live `workspace_members` row.
+async fn is_active_workspace_member(
+    pool: &sqlx::PgPool,
+    workspace_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+) -> Result<bool, Denial> {
+    let db = orm(pool);
+    let hit: Option<uuid::Uuid> = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Id)
+        .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(hit.is_some())
+}
+
+/// Live workspace id for a slug (`deleted_at IS NULL`, the gate scope).
+/// Unlike the V1CM-2 copy, this keeps the liveness predicate — the gates
+/// and `inv_create` ran the live-workspace read.
+async fn workspace_id_by_slug(
+    pool: &sqlx::PgPool,
+    slug: &str,
+) -> Result<Option<uuid::Uuid>, Denial> {
+    let db = orm(pool);
+    let id: Option<uuid::Uuid> = workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::Id)
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(id)
+}
+
 /// Authenticate one request from its `X-Api-Key` header.
 ///
 /// * Missing/empty → `None` from `authenticate()` → 401 (every route here
@@ -364,13 +510,13 @@ async fn authenticate_api_token(
     // `deleted_at IS NULL` is the `SoftDeletionManager` scope
     // (`db/mixins.py:56-66`): `APIToken.objects` never sees soft-deleted
     // rows, so a soft-deleted token 403s instead of authenticating.
-    let row: Option<(uuid::Uuid, bool, Option<chrono::DateTime<chrono::Utc>>)> =
-        sqlx::query_as("SELECT user_id, is_active, expired_at FROM api_tokens WHERE token = $1 AND deleted_at IS NULL")
-            .bind(presented)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let Some((user_id, is_active, expired_at)) = row else {
+    let row = live_api_token(pool, presented).await?;
+    let Some(ApiTokenLookup {
+        is_active,
+        expired_at,
+        user_id,
+    }) = row
+    else {
         return Err(Denial::InvalidToken);
     };
     let now = chrono::Utc::now();
@@ -385,9 +531,12 @@ async fn authenticate_api_token(
     auth_token::validate_api_token(Some(&row), presented, now.timestamp())
         .map_err(|_| Denial::InvalidToken)?;
     // `api_token.last_used = now; save(update_fields=["last_used"])`.
-    pidash_services::domain::tokens::touch_api_token_last_used_by_token(pool, presented)
-        .await
-        .map_err(|_| Denial::ServerError)?;
+    pidash_services::domain::tokens::touch_api_token_last_used_by_token(
+        &pidash_db::pool::sea_orm_connection(pool),
+        presented,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
     Ok(user_id)
 }
 
@@ -397,61 +546,43 @@ async fn authenticate_machine_token(
     secret_key: &[u8],
 ) -> Result<uuid::Uuid, Denial> {
     let token_hash = auth_token::hash_token(presented, secret_key);
-    let row: Option<MachineTokenLookup> = sqlx::query_as(
-        r#"SELECT mt.id, mt.user_id, mt.workspace_id, mt.revoked_at,
-                  mt.dev_machine_id, dm.revoked_at AS dev_revoked_at
-           FROM machine_token mt
-           LEFT JOIN dev_machine dm ON dm.id = mt.dev_machine_id
-           WHERE mt.token_hash = $1"#,
-    )
-    .bind(&token_hash)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let row = machine_token_with_device(pool, &token_hash).await?;
     let Some(row) = row else {
         return Err(Denial::InvalidToken);
     };
     let kernel_row = auth_token::MachineTokenRow {
         token_hash: token_hash.clone(),
         revoked_at_unix: row.revoked_at.map(|dt| dt.timestamp()),
-        dev_machine_revoked: row.dev_machine_id.is_some() && row.dev_revoked_at.is_some(),
+        dev_machine_revoked: row.dev_machine_id.is_some() && row.dev_revoked.unwrap_or(false),
+        expires_at_unix: row.expires_at.map(|dt| dt.timestamp()),
     };
     // Hash match, token unrevoked, dev-machine unrevoked
     // (`dev_machine_id is not None and revoked_at is not None`).
-    auth_token::validate_machine_token_static(Some(&kernel_row), &token_hash)
-        .map_err(|_| Denial::InvalidToken)?;
+    auth_token::validate_machine_token_static(
+        Some(&kernel_row),
+        &token_hash,
+        chrono::Utc::now().timestamp(),
+    )
+    .map_err(|_| Denial::InvalidToken)?;
     // `is_workspace_member(user, workspace_id)`: active row, any role.
     // A non-member is revoked first, then denied — exactly like Python.
-    let member: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM workspace_members
-          WHERE workspace_id = $1 AND member_id = $2 AND is_active
-          AND deleted_at IS NULL)",
-    )
-    .bind(row.workspace_id)
-    .bind(row.user_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let member = is_active_workspace_member(pool, row.workspace_id, row.user_id).await?;
     if !member {
-        pidash_services::domain::tokens::revoke_machine_token_by_id_now(pool, row.id)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-        return Err(Denial::InvalidToken);
-    }
-    pidash_services::domain::tokens::touch_machine_token_last_used_by_id_now(pool, row.id)
+        pidash_services::domain::tokens::revoke_machine_token_by_id_now(
+            &pidash_db::pool::sea_orm_connection(pool),
+            row.id,
+        )
         .await
         .map_err(|_| Denial::ServerError)?;
+        return Err(Denial::InvalidToken);
+    }
+    pidash_services::domain::tokens::touch_machine_token_last_used_by_id_now(
+        &pidash_db::pool::sea_orm_connection(pool),
+        row.id,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
     Ok(row.user_id)
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct MachineTokenLookup {
-    id: uuid::Uuid,
-    user_id: uuid::Uuid,
-    workspace_id: uuid::Uuid,
-    revoked_at: Option<chrono::DateTime<chrono::Utc>>,
-    dev_machine_id: Option<uuid::Uuid>,
-    dev_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// `request.user.user_timezone` (`TimezoneMixin`): the stored zone name,
@@ -461,13 +592,15 @@ async fn load_timezone_name(
     pool: &sqlx::PgPool,
     user_id: &uuid::Uuid,
 ) -> Result<Option<String>, Denial> {
-    let zone: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT user_timezone FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    Ok(zone.and_then(|row| row.0))
+    let db = orm(pool);
+    users::Entity::find()
+        .select_only()
+        .column(users::Column::UserTimezone)
+        .filter(users::Column::Id.eq(*user_id))
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)
 }
 
 /// Activate the actor's rendering timezone (`TimezoneMixin.initial` runs
@@ -499,6 +632,13 @@ struct Facts {
     project_admin: bool,
     ws_admin_or_member: bool,
     ws_owner_unfiltered: bool,
+    /// Active workspace membership with role ADMIN (NEWPIDASH-264 PATCH
+    /// override; distinct from `ws_admin_or_member` which also matches
+    /// MEMBER).
+    is_workspace_admin_active: bool,
+    /// Active project membership in this project, any role
+    /// (project-scoped; distinct from `project_member_any_ws`).
+    project_member_scoped: bool,
 }
 
 /// Load every fact the collab gates read. `project_id` is `None` on the
@@ -510,67 +650,150 @@ async fn load_facts(
     actor: &Actor,
     project_id: Option<uuid::Uuid>,
 ) -> Result<Facts, Denial> {
-    let workspace_id: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT id FROM workspaces WHERE slug = $1 AND deleted_at IS NULL")
-            .bind(slug)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let workspace_id = workspace_id.map(|row| row.0);
+    let db = orm(pool);
+    let workspace_id = workspace_id_by_slug(pool, slug).await?;
 
     // BUG-7: `ProjectMemberPermission` SAFE has no `project_id` filter.
-    let project_member_any_ws: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE w.slug = $1 AND pm.member_id = $2 AND pm.is_active
-           AND pm.deleted_at IS NULL)",
-    )
-    .bind(slug)
-    .bind(actor.id)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let project_member_any_ws: bool = project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            project_members::Entity::belongs_to(workspaces::Entity)
+                .from(project_members::Column::WorkspaceId)
+                .to(workspaces::Column::Id)
+                .into(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(project_members::Column::MemberId.eq(actor.id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .is_some();
 
     let project_admin: bool = match project_id {
         None => false,
-        Some(pid) => sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM project_members pm
-               JOIN workspaces w ON w.id = pm.workspace_id
-               WHERE w.slug = $1 AND pm.member_id = $2 AND pm.project_id = $3
-               AND pm.role = 20 AND pm.is_active AND pm.deleted_at IS NULL)",
-        )
-        .bind(slug)
-        .bind(actor.id)
-        .bind(pid)
-        .fetch_one(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?,
+        Some(pid) => project_members::Entity::find()
+            .select_only()
+            .column(project_members::Column::Id)
+            .join(
+                JoinType::InnerJoin,
+                project_members::Entity::belongs_to(workspaces::Entity)
+                    .from(project_members::Column::WorkspaceId)
+                    .to(workspaces::Column::Id)
+                    .into(),
+            )
+            .filter(workspaces::Column::Slug.eq(slug))
+            .filter(project_members::Column::MemberId.eq(actor.id))
+            .filter(project_members::Column::ProjectId.eq(pid))
+            .filter(project_members::Column::Role.eq(ROLE_ADMIN as i16))
+            .filter(project_members::Column::IsActive.eq(true))
+            .filter(project_members::Column::DeletedAt.is_null())
+            .limit(1)
+            .into_tuple::<uuid::Uuid>()
+            .one(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?
+            .is_some(),
     };
 
-    let ws_admin_or_member: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE w.slug = $1 AND wm.member_id = $2 AND wm.role IN (20, 15)
-           AND wm.is_active AND wm.deleted_at IS NULL)",
-    )
-    .bind(slug)
-    .bind(actor.id)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let ws_admin_or_member: bool = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Entity::belongs_to(workspaces::Entity)
+                .from(workspace_members::Column::WorkspaceId)
+                .to(workspaces::Column::Id)
+                .into(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::MemberId.eq(actor.id))
+        .filter(workspace_members::Column::Role.is_in([ROLE_ADMIN as i16, ROLE_MEMBER as i16]))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .is_some();
 
     // BUG-6: `WorkspaceOwnerPermission` has no `is_active` filter.
-    let ws_owner_unfiltered: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE w.slug = $1 AND wm.member_id = $2 AND wm.role = 20
-           AND wm.deleted_at IS NULL)",
-    )
-    .bind(slug)
-    .bind(actor.id)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let ws_owner_unfiltered: bool = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Entity::belongs_to(workspaces::Entity)
+                .from(workspace_members::Column::WorkspaceId)
+                .to(workspaces::Column::Id)
+                .into(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::MemberId.eq(actor.id))
+        .filter(workspace_members::Column::Role.eq(ROLE_ADMIN as i16))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .is_some();
+
+    // NEWPIDASH-264 PATCH override facts: active workspace ADMIN and
+    // project-scoped active membership (any role), both joined on the
+    // slug like the other facts.
+    let is_workspace_admin_active: bool = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Entity::belongs_to(workspaces::Entity)
+                .from(workspace_members::Column::WorkspaceId)
+                .to(workspaces::Column::Id)
+                .into(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::MemberId.eq(actor.id))
+        .filter(workspace_members::Column::Role.eq(ROLE_ADMIN as i16))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .is_some();
+
+    let project_member_scoped: bool = match project_id {
+        None => false,
+        Some(pid) => project_members::Entity::find()
+            .select_only()
+            .column(project_members::Column::Id)
+            .join(
+                JoinType::InnerJoin,
+                project_members::Entity::belongs_to(workspaces::Entity)
+                    .from(project_members::Column::WorkspaceId)
+                    .to(workspaces::Column::Id)
+                    .into(),
+            )
+            .filter(workspaces::Column::Slug.eq(slug))
+            .filter(project_members::Column::MemberId.eq(actor.id))
+            .filter(project_members::Column::ProjectId.eq(pid))
+            .filter(project_members::Column::IsActive.eq(true))
+            .filter(project_members::Column::DeletedAt.is_null())
+            .limit(1)
+            .into_tuple::<uuid::Uuid>()
+            .one(&db)
+            .await
+            .map_err(|_| Denial::ServerError)?
+            .is_some(),
+    };
 
     Ok(Facts {
         workspace_id,
@@ -578,6 +801,8 @@ async fn load_facts(
         project_admin,
         ws_admin_or_member,
         ws_owner_unfiltered,
+        is_workspace_admin_active,
+        project_member_scoped,
     })
 }
 
@@ -817,7 +1042,8 @@ async fn rewrite_project_id(
         workspace_slug: slug,
         actor_id,
     };
-    queries_projmem::fetch_project_id(pool, &scope, raw)
+    let db = orm(pool);
+    queries_projmem::fetch_project_id(&db, &scope, raw)
         .await
         .map_err(|_| Denial::ServerError)?
         .ok_or(Denial::ProjectNotFound)
@@ -831,7 +1057,8 @@ async fn require_workspace(pool: &sqlx::PgPool, slug: &str) -> Result<(), Denial
         workspace_slug: slug,
         actor_id: uuid::Uuid::nil(),
     };
-    let known = queries_projmem::fetch_workspace_exists(pool, &scope)
+    let db = orm(pool);
+    let known = queries_projmem::fetch_workspace_exists(&db, &scope)
         .await
         .map_err(|_| Denial::ServerError)?;
     if known {
@@ -932,6 +1159,17 @@ pub fn render_asset_url(asset: &AssetRef) -> Option<String> {
     }
 }
 
+/// The `file_assets` columns `asset_url` resolves on, plus the joined
+/// workspace slug (`LEFT JOIN workspaces`).
+#[derive(Debug, FromQueryResult)]
+struct AssetRow {
+    id: uuid::Uuid,
+    entity_type: Option<String>,
+    workspace_slug: Option<String>,
+    project_id: Option<uuid::Uuid>,
+    issue_id: Option<uuid::Uuid>,
+}
+
 /// Fetch `asset_url` values for a set of asset ids (one statement).
 pub async fn fetch_asset_urls(
     pool: &sqlx::PgPool,
@@ -941,32 +1179,36 @@ pub async fn fetch_asset_urls(
     if asset_ids.is_empty() {
         return Ok(out);
     }
-    let placeholders: Vec<String> = (1..=asset_ids.len()).map(|i| format!("${i}")).collect();
-    let sql = format!(
-        "SELECT a.id, a.entity_type, w.slug AS workspace_slug, a.project_id, a.issue_id
-         FROM file_assets a LEFT JOIN workspaces w ON w.id = a.workspace_id
-         WHERE a.id IN ({}) AND a.deleted_at IS NULL",
-        placeholders.join(", ")
-    );
-    let mut query = sqlx::query(&sql);
-    for id in asset_ids {
-        query = query.bind(*id);
-    }
-    let rows = query
-        .fetch_all(pool)
+    let db = orm(pool);
+    let rows = file_assets::Entity::find()
+        .select_only()
+        .columns([
+            file_assets::Column::Id,
+            file_assets::Column::EntityType,
+            file_assets::Column::ProjectId,
+            file_assets::Column::IssueId,
+        ])
+        .column_as(workspaces::Column::Slug, "workspace_slug")
+        .join(
+            JoinType::LeftJoin,
+            file_assets::Entity::belongs_to(workspaces::Entity)
+                .from(file_assets::Column::WorkspaceId)
+                .to(workspaces::Column::Id)
+                .into(),
+        )
+        .filter(file_assets::Column::Id.is_in(asset_ids.iter().copied()))
+        .filter(file_assets::Column::DeletedAt.is_null())
+        .into_model::<AssetRow>()
+        .all(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
     for row in rows {
         let asset = AssetRef {
-            id: row.try_get("id").map_err(|_| Denial::ServerError)?,
-            entity_type: row
-                .try_get("entity_type")
-                .map_err(|_| Denial::ServerError)?,
-            workspace_slug: row
-                .try_get("workspace_slug")
-                .map_err(|_| Denial::ServerError)?,
-            project_id: row.try_get("project_id").map_err(|_| Denial::ServerError)?,
-            issue_id: row.try_get("issue_id").map_err(|_| Denial::ServerError)?,
+            id: row.id,
+            entity_type: row.entity_type,
+            workspace_slug: row.workspace_slug,
+            project_id: row.project_id,
+            issue_id: row.issue_id,
         };
         if let Some(url) = render_asset_url(&asset) {
             out.insert(asset.id, url);
@@ -1014,41 +1256,68 @@ pub fn render_invite(inv: &InviteFull, tz: &Tz) -> Value {
     })
 }
 
-fn map_invite_full(row: &sqlx::postgres::PgRow) -> Result<InviteFull, Denial> {
-    Ok(InviteFull {
-        id: row.try_get("id").map_err(|_| Denial::ServerError)?,
-        email: row.try_get("email").map_err(|_| Denial::ServerError)?,
-        role: row
-            .try_get::<i16, _>("role")
-            .map(i32::from)
-            .map_err(|_| Denial::ServerError)?,
-        created_at: row.try_get("created_at").map_err(|_| Denial::ServerError)?,
-        updated_at: row.try_get("updated_at").map_err(|_| Denial::ServerError)?,
-        responded_at: row
-            .try_get("responded_at")
-            .map_err(|_| Denial::ServerError)?,
-        accepted: row.try_get("accepted").map_err(|_| Denial::ServerError)?,
-    })
+/// The invite columns the serialize shape carries (`role` is `smallint`).
+#[derive(Debug, FromQueryResult)]
+struct InviteRow {
+    id: uuid::Uuid,
+    email: String,
+    role: i16,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    responded_at: Option<chrono::DateTime<chrono::Utc>>,
+    accepted: bool,
 }
 
-const INVITE_FULL_SELECT: &str =
-    "SELECT i.id, i.email, i.role, i.created_at, i.updated_at, i.responded_at, i.accepted
-FROM workspace_member_invites i
-JOIN workspaces w ON w.id = i.workspace_id";
+fn map_invite_row(row: InviteRow) -> InviteFull {
+    InviteFull {
+        id: row.id,
+        email: row.email,
+        role: i32::from(row.role),
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        responded_at: row.responded_at,
+        accepted: row.accepted,
+    }
+}
+
+/// Invite rows for a workspace slug, joined to `workspaces` for the slug
+/// filter (the Q6 JOIN/WHERE, `views/invite.py:36-37`).
+fn invite_rows_by_slug(slug: &str) -> sea_orm::Select<workspace_member_invites::Entity> {
+    workspace_member_invites::Entity::find()
+        .select_only()
+        .columns([
+            workspace_member_invites::Column::Id,
+            workspace_member_invites::Column::Email,
+            workspace_member_invites::Column::Role,
+            workspace_member_invites::Column::CreatedAt,
+            workspace_member_invites::Column::UpdatedAt,
+            workspace_member_invites::Column::RespondedAt,
+            workspace_member_invites::Column::Accepted,
+        ])
+        .join(
+            JoinType::InnerJoin,
+            workspace_member_invites::Entity::belongs_to(workspaces::Entity)
+                .from(workspace_member_invites::Column::WorkspaceId)
+                .to(workspaces::Column::Id)
+                .into(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_member_invites::Column::DeletedAt.is_null())
+}
 
 async fn fetch_invites_full(pool: &sqlx::PgPool, slug: &str) -> Result<Vec<InviteFull>, Denial> {
     // `WorkspaceMemberInvite.Meta.ordering = ("-created_at",)`
     // (`db/models/workspace.py:255`) — the fixture Q6 text omits it
     // (same defect family as its `deleted_at` predicate; flagged on
     // PIDASHCONV-373), but the live queryset carries it.
-    let rows = sqlx::query(&format!(
-        "{INVITE_FULL_SELECT}\nWHERE w.slug = $1 AND i.deleted_at IS NULL\nORDER BY i.created_at DESC"
-    ))
-    .bind(slug)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    rows.iter().map(map_invite_full).collect()
+    let db = orm(pool);
+    let rows = invite_rows_by_slug(slug)
+        .order_by_desc(workspace_member_invites::Column::CreatedAt)
+        .into_model::<InviteRow>()
+        .all(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(rows.into_iter().map(map_invite_row).collect())
 }
 
 async fn fetch_invite_full(
@@ -1056,15 +1325,14 @@ async fn fetch_invite_full(
     slug: &str,
     pk: uuid::Uuid,
 ) -> Result<Option<InviteFull>, Denial> {
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(&format!(
-        "{INVITE_FULL_SELECT}\nWHERE w.slug = $1 AND i.deleted_at IS NULL AND i.id = $2"
-    ))
-    .bind(slug)
-    .bind(pk)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| map_invite_full(&row)).transpose()
+    let db = orm(pool);
+    let row = invite_rows_by_slug(slug)
+        .filter(workspace_member_invites::Column::Id.eq(pk))
+        .into_model::<InviteRow>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.map(map_invite_row))
 }
 
 // ---------------------------------------------------------------------------
@@ -1152,10 +1420,16 @@ async fn validate_member_value(
             return None;
         }
     };
-    let known: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
-        .bind(id)
-        .fetch_one(pool)
+    let db = orm(pool);
+    let known: bool = users::Entity::find()
+        .select_only()
+        .column(users::Column::Id)
+        .filter(users::Column::Id.eq(id))
+        .limit(1)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
         .await
+        .map(|hit| hit.is_some())
         .unwrap_or(false);
     if !known {
         errors
@@ -1163,16 +1437,25 @@ async fn validate_member_value(
             .push(format!("Invalid pk \"{id}\" - object does not exist."));
         return None;
     }
-    let in_workspace: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE w.slug = $1 AND wm.member_id = $2 AND wm.deleted_at IS NULL)",
-    )
-    .bind(slug)
-    .bind(id)
-    .fetch_one(pool)
-    .await
-    .unwrap_or(false);
+    let in_workspace: bool = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Entity::belongs_to(workspaces::Entity)
+                .from(workspace_members::Column::WorkspaceId)
+                .to(workspaces::Column::Id)
+                .into(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::MemberId.eq(id))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .limit(1)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
+        .await
+        .map(|hit| hit.is_some())
+        .unwrap_or(false);
     if !in_workspace {
         errors.member.push("Member not found in workspace".into());
         return None;
@@ -1227,6 +1510,95 @@ fn validate_role_value(value: &Value, errors: &mut FieldErrors) -> Option<i32> {
             None
         }
     }
+}
+
+/// Coerce a raw `role` value to a valid choice without collecting errors
+/// (NEWPIDASH-264 guard pre-check). Mirrors [`validate_role_value`]'s
+/// coercion: JSON integers and numeric strings in `[20, 15, 5]` yield
+/// `Some`; everything else (including floats, bools, null) yields `None`
+/// so the caller falls through to the serializer's 400 choice error
+/// instead of the app endpoint's `int()` 403/500 (tier-3 precedence).
+fn coerce_role_value(value: &Value) -> Option<i32> {
+    let coerced: Option<i64> = match value {
+        Value::Number(n) => n.as_i64(),
+        Value::String(s) => s.parse::<i64>().ok(),
+        _ => None,
+    };
+    match coerced {
+        Some(role)
+            if [
+                i64::from(ROLE_ADMIN),
+                i64::from(ROLE_MEMBER),
+                i64::from(ROLE_GUEST),
+            ]
+            .contains(&role) =>
+        {
+            Some(role as i32)
+        }
+        _ => None,
+    }
+}
+
+/// Active workspace role for one user in a slug's workspace, or `None`
+/// when no active row exists (NEWPIDASH-264 guard fetch; Django
+/// `WorkspaceMember.objects.get(..., is_active=True)`, miss → 404).
+async fn workspace_role_for(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    user_id: uuid::Uuid,
+) -> Result<Option<i32>, Denial> {
+    let db = orm(pool);
+    let role: Option<i16> = workspace_members::Entity::find()
+        .select_only()
+        .column(workspace_members::Column::Role)
+        .join(
+            JoinType::InnerJoin,
+            workspace_members::Entity::belongs_to(workspaces::Entity)
+                .from(workspace_members::Column::WorkspaceId)
+                .to(workspaces::Column::Id)
+                .into(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspace_members::Column::MemberId.eq(user_id))
+        .filter(workspace_members::Column::IsActive.eq(true))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(role.map(i32::from))
+}
+
+/// Active project role for one user in a slug+project, or `None` when no
+/// active row exists (NEWPIDASH-264 guard fetch; Django
+/// `ProjectMember.objects.get(..., is_active=True)`, miss → 404).
+async fn project_role_for(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    project_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+) -> Result<Option<i32>, Denial> {
+    let db = orm(pool);
+    let role: Option<i16> = project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::Role)
+        .join(
+            JoinType::InnerJoin,
+            project_members::Entity::belongs_to(workspaces::Entity)
+                .from(project_members::Column::WorkspaceId)
+                .to(workspaces::Column::Id)
+                .into(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(project_members::Column::MemberId.eq(user_id))
+        .filter(project_members::Column::ProjectId.eq(project_id))
+        .filter(project_members::Column::IsActive.eq(true))
+        .filter(project_members::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(role.map(i32::from))
 }
 
 /// Validate `email` through DRF's `CharField(max_length=255)` pipeline
@@ -1418,32 +1790,41 @@ fn email_domain_byte(byte: u8) -> bool {
 // User fetching (full `UserLite` columns)
 // ---------------------------------------------------------------------------
 
-const USER_LITE_SELECT: &str =
-    "SELECT u.id, u.first_name, u.last_name, u.email, u.avatar, u.avatar_asset_id, u.display_name
-FROM users u";
+/// The `UserLite` columns (`email` is nullable, `db/models/user.py:61`).
+#[derive(Debug, FromQueryResult)]
+struct UserLiteRow {
+    id: uuid::Uuid,
+    first_name: String,
+    last_name: String,
+    email: Option<String>,
+    avatar: String,
+    avatar_asset_id: Option<uuid::Uuid>,
+    display_name: String,
+}
 
-fn map_user_lite(row: &sqlx::postgres::PgRow) -> Result<UserLite, Denial> {
-    Ok(UserLite {
-        id: row.try_get("id").map_err(|_| Denial::ServerError)?,
-        first_name: row.try_get("first_name").map_err(|_| Denial::ServerError)?,
-        last_name: row.try_get("last_name").map_err(|_| Denial::ServerError)?,
-        // `email` is nullable (`db/models/user.py:61`); a non-opt decode
-        // 500s the whole list on one NULL row.
-        email: row
-            .try_get::<Option<String>, _>("email")
-            .map_err(|_| Denial::ServerError)?,
-        avatar: row
-            .try_get::<Option<String>, _>("avatar")
-            .map_err(|_| Denial::ServerError)?
-            .unwrap_or_default(),
-        avatar_asset_id: row
-            .try_get("avatar_asset_id")
-            .map_err(|_| Denial::ServerError)?,
-        display_name: row
-            .try_get::<Option<String>, _>("display_name")
-            .map_err(|_| Denial::ServerError)?
-            .unwrap_or_default(),
-    })
+fn map_user_row(row: UserLiteRow) -> UserLite {
+    UserLite {
+        id: row.id,
+        first_name: row.first_name,
+        last_name: row.last_name,
+        email: row.email,
+        avatar: row.avatar,
+        avatar_asset_id: row.avatar_asset_id,
+        display_name: row.display_name,
+    }
+}
+
+/// The `UserLite` columns, for the by-id / by-list reads below.
+fn user_lite_rows() -> sea_orm::Select<users::Entity> {
+    users::Entity::find().select_only().columns([
+        users::Column::Id,
+        users::Column::FirstName,
+        users::Column::LastName,
+        users::Column::Email,
+        users::Column::Avatar,
+        users::Column::AvatarAssetId,
+        users::Column::DisplayName,
+    ])
 }
 
 /// Full `UserLite` rows for an id list (the member views embed the user
@@ -1466,20 +1847,15 @@ async fn fetch_users_lite(
         // Django's `id__in=[]` empty-result short-circuit: no statement.
         return Ok(Vec::new());
     }
-    let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("${i}")).collect();
-    let sql = format!(
-        "{USER_LITE_SELECT} WHERE u.id IN ({}) ORDER BY u.created_at DESC",
-        placeholders.join(", ")
-    );
-    let mut query = sqlx::query(&sql);
-    for id in ids {
-        query = query.bind(*id);
-    }
-    let rows = query
-        .fetch_all(pool)
+    let db = orm(pool);
+    let rows = user_lite_rows()
+        .filter(users::Column::Id.is_in(ids.iter().copied()))
+        .order_by_desc(users::Column::CreatedAt)
+        .into_model::<UserLiteRow>()
+        .all(&db)
         .await
         .map_err(|_| Denial::ServerError)?;
-    rows.iter().map(map_user_lite).collect()
+    Ok(rows.into_iter().map(map_user_row).collect())
 }
 
 /// Key user rows by id (for callers walking another queryset's order).
@@ -1490,18 +1866,26 @@ fn users_by_id(users: Vec<UserLite>) -> HashMap<uuid::Uuid, UserLite> {
 /// One user by id (`User.objects.get`, `member.py:190`) — the plain
 /// manager, no soft-delete scope (see [`fetch_users_lite`]).
 async fn fetch_user_lite(pool: &sqlx::PgPool, id: uuid::Uuid) -> Result<Option<UserLite>, Denial> {
-    let row: Option<sqlx::postgres::PgRow> =
-        sqlx::query(&format!("{USER_LITE_SELECT} WHERE u.id = $1"))
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    row.map(|row| map_user_lite(&row)).transpose()
+    let db = orm(pool);
+    let row = user_lite_rows()
+        .filter(users::Column::Id.eq(id))
+        .into_model::<UserLiteRow>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.map(map_user_row))
 }
 
 // ---------------------------------------------------------------------------
 // Handlers: workspace members
 // ---------------------------------------------------------------------------
+
+/// One workspace membership (id + role) for the workspace-members list.
+#[derive(Debug, FromQueryResult)]
+struct MembershipRow {
+    member_id: uuid::Uuid,
+    role: i16,
+}
 
 /// `GET workspaces/<slug>/members/` (`member.py:69-91`): `UserLite` + the
 /// workspace `role` per entry, in queryset order.
@@ -1535,15 +1919,23 @@ async fn ws_members_inner(
     // ids+roles ride this statement and users are fetched separately.
     // `WorkspaceMember.Meta.ordering = ("-created_at",)`
     // (`db/models/workspace.py:227`) — the Python loop walks this order.
-    let memberships: Vec<(uuid::Uuid, i16)> = sqlx::query_as(
-        "SELECT wm.member_id, wm.role FROM workspace_members wm
-         WHERE wm.workspace_id = $1 AND wm.deleted_at IS NULL
-         ORDER BY wm.created_at DESC",
-    )
-    .bind(workspace_id)
-    .fetch_all(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = orm(&pool);
+    let memberships: Vec<(uuid::Uuid, i16)> = workspace_members::Entity::find()
+        .select_only()
+        .columns([
+            workspace_members::Column::MemberId,
+            workspace_members::Column::Role,
+        ])
+        .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+        .filter(workspace_members::Column::DeletedAt.is_null())
+        .order_by_desc(workspace_members::Column::CreatedAt)
+        .into_model::<MembershipRow>()
+        .all(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .into_iter()
+        .map(|row| (row.member_id, row.role))
+        .collect();
     let ids: Vec<uuid::Uuid> = memberships.iter().map(|row| row.0).collect();
     let users = users_by_id(fetch_users_lite(&pool, &ids).await?);
     let asset_ids: Vec<uuid::Uuid> = users
@@ -1601,7 +1993,8 @@ async fn pm_list_inner(
         workspace_slug: slug,
         actor_id: actor.id,
     };
-    let ids = queries_projmem::fetch_project_member_ids(&pool, &scope, project_id)
+    let db = orm(&pool);
+    let ids = queries_projmem::fetch_project_member_ids(&db, &scope, project_id)
         .await
         .map_err(|_| Denial::ServerError)?;
     // The rendered order is the *users* queryset order (`-created_at`),
@@ -1701,13 +2094,17 @@ async fn pm_create_inner(
     let (member_id, role) = (member_id.expect("validated"), role.expect("validated"));
 
     // `ProjectBaseModel.save`: `workspace = project.workspace`.
-    let workspace_id: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT workspace_id FROM projects WHERE id = $1 AND deleted_at IS NULL")
-            .bind(project_id)
-            .fetch_optional(&pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let Some((workspace_id,)) = workspace_id else {
+    let db = orm(&pool);
+    let workspace_id: Option<uuid::Uuid> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::WorkspaceId)
+        .filter(projects::Column::Id.eq(project_id))
+        .filter(projects::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let Some(workspace_id) = workspace_id else {
         return Err(Denial::ServerError);
     };
 
@@ -1717,7 +2114,7 @@ async fn pm_create_inner(
     let prefs: Value =
         serde_json::from_str(&default_preferences_json()).map_err(|_| Denial::ServerError)?;
     let membership_id = match pidash_services::domain::projects::members::add(
-        &mut *tx,
+        &pidash_db::orm_tx::TxConn::new(&mut tx),
         &pidash_services::domain::projects::members::NewProjectMember {
             workspace_id,
             project_id: Some(project_id),
@@ -1789,15 +2186,23 @@ async fn create_project_user_property(
     member_id: uuid::Uuid,
     actor_id: uuid::Uuid,
 ) -> Result<(), Denial> {
-    let min_sort: Option<f64> = sqlx::query_scalar(
-        "SELECT MIN(sort_order) FROM project_user_properties
-         WHERE workspace_id = $1 AND user_id = $2 AND deleted_at IS NULL",
-    )
-    .bind(workspace_id)
-    .bind(member_id)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    // `MIN(sort_order)`: the smallest live sort order minus 10000, or
+    // 65535.0 when none (`sort_order` is NOT NULL, so the first row in
+    // ascending order is the minimum). On the caller's transaction
+    // through `TxConn`; the `add_property_db_now` kernel below stays sqlx.
+    let conn = pidash_db::orm_tx::TxConn::new(tx);
+    let min_sort: Option<f64> = project_user_properties::Entity::find()
+        .select_only()
+        .column(project_user_properties::Column::SortOrder)
+        .filter(project_user_properties::Column::WorkspaceId.eq(workspace_id))
+        .filter(project_user_properties::Column::UserId.eq(member_id))
+        .filter(project_user_properties::Column::DeletedAt.is_null())
+        .order_by_asc(project_user_properties::Column::SortOrder)
+        .limit(1)
+        .into_tuple()
+        .one(&conn)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let sort_order = min_sort.map(|min| min - 10000.0).unwrap_or(65535.0);
     let filters: Value =
         serde_json::from_str(&default_issue_filters_json()).map_err(|_| Denial::ServerError)?;
@@ -1808,7 +2213,7 @@ async fn create_project_user_property(
     let prefs: Value =
         serde_json::from_str(&default_preferences_json()).map_err(|_| Denial::ServerError)?;
     let insert = pidash_services::domain::projects::members::add_property_db_now(
-        &mut **tx,
+        &pidash_db::orm_tx::TxConn::new(tx),
         &pidash_services::domain::projects::members::NewMemberProperty {
             workspace_id,
             project_id,
@@ -1922,7 +2327,8 @@ async fn pm_detail_get_inner(
         workspace_slug: slug,
         actor_id: actor.id,
     };
-    let membership = queries_projmem::fetch_project_member(&pool, &scope, project_id, pk)
+    let db = orm(&pool);
+    let membership = queries_projmem::fetch_project_member(&db, &scope, project_id, pk)
         .await
         .map_err(|_| Denial::ServerError)?
         .ok_or(Denial::MemberNotFound)?;
@@ -1943,7 +2349,11 @@ async fn pm_detail_get_inner(
 }
 
 /// `PATCH .../members/<pk>/` (`member.py:203-208`): the *membership* shape.
-/// No workspace-exists check in Python — ported as written.
+/// No workspace-exists check in Python — ported as written. NEWPIDASH-264
+/// adds the PDASHOSS01-328 / app `partial_update` role rule here (Old bug
+/// fix, DIFF-24): the gate gains the workspace-admin override for PATCH
+/// only, and the handler enforces the workspace-admin-target 403,
+/// equal-or-higher 403s, self 400 and guest cap 400 with the app bodies.
 async fn pm_detail_patch(
     State(state): State<AppState>,
     Path((slug, project_raw, pk_raw)): Path<(String, String, String)>,
@@ -1989,12 +2399,22 @@ async fn pm_detail_patch_inner(
     let actor = authenticate(&pool, &req.headers, state.settings().secret_key.as_bytes()).await?;
     let project_id = rewrite_project_id(&pool, slug, actor.id, project_raw).await?;
     let facts = load_facts(&pool, slug, &actor, Some(project_id)).await?;
-    check_gate(
+    // NEWPIDASH-264: PATCH-only workspace-admin override. The strict
+    // `ProjectAdminPermission` gate still denies; a workspace admin who is
+    // an active project member (any role) is let through to the handler,
+    // mirroring the app `@allow_permission` override (`base.py:64-78`).
+    // POST/DELETE keep the strict gate (no handler guard there, so
+    // opening them would be unsafe) — DELETE has no higher-role check.
+    if let Err(denial) = check_gate(
         V1Route::ProjectMemberDetail,
         "PATCH",
         &facts,
         Some(project_id),
-    )?;
+    ) {
+        if !(facts.is_workspace_admin_active && facts.project_member_scoped) {
+            return Err(denial);
+        }
+    }
     // Gate passed: activate the stored zone now (`TimezoneMixin.initial`
     // runs after permissions; an unknown zone 400s only for survivors).
     activate_timezone(actor.timezone.as_deref())?;
@@ -2002,10 +2422,41 @@ async fn pm_detail_patch_inner(
         workspace_slug: slug,
         actor_id: actor.id,
     };
-    let membership = queries_projmem::fetch_project_member(&pool, &scope, project_id, pk)
+    let db = orm(&pool);
+    let membership = queries_projmem::fetch_project_member(&db, &scope, project_id, pk)
         .await
         .map_err(|_| Denial::ServerError)?
         .ok_or(Denial::MemberNotFound)?;
+    // NEWPIDASH-264 role-rule lookups (`partial_update`: target ws role,
+    // requester ws role, self 400, requester project role) run before the
+    // body parses, matching Django order: `DoesNotExist` 404s and the
+    // self 400 beat `ParseError`. A null target member or a missing
+    // active row 404s exactly where Django's `.get(..., is_active=True)`
+    // would.
+    let Some(target_member_id) = membership.member_id else {
+        return Err(Denial::MemberNotFound);
+    };
+    let Some(target_workspace_role) = workspace_role_for(&pool, slug, target_member_id).await?
+    else {
+        return Err(Denial::MemberNotFound);
+    };
+    let is_target_workspace_admin = target_workspace_role == ROLE_ADMIN;
+    let Some(requester_workspace_role) = workspace_role_for(&pool, slug, actor.id).await? else {
+        return Err(Denial::MemberNotFound);
+    };
+    let is_requester_workspace_admin = requester_workspace_role == ROLE_ADMIN;
+    if actor.id == target_member_id && !is_requester_workspace_admin {
+        return Err(Denial::BadError(
+            "You cannot update your own role".to_owned(),
+        ));
+    }
+    let Some(requester_project_role) = project_role_for(&pool, slug, project_id, actor.id).await?
+    else {
+        return Err(Denial::MemberNotFound);
+    };
+    let target_role = membership_role(&pool, &membership.id)
+        .await?
+        .ok_or(Denial::ServerError)?;
     // The body parses after the row fetch (`patch()`: `objects.get` runs
     // before the serializer reads `request.data`); unparseable JSON proxies
     // for Django's exact `ParseError` bytes, while empty bodies are `{}` and
@@ -2029,12 +2480,50 @@ async fn pm_detail_patch_inner(
     if from_form {
         member_blank_to_null(&mut data);
     }
+    // NEWPIDASH-264 role matrix (`partial_update`, inside `"role" in
+    // request.data`): workspace-admin target (absolute), admin-only,
+    // equal-or-higher target/assign (requester ws-admin bypass), guest
+    // cap (absolute). Runs before serializer validation like Django; an
+    // invalid choice skips the guards and falls through to the 400
+    // choice error below (tier-3 precedence).
+    if let Some(raw_role) = data.get("role") {
+        if let Some(new_role) = coerce_role_value(raw_role) {
+            if is_target_workspace_admin && actor.id != target_member_id {
+                return Err(Denial::ForbiddenError(
+                    "You cannot update the role of a workspace admin".to_owned(),
+                ));
+            }
+            if requester_project_role < ROLE_ADMIN && !is_requester_workspace_admin {
+                return Err(Denial::ForbiddenError(
+                    "You do not have permission to update roles".to_owned(),
+                ));
+            }
+            if target_role >= requester_project_role && !is_requester_workspace_admin {
+                return Err(Denial::ForbiddenError(
+                    "You cannot update the role of a member with a role equal to or higher than your own"
+                        .to_owned(),
+                ));
+            }
+            if new_role >= requester_project_role && !is_requester_workspace_admin {
+                return Err(Denial::ForbiddenError(
+                    "You cannot assign a role equal to or higher than your own".to_owned(),
+                ));
+            }
+            if target_workspace_role == ROLE_GUEST
+                && (new_role == ROLE_MEMBER || new_role == ROLE_ADMIN)
+            {
+                return Err(Denial::BadError(
+                    "You cannot add a user with role higher than the workspace role".to_owned(),
+                ));
+            }
+        }
+    }
     let mut errors = FieldErrors::default();
     // Partial: absent keys keep their rows; present keys validate. A failed
     // present key leaves the old value in place, but the errors below stop
     // the write — exactly like DRF's `is_valid` gate before `save`.
     let mut member_id = membership.member_id;
-    let mut role = membership_role(&pool, &membership.id).await?;
+    let mut role = Some(target_role);
     if let Some(value) = data.get("member") {
         if let Some(valid) = validate_member_value(&pool, slug, value, &mut errors).await {
             member_id = Some(valid);
@@ -2049,7 +2538,7 @@ async fn pm_detail_patch_inner(
         return Err(Denial::BadJson(errors.body()));
     }
     pidash_services::domain::projects::members::update_member_identity(
-        &pool,
+        &pidash_db::pool::sea_orm_connection(&pool),
         membership.id,
         member_id,
         role,
@@ -2065,13 +2554,16 @@ async fn pm_detail_patch_inner(
 
 /// Current role of a membership row (the PATCH base when `role` is absent).
 async fn membership_role(pool: &sqlx::PgPool, id: &uuid::Uuid) -> Result<Option<i32>, Denial> {
-    let row: Option<(Option<i16>,)> =
-        sqlx::query_as("SELECT role FROM project_members WHERE id = $1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    Ok(row.and_then(|row| row.0).map(i32::from))
+    let db = orm(pool);
+    let role: Option<i16> = project_members::Entity::find()
+        .select_only()
+        .column(project_members::Column::Role)
+        .filter(project_members::Column::Id.eq(*id))
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(role.map(i32::from))
 }
 
 /// `DELETE .../members/<pk>/` (`member.py:218-222`): flip `is_active`, keep
@@ -2120,12 +2612,13 @@ async fn pm_detail_delete_inner(
         workspace_slug: slug,
         actor_id: actor.id,
     };
-    let membership = queries_projmem::fetch_project_member(&pool, &scope, project_id, pk)
+    let db = orm(&pool);
+    let membership = queries_projmem::fetch_project_member(&db, &scope, project_id, pk)
         .await
         .map_err(|_| Denial::ServerError)?
         .ok_or(Denial::MemberNotFound)?;
     pidash_services::domain::projects::members::deactivate_actor_first(
-        &pool,
+        &pidash_db::pool::sea_orm_connection(&pool),
         membership.id,
         actor.id,
     )
@@ -2214,13 +2707,7 @@ async fn inv_create_inner(
 
     // `Workspace.objects.get(slug=slug)` — miss 404s through the viewset
     // exception handler (unreachable behind the gate, ported in place).
-    let workspace_id: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT id FROM workspaces WHERE slug = $1 AND deleted_at IS NULL")
-            .bind(slug)
-            .fetch_optional(&pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let Some((workspace_id,)) = workspace_id else {
+    let Some(workspace_id) = workspace_id_by_slug(&pool, slug).await? else {
         return Err(Denial::InviteNotFound);
     };
     // The body parses after the workspace fetch (`create()`: `objects.get`
@@ -2261,16 +2748,26 @@ async fn inv_create_inner(
     // failure means this check never runs — skip it when errors exist.
     if errors.is_empty() {
         if let Some(email) = email.as_deref() {
-            let duplicate: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM workspace_member_invites i
-                   JOIN workspaces w ON w.id = i.workspace_id
-                   WHERE i.email = $1 AND w.slug = $2 AND i.deleted_at IS NULL)",
-            )
-            .bind(email)
-            .bind(slug)
-            .fetch_one(&pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+            let db = orm(&pool);
+            let duplicate: bool = workspace_member_invites::Entity::find()
+                .select_only()
+                .column(workspace_member_invites::Column::Id)
+                .join(
+                    JoinType::InnerJoin,
+                    workspace_member_invites::Entity::belongs_to(workspaces::Entity)
+                        .from(workspace_member_invites::Column::WorkspaceId)
+                        .to(workspaces::Column::Id)
+                        .into(),
+                )
+                .filter(workspace_member_invites::Column::Email.eq(email))
+                .filter(workspaces::Column::Slug.eq(slug))
+                .filter(workspace_member_invites::Column::DeletedAt.is_null())
+                .limit(1)
+                .into_tuple::<uuid::Uuid>()
+                .one(&db)
+                .await
+                .map_err(|_| Denial::ServerError)?
+                .is_some();
             if duplicate {
                 errors.non_field.push("Email already invited".into());
             }
@@ -2282,24 +2779,33 @@ async fn inv_create_inner(
     let (email, role) = (email.expect("validated"), role.expect("validated"));
 
     let invite_id = uuid::Uuid::new_v4();
-    let insert = sqlx::query(
-        "INSERT INTO workspace_member_invites (id, email, accepted, token, message,
-            responded_at, role, workspace_id, created_by_id, updated_by_id,
-            created_at, updated_at, deleted_at)
-         VALUES ($1, $2, false, '', NULL,
-            NULL, $3, $4, $5, NULL,
-            now(), now(), NULL)",
-    )
-    .bind(invite_id)
-    .bind(&email)
-    .bind(role)
-    .bind(workspace_id)
-    .bind(actor.id)
-    .execute(&pool)
-    .await;
-    if let Err(err) = insert {
-        return Err(integrity_denial(&err));
-    }
+    let now: chrono::DateTime<chrono::FixedOffset> = chrono::Utc::now().into();
+    let invite = workspace_member_invites::ActiveModel {
+        id: Set(invite_id),
+        email: Set(email.clone()),
+        accepted: Set(false),
+        token: Set(String::new()),
+        message: Set(None),
+        responded_at: Set(None),
+        role: Set(role as i16),
+        workspace_id: Set(workspace_id),
+        created_by_id: Set(Some(actor.id)),
+        updated_by_id: Set(None),
+        created_at: Set(now),
+        updated_at: Set(now),
+        deleted_at: Set(None),
+    };
+    let db = orm(&pool);
+    workspace_member_invites::Entity::insert(invite)
+        .exec_without_returning(&db)
+        .await
+        .map_err(|error| {
+            if pidash_db::orm_tx::is_integrity_violation(&error) {
+                Denial::BadPayload
+            } else {
+                Denial::ServerError
+            }
+        })?;
     let invite = fetch_invite_full(&pool, slug, invite_id)
         .await?
         .ok_or(Denial::ServerError)?;
@@ -2457,17 +2963,25 @@ async fn inv_detail_patch_inner(
     if !errors.is_empty() {
         return Err(Denial::BadJson(errors.body()));
     }
-    sqlx::query(
-        "UPDATE workspace_member_invites SET role = $1,
-            updated_by_id = $2, updated_at = now()
-         WHERE id = $3",
-    )
-    .bind(role)
-    .bind(actor.id)
-    .bind(invite.id)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let now: chrono::DateTime<chrono::FixedOffset> = chrono::Utc::now().into();
+    let db = orm(&pool);
+    workspace_member_invites::Entity::update_many()
+        .col_expr(
+            workspace_member_invites::Column::Role,
+            Expr::value(role as i16),
+        )
+        .col_expr(
+            workspace_member_invites::Column::UpdatedById,
+            Expr::value(actor.id),
+        )
+        .col_expr(
+            workspace_member_invites::Column::UpdatedAt,
+            Expr::value(now),
+        )
+        .filter(workspace_member_invites::Column::Id.eq(invite.id))
+        .exec(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let invite = fetch_invite_full(&pool, slug, pk)
         .await?
         .ok_or(Denial::ServerError)?;
@@ -2524,16 +3038,25 @@ async fn inv_detail_delete_inner(
     // Instance `delete()` → `save()`: `deleted_at` + `updated_*`
     // (`mixins.py:72-77`, `base.py:23-44`), then the unconditional
     // `soft_delete_related_objects.delay(...)` enqueue (`:78`).
-    let now = chrono::Utc::now();
-    sqlx::query(
-        "UPDATE workspace_member_invites SET deleted_at = $1, updated_at = $1, updated_by_id = $2 WHERE id = $3",
-    )
-    .bind(now)
-    .bind(actor.id)
-    .bind(invite.id)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let now: chrono::DateTime<chrono::FixedOffset> = chrono::Utc::now().into();
+    let db = orm(&pool);
+    workspace_member_invites::Entity::update_many()
+        .col_expr(
+            workspace_member_invites::Column::DeletedAt,
+            Expr::value(now),
+        )
+        .col_expr(
+            workspace_member_invites::Column::UpdatedAt,
+            Expr::value(now),
+        )
+        .col_expr(
+            workspace_member_invites::Column::UpdatedById,
+            Expr::value(actor.id),
+        )
+        .filter(workspace_member_invites::Column::Id.eq(invite.id))
+        .exec(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     super::handlers_project::enqueue_soft_delete(&pool, "workspacememberinvite", &invite.id).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -2558,16 +3081,9 @@ async fn users_me_inner(state: &AppState, headers: &HeaderMap) -> Result<Respons
     // `request.user` straight from authentication — no manager scope, so a
     // soft-deleted row still renders (a missing row entirely 500s, as the
     // FK fetch would in Python).
-    let row: Option<sqlx::postgres::PgRow> =
-        sqlx::query(&format!("{USER_LITE_SELECT} WHERE u.id = $1"))
-            .bind(actor.id)
-            .fetch_optional(&pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    let Some(row) = row else {
-        return Err(Denial::ServerError);
-    };
-    let user = map_user_lite(&row)?;
+    let user = fetch_user_lite(&pool, actor.id)
+        .await?
+        .ok_or(Denial::ServerError)?;
     let assets =
         fetch_asset_urls(&pool, &user.avatar_asset_id.into_iter().collect::<Vec<_>>()).await?;
     Ok(ok_json(render_user_lite(
@@ -3338,7 +3854,8 @@ mod live_tests {
                 repo_url, base_branch, agent_default_interval_seconds,
                 agent_default_max_ticks, agent_ticking_enabled, is_default,
                 agent_review_default_interval_seconds, default_agent_executor,
-                agent_test_default_interval_seconds, created_at, updated_at)
+                agent_test_default_interval_seconds, created_at, updated_at,
+                default_work_type)
              VALUES ($1, $2, '', 0, $3,
                 $4, $5, true, true,
                 true, true, false, 0, 0,
@@ -3346,7 +3863,7 @@ mod live_tests {
                 false, 'UTC', false,
                 '', '', 0,
                 0, false, false,
-                0, '', 0, now(), now())",
+                0, '', 0, now(), now(), 'software')",
         )
         .bind(uid(&project_id))
         .bind(format!("CT Project {short}"))
@@ -3976,6 +4493,41 @@ mod live_tests {
         assert_eq!(
             json_of(&bytes),
             serde_json::json!({"detail": "Given API token is not valid"})
+        );
+    }
+
+    #[test]
+    fn coerce_role_accepts_only_valid_choices() {
+        // NEWPIDASH-264 guard pre-check: valid ints and numeric strings
+        // in [20, 15, 5]; everything else falls through to the 400.
+        for (value, expected) in [
+            (serde_json::json!(20), Some(20)),
+            (serde_json::json!(15), Some(15)),
+            (serde_json::json!(5), Some(5)),
+            (serde_json::json!("20"), Some(20)),
+            (serde_json::json!("15"), Some(15)),
+            (serde_json::json!(99), None),
+            (serde_json::json!("99"), None),
+            (serde_json::json!("abc"), None),
+            (serde_json::json!(15.0), None),
+            (serde_json::json!(true), None),
+            (serde_json::json!(null), None),
+        ] {
+            assert_eq!(coerce_role_value(&value), expected, "{value}");
+        }
+    }
+
+    #[test]
+    fn forbidden_error_body_is_byte_identical_app_guard() {
+        // NEWPIDASH-264: guard 403s render {"error":...}, distinct from
+        // the gate's CLASS_DENIAL {"detail":...}.
+        let (status, body) =
+            Denial::ForbiddenError("You cannot update the role of a workspace admin".to_owned())
+                .status_and_body();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            body.as_deref(),
+            Some(r#"{"error":"You cannot update the role of a workspace admin"}"#)
         );
     }
 }

@@ -1507,6 +1507,7 @@ mod tests {
             created_via: None,
             assigned_pod_id: None,
             agent_executor: None,
+            work_type: None,
         };
         assert_eq!(
             issue_comment::IssueComment::label(&rendered_issue.to_string()),

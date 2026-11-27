@@ -1,10 +1,12 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Oracle scenario (NEWFRONT-187): the conversation sidebar deep-links
+// Oracle scenario (NEWFRONT-187): the conversation history deep-links
 // every thread newest-first with an untitled fallback, highlights the
 // open thread, hides archived threads, shows a placeholder when empty,
-// and prepends a just-started thread without a reload. Row: AGT-044.
+// and prepends a just-started thread without a reload. The oracle keeps
+// a persistent sidebar; the new app opens the same list from a Chat
+// History button (NEWPIDASH-337, driver-abstracted). Row: AGT-044.
 import { test, expect } from "../../fixtures";
 import {
   serverAssistantConfigDelete,
@@ -21,7 +23,7 @@ import { DUMMY_PROVIDER, UNTITLED, expectBubbles, expectSidebarTitles } from "./
 const ROWS = ["AGT-044"];
 
 test(
-  specTitle(ROWS, "sidebar lists, links, highlights and prepends threads"),
+  specTitle(ROWS, "history lists, links, highlights and prepends threads"),
   { tag: specTags(ROWS) },
   async ({ driver }) => {
     const harness = await test.step("fresh owner plus workspace", async () => schedulerHarness("parity-agt44"));

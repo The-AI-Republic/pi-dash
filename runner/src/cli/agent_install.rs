@@ -55,9 +55,7 @@ pub async fn ensure_agent_installed(
     let name = agent.display_name();
     println!();
     println!("⚠ Pi Dash could not run the {name} CLI (`{binary}`) on this machine.");
-    println!(
-        "  This runner drives {name}, so its runs will fail until `{binary}` is installed."
-    );
+    println!("  This runner drives {name}, so its runs will fail until `{binary}` is installed.");
 
     if skip_install {
         println!("  --skip-agent-install was set, so Pi Dash won't install it for you.");
@@ -252,7 +250,10 @@ pub fn set_runner_agent_binary(runner: &mut RunnerConfig, agent: AgentKind, path
         AgentKind::CursorAgent => runner.cursor_agent.binary = p,
         AgentKind::OpenClaw => runner.openclaw.binary = p,
         AgentKind::Grok => runner.grok.binary = p,
+        AgentKind::Antigravity => runner.antigravity.binary = p,
         AgentKind::MuseCode => runner.muse_code.binary = p,
+        // The daemon resolves the engine itself (`engine::locate`).
+        AgentKind::PidashAgent => {}
     }
 }
 
@@ -275,8 +276,8 @@ fn open_install_page(agent: AgentKind) {
 mod tests {
     use super::*;
     use crate::config::schema::{
-        AgentKind, ClaudeCodeSection, CodexSection, CursorAgentSection, GrokSection,
-        MuseCodeSection, OpenClawSection, RunnerConfig, WorkspaceSection,
+        AgentKind, AntigravitySection, ClaudeCodeSection, CodexSection, CursorAgentSection,
+        GrokSection, MuseCodeSection, OpenClawSection, RunnerConfig, WorkspaceSection,
     };
     use std::path::PathBuf;
 
@@ -296,6 +297,7 @@ mod tests {
             cursor_agent: CursorAgentSection::default(),
             openclaw: OpenClawSection::default(),
             grok: GrokSection::default(),
+            antigravity: AntigravitySection::default(),
             muse_code: MuseCodeSection::default(),
             approval_policy: Default::default(),
         }
@@ -370,7 +372,11 @@ mod tests {
             "expected to resolve a present binary {binary:?}"
         );
         let p = resolved.unwrap();
-        assert!(p.is_absolute(), "resolved path not absolute: {}", p.display());
+        assert!(
+            p.is_absolute(),
+            "resolved path not absolute: {}",
+            p.display()
+        );
     }
 
     #[tokio::test]

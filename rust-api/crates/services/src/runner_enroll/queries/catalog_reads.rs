@@ -509,6 +509,15 @@ pub async fn insert_dev_machine(
         label: Set(dev_machine_label(host_label)),
         visibility: Set(0),
         provisioning: Set(provisioning.to_owned()),
+        engine_paused_by_owner: Set(false),
+        engine_auto_pause_reason: Set(String::new()),
+        engine_team_runs: Set(false),
+        engine_sign_in_state: Set("never".to_owned()),
+        engine_credential_expires_at: Set(None),
+        engine_state: Set(serde_json::json!({})),
+        engine_state_reported_at: Set(None),
+        merged_into_id: Set(None),
+        merge_result: Set(serde_json::json!({})),
         last_seen_at: Set(Some(now.into())),
         revoked_at: Set(None),
         created_at: Set(now.into()),
@@ -954,6 +963,15 @@ mod tests {
         "label",
         "visibility",
         "provisioning",
+        "engine_paused_by_owner",
+        "engine_auto_pause_reason",
+        "engine_team_runs",
+        "engine_sign_in_state",
+        "engine_credential_expires_at",
+        "engine_state",
+        "engine_state_reported_at",
+        "merged_into_id",
+        "merge_result",
         "last_seen_at",
         "revoked_at",
         "created_at",
@@ -985,7 +1003,7 @@ mod tests {
         assert_eq!(mt_cols::COLUMNS, TOKEN_COLS);
         assert_eq!(mt_cols::TABLE, "machine_token");
         assert_eq!(r_cols::TABLE, "runner");
-        // Cross-domain projects list (46 cols, id sixth) comes from the
+        // Cross-domain projects list (47 cols, id sixth) comes from the
         // merged app_project port — spot-pin head, id slot and tail.
         assert_eq!(
             &project_cols::COLUMNS[..6],
@@ -998,9 +1016,10 @@ mod tests {
                 "id"
             ]
         );
-        assert_eq!(project_cols::COLUMNS.len(), 46);
+        assert_eq!(project_cols::COLUMNS.len(), 47);
         assert_eq!(project_cols::COLUMNS[12], "identifier");
         assert_eq!(project_cols::COLUMNS[45], "default_agent_executor");
+        assert_eq!(project_cols::COLUMNS[46], "default_work_type");
         assert_eq!(project_cols::TABLE, "projects");
         // Own cross-domain table pins.
         assert_eq!(AGENT_RUN_TABLE, "agent_run");

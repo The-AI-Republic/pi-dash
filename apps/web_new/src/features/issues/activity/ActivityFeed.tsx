@@ -17,6 +17,7 @@ import { ActivityEntryRow } from "./ActivityEntryRow.js";
 import { FeedHeader } from "./FeedHeader.js";
 import { CLOUD_FEED_FILTERS, FEED_FILTERS, composeFeed, flipSort, toggleFeedFilter } from "./model.js";
 import { useFeedPrefs } from "./prefs.js";
+import { timelinePosition, type TimelinePosition } from "./TimelineRow.js";
 
 export const FEED_LOAD_FAILED = "Couldn't load the activity.";
 
@@ -30,8 +31,11 @@ export interface ActivityFeedProps {
   commentsError: boolean;
   /** The composer element; placed by the sort order. */
   composer: React.ReactNode;
-  /** Comment card wiring, shared with the thread. */
-  renderComment: (comment: IssueComment) => React.ReactNode;
+  /**
+   * Comment card wiring, shared with the thread. The feed passes each
+   * comment's timeline position so the card can trim the rail at the ends.
+   */
+  renderComment: (comment: IssueComment, position: TimelinePosition) => React.ReactNode;
   /** Archived issues keep the timeline and drop the composer. */
   archived: boolean;
   /** Cloud worklog surfaces: the fifth filter toggle plus the header's leading control (ISS-206). */
@@ -96,18 +100,21 @@ export function ActivityFeed({
         ) : failed ? (
           <p className="text-body text-(--danger)">{FEED_LOAD_FAILED}</p>
         ) : (
-          <div className="flex flex-col gap-(--space-6)">
-            {entries.map((entry) =>
-              entry.kind === "comment" ? (
+          <div className="flex flex-col">
+            {/* No gap between rows: each row paints its own rail segment,
+            so the segments join into one continuous line. */}
+            {entries.map((entry, index) => {
+              const position = timelinePosition(index, entries.length);
+              return entry.kind === "comment" ? (
                 <div key={entry.id} data-feed-row="true">
-                  {renderComment(entry.comment)}
+                  {renderComment(entry.comment, position)}
                 </div>
               ) : (
                 <div key={entry.id} data-feed-row="true">
-                  <ActivityEntryRow workspaceSlug={workspaceSlug} activity={entry.activity} />
+                  <ActivityEntryRow workspaceSlug={workspaceSlug} activity={entry.activity} position={position} />
                 </div>
-              )
-            )}
+              );
+            })}
           </div>
         )}
         {!archived && order === "asc" ? composer : null}

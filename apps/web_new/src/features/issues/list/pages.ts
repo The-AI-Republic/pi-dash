@@ -157,7 +157,8 @@ export function useListPages(
   labels: ReadonlyMap<string, string>,
   showEmptyGroups: boolean,
   showSubIssues: boolean,
-  richFilters: RichExpression = {}
+  richFilters: RichExpression = {},
+  groupOrder: readonly string[] = []
 ): ListPages {
   const client = getAppClient();
   const serverKey = serverGroupBy(groupBy);
@@ -233,16 +234,31 @@ export function useListPages(
     if (firstGroupedPage !== undefined && isGroupedPage(firstGroupedPage)) {
       merged = mergeGroupedPage(
         merged,
-        groupedSections(firstGroupedPage, labels, { showEmptyGroups, dimension: groupBy })
+        groupedSections(firstGroupedPage, labels, { showEmptyGroups, dimension: groupBy, order: groupOrder }),
+        groupOrder
       );
     }
     for (let index = 0; index < sectionEntries.length; index++) {
       const page = sectionQueries[index]?.data;
       if (page === undefined || !isGroupedPage(page)) continue;
-      merged = mergeGroupedPage(merged, groupedSections(page, labels, { showEmptyGroups, dimension: groupBy }));
+      merged = mergeGroupedPage(
+        merged,
+        groupedSections(page, labels, { showEmptyGroups, dimension: groupBy, order: groupOrder }),
+        groupOrder
+      );
     }
     return merged;
-  }, [grouped, flatPages, firstGroupedPage, sectionEntries, sectionQueries, labels, showEmptyGroups, groupBy]);
+  }, [
+    grouped,
+    flatPages,
+    firstGroupedPage,
+    sectionEntries,
+    sectionQueries,
+    labels,
+    showEmptyGroups,
+    groupBy,
+    groupOrder,
+  ]);
 
   const flatLast = flatPages[flatPages.length - 1];
   const flatHasMore = flatLast?.next_page_results ?? false;

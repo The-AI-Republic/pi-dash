@@ -154,14 +154,22 @@ import {
   updateConnectionModel,
 } from "./contracts/assistant.js";
 import {
+  FREE_QUOTA_PATH,
+  FREE_QUOTA_STALE_TIME_MS,
   appIconUrl,
   appOAuthBeginUrl,
   getAppAuthStatus,
   getAppManifest,
+  getFreeQuota,
   getOpenhubStatus,
   installApp,
+  isFreeModel,
+  isFreePlan,
+  isModelSelectableForPlan,
   listInstalledApps,
   listMarketplaceApps,
+  normalizeFreeQuota,
+  normalizePlanId,
   setAppActivation,
   startAppOAuth,
   submitAppApiKey,
@@ -341,10 +349,21 @@ import {
   deleteDevMachine,
   getCreateRunnerStatus,
   listDevMachines,
+  listReplaceCandidates,
+  mergeDevMachineInto,
   revokeDevMachine,
   rotateDevMachine,
 } from "./contracts/dev-machines.js";
-import { deleteRunner, getRunner, listRunners, revokeRunner } from "./contracts/runners.js";
+import {
+  deleteRunner,
+  getRunner,
+  getRunnerReconfigureStatus,
+  listRunners,
+  pauseRunner,
+  reconfigureRunner,
+  resumeRunner,
+  revokeRunner,
+} from "./contracts/runners.js";
 import { cancelRun, commentAndRun, createRun, getRun, listRuns, reTickIssue, runAi } from "./contracts/runs.js";
 import { decideApproval, listApprovals } from "./contracts/approvals.js";
 import { bulkSubscribeIssues, bulkUpdateIssues } from "./contracts/issue-bulk.js";
@@ -684,6 +703,9 @@ describe("auth contracts", () => {
     const startCall = transport.calls.find((call) => call.url.endsWith("/api/v1/auth/device/start/"));
     expect(startCall?.init.method).toBe("POST");
     expect(startCall?.init.body).toBe("{}");
+    await startDeviceGrant(client, { scope: "engine" });
+    const engineCall = transport.calls.filter((call) => call.url.endsWith("/api/v1/auth/device/start/")).at(-1);
+    expect(engineCall?.init.body).toBe(JSON.stringify({ scope: "engine" }));
   });
 
   it("rejects a device grant missing its polling facts", async () => {
@@ -4228,6 +4250,12 @@ describe("dev-machines contracts", () => {
     expect(params.searchParams.get("workspace")).toBe(UUID2);
   });
 
+  it("preserves legacy machine provisioning for engine availability", async () => {
+    const legacy = { ...machine, provisioning: "desktop_bundled", engine_sign_in_state: "never" };
+    const client = createClient({ baseUrl: "https://api.test", transport: json([legacy]) });
+    expect(await listDevMachines(client, UUID2)).toEqual([legacy]);
+  });
+
   it("rotates with the workspace in the body", async () => {
     const transport = mutating(machine);
     const client = createClient({ baseUrl: "https://api.test", transport });
@@ -4307,6 +4335,44 @@ describe("dev-machines contracts", () => {
     const client = createClient({ baseUrl: "https://api.test", transport: json([{ ...machine, id: 7 }]) });
     const error = await listDevMachines(client, UUID2).catch((e: unknown) => e);
     expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("merges a machine into the computer that replaced it", async () => {
+    const result = {
+      source_dev_machine_id: UUID,
+      target_dev_machine_id: UUID2,
+      merged_at: "2026-10-17T04:00:00.000Z",
+      moved_runner_ids: [UUID],
+      collisions: [{ revoked_runner_id: UUID, survivor_runner_id: UUID2 }],
+    };
+    const transport = mutating(result);
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(mergeDevMachineInto(client, UUID, UUID2)).resolves.toEqual(result);
+    const mergeCall = transport.calls.find((call) => call.url.endsWith(`/dev-machines/${UUID}/merge-into/`));
+    expect(mergeCall?.init.method).toBe("POST");
+    expect(mergeCall?.init.body).toBe(JSON.stringify({ target: UUID2 }));
+  });
+
+  it("lists replace candidates for a machine", async () => {
+    const candidates = {
+      candidates: [
+        {
+          id: UUID,
+          label: "rich-laptop",
+          host_label: "rich-laptop",
+          display_name: null,
+          last_seen_at: "2026-10-30T12:00:00.000Z",
+          created_at: "2026-10-01T04:00:00.000Z",
+          provisioning: "manual",
+          live_runner_count: 1,
+        },
+      ],
+    };
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify(candidates) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(listReplaceCandidates(client, UUID2)).resolves.toEqual(candidates);
+    const call = transport.calls[0];
+    expect(call?.url.endsWith(`/dev-machines/${UUID2}/replace-candidates/`)).toBe(true);
   });
 });
 
@@ -4394,6 +4460,52 @@ describe("runners contracts", () => {
     expect(revokeCall?.init.body).toBeUndefined();
   });
 
+  it("pauses without a body and parses the in-flight runs", async () => {
+    const RUN = "22222222-2222-4222-8222-222222222222";
+    const transport = mutating({
+      ...runner,
+      paused_at: "2026-10-17T04:00:00.000Z",
+      in_flight_runs: [{ id: RUN, status: "running" }],
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const paused = await pauseRunner(client, UUID);
+    expect(paused.paused_at).toBe("2026-10-17T04:00:00.000Z");
+    expect(paused.in_flight_runs).toEqual([{ id: RUN, status: "running" }]);
+    const call = transport.calls.find((c) => c.url.endsWith(`/api/runners/${UUID}/pause/`));
+    expect(call?.init.method).toBe("POST");
+    expect(call?.init.body).toBeUndefined();
+  });
+
+  it("resumes without a body and parses the cleared row", async () => {
+    const transport = mutating({ ...runner, paused_at: null });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const resumed = await resumeRunner(client, UUID);
+    expect(resumed.paused_at).toBeNull();
+    const call = transport.calls.find((c) => c.url.endsWith(`/api/runners/${UUID}/resume/`));
+    expect(call?.init.method).toBe("POST");
+  });
+
+  it("sends only the changed settings to reconfigure", async () => {
+    const REQ = "33333333-3333-4333-8333-333333333333";
+    const transport = mutating({ request_id: REQ }, 202);
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const accepted = await reconfigureRunner(client, UUID, { model: "gpt-5.5", reasoning_effort: "high" });
+    expect(accepted.request_id).toBe(REQ);
+    const call = transport.calls.find((c) => c.url.endsWith(`/api/runners/${UUID}/reconfigure/`));
+    expect(call?.init.method).toBe("POST");
+    expect(JSON.parse(String(call?.init.body))).toEqual({ model: "gpt-5.5", reasoning_effort: "high" });
+  });
+
+  it("reads the reconfigure status", async () => {
+    const REQ = "33333333-3333-4333-8333-333333333333";
+    const transport = mutating({ request_id: REQ, status: "error", error: "runner is busy" });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const status = await getRunnerReconfigureStatus(client, UUID, REQ);
+    expect(status.status).toBe("error");
+    expect(status.error).toBe("runner is busy");
+    expect(transport.calls.some((c) => c.url.endsWith(`/api/runners/${UUID}/reconfigure/${REQ}/`))).toBe(true);
+  });
+
   it("deletes with the purge default", async () => {
     const transport = mutating(null, 204);
     const client = createClient({ baseUrl: "https://api.test", transport });
@@ -4469,6 +4581,15 @@ describe("runs contracts", () => {
       },
     ],
   };
+
+  it("parses a run without queue_position (dropped by PDASHOSS01-156)", async () => {
+    const { queue_position: _dropped, ...current } = run;
+    const page = { results: [current], count: 1, total_count: 1, total_pages: 1, page: 1, per_page: 30 };
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify(page) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await listRuns(client);
+    expect(parsed.results[0]?.id).toBe(UUID);
+  });
 
   it("lists runs with no query", async () => {
     const page = { results: [run], count: 1, total_count: 1, total_pages: 1, page: 1, per_page: 30 };
@@ -6690,6 +6811,89 @@ describe("openhub contracts", () => {
   });
 });
 
+describe("free-quota contracts", () => {
+  it("reads the nested hub shape through the proxy path", async () => {
+    const transport = recordingTransport(() =>
+      fakeResponse({
+        body: JSON.stringify({
+          llm: { freeTokensUsed: 123, freeTokensLimit: 2_000_000, freeModels: ["openhub_free_llm"] },
+          resetsAt: "2026-11-10T00:00:00Z",
+          plan: "free",
+        }),
+      })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const quota = await getFreeQuota(client);
+    expect(quota).toEqual({
+      freeModels: ["openhub_free_llm"],
+      plan: "free",
+      freeTokensUsed: 123,
+      freeTokensLimit: 2_000_000,
+      resetsAt: "2026-11-10T00:00:00Z",
+    });
+    expect(transport.calls[0]?.url).toBe(`https://api.test${FREE_QUOTA_PATH}`);
+    expect(FREE_QUOTA_STALE_TIME_MS).toBeGreaterThanOrEqual(30_000);
+    expect(FREE_QUOTA_STALE_TIME_MS).toBeLessThanOrEqual(60_000);
+  });
+
+  it("reads the flat snake-case dialect with no nested envelope", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({
+        free_tokens_used: 7,
+        free_tokens_limit: 5_000_000,
+        free_models: ["other/model"],
+        resets_at: "2026-11-10T00:00:00Z",
+        plan: "Member",
+      }),
+    });
+    const quota = await getFreeQuota(client);
+    expect(quota.freeModels).toEqual(["other/model"]);
+    expect(quota.plan).toBe("member");
+    expect(quota.freeTokensUsed).toBe(7);
+    expect(quota.freeTokensLimit).toBe(5_000_000);
+    expect(quota.resetsAt).toBe("2026-11-10T00:00:00Z");
+  });
+
+  it("normalizes plan ids case-insensitively and keeps unknown plans usable", () => {
+    expect(normalizePlanId("Free")).toBe("free");
+    expect(normalizePlanId(" PAY_AS_YOU_GO ")).toBe("payg");
+    expect(normalizePlanId("Pay-as-you-go")).toBe("payg");
+    expect(normalizePlanId("Member")).toBe("member");
+    expect(normalizePlanId(0)).toBe("free");
+    expect(normalizePlanId(5)).toBe("payg");
+    expect(normalizePlanId(6)).toBe("member");
+    expect(normalizePlanId(null)).toBe("");
+    expect(isFreePlan("free")).toBe(true);
+    expect(isFreePlan("Free")).toBe(true);
+    expect(isFreePlan("payg")).toBe(false);
+    expect(isFreePlan("member")).toBe(false);
+    expect(isFreePlan("enterprise")).toBe(false);
+    expect(isFreePlan(null)).toBe(false);
+  });
+
+  it("classifies models from the server list, never a hardcoded one", () => {
+    const freeModels = ["openhub_free_llm"];
+    expect(isFreeModel("openhub_free_llm", freeModels)).toBe(true);
+    expect(isFreeModel("  openhub_free_llm  ", freeModels)).toBe(true);
+    expect(isFreeModel("moonshotai/kimi-k3", freeModels)).toBe(false);
+    expect(isModelSelectableForPlan("free", "openhub_free_llm", freeModels)).toBe(true);
+    expect(isModelSelectableForPlan("free", "moonshotai/kimi-k3", freeModels)).toBe(false);
+    expect(isModelSelectableForPlan("payg", "moonshotai/kimi-k3", freeModels)).toBe(true);
+    expect(isModelSelectableForPlan("member", "moonshotai/kimi-k3", freeModels)).toBe(true);
+    expect(isModelSelectableForPlan(null, "moonshotai/kimi-k3", freeModels)).toBe(true);
+  });
+
+  it("rejects an unreadable quota answer instead of guessing", async () => {
+    for (const body of [{ plan: "free" }, { freeModels: [] }, null, "nope", { llm: {} }]) {
+      expect(normalizeFreeQuota(body)).toBeNull();
+    }
+    const client = createClient({ baseUrl: "https://api.test", transport: json({ plan: "free" }) });
+    const error = await getFreeQuota(client).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+});
+
 describe("assistant connection contracts", () => {
   const row = {
     id: UUID,
@@ -6750,6 +6954,25 @@ describe("assistant connection contracts", () => {
     expect(list.connections).toEqual([]);
     expect(list.openhub_available).toBeUndefined();
     expect(resolveOpenhubAvailable(list)).toBe(true);
+  });
+
+  it("parses a cloud list that omits the model-labels map", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({
+        connections: [],
+        codex_model_options: ["gpt-5.6-sol"],
+        has_codex_credential: false,
+        openai_login_available: true,
+        openhub_model_options: [],
+        openhub_available: false,
+        openhub_wallet_url: "https://hub.airepublic.com/account/credits",
+      }),
+    });
+    const list = await listAssistantConnections(client);
+    expect(list.connections).toEqual([]);
+    expect(list.codex_model_labels).toBeUndefined();
+    expect(list.codex_model_options).toEqual(["gpt-5.6-sol"]);
   });
 
   it("keeps an explicit hosted-lane flag as-is", () => {
@@ -7049,6 +7272,7 @@ describe("scheduler contracts", () => {
     prompt: "Contract base prompt.",
     color: "#3b82f6",
     source: "builtin",
+    is_builtin: false,
     is_enabled: true,
     active_binding_count: 1,
     created_at: "2026-10-01T00:00:00Z",

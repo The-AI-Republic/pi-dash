@@ -928,6 +928,8 @@ export interface ParityDriver {
   uploadAttachment(file: { name: string; mime: string; bytes: Buffer }): Promise<void>;
   /** Click the widget action-row button (e.g. `Manually Run AI`); ends settled. */
   clickWidgetAction(name: string): Promise<void>;
+  /** True when the named widget action-row control is present and disabled (NEWPIDASH-141). */
+  widgetActionDisabled(name: string): Promise<boolean>;
   /** Post a comment through the composer; ends with the comment rendered. */
   postComment(text: string): Promise<void>;
   /** Type into the composer without submitting; the draft stays editable. */
@@ -1223,6 +1225,10 @@ export interface ParityDriver {
   codeReviewInputValue(): Promise<string>;
   /** Detach the review row showing `title`; resolves once its row is gone. */
   codeReviewDetach(title: string): Promise<void>;
+  /** Whether the attach form input is present (archived items hide it). */
+  codeReviewAttachVisible(): Promise<boolean>;
+  /** Whether any per-row detach control is present (archived items hide it). */
+  codeReviewDetachVisible(): Promise<boolean>;
   /** Whether the worklog create control renders in the activity header. */
   worklogCreateVisible(): Promise<boolean>;
   // --- Shared property dropdowns (NEWFRONT-122, ISS-207–220). Observed on
@@ -3059,7 +3065,10 @@ export interface ParityDriver {
   schedulerProjectRows(): Promise<SchedulerProjectRow[]>;
   /** Whether the install list shows its empty-state row. */
   schedulerProjectEmptyVisible(): Promise<boolean>;
-  /** Whether the list header offers the New Scheduler control. */
+  /**
+   * Whether the page offers the New Scheduler control anywhere: the section
+   * tab row on the project schedulers pages, the header on the settings variant.
+   */
   schedulerProjectNewVisible(): Promise<boolean>;
   /** Open an install's detail by clicking its list row; waits for the detail. */
   schedulerProjectRowOpen(handle: string): Promise<void>;
@@ -3292,6 +3301,13 @@ export interface ParityDriver {
   schedulerOpenProjectSection(workspaceSlug: string, projectId: string): Promise<void>;
   /** Section tabs with their highlight state, in display order. */
   schedulerSectionTabs(): Promise<{ label: string; active: boolean }[]>;
+  /**
+   * Where New Scheduler sits in the project schedulers section (PDASHOSS01-348):
+   * whether the List | Calendar tab row carries it, and how many visible
+   * New Scheduler buttons the page shows in total (1 means no second copy
+   * in the tab body).
+   */
+  schedulerSectionNewPlacement(): Promise<{ inTabRow: boolean; total: number }>;
   /** Follow one section tab; waits for its content to settle. */
   schedulerSectionOpenTab(tab: "List" | "Calendar"): Promise<void>;
   /** Open the project-settings schedulers variant. */
@@ -3682,13 +3698,20 @@ export interface ParityDriver {
   assistantIsScrolledToBottom(): Promise<boolean>;
   /** Follow a tool-activity deep link. */
   assistantClickToolLink(activityIndex: number, linkIndex: number): Promise<void>;
-  /** Sidebar threads top to bottom with hrefs and the active mark. */
+  /**
+   * History threads top to bottom with hrefs and the active mark: the
+   * oracle's persistent rail reads directly, while the new app opens the
+   * Chat History dialog first (NEWPIDASH-337).
+   */
   assistantSidebarThreads(): Promise<AssistantSidebarThread[]>;
-  /** Whether the sidebar shows the no-conversations placeholder. */
+  /**
+   * Whether the history surface shows the no-conversations placeholder:
+   * the oracle rail or the new app's Chat History dialog.
+   */
   assistantSidebarEmptyVisible(): Promise<boolean>;
-  /** Click the sidebar's New chat entry. */
+  /** Click the New chat entry (the oracle rail or the new app page header). */
   assistantClickNewChat(): Promise<void>;
-  /** Click a sidebar thread by index. */
+  /** Click a history thread by index (oracle rail row or new app dialog row). */
   assistantClickSidebarThread(index: number): Promise<void>;
   /** Whether the dashboard assistant card renders. */
   assistantCardVisible(): Promise<boolean>;
@@ -3781,13 +3804,24 @@ export interface ParityDriver {
     transcribe: number;
     remove: number;
   }>;
-  /** Visible texts of buttons inside the assistant sidebar (negative proofs). */
+  /**
+   * Visible texts of buttons inside the assistant history surface
+   * (negative proofs): the oracle rail or the new app's Chat History
+   * dialog, which is links-only.
+   */
   assistantSidebarButtons(): Promise<string[]>;
   /** Rename/archive/delete-ish controls in the assistant layout (negative proofs). */
   assistantThreadManagementControls(): Promise<string[]>;
-  /** Header text of the assistant sidebar. */
+  /**
+   * Label of the assistant history surface: the oracle rail's brand header
+   * or the new app's Chat History button (NEWPIDASH-337).
+   */
   assistantSidebarHeader(): Promise<string | null>;
-  /** Row element kinds of the sidebar New-chat entry + thread rows. */
+  /**
+   * Row element kinds of the New-chat entry + thread rows: the oracle rail
+   * reads its own links, while the new app reads the header link plus the
+   * Chat History dialog rows (NEWPIDASH-337).
+   */
   assistantSidebarRowKinds(): Promise<{ newChat: string | null; rows: string[] }>;
   /** Links and buttons inside skipped-server notices (negative proofs). */
   assistantSkippedNoticeActions(): Promise<{ kind: string; text: string; href: string | null }[]>;
@@ -4023,6 +4057,8 @@ export interface ParityDriver {
   archivesCyclesGroupHeadings(): Promise<string[]>;
   /** Open the side peek for the named row; waits for the peek to show it. */
   archivesCyclesOpenPeek(name: string): Promise<void>;
+  /** Click the archived row's name/body to open its peek; waits for the peek panel. */
+  archivesCyclesClickRow(name: string): Promise<void>;
   /** Open the tab at a shared peek link without settling (fresh loads never settle). */
   archivesCyclesOpenPeekLink(workspaceSlug: string, projectId: string, cycleId: string): Promise<void>;
   /** Peek panel heading, or null when no peek is open. */
@@ -4643,6 +4679,16 @@ export interface ParityDriver {
   viewsDetailAddClick(): Promise<void>;
   /** Whether the detail body text currently contains `name`. */
   viewsDetailShowsIssue(name: string): Promise<boolean>;
+  /** Open the detail header's view overflow menu; resolves once items show. */
+  viewsDetailMenuOpen(): Promise<void>;
+  /** Visible entries of the open detail header menu in display order. */
+  viewsDetailMenuItems(): Promise<string[]>;
+  /** Pick an entry of the open detail header menu; resolves once it closes. */
+  viewsDetailMenuPick(item: string): Promise<void>;
+  /** Copy the detail view's link; resolves with the clipboard text. */
+  viewsDetailCopyLink(): Promise<string>;
+  /** Follow the detail menu's new-tab entry; resolves with the popup URL. */
+  viewsDetailMenuOpenNewTabHref(): Promise<string>;
   /** Custom workspace view names in list order. */
   wsViewsListNames(): Promise<string[]>;
   /** Static default view names in list order. */
@@ -4782,6 +4828,12 @@ export interface ParityDriver {
   archivesPeekVisible(): Promise<boolean>;
   /** Close the open peek panel. */
   archivesPeekClose(): Promise<void>;
+  /** Names of the open peek `…` menu entries on the archived issues tab. */
+  archivesPeekQuickActionNames(): Promise<string[]>;
+  /** Click the archived peek menu entry whose label contains `entry`. */
+  archivesPeekChoose(entry: string): Promise<void>;
+  /** Click the archived peek header copy control (both editions copy the archived address). */
+  archivesPeekCopyLink(): Promise<void>;
   /** Archived-detail banner text, or null when no banner shows. */
   archivesDetailBannerText(): Promise<string | null>;
   /** Whether a loading skeleton shows in the archives content. */
@@ -6299,6 +6351,8 @@ export interface ParityDriver {
   cyclesHeroTapProgressGroup(group: string): Promise<void>;
   /** Click the indexed breakdown entry; waits for the detail navigation. */
   cyclesHeroClickBreakdownEntry(index: number): Promise<void>;
+  /** Click the breakdown entry carrying the text without waiting for navigation. */
+  cyclesHeroTapBreakdownEntryByText(entryText: string): Promise<void>;
   /** Open the workspace-level active-cycles page; waits until it settles. */
   cyclesHeroOpenWorkspaceActives(workspaceSlug: string): Promise<void>;
   /** Upsell banner heading, benefit-card count, and upgrade-link facts. */
@@ -9689,6 +9743,30 @@ export interface CloudAssistantConnectionFacts {
   actions: string[];
 }
 
+/** One hosted-lane picker option (NEWPIDASH-150). */
+export interface CloudAssistantModelOptionFacts {
+  /** Picker option value (the model slug). */
+  value: string;
+  /** Option text as rendered (label plus credit badge, when present). */
+  text: string;
+  /** Whether the option is disabled (paid model on the free plan). */
+  disabled: boolean;
+}
+
+/** Hosted-lane picker budget facts (NEWPIDASH-150). */
+export interface CloudAssistantModelBudgetFacts {
+  /** Card title the facts were read from. */
+  title: string;
+  /** Current picker value (the active model). */
+  value: string;
+  /** Picker options in display order, with badges and disabled states. */
+  options: CloudAssistantModelOptionFacts[];
+  /** Needs-credit notice text, or null when the stored model is affordable. */
+  notice: string | null;
+  /** Top-up link target, or null when no wallet address is wired. */
+  topUpHref: string | null;
+}
+
 /** AI Assistant add-form structure (NEWFRONT-440, CLOUD-033). */
 export interface CloudAssistantAddFormFacts {
   /** Provider option values in display order. */
@@ -10785,12 +10863,12 @@ export interface WsSettingsMemberRowFacts {
   settingsGeneralTimezoneText(): Promise<string>;
   /** Creation-timestamp line as rendered. */
   settingsGeneralCreatedText(): Promise<string>;
-  /** Selected execution-target value. */
-  settingsGeneralExecutorValue(): Promise<string>;
-  /** Whether an execution-target option is disabled. */
-  settingsGeneralExecutorOptionDisabled(value: string): Promise<boolean>;
-  /** Pick an execution target. */
-  settingsGeneralSetExecutor(value: string): Promise<void>;
+  /**
+   * Whether the tab still renders a default execution-target control.
+   * Runner is the only executor (built-in engine design §6), so both apps
+   * answer false once the form has rendered.
+   */
+  settingsGeneralExecutorPresent(): Promise<boolean>;
   /** Whether the automated-run master switch is on. */
   settingsGeneralTickingOn(): Promise<boolean>;
   /** Flip the automated-run master switch. */
@@ -11503,6 +11581,12 @@ export interface DeskSigninUpdateLink {
   ganttDependencyHandleCount(): Promise<number>;
   /** Drag the handle of `fromId` onto the lane of `toId`; resolves once the pointer releases. */
   ganttLinkBlocks(fromId: string, toId: string): Promise<void>;
+  // --- Cloud assistant model budget (NEWPIDASH-150). Appended; existing
+  // --- methods above are untouched per the shared driver contract. The
+  // --- scenario runs on web_new only: the OSS oracle provably lacks the
+  // --- free-quota picker, so the old-app driver throws on these.
+  /** Hosted-lane picker budget facts for the titled connection. */
+  cloudAssistantModelBudget(title: string): Promise<CloudAssistantModelBudgetFacts>;
 }
 
 /** General-tab field keys for the NEWFRONT-426 settingsProfile readers. */

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Pi Dash"
+  short_description: "Create, search, update, and comment on Pi Dash issues"
+  default_prompt: "Use $pidash to create a Pi Dash issue for this workspace."
+
+policy:
+  allow_implicit_invocation: true

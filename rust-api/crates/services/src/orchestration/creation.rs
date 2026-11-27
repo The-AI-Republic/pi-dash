@@ -36,11 +36,11 @@
 //!   verbatim) plus the three `cloud_agent.creation` calls
 //!   (`execution_fields`, `lock_cloud_creation_capacity`,
 //!   `dispatch_after_commit` — D-11 L6, merged jobs-side). Services code
-//!   must not call `jobs::dispatch` (the `jobs → services` edge is
+//!   must not call `jobs::run_dispatch` (the `jobs → services` edge is
 //!   load-bearing; calling back would cycle), so the jobs-side
 //!   `LiveCreationStore` (`pidash-jobs`, `orchestration/creation_jobs.rs`)
 //!   implements this trait by delegating those three methods to the
-//!   merged `jobs::dispatch` functions.
+//!   merged `jobs::run_dispatch` functions.
 //! * [`FinalizeAgentRunSeam`] — the one-method seam for the
 //!   `finalize_agent_run(run.id, FAILED, …)` call sites in this module.
 //!   Finalization is runner D-15 (downstream of D-12 — no edge, it would
@@ -94,16 +94,17 @@ use uuid::Uuid;
 
 use crate::runner_sessions::guards::HEARTBEAT_GRACE_SECS;
 
-use pidash_db::dispatch::status::{AgentRunStatus, AgentRunTrigger};
+use pidash_db::agent_runs::status::{AgentRunStatus, AgentRunTrigger};
 use pidash_db::orchestration::is_terminal_status;
 use pidash_db::orchestration::runs::ACTIVE_STATUSES;
 use pidash_db::runner_runs::agent_run;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 pub use pidash_types::orchestration::PROJECT_MOVE_HANDOFF_CONFIG_KEY;
 use pidash_types::orchestration::{ContinuationOutcome, PhaseConfig, StateRef, TransitionOutcome};
 
-use crate::dispatch::UserFlags;
-use crate::prompting::{composer, context, recipes};
+use crate::domain::project_settings::AgentStages;
+use crate::prompting::{composer, context, recipes, work_types};
+use crate::run_creation::UserFlags;
 
 // ---------------------------------------------------------------------------
 // Reasons, triggers, literals
@@ -172,7 +173,7 @@ pub const OWNER_UNASSIGNED: Option<Uuid> = None;
 /// The issue projection every unit reads (`service.py` passes full issue
 /// rows; this projects the consumed columns). `$1` is the issue id.
 pub const ISSUE_SELECT_SQL: &str = "SELECT id, workspace_id, project_id, state_id, parent_id, \
-    created_by_id, assigned_pod_id, agent_executor, git_work_branch, workpad, name, \
+    created_by_id, assigned_pod_id, assigned_runner_id, agent_executor, work_type, git_work_branch, workpad, name, \
     description_stripped, priority, sequence_id, target_date FROM issues WHERE id = $1";
 
 /// The project projection (`service.py` reads `issue.project` for the
@@ -181,12 +182,29 @@ pub const ISSUE_SELECT_SQL: &str = "SELECT id, workspace_id, project_id, state_i
 pub const PROJECT_SELECT_SQL: &str = "SELECT id, workspace_id, identifier, name, description, \
     repo_url, base_branch, default_agent_executor, project_lead_id, default_assignee_id, \
     agent_default_max_ticks, agent_default_interval_seconds, \
-    agent_review_default_interval_seconds, agent_test_default_interval_seconds \
-    FROM projects WHERE id = $1";
+    agent_review_default_interval_seconds, agent_test_default_interval_seconds, \
+    default_work_type FROM projects WHERE id = $1";
 
 /// The state projection (registry reads `name` + `group` only). `$1` is
 /// the state id.
 pub const STATE_SELECT_SQL: &str = "SELECT id, name, \"group\" FROM states WHERE id = $1";
+
+/// SeaORM form of [`STATE_SELECT_SQL`]: a state's `(name, group)` through
+/// the plain manager (no soft-delete guard).
+pub async fn state_name_group(
+    db: &impl sea_orm::ConnectionTrait,
+    state_id: Uuid,
+) -> Result<Option<(String, String)>, sea_orm::DbErr> {
+    use pidash_db::entity::states;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    states::Entity::find()
+        .select_only()
+        .columns([states::Column::Name, states::Column::Group])
+        .filter(states::Column::Id.eq(state_id))
+        .into_tuple()
+        .one(db)
+        .await
+}
 
 /// The consumed `agent_run` projection for creation reads. Django
 /// selects the full 39-column row; the L2 `READ_COLUMNS` projection
@@ -199,6 +217,7 @@ pub const RUN_VIEW_COLUMNS: &[&str] = &[
     "pod_id",
     "runner_id",
     "pinned_runner_id",
+    "pin_kind",
     "parent_run_id",
     "work_item_id",
     "status",
@@ -208,6 +227,7 @@ pub const RUN_VIEW_COLUMNS: &[&str] = &[
     "run_config",
     "tool_plan",
     "error_details",
+    "failure_reason",
     "prompt",
     "prompt_manifest",
     "ended_at",
@@ -248,18 +268,25 @@ pub fn run_select_sql() -> String {
 }
 
 /// The parent's runner for pinning (`service.py:538-540`:
-/// `parent.runner`). `$1` is the runner id.
-pub const RUNNER_SELECT_SQL: &str =
-    "SELECT id, pod_id, status, last_heartbeat_at, paused_at FROM runner WHERE id = $1";
+/// `parent.runner`). `$1` is the runner id. The last three fields are
+/// the #2903 engine facts: provisioning, pod_dispatch, and engine_paused
+/// (`dm.engine_paused_by_owner = TRUE OR dm.engine_auto_pause_reason <> ''`)
+/// — the locality-pin gate (`locality_pin_allowed`).
+pub const RUNNER_SELECT_SQL: &str = "SELECT runner.id, runner.pod_id, runner.status, runner.last_heartbeat_at, runner.paused_at, runner.provisioning, runner.pod_dispatch, (dm.engine_paused_by_owner = TRUE OR dm.engine_auto_pause_reason <> '') AS engine_paused, runner.name FROM runner LEFT JOIN dev_machine dm ON dm.id = runner.dev_machine_id WHERE runner.id = $1";
 
-/// The decoded [`RUNNER_SELECT_SQL`] row
-/// (`id, pod_id, status, last_heartbeat_at, paused_at`).
+/// The decoded [`RUNNER_SELECT_SQL`] row (`id, pod_id, status,
+/// last_heartbeat_at, paused_at, provisioning, pod_dispatch,
+/// engine_paused`).
 pub type RunnerSelectRow = (
     Uuid,
     Uuid,
     String,
     Option<DateTime<Utc>>,
     Option<DateTime<Utc>>,
+    String,
+    String,
+    bool,
+    String,
 );
 
 /// The assigned pod (`service.py:329`): the default `Pod.objects`
@@ -306,19 +333,28 @@ pub fn run_lock_sql() -> String {
 /// this lists every non-generated column in model order (the three
 /// `JSONKeyBigIntegerField` generated columns and the
 /// `JSONKeyTextField` `refusal_category` excluded). Fixed values
-/// are literals (`queued`, `0`, `""`, `{}`, `[]`, NULLs); `$1..$14`
-/// carry the caller-supplied fields in [`NewAgentRun`] order.
+/// are literals (`queued`, `0`, `""`, `{}`, `[]`, NULLs); `$1..$14` and
+/// `$15` (`pin_kind`, appended at the end) carry the caller-supplied
+/// fields in [`NewAgentRun`] order, and `$16` the `work_type` stamp
+/// (added after `phase_kind` in model order).
 pub const RUN_INSERT_SQL: &str =
     "INSERT INTO agent_run (id, workspace_id, owner_id, created_by_id, \
     pod_id, runner_id, pinned_runner_id, work_item_id, scheduler_binding_id, parent_run_id, \
     status, executor_kind, dispatch_attempts, cancel_requested_at, cancel_reason, \
     tool_plan, terminal_hooks_applied_at, terminal_capacity_released_at, prompt, trigger, \
-    prompt_manifest, phase_kind, run_config, required_capabilities, thread_id, agent_metadata, \
-    lease_expires_at, done_payload, error_details, llm_model, usage, created_at, \
-    assigned_at, started_at, ended_at) \
+    prompt_manifest, phase_kind, work_type, run_config, required_capabilities, thread_id, agent_metadata, \
+    lease_expires_at, done_payload, error_details, failure_reason, llm_model, usage, created_at, \
+    assigned_at, started_at, ended_at, pin_kind) \
     VALUES ($1, $2, NULL, $3, $4, NULL, $5, $6, NULL, $7, 'queued', $8, 0, NULL, '', $10, \
-    NULL, NULL, '', $11, NULL, $12, $13, '[]', '', '{}', NULL, NULL, $9, '', '{}', $14, \
-    NULL, NULL, NULL)";
+    NULL, NULL, '', $11, NULL, $12, $16, $13, '[]', '', '{}', NULL, NULL, $9, '', '', '{}', $14, \
+    NULL, NULL, NULL, $15)";
+
+/// `parent.thread_id = ""; parent.save(update_fields=["thread_id"])`
+/// (`service.py:494-495,896-897`, `pod_once`, §23.3): a one-shot pod run
+/// starts a fresh agent session. Unsaved when the parent row has no
+/// thread. `$1` is the run id.
+pub const THREAD_CLEAR_SQL: &str =
+    "UPDATE agent_run SET thread_id = '' WHERE id = $1 AND thread_id <> ''";
 
 /// `run.save(update_fields=["prompt", "prompt_manifest"])`
 /// (`service.py:522,639,824`). `$1`/`$2` are prompt/manifest, `$3` the
@@ -352,15 +388,27 @@ pub fn finalize_lock_sql() -> String {
 }
 
 /// The finalize write (`agent_run_finalization.py:52-71`):
+/// `finalize_agent_run`'s `failure_reason` safety net for these FAILED
+/// writes (PDASHOSS01-183): `classify(error, error_code=error_code)` —
+/// no runner reason on the orchestration paths.
+pub fn finalize_failure_reason(error_code: &str, error: &str) -> String {
+    pidash_types::runner_runs::classify_failure(error, "", error_code)
+        .value()
+        .to_owned()
+}
+
 /// status/ended_at/terminal NULLs + the updates
 /// (`error_code`, `error`), folded into `error_details` under the
-/// finalize lock (PDASHOSS01-187). `$1` ended_at, `$2` the
-/// [`finalize_error_details_patch`], `$3` the run id.
+/// finalize lock (PDASHOSS01-187), plus the `failure_reason` safety
+/// net (PDASHOSS01-183, see [`finalize_failure_reason`]). `$1`
+/// ended_at, `$2` the [`finalize_error_details_patch`], `$3`
+/// failure_reason, `$4` the run id.
 pub fn finalize_update_sql() -> String {
     format!(
         "UPDATE agent_run SET status = 'failed', ended_at = $1, \
          terminal_hooks_applied_at = NULL, \
-         terminal_capacity_released_at = NULL, error_details = {} WHERE id = $3",
+         terminal_capacity_released_at = NULL, error_details = {}, \
+         failure_reason = $3 WHERE id = $4",
         crate::runner_runs::finalization::error_details_merge_sql("$2")
     )
 }
@@ -391,22 +439,6 @@ pub fn initial_error_details(error_code: &str) -> Value {
         &[("error_code", Value::String(error_code.to_owned()))],
     )
 }
-
-/// The cloud terminal-event guard (`agent_run_finalization.py:72-75`).
-/// `$1` is the run id.
-pub const TERMINAL_EVENT_EXISTS_SQL: &str =
-    "SELECT EXISTS(SELECT 1 FROM agent_run_event WHERE agent_run_id = $1 AND kind = 'terminal')";
-
-/// The next event seq (`agent_run_finalization.py:76-78`):
-/// `max(seq) + 1`, `1` when no rows. `$1` is the run id.
-pub const TERMINAL_EVENT_SEQ_SQL: &str =
-    "SELECT COALESCE(MAX(seq), 0) + 1 FROM agent_run_event WHERE agent_run_id = $1";
-
-/// The cloud terminal event (`agent_run_finalization.py:79-84`): `$1`
-/// run id, `$2` seq, `$3` the `{"status", "error_code"}` payload, `$4`
-/// created_at.
-pub const TERMINAL_EVENT_INSERT_SQL: &str = "INSERT INTO agent_run_event \
-    (agent_run_id, seq, kind, payload, created_at) VALUES ($1, $2, 'terminal', $3, $4)";
 
 /// Creator flags for the executor seam (`user_has_llm_config` reads
 /// `is_active` / `is_bot`, `agent_execution.py:76`). `$1` is the user id.
@@ -533,6 +565,56 @@ pub const BUNDLE_OVERRIDES_SQL: &str = "SELECT section_key, body, version, user_
 /// workspace id.
 pub const BUNDLE_WORKSPACE_SQL: &str = "SELECT slug, name FROM workspaces WHERE id = $1";
 
+/// The issue's last runs for `stage_history` (lean workflow design §8.3),
+/// newest first; the context renders them oldest first. `$1` is the issue
+/// id, `$2` the new run id (excluded).
+pub const BUNDLE_STAGE_HISTORY_SQL: &str = "SELECT phase_kind, \
+    done_payload->>'status' AS result, done_payload->>'note' AS note, created_at \
+    FROM agent_run WHERE work_item_id = $1 AND id != $2 ORDER BY created_at DESC LIMIT 10";
+
+/// The lean-workflow prompt inputs the creation bundle carries on top of
+/// the Django-era ones: the project's stage setting and the run history. Loaded by [`load_stage_inputs`].
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct StageInputs {
+    pub agent_stages: AgentStages,
+    pub stage_history: Vec<context::StageHistoryRow>,
+}
+
+/// Run the stage-inputs queries on any connection — every render-bundle
+/// store (jobs creation + handoff, the services move twin, the api preview)
+/// shares this one loader. The settings come from the one stage-switch
+/// read ([`crate::domain::project_settings::stage_switches_for_project`]);
+/// a bag that fails to parse reads as the default (Auto), like
+/// `ProjectClockPolicy::with_stages`.
+pub async fn load_stage_inputs(
+    conn: &impl sea_orm::ConnectionTrait,
+    project_id: Uuid,
+    issue_id: Uuid,
+    run_id: Uuid,
+) -> Result<StageInputs, sea_orm::DbErr> {
+    use sea_orm::DbBackend;
+    let backend = DbBackend::Postgres;
+    let agent_stages =
+        crate::domain::project_settings::agent_stages_for_project(conn, project_id).await?;
+    let rows = conn
+        .query_all(backend.build(&orm::bundle_stage_history_select(issue_id, run_id)))
+        .await?;
+    let mut stage_history = Vec::with_capacity(rows.len());
+    for row in rows {
+        let created_at: DateTime<chrono::FixedOffset> = row.try_get("", "created_at")?;
+        stage_history.push(context::StageHistoryRow {
+            phase_kind: row.try_get("", "phase_kind")?,
+            result: row.try_get("", "result")?,
+            note: row.try_get("", "note")?,
+            date: created_at.format("%Y-%m-%d").to_string(),
+        });
+    }
+    Ok(StageInputs {
+        agent_stages,
+        stage_history,
+    })
+}
+
 /// The INSERT as executed: [`RUN_INSERT_SQL`] plus `RETURNING` the
 /// [`RUN_VIEW_COLUMNS`] projection, like `objects.create`.
 pub fn run_insert_returning_sql() -> String {
@@ -541,6 +623,818 @@ pub fn run_insert_returning_sql() -> String {
         RUN_INSERT_SQL,
         RUN_VIEW_COLUMNS.join(", ")
     )
+}
+
+// ---------------------------------------------------------------------------
+// SeaORM builders (the domain creation seam runs these; the SQL texts above
+// stay for the jobs-side stores until they migrate)
+// ---------------------------------------------------------------------------
+
+/// SeaORM statements mirroring the creation-flow and render-bundle SQL
+/// above, one per constant (named after it), decoded by name.
+pub mod orm {
+    use chrono::{DateTime, Utc};
+    use pidash_db::entity::{
+        agent_run as run, dev_machine, git_code_review_links as reviews, git_repositories as repos,
+        git_repository_bindings as bindings, issue_agent_ticker as ticker, issue_assignees,
+        issue_comments as comments, issue_labels, issue_relations as relations, issues, labels,
+        pod, projects, prompt_section_override as overrides, runner, states, users, workspaces,
+    };
+    use sea_orm::sea_query::extension::postgres::{PgBinOper, PgFunc};
+    use sea_orm::sea_query::{
+        Alias, Condition, Expr, Func, InsertStatement, JoinType, LockType, Order, Query,
+        SelectStatement, SimpleExpr, UpdateStatement,
+    };
+    use serde_json::Value;
+    use uuid::Uuid;
+
+    use super::{AgentRunStatus, NewAgentRun, ACTIVE_STATUSES, RUN_VIEW_COLUMNS};
+
+    fn alias(name: &str) -> Alias {
+        Alias::new(name)
+    }
+
+    /// `<table>.<column>` for an aliased table.
+    fn at(table: &str, column: impl sea_orm::sea_query::IntoIden + 'static) -> Expr {
+        Expr::col((alias(table), column))
+    }
+
+    /// The [`RUN_VIEW_COLUMNS`] projection as entity columns.
+    pub const RUN_VIEW: [run::Column; 20] = [
+        run::Column::Id,
+        run::Column::WorkspaceId,
+        run::Column::CreatedById,
+        run::Column::PodId,
+        run::Column::RunnerId,
+        run::Column::PinnedRunnerId,
+        run::Column::PinKind,
+        run::Column::ParentRunId,
+        run::Column::WorkItemId,
+        run::Column::Status,
+        run::Column::Trigger,
+        run::Column::ExecutorKind,
+        run::Column::PhaseKind,
+        run::Column::RunConfig,
+        run::Column::ToolPlan,
+        run::Column::ErrorDetails,
+        run::Column::FailureReason,
+        run::Column::Prompt,
+        run::Column::PromptManifest,
+        run::Column::EndedAt,
+    ];
+
+    const _: () = assert!(RUN_VIEW.len() == RUN_VIEW_COLUMNS.len());
+
+    fn run_view() -> SelectStatement {
+        Query::select()
+            .columns(RUN_VIEW.map(|column| (run::Entity, column)))
+            .from(run::Entity)
+            .to_owned()
+    }
+
+    fn run_col(column: run::Column) -> Expr {
+        Expr::col((run::Entity, column))
+    }
+
+    /// [`super::ISSUE_SELECT_SQL`]: the consumed issue projection, no
+    /// scope.
+    pub fn issue_select(issue_id: Uuid) -> SelectStatement {
+        use issues::Column as C;
+        Query::select()
+            .columns([
+                C::Id,
+                C::WorkspaceId,
+                C::ProjectId,
+                C::StateId,
+                C::ParentId,
+                C::CreatedById,
+                C::AssignedPodId,
+                C::AssignedRunnerId,
+                C::AgentExecutor,
+                C::WorkType,
+                C::GitWorkBranch,
+                C::Workpad,
+                C::Name,
+                C::DescriptionStripped,
+                C::Priority,
+                C::SequenceId,
+                C::TargetDate,
+            ])
+            .from(issues::Entity)
+            .and_where(Expr::col(C::Id).eq(issue_id))
+            .to_owned()
+    }
+
+    /// [`super::PROJECT_SELECT_SQL`]: the consumed project projection.
+    pub fn project_select(project_id: Uuid) -> SelectStatement {
+        use projects::Column as C;
+        Query::select()
+            .columns([
+                C::Id,
+                C::WorkspaceId,
+                C::Identifier,
+                C::Name,
+                C::Description,
+                C::RepoUrl,
+                C::BaseBranch,
+                C::DefaultAgentExecutor,
+                C::ProjectLeadId,
+                C::DefaultAssigneeId,
+                C::AgentDefaultMaxTicks,
+                C::AgentDefaultIntervalSeconds,
+                C::AgentReviewDefaultIntervalSeconds,
+                C::AgentTestDefaultIntervalSeconds,
+                C::DefaultWorkType,
+            ])
+            .from(projects::Entity)
+            .and_where(Expr::col(C::Id).eq(project_id))
+            .to_owned()
+    }
+
+    /// [`super::STATE_SELECT_SQL`]: `id`, `name`, `group`.
+    pub fn state_select(state_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([
+                states::Column::Id,
+                states::Column::Name,
+                states::Column::Group,
+            ])
+            .from(states::Entity)
+            .and_where(Expr::col(states::Column::Id).eq(state_id))
+            .to_owned()
+    }
+
+    /// [`super::latest_prior_run_sql`]: the newest run on the item.
+    pub fn latest_prior_run_select(issue_id: Uuid) -> SelectStatement {
+        run_view()
+            .and_where(run_col(run::Column::WorkItemId).eq(issue_id))
+            .order_by(run::Column::CreatedAt, Order::Desc)
+            .limit(1)
+            .to_owned()
+    }
+
+    /// [`super::active_run_sql`]: the newest active run on the item.
+    pub fn active_run_select(issue_id: Uuid) -> SelectStatement {
+        run_view()
+            .and_where(run_col(run::Column::WorkItemId).eq(issue_id))
+            .and_where(
+                run_col(run::Column::Status)
+                    .is_in(ACTIVE_STATUSES.iter().map(|status| status.value())),
+            )
+            .order_by(run::Column::CreatedAt, Order::Desc)
+            .limit(1)
+            .to_owned()
+    }
+
+    /// [`super::run_select_sql`]: one run, unlocked.
+    pub fn run_select(run_id: Uuid) -> SelectStatement {
+        run_view()
+            .and_where(run_col(run::Column::Id).eq(run_id))
+            .to_owned()
+    }
+
+    /// [`super::run_lock_sql`]: one run, `FOR UPDATE OF agent_run`.
+    pub fn run_lock_select(run_id: Uuid) -> SelectStatement {
+        run_select(run_id)
+            .lock_with_tables(LockType::Update, [run::Entity])
+            .to_owned()
+    }
+
+    /// [`super::finalize_lock_sql`]: the still non-terminal run,
+    /// `FOR UPDATE OF agent_run`.
+    pub fn finalize_lock_select(run_id: Uuid) -> SelectStatement {
+        run_view()
+            .and_where(run_col(run::Column::Id).eq(run_id))
+            .and_where(
+                run_col(run::Column::Status).is_not_in(
+                    [
+                        AgentRunStatus::Completed,
+                        AgentRunStatus::Failed,
+                        AgentRunStatus::Cancelled,
+                        AgentRunStatus::Blocked,
+                        AgentRunStatus::Refused,
+                    ]
+                    .iter()
+                    .map(|status| status.value()),
+                ),
+            )
+            .lock_with_tables(LockType::Update, [run::Entity])
+            .to_owned()
+    }
+
+    /// [`super::finalize_update_sql`]: `failed`, the end stamp, the
+    /// terminal NULLs, and the `error_details` merge: drop the patch's
+    /// keys from the stored object (a non-object counts as `{}`), then
+    /// add its non-null values (`jsonb_strip_nulls`, applied here to the
+    /// flat patch). The `failure_reason` safety net (PDASHOSS01-183)
+    /// classifies from the patch's code/message.
+    pub fn finalize_update(
+        run_id: Uuid,
+        ended_at: DateTime<Utc>,
+        patch: &Value,
+    ) -> UpdateStatement {
+        let failure_reason = {
+            let get = |key: &str| {
+                patch
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+            };
+            super::finalize_failure_reason(get("code"), get("message"))
+        };
+        let stored = Expr::case(
+            Expr::expr(Func::cust(alias("jsonb_typeof")).arg(run_col(run::Column::ErrorDetails)))
+                .eq("object"),
+            run_col(run::Column::ErrorDetails),
+        )
+        .finally(Expr::val(serde_json::json!({})));
+        let mut merged: SimpleExpr = stored.into();
+        let mut kept = serde_json::Map::new();
+        if let Some(object) = patch.as_object() {
+            for (key, value) in object {
+                merged = Expr::expr(merged).sub(Expr::val(key.as_str()));
+                if !value.is_null() {
+                    kept.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        let merged =
+            Expr::expr(merged).binary(PgBinOper::Concatenate, Expr::val(Value::Object(kept)));
+        Query::update()
+            .table(run::Entity)
+            .value(run::Column::Status, "failed")
+            .value(run::Column::EndedAt, ended_at)
+            .value(run::Column::TerminalHooksAppliedAt, None::<DateTime<Utc>>)
+            .value(
+                run::Column::TerminalCapacityReleasedAt,
+                None::<DateTime<Utc>>,
+            )
+            .value(run::Column::ErrorDetails, merged)
+            .value(run::Column::FailureReason, failure_reason)
+            .and_where(run_col(run::Column::Id).eq(run_id))
+            .to_owned()
+    }
+
+    /// [`super::RUNNER_SELECT_SQL`]: the parent's runner, with the
+    /// #2903 engine columns (`provisioning`, `pod_dispatch`,
+    /// `dev_machine_id`) so seam twins can populate `RunnerView`.
+    pub fn runner_select(runner_id: Uuid) -> SelectStatement {
+        use runner::Column as C;
+        Query::select()
+            .columns([
+                C::Id,
+                C::PodId,
+                C::Status,
+                C::Name,
+                C::LastHeartbeatAt,
+                C::PausedAt,
+                C::Provisioning,
+                C::PodDispatch,
+                C::DevMachineId,
+            ])
+            .from(runner::Entity)
+            .and_where(Expr::col(C::Id).eq(runner_id))
+            .to_owned()
+    }
+
+    /// The engine-pause columns of one dev machine (`#2903` pause state).
+    pub fn dev_machine_select(machine_id: Uuid) -> SelectStatement {
+        use pidash_db::entity::dev_machine::Column as C;
+        Query::select()
+            .columns([C::EnginePausedByOwner, C::EngineAutoPauseReason])
+            .from(dev_machine::Entity)
+            .and_where(Expr::col(C::Id).eq(machine_id))
+            .to_owned()
+    }
+
+    /// [`super::ASSIGNED_POD_SELECT_SQL`]: a live pod by id.
+    pub fn assigned_pod_select(pod_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([pod::Column::Id, pod::Column::ProjectId])
+            .from(pod::Entity)
+            .and_where(Expr::col(pod::Column::Id).eq(pod_id))
+            .and_where(Expr::col(pod::Column::DeletedAt).is_null())
+            .to_owned()
+    }
+
+    /// [`super::DEFAULT_POD_SELECT_SQL`]: the first live default pod by id.
+    pub fn default_pod_select(project_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([pod::Column::Id, pod::Column::ProjectId])
+            .from(pod::Entity)
+            .and_where(Expr::col(pod::Column::ProjectId).eq(project_id))
+            .and_where(Expr::col(pod::Column::IsDefault).into())
+            .and_where(Expr::col(pod::Column::DeletedAt).is_null())
+            .order_by(pod::Column::Id, Order::Asc)
+            .limit(1)
+            .to_owned()
+    }
+
+    /// [`super::TICKER_RESUME_SELECT_SQL`]: the ticker's resume pointer.
+    pub fn ticker_resume_select(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column(ticker::Column::ResumeParentRunId)
+            .from(ticker::Entity)
+            .and_where(Expr::col(ticker::Column::IssueId).eq(issue_id))
+            .to_owned()
+    }
+
+    /// [`super::WORK_ITEM_ID_SELECT_SQL`]: a run's work item.
+    pub fn work_item_id_select(run_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column(run::Column::WorkItemId)
+            .from(run::Entity)
+            .and_where(run_col(run::Column::Id).eq(run_id))
+            .to_owned()
+    }
+
+    /// [`super::ISSUE_LOCK_SQL`]: `Issue.all_objects` row lock, no scope.
+    pub fn issue_lock_select(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column((issues::Entity, issues::Column::Id))
+            .from(issues::Entity)
+            .and_where(Expr::col((issues::Entity, issues::Column::Id)).eq(issue_id))
+            .lock_with_tables(LockType::Update, [issues::Entity])
+            .to_owned()
+    }
+
+    /// [`super::USER_FLAGS_SELECT_SQL`]: `is_active`, `is_bot`.
+    pub fn user_flags_select(user_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([users::Column::IsActive, users::Column::IsBot])
+            .from(users::Entity)
+            .and_where(Expr::col(users::Column::Id).eq(user_id))
+            .to_owned()
+    }
+
+    /// [`super::run_insert_returning_sql`]: every non-generated column
+    /// (the fixed literals as values), `RETURNING` the run view.
+    pub fn run_insert(row: &NewAgentRun) -> InsertStatement {
+        use run::Column as C;
+        let none_uuid = || Expr::value(None::<Uuid>);
+        let none_at = || Expr::value(None::<DateTime<Utc>>);
+        let none_json = || Expr::value(None::<Value>);
+        Query::insert()
+            .into_table(run::Entity)
+            .columns([
+                C::Id,
+                C::WorkspaceId,
+                C::OwnerId,
+                C::CreatedById,
+                C::PodId,
+                C::RunnerId,
+                C::PinnedRunnerId,
+                C::WorkItemId,
+                C::SchedulerBindingId,
+                C::ParentRunId,
+                C::Status,
+                C::ExecutorKind,
+                C::DispatchAttempts,
+                C::CancelRequestedAt,
+                C::CancelReason,
+                C::ToolPlan,
+                C::TerminalHooksAppliedAt,
+                C::TerminalCapacityReleasedAt,
+                C::Prompt,
+                C::Trigger,
+                C::PromptManifest,
+                C::PhaseKind,
+                C::WorkType,
+                C::RunConfig,
+                C::RequiredCapabilities,
+                C::ThreadId,
+                C::AgentMetadata,
+                C::LeaseExpiresAt,
+                C::DonePayload,
+                C::ErrorDetails,
+                C::FailureReason,
+                C::LlmModel,
+                C::Usage,
+                C::CreatedAt,
+                C::AssignedAt,
+                C::StartedAt,
+                C::EndedAt,
+                C::PinKind,
+            ])
+            .values_panic([
+                Expr::value(row.id),
+                Expr::value(row.workspace_id),
+                none_uuid(),
+                Expr::value(row.created_by_id),
+                Expr::value(row.pod_id),
+                none_uuid(),
+                Expr::value(row.pinned_runner_id),
+                Expr::value(row.work_item_id),
+                none_uuid(),
+                Expr::value(row.parent_run_id),
+                Expr::value(super::STATUS_QUEUED),
+                Expr::value(row.executor_kind.value()),
+                Expr::value(0_i32),
+                none_at(),
+                Expr::value(""),
+                Expr::value(row.tool_plan.clone()),
+                none_at(),
+                none_at(),
+                Expr::value(""),
+                Expr::value(row.trigger.as_str()),
+                none_json(),
+                Expr::value(row.phase_kind.as_str()),
+                Expr::value(row.work_type.as_str()),
+                Expr::value(row.run_config.clone()),
+                Expr::value(serde_json::json!([])),
+                Expr::value(""),
+                Expr::value(serde_json::json!({})),
+                none_at(),
+                none_json(),
+                Expr::value(row.error_details.clone()),
+                Expr::value(""),
+                Expr::value(""),
+                Expr::value(serde_json::json!({})),
+                Expr::value(row.now),
+                none_at(),
+                none_at(),
+                none_at(),
+                Expr::value(row.pin_kind.as_str()),
+            ])
+            .returning(Query::returning().columns(RUN_VIEW))
+            .to_owned()
+    }
+
+    /// [`super::THREAD_CLEAR_SQL`]: `parent.thread_id = ""` (`pod_once`,
+    /// §23.3), a no-op when the parent row has no thread.
+    pub fn thread_clear(run_id: Uuid) -> UpdateStatement {
+        Query::update()
+            .table(run::Entity)
+            .value(run::Column::ThreadId, "")
+            .and_where(run_col(run::Column::Id).eq(run_id))
+            .and_where(run_col(run::Column::ThreadId).ne(""))
+            .to_owned()
+    }
+
+    /// [`super::PROMPT_UPDATE_SQL`].
+    pub fn prompt_update(run_id: Uuid, prompt: &str, manifest: &Value) -> UpdateStatement {
+        Query::update()
+            .table(run::Entity)
+            .value(run::Column::Prompt, prompt)
+            .value(run::Column::PromptManifest, manifest.clone())
+            .and_where(run_col(run::Column::Id).eq(run_id))
+            .to_owned()
+    }
+
+    /// [`super::RUN_CONFIG_UPDATE_SQL`].
+    pub fn run_config_update(run_id: Uuid, config: &Value) -> UpdateStatement {
+        Query::update()
+            .table(run::Entity)
+            .value(run::Column::RunConfig, config.clone())
+            .and_where(run_col(run::Column::Id).eq(run_id))
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_LABELS_SQL`]: label names through the link table
+    /// (link rows unfiltered), live labels, newest label first.
+    pub fn bundle_labels_select(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column((alias("l"), labels::Column::Name))
+            .from_as(issue_labels::Entity, alias("il"))
+            .join_as(
+                JoinType::InnerJoin,
+                labels::Entity,
+                alias("l"),
+                at("l", labels::Column::Id).equals((alias("il"), issue_labels::Column::LabelId)),
+            )
+            .and_where(at("il", issue_labels::Column::IssueId).eq(issue_id))
+            .and_where(at("l", labels::Column::DeletedAt).is_null())
+            .order_by((alias("l"), labels::Column::CreatedAt), Order::Desc)
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_ASSIGNEES_SQL`]: `display_name`, `email`, link rows
+    /// unfiltered, newest user first.
+    pub fn bundle_assignees_select(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([
+                (alias("u"), users::Column::DisplayName),
+                (alias("u"), users::Column::Email),
+            ])
+            .from_as(issue_assignees::Entity, alias("ia"))
+            .join_as(
+                JoinType::InnerJoin,
+                users::Entity,
+                alias("u"),
+                at("u", users::Column::Id)
+                    .equals((alias("ia"), issue_assignees::Column::AssigneeId)),
+            )
+            .and_where(at("ia", issue_assignees::Column::IssueId).eq(issue_id))
+            .order_by((alias("u"), users::Column::CreatedAt), Order::Desc)
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_PROJECT_STATES_SQL`]: live non-triage states by
+    /// `sequence`.
+    pub fn bundle_project_states_select(project_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([
+                states::Column::Name,
+                states::Column::Group,
+                states::Column::Description,
+            ])
+            .from(states::Entity)
+            .and_where(Expr::col(states::Column::ProjectId).eq(project_id))
+            .and_where(Expr::col(states::Column::DeletedAt).is_null())
+            .and_where(Expr::col(states::Column::Group).ne("triage"))
+            .order_by(states::Column::Sequence, Order::Asc)
+            .to_owned()
+    }
+
+    /// `issues i JOIN projects p LEFT JOIN states s`, projecting
+    /// `id`, `name`, `sequence_id`, `identifier`, `state_name`.
+    fn issue_refs() -> SelectStatement {
+        Query::select()
+            .columns([
+                (alias("i"), issues::Column::Id),
+                (alias("i"), issues::Column::Name),
+                (alias("i"), issues::Column::SequenceId),
+            ])
+            .column((alias("p"), projects::Column::Identifier))
+            .expr_as(at("s", states::Column::Name), alias("state_name"))
+            .from_as(issues::Entity, alias("i"))
+            .join_as(
+                JoinType::InnerJoin,
+                projects::Entity,
+                alias("p"),
+                at("p", projects::Column::Id).equals((alias("i"), issues::Column::ProjectId)),
+            )
+            .join_as(
+                JoinType::LeftJoin,
+                states::Entity,
+                alias("s"),
+                at("s", states::Column::Id).equals((alias("i"), issues::Column::StateId)),
+            )
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_CHILDREN_SQL`]: live, non-triage (a NULL group
+    /// drops, as `s.group != 'triage'` does), unarchived, non-draft
+    /// children, oldest first.
+    pub fn bundle_children_select(issue_id: Uuid) -> SelectStatement {
+        issue_refs()
+            .and_where(at("i", issues::Column::ParentId).eq(issue_id))
+            .and_where(at("i", issues::Column::DeletedAt).is_null())
+            .and_where(at("s", states::Column::Group).ne("triage"))
+            .and_where(at("i", issues::Column::ArchivedAt).is_null())
+            .and_where(at("p", projects::Column::ArchivedAt).is_null())
+            .and_where(at("i", issues::Column::IsDraft).not())
+            .order_by((alias("i"), issues::Column::CreatedAt), Order::Asc)
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_RELATIONS_SQL`]: live relation rows either way,
+    /// newest first.
+    pub fn bundle_relations_select(issue_id: Uuid) -> SelectStatement {
+        use relations::Column as C;
+        Query::select()
+            .columns([C::IssueId, C::RelatedIssueId, C::RelationType])
+            .from(relations::Entity)
+            .cond_where(
+                Condition::any()
+                    .add(Expr::col(C::IssueId).eq(issue_id))
+                    .add(Expr::col(C::RelatedIssueId).eq(issue_id)),
+            )
+            .and_where(Expr::col(C::DeletedAt).is_null())
+            .order_by(C::CreatedAt, Order::Desc)
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_RELATION_TARGETS_SQL`]: the live targets, plus
+    /// `state_group`.
+    pub fn bundle_relation_targets_select(ids: &[Uuid]) -> SelectStatement {
+        issue_refs()
+            .expr_as(at("s", states::Column::Group), alias("state_group"))
+            .and_where(at("i", issues::Column::Id).is_in(ids.iter().copied()))
+            .and_where(at("i", issues::Column::DeletedAt).is_null())
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_COMMENTS_SQL`]: live, unfolded comments with the
+    /// actor (LEFT join), chronological.
+    pub fn bundle_comments_select(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([
+                (alias("c"), comments::Column::CommentStripped),
+                (alias("c"), comments::Column::SpeakerType),
+                (alias("c"), comments::Column::SpeakerLabel),
+                (alias("c"), comments::Column::SpeakerAgentRunId),
+                (alias("c"), comments::Column::CreatedAt),
+            ])
+            .columns([
+                (alias("u"), users::Column::DisplayName),
+                (alias("u"), users::Column::Email),
+                (alias("u"), users::Column::Username),
+                (alias("u"), users::Column::IsBot),
+            ])
+            .from_as(comments::Entity, alias("c"))
+            .join_as(
+                JoinType::LeftJoin,
+                users::Entity,
+                alias("u"),
+                at("u", users::Column::Id).equals((alias("c"), comments::Column::ActorId)),
+            )
+            .and_where(at("c", comments::Column::IssueId).eq(issue_id))
+            .and_where(at("c", comments::Column::DeletedAt).is_null())
+            // `labels @> ARRAY['fold']` is `'fold' = ANY(labels)`.
+            .and_where(
+                Expr::val("fold")
+                    .eq(PgFunc::any(at("c", comments::Column::Labels)))
+                    .not(),
+            )
+            .order_by((alias("c"), comments::Column::CreatedAt), Order::Asc)
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_CODE_REVIEWS_SQL`]: live review links, newest first.
+    pub fn bundle_code_reviews_select(issue_id: Uuid) -> SelectStatement {
+        use reviews::Column as C;
+        Query::select()
+            .columns([
+                C::Url,
+                C::Title,
+                C::State,
+                C::Merged,
+                C::Draft,
+                C::Provider,
+                C::ExternalIid,
+            ])
+            .from(reviews::Entity)
+            .and_where(Expr::col(C::IssueId).eq(issue_id))
+            .and_where(Expr::col(C::DeletedAt).is_null())
+            .order_by(C::CreatedAt, Order::Desc)
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_REMOTE_SQL`]: the oldest live binding's live repo.
+    pub fn bundle_remote_select(project_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([
+                (alias("r"), repos::Column::Provider),
+                (alias("r"), repos::Column::HostUrl),
+                (alias("r"), repos::Column::FullName),
+            ])
+            .from_as(bindings::Entity, alias("b"))
+            .join_as(
+                JoinType::InnerJoin,
+                repos::Entity,
+                alias("r"),
+                at("r", repos::Column::Id).equals((alias("b"), bindings::Column::RepositoryId)),
+            )
+            .and_where(at("b", bindings::Column::ProjectId).eq(project_id))
+            .and_where(at("b", bindings::Column::DeletedAt).is_null())
+            .and_where(at("r", repos::Column::DeletedAt).is_null())
+            .order_by((alias("b"), bindings::Column::CreatedAt), Order::Asc)
+            .limit(1)
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_ANCESTOR_HOP_SQL`]: one plain FK hop.
+    pub fn bundle_ancestor_hop_select(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([
+                issues::Column::Name,
+                issues::Column::ProjectId,
+                issues::Column::ParentId,
+            ])
+            .from(issues::Entity)
+            .and_where(Expr::col(issues::Column::Id).eq(issue_id))
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_PROJECT_IDENTIFIER_SQL`].
+    pub fn bundle_project_identifier_select(project_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column(projects::Column::Identifier)
+            .from(projects::Entity)
+            .and_where(Expr::col(projects::Column::Id).eq(project_id))
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_SEQUENCE_SQL`].
+    pub fn bundle_sequence_select(issue_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column(issues::Column::SequenceId)
+            .from(issues::Entity)
+            .and_where(Expr::col(issues::Column::Id).eq(issue_id))
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_PARENT_COLS_SQL`]: the parent's columns plus its
+    /// live comment count (output name `comments_count`).
+    pub fn bundle_parent_cols_select(parent_id: Uuid) -> SelectStatement {
+        let count = Query::select()
+            .expr(Expr::col((alias("c"), comments::Column::Id)).count())
+            .from_as(comments::Entity, alias("c"))
+            .and_where(at("c", comments::Column::IssueId).equals((alias("i"), issues::Column::Id)))
+            .and_where(at("c", comments::Column::DeletedAt).is_null())
+            .to_owned();
+        Query::select()
+            .columns([
+                (alias("i"), issues::Column::Name),
+                (alias("i"), issues::Column::StateId),
+                (alias("i"), issues::Column::GitWorkBranch),
+            ])
+            .expr_as(
+                SimpleExpr::SubQuery(None, Box::new(count.into_sub_query_statement())),
+                alias("comments_count"),
+            )
+            .from_as(issues::Entity, alias("i"))
+            .and_where(at("i", issues::Column::Id).eq(parent_id))
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_PARENT_DESCRIPTION_SQL`].
+    pub fn bundle_parent_description_select(parent_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column(issues::Column::DescriptionStripped)
+            .from(issues::Entity)
+            .and_where(Expr::col(issues::Column::Id).eq(parent_id))
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_PRIOR_RUN_COUNT_SQL`]: output name `n`.
+    pub fn bundle_prior_run_count_select(issue_id: Uuid, run_id: Uuid) -> SelectStatement {
+        Query::select()
+            .expr_as(Expr::col(run::Column::Id).count(), alias("n"))
+            .from(run::Entity)
+            .and_where(run_col(run::Column::WorkItemId).eq(issue_id))
+            .and_where(run_col(run::Column::Id).ne(run_id))
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_TICKER_SQL`].
+    pub fn bundle_ticker_select(issue_id: Uuid) -> SelectStatement {
+        use ticker::Column as C;
+        Query::select()
+            .columns([C::Used, C::Waited, C::Granted, C::Enabled])
+            .from(ticker::Entity)
+            .and_where(Expr::col(C::IssueId).eq(issue_id))
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_DONE_PAYLOAD_SQL`].
+    pub fn bundle_done_payload_select(run_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column(run::Column::DonePayload)
+            .from(run::Entity)
+            .and_where(run_col(run::Column::Id).eq(run_id))
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_OVERRIDES_SQL`]: active workspace rows plus the
+    /// user's (`user_id = NULL` never matches).
+    pub fn bundle_overrides_select(workspace_id: Uuid, user_id: Option<Uuid>) -> SelectStatement {
+        use overrides::Column as C;
+        Query::select()
+            .columns([C::SectionKey, C::Body, C::Version, C::UserId])
+            .from(overrides::Entity)
+            .and_where(Expr::col(C::IsActive).into())
+            .and_where(Expr::col(C::WorkspaceId).eq(workspace_id))
+            .cond_where(
+                Condition::any()
+                    .add(Expr::col(C::UserId).is_null())
+                    .add(Expr::col(C::UserId).eq(user_id)),
+            )
+            .to_owned()
+    }
+
+    /// `"agent_run"."done_payload" ->> '<key>'`: one `done_payload` key as
+    /// text (NULL when absent or JSON null).
+    pub fn done_payload_text(key: &str) -> sea_orm::sea_query::SimpleExpr {
+        use sea_orm::sea_query::extension::postgres::PgExpr;
+        Expr::col((run::Entity, run::Column::DonePayload)).cast_json_field(key)
+    }
+
+    /// [`super::BUNDLE_STAGE_HISTORY_SQL`]: output names `phase_kind`,
+    /// `result`, `note`, `created_at`.
+    pub fn bundle_stage_history_select(issue_id: Uuid, run_id: Uuid) -> SelectStatement {
+        Query::select()
+            .column((run::Entity, run::Column::PhaseKind))
+            .expr_as(done_payload_text("status"), alias("result"))
+            .expr_as(done_payload_text("note"), alias("note"))
+            .column((run::Entity, run::Column::CreatedAt))
+            .from(run::Entity)
+            .and_where(run_col(run::Column::WorkItemId).eq(issue_id))
+            .and_where(run_col(run::Column::Id).ne(run_id))
+            .order_by((run::Entity, run::Column::CreatedAt), Order::Desc)
+            .limit(10)
+            .to_owned()
+    }
+
+    /// [`super::BUNDLE_WORKSPACE_SQL`].
+    pub fn bundle_workspace_select(workspace_id: Uuid) -> SelectStatement {
+        Query::select()
+            .columns([workspaces::Column::Slug, workspaces::Column::Name])
+            .from(workspaces::Entity)
+            .and_where(Expr::col(workspaces::Column::Id).eq(workspace_id))
+            .to_owned()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -559,6 +1453,9 @@ pub struct IssueView {
     pub parent_id: Option<Uuid>,
     pub created_by_id: Option<Uuid>,
     pub assigned_pod_id: Option<Uuid>,
+    /// `Issue.assigned_runner_id`: the dedicated runner (design §9.1),
+    /// `None` for a pod-shared issue.
+    pub assigned_runner_id: Option<Uuid>,
     /// `Issue.agent_executor`: NULL/blank inherits the project default.
     pub agent_executor: Option<String>,
     pub git_work_branch: Option<String>,
@@ -568,6 +1465,9 @@ pub struct IssueView {
     pub priority: Option<String>,
     pub sequence_id: i32,
     pub target_date: Option<chrono::NaiveDate>,
+    /// `Issue.work_type`: the per-issue work-type override (NULL inherits
+    /// the project default, PDASHOSS01-234).
+    pub work_type: Option<String>,
 }
 
 /// The consumed `projects` projection ([`PROJECT_SELECT_SQL`]).
@@ -588,6 +1488,8 @@ pub struct ProjectView {
     pub interval_impl: i64,
     pub interval_review: i64,
     pub interval_test: i64,
+    /// `Project.default_work_type` (PDASHOSS01-234).
+    pub default_work_type: String,
 }
 
 /// The consumed `states` projection ([`STATE_SELECT_SQL`]).
@@ -612,6 +1514,10 @@ pub struct RunView {
     pub pod_id: Uuid,
     pub runner_id: Option<Uuid>,
     pub pinned_runner_id: Option<Uuid>,
+    /// `AgentRun.pin_kind` ("dedicated", "locality", or "" pre-dedicated
+    /// rows): the pin source (§9.1), stamped at insert and echoed on
+    /// the read projection.
+    pub pin_kind: String,
     pub parent_run_id: Option<Uuid>,
     pub work_item_id: Option<Uuid>,
     pub status: AgentRunStatus,
@@ -682,6 +1588,7 @@ pub fn map_run_view(row: &PgRow) -> Result<RunView, sqlx::Error> {
         pod_id: row.try_get("pod_id")?,
         runner_id: row.try_get("runner_id")?,
         pinned_runner_id: row.try_get("pinned_runner_id")?,
+        pin_kind: row.try_get("pin_kind")?,
         parent_run_id: row.try_get("parent_run_id")?,
         work_item_id: row.try_get("work_item_id")?,
         status: map_status(status)?,
@@ -706,10 +1613,20 @@ pub struct RunnerView {
     pub id: Uuid,
     pub pod_id: Uuid,
     pub status: String,
+    /// `runner.name` (the H-13/release and dedicated-bounce comments
+    /// name the runner).
+    pub name: String,
     /// `70d684af`: the pin check needs the heartbeat freshness.
     pub last_heartbeat_at: Option<DateTime<Utc>>,
     /// `09738d222`: the pin check skips operator-paused runners.
     pub paused_at: Option<DateTime<Utc>>,
+    /// `runner.provisioning` — engine iff `desktop_bundled`.
+    pub provisioning: String,
+    /// `runner.pod_dispatch` (`pod_member` / `pinned_only`).
+    pub pod_dispatch: String,
+    /// The runner's dev machine's pause state (`false` when the runner
+    /// has no machine): owner pause or a non-empty auto-pause reason.
+    pub engine_paused: bool,
 }
 
 /// The consumed `pod` projection (live rows only, per `PodManager`).
@@ -751,9 +1668,83 @@ pub struct NewAgentRun {
     pub trigger: String,
     /// The handoff builder passes `""` (it stamps no kind).
     pub phase_kind: String,
+    /// The effective work type the run composes with (`_work_type_for_issue`,
+    /// PDASHOSS01-234): audit metadata stamped on every builder, including
+    /// the handoff.
+    pub work_type: String,
     pub run_config: Value,
     /// `created_at` (`auto_now_add`, supplied explicitly).
     pub now: DateTime<Utc>,
+    /// `pin_kind` ($15, design §9.1): "dedicated" when the issue pins
+    /// its dedicated runner, else "locality".
+    pub pin_kind: String,
+}
+
+/// One §11.2/§23.3 system comment (Django `IssueComment.objects.create`,
+/// `SpeakerType.SYSTEM`): the refusal comment on a refused human run
+/// and the waiting comment for an automatic run queued behind an
+/// unavailable dedicated runner (Django `_post_dedicated_*`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewSystemComment {
+    pub id: Uuid,
+    pub description_id: Uuid,
+    pub now: DateTime<Utc>,
+    pub project_id: Uuid,
+    pub workspace_id: Uuid,
+    pub issue_id: Uuid,
+    pub actor_id: Uuid,
+    pub comment_html: String,
+    pub comment_stripped: String,
+}
+
+/// One [`CreationSeam::dedicated_pin`] call (design §9.1/§9.2): the
+/// pin decision for a creation, with the H-11/H-10 refusal answered in
+/// the same probe (Django `dedicated_run_refusal` + `resolve_run_pin`
+/// read the same assignment).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DedicatedPinArgs<'a> {
+    pub issue_id: Uuid,
+    /// The lineage parent (`None` for a first run / fresh session).
+    pub parent: Option<&'a RunView>,
+    /// The run's pod. `None` when the caller only needs the refusal
+    /// (entry surfaces resolve the pod after the refusal, like Django).
+    pub pod_id: Option<Uuid>,
+    pub fresh_session: bool,
+    pub creator_id: Option<Uuid>,
+    /// The raw trigger string (`run_ai`, `state_transition`, …) — the
+    /// human distinguisher (§8) reads it, like the usage rule does.
+    pub trigger: &'a str,
+    pub pod_once: bool,
+    pub actor_id: Uuid,
+    /// The creation clock (`created_at` of the run this pin feeds):
+    /// the §9.4 waiting comment anchors its 12-hour expiry to it.
+    pub now: DateTime<Utc>,
+}
+
+/// What [`CreationSeam::dedicated_pin`] decided.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PinOutcome {
+    /// The H-11/H-10 refusal code (`assigned_runner_*`), `None` when
+    /// admitted. A refused human run creates nothing.
+    pub refusal: Option<&'static str>,
+    /// The §11.2 refusal comment to file (`None` on admission), and
+    /// the §9.4 waiting comment when the run is created behind an
+    /// unavailable dedicated runner.
+    pub refusal_comment: Option<NewSystemComment>,
+    pub waiting_comment: Option<NewSystemComment>,
+    /// The resolved pin for the INSERT (`runner_id` + `pin_kind`).
+    pub runner_id: Option<Uuid>,
+    pub pin_kind: String,
+}
+
+/// The `pin: "pod_once"` request bit, the serializers' shared parse
+/// (`(request.data.get("pin") or "").strip() == "pod_once"`).
+pub fn pod_once_requested(body: &Value) -> bool {
+    body.get("pin")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        == "pod_once"
 }
 
 // ---------------------------------------------------------------------------
@@ -769,7 +1760,7 @@ pub struct AdmissionError {
 }
 
 /// The executor-specific fields for one creation (`execution_fields`,
-/// `creation.py:11-89`): mirrors `jobs::dispatch::ExecutionFields`
+/// `creation.py:11-89`): mirrors `jobs::run_dispatch::ExecutionFields`
 /// without importing jobs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExecutionFields {
@@ -885,6 +1876,9 @@ pub struct RenderBundle {
     /// The ticker-stashed resume parent `done_payload` (may be absent).
     pub ticker_parent_payload: Option<Value>,
     pub override_rows: Vec<composer::OverrideRow>,
+    /// The project's stage setting, the latest hand-off and the run
+    /// history ([`load_stage_inputs`]).
+    pub stages: StageInputs,
 }
 
 /// The run half of a render call.
@@ -945,6 +1939,16 @@ pub enum ExecutionError {
 // Pure units
 // ---------------------------------------------------------------------------
 
+/// The effective work type a run created for `issue` *now* composes with
+/// (`_work_type_for_issue`): stamped on `AgentRun.work_type` alongside
+/// `phase_kind` as audit metadata (PDASHOSS01-234); nothing routes on it.
+pub fn work_type_for_issue(issue: &IssueView, project: &ProjectView) -> &'static str {
+    work_types::effective_work_type(
+        issue.work_type.as_deref(),
+        Some(project.default_work_type.as_str()),
+    )
+}
+
 /// The prompt kind a run created for the issue *now* will render
 /// (`_phase_kind_for_issue`, `service.py:157-167`): stamped on
 /// `AgentRun.phase_kind`.
@@ -980,6 +1984,88 @@ pub fn run_config_for_issue(
     Value::Object(config)
 }
 
+/// Hex SHA-256 of a workpad body (NEWPIDASH-320 §6.1). The endpoint's
+/// `updated_at` is the issue row's stamp — the agent's own state moves
+/// change it — so the stale-write guard hashes the body instead, which
+/// needs no migration.
+pub fn workpad_sha256(body: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(body.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The `run_config` key holding the workpad hash when the In Progress pass
+/// started, which the `finish` workpad gate compares against
+/// (`.ai_design/unified_workpad/design.md` §8.2). Only a continuation stamps
+/// it, copied from its In Progress parent, so a note written by an earlier
+/// run of the same pass counts. Server-only: the runner envelope never
+/// copies it, and `workpad_sha256` stays the snapshot's own hash (the
+/// update guard).
+pub const STAGE_START_WORKPAD_SHA256: &str = "stage_start_workpad_sha256";
+
+/// The [`STAGE_START_WORKPAD_SHA256`] a continuation of `parent` carries:
+/// the parent's own start hash, else its snapshot hash, when both runs are
+/// In Progress runs. `None` starts a new pass.
+pub fn continued_stage_start_sha(parent: &RunView, kind: &str) -> Option<String> {
+    if kind != recipes::KIND_CODING_TASK || parent.phase_kind != recipes::KIND_CODING_TASK {
+        return None;
+    }
+    parent
+        .run_config
+        .get(STAGE_START_WORKPAD_SHA256)
+        .or_else(|| parent.run_config.get("workpad_sha256"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// Whether a run of this phase kind carries the workpad snapshot: every
+/// issue run (In Progress, review and test) reads and writes the workpad
+/// (`.ai_design/unified_workpad/design.md` U1). Scheduler runs have no
+/// issue and no workpad.
+pub fn carries_workpad(kind: &str) -> bool {
+    matches!(
+        kind,
+        recipes::KIND_CODING_TASK | recipes::KIND_REVIEW | recipes::KIND_TEST
+    )
+}
+
+/// Stamp the runner-context fields onto a run config (NEWPIDASH-320 §6.3,
+/// §6.1): `issue_identifier` for issue runs, `project_identifier` for
+/// issue and scheduler runs, and the workpad snapshot (`workpad_body` +
+/// `workpad_sha256`) for issue runs ([`carries_workpad`]). `None` leaves the
+/// config untouched, so old runners and old servers keep working: the envelope
+/// copies only keys that are present.
+pub fn stamp_run_context(
+    config: Value,
+    issue_identifier: Option<&str>,
+    project_identifier: Option<&str>,
+    workpad_body: Option<&str>,
+) -> Value {
+    let mut map = config.as_object().cloned().unwrap_or_default();
+    if let Some(identifier) = issue_identifier {
+        map.insert(
+            "issue_identifier".to_owned(),
+            Value::String(identifier.to_owned()),
+        );
+    }
+    if let Some(identifier) = project_identifier {
+        map.insert(
+            "project_identifier".to_owned(),
+            Value::String(identifier.to_owned()),
+        );
+    }
+    if let Some(body) = workpad_body {
+        map.insert("workpad_body".to_owned(), Value::String(body.to_owned()));
+        map.insert(
+            "workpad_sha256".to_owned(),
+            Value::String(workpad_sha256(body)),
+        );
+    }
+    Value::Object(map)
+}
+
 /// The runner to pin a follow-up to (`_pinned_runner_for`,
 /// `service.py:528-547`, `70d684af`): the parent's runner when still
 /// eligible. `runner` is `None` when the parent has no runner;
@@ -991,13 +2077,27 @@ pub fn run_config_for_issue(
 /// every later run on the issue. A BUSY runner is alive and stays
 /// eligible; the pinned run waits for it. `09738d222`: an
 /// operator-paused runner is not eligible either — its pins would only
-/// wait out the pause.
+/// wait out the pause. #2903: a pin is also refused unless
+/// `locality_pin_allowed` — engines pin only while they take pod work
+/// (pod_member and unpaused); own-agent runners always pin.
 pub fn pinned_runner_for(
     runner: Option<&RunnerView>,
     target_pod_id: Option<Uuid>,
     now: DateTime<Utc>,
 ) -> Option<Uuid> {
     let runner = runner?;
+    let is_pidash_agent = runner.provisioning
+        == pidash_db::runner_enroll::columns::enums::RUNNER_PROVISIONING_DESKTOP_BUNDLED;
+    let pod_member = runner.pod_dispatch
+        == pidash_db::runner_enroll::columns::enums::RUNNER_POD_DISPATCH_POD_MEMBER;
+    if !pidash_auth::permissions::runner::locality_pin_allowed(
+        true,
+        is_pidash_agent,
+        pod_member,
+        runner.engine_paused,
+    ) {
+        return None;
+    }
     if runner.status == RUNNER_STATUS_REVOKED || runner.status == RUNNER_STATUS_OFFLINE {
         return None;
     }
@@ -1187,7 +2287,6 @@ pub fn render_first_turn(
     bundle: &RenderBundle,
     kind: &str,
     run: &RunRenderRef,
-    extra_toolsets_schema_tool: &str,
 ) -> Result<RenderedTurn, String> {
     let issue = &bundle.issue;
     let project = &bundle.project;
@@ -1228,6 +2327,8 @@ pub fn render_first_turn(
         project_id: project.id.to_string(),
         project_name: project.name.clone(),
         project_description: project.description.clone(),
+        issue_work_type: issue.work_type.clone(),
+        project_default_work_type: Some(project.default_work_type.clone()),
         repo,
         code_reviews: context::code_reviews_context(&bundle.reviews),
         parent: bundle.parent.clone(),
@@ -1236,6 +2337,7 @@ pub fn render_first_turn(
         related: Value::Array(related),
         relations,
         run_id: run.run_id.to_string(),
+        rendered_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         run_template_name: kind.to_owned(),
         attempt: context::compute_attempt(bundle.prior_run_count),
         trigger: Some(run.trigger.clone()),
@@ -1246,14 +2348,10 @@ pub fn render_first_turn(
             .get("unavailable_capabilities")
             .cloned()
             .unwrap_or(Value::Null),
-        extra_toolsets_enabled: run
-            .tool_plan
-            .get("extra_toolsets")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        // Named by the EE seam, consulted only when enabled
-        // (`context.py:514-517`); CE names none.
-        extra_toolsets_schema_tool: extra_toolsets_schema_tool.to_owned(),
+        // P4: extra toolsets died with the retired plane; the
+        // keys still render (always false/empty).
+        extra_toolsets_enabled: false,
+        extra_toolsets_schema_tool: String::new(),
         limits: run.tool_plan.get("limits").cloned().unwrap_or(Value::Null),
         tick: tick_value(
             bundle.ticker.as_ref(),
@@ -1270,6 +2368,8 @@ pub fn render_first_turn(
             bundle.ticker_parent_payload.as_ref(),
         ),
         workpad_body: issue.workpad.clone().unwrap_or_default(),
+        agent_stages: bundle.stages.agent_stages,
+        stage_history: context::stage_history(&bundle.stages.stage_history),
     };
     let context_value = context::build_context(&input);
     // Override keys are workspace/user UUID strings (`load_index`),
@@ -1296,6 +2396,7 @@ pub fn render_first_turn(
         user_id.as_deref(),
         executor_kind,
         tool_catalog_version,
+        Some(work_type_for_issue(issue, project)),
     )
     .map_err(|error| error.message().to_owned())?;
     let manifest = turn
@@ -1319,7 +2420,7 @@ pub fn render_first_turn(
 /// shape; the SQL text for each lives in the adjacent `*_SQL` consts,
 /// which the pool implementation must execute verbatim. The three
 /// `cloud_agent.creation` calls are methods here (the jobs-side store
-/// delegates them to the merged `jobs::dispatch` functions) so the
+/// delegates them to the merged `jobs::run_dispatch` functions) so the
 /// Python control flow stays services-side in verbatim order.
 ///
 /// Native `async fn` in trait (stable since 1.75): no `async-trait`
@@ -1389,15 +2490,6 @@ pub trait CreationSeam {
         &mut self,
         req: &ExecutionRequest,
     ) -> Result<ExecutionFields, ExecutionError>;
-    /// `lock_cloud_creation_capacity` (`creation.py:155-177`) on the
-    /// caller's insertion transaction. A manual over-capacity raise
-    /// surfaces as [`CreationError::CapacityRefused`] and propagates.
-    async fn lock_cloud_creation_capacity(
-        &mut self,
-        workspace_id: Uuid,
-        executor_kind: AgentExecutorKind,
-        automatic: bool,
-    ) -> Result<Option<AdmissionError>, CreationError>;
     /// `dispatch_after_commit` (`creation.py:148-152`): collect the run
     /// id for post-commit dispatch. Nothing executes inline.
     fn dispatch_after_commit(&mut self, run_id: Uuid);
@@ -1413,10 +2505,38 @@ pub trait CreationSeam {
         trigger: &str,
         created_by_id: Uuid,
     ) -> Result<RenderBundle, CreationError>;
-    /// The EE schema-tool name (`extra_toolsets_schema_tool`,
-    /// `context.py:512-517`): consulted only when the run's plan
-    /// enables extra toolsets. CE names none.
-    fn extra_toolsets_schema_tool(&self) -> String;
+    /// (P4: the extra-toolsets schema tool died with the toolsets seam.)
+    /// The dedicated-runner pin decision for one creation (design
+    /// §9.1/§9.2 + §11.2/§23.3): the H-11/H-10 refusal answered in
+    /// the same probe as the pin (Django `dedicated_run_refusal`
+    /// then `resolve_run_pin` read the same assignment). A refused
+    /// caller creates nothing; the comments are filed by the seam.
+    async fn dedicated_pin(
+        &mut self,
+        args: &DedicatedPinArgs<'_>,
+    ) -> Result<PinOutcome, CreationError>;
+    /// One §11.2/§23.3 system comment (Django
+    /// `_post_dedicated_refusal_comment` /
+    /// `_post_dedicated_waiting_comment` /
+    /// `_post_pod_once_started_comment`).
+    async fn insert_system_comment(
+        &mut self,
+        comment: &NewSystemComment,
+    ) -> Result<(), CreationError>;
+    /// `parent.thread_id = ""; parent.save(update_fields=["thread_id"])`
+    /// (`service.py:494-495,896-897`, `pod_once`, §23.3).
+    async fn clear_parent_thread(&mut self, run_id: Uuid) -> Result<(), CreationError>;
+    /// The §23.3 `pod_once` started-comment row (Django
+    /// `_post_pod_once_started_comment`, `scheduling.py:1044-1067`),
+    /// filed by [`Self::insert_system_comment`] after a successful
+    /// create.
+    async fn pod_once_started_comment(
+        &mut self,
+        issue_id: Uuid,
+        pod_id: Uuid,
+        actor_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<NewSystemComment, CreationError>;
 }
 
 /// The one-method seam for the `finalize_agent_run(run.id, FAILED, …)`
@@ -1454,6 +2574,10 @@ pub struct CreateDispatchRequest {
     pub parent: Option<RunView>,
     pub creator_id: Uuid,
     pub pod_id: Uuid,
+    /// One-shot pod run (§23.3): the dedicated pin is bypassed for
+    /// this run only, and the parent's thread (the resume hint) is
+    /// cleared.
+    pub pod_once: bool,
     pub fresh_session: bool,
     /// The trigger to stamp, carried verbatim like Django's
     /// `trigger: str` (`service.py:742`): usually a member value,
@@ -1471,6 +2595,10 @@ pub struct ContinuationRequest {
     pub parent: RunView,
     pub creator_id: Uuid,
     pub pod_id: Uuid,
+    /// One-shot pod run (§23.3): the dedicated pin is bypassed for
+    /// this run only, and the parent's thread (the resume hint) is
+    /// cleared.
+    pub pod_once: bool,
     /// The trigger to stamp, carried verbatim like Django's
     /// `trigger: str` (`service.py:443`): usually a member value,
     /// but the dispatch path forwards the stored `triggered_by`
@@ -1530,17 +2658,7 @@ async fn render_new_run<C: CreationSeam>(
             run_ref.created_by_id,
         )
         .await?;
-    let schema_tool = if run_ref
-        .tool_plan
-        .get("extra_toolsets")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        seam.extra_toolsets_schema_tool()
-    } else {
-        String::new()
-    };
-    Ok(render_first_turn(&bundle, kind, run_ref, &schema_tool))
+    Ok(render_first_turn(&bundle, kind, run_ref))
 }
 
 /// Create a fresh `AgentRun` and dispatch it
@@ -1585,11 +2703,7 @@ pub async fn create_and_dispatch_run<S: CreationSeam + FinalizeAgentRunSeam>(
         }
         Err(ExecutionError::Store(error)) => return Err(error),
     };
-    let mut admission_error = execution.cloud_admission_error.clone();
-    admission_error = seam
-        .lock_cloud_creation_capacity(project.workspace_id, execution.executor_kind, automatic)
-        .await?
-        .or(admission_error);
+    let admission_error = execution.cloud_admission_error.clone();
     let effective_parent = if req.fresh_session {
         None
     } else {
@@ -1604,10 +2718,49 @@ pub async fn create_and_dispatch_run<S: CreationSeam + FinalizeAgentRunSeam>(
             }
         }
     }
+    // The dedicated pin (§9.1): a dedicated issue pins its runner,
+    // whatever the parent/locality path computed.
+    let pin_kind = if issue.assigned_runner_id.is_some() {
+        let outcome = seam
+            .dedicated_pin(&DedicatedPinArgs {
+                issue_id: issue.id,
+                parent: effective_parent.as_ref(),
+                pod_id: Some(req.pod_id),
+                fresh_session: req.fresh_session,
+                creator_id: Some(req.creator_id),
+                trigger: req.trigger.as_str(),
+                pod_once: req.pod_once,
+                actor_id: req.creator_id,
+                now: req.now,
+            })
+            .await?;
+        computed_pin = outcome.runner_id;
+        outcome.pin_kind
+    } else {
+        String::new()
+    };
     let pinned_runner = execution.merge_pin(computed_pin);
     let state = seam.state(issue.state_id).await?;
     let kind = phase_kind_for_issue(state);
     let run_id = Uuid::new_v4();
+    // Runner context (NEWPIDASH-320 §6.1, §6.3): the workpad snapshot
+    // rides along for every issue run (`.ai_design/unified_workpad/`).
+    let workpad_snapshot =
+        carries_workpad(&kind).then(|| issue.workpad.clone().unwrap_or_default());
+    let run_config = stamp_run_context(
+        run_config_for_issue(
+            project.repo_url.as_deref(),
+            project.base_branch.as_deref(),
+            issue.git_work_branch.as_deref(),
+            None,
+        ),
+        Some(&context::issue_identifier(
+            &project.identifier,
+            i64::from(issue.sequence_id),
+        )),
+        Some(&project.identifier),
+        workpad_snapshot.as_deref(),
+    );
     let run = seam
         .insert_run(&NewAgentRun {
             id: run_id,
@@ -1624,13 +2777,10 @@ pub async fn create_and_dispatch_run<S: CreationSeam + FinalizeAgentRunSeam>(
             tool_plan: execution.tool_plan.clone(),
             trigger: req.trigger.clone(),
             phase_kind: kind.clone(),
-            run_config: run_config_for_issue(
-                project.repo_url.as_deref(),
-                project.base_branch.as_deref(),
-                issue.git_work_branch.as_deref(),
-                None,
-            ),
+            work_type: work_type_for_issue(&issue, &project).to_owned(),
+            run_config,
             now: req.now,
+            pin_kind: pin_kind.clone(),
         })
         .await?;
     if let Some(admission) = admission_error {
@@ -1729,22 +2879,58 @@ pub async fn create_continuation_run<S: CreationSeam + FinalizeAgentRunSeam>(
         }
         Err(ExecutionError::Store(error)) => return Err(error),
     };
-    let mut admission_error = execution.cloud_admission_error.clone();
-    admission_error = seam
-        .lock_cloud_creation_capacity(project.workspace_id, execution.executor_kind, automatic)
-        .await?
-        .or(admission_error);
-    // Continuation inserts the literal repo snapshot, not the
-    // `_run_config_for_issue` refresh (`service.py:489-493`): same
-    // three keys, no base to strip.
-    let run_config = run_config_for_issue(
-        project.repo_url.as_deref(),
-        project.base_branch.as_deref(),
-        issue.git_work_branch.as_deref(),
-        None,
-    );
+    let admission_error = execution.cloud_admission_error.clone();
+    // The dedicated pin (§9.2): a dedicated issue pins its runner,
+    // whatever the parent/locality path computed.
+    let pin_kind = if issue.assigned_runner_id.is_some() {
+        let outcome = seam
+            .dedicated_pin(&DedicatedPinArgs {
+                issue_id: issue.id,
+                parent: Some(&req.parent),
+                pod_id: Some(req.pod_id),
+                fresh_session: false,
+                creator_id: Some(req.creator_id),
+                trigger: req.trigger.as_str(),
+                pod_once: req.pod_once,
+                actor_id: req.creator_id,
+                now: req.now,
+            })
+            .await?;
+        computed_pin = outcome.runner_id;
+        outcome.pin_kind
+    } else {
+        String::new()
+    };
     let state = seam.state(issue.state_id).await?;
     let kind = phase_kind_for_issue(state);
+    // Continuation inserts the literal repo snapshot, not the
+    // `_run_config_for_issue` refresh (`service.py:489-493`): same
+    // three keys, no base to strip — plus the runner context
+    // (NEWPIDASH-320 §6.1, §6.3).
+    let workpad_snapshot =
+        carries_workpad(&kind).then(|| issue.workpad.clone().unwrap_or_default());
+    let mut run_config = stamp_run_context(
+        run_config_for_issue(
+            project.repo_url.as_deref(),
+            project.base_branch.as_deref(),
+            issue.git_work_branch.as_deref(),
+            None,
+        ),
+        Some(&context::issue_identifier(
+            &project.identifier,
+            i64::from(issue.sequence_id),
+        )),
+        Some(&project.identifier),
+        workpad_snapshot.as_deref(),
+    );
+    // The workpad gate measures from the start of the In Progress pass,
+    // not from this continuation (design §8.2).
+    if let (Some(start), Some(map)) = (
+        continued_stage_start_sha(&req.parent, &kind),
+        run_config.as_object_mut(),
+    ) {
+        map.insert(STAGE_START_WORKPAD_SHA256.to_owned(), Value::String(start));
+    }
     let run_id = Uuid::new_v4();
     let run = seam
         .insert_run(&NewAgentRun {
@@ -1762,8 +2948,10 @@ pub async fn create_continuation_run<S: CreationSeam + FinalizeAgentRunSeam>(
             tool_plan: execution.tool_plan.clone(),
             trigger: req.trigger.clone(),
             phase_kind: kind.clone(),
+            work_type: work_type_for_issue(&issue, &project).to_owned(),
             run_config,
             now: req.now,
+            pin_kind: pin_kind.clone(),
         })
         .await?;
     if let Some(admission) = admission_error {
@@ -1859,13 +3047,56 @@ pub async fn create_project_move_handoff_run<S: CreationSeam + FinalizeAgentRunS
     if let Some(existing) = seam.active_run_for(issue.id).await? {
         return Ok(existing);
     }
-    let run_config = run_config_for_issue(
+    // The render kind still comes from the issue's current state even
+    // though the row stamps no `phase_kind` (see below; `finish` reads the
+    // kind from the state for such a run): it snapshots the current
+    // workpad exactly like the other builders (NEWPIDASH-320
+    // §6.1, §6.3). The parent's snapshot never rides along — it is
+    // stale by construction.
+    let render_kind = phase_kind_for_issue(seam.state(issue.state_id).await?);
+    let workpad_snapshot =
+        carries_workpad(&render_kind).then(|| issue.workpad.clone().unwrap_or_default());
+    let mut run_config = run_config_for_issue(
         project.repo_url.as_deref(),
         project.base_branch.as_deref(),
         issue.git_work_branch.as_deref(),
         Some(&req.parent.run_config),
     );
+    if let Some(map) = run_config.as_object_mut() {
+        map.remove("workpad_body");
+        map.remove("workpad_sha256");
+        map.remove(STAGE_START_WORKPAD_SHA256);
+    }
+    let run_config = stamp_run_context(
+        run_config,
+        Some(&context::issue_identifier(
+            &project.identifier,
+            i64::from(issue.sequence_id),
+        )),
+        Some(&project.identifier),
+        workpad_snapshot.as_deref(),
+    );
     let run_id = Uuid::new_v4();
+    // The dedicated pin (§9.2) survives a project move — the issue
+    // carries its runner into the new project; affinity clears only
+    // the locality pin.
+    let pin_kind = if issue.assigned_runner_id.is_some() {
+        seam.dedicated_pin(&DedicatedPinArgs {
+            issue_id: issue.id,
+            parent: Some(&req.parent),
+            pod_id: Some(req.pod_id),
+            fresh_session: false,
+            creator_id: Some(req.parent.created_by_id),
+            trigger: req.parent.trigger.as_str(),
+            pod_once: false,
+            actor_id: req.parent.created_by_id,
+            now: req.now,
+        })
+        .await?
+        .pin_kind
+    } else {
+        String::new()
+    };
     let run = seam
         .insert_run(&NewAgentRun {
             id: run_id,
@@ -1882,8 +3113,10 @@ pub async fn create_project_move_handoff_run<S: CreationSeam + FinalizeAgentRunS
             tool_plan: execution.tool_plan.clone(),
             trigger: req.parent.trigger.clone(),
             phase_kind: String::new(),
+            work_type: work_type_for_issue(&issue, &project).to_owned(),
             run_config,
             now: req.now,
+            pin_kind,
         })
         .await?;
     if let Some(admission) = admission_error {
@@ -1892,9 +3125,9 @@ pub async fn create_project_move_handoff_run<S: CreationSeam + FinalizeAgentRunS
             .await;
     }
     // The render kind still comes from the issue's current state even
-    // though the row stamps no `phase_kind`.
-    let state = seam.state(issue.state_id).await?;
-    let kind = phase_kind_for_issue(state);
+    // though the row stamps no `phase_kind` (read once above for the
+    // workpad snapshot).
+    let kind = render_kind;
     let turn = match render_new_run(
         seam,
         issue.id,
@@ -2148,9 +3381,31 @@ pub async fn resolve_pod_for_issue<C: CreationSeam>(
     Ok(resolve_pod_select(None, default.as_ref()))
 }
 
+/// Section count of the `coding-task` recipe for `software`: 12 core
+/// sections (the `this-run` block first, NEWPIDASH-325) plus the
+/// `software.context` and `software.execute` slots. Diverges from the
+/// Django-captured FX6 manifests on purpose (D13).
+#[cfg(test)]
+const LEAN_CODING_SECTIONS: usize = 14;
+/// The `review` recipe for `software`: 8 core sections (likewise
+/// `this-run` first; `workpad` since the unified workpad) plus the
+/// `software.context` and `software.review` slots.
+#[cfg(test)]
+const LEAN_REVIEW_SECTIONS: usize = 10;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stage_queries_read_done_payload_keys_with_the_builder() {
+        use sea_orm::sea_query::PostgresQueryBuilder;
+        let issue = Uuid::nil();
+        let history =
+            orm::bundle_stage_history_select(issue, issue).to_string(PostgresQueryBuilder);
+        assert!(history.contains("\"agent_run\".\"done_payload\" ->> 'status' AS \"result\""));
+        assert!(history.contains("\"agent_run\".\"done_payload\" ->> 'note' AS \"note\""));
+    }
     use serde_json::json;
 
     static CREATE_DISPATCH: &str = include_str!(
@@ -2199,6 +3454,196 @@ mod tests {
         }
     }
 
+    /// The [`orm`] builders, rendered without a database: aliased
+    /// joins (`AS`), INNER vs LEFT, the scopes, orderings, lock forms
+    /// and the output names the seam decodes by.
+    #[test]
+    fn orm_statement_shapes() {
+        use sea_orm::sea_query::PostgresQueryBuilder;
+        let render =
+            |select: sea_orm::sea_query::SelectStatement| select.to_string(PostgresQueryBuilder);
+        let id = uid(0x01);
+
+        let labels = render(orm::bundle_labels_select(id));
+        assert!(labels.contains("FROM \"issue_labels\" AS \"il\" INNER JOIN \"labels\" AS \"l\" ON \"l\".\"id\" = \"il\".\"label_id\""), "{labels}");
+        assert!(labels.contains("\"l\".\"deleted_at\" IS NULL"), "{labels}");
+        assert!(
+            labels.ends_with("ORDER BY \"l\".\"created_at\" DESC"),
+            "{labels}"
+        );
+        assert!(
+            !labels.contains("\"il\".\"deleted_at\""),
+            "link rows unfiltered: {labels}"
+        );
+
+        let assignees = render(orm::bundle_assignees_select(id));
+        assert!(
+            assignees
+                .contains("INNER JOIN \"users\" AS \"u\" ON \"u\".\"id\" = \"ia\".\"assignee_id\""),
+            "{assignees}"
+        );
+        assert!(
+            assignees.ends_with("ORDER BY \"u\".\"created_at\" DESC"),
+            "{assignees}"
+        );
+
+        let children = render(orm::bundle_children_select(id));
+        assert!(children.contains("FROM \"issues\" AS \"i\" INNER JOIN \"projects\" AS \"p\" ON \"p\".\"id\" = \"i\".\"project_id\" LEFT JOIN \"states\" AS \"s\" ON \"s\".\"id\" = \"i\".\"state_id\""), "{children}");
+        assert!(
+            children.contains("\"s\".\"name\" AS \"state_name\""),
+            "{children}"
+        );
+        for guard in [
+            "\"i\".\"deleted_at\" IS NULL",
+            "\"s\".\"group\" <> 'triage'",
+            "\"i\".\"archived_at\" IS NULL",
+            "\"p\".\"archived_at\" IS NULL",
+            "NOT \"i\".\"is_draft\"",
+        ] {
+            assert!(children.contains(guard), "{guard}: {children}");
+        }
+        assert!(
+            children.ends_with("ORDER BY \"i\".\"created_at\" ASC"),
+            "{children}"
+        );
+
+        let targets = render(orm::bundle_relation_targets_select(&[id, uid(0x02)]));
+        assert!(
+            targets.contains("\"s\".\"group\" AS \"state_group\""),
+            "{targets}"
+        );
+        assert!(targets.contains("\"i\".\"id\" IN ("), "{targets}");
+        assert!(
+            !targets.contains("archived_at"),
+            "targets keep archived rows: {targets}"
+        );
+
+        let comments = render(orm::bundle_comments_select(id));
+        assert!(comments.contains("FROM \"issue_comments\" AS \"c\" LEFT JOIN \"users\" AS \"u\" ON \"u\".\"id\" = \"c\".\"actor_id\""), "{comments}");
+        assert!(
+            comments.contains("NOT 'fold' = ANY(\"c\".\"labels\")"),
+            "{comments}"
+        );
+        assert!(
+            comments.ends_with("ORDER BY \"c\".\"created_at\" ASC"),
+            "{comments}"
+        );
+
+        let remote = render(orm::bundle_remote_select(id));
+        assert!(remote.contains("FROM \"git_repository_bindings\" AS \"b\" INNER JOIN \"git_repositories\" AS \"r\" ON \"r\".\"id\" = \"b\".\"repository_id\""), "{remote}");
+        assert!(
+            remote.ends_with("ORDER BY \"b\".\"created_at\" ASC LIMIT 1"),
+            "{remote}"
+        );
+
+        let parent = render(orm::bundle_parent_cols_select(id));
+        assert!(parent.contains("(SELECT COUNT(\"c\".\"id\") FROM \"issue_comments\" AS \"c\" WHERE \"c\".\"issue_id\" = \"i\".\"id\" AND \"c\".\"deleted_at\" IS NULL) AS \"comments_count\""), "{parent}");
+
+        let overrides = render(orm::bundle_overrides_select(id, None));
+        assert!(
+            overrides.contains("\"is_active\" AND \"workspace_id\" = "),
+            "{overrides}"
+        );
+        assert!(
+            overrides.contains("(\"user_id\" IS NULL OR \"user_id\" = NULL)"),
+            "{overrides}"
+        );
+
+        // Run reads: the view projection, newest first, the active set,
+        // and `FOR UPDATE OF "agent_run"` on the lock forms only.
+        let latest = render(orm::latest_prior_run_select(id));
+        assert!(
+            latest.ends_with("ORDER BY \"created_at\" DESC LIMIT 1"),
+            "{latest}"
+        );
+        assert!(!latest.contains("FOR UPDATE"), "{latest}");
+        let active = render(orm::active_run_select(id));
+        for status in ACTIVE_STATUSES {
+            assert!(
+                active.contains(&format!("'{}'", status.value())),
+                "{status:?}: {active}"
+            );
+        }
+        let lock = render(orm::run_lock_select(id));
+        assert!(lock.ends_with("FOR UPDATE OF \"agent_run\""), "{lock}");
+        let finalize = render(orm::finalize_lock_select(id));
+        assert!(finalize.contains("\"agent_run\".\"status\" NOT IN ('completed', 'failed', 'cancelled', 'blocked', 'refused')"), "{finalize}");
+        assert!(
+            finalize.ends_with("FOR UPDATE OF \"agent_run\""),
+            "{finalize}"
+        );
+        let issue_lock = render(orm::issue_lock_select(id));
+        assert!(
+            issue_lock.ends_with("FOR UPDATE OF \"issues\""),
+            "{issue_lock}"
+        );
+        assert!(
+            !issue_lock.contains("deleted_at"),
+            "all_objects: {issue_lock}"
+        );
+        let default_pod = render(orm::default_pod_select(id));
+        assert!(
+            default_pod
+                .contains("\"is_default\" AND \"deleted_at\" IS NULL ORDER BY \"id\" ASC LIMIT 1"),
+            "{default_pod}"
+        );
+        for (column, name) in RUN_VIEW_COLUMNS.iter().zip(orm::RUN_VIEW.iter()) {
+            assert_eq!(
+                *column,
+                sea_orm::Iden::to_string(name),
+                "RUN_VIEW column order matches RUN_VIEW_COLUMNS"
+            );
+        }
+
+        // Writes: the finalize merge keeps the stored object (reset when
+        // not one), drops the patch's keys, adds its non-null values.
+        let merge = orm::finalize_update(id, now(), &finalize_error_details_patch("c", ""))
+            .to_string(PostgresQueryBuilder);
+        assert!(merge.contains("\"status\" = 'failed'"), "{merge}");
+        assert!(
+            merge.contains(
+                "\"terminal_hooks_applied_at\" = NULL, \"terminal_capacity_released_at\" = NULL"
+            ),
+            "{merge}"
+        );
+        assert!(merge.contains("(CASE WHEN (jsonb_typeof(\"agent_run\".\"error_details\") = 'object') THEN \"agent_run\".\"error_details\" ELSE '{}' END) - 'code' - 'message') || E'{"), "{merge}");
+        let insert = orm::run_insert(&NewAgentRun {
+            id,
+            workspace_id: uid(0x10),
+            created_by_id: uid(0x40),
+            pod_id: uid(0x50),
+            pinned_runner_id: None,
+            pin_kind: "locality".to_owned(),
+            work_item_id: uid(0x02),
+            parent_run_id: None,
+            executor_kind: AgentExecutorKind::RetiredCloudRun,
+            error_details: json!({}),
+            tool_plan: json!({}),
+            trigger: "direct".to_owned(),
+            phase_kind: String::new(),
+            work_type: "software".to_owned(),
+            run_config: json!({}),
+            now: now(),
+        })
+        .to_string(PostgresQueryBuilder);
+        assert!(insert.starts_with("INSERT INTO \"agent_run\" (\"id\", \"workspace_id\", \"owner_id\", \"created_by_id\""), "{insert}");
+        assert!(
+            insert.contains("'queued', 'cloud_agent', 0, NULL, ''"),
+            "{insert}"
+        );
+        assert!(
+            insert.ends_with(&format!(
+                "RETURNING {}",
+                RUN_VIEW_COLUMNS
+                    .iter()
+                    .map(|column| format!("\"{column}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            "{insert}"
+        );
+    }
+
     fn issue_view() -> IssueView {
         IssueView {
             id: uid(0x01),
@@ -2208,6 +3653,7 @@ mod tests {
             parent_id: None,
             created_by_id: Some(uid(0x40)),
             assigned_pod_id: None,
+            assigned_runner_id: None,
             agent_executor: None,
             git_work_branch: None,
             workpad: None,
@@ -2216,6 +3662,7 @@ mod tests {
             priority: None,
             sequence_id: 1,
             target_date: None,
+            work_type: None,
         }
     }
 
@@ -2235,6 +3682,7 @@ mod tests {
             interval_impl: 10800,
             interval_review: 10800,
             interval_test: 10800,
+            default_work_type: "software".to_owned(),
         }
     }
 
@@ -2254,6 +3702,7 @@ mod tests {
             pod_id: uid(0x50),
             runner_id: None,
             pinned_runner_id: None,
+            pin_kind: String::new(),
             parent_run_id: None,
             work_item_id: Some(uid(0x01)),
             status: AgentRunStatus::Queued,
@@ -2325,6 +3774,7 @@ mod tests {
             has_parent_run: false,
             ticker_parent_payload: None,
             override_rows: Vec::new(),
+            stages: Default::default(),
         }
     }
 
@@ -2355,6 +3805,10 @@ mod tests {
         /// plans come back key-normalized while the caller's value keeps
         /// insertion order (PIDASHCONV-1072).
         normalize_tool_plan: bool,
+        /// Dedicated-runner assignments (design §9.1) keyed by issue.
+        assigned_runners: HashMap<Uuid, Option<Uuid>>,
+        system_comments: Vec<NewSystemComment>,
+        cleared_threads: Vec<Uuid>,
     }
 
     impl Default for FakeSeam {
@@ -2380,6 +3834,9 @@ mod tests {
                 finalized: Vec::new(),
                 lock_order: std::cell::RefCell::new(Vec::new()),
                 normalize_tool_plan: false,
+                assigned_runners: HashMap::new(),
+                system_comments: Vec::new(),
+                cleared_threads: Vec::new(),
             }
         }
     }
@@ -2569,6 +4026,7 @@ mod tests {
                 pod_id: row.pod_id,
                 runner_id: None,
                 pinned_runner_id: row.pinned_runner_id,
+                pin_kind: row.pin_kind.clone(),
                 parent_run_id: row.parent_run_id,
                 work_item_id: Some(row.work_item_id),
                 status: AgentRunStatus::Queued,
@@ -2623,15 +4081,6 @@ mod tests {
             self.execution.clone().expect("script execution")
         }
 
-        async fn lock_cloud_creation_capacity(
-            &mut self,
-            _workspace_id: Uuid,
-            _executor_kind: AgentExecutorKind,
-            _automatic: bool,
-        ) -> Result<Option<AdmissionError>, CreationError> {
-            self.lock.clone().expect("script lock")
-        }
-
         fn dispatch_after_commit(&mut self, run_id: Uuid) {
             self.dispatched.push(run_id);
         }
@@ -2652,8 +4101,65 @@ mod tests {
                 .ok_or_else(|| CreationError::Db("no bundle".to_owned()))
         }
 
-        fn extra_toolsets_schema_tool(&self) -> String {
-            String::new()
+        async fn dedicated_pin(
+            &mut self,
+            args: &DedicatedPinArgs<'_>,
+        ) -> Result<PinOutcome, CreationError> {
+            // The fake mirrors "no dedicated assignment": the issue's
+            // assigned runner decides; no refusal and unpinned.
+            let assigned = self
+                .assigned_runners
+                .get(&args.issue_id)
+                .copied()
+                .unwrap_or(None);
+            let (runner_id, pin_kind) = match assigned {
+                Some(runner_id) if !args.pod_once => (Some(runner_id), "dedicated".to_owned()),
+                _ => (
+                    None,
+                    crate::domain::issue_assignment::PIN_LOCALITY.to_owned(),
+                ),
+            };
+            Ok(PinOutcome {
+                refusal: None,
+                refusal_comment: None,
+                waiting_comment: None,
+                runner_id,
+                pin_kind,
+            })
+        }
+
+        async fn insert_system_comment(
+            &mut self,
+            comment: &NewSystemComment,
+        ) -> Result<(), CreationError> {
+            self.system_comments.push(comment.clone());
+            Ok(())
+        }
+
+        async fn clear_parent_thread(&mut self, run_id: Uuid) -> Result<(), CreationError> {
+            self.cleared_threads.push(run_id);
+            Ok(())
+        }
+
+        async fn pod_once_started_comment(
+            &mut self,
+            issue_id: Uuid,
+            _pod_id: Uuid,
+            actor_id: Uuid,
+            now: DateTime<Utc>,
+        ) -> Result<NewSystemComment, CreationError> {
+            let issue = self.issue(issue_id).await?;
+            Ok(NewSystemComment {
+                id: Uuid::new_v4(),
+                description_id: Uuid::new_v4(),
+                now,
+                project_id: issue.project_id.unwrap_or_else(Uuid::nil),
+                workspace_id: issue.workspace_id,
+                issue_id,
+                actor_id,
+                comment_html: "pod_once".to_owned(),
+                comment_stripped: "pod_once".to_owned(),
+            })
         }
     }
 
@@ -2754,6 +4260,118 @@ mod tests {
         );
     }
 
+    /// NEWPIDASH-320 §6.1, §6.3: the runner-context stamp — identifiers
+    /// for issue and scheduler runs, the workpad snapshot for
+    /// Unified workpad §8.2: a continuation inside the In Progress pass
+    /// carries the pass's start hash, so a note an earlier run of the pass
+    /// wrote still counts; any other pairing starts a new pass.
+    #[test]
+    fn continuation_carries_the_pass_start_workpad_hash() {
+        let mut parent = run_view(uid(0x60));
+        parent.run_config = json!({"workpad_sha256": "first"});
+        assert_eq!(
+            continued_stage_start_sha(&parent, recipes::KIND_CODING_TASK).as_deref(),
+            Some("first")
+        );
+        // A continuation of a continuation keeps the original start.
+        parent.run_config = json!({"workpad_sha256": "later", STAGE_START_WORKPAD_SHA256: "first"});
+        assert_eq!(
+            continued_stage_start_sha(&parent, recipes::KIND_CODING_TASK).as_deref(),
+            Some("first")
+        );
+        // Not an In Progress continuation: a new pass.
+        assert_eq!(
+            continued_stage_start_sha(&parent, recipes::KIND_REVIEW),
+            None
+        );
+        parent.phase_kind = recipes::KIND_REVIEW.to_owned();
+        assert_eq!(
+            continued_stage_start_sha(&parent, recipes::KIND_CODING_TASK),
+            None
+        );
+        // A parent from before NEWPIDASH-320 has no hash: not gated.
+        parent.phase_kind = recipes::KIND_CODING_TASK.to_owned();
+        parent.run_config = json!({});
+        assert_eq!(
+            continued_stage_start_sha(&parent, recipes::KIND_CODING_TASK),
+            None
+        );
+    }
+
+    /// every issue run. `None` leaves the config untouched.
+    #[test]
+    fn stamp_run_context_covers_kinds() {
+        let base = json!({
+            "repo_url": null,
+            "repo_ref": null,
+            "git_work_branch": null,
+        });
+        // Issue coding-task run: identifiers plus the workpad snapshot.
+        let coding = stamp_run_context(base.clone(), Some("FX6-1"), Some("FX6"), Some("# plan"));
+        assert_eq!(
+            coding,
+            json!({
+                "repo_url": null,
+                "repo_ref": null,
+                "git_work_branch": null,
+                "issue_identifier": "FX6-1",
+                "project_identifier": "FX6",
+                "workpad_body": "# plan",
+                "workpad_sha256": workpad_sha256("# plan"),
+            })
+        );
+        // Every issue run carries the workpad; scheduler runs never do.
+        assert!(carries_workpad(recipes::KIND_CODING_TASK));
+        assert!(carries_workpad(recipes::KIND_REVIEW));
+        assert!(carries_workpad(recipes::KIND_TEST));
+        assert!(!carries_workpad(recipes::KIND_SCHEDULER));
+        // No snapshot passed: identifiers only, no workpad keys.
+        let review = stamp_run_context(base.clone(), Some("FX6-1"), Some("FX6"), None);
+        assert_eq!(
+            review,
+            json!({
+                "repo_url": null,
+                "repo_ref": null,
+                "git_work_branch": null,
+                "issue_identifier": "FX6-1",
+                "project_identifier": "FX6",
+            })
+        );
+        // Scheduler run: project only.
+        let sched = stamp_run_context(base.clone(), None, Some("FX6"), None);
+        assert_eq!(
+            sched,
+            json!({
+                "repo_url": null,
+                "repo_ref": null,
+                "git_work_branch": null,
+                "project_identifier": "FX6",
+            })
+        );
+        // Empty workpad still snapshots (the runner writes an empty file).
+        let empty = stamp_run_context(base.clone(), Some("FX6-1"), Some("FX6"), Some(""));
+        assert_eq!(empty["workpad_body"], json!(""));
+        assert_eq!(
+            empty["workpad_sha256"],
+            json!("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        );
+        // The base value is never mutated.
+        assert_eq!(
+            base,
+            json!({"repo_url": null, "repo_ref": null, "git_work_branch": null})
+        );
+    }
+
+    #[test]
+    fn workpad_sha256_is_hex_of_body() {
+        assert_eq!(
+            workpad_sha256(""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(workpad_sha256("# plan").len(), 64);
+        assert_ne!(workpad_sha256("# plan"), workpad_sha256("# plan\n"));
+    }
+
     #[test]
     fn pin_matrix_matches_m1_m10() {
         let clock = now();
@@ -2761,14 +4379,19 @@ mod tests {
             id: uid(0x60),
             pod_id: uid(0x50),
             status: "online".to_owned(),
+            name: "runner-fixture".to_owned(),
             last_heartbeat_at: Some(clock),
             paused_at: None,
+            provisioning: "personal".to_owned(),
+            pod_dispatch: "pod_member".to_owned(),
+            engine_paused: false,
         };
         // M1: no runner.
         assert_eq!(pinned_runner_for(None, Some(uid(0x50)), clock), None);
         // M2: revoked.
         let revoked = RunnerView {
             status: RUNNER_STATUS_REVOKED.to_owned(),
+            name: "runner-fixture".to_owned(),
             ..runner.clone()
         };
         assert_eq!(
@@ -2793,6 +4416,7 @@ mod tests {
         // M6 (`70d684af`): offline.
         let offline = RunnerView {
             status: RUNNER_STATUS_OFFLINE.to_owned(),
+            name: "runner-fixture".to_owned(),
             ..runner.clone()
         };
         assert_eq!(
@@ -2820,6 +4444,7 @@ mod tests {
         // M9: busy but fresh stays eligible (the pinned run waits for it).
         let busy = RunnerView {
             status: "busy".to_owned(),
+            name: "runner-fixture".to_owned(),
             ..runner.clone()
         };
         assert_eq!(
@@ -2831,6 +4456,7 @@ mod tests {
         // the heartbeat — not the status — rules it out.
         let busy_stale = RunnerView {
             status: "busy".to_owned(),
+            name: "runner-fixture".to_owned(),
             last_heartbeat_at: Some(clock - chrono::Duration::seconds(3600)),
             ..runner.clone()
         };
@@ -2854,6 +4480,33 @@ mod tests {
         };
         assert_eq!(
             pinned_runner_for(Some(&paused), Some(uid(0x50)), clock),
+            None
+        );
+        // #2903 locality gate: engines pin only while they take pod
+        // work. An unpaused pod-member engine pins; a paused one or a
+        // pinned-only one does not; own-agent runners pin regardless.
+        let engine = RunnerView {
+            provisioning: "desktop_bundled".to_owned(),
+            ..runner.clone()
+        };
+        assert_eq!(
+            pinned_runner_for(Some(&engine), Some(uid(0x50)), clock),
+            Some(uid(0x60))
+        );
+        let engine_paused = RunnerView {
+            engine_paused: true,
+            ..engine.clone()
+        };
+        assert_eq!(
+            pinned_runner_for(Some(&engine_paused), Some(uid(0x50)), clock),
+            None
+        );
+        let engine_pinned_only = RunnerView {
+            pod_dispatch: "pinned_only".to_owned(),
+            ..engine.clone()
+        };
+        assert_eq!(
+            pinned_runner_for(Some(&engine_pinned_only), Some(uid(0x50)), clock),
             None
         );
     }
@@ -2955,6 +4608,24 @@ mod tests {
     }
 
     #[test]
+    fn work_type_for_issue_follows_the_resolution_chain() {
+        let mut issue = issue_view();
+        let mut project = project_view();
+        assert_eq!(work_type_for_issue(&issue, &project), "software");
+        project.default_work_type = "general".to_owned();
+        assert_eq!(work_type_for_issue(&issue, &project), "general");
+        issue.work_type = Some("software".to_owned());
+        assert_eq!(work_type_for_issue(&issue, &project), "software");
+        // An unknown stored key falls through to the project default.
+        issue.work_type = Some("retired".to_owned());
+        assert_eq!(work_type_for_issue(&issue, &project), "general");
+        // Blank project default with no override: the `general` net.
+        issue.work_type = None;
+        project.default_work_type = String::new();
+        assert_eq!(work_type_for_issue(&issue, &project), "general");
+    }
+
+    #[test]
     fn handoff_marker_helpers() {
         let config = json!({"_project_move_handoff": {"target_project_id": "p"}});
         assert!(handoff_marker(&config).is_some());
@@ -3034,7 +4705,6 @@ mod tests {
                 tool_plan: json!({}),
                 created_by_id: uid(0x40),
             },
-            "",
         )
         .expect("renders");
         for marker in [
@@ -3042,60 +4712,16 @@ mod tests {
             "FX6 C1",
             "In Progress (group: started)",
             "https://example.com/fx6.git",
-            "coding-task",
+            "Software delivery workflow (work type: software)",
         ] {
             assert!(turn.text.contains(marker), "missing {marker}");
         }
         let manifest = turn.manifest.as_array().expect("bare list");
-        assert_eq!(
-            manifest.len(),
-            after["prompt_manifest"].as_array().unwrap().len()
-        );
+        assert_eq!(manifest.len(), LEAN_CODING_SECTIONS);
         assert_eq!(
             manifest[0]["section_key"],
             after["prompt_manifest"][0]["section_key"]
         );
-    }
-
-    #[test]
-    fn render_names_injected_schema_tool_for_snapshotted_cloud_runs() {
-        let bundle = test_bundle(
-            issue_view(),
-            project_view(),
-            Some(state_view("In Progress", "started")),
-        );
-        let snapshotted = RunRenderRef {
-            run_id: uid(0x80),
-            parent_run_id: None,
-            trigger: AgentRunTrigger::StateTransition.value().to_owned(),
-            executor_kind: AgentExecutorKind::CloudAgent,
-            tool_plan: json!({"extra_toolsets": true}),
-            created_by_id: uid(0x40),
-        };
-        let turn = render_first_turn(&bundle, "coding-task", &snapshotted, "acme_get_tool_schema")
-            .expect("renders");
-        assert!(
-            turn.text.contains("acme_get_tool_schema"),
-            "injected name reaches the shared prompt"
-        );
-        // No snapshot, no instruction — even with a name on hand, the
-        // section stays hidden (`context.py:514-517`).
-        let unsnapshotted = RunRenderRef {
-            run_id: uid(0x80),
-            parent_run_id: None,
-            trigger: AgentRunTrigger::StateTransition.value().to_owned(),
-            executor_kind: AgentExecutorKind::CloudAgent,
-            tool_plan: json!({}),
-            created_by_id: uid(0x40),
-        };
-        let ce = render_first_turn(
-            &bundle,
-            "coding-task",
-            &unsnapshotted,
-            "acme_get_tool_schema",
-        )
-        .expect("renders");
-        assert!(!ce.text.contains("acme_get_tool_schema"));
     }
 
     #[test]
@@ -3118,14 +4744,14 @@ mod tests {
                 tool_plan: json!({}),
                 created_by_id: uid(0x40),
             },
-            "",
         )
         .expect("renders");
         assert!(turn.text.contains("You are reviewing"));
         assert!(turn.text.contains("FX6-1"));
+        let _ = after;
         assert_eq!(
             turn.manifest.as_array().expect("bare list").len(),
-            after["prompt_manifest"].as_array().unwrap().len()
+            LEAN_REVIEW_SECTIONS
         );
     }
 
@@ -3137,6 +4763,7 @@ mod tests {
             parent,
             creator_id: uid(0x40),
             pod_id: uid(0x50),
+            pod_once: false,
             fresh_session: false,
             trigger: AgentRunTrigger::StateTransition.value().to_owned(),
             now: now(),
@@ -3165,6 +4792,9 @@ mod tests {
             row.phase_kind,
             case["after"]["phase_kind"].as_str().unwrap()
         );
+        // The effective work type is stamped alongside the kind
+        // (PDASHOSS01-234): no issue override → the project default.
+        assert_eq!(row.work_type, "software");
         assert_eq!(row.trigger, AgentRunTrigger::StateTransition.value());
         assert_eq!(row.executor_kind, AgentExecutorKind::LocalRunner);
         assert_eq!(row.tool_plan, json!({}));
@@ -3174,14 +4804,15 @@ mod tests {
                 "repo_url": "https://example.com/fx6.git",
                 "repo_ref": "main",
                 "git_work_branch": null,
+                "issue_identifier": "FX6-1",
+                "project_identifier": "FX6",
+                "workpad_body": "",
+                "workpad_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             })
         );
         let (prompt, manifest) = seam.saved_prompts.borrow()[&created].clone();
         assert!(prompt.contains("FX6-1"));
-        assert_eq!(
-            manifest.as_array().unwrap().len(),
-            case["after"]["prompt_manifest"].as_array().unwrap().len()
-        );
+        assert_eq!(manifest.as_array().unwrap().len(), LEAN_CODING_SECTIONS);
         // Owner stays NULL: the INSERT hardcodes it.
         assert!(RUN_INSERT_SQL.contains("owner_id"));
     }
@@ -3198,8 +4829,12 @@ mod tests {
                 id: uid(0x60),
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
+                name: "runner-fixture".to_owned(),
                 last_heartbeat_at: Some(now()),
                 paused_at: None,
+                provisioning: "personal".to_owned(),
+                pod_dispatch: "pod_member".to_owned(),
+                engine_paused: false,
             },
         );
         let outcome = create_and_dispatch_run(&mut seam, &dispatch_req(Some(parent)))
@@ -3226,8 +4861,12 @@ mod tests {
                 id: uid(0x60),
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
+                name: "runner-fixture".to_owned(),
                 last_heartbeat_at: Some(now()),
                 paused_at: None,
+                provisioning: "personal".to_owned(),
+                pod_dispatch: "pod_member".to_owned(),
+                engine_paused: false,
             },
         );
         let mut req = dispatch_req(Some(parent));
@@ -3242,43 +4881,7 @@ mod tests {
         assert_eq!(inserted[0].phase_kind, "review");
         let created = outcome.created_run.unwrap();
         let manifest = &seam.saved_prompts.borrow()[&created].1;
-        assert_eq!(manifest.as_array().unwrap().len(), 10);
-    }
-
-    #[tokio::test]
-    async fn c4_admission_error_failed() {
-        let dispatch = fixture(CREATE_DISPATCH);
-        let case = &dispatch["cases"]["C4_admission_error_failed"];
-        let mut seam = FakeSeam::minimal().with_bundle();
-        seam.lock = Some(Ok(Some(AdmissionError {
-            code: "run_quota_exceeded".to_owned(),
-            detail: "Cloud Agent queue is full for this workspace".to_owned(),
-        })));
-        let outcome = create_and_dispatch_run(&mut seam, &dispatch_req(None))
-            .await
-            .expect("failed, not error");
-        assert_eq!(outcome.reason, case["reason"].as_str().unwrap());
-        let created = outcome.created_run.expect("row exists");
-        assert!(seam.dispatched.is_empty());
-        assert!(seam.saved_prompts.borrow().is_empty());
-        assert_eq!(
-            seam.finalized,
-            vec![(
-                created,
-                "run_quota_exceeded".to_owned(),
-                "Cloud Agent queue is full for this workspace".to_owned()
-            )]
-        );
-        let run = seam.runs.borrow()[&created].clone();
-        assert_eq!(run.status, AgentRunStatus::Failed);
-        assert_eq!(
-            run.error_code(),
-            case["after"]["error_code"].as_str().unwrap()
-        );
-        assert_eq!(run.error(), case["after"]["error"].as_str().unwrap());
-        assert_eq!(run.ended_at, Some(now()));
-        assert!(run.prompt.is_empty());
-        assert_eq!(run.prompt_manifest, None);
+        assert_eq!(manifest.as_array().unwrap().len(), LEAN_REVIEW_SECTIONS);
     }
 
     #[tokio::test]
@@ -3311,24 +4914,13 @@ mod tests {
         assert!(seam.dispatched.is_empty());
     }
 
-    #[tokio::test]
-    async fn lock_capacity_raise_propagates() {
-        let mut seam = FakeSeam::minimal().with_bundle();
-        seam.lock = Some(Err(CreationError::CapacityRefused(
-            "Cloud Agent queue is full for this workspace".to_owned(),
-        )));
-        let err = create_and_dispatch_run(&mut seam, &dispatch_req(None))
-            .await
-            .expect_err("propagates");
-        assert!(matches!(err, CreationError::CapacityRefused(_)));
-    }
-
     fn continuation_req(parent: RunView) -> ContinuationRequest {
         ContinuationRequest {
             issue_id: uid(0x01),
             parent,
             creator_id: uid(0x40),
             pod_id: uid(0x50),
+            pod_once: false,
             trigger: AgentRunTrigger::CommentAndRun.value().to_owned(),
             now: now(),
         }
@@ -3348,8 +4940,12 @@ mod tests {
                 id: uid(0x60),
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
+                name: "runner-fixture".to_owned(),
                 last_heartbeat_at: Some(now()),
                 paused_at: None,
+                provisioning: "personal".to_owned(),
+                pod_dispatch: "pod_member".to_owned(),
+                engine_paused: false,
             },
         );
         let outcome = create_continuation_run(&mut seam, &continuation_req(parent))
@@ -3363,92 +4959,6 @@ mod tests {
         assert_eq!(inserted[0].parent_run_id, Some(uid(0x70)));
         assert_eq!(inserted[0].pinned_runner_id, Some(uid(0x60)));
         assert_eq!(inserted[0].trigger, AgentRunTrigger::CommentAndRun.value());
-    }
-
-    #[tokio::test]
-    async fn continuation_renders_limits_from_in_memory_plan() {
-        // PIDASHCONV-1072: Django composes from the in-memory plan
-        // (`run.prompt = build_first_turn(issue, run)` before any
-        // `refresh_from_db`; `service.py:507`), so the `Limits:` line
-        // prints `policy.py` dict order even though the stored row
-        // carries jsonb order. The seam round-trips the plan to prove
-        // the render does not read the row back.
-        let mut seam = FakeSeam::minimal().with_bundle();
-        seam.normalize_tool_plan = true;
-        seam.execution = Some(Ok(ExecutionFields {
-            executor_kind: AgentExecutorKind::CloudAgent,
-            tool_plan: json!({
-                "v": 1,
-                "catalog_version": 1,
-                "tools": [],
-                "required_tools": [],
-                "limits": {
-                    "model_requests": 25,
-                    "tool_calls": 20,
-                    "writes": 3,
-                    "input_tokens": 144_000,
-                    "output_tokens": 16_000,
-                    "total_tokens": 160_000,
-                    "wall_seconds": 285,
-                },
-                "unavailable_capabilities": ["filesystem", "shell", "worktree"],
-                "extra_toolsets": false,
-            }),
-            pinned_runner_entry: Some(None),
-            error_code: None,
-            cloud_admission_error: None,
-        }));
-        let outcome = create_continuation_run(&mut seam, &continuation_req(run_view(uid(0x70))))
-            .await
-            .expect("creates");
-        assert_eq!(outcome.reason, REASON_CREATED);
-        let created = outcome.created_run.expect("created");
-        // The stored row carries jsonb order (the seam round-tripped it).
-        let stored: Vec<String> = seam.runs.borrow()[&created].tool_plan["limits"]
-            .as_object()
-            .expect("limits object")
-            .keys()
-            .cloned()
-            .collect();
-        assert_eq!(
-            stored,
-            vec![
-                "writes",
-                "tool_calls",
-                "input_tokens",
-                "total_tokens",
-                "wall_seconds",
-                "output_tokens",
-                "model_requests",
-            ]
-        );
-        // The composed prompt prints policy.py dict order.
-        let prompts = seam.saved_prompts.borrow();
-        let (prompt, _) = &prompts[&created];
-        let line = prompt
-            .lines()
-            .find(|line| line.starts_with("Limits:"))
-            .expect("Limits line");
-        assert_eq!(
-            line,
-            "Limits: {'model_requests': 25, 'tool_calls': 20, 'writes': 3, \
-             'input_tokens': 144000, 'output_tokens': 16000, \
-             'total_tokens': 160000, 'wall_seconds': 285}."
-        );
-    }
-
-    #[tokio::test]
-    async fn k2_admission_error_failed() {
-        let mut seam = FakeSeam::minimal().with_bundle();
-        seam.lock = Some(Ok(Some(AdmissionError {
-            code: "run_quota_exceeded".to_owned(),
-            detail: "Cloud Agent queue is full for this workspace".to_owned(),
-        })));
-        let outcome = create_continuation_run(&mut seam, &continuation_req(run_view(uid(0x70))))
-            .await
-            .expect("failed, not error");
-        assert_eq!(outcome.reason, "run_quota_exceeded");
-        assert!(seam.dispatched.is_empty());
     }
 
     #[tokio::test]
@@ -3486,12 +4996,16 @@ mod tests {
                 id: uid(0x60),
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
+                name: "runner-fixture".to_owned(),
                 last_heartbeat_at: Some(now()),
                 paused_at: None,
+                provisioning: "personal".to_owned(),
+                pod_dispatch: "pod_member".to_owned(),
+                engine_paused: false,
             },
         );
         seam.execution = Some(Ok(ExecutionFields {
-            executor_kind: AgentExecutorKind::ManagedRunner,
+            executor_kind: AgentExecutorKind::PidashAgent,
             tool_plan: json!({}),
             pinned_runner_entry: Some(Some(uid(0x61))),
             error_code: None,
@@ -3514,12 +5028,16 @@ mod tests {
                 id: uid(0x60),
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
+                name: "runner-fixture".to_owned(),
                 last_heartbeat_at: Some(now()),
                 paused_at: None,
+                provisioning: "personal".to_owned(),
+                pod_dispatch: "pod_member".to_owned(),
+                engine_paused: false,
             },
         );
         seam.execution = Some(Ok(ExecutionFields {
-            executor_kind: AgentExecutorKind::CloudAgent,
+            executor_kind: AgentExecutorKind::RetiredCloudRun,
             tool_plan: json!({"tools": []}),
             pinned_runner_entry: Some(None),
             error_code: None,
@@ -3708,13 +5226,19 @@ mod tests {
         );
         assert_eq!(seam.dispatched, vec![replacement.id]);
         // The replacement's config refreshed the repo snapshot (the
-        // marker never reaches the new row).
+        // marker never reaches the new row), stamped with the runner
+        // context (NEWPIDASH-320 §6.1, §6.3): H2 renders the coding-task
+        // prompt, so the current (empty) workpad rides along.
         assert_eq!(
             replacement.run_config,
             json!({
                 "repo_url": "https://example.com/fx6.git",
                 "repo_ref": "main",
                 "git_work_branch": null,
+                "issue_identifier": "FX6-1",
+                "project_identifier": "FX6",
+                "workpad_body": "",
+                "workpad_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             })
         );
     }
@@ -3985,6 +5509,7 @@ mod tests {
             "assigned_at",
             "started_at",
             "ended_at",
+            "pin_kind",
         ] {
             assert!(RUN_INSERT_SQL.contains(column), "missing {column}");
         }
@@ -4000,9 +5525,13 @@ mod tests {
         ] {
             assert!(!RUN_INSERT_SQL.contains(column), "generated {column}");
         }
-        // `$1..$14` in NewAgentRun order.
+        // `$1..$14` in NewAgentRun order; `$15` carries pin_kind
+        // (appended at the end), `$16` the work_type stamp after
+        // phase_kind.
         assert!(RUN_INSERT_SQL.contains("$14"));
-        assert!(!RUN_INSERT_SQL.contains("$15"));
+        assert!(RUN_INSERT_SQL.contains("$15"));
+        assert!(RUN_INSERT_SQL.contains("$16"));
+        assert!(RUN_INSERT_SQL.contains("work_type"));
         assert!(PROMPT_UPDATE_SQL.contains("prompt_manifest"));
         assert!(!finalize_update_sql().contains("queue_position"));
         assert!(!RUN_INSERT_SQL.contains("queue_position"));

@@ -35,7 +35,7 @@
 //! (pure — the drivers lock, call, and save around it), L6 builders /
 //! parenting / resolvers, the F-06 [`check_project_role`](pidash_auth::permissions::membership::check_project_role)
 //! kernel over L2 role-fact SQL, D-11 L3
-//! [`user_has_llm_config`](crate::dispatch::policy::user_has_llm_config), and
+//! [`user_has_llm_config`](crate::run_creation::executor_policy::user_has_llm_config), and
 //! the merged prompting scheduler composer. `run_config` for scheduler runs
 //! is the literal `{}` (`service.py:963`); scheduler rows stamp no
 //! `phase_kind` (the model default `""`).
@@ -88,21 +88,21 @@ use uuid::Uuid;
 use crate::domain::identity::AgentUserCollisionError;
 use pidash_auth::permissions::membership::check_project_role;
 pub use pidash_auth::permissions::membership::ProjectRoleFacts;
+use pidash_db::agent_runs::status::{AgentRunStatus, AgentRunTrigger};
 use pidash_db::app_project::models::state::StateGroup;
-use pidash_db::dispatch::status::{AgentRunStatus, AgentRunTrigger};
 use pidash_db::orchestration::querysets::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
 use pidash_db::orchestration::runs::ACTIVE_STATUSES;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::orchestration::{
-    is_ticking_state, ContinuationOutcome, StateRef, TickerDecision, TickerEvent,
-    TransitionOutcome, CONTINUATION_ELIGIBLE_GROUPS,
+    phase_config_for, stage_runs_automatically, ContinuationOutcome, StageSwitches, StateRef,
+    TickerDecision, TickerEvent, TransitionOutcome, CONTINUATION_ELIGIBLE_GROUPS,
 };
 
-use crate::dispatch::policy::{user_has_llm_config, UserFlags};
 use crate::prompting::composer::OverrideRow;
 use crate::prompting::context::SchedulerContextInput;
 use crate::prompting::{composer, context};
+use crate::run_creation::executor_policy::{user_has_llm_config, UserFlags};
 
 use super::clock::ClockError;
 use super::clock::{self, ClockIssue, ClockWrite, ProjectClockPolicy};
@@ -234,26 +234,52 @@ pub const SCHEDULER_SELECT_SQL: &str =
 /// project id.
 pub const CLOCK_POLICY_SQL: &str = "SELECT agent_ticking_enabled, agent_default_max_ticks, \
     agent_default_interval_seconds, agent_review_default_interval_seconds, \
-    agent_test_default_interval_seconds FROM projects WHERE id = $1";
+    agent_test_default_interval_seconds, settings FROM projects WHERE id = $1";
+
+/// SeaORM form of [`CLOCK_POLICY_SQL`]: the project's
+/// `(agent_ticking_enabled, agent_default_max_ticks,
+/// agent_default_interval_seconds, agent_review_default_interval_seconds,
+/// agent_test_default_interval_seconds, settings)`, no soft-delete guard.
+pub async fn clock_policy(
+    db: &impl sea_orm::ConnectionTrait,
+    project_id: uuid::Uuid,
+) -> Result<Option<(bool, i32, i32, i32, i32, serde_json::Value)>, sea_orm::DbErr> {
+    use pidash_db::entity::projects;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    projects::Entity::find()
+        .select_only()
+        .columns([
+            projects::Column::AgentTickingEnabled,
+            projects::Column::AgentDefaultMaxTicks,
+            projects::Column::AgentDefaultIntervalSeconds,
+            projects::Column::AgentReviewDefaultIntervalSeconds,
+            projects::Column::AgentTestDefaultIntervalSeconds,
+            projects::Column::Settings,
+        ])
+        .filter(projects::Column::Id.eq(project_id))
+        .into_tuple()
+        .one(db)
+        .await
+}
 
 /// The scheduler full-row INSERT (`AgentRun.objects.create`,
 /// `service.py:953-965`): the same 36 non-generated columns in model
 /// order as L6's `RUN_INSERT_SQL`, with the scheduler VALUES shape —
 /// `work_item` NULL, `scheduler_binding` bound, `parent_run` NULL, the
 /// `'scheduler'` trigger and `'{}'` run config as literals (fixed by the
-/// call path, like `'queued'`), no `phase_kind` stamp (the model default
-/// `""`). `$1..$10` carry the caller-supplied fields in
+/// call path, like `'queued'`), no `phase_kind` or `work_type` stamp (the
+/// model default `""`, bound as the `''` literal). `$1..$10` carry the caller-supplied fields in
 /// [`NewSchedulerRun`] order.
 pub const SCHEDULER_RUN_INSERT_SQL: &str =
     "INSERT INTO agent_run (id, workspace_id, owner_id, created_by_id, \
     pod_id, runner_id, pinned_runner_id, work_item_id, scheduler_binding_id, parent_run_id, \
     status, executor_kind, dispatch_attempts, cancel_requested_at, cancel_reason, \
     tool_plan, terminal_hooks_applied_at, terminal_capacity_released_at, prompt, trigger, \
-    prompt_manifest, phase_kind, run_config, required_capabilities, thread_id, agent_metadata, \
-    lease_expires_at, done_payload, error_details, llm_model, usage, created_at, \
+    prompt_manifest, phase_kind, work_type, run_config, required_capabilities, thread_id, agent_metadata, \
+    lease_expires_at, done_payload, error_details, failure_reason, llm_model, usage, created_at, \
     assigned_at, started_at, ended_at) \
     VALUES ($1, $2, NULL, $3, $4, NULL, $5, NULL, $6, NULL, 'queued', $7, 0, NULL, '', $9, \
-    NULL, NULL, '', 'scheduler', NULL, '', '{}', '[]', '', '{}', NULL, NULL, $8, '', '{}', $10, \
+    NULL, NULL, '', 'scheduler', NULL, '', '', '{}', '[]', '', '{}', NULL, NULL, $8, '', '', '{}', $10, \
     NULL, NULL, NULL)";
 
 /// The scheduler INSERT as executed: [`SCHEDULER_RUN_INSERT_SQL`] plus
@@ -330,6 +356,10 @@ pub struct NewSchedulerRun {
     /// path's `{"code": …}`).
     pub error_details: Value,
     pub tool_plan: Value,
+    /// The scheduler's project identifier (`NEWPIDASH-320` §6.3): stamped
+    /// into `run_config` at insert so the runner can default
+    /// `PIDASH_PROJECT` for scheduler runs.
+    pub project_identifier: String,
     /// `created_at` (`auto_now_add`, supplied explicitly).
     pub now: DateTime<Utc>,
 }
@@ -512,17 +542,43 @@ pub trait PreflightSeam {
         pod_id: Uuid,
         triggered_by: &str,
     ) -> Result<bool, CreationError>;
+
+    /// The `pod_once` preflight (PDASHOSS01-350, design §23.3): the
+    /// authorization (`pod_once_not_allowed` / `pod_once_not_applicable`)
+    /// and the pod-branch availability (`no_eligible_runner_in_pod`).
+    /// `None` means proceed; `Some(code)` is the refusal reason and
+    /// nothing is created (and nothing bounces).
+    async fn pod_once_preflight(
+        &mut self,
+        issue_id: Uuid,
+        creator_id: Uuid,
+        pod_id: Uuid,
+    ) -> Result<Option<String>, CreationError>;
 }
 
 // ---------------------------------------------------------------------------
 // Pure units
 // ---------------------------------------------------------------------------
 
-/// A state transition triggers a run when `to_state` is one of the
-/// registered ticking states (`_is_delegation_trigger`,
-/// `service.py:170-177`).
-pub fn is_delegation_trigger(to_state: Option<&StateRef<'_>>) -> bool {
-    is_ticking_state(to_state)
+/// A state transition triggers a run when `to_state` is a registered
+/// phase that runs automatically in this project
+/// (`_is_delegation_trigger`, `service.py:170-177`; lean agent workflow
+/// §6.1 adds the project's stage switches).
+pub fn is_delegation_trigger(to_state: Option<&StateRef<'_>>, switches: StageSwitches) -> bool {
+    stage_runs_automatically(to_state, switches)
+}
+
+/// The project's stage switches for `issue_id` — both on for a
+/// project-less issue.
+async fn issue_stage_switches<S: EntriesSeam>(
+    seam: &mut S,
+    issue_id: Uuid,
+) -> Result<StageSwitches, EntriesError> {
+    let issue = seam.issue(issue_id).await?;
+    Ok(match issue.project_id {
+        Some(project_id) => seam.clock_policy(project_id).await?.stage_switches(),
+        None => StageSwitches::ALL,
+    })
 }
 
 /// `AgentRun.is_active` (`runner/models.py:1146-1160`): active runs occupy
@@ -571,6 +627,10 @@ pub struct TransitionRequest {
     pub jitter_secs: f64,
     /// The crum user for the ticker create-shape, or `None` on system paths.
     pub created_by: Option<Uuid>,
+    /// One-shot pod run (PDASHOSS01-350, design §23.3): the run goes to
+    /// the pod, unpinned, for this run only; the issue stays dedicated.
+    /// `false` everywhere except the assistant-tool dispatch surface.
+    pub pod_once: bool,
 }
 
 /// One `handle_issue_comment` call (`service.py:349-440`).
@@ -608,6 +668,12 @@ pub struct FireRequest {
     pub jitter_secs: f64,
     /// The crum user for the ticker create-shape, or `None` on system paths.
     pub created_by: Option<Uuid>,
+    /// One-shot pod run (design §23.3, PIDASHCONV-1723): when `true` the
+    /// transition's run is created unpinned in the pod. Threaded from
+    /// `FireSpec::pod_once` (the MCP `pin:"pod_once"` on the state
+    /// move) to `TransitionRequest::pod_once`; `false` on the sync
+    /// path.
+    pub pod_once: bool,
 }
 
 /// Lock the ticker, apply one clock event, and persist the write — the
@@ -686,10 +752,21 @@ pub async fn handle_issue_state_transition<S: EntriesSeam, P: PreflightSeam>(
         group: &state.group,
         name: &state.name,
     });
-    let from_ticking = is_ticking_state(from_ref.as_ref());
-    let to_ticking = is_ticking_state(to_ref.as_ref());
+    // Registered stages, whatever the project's switches say. The switches
+    // are only read when a stage is involved (most moves touch none).
+    let from_stage = phase_config_for(from_ref.as_ref()).is_some();
+    let to_stage = phase_config_for(to_ref.as_ref()).is_some();
+    let switches = if from_stage || to_stage {
+        issue_stage_switches(seam, req.issue_id).await?
+    } else {
+        StageSwitches::ALL
+    };
+    let from_ticking = stage_runs_automatically(from_ref.as_ref(), switches);
+    let to_ticking = stage_runs_automatically(to_ref.as_ref(), switches);
+    // A move between two different stages, switched on or off: leaving
+    // In Progress for one of them remembers the implementation run.
     let cross_stage = match (&req.from_state, &req.to_state) {
-        (Some(from), Some(to)) => from_ticking && to_ticking && from.group != to.group,
+        (Some(from), Some(to)) => from_stage && to_stage && from.group != to.group,
         _ => false,
     };
 
@@ -706,8 +783,12 @@ pub async fn handle_issue_state_transition<S: EntriesSeam, P: PreflightSeam>(
         resume_parent = seam.latest_prior_run(req.issue_id).await?.map(|run| run.id);
     }
 
-    if from_ticking && !to_ticking {
-        let event = TickerEvent::left_bucket();
+    // Leaving any registered stage for one that does not run: the clock
+    // goes dormant. This includes leaving a stage that was switched off
+    // while its ticker was still armed (§6.4).
+    if from_stage && !to_ticking {
+        let mut event = TickerEvent::left_bucket();
+        event.resume_parent = resume_parent;
         reconcile_clock(
             seam,
             req.issue_id,
@@ -724,11 +805,49 @@ pub async fn handle_issue_state_transition<S: EntriesSeam, P: PreflightSeam>(
         });
     }
 
-    if !is_delegation_trigger(to_ref.as_ref()) {
+    if !is_delegation_trigger(to_ref.as_ref(), switches) {
         return Ok(TransitionOutcome {
             created_run: None,
             reason: REASON_NOT_A_TRIGGER_STATE.to_owned(),
         });
+    }
+
+    // Refusal before reconcile (§11.2, §23.3): a person's state move
+    // into a ticking state on an unavailable or usage-excluded
+    // dedicated runner is refused with nothing queued and the clock
+    // untouched. The state change itself stands (the caller already
+    // saved it); no run is created. An agent move (`moved_by_run`
+    // set) is automatic.
+    let creator = match req.actor {
+        Some(actor) => Some(actor),
+        None => resolve_fallback_creator(seam, req.issue_id).await?,
+    };
+    if req.moved_by_run.is_none() {
+        let creator = creator.unwrap_or_else(Uuid::nil);
+        let pin = CreationSeam::dedicated_pin(
+            seam,
+            &crate::orchestration::creation::DedicatedPinArgs {
+                issue_id: req.issue_id,
+                parent: None,
+                pod_id: None,
+                fresh_session: false,
+                creator_id: Some(creator),
+                trigger: AgentRunTrigger::StateTransition.value(),
+                pod_once: req.pod_once,
+                actor_id: creator,
+                now: req.now,
+            },
+        )
+        .await?;
+        if let Some(code) = pin.refusal {
+            if let Some(comment) = pin.refusal_comment {
+                CreationSeam::insert_system_comment(seam, &comment).await?;
+            }
+            return Ok(TransitionOutcome {
+                created_run: None,
+                reason: code.to_owned(),
+            });
+        }
     }
 
     let event = if from_ticking {
@@ -802,10 +921,6 @@ pub async fn handle_issue_state_transition<S: EntriesSeam, P: PreflightSeam>(
     let (parent, fresh_session) =
         parent_for_next_run(seam, req.issue_id, to_state_id, Some(cross_stage)).await?;
 
-    let creator = match req.actor {
-        Some(actor) => Some(actor),
-        None => resolve_fallback_creator(seam, req.issue_id).await?,
-    };
     let Some(creator) = creator else {
         return Ok(TransitionOutcome {
             created_run: None,
@@ -821,18 +936,30 @@ pub async fn handle_issue_state_transition<S: EntriesSeam, P: PreflightSeam>(
         });
     };
 
-    if !preflight
-        .preflight_eligibility_or_bounce(
-            req.issue_id,
-            creator,
-            pod,
-            AgentRunTrigger::StateTransition.value(),
-        )
+    if !req.pod_once {
+        if !preflight
+            .preflight_eligibility_or_bounce(
+                req.issue_id,
+                creator,
+                pod,
+                AgentRunTrigger::StateTransition.value(),
+            )
+            .await?
+        {
+            return Ok(TransitionOutcome {
+                created_run: None,
+                reason: REASON_NO_ELIGIBLE_RUNNER.to_owned(),
+            });
+        }
+    } else if let Some(code) = preflight
+        .pod_once_preflight(req.issue_id, creator, pod)
         .await?
     {
+        // §23.3: refused with the code, nothing queued, nothing bounced;
+        // the move itself already stands.
         return Ok(TransitionOutcome {
             created_run: None,
-            reason: REASON_NO_ELIGIBLE_RUNNER.to_owned(),
+            reason: code,
         });
     }
 
@@ -843,12 +970,19 @@ pub async fn handle_issue_state_transition<S: EntriesSeam, P: PreflightSeam>(
             parent,
             creator_id: creator,
             pod_id: pod,
+            pod_once: req.pod_once,
             fresh_session,
             trigger: AgentRunTrigger::StateTransition.value().to_owned(),
             now: req.now,
         },
     )
     .await?;
+    if req.pod_once && outcome.created_run.is_some() {
+        let comment =
+            CreationSeam::pod_once_started_comment(seam, req.issue_id, pod, creator, req.now)
+                .await?;
+        CreationSeam::insert_system_comment(seam, &comment).await?;
+    }
     Ok(outcome)
 }
 
@@ -919,6 +1053,35 @@ pub async fn handle_issue_comment<S: EntriesSeam>(
         });
     };
 
+    // Refusal before reconcile (§11.2): the comment is saved; the
+    // clock is never armed and one system comment explains why no
+    // run started.
+    let pin = CreationSeam::dedicated_pin(
+        seam,
+        &crate::orchestration::creation::DedicatedPinArgs {
+            issue_id: issue.id,
+            parent: None,
+            pod_id: None,
+            fresh_session: false,
+            creator_id: Some(actor_id),
+            trigger: AgentRunTrigger::CommentAndRun.value(),
+            pod_once: false,
+            actor_id,
+            now: req.now,
+        },
+    )
+    .await?;
+    if let Some(code) = pin.refusal {
+        if let Some(comment) = pin.refusal_comment {
+            CreationSeam::insert_system_comment(seam, &comment).await?;
+        }
+        return Ok(ContinuationOutcome {
+            created_run: None,
+            coalesced_into: None,
+            reason: code.to_owned(),
+        });
+    }
+
     // A human comment is engagement: one free run. If a run is in
     // flight, the clock queues the follow-up and fires it as soon as
     // the issue is free; otherwise re-time the clock and dispatch now —
@@ -928,7 +1091,12 @@ pub async fn handle_issue_comment<S: EntriesSeam>(
         group: &state.group,
         name: &state.name,
     });
-    if is_ticking_state(state_ref.as_ref()) {
+    let switches = if phase_config_for(state_ref.as_ref()).is_some() {
+        issue_stage_switches(seam, issue.id).await?
+    } else {
+        StageSwitches::ALL
+    };
+    if stage_runs_automatically(state_ref.as_ref(), switches) {
         let event = TickerEvent::human_run_requested(
             true,
             Some(actor_id),
@@ -971,6 +1139,7 @@ pub async fn handle_issue_comment<S: EntriesSeam>(
             parent: prior,
             creator_id: actor_id,
             pod_id: pod,
+            pod_once: false,
             trigger: AgentRunTrigger::CommentAndRun.value().to_owned(),
             now: req.now,
         },
@@ -1040,7 +1209,7 @@ pub async fn dispatch_scheduler_run<S: EntriesSeam>(
     let project = seam.project(project_id).await?;
     let workspace = seam.workspace(binding.workspace_id).await?;
     let (creator, creator_valid): (Option<Uuid>, bool) =
-        if project.default_agent_executor == AgentExecutorKind::CloudAgent.value() {
+        if project.default_agent_executor == AgentExecutorKind::RetiredCloudRun.value() {
             // Cloud runs execute against the creator's BYOK LLM config, so
             // the execution principal must also have a usable provider key.
             let mut creator = None;
@@ -1105,25 +1274,11 @@ pub async fn dispatch_scheduler_run<S: EntriesSeam>(
         }
         Err(ExecutionError::Store(error)) => return Err(error.into()),
     };
-    let mut admission_error = execution.cloud_admission_error.clone();
+    let admission_error = execution.cloud_admission_error.clone();
 
-    // Permanent misconfiguration — refuse BEFORE creating a run so a
-    // broken binding writes last_error once instead of minting a FAILED
-    // AgentRun on every scheduler firing. Note the execution's executor
-    // kind, not the project default.
-    if execution.executor_kind == AgentExecutorKind::CloudAgent
-        && binding.outcome_mode != OUTCOME_MODE_CREATE_ISSUE
-    {
-        return Ok(SchedulerOutcome {
-            run: None,
-            error: Some(SCHEDULER_OUTCOME_MODE_REFUSAL.to_owned()),
-        });
-    }
-
-    admission_error = seam
-        .lock_cloud_creation_capacity(project.workspace_id, execution.executor_kind, true)
-        .await?
-        .or(admission_error);
+    // P3 step C: the cloud misconfiguration arm died with the
+    // retired plane. Admission stays as recorded on the execution
+    // fields (P3 step B: the capacity gate's seam call is gone).
     let run_id = Uuid::new_v4();
     let run = seam
         .insert_scheduler_run(&NewSchedulerRun {
@@ -1138,6 +1293,7 @@ pub async fn dispatch_scheduler_run<S: EntriesSeam>(
                 execution.error_code.as_deref().unwrap_or_default(),
             ),
             tool_plan: execution.tool_plan.clone(),
+            project_identifier: project.identifier.clone(),
             now: req.now,
         })
         .await?;
@@ -1207,15 +1363,9 @@ async fn render_scheduler_turn<S: EntriesSeam>(
     // attribute (`run.prompt = build_scheduler_turn(binding, run)` before
     // any `refresh_from_db`; `service.py:977`). The `Limits:` line must
     // print `policy.py` dict order (PIDASHCONV-1072).
-    let extra_enabled = tool_plan
-        .get("extra_toolsets")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let schema_tool = if extra_enabled {
-        seam.extra_toolsets_schema_tool()
-    } else {
-        String::new()
-    };
+    // P4: extra toolsets died; keys render always-false/empty.
+    let extra_enabled = false;
+    let schema_tool = String::new();
     let input = SchedulerContextInput {
         workspace_slug: workspace.slug.clone(),
         workspace_name: workspace.name.clone(),
@@ -1227,6 +1377,7 @@ async fn render_scheduler_turn<S: EntriesSeam>(
         scheduler_name: scheduler.name.clone(),
         scheduler_description: Some(scheduler.description.clone()),
         run_id: run.id.to_string(),
+        rendered_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         executor_kind: run.executor_kind.value().to_owned(),
         available_tools: tool_plan.get("tools").cloned().unwrap_or(Value::Null),
         unavailable_capabilities: tool_plan
@@ -1312,6 +1463,7 @@ pub fn fire_transition_request(
         now: req.now,
         jitter_secs: req.jitter_secs,
         created_by: req.created_by,
+        pod_once: req.pod_once,
     }
 }
 
@@ -1368,21 +1520,24 @@ mod tests {
 
     use crate::domain::identity::AgentUserCollisionError;
     use pidash_auth::permissions::membership::ProjectRoleFacts;
-    use pidash_db::dispatch::status::{AgentRunStatus, AgentRunTrigger};
+    use pidash_db::agent_runs::status::{AgentRunStatus, AgentRunTrigger};
     use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
-    use pidash_types::dispatch::AgentExecutorKind;
+    use pidash_types::agent_runs::AgentExecutorKind;
     use pidash_types::orchestration::StateRef;
 
     use super::*;
-    use crate::dispatch::UserFlags;
     use crate::orchestration::clock::{ClockWrite, ProjectClockPolicy};
     use crate::orchestration::creation::{
         AdmissionError, ExecutionError, ExecutionFields, ExecutionRequest, IssueView, NewAgentRun,
-        PodView, ProjectView, RenderBundle, RunView, RunnerView, StateView,
+        NewSystemComment, PinOutcome, PodView, ProjectView, RenderBundle, RunView, RunnerView,
+        StateView,
     };
-    use crate::orchestration::creation::{CreationError, CreationSeam, FinalizeAgentRunSeam};
+    use crate::orchestration::creation::{
+        CreationError, CreationSeam, DedicatedPinArgs, FinalizeAgentRunSeam,
+    };
     use crate::prompting::composer::OverrideRow;
     use crate::prompting::{composer, context};
+    use crate::run_creation::UserFlags;
 
     static TRANSITION_FIXTURE: &str =
         include_str!("../../../../fixtures/orchestration/fx07_entries/transition.matrix.json");
@@ -1438,6 +1593,7 @@ mod tests {
             parent_id: None,
             created_by_id: Some(uid(0x40)),
             assigned_pod_id: None,
+            assigned_runner_id: None,
             agent_executor: None,
             git_work_branch: None,
             workpad: None,
@@ -1446,6 +1602,7 @@ mod tests {
             priority: Some("none".to_owned()),
             sequence_id: 10,
             target_date: None,
+            work_type: None,
         }
     }
 
@@ -1465,6 +1622,7 @@ mod tests {
             interval_impl: 10_800,
             interval_review: 10_800,
             interval_test: 10_800,
+            default_work_type: "software".to_owned(),
         }
     }
 
@@ -1477,6 +1635,7 @@ mod tests {
             agent_default_interval_seconds: Some(10_800),
             agent_review_default_interval_seconds: Some(10_800),
             agent_test_default_interval_seconds: Some(10_800),
+            ..Default::default()
         }
     }
 
@@ -1496,6 +1655,7 @@ mod tests {
             pod_id: uid(0x50),
             runner_id: None,
             pinned_runner_id: None,
+            pin_kind: String::new(),
             parent_run_id: None,
             work_item_id: Some(uid(0x01)),
             status,
@@ -1566,6 +1726,7 @@ mod tests {
             has_parent_run: false,
             ticker_parent_payload: None,
             override_rows: Vec::new(),
+            stages: Default::default(),
         }
     }
 
@@ -1662,6 +1823,9 @@ mod tests {
         rollbacks: usize,
         policies: HashMap<Uuid, ProjectClockPolicy>,
         bindings: HashMap<Uuid, BindingView>,
+        assigned_runners: HashMap<Uuid, Option<Uuid>>,
+        system_comments: Vec<NewSystemComment>,
+        cleared_threads: Vec<Uuid>,
         schedulers: HashMap<Uuid, SchedulerView>,
         workspaces: HashMap<Uuid, WorkspaceView>,
         role_facts: HashMap<Uuid, (bool, bool, bool, bool)>,
@@ -1850,6 +2014,7 @@ mod tests {
                 pod_id: row.pod_id,
                 runner_id: None,
                 pinned_runner_id: row.pinned_runner_id,
+                pin_kind: row.pin_kind.clone(),
                 parent_run_id: row.parent_run_id,
                 work_item_id: Some(row.work_item_id),
                 status: AgentRunStatus::Queued,
@@ -1901,15 +2066,6 @@ mod tests {
             self.execution.clone().expect("script execution")
         }
 
-        async fn lock_cloud_creation_capacity(
-            &mut self,
-            _workspace_id: Uuid,
-            _executor_kind: AgentExecutorKind,
-            _automatic: bool,
-        ) -> Result<Option<AdmissionError>, CreationError> {
-            self.lock.clone().expect("script lock")
-        }
-
         fn dispatch_after_commit(&mut self, run_id: Uuid) {
             self.dispatched.push(run_id);
         }
@@ -1927,8 +2083,63 @@ mod tests {
                 .ok_or_else(|| CreationError::Db("no bundle".to_owned()))
         }
 
-        fn extra_toolsets_schema_tool(&self) -> String {
-            String::new()
+        async fn dedicated_pin(
+            &mut self,
+            args: &DedicatedPinArgs<'_>,
+        ) -> Result<PinOutcome, CreationError> {
+            let assigned = self
+                .assigned_runners
+                .get(&args.issue_id)
+                .copied()
+                .unwrap_or(None);
+            let (runner_id, pin_kind) = match assigned {
+                Some(runner_id) if !args.pod_once => (Some(runner_id), "dedicated".to_owned()),
+                _ => (
+                    None,
+                    crate::domain::issue_assignment::PIN_LOCALITY.to_owned(),
+                ),
+            };
+            Ok(PinOutcome {
+                refusal: None,
+                refusal_comment: None,
+                waiting_comment: None,
+                runner_id,
+                pin_kind,
+            })
+        }
+
+        async fn insert_system_comment(
+            &mut self,
+            comment: &NewSystemComment,
+        ) -> Result<(), CreationError> {
+            self.system_comments.push(comment.clone());
+            Ok(())
+        }
+
+        async fn clear_parent_thread(&mut self, run_id: Uuid) -> Result<(), CreationError> {
+            self.cleared_threads.push(run_id);
+            Ok(())
+        }
+
+        async fn pod_once_started_comment(
+            &mut self,
+            issue_id: Uuid,
+            _pod_id: Uuid,
+            actor_id: Uuid,
+            now: DateTime<Utc>,
+        ) -> Result<NewSystemComment, CreationError> {
+            let issue = self.issue(issue_id).await?;
+            Ok(NewSystemComment {
+                id: Uuid::new_v4(),
+                description_id: Uuid::new_v4(),
+                now,
+                project_id: issue.project_id.unwrap_or_else(Uuid::nil),
+                workspace_id: issue.workspace_id,
+                issue_id,
+                actor_id,
+                comment_html: "pod_once".to_owned(),
+                comment_stripped: "pod_once".to_owned(),
+            })
         }
     }
 
@@ -2107,13 +2318,19 @@ mod tests {
                 pod_id: row.pod_id,
                 runner_id: None,
                 pinned_runner_id: row.pinned_runner_id,
+                pin_kind: String::new(),
                 parent_run_id: None,
                 work_item_id: None,
                 status: AgentRunStatus::Queued,
                 trigger: AgentRunTrigger::Scheduler.value().to_owned(),
                 executor_kind: row.executor_kind,
                 phase_kind: String::new(),
-                run_config: json!({}),
+                run_config: crate::orchestration::creation::stamp_run_context(
+                    json!({}),
+                    None,
+                    Some(&row.project_identifier),
+                    None,
+                ),
                 tool_plan,
                 error_details: row.error_details.clone(),
                 prompt: String::new(),
@@ -2190,8 +2407,19 @@ mod tests {
         ) -> Result<bool, CreationError> {
             self.calls
                 .push((issue_id, creator_id, pod_id, triggered_by.to_owned()));
-            self.verdict
-                .ok_or_else(|| CreationError::Db("preflight not scripted".to_owned()))
+            match self.verdict {
+                Some(v) => Ok(v),
+                None => panic!("preflight consulted outside its script"),
+            }
+        }
+
+        async fn pod_once_preflight(
+            &mut self,
+            _issue_id: Uuid,
+            _creator_id: Uuid,
+            _pod_id: Uuid,
+        ) -> Result<Option<String>, CreationError> {
+            Ok(None)
         }
     }
 
@@ -2212,6 +2440,7 @@ mod tests {
             now,
             jitter_secs: 0.0,
             created_by: None,
+            pod_once: false,
         }
     }
 
@@ -2684,6 +2913,253 @@ mod tests {
         );
     }
 
+    // -- stage switches (lean agent workflow §6.2) -----------------------
+
+    /// Switch the fixture project's optional stages.
+    fn set_switches(seam: &mut FakeEntriesSeam, review: bool, test: bool) {
+        let policy = seam.policies.get_mut(&uid(0x20)).expect("policy");
+        policy.review_enabled = review;
+        policy.test_enabled = test;
+    }
+
+    /// An armed In Progress clock for the fixture issue.
+    fn armed_ticker(seam: &mut FakeEntriesSeam, now: DateTime<Utc>) {
+        let mut ticker = ticker_row(uid(0x01), now);
+        ticker.used = 2;
+        ticker.enabled = true;
+        ticker.next_run_at = Some(now);
+        seam.tickers.insert(uid(0x01), ticker);
+    }
+
+    #[tokio::test]
+    async fn stage_off_review_entry_creates_no_run_and_goes_dormant() {
+        let now = frozen_now();
+        let mut seam = FakeEntriesSeam::minimal();
+        set_switches(&mut seam, false, true);
+        set_issue_state(&mut seam, uid(0x32));
+        armed_ticker(&mut seam, now);
+
+        let from = seam.states[&uid(0x30)].clone();
+        let to = seam.states[&uid(0x32)].clone();
+        let mut preflight = FakePreflight::allow();
+        let outcome = handle_issue_state_transition(
+            &mut seam,
+            &mut preflight,
+            &transition_req(Some(from), Some(to), now),
+        )
+        .await
+        .expect("transition runs");
+        assert_eq!(outcome.reason, REASON_NOT_A_TRIGGER_STATE);
+        assert!(outcome.created_run.is_none());
+        assert!(seam.dispatched.is_empty());
+        // Left the bucket: the clock is kept but dormant, budget untouched.
+        let row = seam.tickers.get(&uid(0x01)).expect("ticker kept");
+        assert_eq!(row.next_run_at, None);
+        assert_eq!(row.used, 2);
+        assert!(preflight.calls.is_empty(), "no preflight for a label stage");
+    }
+
+    #[tokio::test]
+    async fn stage_off_test_entry_creates_no_run() {
+        let now = frozen_now();
+        let mut seam = FakeEntriesSeam::minimal();
+        seam.states.insert(uid(0x34), state_view("In Test", "test"));
+        set_switches(&mut seam, true, false);
+        set_issue_state(&mut seam, uid(0x34));
+        armed_ticker(&mut seam, now);
+
+        let from = seam.states[&uid(0x32)].clone();
+        let to = seam.states[&uid(0x34)].clone();
+        let mut preflight = FakePreflight::allow();
+        let outcome = handle_issue_state_transition(
+            &mut seam,
+            &mut preflight,
+            &transition_req(Some(from), Some(to), now),
+        )
+        .await
+        .expect("transition runs");
+        assert_eq!(outcome.reason, REASON_NOT_A_TRIGGER_STATE);
+        assert!(outcome.created_run.is_none());
+        assert!(seam.dispatched.is_empty());
+        assert_eq!(
+            seam.tickers.get(&uid(0x01)).expect("ticker").next_run_at,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn stage_off_label_to_label_touches_nothing() {
+        // Both optional stages off: In Review -> In Test is a move between
+        // two labels; no run, no clock row.
+        let now = frozen_now();
+        let mut seam = FakeEntriesSeam::minimal();
+        seam.states.insert(uid(0x34), state_view("In Test", "test"));
+        set_switches(&mut seam, false, false);
+        set_issue_state(&mut seam, uid(0x34));
+
+        let from = seam.states[&uid(0x32)].clone();
+        let to = seam.states[&uid(0x34)].clone();
+        let mut preflight = FakePreflight::allow();
+        let outcome = handle_issue_state_transition(
+            &mut seam,
+            &mut preflight,
+            &transition_req(Some(from), Some(to), now),
+        )
+        .await
+        .expect("transition runs");
+        assert_eq!(outcome.reason, REASON_NOT_A_TRIGGER_STATE);
+        assert!(outcome.created_run.is_none());
+        assert!(seam.tickers.is_empty());
+        assert!(seam.ticker_saves.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stage_on_review_still_creates_entry_run_when_test_is_off() {
+        let now = frozen_now();
+        let mut seam = FakeEntriesSeam::minimal();
+        set_switches(&mut seam, true, false);
+        set_issue_state(&mut seam, uid(0x32));
+        let mut seam = seam.with_bundle_state(uid(0x32));
+
+        let from = seam.states[&uid(0x30)].clone();
+        let to = seam.states[&uid(0x32)].clone();
+        let mut preflight = FakePreflight::allow();
+        let outcome = handle_issue_state_transition(
+            &mut seam,
+            &mut preflight,
+            &transition_req(Some(from), Some(to), now),
+        )
+        .await
+        .expect("transition runs");
+        let run_id = outcome.created_run.expect("review entry run");
+        assert_eq!(seam.runs[&run_id].phase_kind, "review");
+        assert_eq!(seam.dispatched, vec![run_id]);
+    }
+
+    #[tokio::test]
+    async fn stage_off_back_to_in_progress_creates_entry_run() {
+        // Leaving a label stage into In Progress (always on) is an entry.
+        let now = frozen_now();
+        let mut seam = FakeEntriesSeam::minimal();
+        set_switches(&mut seam, false, false);
+        let mut seam = seam.with_bundle();
+
+        let from = seam.states[&uid(0x32)].clone();
+        let to = seam.states[&uid(0x30)].clone();
+        let mut preflight = FakePreflight::allow();
+        let outcome = handle_issue_state_transition(
+            &mut seam,
+            &mut preflight,
+            &transition_req(Some(from), Some(to), now),
+        )
+        .await
+        .expect("transition runs");
+        let run_id = outcome.created_run.expect("coding entry run");
+        assert_eq!(seam.runs[&run_id].phase_kind, "coding-task");
+        assert!(seam.tickers.contains_key(&uid(0x01)), "clock armed");
+    }
+
+    #[tokio::test]
+    async fn leaving_a_switched_off_stage_disarms_a_still_armed_clock() {
+        // Review was switched off while the issue sat In Review with an
+        // armed clock; the issue then moves to Done before the next tick.
+        let now = frozen_now();
+        let mut seam = FakeEntriesSeam::minimal();
+        set_switches(&mut seam, false, true);
+        set_issue_state(&mut seam, uid(0x33));
+        armed_ticker(&mut seam, now);
+
+        let from = seam.states[&uid(0x32)].clone();
+        let to = seam.states[&uid(0x33)].clone();
+        let mut preflight = FakePreflight::allow();
+        let outcome = handle_issue_state_transition(
+            &mut seam,
+            &mut preflight,
+            &transition_req(Some(from), Some(to), now),
+        )
+        .await
+        .expect("transition runs");
+        assert_eq!(outcome.reason, REASON_NOT_A_TRIGGER_STATE);
+        let row = seam.tickers.get(&uid(0x01)).expect("ticker kept");
+        assert!(!row.enabled, "disarmed");
+        assert_eq!(row.next_run_at, None);
+    }
+
+    #[tokio::test]
+    async fn leaving_in_progress_for_a_switched_off_stage_keeps_the_resume_parent() {
+        let now = frozen_now();
+        let mut seam = FakeEntriesSeam::minimal();
+        set_switches(&mut seam, false, true);
+        set_issue_state(&mut seam, uid(0x32));
+        armed_ticker(&mut seam, now);
+        let prior = uid(0x65);
+        let mut prior_run = run_view(prior, AgentRunStatus::Completed);
+        prior_run.phase_kind = "coding-task".to_owned();
+        seam.runs.insert(prior, prior_run);
+        seam.latest.insert(uid(0x01), prior);
+
+        let from = seam.states[&uid(0x30)].clone();
+        let to = seam.states[&uid(0x32)].clone();
+        let mut preflight = FakePreflight::allow();
+        handle_issue_state_transition(
+            &mut seam,
+            &mut preflight,
+            &transition_req(Some(from), Some(to), now),
+        )
+        .await
+        .expect("transition runs");
+        let row = seam.tickers.get(&uid(0x01)).expect("ticker kept");
+        assert_eq!(row.resume_parent_run_id, Some(prior));
+        assert_eq!(row.next_run_at, None, "dormant in a label stage");
+    }
+
+    #[tokio::test]
+    async fn moves_between_non_stages_never_read_the_stage_switches() {
+        // No clock policy for the project: any read would fail the move.
+        let now = frozen_now();
+        let mut seam = FakeEntriesSeam::minimal();
+        seam.policies.clear();
+        set_issue_state(&mut seam, uid(0x33));
+        let from = seam.states[&uid(0x31)].clone();
+        let to = seam.states[&uid(0x33)].clone();
+        let mut preflight = FakePreflight::allow();
+        let outcome = handle_issue_state_transition(
+            &mut seam,
+            &mut preflight,
+            &transition_req(Some(from), Some(to), now),
+        )
+        .await
+        .expect("no policy read for Todo -> Done");
+        assert_eq!(outcome.reason, REASON_NOT_A_TRIGGER_STATE);
+    }
+
+    #[tokio::test]
+    async fn stage_off_comment_and_run_dispatches_bare_stage_run() {
+        // Design §6.3 / D6: a human can still start a run in a stage that
+        // is switched off. It uses the stage's own recipe and never arms
+        // the clock.
+        let now = frozen_now();
+        let mut seam = FakeEntriesSeam::minimal();
+        set_switches(&mut seam, false, true);
+        set_issue_state(&mut seam, uid(0x32));
+        let mut seam = seam.with_bundle_state(uid(0x32));
+        let prior = uid(0x6A);
+        let mut prior_run = run_view(prior, AgentRunStatus::Completed);
+        prior_run.phase_kind = "coding-task".to_owned();
+        seam.runs.insert(prior, prior_run);
+        seam.latest.insert(uid(0x01), prior);
+
+        let outcome = handle_issue_comment(&mut seam, &comment_req(Some(uid(0x40)), now))
+            .await
+            .expect("comment runs");
+        let run_id = outcome.created_run.expect("bare run created");
+        assert_eq!(seam.runs[&run_id].phase_kind, "review");
+        assert_eq!(seam.dispatched, vec![run_id]);
+        assert!(seam.tickers.is_empty(), "no clock in a label stage");
+        assert!(seam.ticker_saves.is_empty());
+        assert_eq!(seam.rollbacks, 0);
+    }
+
     // -- comment matrix (FX-ORCH-07 M1-M10) ------------------------------
 
     fn comment_req(actor_id: Option<Uuid>, now: DateTime<Utc>) -> CommentRequest {
@@ -2890,8 +3366,12 @@ mod tests {
                 id: uid(0x55),
                 pod_id: uid(0x50),
                 status: "online".to_owned(),
+                name: "runner-fixture".to_owned(),
                 last_heartbeat_at: Some(frozen_now()),
                 paused_at: None,
+                provisioning: "personal".to_owned(),
+                pod_dispatch: "pod_member".to_owned(),
+                engine_paused: false,
             },
         );
         let outcome = handle_issue_comment(&mut seam, &comment_req(Some(uid(0x40)), now))
@@ -3021,7 +3501,7 @@ mod tests {
         seam.projects
             .get_mut(&uid(0x20))
             .expect("project")
-            .default_agent_executor = AgentExecutorKind::CloudAgent.value().to_owned();
+            .default_agent_executor = AgentExecutorKind::RetiredCloudRun.value().to_owned();
     }
 
     #[tokio::test]
@@ -3071,7 +3551,9 @@ mod tests {
         assert!(run.prompt.contains(&run_id.to_string()));
         let manifest = run.prompt_manifest.expect("manifest stamped");
         assert!(manifest.is_array());
-        assert_eq!(manifest.as_array().expect("bare list").len(), 6);
+        // Six scheduler sections plus the `this-run` block first
+        // (NEWPIDASH-325).
+        assert_eq!(manifest.as_array().expect("bare list").len(), 7);
         assert_eq!(seam.dispatched, vec![run_id]);
         assert!(seam.finalized.is_empty());
         assert_eq!(seam.compose_calls, 1);
@@ -3380,180 +3862,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn s6_cloud_outcome_mode_refusal_before_insert() {
-        let case = scheduler_case("S6_outcome_mode_refusal");
-        let now = frozen_now();
-        let mut seam = scheduler_seam();
-        cloud_project(&mut seam);
-        role_pass(&mut seam, uid(0x40));
-        seam.llm.insert(uid(0x40), true);
-        seam.execution = Some(Ok(ExecutionFields {
-            executor_kind: AgentExecutorKind::CloudAgent,
-            tool_plan: json!({}),
-            pinned_runner_entry: Some(None),
-            error_code: None,
-            cloud_admission_error: None,
-        }));
-        seam.bindings
-            .get_mut(&uid(0x80))
-            .expect("binding")
-            .outcome_mode = "apply_fix".to_owned();
-        let outcome = dispatch_scheduler_run(
-            &mut seam,
-            &SchedulerRequest {
-                binding_id: uid(0x80),
-                now,
-            },
-        )
-        .await
-        .expect("scheduler runs");
-        assert!(outcome.run.is_none());
-        assert_eq!(outcome.error.as_deref(), case["returned"]["error"].as_str());
-        assert_eq!(
-            outcome.error.as_deref(),
-            Some(SCHEDULER_OUTCOME_MODE_REFUSAL)
-        );
-        assert!(seam.scheduler_runs.is_empty());
-        assert!(seam.dispatched.is_empty());
-    }
-
-    #[tokio::test]
-    async fn scheduler_renders_limits_from_in_memory_plan() {
-        // PIDASHCONV-1072: Django composes from the in-memory plan
-        // (`run.prompt = build_scheduler_turn(binding, run)` before any
-        // `refresh_from_db`; `service.py:977`), so the `Limits:` line
-        // prints `policy.py` dict order even though the stored row
-        // carries jsonb order. The seam round-trips the plan to prove
-        // the render does not read the row back.
-        let now = frozen_now();
-        let mut seam = scheduler_seam();
-        cloud_project(&mut seam);
-        role_pass(&mut seam, uid(0x40));
-        seam.llm.insert(uid(0x40), true);
-        seam.normalize_tool_plan = true;
-        seam.execution = Some(Ok(ExecutionFields {
-            executor_kind: AgentExecutorKind::CloudAgent,
-            tool_plan: json!({
-                "v": 1,
-                "catalog_version": 1,
-                "tools": [],
-                "required_tools": [],
-                "limits": {
-                    "model_requests": 25,
-                    "tool_calls": 20,
-                    "writes": 3,
-                    "input_tokens": 144_000,
-                    "output_tokens": 16_000,
-                    "total_tokens": 160_000,
-                    "wall_seconds": 285,
-                },
-                "unavailable_capabilities": ["filesystem", "shell", "worktree"],
-                "extra_toolsets": false,
-            }),
-            pinned_runner_entry: Some(None),
-            error_code: None,
-            cloud_admission_error: None,
-        }));
-        let outcome = dispatch_scheduler_run(
-            &mut seam,
-            &SchedulerRequest {
-                binding_id: uid(0x80),
-                now,
-            },
-        )
-        .await
-        .expect("scheduler runs");
-        assert!(outcome.error.is_none());
-        let run_id = outcome.run.expect("run returned");
-        // The stored row carries jsonb order (the seam round-tripped it).
-        let stored: Vec<String> = seam.runs[&run_id].tool_plan["limits"]
-            .as_object()
-            .expect("limits object")
-            .keys()
-            .cloned()
-            .collect();
-        assert_eq!(
-            stored,
-            vec![
-                "writes",
-                "tool_calls",
-                "input_tokens",
-                "total_tokens",
-                "wall_seconds",
-                "output_tokens",
-                "model_requests",
-            ]
-        );
-        // The composed prompt prints policy.py dict order.
-        let run = seam.runs.get(&run_id).expect("run stored");
-        let line = run
-            .prompt
-            .lines()
-            .find(|line| line.starts_with("Limits:"))
-            .expect("Limits line");
-        assert_eq!(
-            line,
-            "Limits: {'model_requests': 25, 'tool_calls': 20, 'writes': 3, \
-             'input_tokens': 144000, 'output_tokens': 16000, \
-             'total_tokens': 160000, 'wall_seconds': 285}."
-        );
-    }
-
-    #[tokio::test]
-    async fn s7_admission_failure_returns_failed_run() {
-        let case = scheduler_case("S7_admission_failed_returned");
-        let now = frozen_now();
-        let mut seam = scheduler_seam();
-        seam.lock = Some(Ok(Some(AdmissionError {
-            code: "run_quota_exceeded".to_owned(),
-            detail: "Cloud Agent queue is full for this workspace".to_owned(),
-        })));
-        let outcome = dispatch_scheduler_run(
-            &mut seam,
-            &SchedulerRequest {
-                binding_id: uid(0x80),
-                now,
-            },
-        )
-        .await
-        .expect("scheduler runs");
-        assert!(outcome.error.is_none());
-        let run_id = outcome.run.expect("failed run returned");
-        let run = seam.runs.get(&run_id).expect("run stored").clone();
-        let golden = &case["after"];
-        assert_eq!(run.status.value(), golden["status"].as_str().unwrap());
-        assert_eq!(run.trigger, golden["trigger"].as_str().unwrap());
-        assert_eq!(run.phase_kind, golden["phase_kind"].as_str().unwrap());
-        assert_eq!(run.parent_run_id, None);
-        assert_eq!(run.pinned_runner_id, None);
-        assert_eq!(run.created_by_id, uid(0x40));
-        assert_eq!(run.pod_id, uid(0x50));
-        assert_eq!(run.work_item_id, None);
-        assert_eq!(run.prompt, golden["prompt"].as_str().unwrap());
-        assert!(run.prompt_manifest.is_none());
-        assert!(golden["prompt_manifest"].is_null());
-        assert_eq!(run.run_config, golden["run_config"]);
-        assert_eq!(
-            run.executor_kind.value(),
-            golden["executor_kind"].as_str().unwrap()
-        );
-        assert_eq!(run.tool_plan, golden["tool_plan"]);
-        assert_eq!(run.error_code(), golden["error_code"].as_str().unwrap());
-        assert_eq!(run.error(), golden["error"].as_str().unwrap());
-        assert_eq!(run.ended_at, Some(now));
-        assert_eq!(
-            seam.finalized,
-            vec![(
-                run_id,
-                "run_quota_exceeded".to_owned(),
-                "Cloud Agent queue is full for this workspace".to_owned()
-            )]
-        );
-        assert!(seam.dispatched.is_empty());
-        assert_eq!(seam.compose_calls, 0);
-    }
-
-    #[tokio::test]
     async fn s8_render_failure_returns_failed_run() {
         let case = scheduler_case("S8_render_failed_returned");
         let now = frozen_now();
@@ -3620,6 +3928,8 @@ mod tests {
             prev_state_id: prev,
             current_state_id: current,
             dispatch_immediate: true,
+            pod_once: false,
+
             moved_by_run: None,
             now,
             jitter_secs: 0.0,
@@ -3979,18 +4289,20 @@ mod tests {
         );
         assert_eq!(
             CLOCK_POLICY_SQL,
-            "SELECT agent_ticking_enabled, agent_default_max_ticks, agent_default_interval_seconds, agent_review_default_interval_seconds, agent_test_default_interval_seconds FROM projects WHERE id = $1"
+            "SELECT agent_ticking_enabled, agent_default_max_ticks, agent_default_interval_seconds, agent_review_default_interval_seconds, agent_test_default_interval_seconds, settings FROM projects WHERE id = $1"
         );
     }
 
     #[test]
     fn scheduler_insert_shares_l6_column_order() {
-        // Same 38 non-generated columns in model order as RUN_INSERT_SQL;
-        // only the VALUES shape differs.
+        // Same non-generated columns in model order as RUN_INSERT_SQL,
+        // except the folded §9.1 `pin_kind` (the scheduler builds no pin;
+        // Django's scheduler-created rows default it to ""), only the
+        // VALUES shape differs.
         let head = |sql: &str| sql.split(") VALUES").next().expect("head").to_owned();
         assert_eq!(
             head(SCHEDULER_RUN_INSERT_SQL),
-            head(crate::orchestration::creation::RUN_INSERT_SQL)
+            head(crate::orchestration::creation::RUN_INSERT_SQL).replace(", pin_kind", "")
         );
         let values = SCHEDULER_RUN_INSERT_SQL
             .split("VALUES")
@@ -4024,28 +4336,34 @@ mod tests {
             group: "started",
             name: "In Progress",
         };
-        assert!(is_delegation_trigger(Some(&ticking)));
+        assert!(is_delegation_trigger(Some(&ticking), StageSwitches::ALL));
         let review = StateRef {
             group: "review",
             name: "In Review",
         };
-        assert!(is_delegation_trigger(Some(&review)));
+        assert!(is_delegation_trigger(Some(&review), StageSwitches::ALL));
         let todo = StateRef {
             group: "unstarted",
             name: "Todo",
         };
-        assert!(!is_delegation_trigger(Some(&todo)));
+        assert!(!is_delegation_trigger(Some(&todo), StageSwitches::ALL));
         let grooming = StateRef {
             group: "started",
             name: "Grooming",
         };
-        assert!(!is_delegation_trigger(Some(&grooming)));
+        assert!(!is_delegation_trigger(Some(&grooming), StageSwitches::ALL));
         let done = StateRef {
             group: "completed",
             name: "Done",
         };
-        assert!(!is_delegation_trigger(Some(&done)));
-        assert!(!is_delegation_trigger(None));
+        assert!(!is_delegation_trigger(Some(&done), StageSwitches::ALL));
+        assert!(!is_delegation_trigger(None, StageSwitches::ALL));
+        let review_off = StageSwitches {
+            review: false,
+            test: true,
+        };
+        assert!(!is_delegation_trigger(Some(&review), review_off));
+        assert!(is_delegation_trigger(Some(&ticking), review_off));
     }
 
     #[test]

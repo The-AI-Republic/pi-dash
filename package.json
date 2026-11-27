@@ -43,7 +43,7 @@
       "@types/react-dom@18>@types/react": "catalog:",
       "express": "catalog:",
       "mdast-util-to-hast": "13.2.1",
-      "remark-rehype>mdast-util-to-hast": "^12.1.0",
+      "remark-rehype@10>mdast-util-to-hast": "^12.1.0",
       "valibot": "1.2.0",
       "glob": "11.1.0",
       "js-yaml": "4.1.1",

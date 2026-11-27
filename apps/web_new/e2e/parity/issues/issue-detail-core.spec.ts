@@ -24,6 +24,10 @@ import {
   patchIssueStatus,
   patchProject,
   restoreArchivedIssue,
+  runsLookupIds,
+  serverCancelRun,
+  serverCreateComment,
+  serverCreateRun,
   signInSession,
   subscriptionStatus,
 } from "../helpers/api";
@@ -501,6 +505,53 @@ test(
       expect(await driver.page.getByRole("button", { name: /re-tick/i }).count()).toBe(0);
       expect(await driver.page.getByRole("button", { name: /abort run/i }).count()).toBe(0);
     } finally {
+      await dropIssue(seed, session, issue.id);
+    }
+  }
+);
+
+test(
+  specTitle(["ISS-164"], "a comment posted during an active run appears without a reload"),
+  { tag: specTags(["ISS-164"]) },
+  async ({ driver, seed }) => {
+    await signIn(driver, seed);
+    const session = await signInSession(seed.email, seed.password);
+    const tag = `Oracle poll ${Date.now()}`;
+    const issue = await ownIssue(seed, session, `${tag} issue`);
+    const { workspaceId } = await runsLookupIds(seed.workspaceSlug, seed.email);
+    let runId = "";
+    try {
+      // Start the run before opening the detail so the first read already
+      // carries the active run and the agent-status poll starts on mount.
+      const created = await serverCreateRun(session, {
+        workspaceId,
+        prompt: `${tag} prompt`,
+        workItemId: issue.id,
+      });
+      runId = created.id;
+      await expect
+        .poll(async () => (await fetchIssue(seed.workspaceSlug, seed.projectId, issue.id, session))["agent_status"], {
+          timeout: 30_000,
+        })
+        .toMatchObject({ active_run: expect.objectContaining({ id: runId }) });
+      await test.step("open the issue detail", async () => {
+        await driver.openIssueDetail(seed.workspaceSlug, issue.seq);
+        await expect.poll(() => driver.issueDetailTitle(), { timeout: 30_000 }).toBe(issue.name);
+        await expect.poll(() => driver.sidebarProperty("State"), { timeout: 30_000 }).not.toBeNull();
+      });
+      await test.step("a comment posted during the run appears without a reload", async () => {
+        const body = `${tag} agent note`;
+        await serverCreateComment(seed.workspaceSlug, seed.projectId, issue.id, session, `<p>${body}</p>`);
+        // The agent-status poll (every 15s) re-reads comments and activity,
+        // so the note joins the feed with no reload.
+        await expect
+          .poll(async () => (await driver.activityCommentTexts()).some((text) => text.includes(body)), {
+            timeout: 60_000,
+          })
+          .toBe(true);
+      });
+    } finally {
+      if (runId !== "") await serverCancelRun(runId, session, "parity ISS-164 cleanup").catch(() => undefined);
       await dropIssue(seed, session, issue.id);
     }
   }

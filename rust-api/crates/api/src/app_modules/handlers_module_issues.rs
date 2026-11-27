@@ -80,7 +80,7 @@
 use std::collections::HashMap;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
 use axum::Router;
 use serde_json::{Map, Value};
@@ -91,9 +91,17 @@ use pidash_services::app_modules::tasks;
 use super::gates;
 use crate::app_issues::{
     complex_filter, fetch_count, fetch_json_rows, filters_timezone, group_values, legacy_sql,
-    multi_map, order_key, page_denial, query_last, render_condition, shape_row, Binder, Denial,
-    FilteredSet, QueryMap,
+    multi_map, order_key, page_denial, query_last, render_condition, rich_inner_aliases, shape_row,
+    Binder, Denial, FilteredSet, QueryMap,
 };
+use pidash_db::entity::{module_issues, modules, project_members, projects, workspaces};
+use sea_orm::sea_query::{Expr, Query as SeaQuery};
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QuerySelect, RelationTrait,
+};
+
+use super::handlers_modules::{is_noncanonical_uuid, proxy_segment};
+pub(crate) use crate::paginator::unquote_sort_order;
 use crate::state::AppState;
 use pidash_auth::permissions::allow::AllowFacts;
 pub(crate) use pidash_compat::response::{empty_response, json_response};
@@ -181,12 +189,17 @@ pub(crate) fn actor_user_id(
 /// `White_Space` plus U+001C-U+001F (verified by exhaustively diffing
 /// `str.strip` against `char::is_whitespace` over all code points —
 /// those four are the only differences).
+/// Delegated resolve lives in `handlers_modules`; kept here with the
+/// exhaustive property test below (same-batch duplicate).
+#[allow(dead_code)]
 fn is_py_strip_ws(ch: char) -> bool {
     ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
 }
 
 /// Normalize a non-UUID identifier for the equality lookup
 /// (`db/models/project.py:210`): `str(value).strip().upper()`.
+/// Delegated resolve lives in `handlers_modules`; kept for the unit test.
+#[allow(dead_code)]
 fn normalize_resolve_identifier(raw: &str) -> String {
     raw.trim_matches(is_py_strip_ws).to_uppercase()
 }
@@ -194,26 +207,14 @@ fn normalize_resolve_identifier(raw: &str) -> String {
 /// `_rewrite_project_kwarg` (`app/views/base.py:49-80`): authenticated
 /// callers only (anonymous already 401'd); UUIDs pass through unchecked;
 /// other identifiers resolve `UPPER(identifier)` in the workspace, else
-/// `Http404` (detail 404).
+/// `Http404` (detail 404). Delegates to the SeaORM implementation in
+/// `handlers_modules` (same batch, identical predicates).
 pub(crate) async fn resolve_project_id(
     pool: &sqlx::PgPool,
     slug: &str,
     raw: &str,
 ) -> Result<uuid::Uuid, Denial> {
-    if let Ok(id) = raw.parse::<uuid::Uuid>() {
-        return Ok(id);
-    }
-    let upper = normalize_resolve_identifier(raw);
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(upper)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
+    super::handlers_modules::resolve_project_id(pool, slug, raw).await
 }
 
 /// Badly-formed UUIDs in paths render the `ValidationError` branch
@@ -229,8 +230,8 @@ pub(crate) fn parse_uuid_or_invalid(raw: &str) -> Result<uuid::Uuid, Denial> {
 /// Membership facts for one `(user, slug, project)` over the same rows the
 /// decorator reads (`app/permissions/base.py:19-86`): active project and
 /// workspace memberships scoped by slug/project, soft-deleted rows excluded,
-/// with the allowed-role flags computed against the calling gate's roles
-/// (`handlers_modules::fetch_allow_facts`, same shape).
+/// with the allowed-role flags computed against the calling gate's roles.
+/// Delegates to the SeaORM implementation in `handlers_modules` (same batch).
 pub(crate) async fn fetch_allow_facts(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -238,46 +239,7 @@ pub(crate) async fn fetch_allow_facts(
     user_id: &uuid::Uuid,
     allowed: &[i32],
 ) -> Result<AllowFacts, Denial> {
-    let project_role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let workspace_role: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2
-           AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    use pidash_auth::permissions::ROLE_ADMIN;
-    Ok(AllowFacts {
-        workspace: pidash_types::WorkspaceId::from(slug),
-        authenticated: true,
-        is_workspace_member: workspace_role.is_some(),
-        has_allowed_workspace_role: workspace_role
-            .map(|(role,)| allowed.contains(&i32::from(role)))
-            .unwrap_or(false),
-        is_creator: false,
-        has_allowed_project_role: project_role
-            .map(|(role,)| allowed.contains(&i32::from(role)))
-            .unwrap_or(false),
-        is_project_member: project_role.is_some(),
-        is_workspace_admin: workspace_role
-            .map(|(role,)| i32::from(role) == ROLE_ADMIN)
-            .unwrap_or(false),
-    })
+    super::handlers_modules::fetch_allow_facts(pool, slug, project_id, user_id, allowed).await
 }
 
 /// Run one `super::gates` row: anonymous already 401'd; `Allow` runs the
@@ -342,31 +304,143 @@ async fn module_issue_context(
 /// created — the same issue-list rule the cycle-issue list ports
 /// (`app_cycles::handlers_cycle_issues::guest_creator_scope`). Returns
 /// the creator to scope to.
+/// The fused single-statement form of the guest scope (one round trip):
+/// `EXISTS` active guest membership `AND NOT EXISTS` the view-all flag,
+/// decoded by name (`list_engine::query_built` precedent).
+#[derive(Debug, FromQueryResult)]
+struct GuestScopeRow {
+    scoped: bool,
+}
+
+/// The guest-scope predicate as one statement: an active role-5
+/// membership without the project `guest_view_all_features` flag.
+fn guest_scope_statement(
+    slug: &str,
+    project_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+) -> sea_orm::sea_query::SelectStatement {
+    let guest_membership = SeaQuery::select()
+        .from(project_members::Entity)
+        .columns([project_members::Column::Id])
+        .and_where(project_members::Column::MemberId.eq(*user_id))
+        .and_where(project_members::Column::ProjectId.eq(*project_id))
+        .and_where(project_members::Column::Role.eq(5))
+        .and_where(project_members::Column::IsActive.eq(true))
+        .and_where(project_members::Column::DeletedAt.is_null())
+        .and_where(
+            Expr::col((
+                project_members::Entity,
+                project_members::Column::WorkspaceId,
+            ))
+            .in_subquery(
+                SeaQuery::select()
+                    .from(workspaces::Entity)
+                    .columns([workspaces::Column::Id])
+                    .and_where(workspaces::Column::Slug.eq(slug))
+                    .to_owned(),
+            ),
+        )
+        .to_owned();
+    let view_all_flag = SeaQuery::select()
+        .from(projects::Entity)
+        .columns([projects::Column::Id])
+        .and_where(projects::Column::Id.eq(*project_id))
+        .and_where(projects::Column::GuestViewAllFeatures.eq(true))
+        .and_where(projects::Column::DeletedAt.is_null())
+        .and_where(
+            Expr::col((projects::Entity, projects::Column::WorkspaceId)).in_subquery(
+                SeaQuery::select()
+                    .from(workspaces::Entity)
+                    .columns([workspaces::Column::Id])
+                    .and_where(workspaces::Column::Slug.eq(slug))
+                    .to_owned(),
+            ),
+        )
+        .to_owned();
+    let mut stmt = SeaQuery::select();
+    stmt.expr_as(
+        Expr::exists(guest_membership).and(Expr::exists(view_all_flag).not()),
+        "scoped",
+    );
+    stmt
+}
+
+/// SeaORM twin of the bridge writes' 23503-only mapping: a dangling
+/// issue/module id violates the FK → 400; anything else 500s (the
+/// `ON CONFLICT DO NOTHING` insert cannot reach its own 23505).
+fn orm_fk_denial(error: sea_orm::DbErr) -> Denial {
+    match error {
+        sea_orm::DbErr::Exec(sea_orm::RuntimeErr::SqlxError(sqlx::Error::Database(db_error)))
+        | sea_orm::DbErr::Query(sea_orm::RuntimeErr::SqlxError(sqlx::Error::Database(db_error)))
+            if db_error.code().as_deref() == Some("23503") =>
+        {
+            Denial::BadError("The payload is not valid".to_owned())
+        }
+        _ => Denial::ServerError,
+    }
+}
+
+/// One multi-row `INSERT ... ON CONFLICT DO NOTHING` over a values list
+/// (the old `gen_random_uuid()` + `unnest($N::uuid[])` twin, still one
+/// statement; `replace_members` precedent).
+///
+/// `exec_without_returning` is required: `exec()` maps the Postgres
+/// 0-row statement (every row conflicted on the partial unique)
+/// to `DbErr::RecordNotInserted`, which `orm_fk_denial` would turn
+/// into 500. Django's `bulk_create(ignore_conflicts=True)` at
+/// `issue.py:232-246 / 272-286` instead returns 201 and keeps
+/// enqueueing activity per input id. Only `ON CONFLICT DO NOTHING`'s
+/// 0-row case is a no-op here; 23503 FK failures still map to 400.
+async fn insert_bridge_rows(
+    pool: &sqlx::PgPool,
+    project_id: &uuid::Uuid,
+    workspace_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+    module_ids: &[uuid::Uuid],
+    issue_ids: &[uuid::Uuid],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), Denial> {
+    let models: Vec<module_issues::ActiveModel> = issue_ids
+        .iter()
+        .zip(module_ids.iter())
+        .map(|(issue_id, module_id)| module_issues::ActiveModel {
+            id: sea_orm::Set(uuid::Uuid::new_v4()),
+            project_id: sea_orm::Set(*project_id),
+            workspace_id: sea_orm::Set(*workspace_id),
+            created_by_id: sea_orm::Set(Some(*user_id)),
+            updated_by_id: sea_orm::Set(Some(*user_id)),
+            module_id: sea_orm::Set(*module_id),
+            issue_id: sea_orm::Set(*issue_id),
+            created_at: sea_orm::Set(now.fixed_offset()),
+            updated_at: sea_orm::Set(now.fixed_offset()),
+            deleted_at: sea_orm::Set(None),
+        })
+        .collect();
+    module_issues::Entity::insert_many(models)
+        .on_conflict(
+            sea_orm::sea_query::OnConflict::new()
+                .do_nothing()
+                .to_owned(),
+        )
+        .exec_without_returning(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+        .map_err(orm_fk_denial)?;
+    Ok(())
+}
+
 async fn guest_creator_scope(
     pool: &sqlx::PgPool,
     slug: &str,
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
 ) -> Result<Option<uuid::Uuid>, Denial> {
-    let (scoped,): (bool,) = sqlx::query_as(
-        r#"SELECT EXISTS (
-             SELECT 1 FROM project_members pm
-             JOIN workspaces w ON w.id = pm.workspace_id
-             WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-               AND pm.role = 5 AND pm.is_active AND pm.deleted_at IS NULL
-           ) AND NOT EXISTS (
-             SELECT 1 FROM projects p
-             JOIN workspaces w ON w.id = p.workspace_id
-             WHERE p.id = $2 AND w.slug = $3
-               AND p.guest_view_all_features AND p.deleted_at IS NULL
-           )"#,
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = crate::app_issues::list_engine::query_built::<GuestScopeRow>(
+        &db,
+        &guest_scope_statement(slug, project_id, user_id),
     )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    .await?;
+    let scoped = rows.into_iter().next().is_some_and(|row| row.scoped);
     Ok(scoped.then_some(*user_id))
 }
 
@@ -569,29 +643,119 @@ const RELATION_JOINS: &[(&str, &str)] = &[
     ("issue_subscribers", "issue_subscribers"),
 ];
 
-/// True when every `"alias".` reference in the filter SQL is an `IS NULL` /
-/// `IS NOT NULL` test (the `__isnull` predicates take the LEFT join).
+/// True when the filter SQL references the relation `alias`, quoted
+/// (`"alias".`, complex filters and the group guards below) or unquoted
+/// (`alias.`, legacy predicates, which never quote the alias).
+/// Ported from `app_cycles::handlers_cycle_issues` (PIDASHCONV-1504,
+/// NEWPIDASH-284): the legacy surface must join the link table or
+/// Postgres rejects the query with "missing FROM-clause entry".
+fn alias_mentioned(where_sql: &str, alias: &str) -> bool {
+    if where_sql.contains(&format!("\"{alias}\".")) {
+        return true;
+    }
+    alias_unquoted_offsets(where_sql, alias).next().is_some()
+}
+
+/// Byte offsets of unquoted `alias.` references. The alias must start on
+/// an identifier boundary so a longer name never matches.
+fn alias_unquoted_offsets<'a>(where_sql: &'a str, alias: &str) -> impl Iterator<Item = usize> + 'a {
+    let needle = format!("{alias}.");
+    let mut offsets = Vec::new();
+    let mut base = 0;
+    while let Some(at) = where_sql[base..].find(&needle) {
+        let absolute = base + at;
+        let boundary = absolute == 0 || {
+            let prev = where_sql.as_bytes()[absolute - 1];
+            !prev.is_ascii_alphanumeric() && prev != b'_'
+        };
+        if boundary {
+            offsets.push(absolute);
+        }
+        base = absolute + 1;
+    }
+    offsets.into_iter()
+}
+
+/// True when the identifier after an alias reference is followed by an
+/// `IS NULL` / `IS NOT NULL` test.
+fn is_null_test(after: &str) -> bool {
+    let ident_len = after
+        .chars()
+        .take_while(|char| char.is_alphanumeric() || *char == '_' || *char == '"')
+        .map(|char| char.len_utf8())
+        .sum::<usize>();
+    let tail = after[ident_len..].trim_start();
+    tail.starts_with("IS NULL") || tail.starts_with("IS NOT NULL")
+}
+
+/// True when every reference to `alias` in the filter SQL — quoted or
+/// unquoted — is an `IS NULL` / `IS NOT NULL` test (the `__isnull`
+/// predicates take the LEFT join).
 fn alias_nullable_only(where_sql: &str, alias: &str) -> bool {
     let marker = format!("\"{alias}\".");
     let mut rest = where_sql;
     while let Some(start) = rest.find(&marker) {
-        let after = &rest[start + marker.len()..];
-        let ident_len = after
-            .chars()
-            .take_while(|char| char.is_alphanumeric() || *char == '_' || *char == '"')
-            .map(|char| char.len_utf8())
-            .sum::<usize>();
-        let tail = after[ident_len..].trim_start();
-        if !(tail.starts_with("IS NULL") || tail.starts_with("IS NOT NULL")) {
+        if !is_null_test(&rest[start + marker.len()..]) {
             return false;
         }
-        rest = &after[ident_len..];
+        rest = &rest[start + marker.len()..];
+    }
+    for absolute in alias_unquoted_offsets(where_sql, alias) {
+        if !is_null_test(&where_sql[absolute + alias.len() + 1..]) {
+            return false;
+        }
     }
     true
 }
 
-/// M2M group filters force an INNER join on that relation with the deleted
-/// guard (`GROUP_FILTER_MAPPER` in `utils/grouper.py:41-49`).
+/// Rewrite every `alias.` reference in the filter SQL (both spellings,
+/// see [`alias_mentioned`]) to `replacement.`. Used to give the legacy
+/// stack its own copy of a relation join (NEWPIDASH-195).
+fn rename_alias_refs(sql: &str, alias: &str, replacement: &str) -> String {
+    let mut starts: Vec<usize> = Vec::new();
+    let quoted = format!("\"{alias}\".");
+    let mut base = 0;
+    while let Some(at) = sql[base..].find(&quoted) {
+        starts.push(base + at);
+        base += at + 1;
+    }
+    starts.extend(alias_unquoted_offsets(sql, alias));
+    if starts.is_empty() {
+        return sql.to_owned();
+    }
+    starts.sort_unstable();
+    let mut out = String::with_capacity(sql.len() + starts.len() * replacement.len());
+    let mut cursor = 0;
+    for start in starts {
+        if start < cursor {
+            continue;
+        }
+        let quoted_ref = sql[start..].starts_with('"');
+        let marker_len = if quoted_ref {
+            alias.len() + 3
+        } else {
+            alias.len() + 1
+        };
+        out.push_str(&sql[cursor..start]);
+        if quoted_ref {
+            out.push('"');
+        }
+        out.push_str(replacement);
+        if quoted_ref {
+            out.push('"');
+        }
+        out.push('.');
+        cursor = start + marker_len;
+    }
+    out.push_str(&sql[cursor..]);
+    out
+}
+
+/// M2M group keys LEFT-join their bridge with an
+/// `alias."deleted_at" IS NULL` guard (`GROUP_FILTER_MAPPER` in
+/// `utils/grouper.py:41-49` is Django's LEFT OUTER JOIN + `isnull`
+/// filter, so linkless rows keep the NULL group key that feeds the
+/// "None" bucket — NEWPIDASH-151).
 fn group_join_alias(group_by: Option<&str>, sub_group_by: Option<&str>, alias: &str) -> bool {
     let raw = match alias {
         "issue_assignee" => "assignees__id",
@@ -682,9 +846,17 @@ fn module_filtered_set(
                      WHERE pm.member_id = {user_holder} AND pm.project_id = {project_holder}
                        AND pm.is_active AND pm.deleted_at IS NULL)"#
     )];
+    let mut complex_sql_text = String::new();
     if let Some(cond) = complex_filter(query, tz)? {
         let (fragment, values) = render_condition(&cond);
-        fragments.push(binder.splice(&fragment, values));
+        complex_sql_text = binder.splice(&fragment, values);
+        // NEWPIDASH-280: the rendered tree can hold a top-level `OR`
+        // (`A OR B`). Spliced raw, the WHERE reads `scope AND A OR B` =
+        // `(scope AND A) OR B` and rows matching B in any workspace leak
+        // in. Django applies the tree via `.filter(Q)`, which
+        // parenthesises it — do the same so the scope always applies.
+        complex_sql_text = format!("({complex_sql_text})");
+        fragments.push(complex_sql_text.clone());
     }
     let flat: HashMap<String, String> = query
         .keys()
@@ -704,8 +876,30 @@ fn module_filtered_set(
             legacy_sql_text = format!("{legacy_sql_text} AND {fragment}");
         }
     }
+    // NEWPIDASH-195: Django applies the rich `filters` tree and the
+    // legacy predicates as two separate `.filter()` calls, so a
+    // relation filtered by BOTH stacks joins the link table twice
+    // and an issue linked to both rows matches. Give the legacy
+    // stack's copy of each shared relation its own alias
+    // (`<alias>_legacy`) — otherwise one link row must satisfy both
+    // predicates and the result is empty whenever the two sides
+    // name different rows. Ported from
+    // `app_cycles::handlers_cycle_issues` (NEWPIDASH-284).
+    let mut legacy_joins: Vec<(&str, String, bool)> = Vec::new();
+    if !complex_sql_text.is_empty() && !legacy_sql_text.is_empty() {
+        let mut renamed = legacy_sql_text.clone();
+        for (table, alias) in RELATION_JOINS {
+            if alias_mentioned(&complex_sql_text, alias) && alias_mentioned(&renamed, alias) {
+                let nullable_only = alias_nullable_only(&renamed, alias);
+                let legacy_alias = format!("{alias}_legacy");
+                renamed = rename_alias_refs(&renamed, alias, &legacy_alias);
+                legacy_joins.push((*table, legacy_alias, nullable_only));
+            }
+        }
+        legacy_sql_text = renamed;
+    }
     if !legacy_sql_text.is_empty() {
-        fragments.push(legacy_sql_text);
+        fragments.push(legacy_sql_text.clone());
     }
     // Guest creator scoping (`issue.py:139-140`): one `WHERE` fragment
     // covers the rows and every total (flat and grouped), like Django's
@@ -714,9 +908,12 @@ fn module_filtered_set(
         let holder = binder.bind_uuid(creator);
         fragments.push(format!("issue.created_by_id = {holder}"));
     }
-    // M2M group filters scope their relation to live bridges
-    // (`GROUP_FILTER_MAPPER` in `utils/grouper.py:41-49`, applied by
-    // `issue_queryset_grouper` for the grouped paths).
+    // `GROUP_FILTER_MAPPER` (`utils/grouper.py:41-49`): a canonical m2m
+    // group key — group or sub — filters its join's `deleted_at`. The
+    // predicate sits in WHERE over the LEFT join, so issues whose links
+    // are all soft-deleted drop out while linkless issues stay NULL (the
+    // short aliases carry no guard). Quoted so the nullable scan below
+    // sees the `IS NULL` test (cycle-handler precedent).
     for group in [group_by, sub_group_by].into_iter().flatten() {
         let alias = match group {
             "assignees__id" => "issue_assignee",
@@ -724,7 +921,7 @@ fn module_filtered_set(
             "issue_module__module_id" => "issue_module",
             _ => continue,
         };
-        fragments.push(format!("{alias}.deleted_at IS NULL"));
+        fragments.push(format!("\"{alias}\".\"deleted_at\" IS NULL"));
     }
     let where_sql = fragments.join(" AND ");
     // The scope bridge always joins (one live row per issue in scope: the
@@ -736,19 +933,41 @@ fn module_filtered_set(
     // window `__rn` differs per fanned row), inflating the window.
     let mut joins = String::from(" JOIN module_issues AS bridge ON bridge.issue_id = issue.id");
     let mut referenced = vec!["bridge"];
+    // INNER only on a plain positive reference (rich positive occurrence
+    // or positive legacy predicate); a rich `or`-only alias joins LEFT
+    // (Django LEFT-OUTERs disjuncts) and a `not`'d alias stays in
+    // `NOT EXISTS` with no join.
+    let rich_inner = rich_inner_aliases(query, tz);
     for (table, alias) in RELATION_JOINS {
-        let marker = format!("\"{alias}\".");
-        let mentioned = where_sql.contains(&marker);
-        let nullable_only = mentioned && alias_nullable_only(&where_sql, alias);
+        // `legacy_sql` spells relation aliases unquoted (`label_issue.`)
+        // while complex filters and the group guards quote them
+        // (`"label_issue".`) — `alias_mentioned` sees both (NEWPIDASH-284).
+        let mentioned = alias_mentioned(&where_sql, alias);
+        let legacy_positive = alias_mentioned(&legacy_sql_text, alias)
+            && !alias_nullable_only(&legacy_sql_text, alias);
         let used = mentioned || group_join_alias(group_by, sub_group_by, alias);
         if !used {
             continue;
         }
         referenced.push(*alias);
-        let inner = used && !nullable_only || group_join_alias(group_by, sub_group_by, alias);
+        let inner = rich_inner.contains(alias) || legacy_positive;
         let kind = if inner { "INNER JOIN" } else { "LEFT JOIN" };
         joins.push_str(&format!(
             " {kind} {table} AS {alias} ON {alias}.issue_id = issue.id"
+        ));
+    }
+    // The legacy stacks' own copy of each shared relation join
+    // (NEWPIDASH-195); the probe above only sees the primary
+    // aliases because the renamed fragment spells these
+    // `<alias>_legacy`.
+    for (table, legacy_alias, nullable_only) in &legacy_joins {
+        let kind = if *nullable_only {
+            "LEFT JOIN"
+        } else {
+            "INNER JOIN"
+        };
+        joins.push_str(&format!(
+            " {kind} {table} AS {legacy_alias} ON {legacy_alias}.issue_id = issue.id"
         ));
     }
     // `issue_intake` always joins: the grouped totals carry the intake
@@ -758,7 +977,7 @@ fn module_filtered_set(
     // like every other relation. The `deleted_at` guard is the
     // `SoftDeletionManager` on `IntakeIssue.objects`; at most one live row
     // per issue exists in practice, so the join cannot fan out.
-    let intake_used = where_sql.contains("\"issue_intake\".");
+    let intake_used = alias_mentioned(&where_sql, "issue_intake");
     let intake_kind = if !intake_used || alias_nullable_only(&where_sql, "issue_intake") {
         "LEFT JOIN"
     } else {
@@ -791,7 +1010,14 @@ async fn module_issue_list(
     Path((slug, project_raw, module_raw)): Path<(String, String, String)>,
     Query(query): Query<QueryMap>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:module_id>` 404 precedes auth).
+    if is_noncanonical_uuid(&module_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let (pool, user_id, project_id) =
         module_issue_context(&state, &slug, &project_raw, gate_for_list(), extension).await?;
     let module_id = parse_uuid_or_invalid(&module_raw)?;
@@ -1029,35 +1255,6 @@ fn module_shape_map(row: &Map<String, Value>, fields: &[String]) -> Map<String, 
             module_shape_json_value(field, value, &timezone),
         );
     }
-    out
-}
-
-/// Unquote `sort_order` in serialized grouped rows: Django renders the
-/// float bare (`65535.0`, CPython `repr`), while the maps must carry it as
-/// a string for the grouping kernels (which never do math on it). The
-/// `py_float_str` text is always a bare-JSON-number-safe literal (digits,
-/// `e`, `+`, `-`, `.`, or `nan`/`inf` like the flat path emits), so
-/// splicing the quotes is exact.
-fn unquote_sort_order(results_json: &str) -> String {
-    let mut out = String::with_capacity(results_json.len());
-    let mut rest = results_json;
-    let marker = "\"sort_order\":\"";
-    while let Some(start) = rest.find(marker) {
-        let (head, tail) = rest.split_at(start + marker.len());
-        out.push_str(&head[..head.len() - 1]);
-        match tail.find('"') {
-            Some(end) => {
-                out.push_str(&tail[..end]);
-                rest = &tail[end + 1..];
-            }
-            None => {
-                out.push_str(tail);
-                rest = "";
-                break;
-            }
-        }
-    }
-    out.push_str(rest);
     out
 }
 
@@ -1321,13 +1518,18 @@ async fn project_workspace_id(
     pool: &sqlx::PgPool,
     project_id: &uuid::Uuid,
 ) -> Result<uuid::Uuid, Denial> {
-    let row: Option<(uuid::Uuid,)> =
-        sqlx::query_as(r#"SELECT p.workspace_id FROM projects p WHERE p.id = $1"#)
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-    row.map(|row| row.0).ok_or(Denial::NotFound)
+    // By id alone — no slug or soft-delete filter, exactly as the old
+    // statement (a miss is the `DoesNotExist` 404).
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<uuid::Uuid> = projects::Entity::find()
+        .select_only()
+        .column(projects::Column::WorkspaceId)
+        .filter(projects::Column::Id.eq(*project_id))
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    row.ok_or(Denial::NotFound)
 }
 
 /// One `issue_activity.delay(...)` kwargs map for a module membership
@@ -1468,8 +1670,15 @@ async fn create_module_issues(
     State(state): State<AppState>,
     Path((slug, project_raw, module_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     body: axum::Json<Value>,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:module_id>` 404 precedes auth).
+    if is_noncanonical_uuid(&module_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let (pool, user_id, project_id) = module_issue_context(
         &state,
         &slug,
@@ -1506,26 +1715,17 @@ async fn create_module_issues(
     // `IntegrityError` → 400 `The payload is not valid`.
     if !issue_ids.is_empty() {
         let now = chrono::Utc::now();
-        sqlx::query(
-            r#"INSERT INTO module_issues
-                   (id, project_id, workspace_id, created_by_id, updated_by_id, module_id, issue_id, created_at, updated_at)
-                   SELECT gen_random_uuid(), $1, $2, $3, $3, $4, unnest($5::uuid[]), $6, $6
-                   ON CONFLICT DO NOTHING"#,
+        let modules = vec![module_id; issue_ids.len()];
+        insert_bridge_rows(
+            &pool,
+            &project_id,
+            &workspace_id,
+            &user_id,
+            &modules,
+            &issue_ids,
+            now,
         )
-        .bind(project_id)
-        .bind(workspace_id)
-        .bind(user_id)
-        .bind(module_id)
-        .bind(&issue_ids)
-        .bind(now)
-        .execute(&pool)
-        .await
-        .map_err(|error| match error {
-            sqlx::Error::Database(db) if db.code().as_deref() == Some("23503") => {
-                Denial::BadError("The payload is not valid".to_owned())
-            }
-            _ => Denial::ServerError,
-        })?;
+        .await?;
     }
     // Bulk activity: one publish per *input* issue, even for already-linked
     // rows (`:248-261` iterates `issues`, not the created records).
@@ -1555,8 +1755,15 @@ async fn create_issue_modules(
     State(state): State<AppState>,
     Path((slug, project_raw, issue_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
     body: axum::Json<Value>,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:issue_id>` 404 precedes auth).
+    if is_noncanonical_uuid(&issue_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let (pool, user_id, project_id) = module_issue_context(
         &state,
         &slug,
@@ -1711,26 +1918,17 @@ async fn insert_module_bridges(
         return Ok(());
     }
     let now = chrono::Utc::now();
-    sqlx::query(
-        r#"INSERT INTO module_issues
-               (id, project_id, workspace_id, created_by_id, updated_by_id, module_id, issue_id, created_at, updated_at)
-               SELECT gen_random_uuid(), $1, $2, $3, $3, unnest($4::uuid[]), $5, $6, $6
-               ON CONFLICT DO NOTHING"#,
+    let issues = vec![*issue_id; module_ids.len()];
+    insert_bridge_rows(
+        pool,
+        project_id,
+        workspace_id,
+        user_id,
+        module_ids,
+        &issues,
+        now,
     )
-    .bind(project_id)
-    .bind(workspace_id)
-    .bind(user_id)
-    .bind(module_ids)
-    .bind(issue_id)
-    .bind(now)
-    .execute(pool)
-    .await
-    .map_err(|error| match error {
-        sqlx::Error::Database(db) if db.code().as_deref() == Some("23503") => {
-            Denial::BadError("The payload is not valid".to_owned())
-        }
-        _ => Denial::ServerError,
-    })?;
+    .await?;
     Ok(())
 }
 
@@ -1746,30 +1944,38 @@ async fn bridge_module_name(
     module_id: &uuid::Uuid,
     issue_id: &uuid::Uuid,
 ) -> Result<Option<Value>, Denial> {
-    let bridge: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT mi.id FROM module_issues mi
-           JOIN workspaces w ON w.id = mi.workspace_id
-           WHERE w.slug = $1 AND mi.project_id = $2 AND mi.module_id = $3 AND mi.issue_id = $4
-           AND mi.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(project_id)
-    .bind(module_id)
-    .bind(issue_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let bridge: Option<uuid::Uuid> = module_issues::Entity::find()
+        .select_only()
+        .column(module_issues::Column::Id)
+        .join(
+            JoinType::InnerJoin,
+            module_issues::Relation::Workspaces.def(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(module_issues::Column::ProjectId.eq(*project_id))
+        .filter(module_issues::Column::ModuleId.eq(*module_id))
+        .filter(module_issues::Column::IssueId.eq(*issue_id))
+        .filter(module_issues::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     if bridge.is_none() {
         return Ok(None);
     }
-    let module_row: Option<(Option<String>,)> =
-        sqlx::query_as(r#"SELECT m.name FROM modules m WHERE m.id = $1"#)
-            .bind(module_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
+    // No soft-delete filter: the forward-FK fetch sees soft-deleted
+    // modules (documented above).
+    let module_row: Option<Option<String>> = modules::Entity::find()
+        .select_only()
+        .column(modules::Column::Name)
+        .filter(modules::Column::Id.eq(*module_id))
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     match module_row {
-        Some((name,)) => Ok(Some(name.map(Value::String).unwrap_or(Value::Null))),
+        Some(name) => Ok(Some(name.map(Value::String).unwrap_or(Value::Null))),
         None => Err(Denial::NotFound),
     }
 }
@@ -1824,19 +2030,30 @@ async fn detach_module_bridge(
     kwargs.insert("notification".to_owned(), Value::Bool(true));
     kwargs.insert("origin".to_owned(), Value::String(origin.to_owned()));
     super::handlers_modules::enqueue_task(pool, tasks::ISSUE_ACTIVITY_TASK, kwargs).await;
-    sqlx::query(
-        r#"UPDATE module_issues SET deleted_at = now()
-           WHERE project_id = $1 AND module_id = $2 AND issue_id = $3
-             AND workspace_id IN (SELECT id FROM workspaces WHERE slug = $4)
-             AND deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .bind(module_id)
-    .bind(issue_id)
-    .bind(slug)
-    .execute(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    // `module_id` is `Option` (`None` on the null-item removal): binding
+    // NULL matches nothing under `= NULL`, and the `NOT NULL` column
+    // cannot match `IS NULL` either — either spelling answers the same.
+    let workspace_scope = SeaQuery::select()
+        .from(workspaces::Entity)
+        .columns([workspaces::Column::Id])
+        .and_where(workspaces::Column::Slug.eq(slug))
+        .to_owned();
+    module_issues::Entity::update_many()
+        .col_expr(
+            module_issues::Column::DeletedAt,
+            Expr::value(chrono::Utc::now().fixed_offset()),
+        )
+        .filter(module_issues::Column::ProjectId.eq(*project_id))
+        .filter(module_issues::Column::ModuleId.eq(module_id))
+        .filter(module_issues::Column::IssueId.eq(*issue_id))
+        .filter(
+            Expr::col((module_issues::Entity, module_issues::Column::WorkspaceId))
+                .in_subquery(workspace_scope),
+        )
+        .filter(module_issues::Column::DeletedAt.is_null())
+        .exec(&pidash_db::pool::sea_orm_connection(pool))
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(())
 }
 
@@ -1852,7 +2069,14 @@ async fn module_issue_destroy(
     State(state): State<AppState>,
     Path((slug, project_raw, module_raw, issue_raw)): Path<(String, String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:module_id>`/`<uuid:issue_id>` 404s).
+    if is_noncanonical_uuid(&module_raw) || is_noncanonical_uuid(&issue_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let (pool, user_id, project_id) =
         module_issue_context(&state, &slug, &project_raw, gate_for_destroy(), extension).await?;
     let module_id = parse_uuid_or_invalid(&module_raw)?;
@@ -1878,6 +2102,39 @@ async fn module_issue_destroy(
     )
     .await?;
     Ok(empty_response(StatusCode::NO_CONTENT))
+}
+
+#[cfg(test)]
+mod module_issues1_seaorm_tests {
+    use super::*;
+    use sea_orm::sea_query::PostgresQueryBuilder;
+
+    #[test]
+    fn guest_scope_statement_pins_fused_exists() {
+        let pid = uuid::Uuid::nil();
+        let uid = uuid::Uuid::nil();
+        let (sql, _values) = guest_scope_statement("acme", &pid, &uid).build(PostgresQueryBuilder);
+        assert!(sql.contains("EXISTS"), "{sql}");
+        assert!(sql.contains(r#""project_members""#), "{sql}");
+        // sea-query binds values as placeholders in this rendering.
+        assert!(sql.contains(r#""project_members"."role" = $"#), "{sql}");
+        assert!(
+            sql.contains(r#""project_members"."is_active" = $"#),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(r#""project_members"."deleted_at" IS NULL"#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""projects""#), "{sql}");
+        assert!(
+            sql.contains(r#""projects"."guest_view_all_features" = $"#),
+            "{sql}"
+        );
+        assert!(sql.contains(r#""projects"."deleted_at" IS NULL"#), "{sql}");
+        assert!(sql.contains("NOT EXISTS"), "{sql}");
+        assert!(sql.contains(r#"AS "scoped""#), "{sql}");
+    }
 }
 
 #[cfg(test)]
@@ -2219,6 +2476,244 @@ mod tests {
             ]
         );
         assert_eq!(&sub[25..], &["module_ids"]);
+    }
+
+    #[test]
+    fn legacy_relation_filters_join_their_link_table() {
+        // NEWPIDASH-284: `legacy_sql` renders relation aliases
+        // unquoted (`label_issue.label_id`); the join loop must see
+        // unquoted refs (cycle-handler `alias_mentioned` port) or
+        // Postgres rejects the query ("missing FROM-clause entry" →
+        // 500). Positive legacy predicates take the INNER join.
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "labels",
+                "JOIN issue_labels AS label_issue ON",
+                "label_issue.label_id IN",
+            ),
+            (
+                "assignees",
+                "JOIN issue_assignees AS issue_assignee ON",
+                "issue_assignee.assignee_id IN",
+            ),
+            (
+                "cycle",
+                "JOIN cycle_issues AS issue_cycle ON",
+                "issue_cycle.cycle_id IN",
+            ),
+            (
+                "module",
+                "JOIN module_issues AS issue_module ON",
+                "issue_module.module_id IN",
+            ),
+            (
+                "subscriber",
+                "JOIN issue_subscribers AS issue_subscribers ON",
+                "issue_subscribers.subscriber_id IN",
+            ),
+            (
+                "mentions",
+                "JOIN issue_mentions AS issue_mention ON",
+                "issue_mention.mention_id IN",
+            ),
+        ];
+        for (param, join, predicate) in cases {
+            let mut query = empty_query();
+            query.insert(
+                (*param).to_owned(),
+                OneOrMany::One("00000000-0000-0000-0000-000000000001".to_owned()),
+            );
+            let filtered = module_filtered_set(
+                "slug",
+                &uuid::Uuid::nil(),
+                &uuid::Uuid::nil(),
+                &uuid::Uuid::nil(),
+                &query,
+                None,
+                None,
+                &chrono_tz::UTC,
+                None,
+            )
+            .expect("scope");
+            assert!(
+                filtered.from_where.contains(predicate),
+                "{param} predicate missing: {}",
+                filtered.from_where
+            );
+            assert!(
+                filtered.from_where.contains(join),
+                "{param} join missing: {}",
+                filtered.from_where
+            );
+            assert!(
+                filtered.from_where.contains(&format!("INNER {join}")),
+                "{param} positive predicate must join INNER: {}",
+                filtered.from_where
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_none_filters_take_the_left_join() {
+        // NEWPIDASH-284: `?labels=None` / `?assignees=None` render
+        // `alias.id IS NULL` — the join must still exist (LEFT, like
+        // Django's `__isnull` annotation join) or the query 500s.
+        let cases: &[(&str, &str, &str)] = &[
+            ("labels", "label_issue.label_id IS NULL", "label_issue"),
+            (
+                "assignees",
+                "issue_assignee.assignee_id IS NULL",
+                "issue_assignee",
+            ),
+            ("cycle", "issue_cycle.cycle_id IS NULL", "issue_cycle"),
+            ("module", "issue_module.module_id IS NULL", "issue_module"),
+        ];
+        for (param, predicate, alias) in cases {
+            let mut query = empty_query();
+            query.insert((*param).to_owned(), OneOrMany::One("None".to_owned()));
+            let filtered = module_filtered_set(
+                "slug",
+                &uuid::Uuid::nil(),
+                &uuid::Uuid::nil(),
+                &uuid::Uuid::nil(),
+                &query,
+                None,
+                None,
+                &chrono_tz::UTC,
+                None,
+            )
+            .expect("scope");
+            assert!(
+                filtered.from_where.contains(predicate),
+                "{param} predicate missing: {}",
+                filtered.from_where
+            );
+            assert!(
+                filtered.from_where.contains("LEFT JOIN"),
+                "{param} nullable-only predicate must join LEFT: {}",
+                filtered.from_where
+            );
+            assert!(
+                filtered.from_where.contains(alias),
+                "{param} alias must resolve: {}",
+                filtered.from_where
+            );
+        }
+    }
+
+    #[test]
+    fn shared_relation_gets_a_second_legacy_join() {
+        // NEWPIDASH-284 (NEWPIDASH-195 twin): a rich assignee leaf AND
+        // a legacy `assignees=` key on the same relation must join the
+        // link table twice (Django applies two `.filter()` calls); the
+        // legacy predicates resolve over `issue_assignee_legacy`.
+        let mut query = empty_query();
+        query.insert(
+            "filters".to_owned(),
+            OneOrMany::One(
+                r#"{"assignee_id__in":"00000000-0000-0000-0000-000000000001"}"#.to_owned(),
+            ),
+        );
+        query.insert(
+            "assignees".to_owned(),
+            OneOrMany::One("00000000-0000-0000-0000-000000000002".to_owned()),
+        );
+        let filtered = module_filtered_set(
+            "slug",
+            &uuid::Uuid::nil(),
+            &uuid::Uuid::nil(),
+            &uuid::Uuid::nil(),
+            &query,
+            None,
+            None,
+            &chrono_tz::UTC,
+            None,
+        )
+        .expect("scope");
+        assert!(
+            filtered
+                .from_where
+                .contains("INNER JOIN issue_assignees AS issue_assignee ON"),
+            "primary join missing: {}",
+            filtered.from_where
+        );
+        assert!(
+            filtered
+                .from_where
+                .contains("INNER JOIN issue_assignees AS issue_assignee_legacy ON"),
+            "legacy join missing: {}",
+            filtered.from_where
+        );
+        assert!(
+            filtered
+                .from_where
+                .contains("issue_assignee_legacy.assignee_id IN"),
+            "legacy predicate must resolve over the legacy alias: {}",
+            filtered.from_where
+        );
+        assert!(
+            filtered
+                .from_where
+                .contains("\"issue_assignee\".\"assignee_id\" IN"),
+            "rich leaf must stay on the primary alias: {}",
+            filtered.from_where
+        );
+        assert!(
+            !filtered.from_where.contains("label_issue_legacy"),
+            "unrelated relations gain no legacy copy: {}",
+            filtered.from_where
+        );
+    }
+
+    #[test]
+    fn rich_or_keeps_tenant_scope() {
+        // NEWPIDASH-280: a top-level `or` in the rich `filters` tree
+        // renders as `A OR B`. Spliced unparenthesised after the scope
+        // fragment, the WHERE becomes `scope AND A OR B`, which SQL
+        // reads as `(scope AND A) OR B` — every row matching B in any
+        // workspace leaks in. Django applies the tree via `.filter(Q)`,
+        // which parenthesises it. The fragment must sit in parens.
+        let mut query = empty_query();
+        query.insert(
+            "filters".to_owned(),
+            OneOrMany::One(
+                r#"{"or":[{"label_id__in":["00000000-0000-0000-0000-000000000001"]},{"priority__in":["urgent"]}]}"#
+                    .to_owned(),
+            ),
+        );
+        let filtered = module_filtered_set(
+            "slug",
+            &uuid::Uuid::nil(),
+            &uuid::Uuid::nil(),
+            &uuid::Uuid::nil(),
+            &query,
+            None,
+            None,
+            &chrono_tz::UTC,
+            None,
+        )
+        .expect("scope");
+        // The rendered tree is `("label.." ..) OR (.. priority ..)`: each
+        // disjunct carries its own parens, so asserting the first `(` only
+        // proves nothing — the unfixed `scope AND (A) OR (B)` passed that.
+        // The outer guard is the second `(` and the final `))`.
+        assert!(
+            filtered
+                .from_where
+                .contains(" AND ((\"label_issue\".\"label_id\""),
+            "rich or-tree must sit in its own parens against the scope: {}",
+            filtered.from_where
+        );
+        assert!(
+            filtered.from_where.contains("OR \"issue\".\"priority\" IN"),
+            "expected the priority disjunct in the WHERE: {}",
+            filtered.from_where
+        );
+        assert!(
+            filtered.from_where.ends_with("))"),
+            "rich fragment must close its outer paren at the end of the WHERE: {}",
+            filtered.from_where
+        );
     }
 
     #[test]

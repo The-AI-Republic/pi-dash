@@ -30,6 +30,41 @@ impl Drop for AutoSwapGuard {
 // site is unchanged.
 pub use pidash_ipc::dto::{ExecCommandSnapshot, ObservabilitySnapshot};
 
+/// Why the daemon is shutting down (NEWPIDASH-253): the trigger the
+/// shutdown drain sends with every `DaemonRestart` failure so the issue
+/// comment states the real reason. `Unknown` covers legacy callers that
+/// only have `shutdown()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DaemonShutdownTrigger {
+    SigTerm,
+    SigInt,
+    ControlSocket,
+    Invariant,
+    #[default]
+    Unknown,
+}
+
+impl DaemonShutdownTrigger {
+    /// The token rendered inside the drain detail's parentheses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SigTerm => "SIGTERM",
+            Self::SigInt => "SIGINT",
+            Self::ControlSocket => "control socket disconnect",
+            Self::Invariant => "local invariant failure",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Map a signal trigger to this daemon trigger.
+    pub fn from_signal(signal: crate::util::signal::SignalTrigger) -> Self {
+        match signal {
+            crate::util::signal::SignalTrigger::Term => Self::SigTerm,
+            crate::util::signal::SignalTrigger::Int => Self::SigInt,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct StateHandle {
     inner: Arc<Inner>,
@@ -43,6 +78,7 @@ pub struct StateHandle {
     pub rx_heartbeat_secs: watch::Receiver<u64>,
     reconnect: Arc<tokio::sync::Notify>,
     shutdown: Arc<tokio::sync::Notify>,
+    shutdown_reason: Arc<std::sync::Mutex<Option<DaemonShutdownTrigger>>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -206,6 +242,7 @@ impl StateHandle {
             rx_heartbeat_secs,
             reconnect: Arc::new(tokio::sync::Notify::new()),
             shutdown: Arc::new(tokio::sync::Notify::new()),
+            shutdown_reason: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -246,7 +283,31 @@ impl StateHandle {
     }
 
     pub fn shutdown(&self) {
+        self.shutdown_with_reason(DaemonShutdownTrigger::Unknown);
+    }
+
+    /// Shutdown with the recorded trigger (NEWPIDASH-253). The first
+    /// reason wins: later calls still notify (e.g. a test teardown), but
+    /// the drain reports the first cause.
+    pub fn shutdown_with_reason(&self, trigger: DaemonShutdownTrigger) {
+        {
+            let mut guard = self
+                .shutdown_reason
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if guard.is_none() {
+                *guard = Some(trigger);
+            }
+        }
         self.shutdown.notify_waiters();
+    }
+
+    /// The recorded shutdown trigger, `None` before any shutdown call.
+    pub fn shutdown_reason(&self) -> Option<DaemonShutdownTrigger> {
+        *self
+            .shutdown_reason
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn shutdown_notified(&self) -> Arc<tokio::sync::Notify> {
@@ -574,6 +635,7 @@ impl StateHandle {
             next_retry_at: if connected { None } else { retry.next_retry_at },
             disconnect_reason: if connected { None } else { retry.reason },
             cloud_deleted_confirmations: retry.cloud_deleted_confirmations,
+            workspace_signed_out: false,
             observability,
         }
     }
@@ -607,6 +669,7 @@ impl StateHandle {
             connected,
             uptime_secs: uptime,
             update,
+            run_queue: None,
         }
     }
 
@@ -659,6 +722,9 @@ mod tests {
 
     fn empty_state() -> StateHandle {
         StateHandle::new(Config {
+            engine: Default::default(),
+            auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: Default::default(),
             runners: vec![],
@@ -718,7 +784,10 @@ mod tests {
             .await;
         let snap = state.runner_snapshot().await;
         assert_eq!(snap.next_retry_at, Some(at));
-        assert_eq!(snap.disconnect_reason.as_deref(), Some("server unreachable"));
+        assert_eq!(
+            snap.disconnect_reason.as_deref(),
+            Some("server unreachable")
+        );
 
         state
             .note_retry_scheduled(at, "deleted in cloud; confirming 4/10".into(), 4)
@@ -829,6 +898,9 @@ mod tests {
         let mut daemon: crate::config::schema::DaemonConfig = Default::default();
         daemon.agent_watchdog.kill_after_hours = 72;
         let state = StateHandle::new(Config {
+            engine: Default::default(),
+            auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon,
             runners: vec![],

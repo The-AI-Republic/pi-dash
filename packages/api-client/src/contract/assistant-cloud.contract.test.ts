@@ -35,7 +35,9 @@ describe.skipIf(!cloudContractEnabled)("assistant cloud contract", () => {
   it("lists connections with the codex row seeded", async () => {
     const list = await listAssistantConnections(await signedIn());
     expect(Array.isArray(list.codex_model_options)).toBe(true);
-    expect(typeof list.codex_model_labels).toBe("object");
+    // The cloud backend omits the labels map entirely (NEWPIDASH-150);
+    // the contract tolerates absence but a present map must parse.
+    expect(list.codex_model_labels === undefined || typeof list.codex_model_labels === "object").toBe(true);
     expect(typeof list.has_codex_credential).toBe("boolean");
     expect(typeof list.openai_login_available).toBe("boolean");
     expect(Array.isArray(list.openhub_model_options)).toBe(true);

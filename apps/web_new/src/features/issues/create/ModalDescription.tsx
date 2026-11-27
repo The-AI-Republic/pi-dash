@@ -223,7 +223,7 @@ export function ModalDescription({
     try {
       const uploaded = await withPanelWork(() => upload.mutateAsync({ projectId, scope: assetScope, file }));
       onAssetUploaded(uploaded.assetId);
-      handleRef.current?.insertImage(uploaded.assetUrl);
+      handleRef.current?.insertImage(resolveAsset(uploaded.assetUrl));
     } catch {
       notifyError(UPLOAD_FAILED_TITLE, UPLOAD_FAILED_BODY);
     }

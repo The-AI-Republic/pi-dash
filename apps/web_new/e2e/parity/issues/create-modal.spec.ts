@@ -11,21 +11,65 @@
 // switcher once its buttons are observable.
 import { test, expect } from "../fixtures";
 import {
+  browserCookies,
   createServerCycle,
   createServerModule,
+  createServerState,
   deleteServerCycle,
   deleteServerDraft,
   deleteServerIssue,
   deleteServerModule,
+  deleteServerState,
   serverDraftNames,
   serverDrafts,
+  serverIssueDetails,
   serverIssueRecord,
   serverIssueNames,
   serverIssues,
+  serverPatchProjectUserProperties,
+  serverProjectUserProperties,
   serverProjectViews,
+  signInFreshUser,
   signInSession,
+  uniqueSuffix,
 } from "../helpers/api";
+import type { ParityDriver, ParitySeedFacts } from "../drivers/parity-driver";
 import { specTags, specTitle } from "../helpers/tags";
+
+async function kanbanOpenBoardWithRetry(driver: ParityDriver): Promise<void> {
+  try {
+    await driver.kanbanOpenBoard();
+  } catch {
+    await driver.kanbanOpenBoard();
+  }
+}
+
+async function openBoardByState(
+  driver: ParityDriver,
+  seed: ParitySeedFacts,
+  projectId: string
+): Promise<{
+  user: Awaited<ReturnType<typeof signInFreshUser>>;
+  beforeFilters: Record<string, unknown>;
+  beforeProperties: Record<string, unknown>;
+}> {
+  const user = await signInFreshUser(seed.email, seed.password);
+  const before = await serverProjectUserProperties(seed.workspaceSlug, projectId, user.cookie);
+  await serverPatchProjectUserProperties(seed.workspaceSlug, projectId, user.cookie, {
+    display_filters: {
+      ...before.displayFilters,
+      layout: "kanban",
+      order_by: "sort_order",
+      sub_group_by: null,
+      show_empty_groups: true,
+      group_by: "state",
+    },
+    display_properties: before.displayProperties,
+  });
+  await driver.openAuthenticated(`/${seed.workspaceSlug}/projects/${projectId}/issues`, browserCookies(user));
+  await kanbanOpenBoardWithRetry(driver);
+  return { user, beforeFilters: before.displayFilters, beforeProperties: before.displayProperties };
+}
 
 test(
   specTitle(["ISS-117", "ISS-131"], "create a work item through the modal"),
@@ -194,6 +238,77 @@ test(
 );
 
 test(
+  specTitle(["ISS-119"], "create more from a board column keeps the column state"),
+  { tag: specTags(["ISS-119"]) },
+  async ({ driver, seed }) => {
+    const suffix = uniqueSuffix().slice(0, 6).toUpperCase();
+    const FIRST = `NF119 prefill first ${suffix}`;
+    const SECOND = `NF119 prefill second ${suffix}`;
+    const STATE_NAME = `NF119 Doing ${suffix}`;
+    // The parity seed carries exactly one state, so no non-default column
+    // can exist until this run creates one; it is deleted in cleanup.
+    const setup = await signInFreshUser(seed.email, seed.password);
+    const created = await createServerState(seed.workspaceSlug, seed.projectId, setup.cookie, {
+      name: STATE_NAME,
+      group: "started",
+      color: "#3A3A3A",
+    });
+    const board = await openBoardByState(driver, seed, seed.projectId);
+    const session = board.user.cookie;
+    const targetState = created;
+
+    await test.step("the state columns render", async () => {
+      await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).not.toHaveLength(0);
+    });
+
+    await test.step("the column create opens prefilled with that state", async () => {
+      const columns = await driver.kanbanColumns();
+      const target = columns.find((column) => column.name === STATE_NAME);
+      if (target === undefined) throw new Error(`[parity] column ${JSON.stringify(STATE_NAME)} did not render.`);
+      expect(await driver.kanbanHeaderCreateVisible(target.name)).toBe(true);
+      await driver.kanbanHeaderCreate(target.name);
+      await expect.poll(() => driver.kanbanCreateModalVisible(), { timeout: 30_000 }).toBe(true);
+      await driver.enableCreateMore();
+      await driver.fillCreateTitle(FIRST);
+      await driver.submitCreateModal();
+      await expect.poll(() => driver.createTitleValue(), { timeout: 30_000 }).toBe("");
+      expect(await driver.createModalOpen()).toBe(true);
+      // The second form keeps the opener state: proven through submit so
+      // it checks what the server stored, not only what the modal shows.
+      await driver.fillCreateTitle(SECOND);
+      await driver.submitCreateModal();
+      await expect
+        .poll(() => serverIssueNames(seed.workspaceSlug, seed.projectId, session), { timeout: 60_000 })
+        .toContain(SECOND);
+      expect(await driver.createModalOpen()).toBe(true);
+      for (const name of [FIRST, SECOND]) {
+        const all = await serverIssues(seed.workspaceSlug, seed.projectId, session);
+        const mine = all.find((issue) => issue.name === name);
+        expect(mine).toBeDefined();
+        const details = await serverIssueDetails(seed.workspaceSlug, seed.projectId, mine!.id, session);
+        expect(details.stateId).toBe(targetState.id);
+      }
+      await driver.clickModalDiscard();
+      await expect.poll(() => driver.createModalOpen(), { timeout: 30_000 }).toBe(false);
+    });
+
+    await test.step("cleanup removes only this run's issues and restores prefs", async () => {
+      for (const name of [FIRST, SECOND]) {
+        const all = await serverIssues(seed.workspaceSlug, seed.projectId, session);
+        const mine = all.find((issue) => issue.name === name);
+        if (mine !== undefined)
+          await deleteServerIssue(seed.workspaceSlug, seed.projectId, mine.id, session).catch(() => {});
+      }
+      await deleteServerState(seed.workspaceSlug, seed.projectId, created.id, session).catch(() => {});
+      await serverPatchProjectUserProperties(seed.workspaceSlug, seed.projectId, session, {
+        display_filters: board.beforeFilters,
+        display_properties: board.beforeProperties,
+      }).catch(() => {});
+    });
+  }
+);
+
+test(
   specTitle(["ISS-120"], "discarding a dirty create offers saving a draft"),
   { tag: specTags(["ISS-120"]) },
   async ({ driver, seed }) => {
@@ -233,6 +348,44 @@ test(
       const mine = all.find((draft) => draft.name === NAME);
       expect(mine).toBeDefined();
       await deleteServerDraft(seed.workspaceSlug, mine!.id, session);
+    });
+
+    await test.step("discarding an untouched prefilled opener just closes", async () => {
+      // NEWPIDASH-143: a kanban column's "+" prefills state (and friends);
+      // an untouched prefilled form is not dirty, so discard closes
+      // silently instead of offering a draft.
+      const before = await serverProjectUserProperties(seed.workspaceSlug, seed.projectId, session);
+      await serverPatchProjectUserProperties(seed.workspaceSlug, seed.projectId, session, {
+        display_filters: {
+          ...before.displayFilters,
+          layout: "kanban",
+          order_by: "sort_order",
+          sub_group_by: null,
+          show_empty_groups: true,
+          group_by: "state",
+        },
+        display_properties: before.displayProperties,
+      });
+      try {
+        // Reload so the board re-renders in kanban. openProjectIssuesSettled
+        // forces list layout on the oracle driver, so it cannot reach the
+        // kanban board.
+        await driver.boardReloadIssues();
+        await driver.kanbanOpenBoard();
+        await expect.poll(() => driver.kanbanColumns(), { timeout: 120_000 }).not.toHaveLength(0);
+        const column = (await driver.kanbanColumns())[0]?.name ?? "";
+        expect(column).not.toBe("");
+        await driver.kanbanHeaderCreate(column);
+        await expect.poll(() => driver.kanbanCreateModalVisible(), { timeout: 30_000 }).toBe(true);
+        await driver.clickModalDiscard();
+        await expect.poll(() => driver.createModalOpen(), { timeout: 30_000 }).toBe(false);
+        expect(await driver.pageTextContains("Save this draft?")).toBe(false);
+      } finally {
+        await serverPatchProjectUserProperties(seed.workspaceSlug, seed.projectId, session, {
+          display_filters: before.displayFilters,
+          display_properties: before.displayProperties,
+        });
+      }
     });
   }
 );

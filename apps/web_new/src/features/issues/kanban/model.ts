@@ -87,17 +87,23 @@ const NO_ROWS: readonly IssueListItem[] = [];
 const REFERENCE_FILLED_DIMENSIONS: ReadonlySet<string> = new Set(["labels", "module", "cycle", "assignees"]);
 
 /**
- * Group keys to draw: the envelope's own keys in its order, then the
- * project values the envelope did not mention, then the empty-value
- * bucket last. Filling only happens while empty groups are visible; with
- * the flag off zero-count groups are dropped anyway, so the envelope's
- * keys remain the whole domain.
+ * Group keys to draw: the dimension's explicit order first (states in
+ * workflow order, NEWPIDASH-46), then keys the order does not name in
+ * envelope order, then the project values the envelope did not mention,
+ * then the empty-value bucket last. Filling only happens while empty
+ * groups are visible; with the flag off zero-count groups are dropped
+ * anyway, so the envelope's keys remain the whole domain.
  */
 function filledGroupKeys(
   keys: readonly string[],
-  options: { dimension: string | null; showEmpty: boolean; domain?: readonly string[] | undefined }
+  options: {
+    dimension: string | null;
+    showEmpty: boolean;
+    domain?: readonly string[] | undefined;
+    order?: readonly string[] | undefined;
+  }
 ): { keys: string[]; synthetic: ReadonlySet<string> } {
-  if (!options.showEmpty) return { keys: orderGroupKeys(keys), synthetic: new Set<string>() };
+  if (!options.showEmpty) return { keys: orderGroupKeys(keys, options.order), synthetic: new Set<string>() };
   const seen = new Set(keys);
   const synthetic = new Set<string>();
   const filled: string[] = [...keys];
@@ -111,7 +117,7 @@ function filledGroupKeys(
     synthetic.add(NONE_GROUP_KEY);
     filled.push(NONE_GROUP_KEY);
   }
-  return { keys: orderGroupKeys(filled), synthetic };
+  return { keys: orderGroupKeys(filled, options.order), synthetic };
 }
 
 /**
@@ -137,15 +143,20 @@ function subGroupTotal(bucket: Pick<SubGroupedIssueBucket, "results" | "total_re
 }
 
 /**
- * Columns from a grouped envelope: the server's declared order, the
- * synthetic empty-value bucket last, each with its own full count. The
- * rows of the first page ride their own cells, so callers can render a
- * flat board from the same shape.
+ * Columns from a grouped envelope: the dimension's explicit order first,
+ * the synthetic empty-value bucket last, each with its own full count.
+ * The rows of the first page ride their own cells, so callers can render
+ * a flat board from the same shape.
  */
 export function boardColumns(
   response: Pick<GroupedIssueListResponse, "results">,
   labels: ReadonlyMap<string, string>,
-  options: { dimension: string | null; showEmpty: boolean; domain?: readonly string[] | undefined }
+  options: {
+    dimension: string | null;
+    showEmpty: boolean;
+    domain?: readonly string[] | undefined;
+    order?: readonly string[] | undefined;
+  }
 ): BoardColumn[] {
   const columns: BoardColumn[] = [];
   const filled = filledGroupKeys(Object.keys(response.results), options);
@@ -205,15 +216,19 @@ export function flatBoard(response: Pick<IssueListResponse, "results" | "total_c
 }
 
 /**
- * Sub-group keys in first-seen server order with the empty bucket last.
- * With empty groups visible, a reference-backed sub-group (labels,
+ * Sub-group keys in the dimension's explicit order with the empty bucket
+ * last. With empty groups visible, a reference-backed sub-group (labels,
  * modules, cycles, assignees) also draws its project values and a
  * synthetic empty lane, since the envelope only carries used values.
  */
 export function laneKeys(
   response: Pick<SubGroupedIssueListResponse, "results">,
   showEmpty: boolean,
-  options: { dimension?: string | null; domain?: readonly string[] | undefined } = {}
+  options: {
+    dimension?: string | null;
+    domain?: readonly string[] | undefined;
+    order?: readonly string[] | undefined;
+  } = {}
 ): string[] {
   const seen = new Set<string>();
   for (const bucket of Object.values(response.results)) {
@@ -223,6 +238,7 @@ export function laneKeys(
     dimension: options.dimension ?? null,
     showEmpty,
     domain: options.domain,
+    order: options.order,
   }).keys;
   if (showEmpty) return ordered;
   return ordered.filter((key) => laneTotal(response, key) > 0);
@@ -246,7 +262,12 @@ export function laneTotal(response: Pick<SubGroupedIssueListResponse, "results">
 export function subGroupedColumns(
   response: Pick<SubGroupedIssueListResponse, "results">,
   labels: ReadonlyMap<string, string>,
-  options: { dimension: string | null; showEmpty: boolean; domain?: readonly string[] | undefined }
+  options: {
+    dimension: string | null;
+    showEmpty: boolean;
+    domain?: readonly string[] | undefined;
+    order?: readonly string[] | undefined;
+  }
 ): BoardColumn[] {
   const columns: BoardColumn[] = [];
   const filled = filledGroupKeys(Object.keys(response.results), options);
@@ -282,12 +303,14 @@ export function subGroupedLanes(
     columns: readonly BoardColumn[];
     showEmpty: boolean;
     domain?: readonly string[] | undefined;
+    order?: readonly string[] | undefined;
   }
 ): BoardLane[] {
   const lanes: BoardLane[] = [];
   for (const laneKey of laneKeys(response, options.showEmpty, {
     dimension: options.subDimension,
     domain: options.domain,
+    order: options.order,
   })) {
     const cells: Record<string, BoardCell> = {};
     for (const column of options.columns) {
@@ -322,12 +345,15 @@ export function subGroupedBoard(
     showEmpty: boolean;
     groupDomain?: readonly string[] | undefined;
     subDomain?: readonly string[] | undefined;
+    groupOrder?: readonly string[] | undefined;
+    subOrder?: readonly string[] | undefined;
   }
 ): BoardData {
   const columns = subGroupedColumns(response, options.groupLabels, {
     dimension: options.groupDimension,
     showEmpty: options.showEmpty,
     domain: options.groupDomain,
+    order: options.groupOrder,
   });
   return {
     columns,
@@ -338,6 +364,7 @@ export function subGroupedBoard(
       columns,
       showEmpty: options.showEmpty,
       domain: options.subDomain,
+      order: options.subOrder,
     }),
     subGrouped: true,
     total: response.total_count,
@@ -355,6 +382,7 @@ export function groupedBoard(
     labels: ReadonlyMap<string, string>;
     showEmpty: boolean;
     domain?: readonly string[] | undefined;
+    order?: readonly string[] | undefined;
   }
 ): BoardData {
   const columns = boardColumns(response, options.labels, options);

@@ -56,9 +56,9 @@ pub fn created_line(created: usize) -> String {
 pub const TEST_SUBJECT: &str = "Test email from Pi Dash";
 
 /// `render_to_string("emails/test_email.html")` with no context: the
-/// template carries no tags, so it renders byte-verbatim. Mirrors
-/// `apps/api/templates/emails/test_email.html` (pinned by
-/// `template_matches_django_file`).
+/// template carries no tags, so it renders byte-verbatim. Mirrors the
+/// vendored `rust-api/templates/emails/test_email.html` (pinned by
+/// `template_matches_vendored_copy`).
 pub const TEST_TEMPLATE_HTML: &str = concat!(
     "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Strict//EN\" \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd\"> \n",
     "<html>\n",
@@ -345,12 +345,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn template_matches_django_file() {
+    fn template_matches_vendored_copy() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../apps/api/templates/emails/test_email.html"
+            "/../../../rust-api/templates/emails/test_email.html"
         );
-        let file = std::fs::read_to_string(path).expect("django template readable");
+        let file = std::fs::read_to_string(path).expect("vendored template readable");
         assert_eq!(TEST_TEMPLATE_HTML, file);
     }
 

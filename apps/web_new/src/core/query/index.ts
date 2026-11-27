@@ -15,6 +15,7 @@ export {
   createCachePersistor,
   isOwnerScopedQuery,
   isReferenceQueryKey,
+  isRestoredPreview,
   ownerScopedMeta,
   persistEverything,
   persistReferenceOnly,

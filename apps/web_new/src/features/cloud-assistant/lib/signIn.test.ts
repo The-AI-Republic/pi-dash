@@ -6,7 +6,14 @@
 // transient-failure, timeout and stop behavior.
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { beginProviderSignIn, pollProviderLogin, pollOutcome, type PollClock, type PopupLike } from "./signIn.js";
+import {
+  beginProviderSignIn,
+  beginProviderSignInExternal,
+  pollProviderLogin,
+  pollOutcome,
+  type PollClock,
+  type PopupLike,
+} from "./signIn.js";
 
 function popup(overrides: Partial<PopupLike> = {}): PopupLike & { replaced: string[] } {
   const replaced: string[] = [];
@@ -66,6 +73,45 @@ describe("beginProviderSignIn", () => {
     );
     expect(answer).toEqual({ result: null, failure: { kind: "rejected", error } });
     expect(tab.close).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("beginProviderSignInExternal", () => {
+  it("starts first, then opens the authorize address in the system browser", async () => {
+    const order: string[] = [];
+    const openExternal = vi.fn(async (_url: string) => {
+      order.push("open");
+    });
+    const start = vi.fn(async () => {
+      order.push("start");
+      return { authorize_url: "https://auth.openai.com/x", state: "state-1" };
+    });
+    const answer = await beginProviderSignInExternal(openExternal, start);
+    expect(order).toEqual(["start", "open"]);
+    expect(openExternal).toHaveBeenCalledWith("https://auth.openai.com/x");
+    expect(answer).toEqual({ result: { authorize_url: "https://auth.openai.com/x", state: "state-1" }, failure: null });
+  });
+
+  it("reports a rejected start without opening anything", async () => {
+    const openExternal = vi.fn(async (_url: string) => undefined);
+    const error = new Error("nope");
+    const answer = await beginProviderSignInExternal(openExternal, async () => {
+      throw error;
+    });
+    expect(answer).toEqual({ result: null, failure: { kind: "rejected", error } });
+    expect(openExternal).not.toHaveBeenCalled();
+  });
+
+  it("reports an open failure as a rejected start so the desktop shows no popup copy", async () => {
+    const error = new Error("bridge missing");
+    const openExternal = vi.fn(async (_url: string) => {
+      throw error;
+    });
+    const answer = await beginProviderSignInExternal(openExternal, async () => ({
+      authorize_url: "https://auth",
+      state: "s",
+    }));
+    expect(answer).toEqual({ result: null, failure: { kind: "rejected", error } });
   });
 });
 

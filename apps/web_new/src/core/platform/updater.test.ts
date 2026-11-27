@@ -49,6 +49,13 @@ describe("pending-update payload", () => {
     expect(toPendingUpdate(waiting)).toEqual(waiting);
   });
 
+  it("carries release notes through the payload", () => {
+    expect(toPendingUpdate({ ...waiting, notes: "Fixes the sync race." })).toEqual({
+      ...waiting,
+      notes: "Fixes the sync race.",
+    });
+  });
+
   it("reads the installing flag strictly", () => {
     expect(toPendingUpdate({ ...waiting, installing: true })).toMatchObject({ installing: true });
     expect(toPendingUpdate({ ...waiting, installing: "yes" })).toMatchObject({ installing: false });
@@ -108,7 +115,7 @@ describe("desktop updater", () => {
         return () => undefined;
       },
     });
-    const seen: PendingUpdate[] = [];
+    const seen: (PendingUpdate | null)[] = [];
     platform.updates?.onAvailable((update) => seen.push(update));
     await settle();
     expect(listen).toHaveBeenCalledWith(UPDATE_AVAILABLE_EVENT, expect.any(Function));
@@ -124,12 +131,28 @@ describe("desktop updater", () => {
         return () => undefined;
       },
     });
-    const seen: PendingUpdate[] = [];
+    const seen: (PendingUpdate | null)[] = [];
     platform.updates?.onAvailable((update) => seen.push(update));
     await settle();
-    handler?.({ payload: null });
     handler?.({ payload: { version: "1.4.0" } });
+    handler?.({ payload: "1.4.0" });
     expect(seen).toEqual([]);
+  });
+
+  it("delivers a withdrawal announcement as null", async () => {
+    let handler: Handler | undefined;
+    installBridge({
+      listen: async (_event, callback) => {
+        handler = callback;
+        return () => undefined;
+      },
+    });
+    const seen: (PendingUpdate | null)[] = [];
+    platform.updates?.onAvailable((update) => seen.push(update));
+    await settle();
+    handler?.({ payload: waiting });
+    handler?.({ payload: null });
+    expect(seen).toEqual([waiting, null]);
   });
 
   it("stops listening when the subscription is dropped", async () => {
@@ -141,7 +164,7 @@ describe("desktop updater", () => {
         return stop;
       },
     });
-    const seen: PendingUpdate[] = [];
+    const seen: (PendingUpdate | null)[] = [];
     const unsubscribe = platform.updates?.onAvailable((update) => seen.push(update));
     await settle();
     unsubscribe?.();

@@ -93,3 +93,5 @@ sqlparser = "0.63.0"
 # The moved model-runtime tests assert HTTP types via axum's re-export
 # (same locked axum 0.8.x as the workspace, no new downloads).
 axum = "0.8"
+# NEWPIDASH-204: the KMS instance-role test needs the shared fake IMDS router
+pidash-storage = { path = "../storage", features = ["test-utils"] }

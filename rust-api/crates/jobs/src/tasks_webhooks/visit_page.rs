@@ -62,10 +62,17 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use chrono::Utc;
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
+    QuerySelect, Select, Set,
+};
 use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use pidash_db::entity::{page_logs, pages, user_recent_visits, workspaces};
+use pidash_db::orm_tx::{into_sqlx, TxConn};
 use pidash_db::Pools;
 use pidash_services::tasks_webhooks::page_extract::{
     self, EntityDetails, ImageAttrs, MentionAttrs,
@@ -330,19 +337,66 @@ type DriverResult<T> = Result<T, DriverFailure>;
 
 /// `Workspace.objects.get(slug=slug)`: the default manager soft-filters,
 /// `get` needs exactly one row.
+fn workspace_id_query(slug: &str) -> Select<workspaces::Entity> {
+    workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::Id)
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspaces::Column::DeletedAt.is_null())
+}
+
 async fn workspace_id_by_slug(pool: &PgPool, slug: &str) -> DriverResult<Uuid> {
-    let rows: Vec<(Uuid,)> =
-        sqlx::query_as("SELECT id FROM workspaces WHERE slug = $1 AND deleted_at IS NULL")
-            .bind(slug)
-            .fetch_all(pool)
-            .await
-            .map_err(|error| DriverFailure::Log(format!("workspace lookup: {error}")))?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows: Vec<Uuid> = workspace_id_query(slug)
+        .into_tuple::<Uuid>()
+        .all(&db)
+        .await
+        .map_err(|error| DriverFailure::Log(format!("workspace lookup: {}", into_sqlx(error))))?;
     match rows.as_slice() {
-        [(id,)] => Ok(*id),
+        [id] => Ok(*id),
         _ => Err(DriverFailure::Log(
             "workspace lookup: no single workspace for slug".to_owned(),
         )),
     }
+}
+
+/// The update-path lookup
+/// (`filter(entity_name, entity_identifier, user_id, project_id,
+/// workspace).first()`): soft-filtered, `None` renders as `IS NULL`
+/// (Django `None` exact lookup). `Meta.ordering = ("-created_at",)`
+/// (`recent_visit.py`) plus `.first()` renders
+/// `ORDER BY created_at DESC LIMIT 1`.
+fn recent_visit_query(
+    entity_name: &str,
+    entity_id: Option<Uuid>,
+    user_id: Uuid,
+    project_id: Option<Uuid>,
+    workspace_id: Uuid,
+) -> Select<user_recent_visits::Entity> {
+    let mut query = user_recent_visits::Entity::find()
+        .select_only()
+        .column(user_recent_visits::Column::Id)
+        .filter(user_recent_visits::Column::EntityName.eq(entity_name))
+        .filter(user_recent_visits::Column::UserId.eq(user_id))
+        .filter(user_recent_visits::Column::WorkspaceId.eq(workspace_id))
+        .filter(user_recent_visits::Column::DeletedAt.is_null());
+    query = match (entity_id, project_id) {
+        (None, None) => query
+            .filter(user_recent_visits::Column::EntityIdentifier.is_null())
+            .filter(user_recent_visits::Column::ProjectId.is_null()),
+        (Some(entity), None) => query
+            .filter(user_recent_visits::Column::EntityIdentifier.eq(entity))
+            .filter(user_recent_visits::Column::ProjectId.is_null()),
+        (None, Some(project)) => query
+            .filter(user_recent_visits::Column::EntityIdentifier.is_null())
+            .filter(user_recent_visits::Column::ProjectId.eq(project)),
+        (Some(entity), Some(project)) => query
+            .filter(user_recent_visits::Column::EntityIdentifier.eq(entity))
+            .filter(user_recent_visits::Column::ProjectId.eq(project)),
+    };
+    query
+        .order_by_desc(user_recent_visits::Column::CreatedAt)
+        .limit(1)
 }
 
 /// The update-path lookup
@@ -359,57 +413,38 @@ async fn find_recent_visit(
     project_id: Option<&str>,
     workspace_id: Uuid,
 ) -> DriverResult<Option<Uuid>> {
-    let row: Option<(Uuid,)> = match (entity_identifier, project_id) {
-        (None, None) => sqlx::query_as(
-            "SELECT id FROM user_recent_visits WHERE entity_name = $1 AND entity_identifier IS NULL \
-             AND user_id = $2::uuid AND project_id IS NULL AND workspace_id = $3 \
-             AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
-        )
-        .bind(entity_name)
-        .bind(user_id)
-        .bind(workspace_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| DriverFailure::Log(format!("recent-visit lookup: {error}")))?,
-        (Some(entity_identifier), None) => sqlx::query_as(
-            "SELECT id FROM user_recent_visits WHERE entity_name = $1 AND entity_identifier = $2::uuid \
-             AND user_id = $3::uuid AND project_id IS NULL AND workspace_id = $4 \
-             AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
-        )
-        .bind(entity_name)
-        .bind(entity_identifier)
-        .bind(user_id)
-        .bind(workspace_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| DriverFailure::Log(format!("recent-visit lookup: {error}")))?,
-        (None, Some(project_id)) => sqlx::query_as(
-            "SELECT id FROM user_recent_visits WHERE entity_name = $1 AND entity_identifier IS NULL \
-             AND user_id = $2::uuid AND project_id = $3::uuid AND workspace_id = $4 \
-             AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
-        )
-        .bind(entity_name)
-        .bind(user_id)
-        .bind(project_id)
-        .bind(workspace_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| DriverFailure::Log(format!("recent-visit lookup: {error}")))?,
-        (Some(entity_identifier), Some(project_id)) => sqlx::query_as(
-            "SELECT id FROM user_recent_visits WHERE entity_name = $1 AND entity_identifier = $2::uuid \
-             AND user_id = $3::uuid AND project_id = $4::uuid AND workspace_id = $5 \
-             AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
-        )
-        .bind(entity_name)
-        .bind(entity_identifier)
-        .bind(user_id)
-        .bind(project_id)
-        .bind(workspace_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| DriverFailure::Log(format!("recent-visit lookup: {error}")))?,
-    };
-    Ok(row.map(|(id,)| id))
+    // The old `$2::uuid` / `$3::uuid` / `$4::uuid` casts made garbage ids
+    // fail in the DB (→ `Log`); parse first so they keep that outcome
+    // instead of silently missing.
+    let user_id = Uuid::parse_str(user_id).map_err(|_| {
+        DriverFailure::Log(format!("recent-visit lookup: invalid user_id {user_id}"))
+    })?;
+    let entity_id = entity_identifier
+        .map(|value| {
+            Uuid::parse_str(value).map_err(|_| {
+                DriverFailure::Log(format!(
+                    "recent-visit lookup: invalid entity_identifier {value}"
+                ))
+            })
+        })
+        .transpose()?;
+    let project = project_id
+        .map(|value| {
+            Uuid::parse_str(value).map_err(|_| {
+                DriverFailure::Log(format!("recent-visit lookup: invalid project_id {value}"))
+            })
+        })
+        .transpose()?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<Uuid> =
+        recent_visit_query(entity_name, entity_id, user_id, project, workspace_id)
+            .into_tuple::<Uuid>()
+            .one(&db)
+            .await
+            .map_err(|error| {
+                DriverFailure::Log(format!("recent-visit lookup: {}", into_sqlx(error)))
+            })?;
+    Ok(row)
 }
 
 /// `recent_visited.visited_at = now(); save(update_fields=["visited_at"])`
@@ -419,29 +454,47 @@ async fn find_recent_visit(
 /// silently (`except DatabaseError: pass`); any other failure logs.
 async fn touch_visited_at(pool: &PgPool, id: Uuid) -> DriverResult<()> {
     let now = Utc::now();
-    match sqlx::query("UPDATE user_recent_visits SET visited_at = $1 WHERE id = $2")
-        .bind(now)
-        .bind(id)
-        .execute(pool)
-        .await
-    {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let touched = user_recent_visits::Entity::update_many()
+        .col_expr(user_recent_visits::Column::VisitedAt, Expr::value(now))
+        .filter(user_recent_visits::Column::Id.eq(id))
+        .exec(&db)
+        .await;
+    match touched {
         Ok(_) => Ok(()),
-        Err(sqlx::Error::Database(_)) => Ok(()),
-        Err(error) => Err(DriverFailure::Log(format!("recent-visit touch: {error}"))),
+        Err(error) => {
+            let sqlx_error = into_sqlx(error);
+            if matches!(sqlx_error, sqlx::Error::Database(_)) {
+                Ok(())
+            } else {
+                Err(DriverFailure::Log(format!(
+                    "recent-visit touch: {sqlx_error}"
+                )))
+            }
+        }
     }
 }
 
 async fn live_visit_count(pool: &PgPool, user_id: &str, workspace_id: Uuid) -> DriverResult<i64> {
-    let (count,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM user_recent_visits WHERE user_id = $1::uuid \
-         AND workspace_id = $2 AND deleted_at IS NULL",
-    )
-    .bind(user_id)
-    .bind(workspace_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|error| DriverFailure::Log(format!("recent-visit count: {error}")))?;
-    Ok(count)
+    let user_id = Uuid::parse_str(user_id).map_err(|_| {
+        DriverFailure::Log(format!("recent-visit count: invalid user_id {user_id}"))
+    })?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let count = live_visit_query(user_id, workspace_id)
+        .count(&db)
+        .await
+        .map_err(|error| DriverFailure::Log(format!("recent-visit count: {}", into_sqlx(error))))?;
+    Ok(count as i64)
+}
+
+/// The live-visit count (`user_recent_visits` filtered on user +
+/// workspace, soft-deleted rows excluded). Shared by the count and the
+/// eviction-victim lookups so the scope cannot drift between them.
+fn live_visit_query(user_id: Uuid, workspace_id: Uuid) -> Select<user_recent_visits::Entity> {
+    user_recent_visits::Entity::find()
+        .filter(user_recent_visits::Column::UserId.eq(user_id))
+        .filter(user_recent_visits::Column::WorkspaceId.eq(workspace_id))
+        .filter(user_recent_visits::Column::DeletedAt.is_null())
 }
 
 /// Eviction (`:39-44` + QUIRK-3): oldest live row by `created_at`, then
@@ -450,30 +503,43 @@ async fn live_visit_count(pool: &PgPool, user_id: &str, workspace_id: Uuid) -> D
 /// `save()`). A vanished victim (race) mirrors the `AttributeError`
 /// path: log and skip the create.
 async fn evict_oldest(pool: &PgPool, user_id: &str, workspace_id: Uuid) -> DriverResult<()> {
-    let victim: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT id FROM user_recent_visits WHERE user_id = $1::uuid AND workspace_id = $2 \
-         AND deleted_at IS NULL ORDER BY created_at ASC LIMIT 1",
-    )
-    .bind(user_id)
-    .bind(workspace_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| DriverFailure::Log(format!("recent-visit victim: {error}")))?;
-    let Some((victim,)) = victim else {
+    let user_id = Uuid::parse_str(user_id).map_err(|_| {
+        DriverFailure::Log(format!("recent-visit victim: invalid user_id {user_id}"))
+    })?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let victim: Option<Uuid> = live_visit_query(user_id, workspace_id)
+        .select_only()
+        .column(user_recent_visits::Column::Id)
+        .order_by_asc(user_recent_visits::Column::CreatedAt)
+        .limit(1)
+        .into_tuple::<Uuid>()
+        .one(&db)
+        .await
+        .map_err(|error| {
+            DriverFailure::Log(format!("recent-visit victim: {}", into_sqlx(error)))
+        })?;
+    let Some(victim) = victim else {
         return Err(DriverFailure::Log(
             "recent-visit eviction: no victim row".to_owned(),
         ));
     };
     let now = Utc::now();
-    sqlx::query(
-        "UPDATE user_recent_visits SET deleted_at = $1, visited_at = $1, updated_at = $1, \
-         created_by_id = NULL, updated_by_id = NULL WHERE id = $2",
-    )
-    .bind(now)
-    .bind(victim)
-    .execute(pool)
-    .await
-    .map_err(|error| DriverFailure::Log(format!("recent-visit evict: {error}")))?;
+    user_recent_visits::Entity::update_many()
+        .col_expr(user_recent_visits::Column::DeletedAt, Expr::value(now))
+        .col_expr(user_recent_visits::Column::VisitedAt, Expr::value(now))
+        .col_expr(user_recent_visits::Column::UpdatedAt, Expr::value(now))
+        .col_expr(
+            user_recent_visits::Column::CreatedById,
+            Expr::value(None::<Uuid>),
+        )
+        .col_expr(
+            user_recent_visits::Column::UpdatedById,
+            Expr::value(None::<Uuid>),
+        )
+        .filter(user_recent_visits::Column::Id.eq(victim))
+        .exec(&db)
+        .await
+        .map_err(|error| DriverFailure::Log(format!("recent-visit evict: {}", into_sqlx(error))))?;
     Ok(())
 }
 
@@ -493,28 +559,60 @@ async fn create_recent_visit(
 ) -> DriverResult<()> {
     let now = Utc::now();
     let id = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO user_recent_visits (id, created_at, updated_at, created_by_id, updated_by_id, \
-         deleted_at, workspace_id, project_id, entity_identifier, entity_name, user_id, visited_at) \
-         VALUES ($1, $2, $2, NULL, NULL, NULL, $3, $4::uuid, $5::uuid, $6, $7::uuid, $2)",
-    )
-    .bind(id)
-    .bind(now)
-    .bind(workspace_id)
-    .bind(project_id)
-    .bind(entity_identifier)
-    .bind(entity_name)
-    .bind(user_id)
-    .execute(pool)
+    // Garbage `$4::uuid` / `$5::uuid` / `$7::uuid` casts made the DB fail
+    // (→ `Log`); parse first so they keep that outcome.
+    let user = Uuid::parse_str(user_id).map_err(|_| {
+        DriverFailure::Log(format!("recent-visit create: invalid user_id {user_id}"))
+    })?;
+    let project = project_id
+        .map(|value| {
+            Uuid::parse_str(value).map_err(|_| {
+                DriverFailure::Log(format!("recent-visit create: invalid project_id {value}"))
+            })
+        })
+        .transpose()?;
+    let entity = entity_identifier
+        .map(|value| {
+            Uuid::parse_str(value).map_err(|_| {
+                DriverFailure::Log(format!(
+                    "recent-visit create: invalid entity_identifier {value}"
+                ))
+            })
+        })
+        .transpose()?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    user_recent_visits::ActiveModel {
+        id: Set(id),
+        created_at: Set(now.into()),
+        updated_at: Set(now.into()),
+        created_by_id: Set(None),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        workspace_id: Set(workspace_id),
+        project_id: Set(project),
+        entity_identifier: Set(entity),
+        entity_name: Set(entity_name.to_owned()),
+        user_id: Set(user),
+        visited_at: Set(now.into()),
+    }
+    .insert(&db)
     .await
-    .map_err(|error| DriverFailure::Log(format!("recent-visit create: {error}")))?;
-    sqlx::query(
-        "UPDATE user_recent_visits SET created_by_id = NULL, updated_by_id = NULL WHERE id = $1",
-    )
-    .bind(id)
-    .execute(pool)
-    .await
-    .map_err(|error| DriverFailure::Log(format!("recent-visit backfill: {error}")))?;
+    .map_err(|error| DriverFailure::Log(format!("recent-visit create: {}", into_sqlx(error))))?;
+    user_recent_visits::Entity::update_many()
+        .col_expr(
+            user_recent_visits::Column::CreatedById,
+            Expr::value(None::<Uuid>),
+        )
+        .col_expr(
+            user_recent_visits::Column::UpdatedById,
+            Expr::value(None::<Uuid>),
+        )
+        .filter(user_recent_visits::Column::Id.eq(id))
+        .exec(&db)
+        .await
+        .map_err(|error| {
+            DriverFailure::Log(format!("recent-visit backfill: {}", into_sqlx(error)))
+        })?;
     Ok(())
 }
 
@@ -555,6 +653,26 @@ async fn run_recent_visited(pool: &PgPool, args: RecentVisitedArgs) -> DriverRes
     .await
 }
 
+/// The page lookup (`Page.objects.get(pk=page_id)`): soft-deleted pages
+/// miss, exactly as the default manager renders it.
+fn page_workspace_query(page_id: Uuid) -> Select<pages::Entity> {
+    pages::Entity::find_by_id(page_id)
+        .select_only()
+        .column(pages::Column::WorkspaceId)
+        .filter(pages::Column::DeletedAt.is_null())
+}
+
+/// The logs-exists probe (`EXISTS(... deleted_at IS NULL)`): one live
+/// log row is enough.
+fn page_logs_exist_query(page_id: Uuid) -> Select<page_logs::Entity> {
+    page_logs::Entity::find()
+        .select_only()
+        .column(page_logs::Column::Id)
+        .filter(page_logs::Column::PageId.eq(page_id))
+        .filter(page_logs::Column::DeletedAt.is_null())
+        .limit(1)
+}
+
 async fn run_page_transaction(pool: &PgPool, args: PageTransactionArgs) -> DriverResult<()> {
     // `Page.objects.get(pk=page_id)`: an unparseable pk is a
     // `ValidationError` (logged); a missing row is `DoesNotExist`
@@ -563,25 +681,32 @@ async fn run_page_transaction(pool: &PgPool, args: PageTransactionArgs) -> Drive
         .page_id
         .parse()
         .map_err(|_| DriverFailure::Log("page_transaction: invalid page_id".to_owned()))?;
-    let page: Option<(Uuid, Uuid)> =
-        sqlx::query_as("SELECT id, workspace_id FROM pages WHERE id = $1 AND deleted_at IS NULL")
-            .bind(page_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| {
-                DriverFailure::Log(format!("page_transaction: page lookup: {error}"))
-            })?;
-    let Some((_, workspace_id)) = page else {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let page_workspace: Option<Uuid> = page_workspace_query(page_id)
+        .into_tuple::<Uuid>()
+        .one(&db)
+        .await
+        .map_err(|error| {
+            DriverFailure::Log(format!(
+                "page_transaction: page lookup: {}",
+                into_sqlx(error)
+            ))
+        })?;
+    let Some(workspace_id) = page_workspace else {
         return Err(DriverFailure::Quiet);
     };
 
-    let (has_existing_logs,): (bool,) = sqlx::query_as(
-        "SELECT EXISTS(SELECT 1 FROM page_logs WHERE page_id = $1 AND deleted_at IS NULL)",
-    )
-    .bind(page_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|error| DriverFailure::Log(format!("page_transaction: logs check: {error}")))?;
+    let has_existing_logs: bool = page_logs_exist_query(page_id)
+        .into_tuple::<Uuid>()
+        .one(&db)
+        .await
+        .map_err(|error| {
+            DriverFailure::Log(format!(
+                "page_transaction: logs check: {}",
+                into_sqlx(error)
+            ))
+        })?
+        .is_some();
 
     let old = page_extract::extract_all_components(args.old_description_html.as_deref());
     let new = page_extract::extract_all_components(args.new_description_html.as_deref());
@@ -609,8 +734,11 @@ async fn run_page_transaction(pool: &PgPool, args: PageTransactionArgs) -> Drive
         .begin()
         .await
         .map_err(|error| DriverFailure::Log(format!("page_transaction: insert: {error}")))?;
+    // `plan.inserts` is a `Vec<PlannedPageLog>`; `chunks(50)` never yields
+    // an empty batch, so every `insert_many` below carries at least one row.
+    let conn = TxConn::new(&mut txn);
     for chunk in plan.inserts.chunks(50) {
-        let mut bound: Vec<(Uuid, Option<Uuid>, &PlannedPageLog)> = Vec::with_capacity(chunk.len());
+        let mut models: Vec<page_logs::ActiveModel> = Vec::with_capacity(chunk.len());
         for item in chunk {
             let transaction = item.transaction.parse().map_err(|_| {
                 DriverFailure::Log("page_transaction: insert: invalid transaction id".to_owned())
@@ -625,29 +753,39 @@ async fn run_page_transaction(pool: &PgPool, args: PageTransactionArgs) -> Drive
                         "page_transaction: insert: invalid entity_identifier".to_owned(),
                     )
                 })?;
-            bound.push((transaction, entity_identifier, item));
+            // `entity_name` is NOT NULL but the planner leaves it `None`
+            // for idless components; the old bind of NULL failed in the
+            // DB (→ `Log` + rollback). Fail the chunk the same way
+            // before inserting.
+            let entity_name = item.entity_name.clone().ok_or_else(|| {
+                DriverFailure::Log("page_transaction: insert: null entity_name".to_owned())
+            })?;
+            models.push(page_logs::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                created_at: Set(now.into()),
+                updated_at: Set(now.into()),
+                transaction: Set(transaction),
+                page_id: Set(page_id),
+                entity_identifier: Set(entity_identifier),
+                entity_name: Set(entity_name),
+                entity_type: Set(item.entity_type.clone()),
+                workspace_id: Set(workspace_id),
+                created_by_id: Set(None),
+                updated_by_id: Set(None),
+                deleted_at: Set(None),
+            });
         }
-        let mut builder = sqlx::QueryBuilder::new(
-            "INSERT INTO page_logs (id, created_at, updated_at, transaction, page_id, \
-             entity_identifier, entity_name, entity_type, workspace_id) ",
-        );
-        builder.push_values(bound, |mut row, (transaction, entity_identifier, item)| {
-            row.push_bind(Uuid::new_v4())
-                .push_bind(now)
-                .push_bind(now)
-                .push_bind(transaction)
-                .push_bind(page_id)
-                .push_bind(entity_identifier)
-                .push_bind(item.entity_name.clone())
-                .push_bind(item.entity_type.clone())
-                .push_bind(workspace_id);
-        });
-        builder.push(" ON CONFLICT DO NOTHING");
-        builder
-            .build()
-            .execute(&mut *txn)
+        page_logs::Entity::insert_many(models)
+            .on_conflict(
+                sea_orm::sea_query::OnConflict::new()
+                    .do_nothing()
+                    .to_owned(),
+            )
+            .exec(&conn)
             .await
-            .map_err(|error| DriverFailure::Log(format!("page_transaction: insert: {error}")))?;
+            .map_err(|error| {
+                DriverFailure::Log(format!("page_transaction: insert: {}", into_sqlx(error)))
+            })?;
     }
     txn.commit()
         .await
@@ -661,23 +799,29 @@ async fn run_page_transaction(pool: &PgPool, args: PageTransactionArgs) -> Drive
 }
 
 /// QUIRK-4 driver: soft `UPDATE deleted_at` over the soft-filtered
-/// `transaction__in` set. Binding the ids as text lets Postgres cast to
-/// the `uuid` column exactly like the Django-rendered SQL (a garbage id
-/// errors into the outer handler there and here).
+/// `transaction__in` set. The old `transaction::text = ANY($2)` text
+/// comparison never errors: a garbage id simply matches nothing. Parse
+/// first and skip garbage ids so they keep that outcome (never an
+/// error); an all-garbage list renders `IN (1 = 2)` → zero rows.
 async fn delete_page_logs(pool: &PgPool, transaction_ids: &[String]) -> DriverResult<()> {
     if transaction_ids.is_empty() {
         return Ok(());
     }
+    let parsed: Vec<Uuid> = transaction_ids
+        .iter()
+        .filter_map(|value| Uuid::parse_str(value).ok())
+        .collect();
     let now = Utc::now();
-    sqlx::query(
-        "UPDATE page_logs SET deleted_at = $1 WHERE transaction::text = ANY($2) \
-         AND deleted_at IS NULL",
-    )
-    .bind(now)
-    .bind(transaction_ids)
-    .execute(pool)
-    .await
-    .map_err(|error| DriverFailure::Log(format!("page_transaction: cleanup: {error}")))?;
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    page_logs::Entity::update_many()
+        .col_expr(page_logs::Column::DeletedAt, Expr::value(now))
+        .filter(page_logs::Column::Transaction.is_in(parsed))
+        .filter(page_logs::Column::DeletedAt.is_null())
+        .exec(&db)
+        .await
+        .map_err(|error| {
+            DriverFailure::Log(format!("page_transaction: cleanup: {}", into_sqlx(error)))
+        })?;
     Ok(())
 }
 
@@ -831,6 +975,84 @@ mod tests {
         .expect("kwargs bind");
         assert!(bound.old_description_html.is_none());
         assert!(bind_page_transaction(&json!(["a"]), &json!({})).is_err());
+    }
+
+    #[test]
+    fn recent_visit_query_shape_pins_soft_filter_and_order() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let ws = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").expect("valid uuid");
+        let user = Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").expect("valid uuid");
+        let sql = recent_visit_query("Issue", None, user, None, ws)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("\"user_recent_visits\""), "{sql}");
+        assert!(sql.contains("\"entity_name\""), "{sql}");
+        assert!(sql.contains("\"entity_identifier\" IS NULL"), "{sql}");
+        assert!(sql.contains("\"project_id\" IS NULL"), "{sql}");
+        assert!(sql.contains("\"deleted_at\" IS NULL"), "{sql}");
+        assert!(sql.contains("\"created_at\" DESC"), "{sql}");
+        assert!(sql.contains("LIMIT 1"), "{sql}");
+        let project = Uuid::parse_str("cccccccc-cccc-4ccc-8ccc-cccccccccccc").expect("valid uuid");
+        let with_project = recent_visit_query("Issue", Some(user), user, Some(project), ws)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            with_project.contains("\"entity_identifier\""),
+            "{with_project}"
+        );
+        assert!(with_project.contains("\"project_id\""), "{with_project}");
+        assert!(
+            !with_project.contains("\"entity_identifier\" IS NULL"),
+            "{with_project}"
+        );
+        assert!(
+            !with_project.contains("\"project_id\" IS NULL"),
+            "{with_project}"
+        );
+    }
+
+    // The remaining find builders pin their soft-delete scope and the
+    // eviction ordering (`ORDER BY created_at ASC LIMIT 1`).
+    #[test]
+    fn find_builders_pin_soft_scope_and_victim_order() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let ws = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").expect("valid uuid");
+        let user = Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").expect("valid uuid");
+        let workspace_sql = workspace_id_query("ws-slug")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(workspace_sql.contains("\"workspaces\""), "{workspace_sql}");
+        assert!(workspace_sql.contains("\"slug\""), "{workspace_sql}");
+        assert!(
+            workspace_sql.contains("\"deleted_at\" IS NULL"),
+            "{workspace_sql}"
+        );
+        let live_sql = live_visit_query(user, ws)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(live_sql.contains("\"user_recent_visits\""), "{live_sql}");
+        assert!(live_sql.contains("\"user_id\""), "{live_sql}");
+        assert!(live_sql.contains("\"deleted_at\" IS NULL"), "{live_sql}");
+        let victim_sql = live_visit_query(user, ws)
+            .select_only()
+            .column(user_recent_visits::Column::Id)
+            .order_by_asc(user_recent_visits::Column::CreatedAt)
+            .limit(1)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(victim_sql.contains("\"created_at\" ASC"), "{victim_sql}");
+        assert!(victim_sql.contains("LIMIT 1"), "{victim_sql}");
+        let page_sql = page_workspace_query(user)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(page_sql.contains("\"pages\""), "{page_sql}");
+        assert!(page_sql.contains("\"deleted_at\" IS NULL"), "{page_sql}");
+        let logs_sql = page_logs_exist_query(user)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(logs_sql.contains("\"page_logs\""), "{logs_sql}");
+        assert!(logs_sql.contains("\"deleted_at\" IS NULL"), "{logs_sql}");
+        assert!(logs_sql.contains("LIMIT 1"), "{logs_sql}");
     }
 
     #[test]

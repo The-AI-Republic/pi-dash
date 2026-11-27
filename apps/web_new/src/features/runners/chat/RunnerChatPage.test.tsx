@@ -6,7 +6,7 @@
 // comes from props, history is listed and selectable, selection reaches
 // the address, warm-up runs for the resolving conversation, and the
 // header/composer follow the live state.
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render as renderRaw, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -49,19 +49,32 @@ vi.mock("./historyQueries.js", () => ({
 }));
 vi.mock("../../../shared/dictation/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/dictation/index.js")>();
-  return { ...original, useDictationConfig: hooks.useDictationConfig };
+  return {
+    ...original,
+    useDictationConfig: hooks.useDictationConfig,
+    // Dictation ships hidden; switched on here so the dormant control stays covered.
+    DICTATION_UI_ENABLED: true,
+  };
 });
 
 import { makeRunner, makeSession, testClient, wrapper } from "./harness.js";
 import { RUNNER_CHAT_PAGE_TITLE, RunnerChatPage, runnerChatDocumentTitle } from "./RunnerChatPage.js";
-import { APPROVAL_MODE_COPY, approvalModeKey } from "./approvalCopy.js";
+import { approvalModeKey } from "./approvalCopy.js";
 import { getChatTransport, setChatTransport, type ChatTransport } from "./transport.js";
+import { chatKeys } from "./keys.js";
+
+// The page reads and re-asks chat queries through the query client, so
+// every render sits inside one; a caller that needs to inspect that client
+// passes its own wrapper and wins as the inner provider.
+function render(ui: React.ReactElement, options: Parameters<typeof renderRaw>[1] = {}) {
+  return renderRaw(ui, { wrapper: wrapper(testClient()), ...options });
+}
 
 const runner = makeRunner();
 const openSession = makeSession({ id: "open", last_message_at: "2026-10-18T11:00:00Z" });
 const closedSession = makeSession({ id: "closed", status: "closed", last_message_at: "2026-10-18T12:00:00Z" });
 const newChatStart = vi.fn(async () => undefined);
-const send = vi.fn(async () => undefined);
+const send = vi.fn(async (_draft: string, _restore: (draft: string) => void): Promise<void> => undefined);
 const stop = vi.fn(async () => undefined);
 const close = vi.fn(async () => undefined);
 const dismissSendError = vi.fn();
@@ -172,6 +185,38 @@ beforeEach(() => {
   hooks.useDictationConfig.mockReturnValue({ data: undefined, isPending: false });
   globalThis.localStorage.clear();
   setChatTransport(null);
+});
+
+describe("Home message handoff", () => {
+  it("waits for the local transport and sends once in a fresh conversation", async () => {
+    const consumed = vi.fn();
+    const props = { initialMessage: "hello from Home", onInitialMessageConsumed: consumed };
+    const view = renderPage(props);
+    expect(send).not.toHaveBeenCalled();
+    expect(hooks.useChatActions).toHaveBeenLastCalledWith(expect.objectContaining({ session: null }));
+    expect(hooks.useWarmUp).toHaveBeenLastCalledWith(expect.objectContaining({ enabled: false }));
+    act(() => setChatTransport({ ...getChatTransport(), ownsRunner: () => true }));
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    expect(send).toHaveBeenCalledWith("hello from Home", expect.any(Function));
+    expect(consumed).toHaveBeenCalledTimes(1);
+    rerenderPage(view, props);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a refused first message in the composer", async () => {
+    setChatTransport({ ...getChatTransport(), ownsRunner: () => true });
+    send.mockImplementationOnce(async (draft: string, restore: (value: string) => void) => restore(draft));
+    renderPage({ initialMessage: "keep this draft" });
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("keep this draft"));
+    expect(hooks.useChatActions).toHaveBeenLastCalledWith(expect.objectContaining({ session: null }));
+  });
+
+  it("drops a pending handoff if the viewer changes contacts before local setup", () => {
+    const view = renderPage({ initialMessage: "for the original contact" });
+    rerenderPage(view, { runnerId: "another", initialMessage: null });
+    act(() => setChatTransport({ ...getChatTransport(), ownsRunner: () => true }));
+    expect(send).not.toHaveBeenCalled();
+  });
 });
 
 describe("runnerChatDocumentTitle", () => {
@@ -545,7 +590,7 @@ describe("RunnerChatPage messaging (RUN-027/029/030/031)", () => {
     };
     renderPage();
     expect(screen.queryByRole("alertdialog")).toBeNull();
-    expect(screen.queryByRole("group", { name: "Approval mode" })).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Approval mode" })).toBeNull();
   });
 
   it("refreshes history and transcript from the stream's own refresh signal", () => {
@@ -596,7 +641,9 @@ describe("RunnerChatPage desktop approvals (RUN-034/035)", () => {
   it("shows the mode control and the parked request", () => {
     stream.approval = approval;
     renderPage();
-    expect(screen.getByRole("group", { name: "Approval mode" })).toBeInTheDocument();
+    // The mode is a dropdown in the composer box's toolbar, not the header.
+    const box = screen.getByTestId("runner-chat-composer-box");
+    expect(within(box).getByRole("combobox", { name: "Approval mode" })).toBeInTheDocument();
     const prompt = screen.getByRole("alertdialog", { name: "Approval requested" });
     expect(prompt).toHaveTextContent("npm test");
     expect(prompt).toHaveTextContent("checks the build");
@@ -678,7 +725,7 @@ describe("RunnerChatPage desktop approvals (RUN-034/035)", () => {
   it("persists the chosen mode and hands it to the session and the runner", async () => {
     const transport = getChatTransport();
     renderPage();
-    await userEvent.click(screen.getByRole("button", { name: APPROVAL_MODE_COPY.ask.label }));
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Approval mode" }), "ask");
     expect(globalThis.localStorage.getItem(approvalModeKey("r-1"))).toBe("ask");
     expect(transport.setApprovalMode).toHaveBeenCalledWith("open", "ask");
     expect(transport.setRunnerApprovalMode).toHaveBeenCalledWith("r-1", "ask");
@@ -687,14 +734,7 @@ describe("RunnerChatPage desktop approvals (RUN-034/035)", () => {
   it("loads the stored mode for the contact on screen", () => {
     globalThis.localStorage.setItem(approvalModeKey("r-1"), "workspace");
     renderPage();
-    expect(screen.getByRole("button", { name: APPROVAL_MODE_COPY.workspace.label })).toHaveAttribute(
-      "aria-pressed",
-      "true"
-    );
-    expect(screen.getByRole("button", { name: APPROVAL_MODE_COPY.full_access.label })).toHaveAttribute(
-      "aria-pressed",
-      "false"
-    );
+    expect(screen.getByRole("combobox", { name: "Approval mode" })).toHaveValue("workspace");
   });
 
   it("hands the stored mode to the session the page warms", () => {
@@ -709,23 +749,20 @@ describe("RunnerChatPage desktop approvals (RUN-034/035)", () => {
   it("keeps a server runner on the cloud path and hides the approval controls", () => {
     setChatTransport(localTransport((runnerId) => runnerId === "pidash-builtin"));
     renderPage();
-    expect(screen.queryByRole("group", { name: "Approval mode" })).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Approval mode" })).toBeNull();
     expect(screen.queryByRole("alertdialog")).toBeNull();
   });
 
   it("falls back to full access for an unrecognized stored value", () => {
     globalThis.localStorage.setItem(approvalModeKey("r-1"), "yolo");
     renderPage();
-    expect(screen.getByRole("button", { name: APPROVAL_MODE_COPY.full_access.label })).toHaveAttribute(
-      "aria-pressed",
-      "true"
-    );
+    expect(screen.getByRole("combobox", { name: "Approval mode" })).toHaveValue("full_access");
   });
 
   it("still remembers the choice when no conversation is open yet", async () => {
     hooks.useChatSessions.mockReturnValue({ data: [], isPending: false, refetch: refetchSessions });
     render(<RunnerChatPage workspaceSlug="acme" runnerId="r-1" requestedSessionId={null} onSelectSession={vi.fn()} />);
-    await userEvent.click(screen.getByRole("button", { name: APPROVAL_MODE_COPY.ask.label }));
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Approval mode" }), "ask");
     // No session to name, so only the runner-level value is handed over.
     expect(getChatTransport().setApprovalMode).not.toHaveBeenCalledWith("", "ask");
     expect(getChatTransport().setRunnerApprovalMode).toHaveBeenCalledWith("r-1", "ask");
@@ -735,7 +772,7 @@ describe("RunnerChatPage desktop approvals (RUN-034/035)", () => {
   it("keeps the mode control usable while a send is in flight", async () => {
     actions.sending = true;
     renderPage();
-    expect(screen.getByRole("button", { name: APPROVAL_MODE_COPY.ask.label })).toBeEnabled();
+    expect(screen.getByRole("combobox", { name: "Approval mode" })).toBeEnabled();
   });
 
   it("falls back to full access when storage refuses the read", () => {
@@ -744,10 +781,7 @@ describe("RunnerChatPage desktop approvals (RUN-034/035)", () => {
     });
     try {
       renderPage();
-      expect(screen.getByRole("button", { name: APPROVAL_MODE_COPY.full_access.label })).toHaveAttribute(
-        "aria-pressed",
-        "true"
-      );
+      expect(screen.getByRole("combobox", { name: "Approval mode" })).toHaveValue("full_access");
     } finally {
       getItem.mockRestore();
     }
@@ -781,11 +815,8 @@ describe("RunnerChatPage desktop approvals (RUN-034/035)", () => {
     });
     try {
       renderPage();
-      await userEvent.click(screen.getByRole("button", { name: APPROVAL_MODE_COPY.ask.label }));
-      expect(screen.getByRole("button", { name: APPROVAL_MODE_COPY.ask.label })).toHaveAttribute(
-        "aria-pressed",
-        "true"
-      );
+      await userEvent.selectOptions(screen.getByRole("combobox", { name: "Approval mode" }), "ask");
+      expect(screen.getByRole("combobox", { name: "Approval mode" })).toHaveValue("ask");
       expect(getChatTransport().setApprovalMode).toHaveBeenCalledWith("open", "ask");
     } finally {
       setItem.mockRestore();
@@ -969,5 +1000,60 @@ describe("RunnerChatPage on-machine history (DESK-009)", () => {
     await userEvent.click(within(history()).getByRole("button", { name: "Clear history" }));
     const dialog = screen.getByRole("dialog", { name: "Clear the on-machine history?" });
     for (const button of within(dialog).getAllByRole("button")) expect(button).toBeDisabled();
+  });
+});
+
+describe("RunnerChatPage transport seam (DESK-009)", () => {
+  // A page can mount before the desktop bootstrap installs the transport
+  // that answers the bundled engine, so its first reads go to the cloud
+  // path and fail. Once the seam changes, every chat read is asked again.
+  const localSeam = (): ChatTransport => ({
+    subscribeChatEvents: vi.fn(() => () => undefined),
+    sendChatMessage: vi.fn(),
+    cancelChat: vi.fn(async () => ({ ok: true })),
+    closeChat: vi.fn(async () => openSession),
+    ownsRunner: () => true,
+  });
+
+  function renderWithClient() {
+    const client = testClient();
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const view = render(
+      <RunnerChatPage workspaceSlug="acme" runnerId="r-1" requestedSessionId={null} onSelectSession={vi.fn()} />,
+      { wrapper: wrapper(client) }
+    );
+    return { client, invalidate, view };
+  }
+
+  it("re-reads the chat history when a transport arrives after mount", () => {
+    const { invalidate } = renderWithClient();
+    expect(invalidate).not.toHaveBeenCalled();
+    act(() => setChatTransport(localSeam()));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: chatKeys.all("acme") });
+  });
+
+  it("stays quiet when the seam is replaced by an equal transport", () => {
+    setChatTransport(null);
+    const { invalidate } = renderWithClient();
+    act(() => setChatTransport(null));
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+
+  it("stays quiet when the new transport does not serve this contact", () => {
+    const { invalidate } = renderWithClient();
+    act(() =>
+      setChatTransport({
+        ...localSeam(),
+        ownsRunner: (runnerId: string) => runnerId === "pidash-builtin",
+      })
+    );
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+
+  it("stops listening once the page goes away", () => {
+    const { invalidate, view } = renderWithClient();
+    view.unmount();
+    act(() => setChatTransport(localSeam()));
+    expect(invalidate).not.toHaveBeenCalled();
   });
 });

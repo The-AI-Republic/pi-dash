@@ -61,6 +61,10 @@ const RUN_TERMINAL_PREFIX: &str = "run.terminal.";
 pub struct Bridge {
     binary: String,
     model: Option<String>,
+    /// `--reasoning-effort` tier (`none` … `ultra`). `None` omits the flag so
+    /// Muse applies its own default. Sourced from
+    /// `[runner.muse_code].effort_default`.
+    effort: Option<String>,
     /// `--yolo` (disable approval prompts and sandbox). Always on for MVP,
     /// mirroring the Cursor bridge's `--force` posture — a real approval loop
     /// is a follow-up.
@@ -87,13 +91,14 @@ pub struct Bridge {
 
 impl Bridge {
     pub async fn spawn(binary: &str, cwd: &Path, model_default: Option<String>) -> Result<Self> {
-        Self::spawn_with_resume(binary, cwd, model_default, None).await
+        Self::spawn_with_resume(binary, cwd, model_default, None, None).await
     }
 
     pub async fn spawn_with_resume(
         binary: &str,
         _cwd: &Path,
         model_default: Option<String>,
+        effort_default: Option<String>,
         resume_session_id: Option<&str>,
     ) -> Result<Self> {
         let (exit_tx, exit_rx) = watch::channel::<Option<ExitSnapshot>>(None);
@@ -101,6 +106,7 @@ impl Bridge {
         Ok(Self {
             binary: binary.to_string(),
             model: model_default.filter(|s| !s.is_empty()),
+            effort: effort_default.filter(|s| !s.is_empty()),
             yolo: true,
             session_id: resume_session_id
                 .filter(|s| !s.is_empty())
@@ -131,6 +137,9 @@ impl Bridge {
         }
         if let Some(model) = self.model.as_deref() {
             argv.extend(["--model", model]);
+        }
+        if let Some(effort) = self.effort.as_deref() {
+            argv.extend(["--reasoning-effort", effort]);
         }
         if let Some(session_id) = self.session_id.as_deref().filter(|s| !s.is_empty()) {
             // `muse exec --session-id` requires a UUID and exits immediately
@@ -584,6 +593,37 @@ mod tests {
             .position(|a| a == "--session-id")
             .expect("--session-id");
         assert_eq!(argv.get(s + 1).map(String::as_str), Some(SESSION));
+    }
+
+    #[tokio::test]
+    async fn build_command_passes_reasoning_effort_when_set() {
+        let bridge = Bridge::spawn_with_resume(
+            "muse",
+            Path::new("/tmp"),
+            Some("muse-spark".into()),
+            Some("max".into()),
+            None,
+        )
+        .await
+        .expect("bridge setup");
+        let argv = argv_of(&bridge.build_command(Path::new("/tmp/p.md"), Path::new("/tmp")));
+        let e = argv
+            .iter()
+            .position(|a| a == "--reasoning-effort")
+            .expect("--reasoning-effort");
+        assert_eq!(argv.get(e + 1).map(String::as_str), Some("max"));
+    }
+
+    #[tokio::test]
+    async fn build_command_omits_reasoning_effort_by_default() {
+        let bridge = Bridge::spawn("muse", Path::new("/tmp"), Some("muse-spark".into()))
+            .await
+            .expect("bridge setup");
+        let argv = argv_of(&bridge.build_command(Path::new("/tmp/p.md"), Path::new("/tmp")));
+        assert!(
+            !argv.iter().any(|a| a == "--reasoning-effort"),
+            "argv: {argv:?}"
+        );
     }
 
     #[tokio::test]

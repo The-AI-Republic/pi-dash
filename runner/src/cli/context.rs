@@ -526,7 +526,10 @@ fn yaml_string(value: &str) -> String {
 /// repo, so the context file never shows up in the repo's diff. Deliberately
 /// avoids `.gitignore` — that is a tracked file in someone else's repo. A no-op
 /// when the directory is not a git repo or the line is already present.
-fn exclude_pidash_from_git(workspace_dir: &Path) -> std::io::Result<()> {
+///
+/// Reused by the daemon's run setup (NEWPIDASH-320 §6.1): every run's
+/// `.pidash/` scratch dir (workpad file, context file) stays uncommitted.
+pub(crate) fn exclude_pidash_from_git(workspace_dir: &Path) -> std::io::Result<()> {
     let Some(git_dir) = resolve_git_dir(workspace_dir) else {
         return Ok(());
     };

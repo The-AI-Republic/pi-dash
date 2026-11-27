@@ -2041,3 +2041,347 @@ def test_rust_crawl_link_resolves_idna_hostname(db_conn):
     assert all(titles), f"expected both IDNA titles non-empty: {titles!r}"
     assert titles[0] == titles[1], f"unicode/punycode titles differ: {titles!r}"
 
+
+def test_rust_issue_activity_deleted_writes_row(db_conn):
+    """Issue deleted, Rust side: one ``deleted the issue`` row (NEWPIDASH-134).
+
+    Mirrors ``test_issue_activity_deleted_writes_row`` (same payload, the
+    app destroy's ``current_instance={}`` dict). Settlement plus the row
+    diff is the proof. Pre-fix the binder rejects the dict with
+    ``'current_instance' must be a string or null`` and no row is written.
+    """
+    chain = seed_helpers.issue_chain(db_conn, "rrdeletedactivity")
+    issue, owner, project = chain["issue"], chain["owner"], chain["project"]
+    epoch = 1728500000
+    before = snapshot(db_conn, ["issue_activities"])
+    celery_id = rust_queue.publish(
+        ISSUE_ACTIVITY,
+        kwargs={
+            "type": "issue.activity.deleted",
+            "requested_data": json.dumps({"issue_id": str(issue["id"])}),
+            "current_instance": {},
+            "issue_id": str(issue["id"]),
+            "actor_id": str(owner["id"]),
+            "project_id": str(project["id"]),
+            "epoch": epoch,
+            "subscriber": False,
+            "notification": True,
+        },
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{ISSUE_ACTIVITY} executed")
+    (row,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="deleted issue_activities row",
+    )
+    assert row["comment"] == "deleted the issue"
+    assert row["verb"] == "deleted"
+    assert row["field"] == "issue"
+    assert row["issue_id"] == str(issue["id"])
+    assert row["project_id"] == str(project["id"])
+    assert row["actor_id"] == str(owner["id"])
+    assert row["epoch"] == epoch
+
+
+def test_rust_issue_activity_assignee_subscribes_and_writes_row(db_conn):
+    """Added assignee, Rust side: EXECUTE locally (NEWPIDASH-133).
+
+    Mirrors ``test_issue_activity_assignee_subscribes_and_writes_row``
+    (same payload): settlement plus the row diffs is the proof — with
+    the Django worker stopped, a forward could never produce local
+    rows. Pre-fix the subscriber insert omits ``id``/``created_at``/
+    ``updated_at``, Postgres rejects it, and neither row lands.
+    """
+    chain = seed_helpers.issue_chain(db_conn, "rrassignee")
+    issue, owner, project = chain["issue"], chain["owner"], chain["project"]
+    assignee = seed_helpers.user(db_conn, "rrassignee-assignee")
+    epoch = 1728500000
+    before = snapshot(db_conn, ["issue_activities", "issue_subscribers"])
+    celery_id = rust_queue.publish(
+        ISSUE_ACTIVITY,
+        kwargs={
+            "type": "issue.activity.updated",
+            "requested_data": json.dumps({"assignee_ids": [str(assignee["id"])]}),
+            "current_instance": None,
+            "issue_id": str(issue["id"]),
+            "actor_id": str(owner["id"]),
+            "project_id": str(project["id"]),
+            "epoch": epoch,
+        },
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{ISSUE_ACTIVITY} executed")
+    (row,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="assignee issue_activities row",
+    )
+    assert row["field"] == "assignees"
+    assert row["verb"] == "updated"
+    assert row["comment"] == "added assignee "
+    assert row["old_value"] == ""
+    assert row["new_value"] == assignee["display_name"]
+    assert row["new_identifier"] == str(assignee["id"])
+    assert row["old_identifier"] is None
+    assert row["issue_id"] == str(issue["id"])
+    assert row["project_id"] == str(project["id"])
+    assert row["workspace_id"] == str(chain["workspace"]["id"])
+    assert row["actor_id"] == str(owner["id"])
+    assert row["epoch"] == epoch
+    (sub,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_subscribers", before) or None,
+        what="assignee issue_subscribers row",
+    )
+    assert sub["subscriber_id"] == str(assignee["id"])
+    assert sub["issue_id"] == str(issue["id"])
+    assert sub["project_id"] == str(project["id"])
+    assert sub["workspace_id"] == str(chain["workspace"]["id"])
+    assert sub["created_by_id"] == str(assignee["id"])
+    assert sub["updated_by_id"] == str(assignee["id"])
+    assert sub["deleted_at"] is None
+    assert sub["id"] is not None
+    assert sub["created_at"] is not None
+    assert sub["updated_at"] is not None
+
+
+
+def _relation_second_issue(db_conn, chain):
+    """A second issue (sequence_id 2) for relation payloads."""
+    return insert_row(
+        db_conn,
+        "issues",
+        {
+            "id": str(uuid.uuid4()),
+            "workspace_id": str(chain["workspace"]["id"]),
+            "project_id": str(chain["project"]["id"]),
+            "state_id": str(chain["state"]["id"]),
+            "name": "contract issue two",
+            "description_json": {},
+            "description_html": "<p></p>",
+            "priority": "none",
+            "complexity_score": 0,
+            "sequence_id": 2,
+            "is_draft": False,
+            "sort_order": 65534,
+            "git_work_branch": "",
+            "workpad": "",
+        },
+    )
+
+
+def _relation_rows(conn, before):
+    rows = _added_rows(conn, "issue_activities", before)
+    return rows if len(rows) == 2 else None
+
+
+def test_rust_issue_activity_relation_create_writes_rows(db_conn):
+    """Relation created, Rust side: blocked_by forward + blocking mirror (NEWPIDASH-198).
+
+    Mirrors ``test_issue_activity_relation_create_writes_rows`` (same
+    payload): settlement plus the row diff is the proof — with the Django
+    worker stopped, a forward could never produce local rows. Pre-fix the
+    relation snapshot decodes ``issues.sequence_id`` (``INT4``) as ``i64``
+    and the task fails with ``mismatched types``, so neither row lands.
+    """
+    chain = seed_helpers.issue_chain(db_conn, "rrrelation")
+    issue, owner, project = chain["issue"], chain["owner"], chain["project"]
+    second = _relation_second_issue(db_conn, chain)
+    epoch = 1728500000
+    before = snapshot(db_conn, ["issue_activities"])
+    celery_id = rust_queue.publish(
+        ISSUE_ACTIVITY,
+        kwargs={
+            "type": "issue_relation.activity.created",
+            "requested_data": json.dumps(
+                {"relation_type": "blocked_by", "issues": [str(second["id"])]}
+            ),
+            "current_instance": None,
+            "issue_id": str(issue["id"]),
+            "actor_id": str(owner["id"]),
+            "project_id": str(project["id"]),
+            "epoch": epoch,
+        },
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{ISSUE_ACTIVITY} executed")
+    rows = wait_for(
+        lambda: _relation_rows(db_conn, before),
+        what="relation issue_activities rows",
+    )
+    by_issue = {row["issue_id"]: row for row in rows}
+    assert set(by_issue) == {str(issue["id"]), str(second["id"])}
+    forward = by_issue[str(issue["id"])]
+    assert forward["field"] == "blocked_by"
+    assert forward["verb"] == "updated"
+    assert forward["comment"] == "added blocked_by relation"
+    assert forward["old_value"] == ""
+    assert forward["new_value"] == "CT-2"
+    assert forward["old_identifier"] == str(second["id"])
+    assert forward["project_id"] == str(project["id"])
+    assert forward["workspace_id"] == str(chain["workspace"]["id"])
+    assert forward["actor_id"] == str(owner["id"])
+    assert forward["epoch"] == epoch
+    mirror = by_issue[str(second["id"])]
+    assert mirror["field"] == "blocking"
+    assert mirror["verb"] == "updated"
+    assert mirror["comment"] == "added blocking relation"
+    assert mirror["old_value"] == ""
+    assert mirror["new_value"] == "CT-1"
+    assert mirror["old_identifier"] == str(issue["id"])
+    assert mirror["project_id"] == str(project["id"])
+    assert mirror["workspace_id"] == str(chain["workspace"]["id"])
+    assert mirror["actor_id"] == str(owner["id"])
+    assert mirror["epoch"] == epoch
+
+
+def _estimate_points_world(db_conn, slug):
+    """One issue, one points estimate with values 1/2/3 (NEWPIDASH-273)."""
+    chain = seed_helpers.issue_chain(db_conn, slug)
+    ws = chain["workspace"]
+    project = chain["project"]
+    estimate = seed_helpers.estimate(
+        db_conn, project["id"], ws["id"], name=f"{slug} estimate", type="points"
+    )
+    points = [
+        seed_helpers.estimate_point(
+            db_conn, estimate["id"], project["id"], ws["id"], key=i, value=str(i)
+        )
+        for i in (1, 2, 3)
+    ]
+    return {"chain": chain, "estimate": estimate, "points": points}
+
+
+def test_rust_issue_activity_estimate_move_writes_updated_row(db_conn):
+    """Estimate move, Rust side: ``updated`` row (NEWPIDASH-273, DIFF-22).
+
+    Mirrors the with-replacement delete fan-out (``estimate/base.py:198-210``):
+    ``requested={estimate_point: <new>}``, ``current={estimate_point: <old>}``
+    records ``field=estimate_points``, ``verb=updated``. This path already
+    worked pre-fix; the pin guards the regression while the clear twins
+    below prove the fix. Settlement plus the row diff is the proof.
+    """
+    world = _estimate_points_world(db_conn, "rrestimatemove")
+    chain = world["chain"]
+    issue, owner, project = chain["issue"], chain["owner"], chain["project"]
+    old_point, new_point = world["points"][0], world["points"][2]
+    epoch = 1728500000
+    before = snapshot(db_conn, ["issue_activities"])
+    celery_id = rust_queue.publish(
+        ISSUE_ACTIVITY,
+        kwargs={
+            "type": "issue.activity.updated",
+            "requested_data": json.dumps({"estimate_point": str(new_point["id"])}),
+            "current_instance": json.dumps({"estimate_point": str(old_point["id"])}),
+            "issue_id": str(issue["id"]),
+            "actor_id": str(owner["id"]),
+            "project_id": str(project["id"]),
+            "epoch": epoch,
+        },
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{ISSUE_ACTIVITY} executed")
+    (row,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="estimate-move issue_activities row",
+    )
+    assert row["field"] == "estimate_points"
+    assert row["verb"] == "updated"
+    assert row["comment"] == "updated the estimate point to "
+    assert row["old_value"] == "1"
+    assert row["new_value"] == "3"
+    assert row["old_identifier"] == str(old_point["id"])
+    assert row["new_identifier"] == str(new_point["id"])
+    assert row["issue_id"] == str(issue["id"])
+    assert row["project_id"] == str(project["id"])
+    assert row["workspace_id"] == str(chain["workspace"]["id"])
+    assert row["actor_id"] == str(owner["id"])
+    assert row["epoch"] == epoch
+
+
+def test_rust_issue_activity_estimate_clear_writes_removed_row(db_conn):
+    """Estimate clear, Rust side: ``removed`` row (NEWPIDASH-273, DIFF-22).
+
+    Mirrors the direct PATCH clear (``estimate_point: null``) and the
+    point-delete-without-replacement fan-out (``estimate/base.py:217-228``):
+    ``requested={estimate_point: null}`` records one ``removed`` row per
+    affected issue. Pre-fix the planner returned
+    ``TrackError::EstimateRemovedField`` (BUG-ACT-01, PB-1587) and the
+    whole dispatch aborted with no row — settlement with an empty diff.
+    """
+    world = _estimate_points_world(db_conn, "rrestimateclear")
+    chain = world["chain"]
+    issue, owner, project = chain["issue"], chain["owner"], chain["project"]
+    old_point = world["points"][0]
+    epoch = 1728500000
+    before = snapshot(db_conn, ["issue_activities"])
+    celery_id = rust_queue.publish(
+        ISSUE_ACTIVITY,
+        kwargs={
+            "type": "issue.activity.updated",
+            "requested_data": json.dumps({"estimate_point": None}),
+            "current_instance": json.dumps({"estimate_point": str(old_point["id"])}),
+            "issue_id": str(issue["id"]),
+            "actor_id": str(owner["id"]),
+            "project_id": str(project["id"]),
+            "epoch": epoch,
+        },
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{ISSUE_ACTIVITY} executed")
+    (row,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="estimate-clear issue_activities row",
+    )
+    assert row["field"] == "estimate_points"
+    assert row["verb"] == "removed"
+    assert row["comment"] == "updated the estimate point to "
+    assert row["old_value"] == "1"
+    assert row["new_value"] is None
+    assert row["old_identifier"] == str(old_point["id"])
+    assert row["new_identifier"] is None
+    assert row["issue_id"] == str(issue["id"])
+    assert row["project_id"] == str(project["id"])
+    assert row["workspace_id"] == str(chain["workspace"]["id"])
+    assert row["actor_id"] == str(owner["id"])
+    assert row["epoch"] == epoch
+
+
+def test_rust_issue_activity_estimate_clear_tombstoned_old_writes_removed_row(db_conn):
+    """Delete-clear with tombstoned old point (NEWPIDASH-273, DIFF-22).
+
+    The real point-delete flow enqueues the activity before
+    ``old_estimate_point.delete()`` tombstones the point, so by the time
+    the worker resolves the old id the row is soft-deleted. The Rust
+    snapshot must still return it (no ``deleted_at`` guard) so the
+    ``removed`` row keeps the old value/type instead of falling back to
+    ``old_value=None``. Pre-fix (live-only + crash) this wrote no row.
+    """
+    world = _estimate_points_world(db_conn, "rrestimatetomb")
+    chain = world["chain"]
+    issue, owner, project = chain["issue"], chain["owner"], chain["project"]
+    old_point = world["points"][0]
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE estimate_points SET deleted_at = now() WHERE id = %s",
+            (str(old_point["id"]),),
+        )
+    db_conn.commit()
+    epoch = 1728500000
+    before = snapshot(db_conn, ["issue_activities"])
+    celery_id = rust_queue.publish(
+        ISSUE_ACTIVITY,
+        kwargs={
+            "type": "issue.activity.updated",
+            "requested_data": json.dumps({"estimate_point": None}),
+            "current_instance": json.dumps({"estimate_point": str(old_point["id"])}),
+            "issue_id": str(issue["id"]),
+            "actor_id": str(owner["id"]),
+            "project_id": str(project["id"]),
+            "epoch": epoch,
+        },
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{ISSUE_ACTIVITY} executed")
+    (row,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="tombstoned estimate-clear issue_activities row",
+    )
+    assert row["field"] == "estimate_points"
+    assert row["verb"] == "removed"
+    assert row["old_value"] == "1"
+    assert row["new_value"] is None
+    assert row["old_identifier"] == str(old_point["id"])
+    assert row["new_identifier"] is None

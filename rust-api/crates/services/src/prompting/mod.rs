@@ -12,16 +12,18 @@
 //! * [`validation`] — save-time override validation (`validation.py`).
 //! * [`context`] — template context variables + first/scheduler/direct
 //!   turn builders (`context.py`, `composer.py` turn builders).
-//! * [`seed`] — default/review/test template seeding, reseed commands,
-//!   override revalidation (`seed.py`, `management/commands/`).
+//! * [`seed`] — override revalidation (`revalidate_section_overrides.py`;
+//!   the legacy template seed/reseed half was removed in NEWPIDASH-404).
 //!
 //! Wiring note: the crate root declares `pub mod prompting;` (seam for
 //! this issue's new files); every file under this module is new.
 pub mod composer;
 pub mod context;
+pub mod neutrality;
 pub mod recipes;
 pub mod registry;
 pub mod renderer;
 pub mod seed;
 pub mod shape;
 pub mod validation;
+pub mod work_types;

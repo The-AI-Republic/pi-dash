@@ -14,6 +14,7 @@ import { IconButton, Menu } from "@pidash/kit";
 import { updateEpic, updateIssue, type RelatedIssue } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
+import { shareableAddress } from "../../../shared/shell/shareLink.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { MemberPicker, PriorityPicker, StatePicker } from "../../../shared/pickers/index.js";
 import { issueKeys } from "../api/keys.js";
@@ -33,9 +34,9 @@ export interface RelationRowProps {
   onDelete: (row: RelatedIssue) => void;
 }
 
-/** Resolve a site-relative address against the current origin. */
+/** The hosted address a copied work-item link should carry. */
 export function absoluteUrl(href: string): string {
-  return new URL(href, window.location.origin).toString();
+  return shareableAddress(href);
 }
 
 /** Copy one work item's absolute browse URL for the clipboard. */

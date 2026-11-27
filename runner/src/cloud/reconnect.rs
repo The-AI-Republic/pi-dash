@@ -1,12 +1,14 @@
-//! Reconnect policy for the per-runner HTTP transport (PDASHOSS01-306).
+//! Reconnect policy for the per-runner HTTP transport (PDASHOSS01-306,
+//! NEWPIDASH-244).
 //!
 //! Two independent pieces, both pure so they can be unit-tested without a
 //! server or a clock:
 //!
 //! - [`Backoff`]: exponential backoff with ±20% jitter. Bootstrap starts at
-//!   30 s and doubles up to a 6-hour cap, so a long cloud outage costs a
-//!   handful of requests instead of two per minute per runner. Any success
-//!   or reconnect kick (wake, network change, `pidash reconnect`) resets it.
+//!   30 s and doubles up to a 5-minute cap, so a long cloud outage costs a
+//!   handful of requests per hour per runner instead of two per minute. Any
+//!   success or reconnect kick (wake, network change, `pidash reconnect`)
+//!   resets it.
 //! - [`GoneConfirmation`]: counts consecutive `runner_gone` answers. The
 //!   runner is purged locally only after [`GONE_CONFIRMATIONS`] answers
 //!   spanning at least [`GONE_MIN_SPAN`]; any other answer resets the count,
@@ -27,7 +29,11 @@ pub const BOOTSTRAP_INITIAL_BACKOFF: Duration = Duration::from_secs(30);
 /// a single dropped long-poll should not cost the runner 30 s of latency.
 pub const POLL_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 /// Longest wait between attempts while the cloud is unreachable.
-pub const MAX_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
+/// NEWPIDASH-244 lowered this from 6 h to 5 minutes so CLI-only machines
+/// (no desktop app to kick them) recover within minutes after the cloud
+/// returns. Desktop machines still kick on focus/network/Run, so the
+/// lower cap is additive there.
+pub const MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
 /// Every wait is randomised by up to this fraction in either direction so
 /// runners don't all retry at the same moment when the server recovers.
 pub const JITTER_FRACTION: f64 = 0.20;
@@ -55,12 +61,12 @@ impl Backoff {
         }
     }
 
-    /// 30 s → 1 m → 2 m → … → 6 h, then 6 h forever.
+    /// 30 s → 1 m → 2 m → 4 m → 5 m, then 5 m forever.
     pub fn bootstrap() -> Self {
         Self::new(BOOTSTRAP_INITIAL_BACKOFF, MAX_BACKOFF)
     }
 
-    /// 1 s → 2 s → … → 6 h, then 6 h forever.
+    /// 1 s → 2 s → … → 5 m, then 5 m forever.
     pub fn poll() -> Self {
         Self::new(POLL_INITIAL_BACKOFF, MAX_BACKOFF)
     }
@@ -290,14 +296,13 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_backoff_reaches_and_holds_six_hours() {
+    fn bootstrap_backoff_reaches_and_holds_interactive_cap() {
         let mut b = Backoff::bootstrap();
-        let steps: Vec<u64> = (0..14).map(|_| b.next_base().as_secs()).collect();
+        let steps: Vec<u64> = (0..8).map(|_| b.next_base().as_secs()).collect();
         assert_eq!(
             steps,
-            vec![
-                30, 60, 120, 240, 480, 960, 1920, 3840, 7680, 15360, 21600, 21600, 21600, 21600
-            ]
+            vec![30, 60, 120, 240, 300, 300, 300, 300],
+            "NEWPIDASH-244: cap is 5 min for CLI-only interactive recovery"
         );
     }
 
@@ -370,11 +375,20 @@ mod tests {
     fn retry_after_is_honored_on_429() {
         let mut p = ReconnectPolicy::bootstrap();
         let err = TransportError::RateLimited {
-            retry_after: Some(mins(10)),
+            retry_after: Some(mins(3)),
         };
         assert!(matches!(
             p.on_failure_with(&err, Instant::now(), no_jitter),
-            RetryDecision::Retry { delay, .. } if delay == mins(10)
+            RetryDecision::Retry { delay, .. } if delay == mins(3)
+        ));
+        // NEWPIDASH-244: Retry-After above the 5-minute cap is capped.
+        let mut p2 = ReconnectPolicy::bootstrap();
+        let err10 = TransportError::RateLimited {
+            retry_after: Some(mins(10)),
+        };
+        assert!(matches!(
+            p2.on_failure_with(&err10, Instant::now(), no_jitter),
+            RetryDecision::Retry { delay, .. } if delay == mins(5)
         ));
     }
 
@@ -409,7 +423,10 @@ mod tests {
             assert_eq!(verdict, GoneVerdict::Confirming(shown));
         }
         assert_eq!(g.count(), GONE_CONFIRMATIONS, "count is capped for display");
-        assert_eq!(g.record(t0 + mins(5)), GoneVerdict::Purge(GONE_CONFIRMATIONS));
+        assert_eq!(
+            g.record(t0 + mins(5)),
+            GoneVerdict::Purge(GONE_CONFIRMATIONS)
+        );
     }
 
     #[test]

@@ -51,6 +51,7 @@ import { Route as GodModeDashboardAiRouteImport } from './routes/god-mode/_dashb
 import { Route as GodModeDashboardAuthenticationRouteRouteImport } from './routes/god-mode/_dashboard/authentication/route'
 import { Route as GodModeDashboardEmailRouteImport } from './routes/god-mode/_dashboard/email'
 import { Route as GodModeDashboardGeneralRouteImport } from './routes/god-mode/_dashboard/general'
+import { Route as GodModeDashboardRunnerModelsRouteImport } from './routes/god-mode/_dashboard/runner-models'
 import { Route as GodModeDashboardRunnersRouteImport } from './routes/god-mode/_dashboard/runners'
 import { Route as GodModeDashboardWorkspaceRouteRouteImport } from './routes/god-mode/_dashboard/workspace/route'
 import { Route as SettingsProfileSplatRouteImport } from './routes/settings/profile/$'
@@ -363,6 +364,12 @@ const GodModeDashboardGeneralRoute = GodModeDashboardGeneralRouteImport.update({
   path: '/general',
   getParentRoute: () => GodModeDashboardRouteRoute,
 } as any)
+const GodModeDashboardRunnerModelsRoute =
+  GodModeDashboardRunnerModelsRouteImport.update({
+    id: '/runner-models',
+    path: '/runner-models',
+    getParentRoute: () => GodModeDashboardRouteRoute,
+  } as any)
 const GodModeDashboardRunnersRoute = GodModeDashboardRunnersRouteImport.update({
   id: '/runners',
   path: '/runners',
@@ -999,6 +1006,7 @@ export interface FileRoutesByFullPath {
   '/god-mode/ai': typeof GodModeDashboardAiRoute
   '/god-mode/email': typeof GodModeDashboardEmailRoute
   '/god-mode/general': typeof GodModeDashboardGeneralRoute
+  '/god-mode/runner-models': typeof GodModeDashboardRunnerModelsRoute
   '/god-mode/runners': typeof GodModeDashboardRunnersRoute
   '/settings/profile/$': typeof SettingsProfileSplatRoute
   '/spaces/$workspaceSlug/$projectId': typeof SpacesWorkspaceSlugProjectIdRoute
@@ -1135,6 +1143,7 @@ export interface FileRoutesByTo {
   '/god-mode/ai': typeof GodModeDashboardAiRoute
   '/god-mode/email': typeof GodModeDashboardEmailRoute
   '/god-mode/general': typeof GodModeDashboardGeneralRoute
+  '/god-mode/runner-models': typeof GodModeDashboardRunnerModelsRoute
   '/god-mode/runners': typeof GodModeDashboardRunnersRoute
   '/settings/profile/$': typeof SettingsProfileSplatRoute
   '/spaces/$workspaceSlug/$projectId': typeof SpacesWorkspaceSlugProjectIdRoute
@@ -1275,6 +1284,7 @@ export interface FileRoutesById {
   '/god-mode/_dashboard/ai': typeof GodModeDashboardAiRoute
   '/god-mode/_dashboard/email': typeof GodModeDashboardEmailRoute
   '/god-mode/_dashboard/general': typeof GodModeDashboardGeneralRoute
+  '/god-mode/_dashboard/runner-models': typeof GodModeDashboardRunnerModelsRoute
   '/god-mode/_dashboard/runners': typeof GodModeDashboardRunnersRoute
   '/settings/profile/$': typeof SettingsProfileSplatRoute
   '/spaces/$workspaceSlug/$projectId': typeof SpacesWorkspaceSlugProjectIdRoute
@@ -1420,6 +1430,7 @@ export interface FileRouteTypes {
     | '/god-mode/ai'
     | '/god-mode/email'
     | '/god-mode/general'
+    | '/god-mode/runner-models'
     | '/god-mode/runners'
     | '/settings/profile/$'
     | '/spaces/$workspaceSlug/$projectId'
@@ -1556,6 +1567,7 @@ export interface FileRouteTypes {
     | '/god-mode/ai'
     | '/god-mode/email'
     | '/god-mode/general'
+    | '/god-mode/runner-models'
     | '/god-mode/runners'
     | '/settings/profile/$'
     | '/spaces/$workspaceSlug/$projectId'
@@ -1695,6 +1707,7 @@ export interface FileRouteTypes {
     | '/god-mode/_dashboard/ai'
     | '/god-mode/_dashboard/email'
     | '/god-mode/_dashboard/general'
+    | '/god-mode/_dashboard/runner-models'
     | '/god-mode/_dashboard/runners'
     | '/settings/profile/$'
     | '/spaces/$workspaceSlug/$projectId'
@@ -2120,6 +2133,13 @@ declare module '@tanstack/react-router' {
       path: '/general'
       fullPath: '/god-mode/general'
       preLoaderRoute: typeof GodModeDashboardGeneralRouteImport
+      parentRoute: typeof GodModeDashboardRouteRoute
+    }
+    '/god-mode/_dashboard/runner-models': {
+      id: '/god-mode/_dashboard/runner-models'
+      path: '/runner-models'
+      fullPath: '/god-mode/runner-models'
+      preLoaderRoute: typeof GodModeDashboardRunnerModelsRouteImport
       parentRoute: typeof GodModeDashboardRouteRoute
     }
     '/god-mode/_dashboard/runners': {
@@ -3251,6 +3271,7 @@ interface GodModeDashboardRouteRouteChildren {
   GodModeDashboardAiRoute: typeof GodModeDashboardAiRoute
   GodModeDashboardEmailRoute: typeof GodModeDashboardEmailRoute
   GodModeDashboardGeneralRoute: typeof GodModeDashboardGeneralRoute
+  GodModeDashboardRunnerModelsRoute: typeof GodModeDashboardRunnerModelsRoute
   GodModeDashboardRunnersRoute: typeof GodModeDashboardRunnersRoute
   GodModeDashboardLoopJobIdRoute: typeof GodModeDashboardLoopJobIdRoute
   GodModeDashboardLoopIndexRoute: typeof GodModeDashboardLoopIndexRoute
@@ -3264,6 +3285,7 @@ const GodModeDashboardRouteRouteChildren: GodModeDashboardRouteRouteChildren = {
   GodModeDashboardAiRoute: GodModeDashboardAiRoute,
   GodModeDashboardEmailRoute: GodModeDashboardEmailRoute,
   GodModeDashboardGeneralRoute: GodModeDashboardGeneralRoute,
+  GodModeDashboardRunnerModelsRoute: GodModeDashboardRunnerModelsRoute,
   GodModeDashboardRunnersRoute: GodModeDashboardRunnersRoute,
   GodModeDashboardLoopJobIdRoute: GodModeDashboardLoopJobIdRoute,
   GodModeDashboardLoopIndexRoute: GodModeDashboardLoopIndexRoute,

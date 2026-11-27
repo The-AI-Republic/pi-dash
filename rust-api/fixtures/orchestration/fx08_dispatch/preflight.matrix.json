@@ -28,15 +28,16 @@
         }
       ]
     },
-    "F3a_managed_no_creator": {
+    "F3a_runner_no_creator": {
       "issue": "FX8-3",
       "executor": "managed_runner",
       "creator": null,
       "result": false,
+      "note": "#2903: the managed branch is gone; a stale managed spelling takes the runner branch and the matcher alone decides (no creator gate).",
       "logs": [
         {
           "level": "INFO",
-          "message": "agent_dispatch: bounce issue=88888888-aaaa-bbbb-cccc-000000008103 reason=no-managed-runner triggered_by=tick"
+          "message": "agent_dispatch: bounce issue=88888888-aaaa-bbbb-cccc-000000008103 reason=no-eligible-runner triggered_by=tick"
         },
         {
           "level": "INFO",
@@ -44,14 +45,16 @@
         }
       ]
     },
-    "F3b_managed_disabled": {
+    "F3b_runner_with_creator": {
       "issue": "FX8-4",
-      "seam": "managed_runner_is_enabled -> False",
+      "executor": "managed_runner",
+      "creator": "fx8-creator@example.com",
       "result": false,
+      "note": "#2903: no enrollment/profile/kill-switch leg remains; the matcher answers false and the run bounces with the default body.",
       "logs": [
         {
           "level": "INFO",
-          "message": "agent_dispatch: bounce issue=88888888-aaaa-bbbb-cccc-000000008104 reason=managed_runner_disabled triggered_by=tick"
+          "message": "agent_dispatch: bounce issue=88888888-aaaa-bbbb-cccc-000000008104 reason=no-eligible-runner triggered_by=tick"
         },
         {
           "level": "INFO",
@@ -59,40 +62,13 @@
         }
       ]
     },
-    "F3c_managed_no_profile": {
-      "issue": "FX8-5",
-      "seam": "managed_llm_profile -> unavailable/llm_config_missing",
-      "result": false,
-      "logs": [
-        {
-          "level": "INFO",
-          "message": "agent_dispatch: bounce issue=88888888-aaaa-bbbb-cccc-000000008105 reason=llm_config_missing triggered_by=tick"
-        },
-        {
-          "level": "INFO",
-          "message": "agent_ticker: reconcile issue=88888888-aaaa-bbbb-cccc-000000008105 event=left_bucket -> dispatch_now=False queued=False parked=False reason=no-ticker"
-        }
-      ]
-    },
-    "F3d_managed_not_enrolled": {
-      "issue": "FX8-6",
-      "seam": "enrolled_managed_runners.exists -> False",
-      "result": false,
-      "logs": [
-        {
-          "level": "INFO",
-          "message": "agent_dispatch: bounce issue=88888888-aaaa-bbbb-cccc-000000008106 reason=no-managed-runner triggered_by=tick"
-        },
-        {
-          "level": "INFO",
-          "message": "agent_ticker: reconcile issue=88888888-aaaa-bbbb-cccc-000000008106 event=left_bucket -> dispatch_now=False queued=False parked=False reason=no-ticker"
-        }
-      ]
-    },
-    "F3e_managed_all_pass": {
+    "F3c_runner_match": {
       "issue": "FX8-7",
+      "executor": "managed_runner",
+      "creator": "fx8-creator@example.com",
       "result": true,
       "comments": 0,
+      "note": "#2903: the matcher answers true and the run proceeds with no creator gate.",
       "logs": []
     },
     "F4a_local_runner_match": {

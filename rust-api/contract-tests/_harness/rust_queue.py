@@ -83,9 +83,10 @@ QUEUE_TABLE_DDL = (
     ")"
 )
 QUEUE_CLAIM_INDEX_DDL = (
-    "CREATE INDEX IF NOT EXISTS rust_job_queue_claim_idx "
-    "ON rust_job_queue (status, visible_at, id)"
+    "CREATE INDEX IF NOT EXISTS rust_job_queue_claim_queue_idx "
+    "ON rust_job_queue (queue, status, visible_at, id)"
 )
+QUEUE_LEGACY_DROP_DDL = "DROP INDEX IF EXISTS rust_job_queue_claim_idx"
 
 
 def ensure_schema(database_url: str | None = None) -> None:
@@ -96,6 +97,7 @@ def ensure_schema(database_url: str | None = None) -> None:
     with connect(database_url) as conn, conn.cursor() as cur:
         cur.execute(QUEUE_TABLE_DDL)
         cur.execute(QUEUE_CLAIM_INDEX_DDL)
+        cur.execute(QUEUE_LEGACY_DROP_DDL)
 
 
 def publish(

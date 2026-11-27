@@ -15,7 +15,7 @@ import { User } from "lucide-react";
 import * as React from "react";
 
 import { useMe } from "../../core/session/hooks.js";
-import { PropertyChip } from "./PropertyChip.js";
+import { describeChip, PropertyChip } from "./PropertyChip.js";
 import { selectMemberOptions, type MemberOption } from "./members.js";
 import { usePickerProjectMembers, usePickerWorkspaceMembers } from "./reference.js";
 
@@ -154,7 +154,7 @@ export function MemberPicker(props: MemberPickerProps): React.ReactElement {
             }
             text={text}
             placeholder={!filled}
-            {...(filled ? { title: text } : {})}
+            tooltip={describeChip(accessible, filled ? text : null, "The people responsible for doing this work.")}
             {...(tabIndex === undefined ? {} : { tabIndex })}
           />
         );
@@ -231,7 +231,7 @@ export function MemberPicker(props: MemberPickerProps): React.ReactElement {
             label={`${accessible}: ${summary}`}
             icon={stack}
             borderless
-            title={summary}
+            tooltip={describeChip(accessible, summary, "The people responsible for doing this work.")}
             {...(tabIndex === undefined ? {} : { tabIndex })}
           />
         );
@@ -244,7 +244,7 @@ export function MemberPicker(props: MemberPickerProps): React.ReactElement {
           text={filled ? text : prompt}
           placeholder={!filled}
           borderless={filled}
-          {...(filled ? { title: text } : {})}
+          tooltip={describeChip(accessible, filled ? text : null, "The people responsible for doing this work.")}
           {...(tabIndex === undefined ? {} : { tabIndex })}
         />
       );

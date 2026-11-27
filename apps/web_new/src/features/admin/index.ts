@@ -107,13 +107,17 @@ export {
   useLoopJobDetail,
   useLoopJobs,
   useLoopJobTargets,
+  useCreateRunnerModel,
+  useDeleteRunnerModel,
   useRestrictWorkspaceCreation,
+  useRunnerModels,
   useToggleLoopJob,
   useUpdateGeneralSettings,
   useUpdateInstanceConfigurations,
   useUpdateLoopJob,
+  useUpdateRunnerModel,
 } from "./hooks.js";
-export type { LoopJobToggle, LoopJobUpdate } from "./hooks.js";
+export type { LoopJobToggle, LoopJobUpdate, RunnerModelUpdate } from "./hooks.js";
 export {
   firstAdminEmail,
   GENERAL_NAME_REQUIRED_MESSAGE,
@@ -233,6 +237,7 @@ export { AdminLoopJobDetailPage } from "./components/AdminLoopJobDetailPage.js";
 export { AdminLoopJobModal } from "./components/AdminLoopJobModal.js";
 export { AdminLoopJobsPage } from "./components/AdminLoopJobsPage.js";
 export { AdminRunnersPage } from "./components/AdminRunnersPage.js";
+export { AdminRunnerModelsPage } from "./components/AdminRunnerModelsPage.js";
 export type { AdminEntrySearch } from "./components/AdminEntryGate.js";
 export { AdminDashboardGuard, AdminHomeGuard } from "./components/AdminGuards.js";
 export { AdminHeader } from "./components/AdminHeader.js";

@@ -76,6 +76,10 @@ Wants=network-online.target
 Type=simple
 ExecStart={exe} __run
 Environment=PIDASH_CONFIG_DIR={config_dir}{data_line}{path_line}
+# NEWPIDASH-255: per-run containment cgroups are children of this
+# service's cgroup; control-group kill (the default, pinned here so it
+# can't drift) reaps every run's processes when the daemon stops.
+KillMode=control-group
 Restart=on-failure
 RestartSec=5
 
@@ -224,6 +228,53 @@ pub async fn diagnose_recent_exit() -> Option<String> {
     None
 }
 
+/// Parse `systemctl --user show pidash.service` output for the previous
+/// exit result (NEWPIDASH-253). Only `oom-kill` is reported; anything
+/// else (success, other failures, unparseable output) is `None`. Pure so
+/// it unit-tests without systemd.
+pub fn parse_previous_exit(show_output: &str) -> Option<String> {
+    for line in show_output.lines() {
+        if line.trim() == "Result=oom-kill" {
+            return Some("oom-kill".to_string());
+        }
+    }
+    None
+}
+
+/// The previous `pidash.service` exit result, best-effort (NEWPIDASH-253).
+/// `Some("oom-kill")` when systemd reports the last invocation died to the
+/// OOM killer; `None` on any other platform, without systemd, or on
+/// failure. Bounded so a wedged systemctl never hangs startup.
+///
+/// Note (review question 2026-11-16): systemd resets `Result` on service
+/// start, so a read after startup may report `success` even when the
+/// previous invocation was oom-killed. This is best-effort by design —
+/// when it returns `None` the daemon detail still carries the shutdown
+/// trigger (e.g. SIGTERM), which meets the Done-when; the oom-kill suffix
+/// is an additive hint when `Result` survives the restart.
+pub async fn previous_exit_result() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            Command::new("systemctl")
+                .args(["--user", "show", UNIT_NAME])
+                .output(),
+        )
+        .await;
+        match out {
+            Ok(Ok(output)) if output.status.success() => {
+                parse_previous_exit(&String::from_utf8_lossy(&output.stdout))
+            }
+            _ => None,
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 fn unit_path() -> Result<PathBuf> {
     let home = dirs_home()?;
     Ok(home.join(".config/systemd/user").join(UNIT_NAME))
@@ -291,7 +342,9 @@ mod tests {
             "unit body must not export PIDASH_DATA_DIR for a default-location install; got:\n{body}"
         );
         // The config line must survive the omission without a dangling blank line.
-        assert!(body.contains("Environment=PIDASH_CONFIG_DIR=/etc/pidash\nRestart=on-failure"));
+        assert!(body.contains("Environment=PIDASH_CONFIG_DIR=/etc/pidash"));
+        assert!(body.contains("Restart=on-failure"));
+        assert!(body.contains("KillMode=control-group"));
     }
 
     /// The value a unit body exports for `key` via `Environment=KEY=VALUE`,
@@ -366,6 +419,19 @@ mod tests {
     }
 
     #[test]
+    fn unit_body_leaves_the_umask_alone() {
+        // The daemon's own folders are made owner-only where it creates them
+        // (`util::fs::create_dir_all_private`). A unit-wide `Umask=` would
+        // also be inherited by git and the agent, changing the mode of every
+        // file they create inside a user's existing repo.
+        let body = render_unit("/bin/pidash", "/etc/pidash", Some("/var/lib/pidash"), None);
+        assert!(
+            !body.contains("Umask="),
+            "unit must not set Umask; got:\n{body}"
+        );
+    }
+
+    #[test]
     fn unit_body_omits_path_when_not_captured() {
         let body = render_unit("/bin/pidash", "/etc/pidash", Some("/var/lib/pidash"), None);
         assert!(
@@ -383,9 +449,7 @@ mod tests {
             Some("/home/user/.local/bin:/usr/local/bin:/usr/bin"),
         );
         assert!(
-            body.contains(
-                "Environment=\"PATH=/home/user/.local/bin:/usr/local/bin:/usr/bin\""
-            ),
+            body.contains("Environment=\"PATH=/home/user/.local/bin:/usr/local/bin:/usr/bin\""),
             "unit body must include captured PATH; got:\n{body}"
         );
     }
@@ -404,5 +468,15 @@ mod tests {
         assert_eq!(systemd_double_quoted_escape("/back`tick"), "/back`tick");
         assert_eq!(systemd_double_quoted_escape("/quo\"ted"), "/quo\\\"ted");
         assert_eq!(systemd_double_quoted_escape("a\\b"), "a\\\\b");
+    }
+
+    #[test]
+    fn previous_exit_parser_finds_oom_kill_only() {
+        let show = "Id=pidash.service\nActiveState=failed\nResult=oom-kill\nExecMainCode=1\n";
+        assert_eq!(parse_previous_exit(show).as_deref(), Some("oom-kill"));
+        assert_eq!(parse_previous_exit("Result=success\n"), None);
+        assert_eq!(parse_previous_exit("Result=timeout\n"), None);
+        assert_eq!(parse_previous_exit(""), None);
+        assert_eq!(parse_previous_exit("Result=oom-kill-something\n"), None);
     }
 }

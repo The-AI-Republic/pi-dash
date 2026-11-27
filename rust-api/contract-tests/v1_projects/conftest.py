@@ -53,7 +53,7 @@ def seed(conn):
     db.add_project_member(conn, ws_b["id"], project_b["id"], owner_b["id"], db.ADMIN)
 
     keys = {}
-    for module in ("projects", "members", "invites", "user", "states", "estimates"):
+    for module in ("projects", "members", "invites", "user", "states", "estimates", "settings"):
         keys[module] = db.create_api_token(conn, owner["id"], tag + module[0])["token"]
     keys["member_self"] = db.create_api_token(conn, member["id"], tag + "ms")["token"]
     keys["guest"] = db.create_api_token(conn, guest["id"], tag + "g")["token"]

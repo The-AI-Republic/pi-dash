@@ -6,7 +6,7 @@ import { render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const harness = vi.hoisted(() => ({
-  confirmRuntimeSignOut: vi.fn(async () => ({ deleteChatHistory: false })),
+  confirmRuntimeSignOut: vi.fn(async () => ({ deleteChatHistory: false, signOutComputer: false })),
   registerSignOutPrompt: vi.fn(),
 }));
 
@@ -38,7 +38,10 @@ afterEach(() => {
 
 describe("RuntimeSignOutLifecycle without its dialog chunk", () => {
   it("keeps the history default instead of trapping the user", async () => {
-    await expect(getRuntimeSignOutHooks()?.confirmRuntimeSignOut()).resolves.toEqual({ deleteChatHistory: false });
+    await expect(getRuntimeSignOutHooks()?.confirmRuntimeSignOut()).resolves.toEqual({
+      deleteChatHistory: false,
+      signOutComputer: false,
+    });
     expect(harness.confirmRuntimeSignOut).toHaveBeenCalledTimes(1);
     expect(harness.registerSignOutPrompt).not.toHaveBeenCalled();
   });

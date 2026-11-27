@@ -6,6 +6,9 @@
 // later slices mount their screens through `RunnersAreaShell`, build their
 // child links with `runnersPath`, and read data through the api hooks.
 
+// Display labels for reasoning-effort tiers (shared with the admin model catalog).
+export { EFFORT_LABELS } from "./addRunner/catalog.js";
+
 // In-app command-line setup (DESK-021): detect, install, self-approved login.
 export {
   CLI_SETUP_BUSY,
@@ -24,36 +27,85 @@ export { CliSetupPanel, CLI_SETUP_HEADING, CLI_SETUP_INTRO } from "./components/
 // the app shell) owns sign-out registration; the hooks below are its API.
 export { APPROVAL_MODE_STORAGE_PREFIX, restoreApprovalModes, stashApprovalModes } from "./runtime/approvalModes.js";
 export type { ApprovalModeCarryInput } from "./runtime/approvalModes.js";
-export { isManagedRunnerAvailable, projectAvailabilityQueryOptions, runtimeKeys } from "./runtime/queries.js";
+export { isPidashAgentAvailable, projectAvailabilityQueryOptions, runtimeKeys } from "./runtime/queries.js";
 export {
-  CREDENTIAL_RENEW_BEFORE_MS,
-  connectProject,
+  compatibleHello,
+  currentDiscovery,
+  daemonAccountKey,
+  discoverDaemon,
+  discoveryProblem,
   disposeRuntimeForSignOut,
-  EngineUnavailableError,
+  PidashAgentUnavailableError,
+  pidashAgentActionFor,
   ensureChatRuntime,
   getRuntimeAccount,
   HEARTBEAT_POLL_ATTEMPTS,
   HEARTBEAT_POLL_INTERVAL_MS,
-  MANAGED_RUNNER_KIND,
+  PIDASH_AGENT_EXECUTOR_KIND,
   prepareAgentRun,
   refreshRuntime,
+  renewPidashAgentIfAllowed,
   resumeRuntime,
+  setUpDaemon,
+  signInWorkspace,
+  turnOnPidashAgentForProject,
 } from "./runtime/service.js";
-export type { AgentRunTarget, HeartbeatPoll, RuntimeDeps } from "./runtime/service.js";
+export type {
+  AgentRunTarget,
+  DaemonSetUpStep,
+  PidashAgentAction,
+  HeartbeatPoll,
+  RuntimeDeps,
+} from "./runtime/service.js";
+export { migrateLegacyTrees } from "./runtime/desktop-migration.js";
+export type { MigrationOutcome, MigrationDeps } from "./runtime/desktop-migration.js";
+export {
+  dismissNotices,
+  emptyNotices,
+  folderKey,
+  getServerRunner,
+  hasNotices,
+  loadNotices,
+  podKey,
+  recordNotices,
+  replaceKey,
+  setPodWork,
+  subscribeNotices,
+} from "./runtime/desktop-notices.js";
+export type { DesktopNotices } from "./runtime/desktop-notices.js";
+export {
+  declineReplace,
+  errorText as replaceErrorText,
+  findReplacePrompt,
+  offerReplace,
+  registerReplacePrompt,
+  replaceMachine,
+  replacePromptOpen,
+  setReplacePromptOpen,
+  subscribeReplacePromptOpen,
+} from "./runtime/desktop-replace.js";
+export type { ReplaceCandidate, ReplaceOutcome, ReplacePrompt, ReplaceDeps } from "./runtime/desktop-replace.js";
+export { MigrationNoticesDialog } from "./runtime/MigrationNoticesDialog.js";
+export { ReplaceMachineDialog } from "./runtime/ReplaceMachineDialog.js";
 export { confirmRuntimeSignOut, registerSignOutPrompt } from "./runtime/signOutPrompt.js";
 export { RuntimeSignOutDialog } from "./runtime/SignOutDialog.js";
 export { registerRuntimeSignOutLifecycle, RuntimeSignOutLifecycle } from "./runtime/SignOutLifecycle.js";
+export { RUNTIME_REFRESH_INTERVAL_MS, RuntimeSupervisor } from "./runtime/Supervisor.js";
+export type { RuntimeSupervisorProps } from "./runtime/Supervisor.js";
 export {
-  AVAILABILITY_POLL_INTERVAL_MS,
-  matchProjectIdentifier,
-  RUNTIME_CONNECTED_TEXT,
-  RUNTIME_PREPARING_TEXT,
-  RUNTIME_REFRESH_INTERVAL_MS,
-  RUNTIME_WAITING_TEXT,
-  RuntimeSupervisor,
-  selectRuntimeNotice,
-} from "./runtime/Supervisor.js";
-export type { RuntimeNoticeInput, RuntimeSupervisorProps } from "./runtime/Supervisor.js";
+  AUTH_SYNC_INTERVAL_MS,
+  AuthSyncSupervisor,
+  CLI_SIGN_OUT_MESSAGE,
+  CLI_SIGN_OUT_TITLE,
+} from "./runtime/SyncSupervisor.js";
+export {
+  reconcile,
+  sameAccount,
+  sameCloud,
+  type SyncDecision,
+  type SyncMe,
+  type SyncSnapshot,
+} from "./runtime/sync.js";
 
 export { decideProjectRunnersAccess, decideWorkspaceRunnersAccess, type RunnersAccess } from "./access.js";
 export { buildRunnersAreaValue, RunnersAreaProvider, useRunnersArea, type RunnersAreaValue } from "./area.js";

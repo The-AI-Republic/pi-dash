@@ -36,6 +36,7 @@ vi.mock("../../../core/platform/index.js", async (importOriginal) => {
 
 vi.mock("../../runners/runtime/service.js", () => ({
   disposeRuntimeForSignOut: (input: unknown) => runtimeHarness.dispose(input),
+  canSignOutComputer: () => false,
 }));
 
 import { RuntimeSignOutLifecycle } from "../../runners/runtime/SignOutLifecycle.js";
@@ -115,7 +116,7 @@ describe("WorkspaceNotFoundScreen", () => {
     await userEvent.setup().click(within(dialog).getByRole("button", { name: "Sign out" }));
     await waitFor(() =>
       expect(runtimeHarness.dispose).toHaveBeenCalledWith(
-        expect.objectContaining({ choice: { deleteChatHistory: false }, runtime: {} })
+        expect.objectContaining({ choice: { deleteChatHistory: false, signOutComputer: false }, runtime: {} })
       )
     );
     await waitFor(() => expect(seen.posts).toHaveLength(1));

@@ -8,16 +8,42 @@
 import type { BadgeTone } from "@pidash/kit";
 
 export { parseRunsPage, runsHref, runsPageSearch } from "./runsPage.js";
-import type { AgentRun, RunErrorDiagnostic, RunEvent } from "@pidash/api-client";
+import type { AgentRun, RunErrorDiagnostic, RunEvent, Runner } from "@pidash/api-client";
+
+import { PIDASH_AGENT_NAME, isPidashAgentRunner, runnerDisplayName } from "../../../shared/lib/runnerIdentity.js";
 
 /** Footer text; only shown while the scope has runs. */
 export function pageLabel(page: number, totalPages: number): string {
   return `Page ${page} of ${totalPages}`;
 }
 
-/** Executor badge copy; every non-cloud executor is the local runner. */
+/**
+ * Executor badge copy by kind alone. Legacy `managed_runner` rows ran on
+ * the Pi Dash Agent; every other non-cloud run is the local runner.
+ * The retired cloud kind reads with the frontend-owned retired label
+ * (section 7.3): historical rows only.
+ */
 export function executorLabel(kind: AgentRun["executor_kind"]): string {
-  return kind === "cloud_agent" ? "Cloud executor" : "Local runner";
+  if (kind === "cloud_agent") return "Cloud agent run (retired)";
+  if (kind === "managed_runner") return PIDASH_AGENT_NAME;
+  return "Local runner";
+}
+
+/**
+ * Executor badge copy for one run (Pi Dash Agent design §11): the
+ * label comes from the run's runner, so a run on a Pi Dash Agent reads
+ * "Pi Dash Agent · <machine>". Falls back to the kind label while the
+ * runner is unknown (not loaded, deleted, or never assigned).
+ */
+export function runExecutorLabel(
+  run: Pick<AgentRun, "executor_kind" | "runner">,
+  runners: readonly Runner[] | undefined
+): string {
+  const runner = run.runner === null ? undefined : runners?.find((entry) => entry.id === run.runner);
+  if (runner !== undefined && run.executor_kind !== "cloud_agent" && isPidashAgentRunner(runner)) {
+    return runnerDisplayName(runner);
+  }
+  return executorLabel(run.executor_kind);
 }
 
 export function executorTone(kind: AgentRun["executor_kind"]): BadgeTone {

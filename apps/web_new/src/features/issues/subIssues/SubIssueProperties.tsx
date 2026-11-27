@@ -94,6 +94,7 @@ export function SubIssuePropertyControls({
           variant="ghost"
           disabled={disabled}
           placeholder="State"
+          preload={row.state_id !== null}
           optionGate={stateOptionGate(projectId, row.state_id)}
           onChange={(stateId) => actions.write({ row, patch: { state_id: stateId }, field: "state_id" })}
         />
@@ -165,6 +166,7 @@ export function SubIssuePropertyControls({
           iconOnly
           variant="ghost"
           disabled={disabled}
+          preload={row.assignee_ids.length > 0}
           onChange={(assigneeIds) =>
             actions.write({ row, patch: { assignee_ids: assigneeIds }, field: "assignee_ids" })
           }
