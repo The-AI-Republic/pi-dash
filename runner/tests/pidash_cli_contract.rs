@@ -2508,17 +2508,17 @@ async fn issue_patch_add_and_remove_share_one_label_lookup() {
 const STATES_BODY: &str = r#"{"count":2,"results":[{"id":"s1","name":"Todo","group":"unstarted"},{"id":"s2","name":"Done","group":"completed"}]}"#;
 const PROJECT_UUID: &str = "e509f5c9-c6fd-4b1a-a89c-8cb863610500";
 
-/// Fake that serves states for project `OPENHUB` (and its UUID) and 404s
+/// Fake that serves states for project `ENG` (and its UUID) and 404s
 /// everything else, like the server does for an unknown project.
 fn states_fake_handler() -> Handler {
     Box::new(|req| {
         let known = [
-            "/api/v1/workspaces/acme/projects/OPENHUB/states/".to_string(),
+            "/api/v1/workspaces/acme/projects/ENG/states/".to_string(),
             format!("/api/v1/workspaces/acme/projects/{PROJECT_UUID}/states/"),
         ];
         if known.contains(&req.path) {
             CannedResponse::ok(STATES_BODY)
-        } else if req.path == "/api/v1/workspaces/acme/work-items/OPENHUB-7/" {
+        } else if req.path == "/api/v1/workspaces/acme/work-items/ENG-7/" {
             CannedResponse::ok(format!(r#"{{"id":"i7","project":"{PROJECT_UUID}"}}"#))
         } else {
             CannedResponse {
@@ -2552,13 +2552,10 @@ async fn state_list(
 
 #[tokio::test]
 async fn state_list_positional_project_slug_lists_project_states() {
-    let (resp, paths) = state_list(Some("OPENHUB"), None).await;
+    let (resp, paths) = state_list(Some("ENG"), None).await;
     let resp = resp.expect("slug positional succeeds");
     assert_eq!(resp["results"][0]["name"], "Todo");
-    assert_eq!(
-        paths,
-        vec!["/api/v1/workspaces/acme/projects/OPENHUB/states/"]
-    );
+    assert_eq!(paths, vec!["/api/v1/workspaces/acme/projects/ENG/states/"]);
 }
 
 #[tokio::test]
@@ -2575,22 +2572,19 @@ async fn state_list_positional_project_uuid_lists_project_states() {
 
 #[tokio::test]
 async fn state_list_project_flag_slug_lists_project_states() {
-    let (resp, paths) = state_list(None, Some("OPENHUB")).await;
+    let (resp, paths) = state_list(None, Some("ENG")).await;
     assert_eq!(resp.expect("--project succeeds")["count"], 2);
-    assert_eq!(
-        paths,
-        vec!["/api/v1/workspaces/acme/projects/OPENHUB/states/"]
-    );
+    assert_eq!(paths, vec!["/api/v1/workspaces/acme/projects/ENG/states/"]);
 }
 
 #[tokio::test]
 async fn state_list_positional_issue_identifier_still_resolves_its_project() {
-    let (resp, paths) = state_list(Some("OPENHUB-7"), None).await;
+    let (resp, paths) = state_list(Some("ENG-7"), None).await;
     assert_eq!(resp.expect("issue positional succeeds")["count"], 2);
     assert_eq!(
         paths,
         vec![
-            "/api/v1/workspaces/acme/work-items/OPENHUB-7/".to_string(),
+            "/api/v1/workspaces/acme/work-items/ENG-7/".to_string(),
             format!("/api/v1/workspaces/acme/projects/{PROJECT_UUID}/states/"),
         ]
     );

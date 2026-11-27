@@ -238,9 +238,7 @@ pub enum Request {
     /// one of its workspace credentials and answers with
     /// [`Response::SessionHandoff`]. Older daemons reject this verb as
     /// unknown; the app then falls back to a browser sign-in (§8).
-    SessionHandoff {
-        challenge: String,
-    },
+    SessionHandoff { challenge: String },
 
     // ---- Local chat (PDASHOSS01-159, IPC v4) ------------------------
     //
@@ -1647,7 +1645,10 @@ mod tests {
             engine_detail: None,
         };
         let wire = serde_json::to_value(Response::Hello(hello.clone())).unwrap();
-        let at = wire["data"]["auth_event"]["at"].as_str().unwrap().to_string();
+        let at = wire["data"]["auth_event"]["at"]
+            .as_str()
+            .unwrap()
+            .to_string();
         assert_eq!(
             wire,
             serde_json::json!({

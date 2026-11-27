@@ -103,8 +103,13 @@ async fn client_accepts_the_owner_only_daemon_pipe() {
         BufReader::new(server).read_line(&mut line).await.unwrap();
         line
     });
-    let mut client = Client::connect(&sock).await.expect("own daemon pipe is accepted");
+    let mut client = Client::connect(&sock)
+        .await
+        .expect("own daemon pipe is accepted");
     let _ = tokio::time::timeout(Duration::from_millis(500), client.call(Request::Hello)).await;
-    let line = tokio::time::timeout(Duration::from_secs(5), served).await.unwrap().unwrap();
+    let line = tokio::time::timeout(Duration::from_secs(5), served)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(line.contains("hello"), "{line}");
 }

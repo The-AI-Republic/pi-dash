@@ -206,7 +206,7 @@ mod tests {
 
     #[test]
     fn state_list_positional_project_forms_are_projects() {
-        for arg in ["OPENHUB", "e509f5c9-c6fd-4b1a-a89c-8cb863610500", "MY-PROJ"] {
+        for arg in ["ENG", "e509f5c9-c6fd-4b1a-a89c-8cb863610500", "MY-PROJ"] {
             let target = state_list_target(None, Some(arg), Some("ENG-7"), None).expect("target");
             assert_eq!(project(&target), arg);
         }
