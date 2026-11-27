@@ -172,12 +172,24 @@ fn state_list_target(
     current_issue: Option<&str>,
     current_project: Option<&str>,
 ) -> Result<StateListTarget, CliError> {
+    // A target the caller supplied but left blank (`"$project"` with an
+    // empty variable) is an error, never a fallback to the run context.
     if let Some(project) = project {
+        let project = project.trim();
+        if project.is_empty() {
+            return Err(CliError::new(EXIT_INVALID, "--project must not be empty"));
+        }
         return Ok(StateListTarget::Project(project.to_string()));
     }
     // The positional argument is a project (identifier or UUID) unless it
     // has the `<PROJ>-<number>` shape of a work-item identifier.
-    if let Some(arg) = explicit.map(str::trim).filter(|a| !a.is_empty()) {
+    if let Some(arg) = explicit.map(str::trim) {
+        if arg.is_empty() {
+            return Err(CliError::new(
+                EXIT_INVALID,
+                "state list target must not be empty",
+            ));
+        }
         if looks_like_uuid(arg) || !looks_like_issue_identifier(arg) {
             return Ok(StateListTarget::Project(arg.to_string()));
         }
