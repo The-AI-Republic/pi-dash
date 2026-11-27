@@ -567,6 +567,7 @@ def test_run_now_conflicts(world, conn):
             "phase_kind": "",
             "agent_metadata": {},
             "usage": {"input": 1, "output": 1, "total": 2},
+            "pin_kind": "locality",
             "scheduler_binding_id": world["binding"]["id"],
         },
     )
@@ -676,16 +677,15 @@ def test_name_and_description(world):
 
 
 def test_builtin_definition_is_rejected(world, conn):
+    # NEWPIDASH-256: catalog empty — `security-audit` is no longer builtin,
+    # so the former builtin is now an ordinary editable definition.
     r = send(
         "PATCH", world["keys"]["owner"], definition_url(world, world["builtin"]["id"]),
         json={"prompt": "Do something else."},
     )
-    _assert_conflict(
-        r,
-        "builtin_scheduler",
-        BUILTIN_MESSAGE,
-    )
-    assert scheduler_row(conn, world["builtin"]["id"])["prompt"] == PROMPT
+    assert r.status_code == 200, r.text
+    assert r.json()["is_builtin"] is False
+    assert scheduler_row(conn, world["builtin"]["id"])["prompt"] == "Do something else."
 
 
 def test_user_created_default_source_is_editable(world, conn):
@@ -852,11 +852,19 @@ def test_create_slug_errors(world):
     assert (taken.status_code, taken.json()) == (
         400, {"slug": ["This slug is already in use in this workspace."]}
     )
-    for slug in ("security-audit", "fable-security-audit", " fable-security-audit "):
-        reserved = send("POST", key, ws_list_url(world), json=new_scheduler(world, slug=slug))
-        assert (reserved.status_code, reserved.json()) == (
-            400, {"slug": ["This slug is reserved for a built-in scheduler."]}
-        ), slug
+    # NEWPIDASH-256: catalog empty — no reserved slugs. The former
+    # reserved slugs are ordinary handles: `security-audit` collides
+    # with the world fixture row (duplicate), while a fresh handle that
+    # was once reserved (`fable-security-audit`) now creates normally.
+    dup = send("POST", key, ws_list_url(world), json=new_scheduler(world, slug="security-audit"))
+    assert (dup.status_code, dup.json()) == (
+        400, {"slug": ["This slug is already in use in this workspace."]}
+    )
+    fresh = send("POST", key, ws_list_url(world), json=new_scheduler(world, slug="fable-security-audit"))
+    assert fresh.status_code == 201, fresh.text
+    assert fresh.json()["slug"] == "fable-security-audit"
+    assert fresh.json()["source"] == "builtin"
+    assert fresh.json()["is_builtin"] is False
 
 
 def test_create_validation(world, conn):
@@ -943,11 +951,12 @@ def test_workspace_admin_deletes_definition_and_installs(world, conn):
 
 
 def test_delete_builtin_is_rejected(world, conn):
+    # NEWPIDASH-256: former builtin is ordinary — delete succeeds.
     r = send(
         "DELETE", world["keys"]["owner"], definition_url(world, world["builtin"]["id"])
     )
-    _assert_conflict(r, "builtin_scheduler", BUILTIN_MESSAGE)
-    assert scheduler_row(conn, world["builtin"]["id"])["deleted_at"] is None
+    assert r.status_code == 204, r.text
+    assert scheduler_row(conn, world["builtin"]["id"])["deleted_at"] is not None
 
 
 def test_delete_precondition(world, conn):

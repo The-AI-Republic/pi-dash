@@ -101,6 +101,10 @@ use uuid::Uuid;
 pub const CODE_MACHINE_TOKEN_INVALID: &str = "machine_token_invalid";
 /// `mt_` path: token row revoked (`authentication.py:127`).
 pub const CODE_MACHINE_TOKEN_REVOKED: &str = "machine_token_revoked";
+/// `mt_` path: 60-day idle expiry lapsed (`authentication.py:129`,
+/// `is_expired`; the `machine_token_expired` code is Django's own
+/// `AuthenticationFailed` detail).
+pub const CODE_MACHINE_TOKEN_EXPIRED: &str = "machine_token_expired";
 /// Either path: the bound dev-machine row revoked (`authentication.py:129,143`).
 pub const CODE_DEV_MACHINE_REVOKED: &str = "dev_machine_revoked";
 /// Either `mt_` path: owner left the workspace; the token is revoked first,
@@ -377,6 +381,10 @@ pub struct MachineTokenAuthRow {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
     pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// 60-day idle expiry (`machine_token.expires_at`; `None` on legacy
+    /// rows). `resolve_machine_token` refuses `expires_at <= now`
+    /// (`authentication.py:129`, `MachineToken.is_expired`).
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
     /// `workspaces.slug` (`SlugField`, never null; `None` only if the
     /// workspace row itself is gone, which the FK forbids).
     pub workspace_slug: Option<String>,
@@ -544,6 +552,14 @@ fn dev_machine_revoked() -> SimpleExpr {
     Expr::col((dev_machine::Entity, dev_machine::Column::RevokedAt)).is_not_null()
 }
 
+/// `MachineToken.is_expired(now)`: `expires_at` at or past `now` (no
+/// expiry — legacy rows — never expires), the one expiry check every
+/// `mt_` path shares (`resolve_machine_token`,
+/// `authentication.py:129`).
+fn token_expired(expires_at: Option<chrono::DateTime<chrono::Utc>>) -> bool {
+    expires_at.is_some_and(|expires| expires <= chrono::Utc::now())
+}
+
 /// `Runner.objects.select_related("workspace", "pod",
 /// "dev_machine").get(id=...)`: full row plus the dev-machine revocation
 /// bit. No soft-delete predicate: `Runner` is a plain `models.Model`.
@@ -624,15 +640,19 @@ async fn workspace_member_role(
 /// rows (revoked is denied earlier), so the `is not None` early return never
 /// fires here.
 async fn revoke_machine_token(pool: &PgPool, token_id: Uuid) -> Result<(), sqlx::Error> {
-    pidash_services::domain::tokens::revoke_machine_token_by_id(pool, token_id, chrono::Utc::now())
-        .await
+    pidash_services::domain::tokens::revoke_machine_token_by_id(
+        &pidash_db::pool::sea_orm_connection(pool),
+        token_id,
+        chrono::Utc::now(),
+    )
+    .await
 }
 
 /// `MachineToken.objects.filter(pk=...).update(last_used_at=...)`: no
 /// `updated_at` touch (`QuerySet.update` writes only the named column).
 async fn bump_machine_token_last_used(pool: &PgPool, token_id: Uuid) -> Result<(), sqlx::Error> {
     pidash_services::domain::tokens::touch_machine_token_last_used_by_id(
-        pool,
+        &pidash_db::pool::sea_orm_connection(pool),
         token_id,
         chrono::Utc::now(),
     )
@@ -763,10 +783,10 @@ async fn authenticate_access_jwt(
 }
 
 /// Shared MachineToken path (`authentication.py:120-162`), in order: hash →
-/// row → revoked → machine-revoked → membership-or-revoke → runner-id
-/// required → runner load → runner/machine revoked → binding → `last_used_at`
-/// bump (plain update, NOT best-effort — a DB error escapes to 500) →
-/// payload.
+/// row → machine-revoked → revoked → expired → membership-or-revoke →
+/// runner-id required → runner load → runner/machine revoked → binding →
+/// `last_used_at` bump (plain update, NOT best-effort — a DB error
+/// escapes to 500) → payload.
 #[allow(clippy::result_large_err)]
 async fn authenticate_access_machine_token(
     pool: &PgPool,
@@ -783,11 +803,17 @@ async fn authenticate_access_machine_token(
     let Some(token) = token else {
         return Err(bearer_failure_response(CODE_MACHINE_TOKEN_INVALID, allow));
     };
+    // The machine first: removing a computer on the web revokes its tokens
+    // too, and the daemon must read that as removed (`dev_machine_revoked`),
+    // not a plain token revoke (desktop_unified_signin §12 rule 1).
+    if token.dev_machine_id.is_some() && token.dev_machine_revoked {
+        return Err(bearer_failure_response(CODE_DEV_MACHINE_REVOKED, allow));
+    }
     if token.revoked_at.is_some() {
         return Err(bearer_failure_response(CODE_MACHINE_TOKEN_REVOKED, allow));
     }
-    if token.dev_machine_id.is_some() && token.dev_machine_revoked {
-        return Err(bearer_failure_response(CODE_DEV_MACHINE_REVOKED, allow));
+    if token_expired(token.expires_at) {
+        return Err(bearer_failure_response(CODE_MACHINE_TOKEN_EXPIRED, allow));
     }
     if !member_or_revoke(pool, &token).await? {
         return Err(bearer_failure_response(CODE_MEMBERSHIP_REVOKED, allow));
@@ -897,11 +923,17 @@ pub async fn authenticate_machine_token(
     let Some(token) = token else {
         return Err(bearer_failure_response(CODE_MACHINE_TOKEN_INVALID, allow));
     };
+    // The machine first: removing a computer on the web revokes its tokens
+    // too, and the daemon must read that as removed (`dev_machine_revoked`),
+    // not a plain token revoke (desktop_unified_signin §12 rule 1).
+    if token.dev_machine_id.is_some() && token.dev_machine_revoked {
+        return Err(bearer_failure_response(CODE_DEV_MACHINE_REVOKED, allow));
+    }
     if token.revoked_at.is_some() {
         return Err(bearer_failure_response(CODE_MACHINE_TOKEN_REVOKED, allow));
     }
-    if token.dev_machine_id.is_some() && token.dev_machine_revoked {
-        return Err(bearer_failure_response(CODE_DEV_MACHINE_REVOKED, allow));
+    if token_expired(token.expires_at) {
+        return Err(bearer_failure_response(CODE_MACHINE_TOKEN_EXPIRED, allow));
     }
     if !member_or_revoke(pool, &token).await? {
         return Err(bearer_failure_response(CODE_MEMBERSHIP_REVOKED, allow));
@@ -982,11 +1014,17 @@ async fn authenticate_api_key_machine(
         token_hash: token.token_hash.clone(),
         revoked_at_unix: token.revoked_at.map(|dt| dt.timestamp()),
         dev_machine_revoked: token.dev_machine_id.is_some() && token.dev_machine_revoked,
+        expires_at_unix: token.expires_at.map(|dt| dt.timestamp()),
     };
     // Hash match is implied by the lookup; the kernel checks the
-    // revocation arms. Every arm maps to the one opaque message.
-    if pidash_auth::token::validate_machine_token_static(Some(&static_row), &presented_hash)
-        .is_err()
+    // revocation arms (an expired token maps to the one opaque message,
+    // like every other arm).
+    if pidash_auth::token::validate_machine_token_static(
+        Some(&static_row),
+        &presented_hash,
+        chrono::Utc::now().timestamp(),
+    )
+    .is_err()
     {
         return Ok(ApiKeyOutcome::Invalid);
     }
@@ -1045,9 +1083,13 @@ async fn authenticate_api_key_token(
     {
         return Ok(ApiKeyOutcome::Invalid);
     }
-    pidash_services::domain::tokens::touch_api_token_last_used_by_id(pool, id, chrono::Utc::now())
-        .await
-        .map_err(|_| server_error())?;
+    pidash_services::domain::tokens::touch_api_token_last_used_by_id(
+        &pidash_db::pool::sea_orm_connection(pool),
+        id,
+        chrono::Utc::now(),
+    )
+    .await
+    .map_err(|_| server_error())?;
     // The token loggers stamp this id on the `process_logs` payload
     // (Django reads `request.user` post-view; PIDASHCONV-937).
     crate::middleware::publish_logger_user_id(&user_id.to_string());
@@ -1569,13 +1611,13 @@ mod tests {
             ),
             format!(
                 "INSERT INTO runner (id, owner_id, workspace_id, dev_machine_id, pod_id, name, \
-                 host_label, provisioning, visibility, refresh_token_hash, \
+                 host_label, provisioning, pod_dispatch, visibility, refresh_token_hash, \
                  refresh_token_fingerprint, refresh_token_generation, \
                  previous_refresh_token_hash, access_token_signing_key_version, \
                  enrollment_token_hash, enrollment_token_fingerprint, capabilities, status, os, \
                  arch, runner_version, dev_metadata, protocol_version, created_at, updated_at, \
                  revoked_reason) VALUES ('{runner_id}', '{user}', '{workspace}', '{machine}', \
-                 gen_random_uuid(), 'r', 'h', 'desktop_bundled', 0, '', '', 3, '', 1, '', '', \
+                 gen_random_uuid(), 'r', 'h', 'desktop_bundled', 'pinned_only', 0, '', '', 3, '', 1, '', '', \
                  '[]', 'online', '', '', '', '{{}}', 1, now(), now(), '')"
             ),
             format!(

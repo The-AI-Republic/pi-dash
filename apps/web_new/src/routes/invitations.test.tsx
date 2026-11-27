@@ -23,6 +23,7 @@ describe("invitations guard", () => {
       context: {
         apiClient: {},
         queryClient: {
+          getQueryState: () => undefined,
           ensureQueryData: async (options: { queryKey: readonly unknown[] }) => {
             const value = values[options.queryKey[1] as string];
             if (value instanceof Error) throw value;

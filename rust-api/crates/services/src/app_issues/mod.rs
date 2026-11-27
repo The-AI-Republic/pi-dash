@@ -80,18 +80,16 @@ pub use relation_mapper::{get_actual_relation, get_inverse_relation};
 pub use serializers_create::{
     assignee_member_filter_sql, create_default_assignee_fallback, echo_initial_ids,
     issue_create_to_representation, issue_create_validate, label_filter_null_project_sql,
-    label_filter_sql, m2m_batches, m2m_insert_sql, managed_unavailable_detail,
-    validate_complexity_score, CreateValidateError, ExecutorPolicy, IssueCreateRow,
-    IssueCreateView, LockedIssueAttrs, LockedIssueValues, PodRef, ResolvedProject, ValidateAttrs,
-    ValidateContext, ValidateInstance, ValidateProbes, ValidatedAttrs, COMPLEXITY_SCORE_MESSAGE,
-    CREATE_CONTRACT, DATES_MESSAGE, DEFAULT_ASSIGNEE_EXISTS_SQL, ESTIMATE_EXISTS_SQL,
-    ESTIMATE_INVALID_MESSAGE, EXECUTOR_CLOUD_UNAVAILABLE_MESSAGE, EXECUTOR_MID_FLIGHT_MESSAGE,
-    EXECUTOR_PROJECT_REQUIRED_MESSAGE, EXECUTOR_UNKNOWN_MESSAGE, HAS_ACTIVE_RUN_SQL,
-    ISSUE_CREATE_FIELDS, LABEL_CLEAR_SQL, LOCKED_ISSUE_FIELDS, M2M_BATCH_SIZE, M2M_INSERT_COLUMNS,
-    PARENT_EXISTS_SQL, PARENT_INVALID_MESSAGE, POD_DELETED_MESSAGE, POD_DIFFERENT_PROJECT_MESSAGE,
-    POD_FETCH_SQL, POD_REASSIGN_MESSAGE, PROJECT_FETCH_SQL, REQUIRED_CREATE_CONTEXT_KEYS,
-    STATE_EXISTS_SQL, STATE_INVALID_MESSAGE, STATE_TRIAGE_EXISTS_SQL, SYNC_LOCKED_MESSAGE,
-    UPDATE_CONTRACT,
+    label_filter_sql, m2m_batches, m2m_insert_sql, validate_complexity_score, CreateValidateError,
+    ExecutorPolicy, IssueCreateRow, IssueCreateView, LockedIssueAttrs, LockedIssueValues, PodRef,
+    ResolvedProject, ValidateAttrs, ValidateContext, ValidateInstance, ValidateProbes,
+    ValidatedAttrs, COMPLEXITY_SCORE_MESSAGE, CREATE_CONTRACT, DATES_MESSAGE,
+    DEFAULT_ASSIGNEE_EXISTS_SQL, ESTIMATE_EXISTS_SQL, ESTIMATE_INVALID_MESSAGE,
+    EXECUTOR_MID_FLIGHT_MESSAGE, EXECUTOR_UNKNOWN_MESSAGE, HAS_ACTIVE_RUN_SQL, ISSUE_CREATE_FIELDS,
+    LOCKED_ISSUE_FIELDS, M2M_BATCH_SIZE, M2M_INSERT_COLUMNS, PARENT_EXISTS_SQL,
+    PARENT_INVALID_MESSAGE, POD_DELETED_MESSAGE, POD_DIFFERENT_PROJECT_MESSAGE, POD_FETCH_SQL,
+    POD_REASSIGN_MESSAGE, PROJECT_FETCH_SQL, REQUIRED_CREATE_CONTEXT_KEYS, STATE_EXISTS_SQL,
+    STATE_INVALID_MESSAGE, STATE_TRIAGE_EXISTS_SQL, SYNC_LOCKED_MESSAGE, UPDATE_CONTRACT,
 };
 pub use serializers_detail::{
     agent_live_state_to_representation, agent_run_to_representation,
@@ -114,8 +112,7 @@ pub use serializers_engage::{
     issue_is_actively_synced, issue_reaction_lite_to_representation,
     issue_subscriber_to_representation, ActivitySourceData, AppIssueFlatRow, AppIssueFlatView,
     IssueActivityRow, IssueActivityView, IssueReactionLiteRow, IssueReactionLiteView,
-    IssueSubscriberRow, IssueSubscriberView, APP_ISSUE_FLAT_FIELDS, GITHUB_COMMENT_SYNC_PROBE_SQL,
-    GITHUB_ISSUE_SYNC_PROBE_SQL, GIT_COMMENT_SYNC_PROBE_SQL, GIT_ISSUE_SYNC_PROBE_SQL,
+    IssueSubscriberRow, IssueSubscriberView, APP_ISSUE_FLAT_FIELDS, GIT_ISSUE_SYNC_PROBE_SQL,
     ISSUE_ACTIVITY_ALL_FIELDS, ISSUE_REACTION_LITE_FIELDS, ISSUE_SUBSCRIBER_ALL_FIELDS,
 };
 pub use serializers_expand::{
@@ -125,10 +122,9 @@ pub use serializers_expand::{
     INTAKE_ISSUE_LITE_FIELDS, ISSUE_RELATION_FIELDS, RELATED_ISSUE_FIELDS,
 };
 pub use serializers_label::{
-    app_label_to_representation, validate_label_name, AppLabelRow, AppLabelView, APP_LABEL_FIELDS,
-    APP_LABEL_READONLY_INPUT_FIELDS, APP_LABEL_WRITABLE_FIELDS, LABEL_NAME_ALREADY_EXISTS,
-    LABEL_NAME_CONFLICT_BODY, LABEL_NAME_CONFLICT_EXCLUDING_SELF_PROBE_SQL,
-    LABEL_NAME_CONFLICT_PROBE_SQL,
+    app_label_to_representation, label_name_conflict, validate_label_name, AppLabelRow,
+    AppLabelView, APP_LABEL_FIELDS, APP_LABEL_READONLY_INPUT_FIELDS, APP_LABEL_WRITABLE_FIELDS,
+    LABEL_NAME_ALREADY_EXISTS, LABEL_NAME_CONFLICT_BODY,
 };
 pub use serializers_links::{
     git_code_review_link_to_representation, github_pull_request_link_to_representation,
@@ -149,10 +145,10 @@ pub use serializers_refs::{
     PROJECT_LITE_FIELDS, STATE_LITE_FIELDS,
 };
 pub use shape::{
-    deleted_ids_body, envelope, group_mismatch_body, issues_required_body, on_results_fields,
-    v2_fields, DETAIL_FIELDS, FLAT_LIST_FIELDS, LIST_VALUES_FIELDS, ON_RESULTS_ARRAY_FIELDS,
-    ON_RESULTS_BASE_FIELDS, ON_RESULTS_STATE_GROUP_FIELD, PRIORITY_VALUES, STATE_GROUP_VALUES,
-    V2_REQUIRED_FIELDS,
+    deleted_ids_body, envelope, envelope_head, group_mismatch_body, issues_required_body,
+    on_results_fields, v2_fields, DETAIL_FIELDS, FLAT_LIST_FIELDS, LIST_VALUES_FIELDS,
+    ON_RESULTS_ARRAY_FIELDS, ON_RESULTS_BASE_FIELDS, ON_RESULTS_STATE_GROUP_FIELD, PRIORITY_VALUES,
+    STATE_GROUP_VALUES, V2_REQUIRED_FIELDS,
 };
 
 /// What the Rust handlers do about the `recent_visited_task.delay` call

@@ -44,8 +44,8 @@ function PriorityMark({ priority }: { priority: string | null }): React.ReactEle
   const label = priorityDisplayLabel(priority);
   if (label === null) return null;
   // Native title tooltip: the floating kit Tooltip would pull its popup
-  // runtime into the initial route chain (performance budget: initial JS
-  // at most 220 KB gzipped), and the label it repeats is already visible.
+  // runtime into the initial route chain (size gate: see
+  // .size-limit.mjs), and the label it repeats is already visible.
   return (
     <span title={label}>
       <Badge tone={priorityTone(priority)}>{label}</Badge>

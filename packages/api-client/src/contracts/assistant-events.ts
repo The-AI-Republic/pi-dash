@@ -81,6 +81,14 @@ const TurnFailedEvent = z.object({
     turn_id: uuid(),
     error_code: z.string(),
     detail: z.string(),
+    // Structured free-quota fields (NEWPIDASH-148, PRIVATEPI1-136). The
+    // backend attaches them to the OpenHub error; the Python classifier
+    // formats `resets_at` into `detail`, and Rust formats via chrono. The
+    // frontend prefers the structured `resets_at` (UTC ISO) and re-formats
+    // it to the viewer's zone when present.
+    resets_at: z.optional(z.string()),
+    limit: z.optional(z.union([z.number(), z.string()])),
+    plan: z.optional(z.string()),
   }),
 });
 

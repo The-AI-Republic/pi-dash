@@ -6,11 +6,12 @@
 
 Suite A — boot + storage (D-37 oracle, F37-01/F37-02) — drives the built
 ``pidash-api ops <command>`` binary directly (no Django):
-``wait_for_db`` / ``wait_for_migrations`` against a scratch ``DATABASE_URL``,
-``clear_cache`` against ``REDIS_URL``, and ``create_bucket`` /
-``update_bucket`` against S3. ``stdout``/``stderr``/exit codes are asserted
-byte for byte against the Django goldens in
-``rust-api/fixtures/ops/commands/``.
+``wait_for_db`` / ``wait_for_migrations`` / ``check_migrations`` against a
+scratch ``DATABASE_URL``, ``clear_cache`` against ``REDIS_URL``, and
+``create_bucket`` / ``update_bucket`` against S3. ``stdout``/``stderr``/exit
+codes are asserted byte for byte against the Django goldens in
+``rust-api/fixtures/ops/commands/`` (``check_migrations`` is
+new-system-only and pins its own contract in ``test_boot_storage.py``).
 
 S3 runs against two backends. The happy paths use a real S3-compatible
 server (``AWS_S3_ENDPOINT_URL`` — LocalStack in CI, which like the real

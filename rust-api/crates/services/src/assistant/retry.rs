@@ -4,8 +4,8 @@
 //! `_should_retry` (`:773-807`), `_sleep_for_retry` /
 //! `_calculate_retry_timeout`, and `_parse_retry_after_header`. Two
 //! private copies existed — the turn streaming loop
-//! (`pidash_api::turn::streaming`) and the D-11 send loop
-//! (`pidash_jobs::oss_worker::model_runtime::provider`) — with identical
+//! (now `pidash_jobs::cloud_agent::streaming`) and the D-11 send loop
+//! (`pidash_jobs::cloud_agent::provider`) — with identical
 //! logic; both now use this module, and the cloud overlay's turn seam
 //! (OVL-12) calls it instead of carrying a third copy.
 //!

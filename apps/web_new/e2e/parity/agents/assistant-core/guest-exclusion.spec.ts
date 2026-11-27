@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Oracle scenario (NEWFRONT-187): guests are excluded from the assistant
-// everywhere — no dashboard card, no sidebar rows, and every workspace
+// everywhere — no dashboard card, no history rows, and every workspace
 // assistant endpoint refuses them (403 on REST, 404 on the event stream)
 // — while members proceed normally. A keyed guest still cannot start:
 // the create refusal surfaces as a notice. Row: AGT-041.
@@ -41,8 +41,8 @@ test(
       expect(await driver.assistantCardVisible()).toBe(false);
     });
 
-    await test.step("guest sidebar stays empty with no placeholder", async () => {
-      // The thread list 403s, so the sidebar data stays undefined: neither
+    await test.step("guest history stays empty with no placeholder", async () => {
+      // The thread list 403s, so the history data stays undefined: neither
       // rows nor the empty placeholder render. The spy proves the refused
       // fetch completed before the absence is asserted.
       await driver.assistantStartApiSpy();

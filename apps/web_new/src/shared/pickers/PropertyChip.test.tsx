@@ -5,7 +5,21 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { PropertyChip } from "./PropertyChip.js";
+import { describeChip, PropertyChip } from "./PropertyChip.js";
+
+describe("describeChip", () => {
+  it("names the field and value before the sentence", () => {
+    expect(describeChip("Runs on", "Codex engine", "The agent/runner that will execute this work item.")).toBe(
+      "Runs on: Codex engine — The agent/runner that will execute this work item."
+    );
+  });
+
+  it("reads None when nothing is set", () => {
+    expect(describeChip("State", null, "The workflow stage this work item is in.")).toBe(
+      "State: None — The workflow stage this work item is in."
+    );
+  });
+});
 
 describe("PropertyChip", () => {
   it("names itself from the label, not the visible text", () => {
@@ -42,6 +56,23 @@ describe("PropertyChip", () => {
   it("renders no text node for an empty string either", () => {
     render(<PropertyChip label="Labels" text="" />);
     expect(screen.getByRole("button", { name: "Labels" }).querySelector("span.truncate")).toBeNull();
+  });
+
+  it("shows the descriptive tooltip on hover instead of a native title", async () => {
+    render(
+      <PropertyChip
+        label="Runs on: Codex engine"
+        text="Codex engine"
+        tooltip="Runs on: Codex engine — The agent/runner that will execute this work item."
+      />
+    );
+    const chip = screen.getByRole("button", { name: "Runs on: Codex engine" });
+    expect(chip).not.toHaveAttribute("title");
+    fireEvent.focus(chip);
+    fireEvent.mouseEnter(chip);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "Runs on: Codex engine — The agent/runner that will execute this work item."
+    );
   });
 
   it("passes interaction props through to the button", () => {

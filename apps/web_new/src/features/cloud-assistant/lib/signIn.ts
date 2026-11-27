@@ -28,6 +28,8 @@ export type SignInStartFailure = { kind: "blocked" } | { kind: "closed" } | { ki
 /** Either the started flow, or why it never started. */
 export type SignInStartResult = { result: SignInStart; failure: null } | { result: null; failure: SignInStartFailure };
 
+export type ExternalOpener = (url: string) => Promise<void>;
+
 /**
  * Reserve the tab during the click, start the flow, and point the tab at
  * the authorize address. A blocked tab, a tab closed before the server
@@ -53,6 +55,32 @@ export async function beginProviderSignIn(
     popup.close();
     return { result: null, failure: { kind: "rejected", error } };
   }
+}
+
+/**
+ * Desktop variant (PIDESKAPP-186): the shell has no popup surface, so
+ * there is no tab to reserve — start the flow first, then hand the
+ * authorize address to the system browser. A rejected start and a failed
+ * browser open are both rejected outcomes (reported with the start-failed
+ * copy, never the web popup-blocked copy).
+ */
+export async function beginProviderSignInExternal(
+  openExternal: ExternalOpener,
+  start: () => Promise<SignInStart>
+): Promise<SignInStartResult> {
+  let started: SignInStart;
+  try {
+    started = await start();
+  } catch (error) {
+    return { result: null, failure: { kind: "rejected", error } };
+  }
+  const result: SignInStart = { authorize_url: started.authorize_url, state: started.state };
+  try {
+    await openExternal(result.authorize_url);
+  } catch (error) {
+    return { result: null, failure: { kind: "rejected", error } };
+  }
+  return { result, failure: null };
 }
 
 export type PollOutcome = { kind: "pending" } | { kind: "confirmed" } | { kind: "failed"; detail: string | undefined };

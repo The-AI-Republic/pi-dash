@@ -21,7 +21,7 @@ def _states(client, ws, project):
 def test_list_states_shape(world):
     client, _, ws, project = world.full_stack()
     body = _states(client, ws, project)
-    assert isinstance(body, list) and len(body) == 7
+    assert isinstance(body, list) and len(body) == 8
     for item in body:
         assert_keys(item, STATE_KEYS + LIST_EXTRA, "states-list")
         assert 0 < item["order"] <= 1
@@ -30,6 +30,12 @@ def test_list_states_shape(world):
         by_group.setdefault(item["group"], []).append(item["name"])
     assert by_group["backlog"] == ["Backlog"]
     assert "triage" not in by_group
+    # NEWPIDASH-305: "AI Completed" shares the completed group with "Done"
+    # and sorts between In Test and Done by sequence.
+    assert by_group["completed"] == ["AI Completed", "Done"]
+    names = [item["name"] for item in body]
+    assert names.index("AI Completed") == names.index("In Test") + 1
+    assert names.index("Done") == names.index("AI Completed") + 1
 
 
 def test_list_states_grouped(world):

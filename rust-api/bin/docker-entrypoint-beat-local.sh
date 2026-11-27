@@ -2,7 +2,7 @@
 set -e
 
 pidash-api ops wait_for_db
-pidash-api ops wait_for_migrations
+pidash-api ops check_migrations
 
 # watchmedo (Python-only) is dropped: local autoreload is `cargo watch`
 # outside the image. The worker also runs the scheduler loop (no

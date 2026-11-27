@@ -764,14 +764,17 @@ pub fn workpad_lock_sql() -> String {
 
 /// PR-link list scope in source order (`:39-46`): slug, project,
 /// issue, member, live project.
+/// PDASHOSS01-355: generic git_code_review_links (provider='github').
 pub fn pr_scope_where() -> String {
     [
-        live_row_sql("github_pull_request_links"),
-        workspace_slug_sql("github_pull_request_links"),
-        "github_pull_request_links.project_id = :project_id".to_owned(),
-        "github_pull_request_links.issue_id = :issue_id".to_owned(),
-        member_guard_sql("github_pull_request_links"),
-        project_live_sql("github_pull_request_links"),
+        live_row_sql("git_code_review_links"),
+        workspace_slug_sql("git_code_review_links"),
+        "git_code_review_links.project_id = :project_id".to_owned(),
+        "git_code_review_links.issue_id = :issue_id".to_owned(),
+        member_guard_sql("git_code_review_links"),
+        project_live_sql("git_code_review_links"),
+        "git_code_review_links.provider = 'github'".to_owned(),
+        "git_code_review_links.host_url = 'https://github.com'".to_owned(),
     ]
     .join(" AND ")
 }
@@ -780,36 +783,39 @@ pub fn pr_scope_where() -> String {
 /// (`:47`) + `DISTINCT` (`:48`).
 pub fn pr_list_sql(order: &SubOrder) -> String {
     format!(
-        "SELECT DISTINCT github_pull_request_links.* FROM github_pull_request_links WHERE {} ORDER BY {}",
+        "SELECT DISTINCT git_code_review_links.* FROM git_code_review_links WHERE {} ORDER BY {}",
         pr_scope_where(),
-        order.sql("github_pull_request_links"),
+        order.sql("git_code_review_links"),
     )
 }
 
 /// PR-link detail scope (`:88-94`, ported bug 5): slug, project,
 /// issue, member — NO archived guard, and the chain calls neither
 /// `.order_by` nor `.distinct()`, so `Meta.ordering` applies.
+/// PDASHOSS01-355: generic git_code_review_links (provider='github').
 pub fn pr_detail_scope_where() -> String {
     [
-        live_row_sql("github_pull_request_links"),
-        workspace_slug_sql("github_pull_request_links"),
-        "github_pull_request_links.project_id = :project_id".to_owned(),
-        "github_pull_request_links.issue_id = :issue_id".to_owned(),
-        member_guard_sql("github_pull_request_links"),
+        live_row_sql("git_code_review_links"),
+        workspace_slug_sql("git_code_review_links"),
+        "git_code_review_links.project_id = :project_id".to_owned(),
+        "git_code_review_links.issue_id = :issue_id".to_owned(),
+        member_guard_sql("git_code_review_links"),
+        "git_code_review_links.provider = 'github'".to_owned(),
+        "git_code_review_links.host_url = 'https://github.com'".to_owned(),
     ]
     .join(" AND ")
 }
 
 /// Effective PR-link detail order: `Meta.ordering = ("-created_at",)`
 /// (`db/models/integration/github.py:251`).
-pub const PR_DETAIL_ORDER_SQL: &str = "github_pull_request_links.created_at DESC";
+pub const PR_DETAIL_ORDER_SQL: &str = "git_code_review_links.created_at DESC";
 
 /// Full representative PR-link detail `SELECT` (queryset form, fixture
 /// `github_pr_detail_queryset`): scope + Meta order, no `DISTINCT`.
 /// `delete` executes `.get(pk)` (`:95`) on top.
 pub fn pr_detail_sql() -> String {
     format!(
-        "SELECT github_pull_request_links.* FROM github_pull_request_links WHERE {} ORDER BY {PR_DETAIL_ORDER_SQL}",
+        "SELECT git_code_review_links.* FROM git_code_review_links WHERE {} ORDER BY {PR_DETAIL_ORDER_SQL}",
         pr_detail_scope_where(),
     )
 }
@@ -817,7 +823,7 @@ pub fn pr_detail_sql() -> String {
 /// PR-link `delete` predicate (`:98`): detail scope + pk.
 pub fn pr_detail_where() -> String {
     format!(
-        "{} AND github_pull_request_links.id = :pk",
+        "{} AND git_code_review_links.id = :pk",
         pr_detail_scope_where()
     )
 }
@@ -1277,7 +1283,7 @@ mod tests {
         let order = default_order();
         for (table, list_sql, detail_sql, detail_where, detail_order) in [
             (
-                "github_pull_request_links",
+                "git_code_review_links",
                 pr_list_sql(&order),
                 pr_detail_sql(),
                 pr_detail_where(),
@@ -1302,10 +1308,7 @@ mod tests {
             assert!(detail_sql.contains("pm.member_id = :user"));
             assert!(detail_where.ends_with(&format!("AND {table}.id = :pk")));
         }
-        assert_eq!(
-            PR_DETAIL_ORDER_SQL,
-            "github_pull_request_links.created_at DESC"
-        );
+        assert_eq!(PR_DETAIL_ORDER_SQL, "git_code_review_links.created_at DESC");
         assert_eq!(
             REVIEW_DETAIL_ORDER_SQL,
             "git_code_review_links.created_at DESC"
@@ -1316,7 +1319,7 @@ mod tests {
         assert!(pr_list.starts_with("SELECT DISTINCT"));
         assert!(pr_list.contains("\"projects\".\"archived_at\" IS NULL"));
         let pr_detail = unit_str(&fixture, "github_pr_detail_queryset", "sql");
-        assert!(pr_detail.starts_with("SELECT \"github_pull_request_links\""));
+        assert!(pr_detail.starts_with("SELECT \"git_code_review_links\""));
         assert!(!pr_detail.contains("archived_at"));
         let review_list = unit_str(&fixture, "code_review_list_queryset", "sql");
         assert!(review_list.starts_with("SELECT DISTINCT"));

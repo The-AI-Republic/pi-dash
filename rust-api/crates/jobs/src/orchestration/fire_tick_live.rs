@@ -19,24 +19,27 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use chrono::Utc;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use pidash_db::config::{CloudAgentSettings, ManagedRunnerSettings, RunnerSettings};
-use pidash_db::orchestration::runs::{active_run_sql, latest_prior_run_sql};
-use pidash_services::extensions::{AssistantModelSeam, CloudAgentToolsetsSeam};
+use pidash_db::config::{PidashAgentSettings, RunnerSettings};
+use pidash_db::entity::agent_run;
+use pidash_db::orchestration::runs::ACTIVE_STATUSES;
+use pidash_db::orm_tx::into_sqlx;
+use pidash_db::pool::sea_orm_connection;
+use pidash_services::extensions::AssistantModelSeam;
 use pidash_services::runner_sessions::live_drains::{drain_pod_by_id, DrainError};
 
 use super::creation_jobs::StoreDeps;
 use super::fire_tick_seam::{
-    dispatch_continuation_run, emit_logs, shim_is_ticking_state, shim_tick_interval_seconds,
-    DispatchJobsError, StateView,
+    dispatch_continuation_run, emit_logs, shim_stage_runs_automatically,
+    shim_tick_interval_seconds, DispatchJobsError, StateView,
 };
 use super::live_inputs::{
     creator_universe, fetch_presence, gate_fn, gate_verdicts, profile_fn, JobsMatcher,
 };
-use crate::admission::RedisAdmissionCache;
-use crate::dispatch::DispatchDecision;
+use crate::run_dispatch::DispatchDecision;
 use crate::tasks_ticker::fire_tick::{FireTickSeam, ProjectTickCols};
 
 /// Live [`FireTickSeam`]: pool + dispatch settings + the injected
@@ -47,39 +50,37 @@ use crate::tasks_ticker::fire_tick::{FireTickSeam, ProjectTickCols};
 /// is passed in from the claim read (live, never cached).
 pub struct LiveFireTickSeam {
     pool: PgPool,
-    cloud: CloudAgentSettings,
-    managed: ManagedRunnerSettings,
+    managed: PidashAgentSettings,
     redis: Option<redis::Client>,
     runner: RunnerSettings,
-    toolsets: Arc<dyn CloudAgentToolsetsSeam>,
     assistant_seam: Arc<dyn AssistantModelSeam>,
 }
 
 impl LiveFireTickSeam {
     pub fn new(
         pool: PgPool,
-        cloud: CloudAgentSettings,
-        managed: ManagedRunnerSettings,
+        managed: PidashAgentSettings,
         redis: Option<redis::Client>,
         runner: RunnerSettings,
-        toolsets: Arc<dyn CloudAgentToolsetsSeam>,
         assistant_seam: Arc<dyn AssistantModelSeam>,
     ) -> Self {
         Self {
             pool,
-            cloud,
             managed,
             redis,
             runner,
-            toolsets,
             assistant_seam,
         }
     }
 }
 
 impl FireTickSeam for LiveFireTickSeam {
-    fn is_ticking_state(&self, state: Option<&StateView>) -> bool {
-        shim_is_ticking_state(state)
+    fn stage_runs_automatically(
+        &self,
+        state: Option<&StateView>,
+        project: &ProjectTickCols,
+    ) -> bool {
+        shim_stage_runs_automatically(state, project)
     }
 
     fn tick_interval_seconds(&self, state: Option<&StateView>, project: &ProjectTickCols) -> i64 {
@@ -92,11 +93,22 @@ impl FireTickSeam for LiveFireTickSeam {
     ) -> Pin<Box<dyn Future<Output = Result<bool, sqlx::Error>> + Send + '_>> {
         let pool = self.pool.clone();
         Box::pin(async move {
-            let sql = format!("SELECT EXISTS({})", active_run_sql());
-            sqlx::query_scalar(&sql)
-                .bind(issue_id)
-                .fetch_one(&pool)
+            let conn = sea_orm_connection(&pool);
+            let statuses: Vec<String> = ACTIVE_STATUSES
+                .iter()
+                .map(|s| s.value().to_string())
+                .collect();
+            let found = agent_run::Entity::find()
+                .filter(agent_run::Column::WorkItemId.eq(Some(issue_id)))
+                .filter(agent_run::Column::Status.is_in(statuses))
+                .select_only()
+                .column(agent_run::Column::Id)
+                .limit(1)
+                .into_tuple::<Uuid>()
+                .one(&conn)
                 .await
+                .map_err(into_sqlx)?;
+            Ok(found.is_some())
         })
     }
 
@@ -106,11 +118,17 @@ impl FireTickSeam for LiveFireTickSeam {
     ) -> Pin<Box<dyn Future<Output = Result<bool, sqlx::Error>> + Send + '_>> {
         let pool = self.pool.clone();
         Box::pin(async move {
-            let sql = format!("SELECT EXISTS({})", latest_prior_run_sql());
-            sqlx::query_scalar(&sql)
-                .bind(issue_id)
-                .fetch_one(&pool)
+            let conn = sea_orm_connection(&pool);
+            let found = agent_run::Entity::find()
+                .filter(agent_run::Column::WorkItemId.eq(Some(issue_id)))
+                .select_only()
+                .column(agent_run::Column::Id)
+                .limit(1)
+                .into_tuple::<Uuid>()
+                .one(&conn)
                 .await
+                .map_err(into_sqlx)?;
+            Ok(found.is_some())
         })
     }
 
@@ -121,11 +139,9 @@ impl FireTickSeam for LiveFireTickSeam {
         actor: Option<Uuid>,
     ) -> Pin<Box<dyn Future<Output = Result<Option<Uuid>, sqlx::Error>> + Send + '_>> {
         let pool = self.pool.clone();
-        let cloud = self.cloud.clone();
         let managed = self.managed.clone();
         let redis = self.redis.clone();
         let runner = self.runner.clone();
-        let toolsets = self.toolsets.clone();
         let assistant_seam = self.assistant_seam.clone();
         let matcher = JobsMatcher::new(pool.clone());
         let triggered_by = triggered_by.to_owned();
@@ -134,13 +150,9 @@ impl FireTickSeam for LiveFireTickSeam {
             let presence = Arc::new(fetch_presence(&pool, &universe).await?);
             let verdicts = Arc::new(gate_verdicts(&assistant_seam, &presence).await);
             let deps = StoreDeps {
-                cloud,
                 managed,
-                cache: RedisAdmissionCache::from_env(),
                 has_usable_llm_config: gate_fn(verdicts),
-                toolsets,
                 llm_profile: profile_fn(presence),
-                now_unix_secs: Utc::now().timestamp(),
             };
             let now = Utc::now();
             // Continuation never retimes a clock (a bounce only
@@ -154,6 +166,8 @@ impl FireTickSeam for LiveFireTickSeam {
                 issue_id,
                 &triggered_by,
                 actor,
+                false,
+                false,
             )
             .await
             .map_err(|error| match error {
@@ -183,7 +197,6 @@ impl FireTickSeam for LiveFireTickSeam {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pidash_services::extensions::NoExtraToolsets;
 
     fn state(id: u128, name: &str, group: &str) -> StateView {
         StateView {
@@ -217,11 +230,9 @@ mod tests {
         let settings = pidash_db::config::Settings::test_defaults();
         LiveFireTickSeam::new(
             pool,
-            settings.cloud_agent,
-            settings.managed_runner,
+            settings.pidash_agent,
             None,
             settings.runner,
-            Arc::new(NoExtraToolsets),
             Arc::new(DefaultSeam),
         )
     }
@@ -233,17 +244,18 @@ mod tests {
         let review = state(2, "In Review", "review");
         let done = state(3, "Done", "completed");
         let unknown = state(9, "Renamed", "started");
-        assert!(seam.is_ticking_state(Some(&started)));
-        assert!(seam.is_ticking_state(Some(&review)));
-        assert!(!seam.is_ticking_state(Some(&done)));
-        assert!(!seam.is_ticking_state(Some(&unknown)));
-        assert!(!seam.is_ticking_state(None));
+        assert!(seam.stage_runs_automatically(Some(&started), &ProjectTickCols::default()));
+        assert!(seam.stage_runs_automatically(Some(&review), &ProjectTickCols::default()));
+        assert!(!seam.stage_runs_automatically(Some(&done), &ProjectTickCols::default()));
+        assert!(!seam.stage_runs_automatically(Some(&unknown), &ProjectTickCols::default()));
+        assert!(!seam.stage_runs_automatically(None, &ProjectTickCols::default()));
         let project = ProjectTickCols {
             pool: Some(10),
             ticking_enabled: Some(true),
             interval_default: Some(10800),
             interval_review: Some(7200),
             interval_test: Some(3600),
+            ..Default::default()
         };
         assert_eq!(seam.tick_interval_seconds(Some(&started), &project), 10800);
         assert_eq!(seam.tick_interval_seconds(Some(&review), &project), 7200);
@@ -251,17 +263,108 @@ mod tests {
     }
 
     #[test]
-    fn run_probe_sql_parses() {
-        for sql in [
-            format!("SELECT EXISTS({})", active_run_sql()),
-            format!("SELECT EXISTS({})", latest_prior_run_sql()),
-        ] {
-            let parsed = sqlparser::parser::Parser::parse_sql(
-                &sqlparser::dialect::PostgreSqlDialect {},
-                &sql,
-            )
-            .expect("SQL parses");
-            assert_eq!(parsed.len(), 1, "{sql}");
-        }
+    fn run_probe_statements_pin_shape() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let issue_id = Uuid::from_u128(1);
+        let statuses: Vec<String> = ACTIVE_STATUSES
+            .iter()
+            .map(|s| s.value().to_string())
+            .collect();
+        let active = agent_run::Entity::find()
+            .filter(agent_run::Column::WorkItemId.eq(Some(issue_id)))
+            .filter(agent_run::Column::Status.is_in(statuses))
+            .select_only()
+            .column(agent_run::Column::Id)
+            .limit(1)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(active.contains("\"agent_run\""), "{active}");
+        assert!(active.contains("\"work_item_id\""), "{active}");
+        assert!(active.contains("\"status\" IN"), "{active}");
+        assert!(active.contains("LIMIT 1"), "{active}");
+        let prior = agent_run::Entity::find()
+            .filter(agent_run::Column::WorkItemId.eq(Some(issue_id)))
+            .select_only()
+            .column(agent_run::Column::Id)
+            .limit(1)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(prior.contains("\"agent_run\""), "{prior}");
+        assert!(prior.contains("\"work_item_id\""), "{prior}");
+        assert!(!prior.contains("\"status\" IN"), "{prior}");
+    }
+
+    #[tokio::test]
+    async fn live_run_probes_read_seeded_rows() {
+        let Some(url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        // One-connection pool keeps temp tables visible to SeaORM
+        // queries on the same pool.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect one-connection pool");
+        let mut tx = pool.begin().await.expect("begin");
+        sqlx::query(
+            "CREATE TEMPORARY TABLE agent_run (
+                id UUID PRIMARY KEY, workspace_id UUID NOT NULL, created_by_id UUID NOT NULL,
+                pod_id UUID, pinned_runner_id UUID, work_item_id UUID,
+                scheduler_binding_id UUID, status TEXT NOT NULL, executor_kind TEXT NOT NULL,
+                dispatch_attempts INTEGER NOT NULL, cancel_requested_at TIMESTAMPTZ,
+                cancel_reason TEXT NOT NULL, tool_plan JSONB NOT NULL,
+                prompt TEXT NOT NULL, trigger TEXT NOT NULL, lease_expires_at TIMESTAMPTZ,
+                started_at TIMESTAMPTZ, llm_model TEXT NOT NULL, usage JSONB NOT NULL,
+                done_payload JSONB, error_details JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL,
+                phase_kind TEXT NOT NULL DEFAULT 'coding-task', agent_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                run_config JSONB NOT NULL DEFAULT '{}'::jsonb, required_capabilities JSONB NOT NULL DEFAULT '{}'::jsonb,
+                thread_id TEXT NOT NULL DEFAULT '', owner_id UUID, runner_id UUID, parent_run_id UUID,
+                assigned_at TIMESTAMPTZ, ended_at TIMESTAMPTZ, prompt_manifest JSONB, terminal_hooks_applied_at TIMESTAMPTZ,
+                terminal_capacity_released_at TIMESTAMPTZ, input_tokens BIGINT, output_tokens BIGINT, total_tokens BIGINT,
+                refusal_category TEXT)"
+        )
+        .execute(&mut *tx)
+        .await
+        .expect("temp agent_run");
+        let issue = Uuid::new_v4();
+        let user = Uuid::new_v4();
+        let ws = Uuid::new_v4();
+        let pod = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        sqlx::query("INSERT INTO agent_run (id, workspace_id, created_by_id, pod_id, work_item_id, status, executor_kind, dispatch_attempts, cancel_reason, tool_plan, prompt, trigger, llm_model, usage, error_details, created_at) VALUES ($1, $2, $3, $4, $5, 'running', 'local_runner', 0, '', '{}', '', 'direct', '', '{}', '{}', $6)")
+            .bind(Uuid::new_v4()).bind(ws).bind(user).bind(pod).bind(issue).bind(now)
+            .execute(&mut *tx).await.expect("seed active run");
+        // The pool path reads committed state; with a one-connection
+        // pool the temp table is visible to the SeaORM exists check
+        // on the same connection. Use the transaction's SeaORM bridge.
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        let statuses: Vec<String> = ACTIVE_STATUSES
+            .iter()
+            .map(|s| s.value().to_string())
+            .collect();
+        let found = agent_run::Entity::find()
+            .filter(agent_run::Column::WorkItemId.eq(Some(issue)))
+            .filter(agent_run::Column::Status.is_in(statuses.clone()))
+            .select_only()
+            .column(agent_run::Column::Id)
+            .limit(1)
+            .into_tuple::<Uuid>()
+            .one(&conn)
+            .await
+            .expect("active exists");
+        assert!(found.is_some());
+        let missing = agent_run::Entity::find()
+            .filter(agent_run::Column::WorkItemId.eq(Some(Uuid::new_v4())))
+            .filter(agent_run::Column::Status.is_in(statuses))
+            .select_only()
+            .column(agent_run::Column::Id)
+            .limit(1)
+            .into_tuple::<Uuid>()
+            .one(&conn)
+            .await
+            .expect("missing is none");
+        assert!(missing.is_none());
     }
 }

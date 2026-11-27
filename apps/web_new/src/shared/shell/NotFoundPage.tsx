@@ -6,16 +6,46 @@
 // never a blank screen, a stack trace or an empty shell — and crawlers
 // are told to stay out. The home action is a plain anchor so it keeps
 // working even when client routing is unhappy.
+//
+// The desktop app ships only the screens apps/web_new owns (M-01), so an
+// address it cannot render may still be a real screen in the hosted app.
+// For those, the desktop build hands the address to the system browser
+// instead of claiming the page does not exist (the surface is the desktop
+// hand-off card); the web build keeps this page, because it already is the
+// hosted app and an address nothing here renders really is unknown.
 
 import * as React from "react";
 
+import { platform } from "../../core/platform/index.js";
 import { useDocumentHead } from "./document.js";
+
+// Desktop hand-off splits off the initial bundle (size gate): only the
+// desktop build ever needs the classifier and the card, and only for an
+// address another frontend owns, so the web first paint keeps neither.
+const LazyDesktopHandOff = React.lazy(() =>
+  import("../coexistence/DesktopHandOffBoundary.js").then((module) => ({ default: module.DesktopHandOffBoundary }))
+);
 
 export const NOT_FOUND_TITLE = "404 — Pi Dash";
 export const NOT_FOUND_ROBOTS = "noindex, nofollow";
 export const NOT_FOUND_ART = "/illustrations/not-found.svg";
 
 export function NotFoundPage(): React.ReactElement {
+  // The web build is the hosted app: an address nothing there renders is
+  // simply unknown, so it answers at once with no extra chunk.
+  if (platform.kind !== "desktop") return <NotFoundNotice />;
+  // The desktop defers the decision to the split: the backdrop holds the
+  // window for the moment it takes, so it never blinks the not-found page
+  // under an address that does exist elsewhere.
+  return (
+    <React.Suspense fallback={<main className="min-h-screen bg-(--bg)" />}>
+      <LazyDesktopHandOff />
+    </React.Suspense>
+  );
+}
+
+/** The not-found page itself: art, explanation and a way home. */
+export function NotFoundNotice(): React.ReactElement {
   useDocumentHead({ title: NOT_FOUND_TITLE, robots: NOT_FOUND_ROBOTS });
   return (
     <main className="flex min-h-screen flex-col items-center justify-center gap-(--space-4) bg-(--bg) p-(--space-8) text-center">

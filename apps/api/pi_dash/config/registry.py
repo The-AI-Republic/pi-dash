@@ -195,10 +195,14 @@ _ENV_INFRA = {
     "MIN_RUNNER_VERSION": None,
     "RUNNER_AGENT_STALL_THRESHOLD_SECS": 360,
     "RUNNER_AGENT_OBSERVABILITY_STALE_SECS": 90,
+    # Bounded auto-release for unsatisfiable runner pins (PDASHOSS01-233).
+    "RUNNER_PIN_AUTO_RELEASE_SECS": 600,
     # Desktop-bundled managed runner (.ai_design/managed_runner/design.md §16).
     "MANAGED_RUNNER_ENABLED": "false",
-    "MANAGED_RUNNER_MAX_PER_USER_PROJECT": 1,
+    # Desktop session handoff kill switch (desktop_unified_signin §5.1): default on.
+    "DESKTOP_SESSION_HANDOFF_ENABLED": "true",
     "MANAGED_RUNNER_QUEUED_MAX_AGE_SECS": 43200,
+    "DEDICATED_RUN_QUEUED_MAX_AGE_SECS": 43200,
     "MANAGED_RUNNER_GRACEFUL_STOP_SECS": 30,
     "MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS": 300,
     "DESKTOP_MIN_VERSION_FOR_MANAGED_RUNNER": "",

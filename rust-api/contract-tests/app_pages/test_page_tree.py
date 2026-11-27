@@ -211,3 +211,43 @@ def test_patch_under_unlinked_page_is_rejected(user_client, world, seeder):
     response = user_client.patch(page_url(world, world["page"]["id"]), json={"parent": elsewhere["id"]})
     assert response.status_code == 400
     assert response.json() == {"error": "Parent page not found in this project"}
+
+
+def _soft_deleted_link_page(seeder, db, world, *, name):
+    """A page with a soft-deleted URL-project link and a live second link.
+
+    NEWPIDASH-343: mirrors the NEWPIDASH-240 move state (moving a page to a
+    project it is already linked to soft-deletes the source link). The old
+    ``parent_error(self.visible_pages(), ...)`` path
+    (``app/views/page/base.py:177`` via ``utils/page_tree.py:21``) matches
+    ``Exists(ProjectPage.objects.filter(...))`` under the soft-deletion
+    manager, so this page is not a valid parent in the URL project.
+    """
+    page = seeder.create_page(world["workspace"]["id"], world["owner"]["id"], name=name)
+    seeder.link_page_project(world["workspace"]["id"], world["project"]["id"], page["id"])
+    db.execute(
+        "UPDATE project_pages SET deleted_at=now() WHERE page_id=%s AND project_id=%s",
+        (page["id"], world["project"]["id"]),
+    )
+    other_project = seeder.create_project(world["workspace"]["id"])
+    seeder.create_project_member(
+        world["workspace"]["id"], other_project["id"], world["owner"]["id"], role=20
+    )
+    seeder.link_page_project(world["workspace"]["id"], other_project["id"], page["id"])
+    return page
+
+
+def test_create_under_soft_deleted_link_parent_is_rejected(user_client, world, seeder, db):
+    ghost = _soft_deleted_link_page(seeder, db, world, name="Ghost parent")
+    response = user_client.post(page_url(world), json={"name": "Orphan", "parent": ghost["id"]})
+    assert response.status_code == 400
+    assert response.json() == {"error": "Parent page not found in this project"}
+    assert db.fetchval("SELECT count(*) FROM pages WHERE parent_id=%s", (ghost["id"],)) == 0
+
+
+def test_patch_under_soft_deleted_link_parent_is_rejected(user_client, world, seeder, db):
+    ghost = _soft_deleted_link_page(seeder, db, world, name="Ghost parent")
+    response = user_client.patch(page_url(world, world["page"]["id"]), json={"parent": ghost["id"]})
+    assert response.status_code == 400
+    assert response.json() == {"error": "Parent page not found in this project"}
+    assert db.fetchval("SELECT parent_id FROM pages WHERE id=%s", (world["page"]["id"],)) is None

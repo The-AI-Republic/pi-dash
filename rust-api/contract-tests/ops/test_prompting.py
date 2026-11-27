@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # See the LICENSE file for details.
 
-"""F37-09 contract: prompting ops commands (PIDASHCONV-810, D-37).
+"""F37-09 contract: prompting ops command (PIDASHCONV-810, D-37).
 
-``pidash-api ops <command>`` must behave byte-for-byte like the Django
-management commands it ports
+``pidash-api ops revalidate_section_overrides`` must behave byte-for-byte
+like the Django management command it ports
 (``apps/api/pi_dash/prompting/management/commands/``): same argv, same
 stdout/stderr bytes, same exit codes, same database writes. Every test
 below seeds two identically-migrated scratch databases with the same
@@ -13,14 +13,18 @@ rows (same UUIDs — flagged lines print workspace ids), runs the Django
 oracle against one and the Rust binary against the other, and compares
 the process results plus the resulting table snapshots.
 
+(NEWPIDASH-404 removed the ``reseed_*_template`` commands: nothing reads
+``prompt_template.body`` at run time. The oracle keeps them; the Rust
+binary no longer carries them, so this suite covers revalidate only.)
+
 This suite has no HTTP surface, so ``BASE_URL`` does not apply; it is
 driven by database URLs plus the two binaries under test:
 
 - ``DATABASE_URL`` (required) — psycopg URL of the Rust-side scratch DB.
 - ``ORACLE_DATABASE_URL`` (required) — psycopg URL of the Django-side
   scratch DB. Both DBs must be migrated (``manage.py migrate``); each
-  test truncates ``prompt_template`` / ``prompt_section_override`` and
-  reseeds, so the two DBs stay mutually independent.
+  test truncates ``prompt_section_override`` (and ``prompt_template`` for
+  isolation), so the two DBs stay mutually independent.
 - ``PIDASH_BIN`` — the Rust binary (default:
   ``<repo>/rust-api/target/debug/pidash-api``; build it with
   ``cargo build -p pidash-api-bin`` first).
@@ -78,13 +82,6 @@ DJANGO_PYTHON = os.environ.get("DJANGO_PYTHON", sys.executable)
 MANAGE_PY = Path(os.environ.get("MANAGE_PY", REPO_ROOT / "apps/api/manage.py"))
 DJANGO_SETTINGS = os.environ.get("DJANGO_SETTINGS_MODULE", "pi_dash.settings.test")
 DJANGO_API_DIR = os.environ.get("DJANGO_API_DIR", str(REPO_ROOT / "apps/api"))
-
-# (stdout label, PromptTemplate.name row, Django command == ops subcommand)
-KINDS = [
-    ("default", "coding-task", "reseed_default_template"),
-    ("review", "review", "reseed_review_template"),
-    ("test", "test", "reseed_test_template"),
-]
 
 KNOWN_KEY = "implementation"  # overridable section both backends carry
 LOCKED_KEY = "pidash-cli"  # locked section: deterministic validation error
@@ -207,30 +204,6 @@ def make_workspace(pair, owner_id: str) -> str:
     return wid
 
 
-def add_template(
-    pair,
-    *,
-    name: str,
-    body: str,
-    workspace_id: str | None = None,
-    version: int = 1,
-    is_active: bool = True,
-    updated_at: str = OLD_TS,
-) -> str:
-    """Insert the same template row (same id) on both DBs; return its id."""
-    row_id = str(uuid.uuid4())
-    for conn in pair:
-        with conn.cursor() as cur:
-            cur.execute(
-                """INSERT INTO prompt_template (id, workspace_id, name, body,
-                    is_active, version, updated_by_id, created_at, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, NULL, %s::timestamptz,
-                    %s::timestamptz)""",
-                (row_id, workspace_id, name, body, is_active, version, updated_at, updated_at),
-            )
-    return row_id
-
-
 def add_override(
     pair,
     workspace_id: str,
@@ -292,22 +265,6 @@ def override_snapshot(conn) -> list[tuple]:
         return sorted(cur.fetchall(), key=lambda r: (str(r[1]), str(r[2]), r[3], str(r[0])))
 
 
-def template_ids(conn) -> list[str]:
-    with conn.cursor() as cur:
-        cur.execute("SELECT id FROM prompt_template")
-        return sorted(str(r[0]) for r in cur.fetchall())
-
-
-def template_rows_by_id(conn) -> dict:
-    """Full template rows keyed by id (for same-seeded multi-row tests)."""
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT id, workspace_id, name, body, is_active, version,"
-            " updated_by_id FROM prompt_template"
-        )
-        return {str(r[0]): r for r in cur.fetchall()}
-
-
 def updated_at_of(conn, table: str, row_id: str):
     with conn.cursor() as cur:
         cur.execute(f"SELECT updated_at FROM {table} WHERE id = %s", (row_id,))
@@ -323,160 +280,9 @@ def assert_db_parity(pair) -> None:
 
 
 # --------------------------------------------------------------------------
-# reseed_{default,review,test}_template [--force]
-# --------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("label,name,command", KINDS)
-def test_reseed_missing_row_creates(pair, label, name, command):
-    rust_proc, oracle_proc = run_rust(command), run_oracle(command)
-    assert_cli_parity(rust_proc, oracle_proc)
-    assert rust_proc.stdout == f"{label} template: created\n".encode()
-    rust, oracle = pair
-    assert template_snapshot(rust) == template_snapshot(oracle)
-    (row,) = template_snapshot(rust)
-    workspace_id, row_name, body, is_active, version, updated_by = row
-    assert workspace_id is None  # global row
-    assert row_name == name
-    assert body  # the fresh body; equality across DBs pins fragment/const parity
-    assert is_active is True
-    assert version == 1
-    assert updated_by is None
-
-
-@pytest.mark.parametrize("label,name,command", KINDS)
-def test_reseed_identical_body_skips_without_write(pair, label, name, command):
-    # Each backend first creates from its own fresh body; the bodies must
-    # agree or nothing below is comparable.
-    run_rust(command)
-    run_oracle(command)
-    rust, oracle = pair
-    assert template_snapshot(rust) == template_snapshot(oracle)
-    (row,) = template_snapshot(rust)
-    (rust_id,) = template_ids(rust)
-    (oracle_id,) = template_ids(oracle)
-    before = (
-        updated_at_of(rust, "prompt_template", rust_id),
-        updated_at_of(oracle, "prompt_template", oracle_id),
-    )
-
-    rust_proc, oracle_proc = run_rust(command), run_oracle(command)
-    assert_cli_parity(rust_proc, oracle_proc)
-    assert rust_proc.stdout == f"{label} template: skipped\n".encode()
-    assert template_snapshot(rust) == template_snapshot(oracle) == [row]
-    assert updated_at_of(rust, "prompt_template", rust_id) == before[0]
-    assert updated_at_of(oracle, "prompt_template", oracle_id) == before[1]
-
-
-@pytest.mark.parametrize("label,name,command", KINDS)
-def test_reseed_force_with_identical_body_still_skips(pair, label, name, command):
-    # The quirk: `force and existing.body != body` — force alone never writes.
-    run_rust(command)
-    run_oracle(command)
-    rust, oracle = pair
-    (row,) = template_snapshot(rust)
-    (rust_id,) = template_ids(rust)
-    (oracle_id,) = template_ids(oracle)
-    before = (
-        updated_at_of(rust, "prompt_template", rust_id),
-        updated_at_of(oracle, "prompt_template", oracle_id),
-    )
-
-    rust_proc, oracle_proc = run_rust(command, "--force"), run_oracle(command, "--force")
-    assert_cli_parity(rust_proc, oracle_proc)
-    assert rust_proc.stdout == f"{label} template: skipped\n".encode()
-    assert template_snapshot(rust) == template_snapshot(oracle) == [row]
-    assert updated_at_of(rust, "prompt_template", rust_id) == before[0]
-    assert updated_at_of(oracle, "prompt_template", oracle_id) == before[1]
-
-
-@pytest.mark.parametrize("label,name,command", KINDS)
-def test_reseed_stale_body_skips_without_force(pair, label, name, command):
-    row_id = add_template(pair, name=name, body="stale body", version=3)
-    rust, oracle = pair
-    before = (
-        updated_at_of(rust, "prompt_template", row_id),
-        updated_at_of(oracle, "prompt_template", row_id),
-    )
-    rust_proc, oracle_proc = run_rust(command), run_oracle(command)
-    assert_cli_parity(rust_proc, oracle_proc)
-    assert rust_proc.stdout == f"{label} template: skipped\n".encode()
-    assert template_snapshot(rust) == template_snapshot(oracle)
-    (row,) = template_snapshot(rust)
-    assert row[2] == "stale body" and row[4] == 3
-    assert updated_at_of(rust, "prompt_template", row_id) == before[0]
-    assert updated_at_of(oracle, "prompt_template", row_id) == before[1]
-
-
-@pytest.mark.parametrize("label,name,command", KINDS)
-@pytest.mark.parametrize("old_version,new_version", [(0, 1), (3, 4)])
-def test_reseed_force_refreshes_stale_body(pair, label, name, command, old_version, new_version):
-    # `(version or 0) + 1`, re-activation included: the seed row starts cold.
-    row_id = add_template(
-        pair, name=name, body="stale body", version=old_version, is_active=False
-    )
-    rust, oracle = pair
-    before = (
-        updated_at_of(rust, "prompt_template", row_id),
-        updated_at_of(oracle, "prompt_template", row_id),
-    )
-    rust_proc, oracle_proc = run_rust(command, "--force"), run_oracle(command, "--force")
-    assert_cli_parity(rust_proc, oracle_proc)
-    assert rust_proc.stdout == f"{label} template: refreshed\n".encode()
-    assert template_snapshot(rust) == template_snapshot(oracle)
-    (row,) = template_snapshot(rust)
-    assert row[2] != "stale body"
-    assert row[3] is True
-    assert row[4] == new_version
-    assert row[5] is None  # refresh never touches updated_by
-    assert updated_at_of(rust, "prompt_template", row_id) != before[0]
-    assert updated_at_of(oracle, "prompt_template", row_id) != before[1]
-
-
-@pytest.mark.parametrize("label,name,command", KINDS)
-def test_reseed_refresh_targets_newest_global_row(pair, label, name, command):
-    old_id = add_template(
-        pair, name=name, body="older body", version=7, updated_at="2019-01-01T00:00:00+00:00"
-    )
-    new_id = add_template(
-        pair, name=name, body="newer body", version=2, updated_at="2021-06-01T00:00:00+00:00"
-    )
-    rust_proc, oracle_proc = run_rust(command, "--force"), run_oracle(command, "--force")
-    assert_cli_parity(rust_proc, oracle_proc)
-    assert rust_proc.stdout == f"{label} template: refreshed\n".encode()
-    assert_db_parity(pair)
-    rust, oracle = pair
-    for conn in (rust, oracle):
-        rows = template_rows_by_id(conn)
-        assert rows[old_id][3] == "older body" and rows[old_id][5] == 7  # untouched
-        assert rows[new_id][3] != "newer body" and rows[new_id][5] == 3  # refreshed
-
-
-@pytest.mark.parametrize("label,name,command", KINDS)
-def test_reseed_leaves_workspace_row_alone(pair, owner, label, name, command):
-    wid = make_workspace(pair, owner)
-    ws_id = add_template(pair, name=name, body="workspace body", workspace_id=wid, version=5)
-    rust, oracle = pair
-    before = (
-        updated_at_of(rust, "prompt_template", ws_id),
-        updated_at_of(oracle, "prompt_template", ws_id),
-    )
-    rust_proc, oracle_proc = run_rust(command), run_oracle(command)
-    assert_cli_parity(rust_proc, oracle_proc)
-    # No global row exists, so a global row is created; the workspace row
-    # is invisible to the lookup and stays exactly as seeded.
-    assert rust_proc.stdout == f"{label} template: created\n".encode()
-    assert_db_parity(pair)
-    for conn in (rust, oracle):
-        rows = template_rows_by_id(conn)
-        assert rows[ws_id][3] == "workspace body" and rows[ws_id][5] == 5
-    assert updated_at_of(rust, "prompt_template", ws_id) == before[0]
-    assert updated_at_of(oracle, "prompt_template", ws_id) == before[1]
-
-
-# --------------------------------------------------------------------------
 # revalidate_section_overrides [--clear]
 # --------------------------------------------------------------------------
+# (NEWPIDASH-404: the reseed_*_template section was removed with the commands.)
 
 REVALIDATE = "revalidate_section_overrides"
 ZERO_SUMMARY = b"checked 0 active override(s): 0 newly flagged, 0 cleared.\n"
@@ -540,6 +346,24 @@ def test_revalidate_clean_row_is_kept_silently(pair, owner):
     assert updated_at_of(oracle, "prompt_section_override", row_id) == before[1]
 
 
+def test_revalidate_non_neutral_core_override_flags(pair, owner):
+    # PDASHOSS01-234: a core stage section override that renders cleanly
+    # but still carries git/PR wording would leak into every work type;
+    # both engines flag it with the same byte-exact detail.
+    wid = make_workspace(pair, owner)
+    add_override(pair, wid, KNOWN_KEY, "Commit and push the branch, then open a PR.")
+    rust_proc, oracle_proc = run_rust(REVALIDATE), run_oracle(REVALIDATE)
+    assert_cli_parity(rust_proc, oracle_proc)
+    assert rust_proc.stdout == (
+        f"flagged {wid}/{KNOWN_KEY} (user=None): override for core section {KNOWN_KEY!r}"
+        " carries work-type-specific wording ('branch', 'Commit', 'push', 'PR'); core sections"
+        " are shared by every work type, so move that guidance into a work-type section"
+        " (e.g. 'software.execute')\n"
+        "checked 1 active override(s): 1 newly flagged, 0 cleared.\n"
+    ).encode()
+    assert_db_parity(pair)
+
+
 def test_revalidate_render_failure_flags_with_engine_detail(pair, owner):
     # The attribution wrapper is byte-exact on both sides; only the
     # trailing engine prose differs (minijinja vs Jinja2 StrictUndefined —
@@ -551,7 +375,8 @@ def test_revalidate_render_failure_flags_with_engine_detail(pair, owner):
     assert rust_proc.stderr == oracle_proc.stderr == b""
     prefix = (
         f"flagged {wid}/{KNOWN_KEY} (user=None): override for section"
-        f" {KNOWN_KEY!r} fails to render as part of the 'coding-task' prompt: "
+        f" {KNOWN_KEY!r} fails to render as part of the 'coding-task' prompt"
+        " (work type 'general'): "
     ).encode()
     for proc in (rust_proc, oracle_proc):
         lines = proc.stdout.split(b"\n")

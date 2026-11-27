@@ -106,8 +106,22 @@ export function sanitizeHtml(dirty: string): string {
   }
 }
 
-/** Absolute or self-describing sources never need the asset path. */
-const ABSOLUTE_ASSET_SRC = /^(https?:|data:|blob:|\/)/i;
+/** Scheme-carrying sources (web, data, blob) that paint anywhere unchanged. */
+const SCHEME_ASSET_SRC = /^(https?:|data:|blob:)/i;
+
+/** Rooted leg the API serves bytes at — the only rooted form that is an API address. */
+const ROOTED_ASSET_SRC = /^\/api\/assets\//;
+
+/**
+ * True when a stored source needs display resolution: a bare asset id or a
+ * rooted asset leg. Scheme addresses and other rooted paths paint as
+ * stored, so they never reach the resolver.
+ */
+function needsAssetResolution(src: string): boolean {
+  if (src === "" || SCHEME_ASSET_SRC.test(src)) return false;
+  if (src.startsWith("/")) return ROOTED_ASSET_SRC.test(src);
+  return true;
+}
 
 /** Where a stored description image lives, given the row it belongs to. */
 export interface DescriptionAssetScope {
@@ -122,12 +136,18 @@ export interface DescriptionAssetScope {
  * Resolve a stored `image-component` source (ISS-127). Older clients kept
  * the asset's id in `src`, not a URL: the API rewrites asset ids in
  * `copy_s3_object` and serves the bytes at the workspace/project asset
- * path. Absolute, data, blob and already-rooted legs pass through; a bare
- * id joins that path. Without a scope the id cannot be resolved and is
- * returned untouched.
+ * path. Absolute, data, blob and non-asset rooted legs pass through; a
+ * bare id joins that path, and an already-rooted asset leg stays rooted
+ * unless an API origin is given to join. Without a scope the source
+ * cannot be resolved and is returned untouched.
  */
 export function descriptionAssetSrc(src: string, scope: DescriptionAssetScope | undefined): string {
-  if (src === "" || ABSOLUTE_ASSET_SRC.test(src) || scope === undefined) return src;
+  if (src === "" || scope === undefined || SCHEME_ASSET_SRC.test(src)) return src;
+  if (src.startsWith("/")) {
+    if (!ROOTED_ASSET_SRC.test(src)) return src;
+    if (scope.apiBaseUrl === undefined || scope.apiBaseUrl === "") return src;
+    return `${scope.apiBaseUrl.replace(/\/+$/, "")}${src}`;
+  }
   const project = scope.projectId === null ? "" : `projects/${scope.projectId}/`;
   const path = `/api/assets/v2/workspaces/${scope.workspaceSlug}/${project}${src}/`;
   if (scope.apiBaseUrl === undefined || scope.apiBaseUrl === "") return path;
@@ -150,9 +170,14 @@ export function prepareEditorHtml(dirty: string, resolve: ((src: string) => stri
   const document = new DOMParser().parseFromString(dirty, "text/html");
   for (const element of Array.from(document.body.querySelectorAll("image-component"))) {
     const stored = element.getAttribute("src") ?? "";
-    if (stored === "" || ABSOLUTE_ASSET_SRC.test(stored)) continue;
+    if (!needsAssetResolution(stored)) continue;
     element.setAttribute("src", resolve(stored));
     element.setAttribute("data-stored-src", stored);
+  }
+  for (const element of Array.from(document.body.querySelectorAll("img"))) {
+    const src = element.getAttribute("src") ?? "";
+    if (!needsAssetResolution(src)) continue;
+    element.setAttribute("src", resolve(src));
   }
   return document.body.innerHTML;
 }
@@ -202,6 +227,19 @@ export function renderableHtml(
     if (current) chip.setAttribute("data-current-user", "true");
     chip.textContent = `@${mentionNameFor(mention.entityIdentifier, mention.name) || mentionDisplayName(mention)}`;
     element.replaceWith(chip);
+  }
+  // A picture stored as a plain `<img>` (a description insert carries no
+  // stored id) keeps its source through the same resolver: a rooted asset
+  // leg joins the API origin instead of the bundle origin on desktop.
+  // This pass runs before components become images so each picture
+  // resolves exactly once.
+  if (resolveAsset !== undefined) {
+    for (const image of Array.from(document.body.querySelectorAll("img"))) {
+      const src = image.getAttribute("src") ?? "";
+      if (!needsAssetResolution(src)) continue;
+      const resolved = resolveAsset(src);
+      if (resolved !== src) image.setAttribute("src", resolved);
+    }
   }
   for (const element of Array.from(document.body.querySelectorAll("image-component"))) {
     const stored = storedImageSrc(element);
@@ -349,4 +387,73 @@ export function isStoredHtmlEmptyIgnoring(html: string, allowedTags: readonly st
  */
 export function hasStoredDescriptionContent(html: string): boolean {
   return !isStoredHtmlEmptyIgnoring(html, MENTION_CONTENT_TAGS);
+}
+
+/**
+ * NEWPIDASH-232: Stored bodies from the assistant/MCP path before the fix
+ * wrapped raw markdown inside a single level of <p> tags:
+ * `"<p>## Summary\\nHello **world**</p>"`. The frontend's editor and the
+ * backend sanitizer both keep those <p> wrappers, so the read surface
+ * renders the markdown markers literally. This helper detects that shape
+ * and extracts the original markdown source for the Markdown renderer.
+ *
+ * It returns the markdown source only when the stored body is a
+ * `<p>`-only document (no heading/list/table/code/blockquote) whose text
+ * contains markdown markers (headings, bold/italic, inline code, fences,
+ * list markers, tables or links). Proper HTML from the rich-text editor
+ * returns `null` so the normal `renderableHtml` path paints it.
+ */
+export function extractMarkdownSource(html: string): string | null {
+  if (typeof globalThis.DOMParser === "undefined") return null;
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const body = doc.body;
+  // If any formatted tag exists, this is proper HTML, not wrapped markdown.
+  if (body.querySelector("h1,h2,h3,h4,h5,h6,ul,ol,li,pre,code,blockquote,table,thead,tbody,tr,th,td,strong,em,s,hr")) {
+    return null;
+  }
+  const paras = Array.from(body.querySelectorAll("p"));
+  if (paras.length === 0) return null;
+  // Quick check for markdown markers in the visible text.
+  const text = body.textContent ?? "";
+  const trimmed = text.trim();
+  if (trimmed === "") return null;
+  const hasHeading = /(^|\n)#{1,6}\s+\S/.test(trimmed);
+  const hasBold = /\*\*[^*]+\*\*|__[^_]+__/.test(trimmed);
+  const hasItalic = /[*_][^*_]+[*_]/.test(trimmed) && !hasBold;
+  const hasInlineCode = /`[^`\n]+`/.test(trimmed);
+  const hasFence = /```/.test(trimmed) || /~~~/.test(trimmed);
+  const hasList = /(^|\n)\s*[-*+]\s+\S/.test(trimmed) || /(^|\n)\s*\d+[.)]\s+\S/.test(trimmed);
+  const hasTable = /(^|\n)\s*\|.*\|\s*$/.test(trimmed) && /(^|\n)\s*\|[\s:|-]+\|\s*$/.test(trimmed);
+  const hasLink = /\[[^\]]+\]\([^)]+\)/.test(trimmed);
+  const hasStrike = /~~[^~]+~~/.test(trimmed);
+  if (
+    !hasHeading &&
+    !hasBold &&
+    !hasItalic &&
+    !hasInlineCode &&
+    !hasFence &&
+    !hasList &&
+    !hasTable &&
+    !hasLink &&
+    !hasStrike
+  ) {
+    return null;
+  }
+  const parts: string[] = [];
+  for (const p of paras) {
+    // <br> inside <p> is the naive single-newline; turn it back into \n.
+    // innerHTML may contain entities; read text via a temp node.
+    const inner = p.innerHTML.replace(/<br\s*\/?>/gi, "\n");
+    const div = doc.createElement("div");
+    div.innerHTML = inner;
+    const txt = div.textContent ?? "";
+    // Untrim only outermost paragraph breaks; inner <br> newlines are kept.
+    if (txt.trim() !== "") parts.push(txt.trim());
+    else parts.push(txt);
+  }
+  // Join paragraphs with blank line to recover the original markdown break.
+  const md = parts.join("\n\n").trim();
+  // Final guard: the extracted source must still look like markdown.
+  const recheck = /(^|\n)#{1,6}\s|(\*\*|__).+?(\*\*|__)|`[^`]+`|```|^\s*[-*+]\s|^\s*\d+[.)]\s|\[.+?\]\(.+?\)/.test(md);
+  return recheck ? md : null;
 }

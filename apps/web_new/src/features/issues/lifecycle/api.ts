@@ -11,6 +11,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { archiveIssue, deleteIssue, moveIssueToProject, type ApiClient } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
+import { archivesKeys } from "../../archives/index.js";
 import { issueKeys } from "../api/keys.js";
 
 /** The record a lifecycle write targets. */
@@ -35,15 +36,24 @@ export function moveWorkItem(client: ApiClient, scope: WorkItemScope, targetProj
   return moveIssueToProject(client, scope.workspaceSlug, scope.projectId, scope.issueId, targetProject);
 }
 
-/** The query helper every lifecycle write shares after it settles. */
-function useLifecycleInvalidation(workspaceSlug: string) {
+/**
+ * The query helper every lifecycle write shares after it settles. Archive
+ * and delete move the archived count, so the badge query goes with the
+ * issue reads; the move dialog never opens over the archives, but sharing
+ * the helper keeps the one invalidation site (the badge refetch only runs
+ * while the archives shell is mounted).
+ */
+function useLifecycleInvalidation(workspaceSlug: string, projectId: string) {
   const queryClient = useQueryClient();
-  return () => queryClient.invalidateQueries({ queryKey: issueKeys.all(workspaceSlug) });
+  return () => {
+    void queryClient.invalidateQueries({ queryKey: issueKeys.all(workspaceSlug) });
+    void queryClient.invalidateQueries({ queryKey: archivesKeys.all(workspaceSlug, projectId) });
+  };
 }
 
 /** Archive mutation for one record. */
 export function useArchiveWorkItem(scope: WorkItemScope) {
-  const invalidate = useLifecycleInvalidation(scope.workspaceSlug);
+  const invalidate = useLifecycleInvalidation(scope.workspaceSlug, scope.projectId);
   return useMutation<{ archived_at: string }, Error, void>({
     mutationFn: () => archiveWorkItem(getAppClient(), scope),
     onSettled: () => void invalidate(),
@@ -52,7 +62,7 @@ export function useArchiveWorkItem(scope: WorkItemScope) {
 
 /** Delete mutation for one record. */
 export function useDeleteWorkItem(scope: WorkItemScope) {
-  const invalidate = useLifecycleInvalidation(scope.workspaceSlug);
+  const invalidate = useLifecycleInvalidation(scope.workspaceSlug, scope.projectId);
   return useMutation<void, Error, void>({
     mutationFn: () => deleteWorkItem(getAppClient(), scope),
     onSettled: () => void invalidate(),
@@ -61,7 +71,7 @@ export function useDeleteWorkItem(scope: WorkItemScope) {
 
 /** Move mutation for one record; `mutateAsync(projectId)` answers the moved row. */
 export function useMoveWorkItem(scope: WorkItemScope) {
-  const invalidate = useLifecycleInvalidation(scope.workspaceSlug);
+  const invalidate = useLifecycleInvalidation(scope.workspaceSlug, scope.projectId);
   return useMutation({
     mutationFn: (targetProject: string) => moveWorkItem(getAppClient(), scope, targetProject),
     onSettled: () => void invalidate(),

@@ -22,6 +22,10 @@ vi.mock("../../../shared/shell/index.js", () => ({
   notifyInfo: vi.fn(),
 }));
 
+vi.mock("../../../core/api/client.js", () => ({
+  getAppClient: () => ({ baseUrl: "https://api.test" }),
+}));
+
 const HOST: PageExportHost = {
   pageTitle: "Export me",
   projectId: "project-1",
@@ -115,7 +119,7 @@ describe("PageExportDialog", () => {
     expect(saveFile).toHaveBeenCalledWith(
       HOST,
       { format: "PDF", scope: "No images", size: "A4" },
-      expect.objectContaining({ origin: window.location.origin, sink: expect.any(Object) })
+      expect.objectContaining({ origin: "https://api.test", sink: expect.any(Object) })
     );
   });
 

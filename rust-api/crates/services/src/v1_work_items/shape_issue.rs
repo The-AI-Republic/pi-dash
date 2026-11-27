@@ -289,6 +289,8 @@ pub const FIELDS_IN_ORDER: &[&str] = &[
     "type_id",
     "url",
     "description_markdown",
+    "assigned_runner_detail",
+    "dispatch_wait",
     "created_at",
     "updated_at",
     "deleted_at",
@@ -310,6 +312,7 @@ pub const FIELDS_IN_ORDER: &[&str] = &[
     "git_work_branch",
     "created_via",
     "agent_executor",
+    "work_type",
     "created_by",
     "updated_by",
     "project",
@@ -319,6 +322,7 @@ pub const FIELDS_IN_ORDER: &[&str] = &[
     "estimate_point",
     "type",
     "assigned_pod",
+    "assigned_runner",
 ];
 
 /// Write-only fields (`issue.py:118-151`): accepted on write, absent from the
@@ -352,6 +356,8 @@ pub const READABLE_FIELDS_IN_ORDER: &[&str] = &[
     "id",
     "type_id",
     "url",
+    "assigned_runner_detail",
+    "dispatch_wait",
     "created_at",
     "updated_at",
     "deleted_at",
@@ -373,6 +379,7 @@ pub const READABLE_FIELDS_IN_ORDER: &[&str] = &[
     "git_work_branch",
     "created_via",
     "agent_executor",
+    "work_type",
     "created_by",
     "updated_by",
     "project",
@@ -382,6 +389,7 @@ pub const READABLE_FIELDS_IN_ORDER: &[&str] = &[
     "estimate_point",
     "type",
     "assigned_pod",
+    "assigned_runner",
 ];
 
 /// Read-only blocker keys `to_representation` appends for single-item
@@ -446,6 +454,39 @@ pub const POD_WRONG_PROJECT_BODY: &str = r#"{"assigned_pod":["pod is in a differ
 /// `validate()` pod-reassign guard (`:211-216`).
 pub const POD_REASSIGN_ACTIVE_RUN_BODY: &str =
     r#"{"assigned_pod":["cannot reassign pod while the issue has an active run"]}"#;
+/// `validate()` work-type registry check (PDASHOSS01-234): a truthy
+/// `work_type` that names no registered work type. Raised with a dict, so
+/// DRF list-wraps the message under the field key.
+pub static UNKNOWN_WORK_TYPE_BODY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    serde_json::json!({
+        "work_type": [crate::prompting::work_types::unknown_work_type_message()]
+    })
+    .to_string()
+});
+/// `IssueDetailAPIEndpoint.patch` work-type lock (PDASHOSS01-234): an
+/// agent-attributed PATCH (explicit run-id header) changing `work_type`
+/// while the issue sits in a ticking stage (started / review / test).
+pub const WORK_TYPE_LOCKED_BODY: &str = r#"{"error":"work_type is locked while the issue is being worked; only a human can change it"}"#;
+/// The dedicated-runner E-checks (`validate_execution_target`, design
+/// §7.1): one variant per code, each Django's `ErrorDetail` — every
+/// one keyed on `assigned_runner` (both serializers carry the runner
+/// in attrs under that key, even though the app surface posts
+/// `assigned_runner_id`).
+pub const RUNNER_NOT_FOUND_BODY: &str = r#"{"assigned_runner":["runner not found"]}"#;
+pub const RUNNER_WRONG_PROJECT_BODY: &str =
+    r#"{"assigned_runner":["runner is in a different project"]}"#;
+pub const RUNNER_POD_MISMATCH_BODY: &str =
+    r#"{"assigned_runner":["runner is in a different pod"]}"#;
+pub const RUNNER_REVOKED_BODY: &str = r#"{"assigned_runner":["runner has been revoked"]}"#;
+pub const RUNNER_OWNER_NOT_ON_ISSUE_BODY: &str =
+    r#"{"assigned_runner":["the runner's owner is not on this issue"]}"#;
+pub const ACTIVE_RUN_IN_PROGRESS_BODY: &str =
+    r#"{"assigned_runner":["the issue has an active run; changes take effect on the next run"]}"#;
+/// `normalize_issue_executor` unknown value
+/// (`runner/services/issue_assignment.py:37-38`).
+pub const EXECUTOR_UNKNOWN_BODY: &str = r#"{"agent_executor":["unknown agent executor"]}"#;
+/// `normalize_issue_executor` mid-flight guard (`:40-47`).
+pub const EXECUTOR_MID_FLIGHT_BODY: &str = r#"{"agent_executor":["cannot change the execution target while the issue has an active run"]}"#;
 /// `normalize_description_input` non-string markdown (`:100-101`).
 pub const MARKDOWN_NON_STRING_BODY: &str = r#"{"description_markdown":["Must be a string."]}"#;
 
@@ -570,6 +611,8 @@ pub enum ValidateError {
     PodReassignActiveRun,
     /// lxml round-trip raised, or empty-string input (`:222-229`).
     InvalidHtml,
+    /// `work_type` is truthy but not a registered work type.
+    UnknownWorkType,
     /// `validate_html_content` rejected the round-tripped HTML (`:232-235`).
     HtmlContentInvalid,
     /// `validate_binary_data` rejected the blob (`:240-243`). Dead via this
@@ -577,10 +620,28 @@ pub enum ValidateError {
     BinaryInvalid,
     /// `state` is not a state of this project (`:261-265`).
     StateWrongProject,
+    /// `normalize_issue_executor` unknown value
+    /// (`issue_assignment.py:37-38`).
+    ExecutorUnknown,
+    /// `normalize_issue_executor` mid-flight guard (`:40-47`).
+    ExecutorMidFlight,
     /// `parent` is not an issue of this workspace+project (`:267-276`).
     ParentWrongProject,
     /// `estimate_point` is not one of this workspace+project (`:278-286`).
     EstimatePointWrongProject,
+    /// The dedicated-runner E-checks (`validate_execution_target`):
+    /// E1 `runner_not_found`.
+    RunnerNotFound,
+    /// E2 `runner_wrong_project`.
+    RunnerWrongProject,
+    /// E3 `runner_pod_mismatch`.
+    RunnerPodMismatch,
+    /// E4 `runner_revoked`.
+    RunnerRevoked,
+    /// E7 `runner_owner_not_on_issue`.
+    RunnerOwnerNotOnIssue,
+    /// E8 `active_run_in_progress`.
+    ActiveRunInProgress,
 }
 
 impl ValidateError {
@@ -596,11 +657,35 @@ impl ValidateError {
             ValidateError::PodWrongProject => POD_WRONG_PROJECT_BODY,
             ValidateError::PodReassignActiveRun => POD_REASSIGN_ACTIVE_RUN_BODY,
             ValidateError::InvalidHtml => INVALID_HTML_BODY,
+            ValidateError::UnknownWorkType => UNKNOWN_WORK_TYPE_BODY.as_str(),
             ValidateError::HtmlContentInvalid => HTML_CONTENT_INVALID_BODY,
             ValidateError::BinaryInvalid => BINARY_INVALID_BODY,
             ValidateError::StateWrongProject => STATE_WRONG_PROJECT_BODY,
+            ValidateError::ExecutorUnknown => EXECUTOR_UNKNOWN_BODY,
+            ValidateError::ExecutorMidFlight => EXECUTOR_MID_FLIGHT_BODY,
             ValidateError::ParentWrongProject => PARENT_WRONG_PROJECT_BODY,
             ValidateError::EstimatePointWrongProject => ESTIMATE_POINT_WRONG_PROJECT_BODY,
+            ValidateError::RunnerNotFound => RUNNER_NOT_FOUND_BODY,
+            ValidateError::RunnerWrongProject => RUNNER_WRONG_PROJECT_BODY,
+            ValidateError::RunnerPodMismatch => RUNNER_POD_MISMATCH_BODY,
+            ValidateError::RunnerRevoked => RUNNER_REVOKED_BODY,
+            ValidateError::RunnerOwnerNotOnIssue => RUNNER_OWNER_NOT_ON_ISSUE_BODY,
+            ValidateError::ActiveRunInProgress => ACTIVE_RUN_IN_PROGRESS_BODY,
+        }
+    }
+
+    /// Map a domain E-check code (design §7.1, `validate_execution_target`)
+    /// to its variant. The fallthrough is E8 — the only code left after
+    /// E1-E4/E7 (`""` = assignable never reaches this helper, and the
+    /// domain's other failures carry a DB error instead).
+    pub fn from_runner_code(code: &str) -> Self {
+        match code {
+            "runner_not_found" => ValidateError::RunnerNotFound,
+            "runner_wrong_project" => ValidateError::RunnerWrongProject,
+            "runner_pod_mismatch" => ValidateError::RunnerPodMismatch,
+            "runner_revoked" => ValidateError::RunnerRevoked,
+            "runner_owner_not_on_issue" => ValidateError::RunnerOwnerNotOnIssue,
+            _ => ValidateError::ActiveRunInProgress,
         }
     }
 }
@@ -666,6 +751,27 @@ pub fn check_description_html<'a>(
         }
     }
     Ok(HtmlOutcome::Replaced(effective))
+}
+
+/// Port of the `work_type` branch of `validate()` (PDASHOSS01-234):
+/// a present-but-falsy value (`""` / `None`) normalizes to `None` — the
+/// "inherit the project default" state — and a truthy value must name a
+/// registered work type. `None` (key absent) passes through untouched.
+pub fn normalize_work_type(
+    value: Option<Option<String>>,
+) -> Result<Option<Option<String>>, ValidateError> {
+    match value {
+        None => Ok(None),
+        Some(None) => Ok(Some(None)),
+        Some(Some(key)) if key.is_empty() => Ok(Some(None)),
+        Some(Some(key)) => {
+            if crate::prompting::work_types::is_known(&key) {
+                Ok(Some(Some(key)))
+            } else {
+                Err(ValidateError::UnknownWorkType)
+            }
+        }
+    }
 }
 
 /// Validated `assigned_pod` value: the pod's project (`runner/models.py`),
@@ -1116,6 +1222,36 @@ pub struct BlockerSummary<'a> {
     pub has_open_blockers: bool,
 }
 
+/// One attached code review (NEWPIDASH-366): a `git_code_review_links`
+/// row for the issue, rendered newest-first. `state` is the stored value
+/// (`merged` carries the merged flag separately); soft-deleted rows are
+/// excluded by the fetch, never rendered. Serializable in wire order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CodeReviewItem {
+    pub url: String,
+    pub title: String,
+    pub state: String,
+    pub merged: bool,
+    pub draft: bool,
+    pub provider: String,
+    pub external_iid: String,
+}
+
+/// The issue-detail `active_run` key (NEWPIDASH-251): the newest run
+/// occupying the one-active-run slot, with the assigned runner's last
+/// heartbeat, so coordinators can tell "really running" from "stuck".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ActiveRunSummary {
+    pub id: String,
+    pub status: String,
+    pub runner_id: Option<String>,
+    pub created_at: String,
+    pub assigned_at: Option<String>,
+    pub started_at: Option<String>,
+    pub age_seconds: i64,
+    pub runner_last_heartbeat_at: Option<String>,
+}
+
 /// Caller-resolved grouped relations (`grouped_relations(instance,
 /// member_project_issues(viewer, slug))` at `issue.py:492`), one list per
 /// [`RELATION_TYPES`] entry in order. `..Default::default()` fills the rest
@@ -1193,6 +1329,7 @@ pub struct IssueRow<'a> {
     pub git_work_branch: &'a str,
     pub created_via: Option<&'a str>,
     pub agent_executor: Option<&'a str>,
+    pub work_type: Option<&'a str>,
     pub created_by: Option<&'a str>,
     pub updated_by: Option<&'a str>,
     pub project: &'a str,
@@ -1201,6 +1338,16 @@ pub struct IssueRow<'a> {
     pub state: Option<&'a str>,
     pub estimate_point: Option<&'a str>,
     pub assigned_pod: Option<&'a str>,
+    /// Bare `assigned_runner` FK (model field, renders the PK or null —
+    /// same convention as `assigned_pod`).
+    pub assigned_runner: Option<&'a str>,
+    /// The `assigned_runner_detail` object (design §14.1), `None` when
+    /// the issue is pod-assigned or the runner is gone — renders `null`.
+    pub assigned_runner_detail: Option<&'a Value>,
+    /// The `dispatch_wait` object (design §14.3), `None` on list rows or
+    /// when no QUEUED pinned run exists — renders `null` (Django
+    /// `get_dispatch_wait` returns `None` for list parents).
+    pub dispatch_wait: Option<&'a Value>,
 }
 
 /// Failure modes of [`render_issue`]: caller-contract violations and the two
@@ -1260,6 +1407,17 @@ pub struct RepresentationInput<'a> {
     /// `relations_viewer` context key is set AND the payload is single AND the
     /// fields gate passes); `None` omits the block.
     pub relations: Option<&'a GroupedRelations<'a>>,
+    /// Attached code reviews (NEWPIDASH-366): `Some` on the two single
+    /// GET reads (viewer present, single payload, fields gate passes);
+    /// `None` omits the block. Renders as an array, empty when the issue
+    /// has no reviews.
+    pub code_reviews: Option<&'a [CodeReviewItem]>,
+    /// Newest active run (NEWPIDASH-251): rendered as `active_run`
+    /// on single payloads when `?fields=` requests it (or no `fields=`
+    /// given) and a run occupies the one-active-run slot. Only the
+    /// read service fetches it; write paths and idle issues pass
+    /// `None` (key omitted — absence means no active run).
+    pub active_run: Option<&'a ActiveRunSummary>,
     /// Rendered values for map-hit `expand` names (`state`, `project`,
     /// `workspace`, `created_by`, `updated_by`, `parent`, `estimate_point`
     /// among this serializer's fields): `Some(value)` renders the object,
@@ -1387,6 +1545,7 @@ pub fn render_issue(input: &RepresentationInput<'_>) -> Result<Map<String, Value
             "git_work_branch" => Value::String(row.git_work_branch.to_string()),
             "created_via" => opt_str(row.created_via),
             "agent_executor" => opt_str(row.agent_executor),
+            "work_type" => opt_str(row.work_type),
             "created_by" => opt_str(row.created_by),
             "updated_by" => opt_str(row.updated_by),
             "project" => Value::String(row.project.to_string()),
@@ -1395,6 +1554,15 @@ pub fn render_issue(input: &RepresentationInput<'_>) -> Result<Map<String, Value
             "state" => opt_str(row.state),
             "estimate_point" => opt_str(row.estimate_point),
             "assigned_pod" => opt_str(row.assigned_pod),
+            "assigned_runner" => opt_str(row.assigned_runner),
+            "assigned_runner_detail" => match row.assigned_runner_detail {
+                Some(value) => value.clone(),
+                None => Value::Null,
+            },
+            "dispatch_wait" => match row.dispatch_wait {
+                Some(value) => value.clone(),
+                None => Value::Null,
+            },
             // `filter_fields` only ever yields `FIELDS_IN_ORDER` names, and
             // every non-write-only one is matched above.
             _ => unreachable!("render_issue matched every kept readable field"),
@@ -1505,6 +1673,32 @@ pub fn render_issue(input: &RepresentationInput<'_>) -> Result<Map<String, Value
             out.insert(
                 "relations".to_string(),
                 Value::Object(relations_block(groups)),
+            );
+        }
+    }
+
+    // Attached code reviews (NEWPIDASH-366): the issue's
+    // `git_code_review_links` rows, newest first, soft-deleted excluded.
+    // `Some` on the input already folds the viewer/single/`?fields=`
+    // gate (like `relations` above); always an array, empty when the
+    // issue has no reviews.
+    if let Some(reviews) = input.code_reviews {
+        if !input.is_list && (requested.is_empty() || requested.contains(&"code_reviews")) {
+            out.insert(
+                "code_reviews".to_string(),
+                serde_json::to_value(reviews).expect("CodeReviewItem is always serializable"),
+            );
+        }
+    }
+
+    // Newest active run (NEWPIDASH-251): single payloads,
+    // `?fields=`-gated like the blocker summary above. `None` (write
+    // paths; idle issues) omits the key — absence means no active run.
+    if let Some(run) = input.active_run {
+        if !input.is_list && (requested.is_empty() || requested.contains(&"active_run")) {
+            out.insert(
+                "active_run".to_string(),
+                serde_json::to_value(run).expect("ActiveRunSummary is always serializable"),
             );
         }
     }
@@ -1635,11 +1829,15 @@ mod tests {
     fn field_names_match_fixture_in_order() {
         let fx = fixture();
         let expected = str_list(&fx["units"]["serializer_field_names"]["fields_in_order"]);
-        assert_eq!(FIELDS_IN_ORDER.len(), 36);
+        assert_eq!(FIELDS_IN_ORDER.len(), 40);
         assert_eq!(FIELDS_IN_ORDER, expected.as_slice());
         // Both spellings of the type FK are present (declared + auto).
         assert!(FIELDS_IN_ORDER.contains(&"type_id"));
         assert!(FIELDS_IN_ORDER.contains(&"type"));
+        // dispatch_wait sits immediately after assigned_runner_detail
+        // (Django `serializers/issue.py:156,165` declared order).
+        let pos = |name: &str| FIELDS_IN_ORDER.iter().position(|f| *f == name).unwrap();
+        assert_eq!(pos("dispatch_wait"), pos("assigned_runner_detail") + 1);
     }
 
     #[test]
@@ -1649,8 +1847,9 @@ mod tests {
             .filter(|name| !WRITE_ONLY_FIELDS.contains(name))
             .copied()
             .collect();
-        assert_eq!(READABLE_FIELDS_IN_ORDER.len(), 33);
+        assert_eq!(READABLE_FIELDS_IN_ORDER.len(), 37);
         assert_eq!(READABLE_FIELDS_IN_ORDER, derived.as_slice());
+        assert!(READABLE_FIELDS_IN_ORDER.contains(&"dispatch_wait"));
         assert_eq!(
             WRITE_ONLY_FIELDS,
             ["assignees", "labels", "description_markdown"]
@@ -2545,6 +2744,7 @@ mod tests {
             git_work_branch: "",
             created_via: None,
             agent_executor: None,
+            work_type: None,
             created_by: None,
             updated_by: None,
             project: PROJECT,
@@ -2553,6 +2753,9 @@ mod tests {
             state: Some("97b22834-b823-4109-a527-b39aa310ceae"),
             estimate_point: None,
             assigned_pod: None,
+            assigned_runner: None,
+            assigned_runner_detail: None,
+            dispatch_wait: None,
         }
     }
 
@@ -2596,6 +2799,8 @@ mod tests {
             expanded_labels,
             blockers,
             relations,
+            code_reviews: None,
+            active_run: None,
             expansions: no_expansions,
         })
         .expect("render succeeds")
@@ -2620,7 +2825,7 @@ mod tests {
         );
         let keys: Vec<&str> = out.keys().map(String::as_str).collect();
         assert_eq!(keys, str_list(&goldens["single_keys_in_order"]));
-        assert_eq!(keys.len(), 37);
+        assert_eq!(keys.len(), 41);
         // `scalars` spot values.
         let scalars = &goldens["scalars"];
         assert_eq!(
@@ -2694,9 +2899,202 @@ mod tests {
             expanded_labels: &[],
             blockers: None,
             relations: None,
+            code_reviews: None,
+            active_run: None,
             expansions: no_expansions,
         });
         assert_eq!(err, Err(RenderError::MissingBlockers));
+    }
+
+    #[test]
+    fn render_active_run_block_gated() {
+        // NEWPIDASH-251: the newest active run rides single payloads
+        // with the heartbeat; `fields=`-gated and absent on lists.
+        let row = full_row();
+        let blockers = empty_blockers();
+        let run = ActiveRunSummary {
+            id: "a7509d00-345f-47fb-bee3-6bcf7d3339e2".to_string(),
+            status: "running".to_string(),
+            runner_id: Some("b71fe111-2222-3333-4444-555566667777".to_string()),
+            created_at: "2026-10-02T23:00:00+00:00".to_string(),
+            assigned_at: Some("2026-10-02T23:00:01+00:00".to_string()),
+            started_at: Some("2026-10-02T23:00:05+00:00".to_string()),
+            age_seconds: 720,
+            runner_last_heartbeat_at: Some("2026-10-02T23:10:00+00:00".to_string()),
+        };
+        let no_rows: &[UserLiteRow] = &[];
+        let no_expansions: &[(&str, Option<Value>)] = &[];
+        let render = |fields: Option<&[FieldSpec]>, is_list: bool| {
+            render_issue(&RepresentationInput {
+                row: &row,
+                fields,
+                expand: &[],
+                is_list,
+                assignee_ids: &[],
+                assignee_rows: no_rows,
+                label_ids: &[],
+                expanded_labels: &[],
+                blockers: Some(&blockers),
+                relations: None,
+                code_reviews: None,
+                active_run: Some(&run),
+                expansions: no_expansions,
+            })
+            .expect("render succeeds")
+        };
+        let out = render(None, false);
+        let block = &out["active_run"];
+        assert_eq!(
+            block["id"].as_str().unwrap(),
+            "a7509d00-345f-47fb-bee3-6bcf7d3339e2"
+        );
+        assert_eq!(block["status"].as_str().unwrap(), "running");
+        assert_eq!(block["age_seconds"].as_i64().unwrap(), 720);
+        assert_eq!(
+            block["runner_last_heartbeat_at"].as_str().unwrap(),
+            "2026-10-02T23:10:00+00:00"
+        );
+        // `?fields=id,name` excludes the block; explicit
+        // `?fields=active_run` includes it on single payloads.
+        let restricted = render(Some(&includes(&["id", "name"])), false);
+        assert!(!restricted.contains_key("active_run"));
+        let explicit = render(Some(&includes(&["active_run"])), false);
+        assert!(explicit.contains_key("active_run"));
+        // Lists never carry it (like the blocker keys).
+        let list = render(None, true);
+        assert!(!list.contains_key("active_run"));
+    }
+
+    #[test]
+    fn render_code_reviews_block_gated() {
+        // NEWPIDASH-366: attached reviews ride single payloads as an
+        // array, newest first (the fetch orders them); `?fields=`-gated
+        // and absent on lists. Empty stays `[]`, never omitted.
+        let row = full_row();
+        let blockers = empty_blockers();
+        let reviews = vec![
+            CodeReviewItem {
+                url: "https://github.com/acme/web/pull/2".to_string(),
+                title: "Second".to_string(),
+                state: "open".to_string(),
+                merged: false,
+                draft: false,
+                provider: "github".to_string(),
+                external_iid: "2".to_string(),
+            },
+            CodeReviewItem {
+                url: "https://github.com/acme/web/pull/1".to_string(),
+                title: "First".to_string(),
+                state: "merged".to_string(),
+                merged: true,
+                draft: false,
+                provider: "github".to_string(),
+                external_iid: "1".to_string(),
+            },
+        ];
+        let no_rows: &[UserLiteRow] = &[];
+        let no_expansions: &[(&str, Option<Value>)] = &[];
+        let render =
+            |fields: Option<&[FieldSpec]>, is_list: bool, reviews: Option<&[CodeReviewItem]>| {
+                render_issue(&RepresentationInput {
+                    row: &row,
+                    fields,
+                    expand: &[],
+                    is_list,
+                    assignee_ids: &[],
+                    assignee_rows: no_rows,
+                    label_ids: &[],
+                    expanded_labels: &[],
+                    blockers: Some(&blockers),
+                    relations: None,
+                    code_reviews: reviews,
+                    active_run: None,
+                    expansions: no_expansions,
+                })
+                .expect("render succeeds")
+            };
+        let out = render(None, false, Some(&reviews));
+        let block = out["code_reviews"].as_array().expect("array");
+        assert_eq!(block.len(), 2);
+        assert_eq!(block[0]["url"].as_str().unwrap(), reviews[0].url);
+        assert_eq!(block[0]["state"].as_str().unwrap(), "open");
+        assert!(!block[0]["merged"].as_bool().unwrap());
+        assert_eq!(block[1]["state"].as_str().unwrap(), "merged");
+        assert!(block[1]["merged"].as_bool().unwrap());
+        let key_names: Vec<&str> = block[1]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            key_names,
+            vec![
+                "url",
+                "title",
+                "state",
+                "merged",
+                "draft",
+                "provider",
+                "external_iid"
+            ]
+        );
+        // No reviews still renders the key as `[]`.
+        let empty = render(None, false, Some(&[]));
+        assert_eq!(empty["code_reviews"], Value::Array(Vec::new()));
+        // `None` (list-adjacent writers) omits the key.
+        let omitted = render(None, false, None);
+        assert!(!omitted.contains_key("code_reviews"));
+        // `?fields=id,name` excludes the block; explicit
+        // `?fields=code_reviews` includes it on single payloads.
+        let restricted = render(Some(&includes(&["id", "name"])), false, Some(&reviews));
+        assert!(!restricted.contains_key("code_reviews"));
+        let explicit = render(Some(&includes(&["code_reviews"])), false, Some(&reviews));
+        assert!(explicit.contains_key("code_reviews"));
+        // Lists never carry it (like the blocker keys).
+        let list = render(None, true, Some(&reviews));
+        assert!(!list.contains_key("code_reviews"));
+    }
+
+    #[test]
+    fn render_dispatch_wait_null_and_value() {
+        // `dispatch_wait` renders the supplied object; `None` renders
+        // explicit `null` (Django `get_dispatch_wait` returns `None`
+        // for list parents and when there is no QUEUED pinned run).
+        let mut row = full_row();
+        let blockers = empty_blockers();
+        let out = render_with(&row, None, &[], false, &[], &[], &[], Some(&blockers), None);
+        assert_eq!(out["dispatch_wait"], Value::Null);
+
+        let wait: &'static Value = Box::leak(Box::new(serde_json::json!({
+            "reason": "offline",
+            "pin_kind": "dedicated",
+            "runner": "r-1",
+            "runner_name": "runner-1",
+            "queued_at": "2026-10-02T23:17:12.023611Z",
+            "runner_last_seen_at": null,
+            "runs_ahead": 0,
+            "pause_reason": null,
+            "expires_at": "2026-10-09T23:17:12.023611Z",
+            "releasable": false
+        })));
+        row.dispatch_wait = Some(wait);
+        let out = render_with(&row, None, &[], false, &[], &[], &[], Some(&blockers), None);
+        assert_eq!(out["dispatch_wait"], *wait);
+        // `fields=` filtering gates the key like any other field.
+        let fields = includes(&["id"]);
+        let out = render_with(
+            &row,
+            Some(&fields),
+            &[],
+            false,
+            &[],
+            &[],
+            &[],
+            Some(&blockers),
+            None,
+        );
+        assert!(!out.contains_key("dispatch_wait"));
     }
 
     #[test]
@@ -2753,6 +3151,8 @@ mod tests {
             expanded_labels: &[],
             blockers: Some(&blockers),
             relations: None,
+            code_reviews: None,
+            active_run: None,
             expansions: no_expansions,
         })
         .expect("assignee expand renders");
@@ -2824,6 +3224,8 @@ mod tests {
             expanded_labels: &[],
             blockers: None,
             relations: None,
+            code_reviews: None,
+            active_run: None,
             expansions: no_expansions,
         });
         assert!(matches!(err, Err(RenderError::Fields(_))));
@@ -2976,6 +3378,8 @@ mod tests {
             expanded_labels: &[],
             blockers: Some(&blockers),
             relations: None,
+            code_reviews: None,
+            active_run: None,
             expansions: &expansions,
         })
         .expect("map hits render");
@@ -2994,6 +3398,8 @@ mod tests {
             expanded_labels: &[],
             blockers: Some(&blockers),
             relations: None,
+            code_reviews: None,
+            active_run: None,
             expansions: &[],
         });
         assert_eq!(err, Err(RenderError::MissingExpansion("state".to_string())));
@@ -3039,6 +3445,8 @@ mod tests {
             expanded_labels: &[],
             blockers: Some(&blockers),
             relations: None,
+            code_reviews: None,
+            active_run: None,
             expansions: no_expansions,
         });
         assert_eq!(err, Err(RenderError::BinaryNotUtf8));
@@ -3056,6 +3464,8 @@ mod tests {
             expanded_labels: &[],
             blockers: Some(&blockers),
             relations: None,
+            code_reviews: None,
+            active_run: None,
             expansions: no_expansions,
         });
         assert_eq!(err, Err(RenderError::NonFiniteFloat));
@@ -3109,6 +3519,39 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&item).unwrap(),
             "{\"id\":\"a7509d00-345f-47fb-bee3-6bcf7d3339e2\",\"identifier\":\"CT00003-3\",\"name\":\"Renamed again\",\"state\":null,\"state_group\":null}"
+        );
+    }
+
+    /// PDASHOSS01-234: `work_type` normalization + registry check, and the
+    /// two wire bodies (list-wrapped field error, view-inline 403).
+    #[test]
+    fn work_type_validate_and_bodies() {
+        assert_eq!(normalize_work_type(None), Ok(None));
+        assert_eq!(normalize_work_type(Some(None)), Ok(Some(None)));
+        assert_eq!(
+            normalize_work_type(Some(Some(String::new()))),
+            Ok(Some(None))
+        );
+        assert_eq!(
+            normalize_work_type(Some(Some("general".to_owned()))),
+            Ok(Some(Some("general".to_owned())))
+        );
+        assert_eq!(
+            normalize_work_type(Some(Some("software".to_owned()))),
+            Ok(Some(Some("software".to_owned())))
+        );
+        assert_eq!(
+            normalize_work_type(Some(Some("bogus".to_owned()))),
+            Err(ValidateError::UnknownWorkType)
+        );
+        assert_eq!(
+            ValidateError::UnknownWorkType.body(),
+            r#"{"work_type":["unknown work type; expected one of ['general', 'software']"]}"#
+        );
+        assert_eq!(ValidateError::UnknownWorkType.status(), 400);
+        assert_eq!(
+            WORK_TYPE_LOCKED_BODY,
+            r#"{"error":"work_type is locked while the issue is being worked; only a human can change it"}"#
         );
     }
 }

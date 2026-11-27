@@ -33,6 +33,8 @@ vi.mock("../../../shared/shell/toaster.js", () => shell);
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { createRealtimeHub, getRealtimeHub, resetRealtimeHub } from "../../../core/query/realtime.js";
+import { sidebarKeys } from "../../sidebar/index.js";
+import { PAGE_RESTORE_TO_TOP_TITLE } from "../lib/pageNested.js";
 import { pageKeys } from "./keys.js";
 import {
   PAGE_EVENT_ARCHIVED,
@@ -73,6 +75,7 @@ import { PAGES_PAGE_ID, PAGES_PROJECT_ID, makePageRow } from "../testing.js";
 const SLUG = "acme";
 const OTHER_PROJECT = "723e4567-e89b-12d3-a456-426614174008";
 const OTHER_ROW = "823e4567-e89b-12d3-a456-426614174007";
+const PARENT_ROW = "923e4567-e89b-12d3-a456-426614174011";
 
 function newClient(): QueryClient {
   return new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -175,6 +178,9 @@ describe("usePageVisibilityWrite", () => {
     expect(events).toEqual([expect.objectContaining({ event: PAGE_EVENT_MADE_PRIVATE })]);
     expect(invalidate).toHaveBeenCalledWith({ queryKey: pageKeys.list(SLUG, PAGES_PROJECT_ID) });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: pageKeys.detail(SLUG, PAGES_PROJECT_ID, PAGES_PAGE_ID) });
+    // Discovery, the Archived tab and child rows read other entries under
+    // the pages root, so the whole subtree is re-read (NEWPIDASH-347).
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: pageKeys.all(SLUG) });
   });
 
   it("makes the page public again", async () => {
@@ -251,6 +257,7 @@ describe("usePageLockWrite", () => {
     contracts.lockPage.mockResolvedValue(undefined);
     const events: unknown[] = [];
     getRealtimeHub().subscribe(PAGES_REALTIME_TOPIC, (event) => events.push(event.payload));
+    const invalidate = vi.spyOn(client, "invalidateQueries");
     const hook = renderHook(() => usePageLockWrite(target()), { wrapper: wrapper(client) });
 
     await act(async () => {
@@ -263,6 +270,9 @@ describe("usePageLockWrite", () => {
     expect(cachedDetail(client)?.is_locked).toBe(true);
     expect(shell.notifySuccess).toHaveBeenCalledWith(PAGE_LOCKED_TITLE);
     expect(events).toEqual([expect.objectContaining({ event: PAGE_EVENT_LOCKED })]);
+    // A lock on a search hit or an expanded child row must refresh the
+    // forest and children entries too (NEWPIDASH-347).
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: pageKeys.all(SLUG) });
   });
 
   it("unlocks through the delete route", async () => {
@@ -376,6 +386,95 @@ describe("usePageArchiveWrite", () => {
     expect(events).toEqual([expect.objectContaining({ event: PAGE_EVENT_UNARCHIVED })]);
   });
 
+  it("re-reads the pages subtree and the sidebar favourites when shelving", async () => {
+    const client = newClient();
+    seed(client, makePageRow({ is_favorite: true }), makePageRow({ is_favorite: true }));
+    contracts.archivePage.mockResolvedValue({ archived_at: "2026-10-25 10:00:00.123456" });
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const hook = renderHook(() => usePageArchiveWrite(target()), { wrapper: wrapper(client) });
+
+    await act(async () => {
+      hook.result.current.toggleArchive(true);
+      await settle();
+    });
+
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: pageKeys.all(SLUG) });
+    // Shelving clears the favourite, so the sidebar favourites the old app
+    // drops at once must be re-read too (NEWPIDASH-347).
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: sidebarKeys.favorites(SLUG) });
+  });
+
+  it("leaves the sidebar favourites alone when restoring", async () => {
+    const client = newClient();
+    seed(client, makePageRow({ archived_at: "2026-10-01" }), makePageRow({ archived_at: "2026-10-01" }));
+    contracts.restorePage.mockResolvedValue(undefined);
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const hook = renderHook(() => usePageArchiveWrite(target()), { wrapper: wrapper(client) });
+
+    await act(async () => {
+      hook.result.current.toggleArchive(false);
+      await settle();
+    });
+
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: pageKeys.all(SLUG) });
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: sidebarKeys.favorites(SLUG) });
+  });
+
+  it("announces the top-level detach when restoring under a shelved parent", async () => {
+    const parent = makePageRow({ id: PARENT_ROW, name: "Shelved parent", archived_at: "2026-10-01" });
+    const child = makePageRow({
+      archived_at: "2026-10-01",
+      parent: PARENT_ROW,
+      parent_id: PARENT_ROW,
+    });
+    const client = newClient();
+    seed(client, child, child);
+    contracts.restorePage.mockResolvedValue(undefined);
+    const hook = renderHook(
+      () =>
+        usePageArchiveWrite(
+          { workspaceSlug: SLUG, projectId: PAGES_PROJECT_ID, page: child },
+          { rows: [parent, child] }
+        ),
+      { wrapper: wrapper(client) }
+    );
+
+    await act(async () => {
+      hook.result.current.toggleArchive(false);
+      await settle();
+    });
+
+    expect(shell.notifySuccess).toHaveBeenCalledWith(PAGE_RESTORE_TO_TOP_TITLE);
+  });
+
+  it("keeps the plain restore notice when the parent is not shelved", async () => {
+    const parent = makePageRow({ id: PARENT_ROW, name: "Live parent" });
+    const child = makePageRow({
+      archived_at: "2026-10-01",
+      parent: PARENT_ROW,
+      parent_id: PARENT_ROW,
+    });
+    const client = newClient();
+    seed(client, child, child);
+    contracts.restorePage.mockResolvedValue(undefined);
+    const hook = renderHook(
+      () =>
+        usePageArchiveWrite(
+          { workspaceSlug: SLUG, projectId: PAGES_PROJECT_ID, page: child },
+          { rows: [parent, child] }
+        ),
+      { wrapper: wrapper(client) }
+    );
+
+    await act(async () => {
+      hook.result.current.toggleArchive(false);
+      await settle();
+    });
+
+    expect(shell.notifySuccess).toHaveBeenCalledWith(PAGE_RESTORED_TITLE);
+    expect(shell.notifySuccess).not.toHaveBeenCalledWith(PAGE_RESTORE_TO_TOP_TITLE);
+  });
+
   it("rolls the archive stamp back on refusal", async () => {
     const client = newClient();
     seed(client);
@@ -439,6 +538,7 @@ describe("usePageDeleteWrite", () => {
     contracts.deletePage.mockResolvedValue(undefined);
     const events: unknown[] = [];
     getRealtimeHub().subscribe(PAGES_REALTIME_TOPIC, (event) => events.push(event.payload));
+    const invalidate = vi.spyOn(client, "invalidateQueries");
     const onDeleted = vi.fn();
     const hook = renderHook(() => usePageDeleteWrite(target()), { wrapper: wrapper(client) });
 
@@ -453,6 +553,11 @@ describe("usePageDeleteWrite", () => {
     expect(shell.notifySuccess).toHaveBeenCalledWith(PAGE_DELETED_TITLE);
     expect(onDeleted).toHaveBeenCalledTimes(1);
     expect(events).toEqual([expect.objectContaining({ event: PAGE_EVENT_DELETED })]);
+    // The Archived tab renders from the forest and the sidebar owns the
+    // favourites: both are re-read so neither keeps the ghost row
+    // (NEWPIDASH-347).
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: pageKeys.all(SLUG) });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: sidebarKeys.favorites(SLUG) });
   });
 
   it("leaves the row in place when the delete is refused", async () => {
@@ -507,6 +612,7 @@ describe("usePageMoveWrite", () => {
     contracts.movePageToProject.mockResolvedValue(undefined);
     const events: unknown[] = [];
     getRealtimeHub().subscribe(PAGES_REALTIME_TOPIC, (event) => events.push(event.payload));
+    const invalidate = vi.spyOn(client, "invalidateQueries");
     const hook = renderHook(() => usePageMoveWrite(target()), { wrapper: wrapper(client) });
 
     await act(async () => {
@@ -520,6 +626,9 @@ describe("usePageMoveWrite", () => {
     expect(cachedList(client).map((row) => row.id)).toEqual([OTHER_ROW]);
     expect(shell.notifySuccess).toHaveBeenCalledWith(PAGE_MOVED_TITLE);
     expect(events).toEqual([expect.objectContaining({ event: PAGE_EVENT_MOVED })]);
+    // The moved page leaves every surface at once, including the forest
+    // and child rows (NEWPIDASH-347).
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: pageKeys.all(SLUG) });
   });
 
   it("keeps the row when the move fails", async () => {

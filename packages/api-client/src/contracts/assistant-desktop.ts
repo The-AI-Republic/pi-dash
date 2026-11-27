@@ -16,7 +16,7 @@ import { AssistantApiError } from "./assistant-errors.js";
  * Never carries a credential — the profile is safe to poll, and the
  * operator kill switch folds into `available` without an app update.
  */
-export const AgentProfile = z.object({
+export const PidashAgentProfile = z.object({
   managed_runner_enabled: z.boolean(),
   lane: z.string(),
   base_url: z.string(),
@@ -24,13 +24,18 @@ export const AgentProfile = z.object({
   available: z.boolean(),
   reason_code: z.string(),
   graceful_stop_seconds: z.number(),
+  /**
+   * Where the user adds model credit. Empty when the server names no
+   * place; the chat transcript still shows the gateway's message.
+   */
+  top_up_url: z.optional(z.string()),
 });
-export type AgentProfile = z.infer<typeof AgentProfile>;
+export type PidashAgentProfile = z.infer<typeof PidashAgentProfile>;
 
 /** Read the engine profile (desktop sessions only). */
-export async function getAgentProfile(client: ApiClient): Promise<AgentProfile> {
+export async function getPidashAgentProfile(client: ApiClient): Promise<PidashAgentProfile> {
   const body = await client.getJson<unknown>("/api/users/me/ai-assistant/agent-profile/");
-  return client.parse(AgentProfile, body, "GET /api/users/me/ai-assistant/agent-profile/");
+  return client.parse(PidashAgentProfile, body, "GET /api/users/me/ai-assistant/agent-profile/");
 }
 
 /** The minted credential: the token plus its expiry. */
@@ -54,7 +59,10 @@ export interface PostAgentTokenOptions {
  * Mint a short-lived engine credential with an empty-body POST. The
  * desktop re-fetches before expiry; nothing persists server-side.
  */
-export async function postAgentToken(client: ApiClient, options: PostAgentTokenOptions = {}): Promise<AgentToken> {
+export async function postPidashAgentToken(
+  client: ApiClient,
+  options: PostAgentTokenOptions = {}
+): Promise<AgentToken> {
   const path = "/api/users/me/ai-assistant/agent-token/";
   const envelope = await client.sendJson<unknown>("POST", path, {
     json: {},

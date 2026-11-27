@@ -5,11 +5,18 @@
 // issues render the detail sidebar with every picker disabled while values
 // stay visible. (The dedicated readonly/ components have no usages in the
 // old app; the archived sidebar is the live read-only surface.)
+// NEWPIDASH-141 extends the row: the sub-work-item and attachment action
+// entries stay disabled too, matching the old whole-widgets disable.
+// NEWPIDASH-155 extends the row further: the code-reviews attach and
+// detach entries stay hidden on archived items too, matching the old
+// disabled={disabled || is_archived} pass.
 // Rows: ISS-220 (read-only property components).
 import { test, expect } from "../fixtures";
 import {
+  issueBrowseKey,
   parityProjectIdentifier,
   serverArchiveIssue,
+  serverAttachCodeReview,
   serverCleanupIssueWithSession,
   serverCleanupProject,
   serverCreateIssueFull,
@@ -27,13 +34,14 @@ import { specTags, specTitle } from "../helpers/tags";
 test(
   specTitle(["ISS-220"], "archived issues render every sidebar picker disabled"),
   { tag: specTags(["ISS-220"]) },
-  async ({ driver, seed }) => {
+  async ({ driver, seed, page }) => {
     const tag = `NF122 readonly ${Date.now()}`;
     const session = await signInSession(seed.email, seed.password);
+    const projectCode = parityProjectIdentifier("N122");
     const projectId = await serverCreateProjectWithFlags(
       seed.workspaceSlug,
       `${tag} project`,
-      parityProjectIdentifier("N122"),
+      projectCode,
       {},
       session
     );
@@ -52,6 +60,11 @@ test(
       `${tag} done`;
     const issue = await serverCreateIssueFull(seed.workspaceSlug, projectId, `${tag} issue`, session);
     await serverPatchIssue(seed.workspaceSlug, projectId, issue.id, { state_id: doneStateId }, session);
+    // Seed one review link so the Code reviews section mounts; review repo
+    // names are globally unique, so mint a per-run one.
+    const reviewRepo = `hello-world-nf122-${tag.replace(/[^0-9]/g, "").slice(-10)}`;
+    const reviewUrl = `https://github.com/octocat/${reviewRepo}/pull/1`;
+    await serverAttachCodeReview(seed.workspaceSlug, projectId, issue.id, reviewUrl, session);
     await serverArchiveIssue(seed.workspaceSlug, projectId, issue.id, session);
     try {
       await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
@@ -73,6 +86,40 @@ test(
         // Values still render (read-only shows, never edits).
         await expect.poll(() => driver.propertyValueText("State"), { timeout: 15_000 }).toContain(doneStateName);
         expect(await driver.pickerOpen()).toBe(false);
+      });
+
+      // NEWPIDASH-141: the browse address (not the archives frame above,
+      // which mounts no widgets) is the widget surface — an archived issue
+      // keeps its add entries disabled there too.
+      await test.step("the sub-work-item and attachment entries stay disabled on the browse address", async () => {
+        const key = await issueBrowseKey(seed.workspaceSlug, projectId, projectCode, issue.id, session);
+        await driver.openBrowseWorkItem(seed.workspaceSlug, key);
+        expect(await driver.browseShowsWorkItemDetail()).toBe(true);
+        // The entries mount disabled while membership is still resolving
+        // and only enable once the project read lands, so a single read
+        // can land in that pending window. Read them repeatedly until the
+        // detail has settled; an enabled read at any point is NEWPIDASH-141.
+        for (let attempt = 0; attempt < 8; attempt++) {
+          expect(await driver.widgetActionDisabled("Add sub-work item")).toBe(true);
+          expect(await driver.widgetActionDisabled("Attach")).toBe(true);
+          if (attempt < 7) await page.waitForTimeout(1000);
+        }
+      });
+
+      await test.step("the code-reviews widget stays read-only on the archived browse address", async () => {
+        // The section is still visible (list, not form) on the browse
+        // address; its attach and detach entries must be hidden while
+        // archived. Poll for the section to settle; any live entry at any
+        // point is NEWPIDASH-155.
+        for (let attempt = 0; attempt < 8; attempt++) {
+          expect(await driver.codeReviewsVisible()).toBe(true);
+          const links = await driver.codeReviewLinks();
+          expect(links).toHaveLength(1);
+          expect(links[0]!.href).toBe(reviewUrl);
+          expect(await driver.codeReviewAttachVisible()).toBe(false);
+          expect(await driver.codeReviewDetachVisible()).toBe(false);
+          if (attempt < 7) await page.waitForTimeout(1000);
+        }
       });
     } finally {
       await serverUnarchiveIssue(seed.workspaceSlug, projectId, issue.id, session);

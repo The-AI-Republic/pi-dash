@@ -47,22 +47,16 @@ pub mod startup {
 /// and the services extension seams the overlay implements.
 pub mod state {
     pub use pidash_api::desktop_gate::header_value;
-    pub use pidash_api::desktop_gate::DesktopCredential;
-    pub use pidash_api::desktop_gate::DesktopRequestGate;
+    pub use pidash_api::desktop_gate::PidashAgentDesktopCredential;
+    pub use pidash_api::desktop_gate::PidashAgentDesktopRequestGate;
     pub use pidash_api::state::AppState; // also imported by the overlay as `pidash_api::AppState`.
-    pub use pidash_services::extensions::AgentModelProfile;
     pub use pidash_services::extensions::AssistantModelSeam;
-    pub use pidash_services::extensions::CloudAgentToolsetsSeam;
     pub use pidash_services::extensions::CredentialError;
     pub use pidash_services::extensions::CredentialUnavailable;
-    pub use pidash_services::extensions::ExtraToolset;
-    pub use pidash_services::extensions::NoExtraToolsets;
+    pub use pidash_services::extensions::PidashAgentProfile;
     pub use pidash_services::extensions::SeamFuture;
     pub use pidash_services::extensions::TitleError;
     pub use pidash_services::extensions::TitleRequest;
-    pub use pidash_services::extensions::ToolsetsResolution;
-    pub use pidash_services::extensions::ToolsetsRun;
-    pub use pidash_services::extensions::ToolsetsUnavailable;
 }
 
 /// ORM write services (`pidash_services::domain`): the write context
@@ -76,6 +70,17 @@ pub mod domain {
     pub use pidash_services::domain::assistant::stamp_llm_config_verified;
     pub use pidash_services::domain::assistant::LlmConfigFullSave;
     pub use pidash_services::domain::assistant::LlmConfigInsert;
+    // Desktop session handoff (desktop_unified_signin §5): the overlay's
+    // cloud redeem (desktop JWT pair) calls the same domain checks.
+    pub use pidash_services::domain::desktop_handoff::challenge_for_verifier;
+    pub use pidash_services::domain::desktop_handoff::issue_handoff;
+    pub use pidash_services::domain::desktop_handoff::redeem_handoff;
+    pub use pidash_services::domain::desktop_handoff::HandoffDbError;
+    pub use pidash_services::domain::desktop_handoff::HandoffError;
+    pub use pidash_services::domain::desktop_handoff::IssuedHandoff;
+    pub use pidash_services::domain::desktop_handoff::RedeemedHandoff;
+    pub use pidash_services::domain::desktop_handoff::HANDOFF_DISABLED;
+    pub use pidash_services::domain::desktop_handoff::HANDOFF_TTL_SECS;
     pub use pidash_services::domain::identity::account::create_account;
     pub use pidash_services::domain::identity::account::update_account_metadata;
     pub use pidash_services::domain::identity::account::update_account_rotated_tokens;
@@ -107,6 +112,13 @@ pub mod domain {
     pub use pidash_services::domain::workspaces::members::add_with_active;
     // Renamed: the flat `deactivate_by_workspace` is the projects twin
     // (UPDATE project_members); this one writes workspace_members.
+    pub use pidash_services::domain::issue_assignment::list_project_runners;
+    pub use pidash_services::domain::issue_assignment::resolve_pod_ref;
+    pub use pidash_services::domain::issue_assignment::resolve_runner_ref;
+    pub use pidash_services::domain::issue_assignment::runner_list_row_to_value;
+    pub use pidash_services::domain::issue_assignment::ResolveError;
+    pub use pidash_services::domain::issue_assignment::RunnerListParams;
+    pub use pidash_services::domain::issue_assignment::RunnerListRow;
     pub use pidash_services::domain::workspaces::members::deactivate_by_workspace as deactivate_workspace_members_by_workspace;
     pub use pidash_services::domain::workspaces::members::deactivate_without_updated_by;
     pub use pidash_services::domain::workspaces::members::overwrite;
@@ -223,15 +235,26 @@ pub mod read {
     pub use pidash_services::read::requested_names;
     pub use pidash_services::read::resolve_workpad_state;
     pub use pidash_services::read::search_issues;
-    pub use pidash_services::read::search_issues_sql;
+    pub use pidash_services::read::search_issues_statement;
     pub use pidash_services::read::state_row_from;
     pub use pidash_services::read::workpad_stripped;
     pub use pidash_services::read::workspace_of;
     pub use pidash_services::read::workspace_row;
     pub use pidash_services::read::workspace_slug;
+    // PIDASHCONV-1723: dispatch_wait render seam for MCP pidash_get_issue
+    // (design §14.3). Overlay calls fetch_active_dispatch_run then
+    // build_dispatch_wait with the viewer for `releasable`.
+    pub use pidash_services::domain::issue_assignment::build_dispatch_wait;
+    pub use pidash_services::domain::issue_assignment::dedicated_refusal_body;
+    // PIDASHCONV-1724: by-id sibling so the overlay can build the
+    // refusal body from an issue id without naming an issues::Model.
+    pub use pidash_services::domain::issue_assignment::dedicated_refusal_body_by_id;
+    pub use pidash_services::domain::issue_assignment::fetch_active_dispatch_run;
+    pub use pidash_services::domain::issue_assignment::RunWaitInputs;
     pub use pidash_services::read::ActorDetailView;
     pub use pidash_services::read::AssetRow;
     pub use pidash_services::read::BlockerRows;
+    pub use pidash_services::read::CommentDbRow;
     pub use pidash_services::read::CommentReactionView;
     pub use pidash_services::read::CommentRow;
     pub use pidash_services::read::CommentView;
@@ -241,26 +264,24 @@ pub mod read {
     pub use pidash_services::read::Error;
     pub use pidash_services::read::IssueFlatView;
     pub use pidash_services::read::IssueSearchParams;
+    pub use pidash_services::read::IssueSearchRow;
     pub use pidash_services::read::IssueSearchSort;
     pub use pidash_services::read::IssueSearchStatus;
     pub use pidash_services::read::OwnedAssigneeRow;
     pub use pidash_services::read::OwnedRelationItem;
+    pub use pidash_services::read::PrLinkDbRow;
     pub use pidash_services::read::ProfileRow;
     pub use pidash_services::read::ProjectLiteView;
     pub use pidash_services::read::RenderRequest;
     pub use pidash_services::read::StateRow;
     pub use pidash_services::read::StateRowTuple;
     pub use pidash_services::read::UserShape;
+    pub use pidash_services::read::WorkpadDbRow;
     pub use pidash_services::read::WorkspaceLiteView;
     pub use pidash_services::read::WriteProject;
     pub use pidash_services::read::COMMENT_COLUMNS;
-    pub use pidash_services::read::FULL_ROW_COLUMNS;
     pub use pidash_services::read::ISSUE_EXTRA_COLS;
     pub use pidash_services::read::ISSUE_SELECT_COLS;
-    pub use pidash_services::read::PR_DETAIL_SQL;
-    pub use pidash_services::read::PR_LINK_BY_ID_SQL;
-    pub use pidash_services::read::PR_LINK_LIST_SQL;
-    pub use pidash_services::read::PR_LIST_SQL;
     pub use pidash_services::v1_projects::ser_workflow::state_base_map;
     pub use pidash_services::v1_work_items::shape_issue;
     pub use pidash_services::v1_work_items::shape_issue::issue_url;
@@ -293,7 +314,6 @@ pub mod read {
 /// scheduler, user settings, and cloud ops commands.
 pub mod ops {
     pub use pidash_db::runner_sessions::outbox::OutboxError;
-    pub use pidash_jobs::dispatch::dispatch_waiting;
     pub use pidash_jobs::orchestration::complete_project_move_handoff_inline;
     pub use pidash_jobs::orchestration::drain_publish_effects;
     pub use pidash_jobs::orchestration::fire_pending_entry;
@@ -303,7 +323,10 @@ pub mod ops {
     pub use pidash_jobs::orchestration::run_work_item_id;
     pub use pidash_jobs::orchestration::HandoffInlineDeps;
     pub use pidash_jobs::orchestration::HandoffStore;
+    pub use pidash_jobs::runner_enroll::bounce_issue_for_revoke;
     pub use pidash_jobs::runner_enroll::fire_revoke_bundle;
+    pub use pidash_jobs::runner_enroll::overlay_store_deps;
+    pub use pidash_jobs::runner_enroll::recreate_issue_for_revoke;
     pub use pidash_jobs::runner_enroll::revoke as runners_revoke; // renamed: `revoke` is the services revoke module.
     pub use pidash_jobs::runner_enroll::RevokeBundle;
     pub use pidash_jobs::runner_enroll::RevokeCollected;
@@ -317,20 +340,18 @@ pub mod ops {
     pub use pidash_ops::run;
     pub use pidash_ops::OpsCommand;
     pub use pidash_services::app_issues::SourceIssueRow;
-    pub use pidash_services::dispatch::admission::RedisAdmissionCache;
-    pub use pidash_services::dispatch::tools::advisory_lock_key;
-    pub use pidash_services::dispatch::tools::py_stripped;
-    pub use pidash_services::dispatch::tools::saved_sequence_id;
-    pub use pidash_services::dispatch::tools::saved_sort_order;
-    pub use pidash_services::dispatch::tools::CREATE_ADVISORY_LOCK_SQL;
-    pub use pidash_services::dispatch::tools::CREATE_DEFAULT_POD_SQL;
-    pub use pidash_services::dispatch::tools::CREATE_SAVE_DEFAULT_STATE_SQL;
-    pub use pidash_services::dispatch::tools::CREATE_SAVE_FALLBACK_STATE_SQL;
-    pub use pidash_services::dispatch::tools::CREATE_SEQ_SCAN_SQL;
-    pub use pidash_services::dispatch::tools::CREATE_SORT_ORDER_MAX_SQL;
-    pub use pidash_services::dispatch::LlmProfile;
     pub use pidash_services::domain::identity::agent_system_user_id;
     pub use pidash_services::domain::identity::GetAgentUserError;
+    pub use pidash_services::domain::issue_create_sql::advisory_lock_key;
+    pub use pidash_services::domain::issue_create_sql::py_stripped;
+    pub use pidash_services::domain::issue_create_sql::saved_sequence_id;
+    pub use pidash_services::domain::issue_create_sql::saved_sort_order;
+    pub use pidash_services::domain::issue_create_sql::CREATE_ADVISORY_LOCK_SQL;
+    pub use pidash_services::domain::issue_create_sql::CREATE_DEFAULT_POD_SQL;
+    pub use pidash_services::domain::issue_create_sql::CREATE_SAVE_DEFAULT_STATE_SQL;
+    pub use pidash_services::domain::issue_create_sql::CREATE_SAVE_FALLBACK_STATE_SQL;
+    pub use pidash_services::domain::issue_create_sql::CREATE_SEQ_SCAN_SQL;
+    pub use pidash_services::domain::issue_create_sql::CREATE_SORT_ORDER_MAX_SQL;
     pub use pidash_services::domain::issues::move_to_project;
     pub use pidash_services::domain::issues::CreationDeps;
     pub use pidash_services::domain::issues::MoveDomainOutcome;
@@ -382,6 +403,7 @@ pub mod ops {
     pub use pidash_services::orchestration::creation::TICKER_RESUME_SELECT_SQL;
     pub use pidash_services::orchestration::dispatch::LogLine;
     pub use pidash_services::orchestration::dispatch::LIVE_ASSIGNEE_CANDIDATES_SQL;
+    pub use pidash_services::run_creation::LlmProfile;
     pub use pidash_services::runner_enroll::fire::fire_plan;
     pub use pidash_services::runner_enroll::fire::EffectBundle;
     pub use pidash_services::runner_enroll::fire::FireOp;
@@ -412,7 +434,8 @@ pub mod ops {
     pub use pidash_services::user_settings::UserSettingsSchema;
     pub use pidash_services::v1_projects::tasks::model_activity_kwargs;
     pub use pidash_services::v1_work_items::tasks::issue_activity_kwargs;
-    pub use pidash_types::orchestration::is_ticking_state;
+    pub use pidash_types::orchestration::stage_runs_automatically;
+    pub use pidash_types::orchestration::StageSwitches;
     pub use pidash_types::orchestration::StateRef;
     pub use pidash_types::orchestration::TickerDecision;
     pub use pidash_types::orchestration::TickerEvent;
@@ -431,7 +454,6 @@ pub mod ops {
 pub mod hooks {
     pub use pidash_jobs::hooks::EnqueueHook;
     pub use pidash_jobs::hooks::HookDeps;
-    pub use pidash_jobs::hooks::LiveMoveAdmissionCache;
     pub use pidash_jobs::hooks::LivePodDrain;
     pub use pidash_jobs::hooks::MoveHook;
     pub use pidash_jobs::hooks::OutboxTaskSink;
@@ -442,9 +464,15 @@ pub mod hooks {
     pub use pidash_jobs::hooks::TransitionHook;
     pub use pidash_jobs::issue_transition::PodDrain;
     pub use pidash_jobs::issue_transition::PublishEffectsDrain;
+    // PIDASHCONV-1724: transition outcome visibility for pidash_update_issue
+    // (dispatched_run_id / run_refusal). The overlay wraps IssueTransitionHook
+    // in a recording decorator and reads these types after operations::issues::update
+    // fires; FireRequest is the fire input, FireOutcome the fire output, and
+    // TransitionOutcome carries created_run / reason.
     pub use pidash_services::domain::activity::TaskEnqueueHook;
-    pub use pidash_services::domain::issues_move::MoveAdmissionCache;
     pub use pidash_services::domain::transition::IssueTransitionHook;
+    pub use pidash_services::orchestration::entries::{FireOutcome, FireRequest};
+    pub use pidash_types::orchestration::TransitionOutcome;
 }
 
 /// The serializer step of the v1 write endpoints: validate the payload,
@@ -459,6 +487,9 @@ pub mod operations {
     pub use pidash_services::operations::relations;
     pub use pidash_services::operations::requested_data_text;
     pub use pidash_services::operations::requested_data_value;
+    // NEWPIDASH-37: api-backed (the scheduler cores live in `pidash_api`),
+    // same contract as the services-backed submodules.
+    pub use pidash_api::v1_schedulers::service as schedulers;
     pub use pidash_services::operations::workpad;
     pub use pidash_services::operations::Deps;
     pub use pidash_services::operations::Error;
@@ -488,6 +519,7 @@ pub mod compat {
     pub use pidash_api::space::sanitize::sanitize_html;
     pub use pidash_api::space::sanitize::strip_tags;
     pub use pidash_api::space::sanitize::Sanitize;
+    pub use pidash_api::v1_work_items::handlers_actions::dispatch_deps_for_ids;
     pub use pidash_api::v1_work_items::handlers_actions::gate_fn;
     pub use pidash_api::v1_work_items::handlers_actions::profile_fn;
     pub use pidash_api::v1_work_items::handlers_actions::LiveMatcher;
@@ -574,23 +606,6 @@ pub mod assistant {
     pub use pidash_api::assistant::throttles::ThrottleSpec;
     pub use pidash_api::assistant::throttles::Throttled;
     pub use pidash_api::assistant::throttles::LLM_TEST_THROTTLE;
-    pub use pidash_api::turn::history::dump_blob;
-    pub use pidash_api::turn::history::dump_message;
-    pub use pidash_api::turn::history::now_stamp;
-    pub use pidash_api::turn::history::parse_blob;
-    pub use pidash_api::turn::history::parse_retry_details;
-    pub use pidash_api::turn::history::retry_message;
-    pub use pidash_api::turn::history::CodecError;
-    pub use pidash_api::turn::history::RetryErrorDetail;
-    pub use pidash_api::turn::history::RetryLocSeg;
-    pub use pidash_api::turn::history::RunIds;
-    pub use pidash_api::turn::history::TurnFinish;
-    pub use pidash_api::turn::history::TurnMessage;
-    pub use pidash_api::turn::history::TurnOutcome;
-    pub use pidash_api::turn::history::TurnRequestPart;
-    pub use pidash_api::turn::history::TurnResponsePart;
-    pub use pidash_api::turn::history::TurnRetryContent;
-    pub use pidash_api::turn::history::TurnState;
     pub use pidash_api::turn::live::create_message;
     pub use pidash_api::turn::live::mcp_max_servers;
     pub use pidash_api::turn::live::mcp_timeouts;
@@ -624,7 +639,6 @@ pub mod assistant {
     pub use pidash_db::assistant::models::user_llm_config;
     pub use pidash_db::assistant::models::user_llm_config::UserLLMConfig;
     pub use pidash_db::assistant::models::ThreadKind;
-    pub use pidash_jobs::assistant::classify_provider_error;
     pub use pidash_jobs::assistant::register_assistant_tasks;
     pub use pidash_jobs::assistant::register_turn_handler;
     pub use pidash_jobs::assistant::run_turn::cancel_key;
@@ -638,12 +652,10 @@ pub mod assistant {
     pub use pidash_jobs::assistant::run_turn::thread_lock_select;
     pub use pidash_jobs::assistant::run_turn::truncate_code;
     pub use pidash_jobs::assistant::run_turn::truncate_detail;
-    pub use pidash_jobs::assistant::run_turn::AgentError;
     pub use pidash_jobs::assistant::run_turn::DriveResult;
     pub use pidash_jobs::assistant::run_turn::ModelError;
     pub use pidash_jobs::assistant::run_turn::SeamError;
     pub use pidash_jobs::assistant::run_turn::SkippedServer;
-    pub use pidash_jobs::assistant::run_turn::StreamItem;
     pub use pidash_jobs::assistant::run_turn::ToolsetHandle;
     pub use pidash_jobs::assistant::run_turn::TurnContext;
     pub use pidash_jobs::assistant::run_turn::TurnSeam;
@@ -666,19 +678,39 @@ pub mod assistant {
     pub use pidash_jobs::assistant::run_turn::TABLE_MESSAGE;
     pub use pidash_jobs::assistant::run_turn::TURN_HARD_LIMIT_SECS;
     pub use pidash_jobs::assistant::run_turn::TURN_SOFT_LIMIT_SECS;
-    pub use pidash_jobs::assistant::BYOK;
     pub use pidash_jobs::assistant::RUN_TURN_TASK;
     pub use pidash_jobs::assistant::SWEEP_TASK;
-    pub use pidash_jobs::oss_worker::model_runtime::github::github_headers;
-    pub use pidash_jobs::oss_worker::model_runtime::github::installation_token;
-    pub use pidash_jobs::oss_worker::model_runtime::github::GithubAppContext;
-    pub use pidash_jobs::oss_worker::model_runtime::github::GithubFailure;
-    pub use pidash_jobs::oss_worker::model_runtime::github::GithubHeadersError;
-    pub use pidash_jobs::oss_worker::model_runtime::github::GithubRestClient;
-    pub use pidash_jobs::oss_worker::model_runtime::github::CLIENT_USER_AGENT;
-    pub use pidash_jobs::oss_worker::model_runtime::keys::KeyResolver;
-    pub use pidash_jobs::oss_worker::model_runtime::provider::Lane;
-    pub use pidash_jobs::oss_worker::model_runtime::provider::ProviderError;
+    pub use pidash_jobs::cloud_agent::errors::classify_provider_error;
+    pub use pidash_jobs::cloud_agent::errors::BYOK;
+    pub use pidash_jobs::cloud_agent::history::dump_blob;
+    pub use pidash_jobs::cloud_agent::history::dump_message;
+    pub use pidash_jobs::cloud_agent::history::now_stamp;
+    pub use pidash_jobs::cloud_agent::history::parse_blob;
+    pub use pidash_jobs::cloud_agent::history::parse_retry_details;
+    pub use pidash_jobs::cloud_agent::history::retry_message;
+    pub use pidash_jobs::cloud_agent::history::CodecError;
+    pub use pidash_jobs::cloud_agent::history::RetryErrorDetail;
+    pub use pidash_jobs::cloud_agent::history::RetryLocSeg;
+    pub use pidash_jobs::cloud_agent::history::RunIds;
+    pub use pidash_jobs::cloud_agent::history::TurnFinish;
+    pub use pidash_jobs::cloud_agent::history::TurnMessage;
+    pub use pidash_jobs::cloud_agent::history::TurnOutcome;
+    pub use pidash_jobs::cloud_agent::history::TurnRequestPart;
+    pub use pidash_jobs::cloud_agent::history::TurnResponsePart;
+    pub use pidash_jobs::cloud_agent::history::TurnRetryContent;
+    pub use pidash_jobs::cloud_agent::history::TurnState;
+    pub use pidash_jobs::cloud_agent::keys::KeyResolver;
+    pub use pidash_jobs::cloud_agent::provider::Lane;
+    pub use pidash_jobs::cloud_agent::provider::ProviderError;
+    pub use pidash_jobs::cloud_agent::AgentError;
+    pub use pidash_jobs::cloud_agent::StreamItem;
+    pub use pidash_jobs::integrations::github_app::github_headers;
+    pub use pidash_jobs::integrations::github_app::installation_token;
+    pub use pidash_jobs::integrations::github_app::GithubAppContext;
+    pub use pidash_jobs::integrations::github_app::GithubFailure;
+    pub use pidash_jobs::integrations::github_app::GithubHeadersError;
+    pub use pidash_jobs::integrations::github_app::GithubRestClient;
+    pub use pidash_jobs::integrations::github_app::CLIENT_USER_AGENT;
     pub use pidash_services::assistant::config::delete_config;
     pub use pidash_services::assistant::config::fetch_llm_config_full;
     pub use pidash_services::assistant::config::get_config;
@@ -716,7 +748,7 @@ pub mod assistant {
     pub use pidash_services::assistant::retry::MAX_RETRIES;
     pub use pidash_services::assistant::retry::MAX_RETRY_DELAY_SECS;
     pub use pidash_services::assistant::retry::RETRY_AFTER_MAX_SECS;
-    pub use pidash_services::assistant::seams::agent_model_credential_for_user;
+    pub use pidash_services::assistant::seams::pidash_agent_credential_for_user;
     pub use pidash_services::assistant::ssrf::is_blocked;
     pub use pidash_services::assistant::ssrf::SystemResolver;
     pub use pidash_services::assistant::title::clean_title;
@@ -737,21 +769,103 @@ pub mod assistant {
     pub use pidash_types::assistant::serializers::PROVIDER_OPENAI_COMPATIBLE;
 }
 
+/// Cloud agent: the chat engine (model loop, provider streaming,
+/// usage limits, provider error classification). Added in P2 (agent
+/// naming convention); the `assistant::*` re-exports above keep
+/// compiling unchanged.
+pub mod cloud_agent {
+    pub use pidash_jobs::cloud_agent::agent::run_agent;
+    pub use pidash_jobs::cloud_agent::agent::ToolCallOutcome;
+    pub use pidash_jobs::cloud_agent::agent::ToolKind;
+    pub use pidash_jobs::cloud_agent::agent::Toolset;
+    pub use pidash_jobs::cloud_agent::agent::TurnAgentConfig;
+    pub use pidash_jobs::cloud_agent::agent::TurnAgentOutcome;
+    pub use pidash_jobs::cloud_agent::agent::TurnLoopError;
+    pub use pidash_jobs::cloud_agent::errors::classify_provider_error;
+    pub use pidash_jobs::cloud_agent::errors::provider_detail;
+    pub use pidash_jobs::cloud_agent::errors::BYOK;
+    pub use pidash_jobs::cloud_agent::errors::CODE_AUTH_FAILED;
+    pub use pidash_jobs::cloud_agent::errors::CODE_MODEL_INVALID;
+    pub use pidash_jobs::cloud_agent::errors::CODE_MODEL_UNAVAILABLE;
+    pub use pidash_jobs::cloud_agent::errors::CODE_OUT_OF_CREDIT;
+    pub use pidash_jobs::cloud_agent::errors::CODE_RATE_LIMITED;
+    pub use pidash_jobs::cloud_agent::errors::CODE_SESSION_EXPIRED;
+    pub use pidash_jobs::cloud_agent::errors::CODE_UNREACHABLE;
+    pub use pidash_jobs::cloud_agent::errors::DETAIL_AUTH_FAILED;
+    pub use pidash_jobs::cloud_agent::errors::DETAIL_MODEL_INVALID_SUFFIX;
+    pub use pidash_jobs::cloud_agent::errors::DETAIL_MODEL_UNAVAILABLE_SUFFIX;
+    pub use pidash_jobs::cloud_agent::errors::DETAIL_OUT_OF_CREDIT;
+    pub use pidash_jobs::cloud_agent::errors::DETAIL_RATE_LIMITED;
+    pub use pidash_jobs::cloud_agent::errors::DETAIL_SESSION_EXPIRED;
+    pub use pidash_jobs::cloud_agent::errors::DETAIL_UNREACHABLE;
+    pub use pidash_jobs::cloud_agent::errors::GATEWAY;
+    pub use pidash_jobs::cloud_agent::history::dump_blob;
+    pub use pidash_jobs::cloud_agent::history::dump_message;
+    pub use pidash_jobs::cloud_agent::history::join_valid_blobs;
+    pub use pidash_jobs::cloud_agent::history::now_stamp;
+    pub use pidash_jobs::cloud_agent::history::parse_blob;
+    pub use pidash_jobs::cloud_agent::history::parse_retry_details;
+    pub use pidash_jobs::cloud_agent::history::retry_message;
+    pub use pidash_jobs::cloud_agent::history::CodecError;
+    pub use pidash_jobs::cloud_agent::history::RetryErrorDetail;
+    pub use pidash_jobs::cloud_agent::history::RetryLocSeg;
+    pub use pidash_jobs::cloud_agent::history::RunIds;
+    pub use pidash_jobs::cloud_agent::history::TurnFinish;
+    pub use pidash_jobs::cloud_agent::history::TurnMessage;
+    pub use pidash_jobs::cloud_agent::history::TurnOutcome;
+    pub use pidash_jobs::cloud_agent::history::TurnRequestPart;
+    pub use pidash_jobs::cloud_agent::history::TurnResponsePart;
+    pub use pidash_jobs::cloud_agent::history::TurnRetryContent;
+    pub use pidash_jobs::cloud_agent::history::TurnState;
+    pub use pidash_jobs::cloud_agent::keys::KeyFailure;
+    pub use pidash_jobs::cloud_agent::keys::KeyResolver;
+    pub use pidash_jobs::cloud_agent::provider::transform_anthropic_schema;
+    pub use pidash_jobs::cloud_agent::provider::transform_openai_schema;
+    pub use pidash_jobs::cloud_agent::provider::wire_tool_for;
+    pub use pidash_jobs::cloud_agent::provider::wire_tools_for;
+    pub use pidash_jobs::cloud_agent::provider::Finish;
+    pub use pidash_jobs::cloud_agent::provider::Lane;
+    pub use pidash_jobs::cloud_agent::provider::ProviderError;
+    pub use pidash_jobs::cloud_agent::provider::ToolArgs;
+    pub use pidash_jobs::cloud_agent::provider::ToolCall;
+    pub use pidash_jobs::cloud_agent::provider::WireTool;
+    pub use pidash_jobs::cloud_agent::provider::ANTHROPIC_BASE_URL;
+    pub use pidash_jobs::cloud_agent::provider::ANTHROPIC_VERSION;
+    pub use pidash_jobs::cloud_agent::provider::INVALID_JSON_KEY;
+    pub use pidash_jobs::cloud_agent::provider::USER_AGENT;
+    pub use pidash_jobs::cloud_agent::usage::check_before_request;
+    pub use pidash_jobs::cloud_agent::usage::check_before_tool_call;
+    pub use pidash_jobs::cloud_agent::usage::check_tokens;
+    pub use pidash_jobs::cloud_agent::usage::LimitBreach;
+    pub use pidash_jobs::cloud_agent::usage::ProviderTable;
+    pub use pidash_jobs::cloud_agent::usage::ProviderTableError;
+    pub use pidash_jobs::cloud_agent::usage::RequestUsage;
+    pub use pidash_jobs::cloud_agent::usage::RunUsage;
+    pub use pidash_jobs::cloud_agent::usage::UsageLimits;
+    pub use pidash_jobs::cloud_agent::usage::UsageNumber;
+    pub use pidash_jobs::cloud_agent::usage_table::load;
+    pub use pidash_jobs::cloud_agent::usage_table::UsageDocument;
+    pub use pidash_jobs::cloud_agent::usage_table::UsageTableError;
+    pub use pidash_jobs::cloud_agent::validation::unknown_tool_content;
+    pub use pidash_jobs::cloud_agent::AgentError;
+    pub use pidash_jobs::cloud_agent::StreamItem;
+}
+
 /// Worker, queue and task registry: handler registration, schedules,
 /// and task-name constants.
 pub mod jobs {
-    pub use pidash_jobs::admission::RedisAdmissionCache;
     pub use pidash_jobs::default_schedule;
-    pub use pidash_jobs::dispatch_execute::extra_toolsets_allowed;
+    // P4: extra_toolsets_allowed died with the retired plane.
     pub use pidash_jobs::integrations::git_sync::TASK_NAMES as GIT_SYNC_TASK_NAMES; // renamed: TASK_NAMES clashes across task modules.
     pub use pidash_jobs::integrations::github_signals::dispatch_completion_comment;
     pub use pidash_jobs::integrations::github_signals::dispatch_job;
     pub use pidash_jobs::integrations::github_signals::DispatchOutcome;
     pub use pidash_jobs::integrations::github_signals::DispatchTarget;
-    pub use pidash_jobs::integrations::github_sync::TASK_NAMES as GITHUB_SYNC_TASK_NAMES; // renamed: TASK_NAMES clashes across task modules.
     pub use pidash_jobs::license::tasks::TASK_NAME;
     pub use pidash_jobs::loop_scan::TASK_NAMES as LOOP_SCAN_TASK_NAMES; // renamed: TASK_NAMES clashes across task modules.
+    pub use pidash_jobs::orchestration::bounce_issue_no_eligible_runner;
     pub use pidash_jobs::orchestration::create_and_dispatch_run;
+    pub use pidash_jobs::orchestration::dispatch_continuation_run;
     pub use pidash_jobs::orchestration::preflight_eligibility_or_bounce;
     pub use pidash_jobs::orchestration::runner_seams::complete_project_move_handoff_live;
     pub use pidash_jobs::orchestration::StoreDeps;
@@ -786,11 +900,12 @@ pub mod jobs {
     pub use pidash_jobs::OssWorkerCtx;
     pub use pidash_jobs::TaskMessage;
     pub use pidash_jobs::WorkerConfig;
-    pub use pidash_types::dispatch::AgentExecutorKind;
+    pub use pidash_types::agent_runs::AgentExecutorKind;
 }
 
 /// Database layer: pools, settings/config, transactions, and query helpers.
 pub mod db {
+    pub use pidash_db::agent_runs::status::AgentRunStatus;
     pub use pidash_db::app_integrations::queries_github::next_url;
     pub use pidash_db::app_integrations::queries_github::DEFAULT_TIMEOUT_SECONDS;
     pub use pidash_db::app_integrations::queries_github::GITHUB_ACCEPT_HEADER;
@@ -800,15 +915,13 @@ pub mod db {
     pub use pidash_db::app_project::models::project_member;
     pub use pidash_db::config::registry::ConfigRegistry;
     pub use pidash_db::config::registry::ConfigSource;
-    pub use pidash_db::config::settings::CloudAgentSettings;
-    pub use pidash_db::config::settings::ManagedRunnerSettings;
+    pub use pidash_db::config::settings::PidashAgentSettings;
     pub use pidash_db::config::settings::RunnerSettings;
     pub use pidash_db::config::AssistantSettings;
     pub use pidash_db::config::NoOverlay;
     pub use pidash_db::config::Profile;
     pub use pidash_db::config::Settings;
     pub use pidash_db::config::SettingsOverlay;
-    pub use pidash_db::dispatch::status::AgentRunStatus;
     pub use pidash_db::license::models::instance::TABLE;
     pub use pidash_db::license::models::instance_admin;
     pub use pidash_db::license::models::instance_configuration;
@@ -825,6 +938,9 @@ pub mod db {
     pub use pidash_db::orchestration::querysets::fetch_is_workspace_member;
     pub use pidash_db::orchestration::runs::active_run_for;
     pub use pidash_db::orchestration::runs::latest_prior_run;
+    // NEWPIDASH-37: the SeaORM-over-sqlx bridge; the overlay's
+    // transaction-held calls need it after the Batch 3 ORM migration.
+    pub use pidash_db::orm_tx::TxConn;
     pub use pidash_db::pool::Pools; // also imported by the overlay as `pidash_db::Pools`.
     pub use pidash_db::redis::client_from_settings; // canonical settings client (PIDASHCONV-1593).
     pub use pidash_db::redis::RedisHandle;
@@ -839,6 +955,19 @@ pub mod db {
     pub use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
     pub use pidash_db::tx::Transaction;
     pub use pidash_db::DbConfig;
+}
+
+/// OpenHub assistant-model catalog (NEWPIDASH-302): the enabled
+/// `openhub` rows and the default, read from the OSS-owned
+/// `rust_runner_model_catalog` table. The overlay (cloud) calls these
+/// instead of copying the query.
+pub mod runner_models {
+    pub use pidash_api::runner_models::guards::CATALOG_AGENTS;
+    pub use pidash_api::runner_models::guards::KNOWN_AGENTS;
+    pub use pidash_api::runner_models::guards::OPENHUB_AGENT;
+    pub use pidash_api::runner_models::openhub_default_model;
+    pub use pidash_api::runner_models::openhub_enabled_rows;
+    pub use pidash_db::entity::rust_runner_model_catalog;
 }
 
 /// Test-only helpers shared with the overlay. Empty: the seed
@@ -956,5 +1085,32 @@ mod tests {
         let _ = std::mem::size_of_val(&crate::read::render_comment_value);
         let _ = std::mem::size_of::<crate::read::DecodedComment>();
         let _ = std::mem::size_of::<crate::read::SocialRenderError>();
+    }
+
+    /// NEWPIDASH-37: the scheduler service entries resolve through the
+    /// SDK facade. Behaviour is pinned by `pidash_api`'s cores (the
+    /// entries call the same functions the v1 handlers call) and by the
+    /// v1_schedulers contract suite; this only locks the paths.
+    #[test]
+    fn operations_schedulers_is_exported() {
+        use crate::operations::schedulers;
+        let _ = std::mem::size_of_val(&schedulers::list_definitions);
+        let _ = std::mem::size_of_val(&schedulers::list_project_schedulers);
+        let _ = std::mem::size_of_val(&schedulers::get_scheduler);
+        let _ = std::mem::size_of_val(&schedulers::list_runs);
+        let _ = std::mem::size_of_val(&schedulers::patch_binding);
+        let _ = std::mem::size_of_val(&schedulers::run_now);
+        let _ = std::mem::size_of_val(&schedulers::install_binding);
+        let _ = std::mem::size_of_val(&schedulers::uninstall_binding);
+        let _ = std::mem::size_of_val(&schedulers::create_definition);
+        let _ = std::mem::size_of_val(&schedulers::patch_definition);
+        let _ = std::mem::size_of_val(&schedulers::delete_definition);
+        let _ = std::mem::size_of_val(&schedulers::denial_parts);
+        let _ = std::mem::size_of::<schedulers::ServiceCtx>();
+        let _ = std::mem::size_of::<schedulers::ListParams>();
+        let _ = std::mem::size_of::<schedulers::Outcome>();
+        let _ = std::mem::size_of::<schedulers::Denial>();
+        let params = schedulers::ListParams::empty();
+        assert!(params.per_page.is_none());
     }
 }

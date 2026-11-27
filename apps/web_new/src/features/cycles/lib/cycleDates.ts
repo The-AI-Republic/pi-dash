@@ -189,9 +189,29 @@ export interface CycleSpanModel {
 }
 
 /**
+ * The viewer zone for "in your timezone" equivalents (CYC-044).
+ * Prefers the profile's `user_timezone` and falls back to the
+ * browser zone only when the profile is unset, empty, or invalid.
+ * This is the sole place the area decides which viewer zone to show.
+ */
+export function resolveViewerTimeZone(userTimeZone: string | null | undefined): string | undefined {
+  const systemZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  if (userTimeZone === null || userTimeZone === undefined) return systemZone;
+  const trimmed = userTimeZone.trim();
+  if (trimmed === "") return systemZone;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: trimmed });
+    return trimmed;
+  } catch {
+    return systemZone;
+  }
+}
+
+/**
  * Everything one date span renders: the project-zone range, the offset
  * chip anchored at the start date, and the viewer-zone tooltip. The
- * viewer zone defaults to the browser's and is injectable for tests.
+ * viewer zone defaults to the browser's and is injectable for tests;
+ * callers prefer the profile zone via {@link resolveViewerTimeZone}.
  */
 export function cycleSpanModel(
   startDate: string | null,
@@ -205,7 +225,10 @@ export function cycleSpanModel(
     anchor === null || Number.isNaN(new Date(anchor).getTime())
       ? null
       : projectOffsetChip(projectTimeZone, new Date(anchor));
-  const viewer = viewerTimeZone === undefined ? Intl.DateTimeFormat().resolvedOptions().timeZone : viewerTimeZone;
+  const viewer =
+    viewerTimeZone === undefined || viewerTimeZone.trim() === ""
+      ? Intl.DateTimeFormat().resolvedOptions().timeZone
+      : viewerTimeZone;
   const zonesDiffer =
     chip !== null &&
     viewer !== undefined &&

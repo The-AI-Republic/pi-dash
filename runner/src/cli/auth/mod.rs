@@ -11,7 +11,9 @@ use clap::{Args as ClapArgs, Subcommand};
 
 pub mod login;
 pub mod logout;
+mod replace;
 pub mod status;
+pub mod switch;
 
 use crate::util::paths::Paths;
 

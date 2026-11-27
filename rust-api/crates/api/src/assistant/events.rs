@@ -36,7 +36,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use pidash_db::assistant::event_queries::{serialize_event_json, EventParts};
 use uuid::Uuid;
 
@@ -116,6 +116,20 @@ fn py_float(number: &serde_json::Number) -> String {
     let rendered = number.to_string();
     if rendered.contains('e') || rendered.contains('E') {
         return py_exponent(&rendered);
+    }
+    if !rendered.contains('.') {
+        // Integer literal: Python ints are unbounded, so `json.dumps`
+        // echoes the exact digits at any magnitude — never scientific
+        // notation (PIDASHCONV-1332). The i64/u64 arms normalize
+        // spellings like `-0` to `0`; past them the literal (exact under
+        // `arbitrary_precision`) echoes verbatim.
+        if let Some(int) = number.as_i64() {
+            return int.to_string();
+        }
+        if let Some(uint) = number.as_u64() {
+            return uint.to_string();
+        }
+        return rendered;
     }
     let (negative, digits) = match rendered.strip_prefix('-') {
         Some(rest) => (true, rest),
@@ -232,42 +246,16 @@ pub fn sse_frame(event_json: &str) -> String {
     format!("event: chat.event\ndata: {event_json}\n\n")
 }
 
-/// Render raw publish bytes exactly like the f-string in `events.py:89`.
-///
-/// `data` arrives as `bytes` (the subscribe client never sets
-/// `decode_responses`, verified live against redis-py 5.0.4), so
-/// `{data}` renders the `b'...'` repr — including CPython's delimiter
-/// switch to `"` when the payload holds `'` but no `"` (oracle-verified
-/// below against the interpreter).
-pub fn py_bytes_repr(payload: &[u8]) -> String {
-    let quote = if payload.contains(&b'\'') && !payload.contains(&b'"') {
-        b'"'
-    } else {
-        b'\''
-    };
-    let mut out = String::with_capacity(payload.len() + 3);
-    out.push('b');
-    out.push(quote as char);
-    for &byte in payload {
-        match byte {
-            b'\'' if quote == b'\'' => out.push_str("\\'"),
-            b'"' if quote == b'"' => out.push_str("\\\""),
-            b'\\' => out.push_str("\\\\"),
-            b'\t' => out.push_str("\\t"),
-            b'\n' => out.push_str("\\n"),
-            b'\r' => out.push_str("\\r"),
-            0x20..=0x7e => out.push(byte as char),
-            _ => out.push_str(&format!("\\x{byte:02x}")),
-        }
-    }
-    out.push(quote as char);
-    out
-}
-
 /// One live-tail frame (`events.py:89`): the publish relayed verbatim
-/// through [`py_bytes_repr`].
+/// as clean JSON, like the replay [`sse_frame`].
+///
+/// DIFF-29 (NEWPIDASH-268, PB-0983): Django renders `{data}` on the
+/// Redis `bytes`, i.e. the `b'...'` repr every client's `JSON.parse`
+/// throws on and drops. Rust keeps the publish bytes themselves —
+/// the worker publishes [`serialize_event_json`] output (UTF-8 JSON),
+/// so the lossy decode below is identity in practice.
 pub fn live_tail_frame(payload: &[u8]) -> String {
-    format!("event: chat.event\ndata: {}\n\n", py_bytes_repr(payload))
+    sse_frame(&String::from_utf8_lossy(payload))
 }
 
 /// SSE response shell (`events.py:106-115`): `Cache-Control: no-cache`,
@@ -333,35 +321,34 @@ async fn assistant_event_stream(
     // order-preserving and re-rendered spaced (see `py_dumps`).
     // `message` is the event's nullable `message_id` UUIDField
     // (`events.py:44`), not the turn.
-    let rows = sqlx::query_as::<_, (i64, Uuid, Option<Uuid>, i64, String, String, DateTime<Utc>)>(
-        "SELECT \"id\", \"thread_id\", \"message_id\", \"seq\", \"kind\", \
-         \"payload\"::text, \"created_at\" \
-         FROM \"assistant_event\" \
-         WHERE (\"thread_id\" = $1 AND \"seq\" > $2) \
-         ORDER BY \"seq\" ASC LIMIT 1000",
-    )
-    .bind(thread_id)
-    .bind(after)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| server_error())?;
-    let mut frames = Vec::with_capacity(rows.len());
-    for (id, row_thread_id, message_id, seq, kind, payload_text, created_at) in &rows {
-        let payload: serde_json::Value =
-            serde_json::from_str(payload_text).unwrap_or(serde_json::Value::Null);
-        let thread_str = row_thread_id.to_string();
-        let message_str = message_id.map(|id| id.to_string());
-        let created = py_iso(created_at);
-        frames.push(sse_frame(&serialize_event_json(&EventParts {
-            id: *id,
-            thread_id: &thread_str,
-            message_id: message_str.as_deref(),
-            seq: *seq,
-            kind,
-            payload_json: &py_dumps(&payload),
-            created_at: &created,
-        })));
-    }
+    let frames = {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+        let db = pidash_db::pool::sea_orm_connection(pool);
+        let rows = pidash_db::entity::assistant_event::Entity::find()
+            .filter(pidash_db::entity::assistant_event::Column::ThreadId.eq(thread_id))
+            .filter(pidash_db::entity::assistant_event::Column::Seq.gt(after))
+            .order_by_asc(pidash_db::entity::assistant_event::Column::Seq)
+            .limit(1000)
+            .all(&db)
+            .await
+            .map_err(|_| server_error())?;
+        let mut frames = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let thread_str = row.thread_id.to_string();
+            let message_str = row.message_id.map(|id| id.to_string());
+            let created = py_iso(&row.created_at.with_timezone(&Utc));
+            frames.push(sse_frame(&serialize_event_json(&EventParts {
+                id: row.id,
+                thread_id: &thread_str,
+                message_id: message_str.as_deref(),
+                seq: row.seq,
+                kind: &row.kind,
+                payload_json: &py_dumps(&row.payload),
+                created_at: &created,
+            })));
+        }
+        frames
+    };
 
     // Live tail (`events.py:77-103`): subscribe to `assistant:thread:<id>`
     // ([`live_tail_channel`]) after the replay prefix, then relay each
@@ -508,6 +495,25 @@ mod tests {
     }
 
     #[test]
+    fn py_float_echoes_big_integers_verbatim() {
+        // Python ints are unbounded: `json.dumps` echoes exact digits at
+        // any magnitude, never scientific notation (PIDASHCONV-1332 —
+        // the runner outbox enqueue path renders through here).
+        let value: serde_json::Value =
+            serde_json::from_str(r#"{"big": 18446744073709551616, "neg": -9223372036854775809}"#)
+                .expect("valid JSON");
+        assert_eq!(
+            py_dumps(&value),
+            r#"{"big": 18446744073709551616, "neg": -9223372036854775809}"#
+        );
+        let neg_zero: serde_json::Value = serde_json::from_str("-0").expect("int");
+        assert_eq!(py_dumps(&neg_zero), "0");
+        // Float-syntax literals still take the `repr` path.
+        let float: serde_json::Value = serde_json::from_str("1e19").expect("float");
+        assert_eq!(py_dumps(&float), "1e+19");
+    }
+
+    #[test]
     fn sse_frame_wraps_event_json() {
         assert_eq!(
             sse_frame(r#"{"seq": 1}"#),
@@ -517,34 +523,20 @@ mod tests {
     }
 
     #[test]
-    fn py_bytes_repr_matches_cpython_bytes_repr() {
-        // Oracle: `repr()` of each input run against the interpreter.
-        let cases: &[(&[u8], &str)] = &[
-            (b"", "b''"),
-            (b"{}", "b'{}'"),
-            (b"{\"seq\": 1}", "b'{\"seq\": 1}'"),
-            (b"a'b", "b\"a'b\""),
-            (b"a\\b", "b'a\\\\b'"),
-            (b"a\nb\rc\td", "b'a\\nb\\rc\\td'"),
-            (b"\x00\x1b\x7f\x80\xff", "b'\\x00\\x1b\\x7f\\x80\\xff'"),
-            ("héllo".as_bytes(), "b'h\\xc3\\xa9llo'"),
-            (b"\"quotes\"", "b'\"quotes\"'"),
-            (b"\"x\"", "b'\"x\"'"),
-            (b"a'b\"c", "b'a\\'b\"c'"),
-            (b"'", "b\"'\""),
-            (b"\"", "b'\"'"),
-            (b"{\"a\": \"it's\"}", "b'{\"a\": \"it\\'s\"}'"),
-        ];
-        for (payload, expected) in cases {
-            assert_eq!(&py_bytes_repr(payload), expected, "payload {payload:?}");
-        }
-    }
-
-    #[test]
     fn live_tail_frame_relays_publish_verbatim() {
+        // DIFF-29 (NEWPIDASH-268, PB-0983): the live tail carries the
+        // publish as clean JSON verbatim like the replay path —
+        // never wrapped in a Python bytes-repr the client's
+        // `JSON.parse` would drop.
         assert_eq!(
             live_tail_frame(b"{\"seq\": 1}"),
-            "event: chat.event\ndata: b'{\"seq\": 1}'\n\n"
+            "event: chat.event\ndata: {\"seq\": 1}\n\n"
+        );
+        // An apostrophe in the payload stays verbatim (the old repr
+        // switched delimiters here).
+        assert_eq!(
+            live_tail_frame(b"{\"a\": \"it's\"}"),
+            "event: chat.event\ndata: {\"a\": \"it's\"}\n\n"
         );
     }
 }

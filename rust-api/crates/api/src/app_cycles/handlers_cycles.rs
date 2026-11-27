@@ -345,6 +345,7 @@ async fn resolve_project_id(
     // match on the upper-cased input uses the plain btree
     // (`db/models/project.py:200-212`); no `__iexact`, same as Python.
     let upper = normalize_resolve_identifier(raw);
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let row: Option<(uuid::Uuid,)> = sqlx::query_as(
         r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
            WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
@@ -364,23 +365,37 @@ async fn resolve_project_id(
 struct ProjectRow {
     workspace_id: uuid::Uuid,
     archived_at: Option<chrono::DateTime<chrono::Utc>>,
+    timezone: String,
+}
+
+impl ProjectRow {
+    /// `pytz.timezone(project.timezone)`: the zone `user_timezone_converter`
+    /// renders response dates in. `UnknownTimeZoneError` is a `KeyError`, so
+    /// a stored name pytz refuses answers the `KeyError` 400 (`base.py`).
+    fn zone(&self) -> Result<Tz, Denial> {
+        self.timezone
+            .parse::<Tz>()
+            .map_err(|_| Denial::BadError("The required key does not exist.".to_owned()))
+    }
 }
 
 async fn project_row(pool: &sqlx::PgPool, project_id: &uuid::Uuid) -> Result<ProjectRow, Denial> {
-    let row: Option<(uuid::Uuid, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
-        r#"SELECT workspace_id, archived_at FROM projects
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
+    let row: Option<(uuid::Uuid, Option<chrono::DateTime<chrono::Utc>>, String)> = sqlx::query_as(
+        r#"SELECT workspace_id, archived_at, timezone FROM projects
            WHERE id = $1 AND deleted_at IS NULL"#,
     )
     .bind(project_id)
     .fetch_optional(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
-    let Some((workspace_id, archived_at)) = row else {
+    let Some((workspace_id, archived_at, timezone)) = row else {
         return Err(Denial::NotFound);
     };
     Ok(ProjectRow {
         workspace_id,
         archived_at,
+        timezone,
     })
 }
 
@@ -395,6 +410,7 @@ async fn membership(
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
 ) -> Result<(Option<i16>, Option<i16>), Denial> {
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let workspace_role: Option<(Option<i16>,)> = sqlx::query_as(
         r#"SELECT wm.role FROM workspace_members wm
            JOIN workspaces w ON w.id = wm.workspace_id
@@ -406,6 +422,7 @@ async fn membership(
     .await
     .map_err(|_| Denial::ServerError)?;
     let workspace_role = workspace_role.and_then(|row| row.0);
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let row: Option<(Option<i16>,)> = sqlx::query_as(
         r#"SELECT pm.role FROM project_members pm
            JOIN workspaces w ON w.id = pm.workspace_id
@@ -478,6 +495,7 @@ async fn is_cycle_creator(
     pk: &uuid::Uuid,
     user_id: &uuid::Uuid,
 ) -> Result<bool, Denial> {
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let row: Option<(uuid::Uuid,)> = sqlx::query_as(
         r#"SELECT id FROM cycles WHERE id = $1 AND created_by_id = $2 AND deleted_at IS NULL"#,
     )
@@ -607,6 +625,7 @@ async fn fetch_cycle_rows(
         annotated_select(false),
         annotated_from(current_only, false, false),
     );
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let rows = sqlx::query(&sql)
         .bind(slug)
         .bind(project_id)
@@ -639,6 +658,7 @@ async fn fetch_cycle_by_pk(
         annotated_select(sub_issues),
         annotated_from(false, true, include_archived),
     );
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let row: Option<(String,)> = sqlx::query_as(&sql)
         .bind(slug)
         .bind(project_id)
@@ -675,11 +695,12 @@ fn json_text_to_map(text: &str) -> Result<Map<String, Value>, Denial> {
 // Shaping: row maps to DRF key order + bytes
 // ---------------------------------------------------------------------------
 
-/// Render one `row_to_json` timestamptz in the actor zone: DRF renders
-/// `DateTimeField` in the activated actor zone (`TimezoneMixin`), and the
-/// `user_timezone_converter` project-tz detour is a pure zone round-trip
-/// (`x.astimezone(A).astimezone(B) == x.astimezone(B)`), so the wire form
-/// is the stored instant in the actor zone. `null` stays `null`.
+/// Render one `row_to_json` timestamptz in `timezone`. Response bodies pass
+/// the project zone: the view returns raw `.values()` dicts converted by
+/// `user_timezone_converter(.., project_timezone)` and no serializer field
+/// re-zones them, so the actor zone `TimezoneMixin` activates never applies.
+/// The activity before-image passes the actor zone ([`snapshot_value`]).
+/// `null` stays `null`.
 fn shape_datetime(value: Option<&Value>, timezone: &Tz) -> String {
     let text = match value {
         Some(Value::String(text)) => text,
@@ -917,7 +938,7 @@ fn snapshot_cycle_instance(before: &Map<String, Value>, timezone: &Tz) -> String
 /// One before-image value: DRF field rendering over the fetched value.
 /// Datetimes enforce the activated (user) zone exactly like
 /// `DateTimeField.to_representation` (djangorestframework 3.15.2
-/// `fields.py`), so the response-body [`shape_datetime`] applies; the
+/// `fields.py`), unlike the project-zone response body; the
 /// Postgres `row_to_json` int rendering of `sort_order` goes through
 /// the float kernel. JSON props go through the domain
 /// `super::handlers_misc::python_dumps`: `json.dumps` separators apply
@@ -1101,15 +1122,16 @@ fn validate_write(
         Some(Value::Null) => errors.push(err("name", "This field may not be null.".to_owned())),
         Some(Value::String(text)) => {
             out.present.push("name");
-            if text.is_empty() {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
                 errors.push(err("name", "This field may not be blank.".to_owned()));
-            } else if text.chars().count() > 255 {
+            } else if trimmed.chars().count() > 255 {
                 errors.push(err(
                     "name",
                     "Ensure this field has no more than 255 characters.".to_owned(),
                 ));
             } else {
-                out.name = Some(text.clone());
+                out.name = Some(trimmed.to_owned());
             }
         }
         Some(Value::Bool(_)) | Some(Value::Array(_)) | Some(Value::Object(_)) => {
@@ -1133,7 +1155,7 @@ fn validate_write(
         }
         Some(Value::String(text)) => {
             out.present.push("description");
-            out.description = Some(Value::String(text.clone()));
+            out.description = Some(Value::String(text.trim().to_owned()));
         }
         Some(Value::Bool(_)) | Some(Value::Array(_)) | Some(Value::Object(_)) => {
             errors.push(err("description", "Not a valid string.".to_owned()));
@@ -1231,7 +1253,7 @@ fn validate_write(
                 out.present.push(field);
             }
             Some(Value::String(text)) => {
-                if text.chars().count() > 255 {
+                if text.trim().chars().count() > 255 {
                     errors.push(err(
                         field,
                         "Ensure this field has no more than 255 characters.".to_owned(),
@@ -1243,7 +1265,7 @@ fn validate_write(
                     } else {
                         &mut out.external_id
                     };
-                    *target = Some(Value::String(text.clone()));
+                    *target = Some(Value::String(text.trim().to_owned()));
                 }
             }
             Some(Value::Bool(_)) | Some(Value::Array(_)) | Some(Value::Object(_)) => {
@@ -1275,6 +1297,8 @@ fn validate_write(
             // `pytz.common_timezones` membership; `chrono-tz` parses the
             // same IANA names (documented approximation for exotic
             // aliases, never hit by the suite).
+            // ChoiceField does not trim: padded input is rejected with
+            // the raw padded value in the message.
             if text.parse::<Tz>().is_err() {
                 errors.push(err(
                     "timezone",
@@ -1408,6 +1432,7 @@ async fn check_user_refs(
         if write.has(field) {
             if let Some(id) = id {
                 let row: Option<(uuid::Uuid,)> =
+                    // raw-sql: simple user existence probe; SeaORM find_by_id count equivalent but kept as raw to preserve exact single-round-trip query count
                     sqlx::query_as(r#"SELECT id FROM users WHERE id = $1"#)
                         .bind(id)
                         .fetch_optional(pool)
@@ -1467,6 +1492,7 @@ async fn rewrite_project_id(
     };
     let id = override_id.unwrap_or(*url_project);
     let row: Option<(uuid::Uuid,)> =
+        // raw-sql: simple project existence probe; SeaORM equivalent but kept raw for query count parity
         sqlx::query_as(r#"SELECT id FROM projects WHERE id = $1 AND deleted_at IS NULL"#)
             .bind(id)
             .fetch_optional(pool)
@@ -1489,6 +1515,7 @@ async fn rewrite_project_id(
 /// softened, `timezone_converter.py:53-55`).
 async fn rewrite_timezone(pool: &sqlx::PgPool, project_id: &uuid::Uuid) -> Result<Tz, Denial> {
     let row: Option<(String,)> =
+        // raw-sql: timezone single-column probe; SeaORM select_only equivalent but kept raw
         sqlx::query_as(r#"SELECT timezone FROM projects WHERE id = $1 AND deleted_at IS NULL"#)
             .bind(project_id)
             .fetch_optional(pool)
@@ -1503,8 +1530,10 @@ async fn rewrite_timezone(pool: &sqlx::PgPool, project_id: &uuid::Uuid) -> Resul
 /// `convert_to_utc` for a start date (`timezone_converter.py:69-83`):
 /// local midnight plus one second, shifted to UTC — unless the date is
 /// today in the project zone, when the current instant is returned.
-/// `pytz.localize(is_dst=False)` picks standard time for ambiguous wall
-/// times (the later instant); a DST gap raises (ported as 500).
+/// Django localises midnight with `pytz.localize(..., is_dst=False)` —
+/// never raises (folds take the standard/late side, gaps the
+/// pre-transition offset) — then adds `+1s` on midnight's fixed offset.
+/// We share the date-check helper so create/PATCH and date-check agree.
 fn convert_start(
     project_tz: &Tz,
     date: chrono::NaiveDate,
@@ -1513,32 +1542,23 @@ fn convert_start(
     if date == now.with_timezone(project_tz).date_naive() {
         return Ok(now);
     }
-    let naive = date.and_hms_opt(0, 0, 0).expect("midnight exists");
-    use chrono::{LocalResult, TimeZone as _};
-    match project_tz.from_local_datetime(&naive) {
-        LocalResult::Single(local) => {
-            Ok(local.with_timezone(&chrono::Utc) + chrono::Duration::seconds(1))
-        }
-        LocalResult::Ambiguous(_, later) => {
-            Ok(later.with_timezone(&chrono::Utc) + chrono::Duration::seconds(1))
-        }
-        LocalResult::None => Err(Denial::ServerError),
-    }
+    let midnight_utc = crate::v1_cycles_modules::cycle::project_midnight_utc(project_tz, &date)
+        .map_err(|_| Denial::ServerError)?;
+    Ok(midnight_utc + chrono::Duration::seconds(1))
 }
 
 /// `convert_to_utc` for an end date (`timezone_converter.py:84-94`):
-/// local 23:59:00 shifted to UTC. No same-day branch.
+/// midnight plus `+23:59` on midnight's fixed offset, shifted to UTC.
+/// Django adds the timedelta to the midnight-localised datetime, not to
+/// a separately localised 23:59 (which would take 23:59's own offset and
+/// be one hour off on mid-day transitions). No same-day branch.
 fn convert_end(
     project_tz: &Tz,
     date: chrono::NaiveDate,
 ) -> Result<chrono::DateTime<chrono::Utc>, Denial> {
-    let naive = date.and_hms_opt(23, 59, 0).expect("23:59 exists");
-    use chrono::{LocalResult, TimeZone as _};
-    match project_tz.from_local_datetime(&naive) {
-        LocalResult::Single(local) => Ok(local.with_timezone(&chrono::Utc)),
-        LocalResult::Ambiguous(_, later) => Ok(later.with_timezone(&chrono::Utc)),
-        LocalResult::None => Err(Denial::ServerError),
-    }
+    let midnight_utc = crate::v1_cycles_modules::cycle::project_midnight_utc(project_tz, &date)
+        .map_err(|_| Denial::ServerError)?;
+    Ok(midnight_utc + chrono::Duration::hours(23) + chrono::Duration::minutes(59))
 }
 
 /// The `validate()` tail (`serializers/cycle.py:16-38`): ordering check
@@ -1718,7 +1738,6 @@ async fn cycle_list(
     let resolved = actor(&state, extension).await?;
     let pool = pool_of(&state)?.clone();
     let user_id = resolved.id;
-    let timezone = resolved.timezone;
     let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
     check_gate(
         &pool,
@@ -1732,7 +1751,7 @@ async fn cycle_list(
     .await?;
     // `Project.objects.get` inside `get_queryset` runs before any row is
     // read: a missing project is the `ObjectDoesNotExist` 404.
-    project_row(&pool, &project_id).await?;
+    let timezone = project_row(&pool, &project_id).await?.zone()?;
     let now = chrono::Utc::now();
     let cycle_view = crate::app_issues::query_last(&query, "cycle_view");
     if cycle_view.as_deref() == Some("current") {
@@ -1840,6 +1859,7 @@ async fn cycle_create(
     let now = chrono::Utc::now();
     // `Cycle.save`: min sort over the project's live cycles minus 10000
     // whenever one exists — even over an explicit input (ported bug 5).
+    // raw-sql: MIN aggregate over sort_order with GROUP BY project; MIN not buildable without Func::min and preserves Postgres float typing
     let min_sort: Option<(Option<f64>,)> = sqlx::query_as(
         r#"SELECT MIN(sort_order) FROM cycles WHERE project_id = $1 AND deleted_at IS NULL"#,
     )
@@ -1852,6 +1872,7 @@ async fn cycle_create(
         None => write.sort_order.unwrap_or(65535.0),
     };
     let id = uuid::Uuid::new_v4();
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let insert = sqlx::query(
         r#"INSERT INTO cycles (id, created_at, updated_at, name, description,
             start_date, end_date, created_by_id, owned_by_id, project_id,
@@ -1906,6 +1927,7 @@ async fn cycle_create(
     let row = fetch_cycle_by_pk(&pool, &slug, &project_id, &user_id, &now, &id, false, false)
         .await?
         .ok_or(Denial::ServerError)?;
+    let project_zone = project.zone()?;
     if let Some(origin) = super::activity_origin(&state) {
         enqueue_message(
             &pool,
@@ -1915,7 +1937,7 @@ async fn cycle_create(
     }
     Ok(json_response(
         StatusCode::CREATED,
-        shape_write_row(&row, &timezone),
+        shape_write_row(&row, &project_zone),
     ))
 }
 
@@ -1955,8 +1977,10 @@ async fn cycle_partial_update(
     let pk = parse_pk(&pk).ok_or(Denial::BadDetail)?;
     // `get_queryset` (with its `Project.objects.get`) runs before the
     // row read: a missing project is the 404, and an archived project
-    // behaves like a missing row (the 500 below).
+    // behaves like a missing row (the 500 below). Its `pytz.timezone`
+    // runs there too: an unknown zone refuses before any read or write.
     let project = project_row(&pool, &project_id).await?;
+    let project_zone = project.zone()?;
     let now = chrono::Utc::now();
     let before = if project.archived_at.is_some() {
         None
@@ -2022,7 +2046,7 @@ async fn cycle_partial_update(
     }
     Ok(json_response(
         StatusCode::OK,
-        shape_write_row(&row, &timezone),
+        shape_write_row(&row, &project_zone),
     ))
 }
 
@@ -2106,6 +2130,7 @@ async fn apply_cycle_update(
     sets.push("updated_by_id = $1".to_owned());
     sets.push("updated_at = $2".to_owned());
     let sql = format!("UPDATE cycles SET {} WHERE id = ${index}", sets.join(", "));
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let mut query = sqlx::query(&sql).bind(user_id).bind(now);
     if write.has("name") {
         query = query.bind(write.name.clone().unwrap_or_default());
@@ -2165,7 +2190,7 @@ async fn apply_cycle_update(
     Ok(())
 }
 
-/// `GET .../cycles/<pk>/` (`base.py:410-475`): MEMBER retrieve with the
+/// `GET .../cycles/<pk>/` (`base.py:410-475`): GUEST retrieve with the
 /// `sub_issues` annotation; a miss is `{"error": "Cycle not found"}`.
 async fn cycle_retrieve(
     State(state): State<AppState>,
@@ -2179,7 +2204,6 @@ async fn cycle_retrieve(
     let resolved = actor(&state, extension).await?;
     let pool = pool_of(&state)?.clone();
     let user_id = resolved.id;
-    let timezone = resolved.timezone;
     let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
     check_gate(
         &pool,
@@ -2191,7 +2215,9 @@ async fn cycle_retrieve(
         false,
     )
     .await?;
-    project_row(&pool, &project_id).await?;
+    // `get_queryset` opens the view, so an unknown zone (its `pytz.timezone`)
+    // answers before the missing-cycle 404.
+    let timezone = project_row(&pool, &project_id).await?.zone()?;
     let now = chrono::Utc::now();
     let pk = parse_pk(&pk).ok_or(Denial::BadDetail)?;
     let row =
@@ -2240,6 +2266,7 @@ async fn cycle_destroy(
     .await?;
     // `Cycle.objects.get(...)`: no archived filter, live rows only — a
     // miss is the `ObjectDoesNotExist` 404 (ported bug 4).
+    // raw-sql: cycle lookup join workspaces; SeaORM count equivalent but kept raw for query count parity, join preserved
     let row: Option<(String,)> = sqlx::query_as(
         r#"SELECT c.name FROM cycles c JOIN workspaces w ON w.id = c.workspace_id AND w.slug = $1
            WHERE c.id = $2 AND c.project_id = $3 AND c.deleted_at IS NULL"#,
@@ -2255,6 +2282,7 @@ async fn cycle_destroy(
     };
     // `cycle_issues` ids for the activity payload (live bridge rows;
     // note the ported `self.kwargs.get("pk")` — the cycle pk).
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     let issue_rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
         r#"SELECT issue_id FROM cycle_issues WHERE cycle_id = $1 AND deleted_at IS NULL"#,
     )
@@ -2281,6 +2309,7 @@ async fn cycle_destroy(
     }
     // Soft delete (`SoftDeleteModel.delete` → `save()` → crum stamps
     // `updated_by`, `auto_now` stamps `updated_at`).
+    // raw-sql: UPDATE with JSON or foreign-key side effects; builder col_expr typing needs Expr::cust
     sqlx::query(
         r#"UPDATE cycles SET deleted_at = $2, updated_at = $2, updated_by_id = $3 WHERE id = $1"#,
     )
@@ -2293,6 +2322,7 @@ async fn cycle_destroy(
     enqueue_message(&pool, soft_delete_message(&pk)).await;
     // Favorites go through the soft-delete queryset (only `deleted_at`
     // moves — a direct `update`, no `save()` stamp).
+    // raw-sql: UPDATE with JSON or foreign-key side effects; builder col_expr typing needs Expr::cust
     sqlx::query(
         r#"UPDATE user_favorites SET deleted_at = $4
            WHERE user_id = $1 AND entity_type = 'cycle' AND entity_identifier = $2
@@ -2306,6 +2336,7 @@ async fn cycle_destroy(
     .await
     .map_err(|_| Denial::ServerError)?;
     // Recent visits are hard-deleted (`delete(soft=False)`).
+    // raw-sql: complex annotated read with GROUP BY, FILTER, AT TIME ZONE; not buildable without Expr::cust and duplicate-column guard
     sqlx::query(
         r#"DELETE FROM user_recent_visits USING workspaces w
            WHERE user_recent_visits.workspace_id = w.id AND w.slug = $1
@@ -2495,6 +2526,25 @@ mod tests {
             snapshot.contains(r#""view_props": {"a": 1, "b": [true, null]}"#),
             "{snapshot}"
         );
+    }
+
+    #[test]
+    fn project_zone_renders_response_dates_and_refuses_unknown_names() {
+        let row = |timezone: &str| ProjectRow {
+            workspace_id: uuid::Uuid::nil(),
+            archived_at: None,
+            timezone: timezone.to_owned(),
+        };
+        let zone = row("America/New_York").zone().expect("zone");
+        assert!(
+            shape_head(&row_map(), &zone).contains("\"start_date\":\"2026-02-28T19:00:01-05:00\""),
+            "{}",
+            shape_head(&row_map(), &zone)
+        );
+        assert!(matches!(
+            row("Not/AZone").zone(),
+            Err(Denial::BadError(message)) if message == "The required key does not exist."
+        ));
     }
 
     #[test]
@@ -2695,6 +2745,33 @@ mod tests {
         // Same-day start returns now.
         let today = now.with_timezone(&tz).date_naive();
         assert_eq!(convert_start(&tz, today, now).expect("today"), now);
+    }
+
+    #[test]
+    fn convert_boundaries_dst_transition_days() {
+        // NEWPIDASH-212: Django localises midnight (pytz, is_dst=False)
+        // then adds +1s/+23:59 on midnight's fixed offset. Localising
+        // 23:59 directly is one hour off on transition days; a gap
+        // midnight must not 500.
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-30T00:00:00Z")
+            .expect("now")
+            .with_timezone(&chrono::Utc);
+        let ny: Tz = "America/New_York".parse().expect("tz");
+        // Fall-back day: midnight EDT (-04): end = midnight + 23:59.
+        let fall = chrono::NaiveDate::from_ymd_opt(2026, 11, 1).expect("date");
+        let end = convert_end(&ny, fall).expect("end");
+        assert_eq!(end.to_rfc3339(), "2026-11-02T03:59:00+00:00");
+        // Spring-forward day: midnight EST (-05): end = midnight + 23:59.
+        let spring = chrono::NaiveDate::from_ymd_opt(2027, 3, 14).expect("date");
+        let end = convert_end(&ny, spring).expect("end");
+        assert_eq!(end.to_rfc3339(), "2027-03-15T04:59:00+00:00");
+        // Cairo: DST starts at 00:00 on 2026-04-24, so midnight does not
+        // exist; pytz takes the pre-transition offset (+02): midnight is
+        // 2026-04-23T22:00:00Z, +1s is the start.
+        let cairo: Tz = "Africa/Cairo".parse().expect("tz");
+        let gap = chrono::NaiveDate::from_ymd_opt(2026, 4, 24).expect("date");
+        let start = convert_start(&cairo, gap, now).expect("start");
+        assert_eq!(start.to_rfc3339(), "2026-04-23T22:00:01+00:00");
     }
 
     #[test]

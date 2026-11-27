@@ -397,7 +397,7 @@ pub fn sub_issues_sql() -> String {
 /// Guards the `estimate_distribution` block and the points
 /// `completion_chart`.
 pub fn estimate_type_exists_sql() -> String {
-    "SELECT 1 FROM projects JOIN workspaces ON (projects.workspace_id = workspaces.id) JOIN estimates ON (projects.estimate_id = estimates.id) WHERE workspaces.slug = :slug AND projects.id = :project_id AND estimates.type = 'points'".to_owned()
+    "SELECT 1 FROM projects JOIN workspaces ON (projects.workspace_id = workspaces.id) JOIN estimates ON (projects.estimate_id = estimates.id) WHERE workspaces.slug = :slug AND projects.id = :project_id AND projects.deleted_at IS NULL AND estimates.type = 'points' AND estimates.deleted_at IS NULL".to_owned()
 }
 
 /// `avatar_url` `Case` (`base.py:442-460`, repeated `:549-565` and the
@@ -849,6 +849,8 @@ mod tests {
         }
         let gate = estimate_type_exists_sql();
         assert!(gate.contains("estimates.type = 'points'"));
+        assert!(gate.contains("estimates.deleted_at IS NULL"));
+        assert!(gate.contains("projects.deleted_at IS NULL"));
         // workspace__slug / estimate__type are joins (projects carries only
         // workspace_id / estimate_id); the INNER JOIN doubles as the
         // estimate__isnull=False gate.

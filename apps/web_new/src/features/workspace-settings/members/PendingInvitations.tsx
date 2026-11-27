@@ -14,7 +14,7 @@ import * as React from "react";
 
 import type { WorkspaceInvitation } from "@pidash/api-client";
 
-import { invitationInitial, invitationLink, PENDING_GROUP_LABEL, selectPendingInvitations } from "./invitations.js";
+import { invitationInitial, PENDING_GROUP_LABEL, selectPendingInvitations } from "./invitations.js";
 import { InvitationRoleControl } from "./InvitationRoleControl.js";
 
 export interface PendingInvitationsProps {
@@ -40,7 +40,6 @@ export function PendingInvitations({
   const matching = React.useMemo(() => selectPendingInvitations(invitations, search), [invitations, search]);
 
   if (matching.length === 0) return null;
-  const origin = window.location.origin;
 
   return (
     <section
@@ -72,7 +71,7 @@ export function PendingInvitations({
           className="flex flex-col rounded-(--radius-control) border border-(--border)"
         >
           {matching.map((invitation) => {
-            const link = invitationLink(invitation, origin);
+            const link = invitation.invite_link.trim() === "" ? null : invitation.invite_link;
             return (
               <li
                 key={invitation.id}

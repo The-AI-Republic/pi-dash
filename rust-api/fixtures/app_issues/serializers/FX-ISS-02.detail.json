@@ -136,14 +136,16 @@
     },
     "run_count": "runs.count() — total runs for the issue, all statuses",
     "runs_base": "AgentRun.objects.filter(work_item=obj) (:1384)",
-    "ticker_source": "obj.agent_ticker reverse OneToOne; ObjectDoesNotExist -> None (:1275-1281)"
+    "ticker_source": "obj.agent_ticker reverse OneToOne; ObjectDoesNotExist -> None (:1275-1281)",
+    "total_tokens": "runs.aggregate(total=Sum('total_tokens'))['total'] or 0 — cumulative tokens over every run for the issue; NULL (never-reported) rows skipped, 0 when none (:1415-1421, PDASHOSS01-189)"
   },
   "agent_status_shape": {
     "envelope": {
       "active_run": "serialized run or None (include_live_state=True)",
       "latest_run": "serialized run or None (include_live_state = active_run is None)",
       "run_count": "int",
-      "ticker": "agent_ticker block or None"
+      "ticker": "agent_ticker block or None",
+      "total_tokens": "int (never None; 0 when no run reported usage)"
     },
     "null_when": "ticker is None AND latest_run is None -> get_agent_status returns None (:1404-1405)",
     "run_keys": [

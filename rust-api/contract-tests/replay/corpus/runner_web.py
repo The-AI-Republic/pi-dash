@@ -222,7 +222,10 @@ SESSIONS = (
             ],
             # Evidence: rotate revokes the machine's tokens with
             # now() per backend (request 52).
-            "machine_token": ["last_used_at", "revoked_at"],
+            # expires_at is minted as now+60d on both backends
+            # (runner/models.py save + Rust tokens mint, PIDESKAPP-122);
+            # the replay sees two instants ms apart (NEWPIDASH-58).
+            "machine_token": ["last_used_at", "revoked_at", "expires_at"],
             "agent_run_approval": ["requested_at"],
             # Evidence: chat-approval decide stamps decided_at with
             # now() per backend (the persisted half of the offline
@@ -652,6 +655,42 @@ SESSIONS = (
                 auth="admin", expect_status=404,
                 **_csrf("w0"),
             ),
+            # -- owner engine controls (#2903, NEWPIDASH-49): PATCH
+            # pod_dispatch + machine PATCH (the moff machine hosts roff,
+            # an own-agent runner; pause/team flips are no-op pins here).
+            # The runner PATCH below expects 404, not 400: rdel_id was
+            # deleted earlier in this session, and both backends look
+            # the runner up before validating pod_dispatch (Django
+            # runners.py patch, Rust manage.rs runner_patch), so both
+            # answer 404 {"error":"not found"} (NEWPIDASH-58 req56).
+            Request(
+                "PATCH", f"{WEB}/{{rdel_id}}/",
+                route=f"{WEB}/{{runner_id}}/",
+                json={"pod_dispatch": "sometimes"},
+                auth="admin", expect_status=404,
+                **_csrf("w0"),
+            ),
+            Request(
+                "PATCH", f"{WEB}/dev-machines/{{mspare}}/",
+                route=f"{WEB}/dev-machines/{{machine_id}}/",
+                json={"workspace": "{ws_id}", "bogus": 1},
+                auth="admin", expect_status=400,
+                **_csrf("w0"),
+            ),
+            Request(
+                "PATCH", f"{WEB}/dev-machines/{{mspare}}/",
+                route=f"{WEB}/dev-machines/{{machine_id}}/",
+                json={"workspace": "{ws_id}", "engine_paused_by_owner": "yes"},
+                auth="admin", expect_status=400,
+                **_csrf("w0"),
+            ),
+            Request(
+                "PATCH", f"{WEB}/dev-machines/{{mspare}}/",
+                route=f"{WEB}/dev-machines/{{machine_id}}/",
+                json={"workspace": "{ws_id}", "engine_team_runs": True},
+                auth="admin", expect_status=200,
+                **_csrf("w0"),
+            ),
             Request(
                 "DELETE", f"{WEB}/dev-machines/{{mspare}}/",
                 route=f"{WEB}/dev-machines/{{machine_id}}/",
@@ -736,3 +775,4 @@ SESSIONS = (
         ),
     ),
 )
+

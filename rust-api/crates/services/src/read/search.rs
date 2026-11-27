@@ -11,26 +11,19 @@
 //! mapping; this module takes parsed values.)
 
 use chrono::{DateTime, Utc};
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QueryOrder, QuerySelect,
+    RelationTrait,
+};
+use sea_query::extension::postgres::PgExpr;
+use sea_query::{Alias, Condition, Expr, Func, SimpleExpr};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use pidash_db::entity::{issue_comments, issues, project_members, projects, states, workspaces};
+
 use super::{DbError, Error};
 use crate::app_views_search::fts;
-
-/// The full-row select list: the issue payload columns plus the
-/// joined refs (`project_identifier`, `workspace_slug`, `state_name`,
-/// `state_group`), all aliased identically for the row decode.
-pub const FULL_ROW_COLUMNS: &str =
-    "issues.id, issues.type_id, issues.created_at, issues.updated_at, \
-     issues.deleted_at, issues.point, issues.name, issues.description_html, \
-     issues.description_binary, issues.priority, issues.complexity_score, \
-     issues.start_date, issues.target_date, issues.sequence_id, issues.sort_order, \
-     issues.completed_at, issues.archived_at, issues.is_draft, issues.external_source, \
-     issues.external_id, issues.git_work_branch, issues.created_via, issues.agent_executor, \
-     issues.created_by_id, issues.updated_by_id, issues.project_id, issues.workspace_id, \
-     issues.parent_id, issues.state_id, issues.estimate_point_id, issues.assigned_pod_id, \
-     project.identifier AS project_identifier, workspaces.slug AS workspace_slug, \
-     state.name AS state_name, state.\"group\" AS state_group";
 
 /// The `status` filter (`tools.py:1310`, checked at `:1316-1321`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,210 +64,475 @@ pub struct IssueSearchParams<'a> {
     pub limit: i64,
 }
 
-/// Build the search statement. The scope is the membership issue
-/// scope line for line (membership join, null-safe triage exclusion,
-/// archived / draft guards, `DISTINCT`) over the full-row select list
-/// plus the `_rank` / `_headline` annotations; then the optional
-/// project narrowing, status, and since predicates, the FTS filter,
-/// and the sort + limit.
-///
-/// Bind order: `$1` slug, `$2` user, `[$3]` project, rank/headline/filter
-/// query copies, int tokens, LIKE pattern, `[since]`, limit.
-pub fn search_issues_sql(
-    narrowed: bool,
-    status: IssueSearchStatus,
-    with_since: bool,
-    sort: IssueSearchSort,
+/// One search row: the issue payload columns plus the joined refs
+/// (`project_identifier`, `workspace_slug`, `state_name`, `state_group`)
+/// and the `_rank` / `_headline` annotations, decoded by name. The
+/// joined refs are `Option` for the `LEFT JOIN` state; the inner-joined
+/// project/workspace refs always decode as `Some`.
+#[derive(Debug, Clone, PartialEq, FromQueryResult)]
+pub struct IssueSearchRow {
+    pub id: Uuid,
+    pub type_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub deleted_at: Option<DateTime<Utc>>,
+    pub point: Option<i32>,
+    pub name: String,
+    pub description_html: String,
+    pub description_binary: Option<Vec<u8>>,
+    pub priority: String,
+    pub complexity_score: i32,
+    pub start_date: Option<chrono::NaiveDate>,
+    pub target_date: Option<chrono::NaiveDate>,
+    pub sequence_id: i32,
+    pub sort_order: f64,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub archived_at: Option<chrono::NaiveDate>,
+    pub is_draft: bool,
+    pub external_source: Option<String>,
+    pub external_id: Option<String>,
+    pub git_work_branch: String,
+    pub created_via: Option<String>,
+    pub agent_executor: Option<String>,
+    pub created_by_id: Option<Uuid>,
+    pub updated_by_id: Option<Uuid>,
+    pub project_id: Uuid,
+    pub workspace_id: Uuid,
+    pub parent_id: Option<Uuid>,
+    pub state_id: Option<Uuid>,
+    pub estimate_point_id: Option<Uuid>,
+    pub assigned_pod_id: Option<Uuid>,
+    pub project_identifier: Option<String>,
+    pub workspace_slug: Option<String>,
+    pub state_name: Option<String>,
+    pub state_group: Option<String>,
+    pub rank: Option<f32>,
+    pub headline: Option<String>,
+}
+
+/// `'english'::regconfig`: the FTS config literal, bound as text and
+/// cast (the `queries_search` precedent).
+fn regconfig() -> SimpleExpr {
+    SimpleExpr::from(Expr::val("english")).cast_as(Alias::new("regconfig"))
+}
+
+/// `to_tsvector('english'::regconfig, <text>)` as a function
+/// expression (`Func::cust`, the `queries_search` precedent: `PgFunc`
+/// only omits the config or takes an OID, and the config name is
+/// normative here).
+fn tsvector(text: SimpleExpr) -> sea_query::FunctionCall {
+    Func::cust("to_tsvector").arg(regconfig()).arg(text)
+}
+
+/// `websearch_to_tsquery('english'::regconfig, <query>)`.
+fn tsquery(query: &str) -> sea_query::FunctionCall {
+    Func::cust("websearch_to_tsquery")
+        .arg(regconfig())
+        .arg(Expr::val(query))
+}
+
+/// The issue's search vector: `to_tsvector('english'::regconfig,
+/// COALESCE(name, '') || ' ' || COALESCE(description_stripped, ''))`.
+fn issue_vector() -> sea_query::FunctionCall {
+    let text = SimpleExpr::from(Func::coalesce([
+        Expr::col((issues::Entity, issues::Column::Name)).into(),
+        SimpleExpr::from(Expr::val("")),
+    ]))
+    .concatenate(Expr::val(" "))
+    .concatenate(Func::coalesce([
+        Expr::col((issues::Entity, issues::Column::DescriptionStripped)).into(),
+        SimpleExpr::from(Expr::val("")),
+    ]));
+    tsvector(text)
+}
+
+/// The comment vector: `to_tsvector('english'::regconfig,
+/// COALESCE(comment_stripped, ''))`.
+fn comment_vector() -> sea_query::FunctionCall {
+    tsvector(SimpleExpr::from(Func::coalesce([
+        Expr::col((
+            issue_comments::Entity,
+            issue_comments::Column::CommentStripped,
+        ))
+        .into(),
+        SimpleExpr::from(Expr::val("")),
+    ])))
+}
+
+/// The comment-text arm (`Q(id__in=_matching_comment_issue_ids(...))`,
+/// `search/issue.py:102-103,111-112`): the soft-deletion-excluded
+/// comment set, selecting `issue_id`.
+fn comment_match(query: &str) -> SimpleExpr {
+    use sea_query::Query as SeaQuery;
+    Expr::col((issues::Entity, issues::Column::Id)).in_subquery(
+        SeaQuery::select()
+            .column(issue_comments::Column::IssueId)
+            .from(issue_comments::Entity)
+            .and_where(Expr::col(issue_comments::Column::DeletedAt).is_null())
+            .and_where(comment_vector().matches(tsquery(query)))
+            .take(),
+    )
+}
+
+/// The project-identifier arm: `EXISTS (SELECT 1 FROM projects WHERE
+/// projects.id = issues.project_id AND identifier ILIKE pattern)`.
+fn identifier_exists(like_pattern: &str) -> SimpleExpr {
+    use sea_query::Query as SeaQuery;
+    Expr::exists(
+        SeaQuery::select()
+            .expr(Expr::val(1))
+            .from(projects::Entity)
+            .and_where(
+                Expr::col((projects::Entity, projects::Column::Id))
+                    .eq(Expr::col((issues::Entity, issues::Column::ProjectId))),
+            )
+            .and_where(
+                Expr::col((projects::Entity, projects::Column::Identifier)).ilike(like_pattern),
+            )
+            .take(),
+    )
+}
+
+/// `EXISTS (SELECT 1 FROM "project_members" WHERE
+/// "project_members"."project_id" = <project_col> AND
+/// "project_members"."member_id" = $user AND "is_active")`: the
+/// membership scope (the old `JOIN project_members ... + DISTINCT`
+/// collapses to one row per issue; `EXISTS` yields the same rows
+/// without the fan-out).
+fn member_exists(project_col: (impl EntityTrait, impl ColumnTrait), user_id: &Uuid) -> SimpleExpr {
+    use sea_query::Query as SeaQuery;
+    Expr::exists(
+        SeaQuery::select()
+            .expr(Expr::val(1))
+            .from(project_members::Entity)
+            .and_where(
+                Expr::col((project_members::Entity, project_members::Column::ProjectId))
+                    .equals(project_col),
+            )
+            .and_where(
+                Expr::col((project_members::Entity, project_members::Column::MemberId))
+                    .eq(*user_id),
+            )
+            .and_where(
+                Expr::col((project_members::Entity, project_members::Column::IsActive)).eq(true),
+            )
+            .take(),
+    )
+}
+
+/// The `_build_search_filter` OR-chain (`search/issue.py:93-125`), in
+/// Django arm order: FTS, name fallback, optional comment arm,
+/// sequence ints, project identifier. The `ILIKE` patterns arrive
+/// pre-concatenated (`%{escape}%`); the `ESCAPE '\'` clause is
+/// postgres's default, so omitting it is equivalent.
+fn search_filter(
+    mut condition: Condition,
+    query: &str,
+    like: &str,
+    sequence: &[i32],
     include_comments: bool,
-) -> String {
-    let mut next: i32 = 3;
-    let mut predicates = String::new();
-    if narrowed {
-        predicates.push_str(&format!(" AND issues.project_id = ${next}"));
-        next += 1;
+) -> Condition {
+    condition = condition.add(issue_vector().matches(tsquery(query)));
+    condition = condition.add(Expr::col((issues::Entity, issues::Column::Name)).ilike(like));
+    if include_comments {
+        condition = condition.add(comment_match(query));
     }
-    match status {
+    condition = condition.add(
+        Expr::col((issues::Entity, issues::Column::SequenceId)).is_in(sequence.iter().copied()),
+    );
+    condition.add(identifier_exists(like))
+}
+
+/// The `_headline` annotation options (`search/issue.py:171-182`):
+/// the exact literal `fts::headline_sql` renders (its `''` escapes
+/// are the SQL-literal form of these single quotes).
+const HEADLINE_OPTIONS: &str =
+    "StartSel='<<', StopSel='>>', MaxWords=20, MinWords=10, ShortWord=3, HighlightAll=false";
+
+/// Build the search statement. The scope is the membership issue
+/// scope line for line (membership `EXISTS`, null-safe triage
+/// exclusion, archived / draft guards, `DISTINCT`) over the full-row
+/// select list plus the `rank` / `headline` annotations; then the
+/// optional project narrowing, status, and since predicates, the FTS
+/// filter, and the sort + limit.
+pub fn search_issues_statement(
+    query: &str,
+    like: &str,
+    sequence: &[i32],
+    params: &IssueSearchParams<'_>,
+) -> sea_orm::Select<issues::Entity> {
+    let filter = search_filter(
+        Condition::any(),
+        query,
+        like,
+        sequence,
+        params.include_comments,
+    );
+
+    let mut select = issues::Entity::find()
+        .select_only()
+        .columns([
+            issues::Column::Id,
+            issues::Column::TypeId,
+            issues::Column::CreatedAt,
+            issues::Column::UpdatedAt,
+            issues::Column::DeletedAt,
+            issues::Column::Point,
+            issues::Column::Name,
+            issues::Column::DescriptionHtml,
+            issues::Column::DescriptionBinary,
+            issues::Column::Priority,
+            issues::Column::ComplexityScore,
+            issues::Column::StartDate,
+            issues::Column::TargetDate,
+            issues::Column::SequenceId,
+            issues::Column::SortOrder,
+            issues::Column::CompletedAt,
+            issues::Column::ArchivedAt,
+            issues::Column::IsDraft,
+            issues::Column::ExternalSource,
+            issues::Column::ExternalId,
+            issues::Column::GitWorkBranch,
+            issues::Column::CreatedVia,
+            issues::Column::AgentExecutor,
+            issues::Column::CreatedById,
+            issues::Column::UpdatedById,
+            issues::Column::ProjectId,
+            issues::Column::WorkspaceId,
+            issues::Column::ParentId,
+            issues::Column::StateId,
+            issues::Column::EstimatePointId,
+            issues::Column::AssignedPodId,
+        ])
+        .column_as(projects::Column::Identifier, "project_identifier")
+        .column_as(workspaces::Column::Slug, "workspace_slug")
+        .column_as(states::Column::Name, "state_name")
+        .column_as(states::Column::Group, "state_group")
+        .column_as(
+            SimpleExpr::from(
+                Func::cust("ts_rank")
+                    .arg(issue_vector())
+                    .arg(tsquery(query)),
+            ),
+            "rank",
+        )
+        .column_as(
+            SimpleExpr::from(
+                Func::cust("ts_headline")
+                    .arg(regconfig())
+                    .arg(Expr::col((
+                        issues::Entity,
+                        issues::Column::DescriptionStripped,
+                    )))
+                    .arg(tsquery(query))
+                    .arg(Expr::val(HEADLINE_OPTIONS)),
+            ),
+            "headline",
+        )
+        .distinct()
+        .join(JoinType::InnerJoin, issues::Relation::Workspaces.def())
+        .join(JoinType::InnerJoin, issues::Relation::Projects.def())
+        .join(JoinType::LeftJoin, issues::Relation::States.def())
+        .filter(issues::Column::DeletedAt.is_null())
+        .filter(workspaces::Column::Slug.eq(params.workspace_slug))
+        .filter(member_exists(
+            (issues::Entity, issues::Column::ProjectId),
+            &params.user_id,
+        ))
+        .filter(
+            Expr::col((states::Entity, states::Column::Group))
+                .is_null()
+                .or(Expr::col((states::Entity, states::Column::Group)).ne("triage")),
+        )
+        .filter(issues::Column::ArchivedAt.is_null())
+        .filter(projects::Column::ArchivedAt.is_null())
+        .filter(issues::Column::IsDraft.eq(false))
+        .filter(filter);
+
+    if let Some(project_id) = params.project_id {
+        select = select.filter(issues::Column::ProjectId.eq(project_id));
+    }
+    match params.status {
         IssueSearchStatus::All => {}
         // `.exclude(state__group__in=[...])` renders `NOT (... IN ...)`:
         // NULL-group rows evaluate to NULL and drop out, exactly like
         // Django — stateless issues only surface under `all`.
-        // (BUG-947-1: `tools.py:1317-1318`; the open listing silently
-        // drops stateless issues while `list_issues` keeps them.)
         IssueSearchStatus::Open => {
-            predicates.push_str(" AND NOT (state.\"group\" IN ('completed', 'cancelled'))");
+            select = select.filter(
+                Expr::col((states::Entity, states::Column::Group))
+                    .is_in(["completed", "cancelled"])
+                    .not(),
+            );
         }
         IssueSearchStatus::Closed => {
-            predicates.push_str(" AND state.\"group\" IN ('completed', 'cancelled')");
+            select = select.filter(
+                Expr::col((states::Entity, states::Column::Group))
+                    .is_in(["completed", "cancelled"]),
+            );
         }
     }
-    let rank_param = next;
-    let headline_param = next + 1;
-    let fts_param = next + 2;
-    let seq_param = next + 3;
-    let like_param = next + 4;
-    next += 5;
-    predicates.push_str(&format!(
-        " AND {}",
-        fts::search_filter_sql(
-            include_comments,
-            &format!("${fts_param}"),
-            &format!("${seq_param}"),
-            &format!("${like_param}"),
-        )
-    ));
-    if with_since {
-        predicates.push_str(&format!(" AND issues.updated_at >= ${next}"));
-        next += 1;
+    if let Some(since) = params.since {
+        select = select.filter(issues::Column::UpdatedAt.gte(since));
     }
-    let order = match sort {
-        IssueSearchSort::Rank => "ORDER BY _rank DESC, issues.updated_at DESC",
-        IssueSearchSort::Created => "ORDER BY issues.created_at DESC",
-        IssueSearchSort::Updated => "ORDER BY issues.updated_at DESC",
+    select = match params.sort {
+        IssueSearchSort::Rank => select
+            .order_by(Expr::col(Alias::new("rank")), sea_query::Order::Desc)
+            .order_by_desc(issues::Column::UpdatedAt),
+        IssueSearchSort::Created => select.order_by_desc(issues::Column::CreatedAt),
+        IssueSearchSort::Updated => select.order_by_desc(issues::Column::UpdatedAt),
     };
-    format!(
-        "SELECT DISTINCT {FULL_ROW_COLUMNS}, {rank} AS _rank, {headline} AS _headline \
-         FROM issues \
-         JOIN workspaces ON workspaces.id = issues.workspace_id \
-         JOIN projects AS project ON project.id = issues.project_id \
-         JOIN project_members AS pm ON pm.project_id = project.id \
-         LEFT OUTER JOIN states AS state ON state.id = issues.state_id \
-         WHERE issues.deleted_at IS NULL \
-           AND workspaces.slug = $1 \
-           AND pm.member_id = $2 AND pm.is_active \
-           AND (state.\"group\" IS NULL OR NOT (state.\"group\" = 'triage')) \
-           AND issues.archived_at IS NULL \
-           AND project.archived_at IS NULL \
-           AND issues.is_draft = FALSE{predicates} \
-         {order} LIMIT ${next}",
-        rank = fts::rank_sql("issues", &format!("${rank_param}")),
-        headline = fts::headline_sql(&format!("${headline_param}")),
-    )
+    select.limit(u64::try_from(params.limit).unwrap_or(0))
 }
 
 /// `search_issues` (`tools.py:1304-1361`): full-text search over the
-/// membership scope. Returns the full rows with `_rank` (`ts_rank`,
-/// `real`) and `_headline` annotations; the caller shapes snippets,
-/// ranks, urls and per-row summaries. Bind order follows
-/// [`search_issues_sql`]: slug, user, [project], the raw query three
-/// times (rank, headline, filter — Django binds one copy per
-/// `SearchQuery` rendering too), the int tokens, the LIKE pattern,
-/// [since], limit.
+/// membership scope. Returns the full rows with `rank` (`ts_rank`,
+/// `real`) and `headline` annotations; the caller shapes snippets,
+/// ranks, urls and per-row summaries.
 pub async fn search_issues(
     pool: &PgPool,
     query: &str,
     params: &IssueSearchParams<'_>,
-) -> Result<Vec<sqlx::postgres::PgRow>, Error> {
-    let sql = search_issues_sql(
-        params.project_id.is_some(),
-        params.status,
-        params.since.is_some(),
-        params.sort,
-        params.include_comments,
-    );
+) -> Result<Vec<IssueSearchRow>, Error> {
     let like = fts::escape_like(query);
     let sequence: Vec<i32> = fts::sequence_tokens(query)
         .into_iter()
         .filter_map(|token| i32::try_from(token).ok())
         .collect();
-    let mut bound = sqlx::query(&sql)
-        .bind(params.workspace_slug)
-        .bind(params.user_id);
-    if let Some(project_id) = params.project_id {
-        bound = bound.bind(project_id);
-    }
-    bound = bound
-        .bind(query)
-        .bind(query)
-        .bind(query)
-        .bind(sequence.as_slice())
-        .bind(like.as_str());
-    if let Some(since) = params.since {
-        bound = bound.bind(since);
-    }
-    let rows = bound
-        .bind(params.limit)
-        .fetch_all(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = search_issues_statement(query, &like, &sequence, params)
+        .into_model::<IssueSearchRow>()
+        .all(&db)
         .await
-        .map_err(|error| DbError::new("issue-search", error))?;
+        .map_err(|error| DbError::from_orm("issue-search", error))?;
     Ok(rows)
 }
 
 #[cfg(test)]
 mod tests {
+    use chrono::TimeZone;
+    use sea_orm::{DbBackend, QueryTrait};
+
     use super::*;
 
+    /// The full arm: narrowed + open + since + rank + comments; the
+    /// bare arm drops each.
     #[test]
-    fn search_sql_composes_scope_filters_and_sort() {
-        // Moved with the builder from the MCP read tools: the full arm
-        // composes narrowing + open + since + rank + comments; the bare
-        // arm drops each.
-        let full = search_issues_sql(
-            true,
-            IssueSearchStatus::Open,
-            true,
-            IssueSearchSort::Rank,
-            true,
-        );
+    fn search_statement_composes_scope_filters_and_sort() {
+        let full = search_issues_statement(
+            "seed",
+            "%seed%",
+            &[1, 2],
+            &IssueSearchParams {
+                workspace_slug: "acme",
+                user_id: Uuid::nil(),
+                project_id: Some(Uuid::nil()),
+                status: IssueSearchStatus::Open,
+                since: Some(Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap()),
+                sort: IssueSearchSort::Rank,
+                include_comments: true,
+                limit: 10,
+            },
+        )
+        .build(DbBackend::Postgres)
+        .to_string();
         assert!(full.contains("SELECT DISTINCT"), "{full}");
-        assert!(full.contains("AS _rank"), "{full}");
-        assert!(full.contains("AS _headline"), "{full}");
-        assert!(full.contains("issues.project_id = $3"), "{full}");
+        assert!(full.contains(r#"AS "rank""#), "{full}");
+        assert!(full.contains(r#"AS "headline""#), "{full}");
+        assert!(full.contains("ts_rank"), "{full}");
+        assert!(full.contains("ts_headline"), "{full}");
+        assert!(full.contains("websearch_to_tsquery"), "{full}");
+        assert!(full.contains("@@"), "{full}");
+        assert!(full.contains(r#""issues"."project_id" = "#), "{full}");
         assert!(
-            full.contains("AND NOT (state.\"group\" IN ('completed', 'cancelled'))"),
+            full.contains(r#"NOT "states"."group" IN ('completed', 'cancelled')"#),
             "{full}"
         );
-        assert!(full.contains("issues.updated_at >="), "{full}");
-        assert!(full.contains("issues.id IN (SELECT issue_id"), "{full}");
+        assert!(full.contains(r#""issues"."updated_at" >= "#), "{full}");
         assert!(
-            full.contains("ORDER BY _rank DESC, issues.updated_at DESC"),
+            full.contains(r#"ORDER BY "rank" DESC, "issues"."updated_at" DESC"#),
             "{full}"
         );
-        // Placeholder census, narrowed + since: 1 slug, 2 user, 3 project,
-        // 4-8 rank/headline/fts/seq/like, 9 since, 10 limit.
-        for placeholder in [
-            "$1",
-            "$2",
-            "$3",
-            "$4",
-            "$5",
-            "$6",
-            "$7",
-            "$8",
-            "$9",
-            "LIMIT $10",
-        ] {
-            assert!(full.contains(placeholder), "{full}");
-        }
-        assert!(!full.contains("$11"), "{full}");
+        assert!(full.contains("LIMIT 10"), "{full}");
+        assert!(
+            full.contains(r#"JOIN "workspaces" ON "issues"."workspace_id" = "workspaces"."id""#),
+            "{full}"
+        );
+        assert!(
+            full.contains(r#"JOIN "projects" ON "issues"."project_id" = "projects"."id""#),
+            "{full}"
+        );
+        assert!(
+            full.contains(r#"LEFT JOIN "states" ON "issues"."state_id" = "states"."id""#),
+            "{full}"
+        );
+        assert!(
+            full.contains(r#"EXISTS(SELECT 1 FROM "project_members""#),
+            "{full}"
+        );
+        assert!(full.contains(r#""project_members"."member_id""#), "{full}");
+        assert!(
+            full.contains(r#""project_members"."is_active" = TRUE"#),
+            "{full}"
+        );
+        assert!(full.contains(r#""states"."group" IS NULL"#), "{full}");
+        assert!(full.contains(r#""states"."group" <> 'triage'"#), "{full}");
+        assert!(full.contains("ILIKE"), "{full}");
+        assert!(full.contains(r#""issues"."sequence_id" IN ("#), "{full}");
+        // The comment arm nests the comment subquery.
+        assert!(full.contains("issue_comments"), "{full}");
 
-        let bare = search_issues_sql(
-            false,
-            IssueSearchStatus::All,
-            false,
-            IssueSearchSort::Updated,
-            false,
-        );
-        assert!(!bare.contains("issues.project_id = "), "{bare}");
+        let bare = search_issues_statement(
+            "seed",
+            "%seed%",
+            &[],
+            &IssueSearchParams {
+                workspace_slug: "acme",
+                user_id: Uuid::nil(),
+                project_id: None,
+                status: IssueSearchStatus::All,
+                since: None,
+                sort: IssueSearchSort::Updated,
+                include_comments: false,
+                limit: 8,
+            },
+        )
+        .build(DbBackend::Postgres)
+        .to_string();
+        assert!(!bare.contains(r#"AND "issues"."project_id" = "#), "{bare}");
         assert!(!bare.contains("IN ('completed', 'cancelled')"), "{bare}");
-        assert!(!bare.contains("issues.updated_at >="), "{bare}");
-        assert!(!bare.contains("issues.id IN (SELECT issue_id"), "{bare}");
-        assert!(bare.contains("ORDER BY issues.updated_at DESC"), "{bare}");
-        // 1 slug, 2 user, 3-7 rank/headline/fts/seq/like, 8 limit.
-        assert!(bare.contains("LIMIT $8"), "{bare}");
-
-        let created = search_issues_sql(
-            false,
-            IssueSearchStatus::Closed,
-            false,
-            IssueSearchSort::Created,
-            false,
-        );
+        assert!(!bare.contains(r#""issues"."updated_at" >= "#), "{bare}");
         assert!(
-            created.contains("AND state.\"group\" IN ('completed', 'cancelled')"),
+            bare.contains(r#"ORDER BY "issues"."updated_at" DESC"#),
+            "{bare}"
+        );
+        // Empty sequence list: `IN ()` would be a syntax error; the
+        // builder renders the always-false guard instead.
+        assert!(bare.contains("1 = 2"), "{bare}");
+        assert!(bare.contains("LIMIT 8"), "{bare}");
+
+        let created = search_issues_statement(
+            "seed",
+            "%seed%",
+            &[],
+            &IssueSearchParams {
+                workspace_slug: "acme",
+                user_id: Uuid::nil(),
+                project_id: None,
+                status: IssueSearchStatus::Closed,
+                since: None,
+                sort: IssueSearchSort::Created,
+                include_comments: false,
+                limit: 5,
+            },
+        )
+        .build(DbBackend::Postgres)
+        .to_string();
+        assert!(
+            created.contains(r#""states"."group" IN ('completed', 'cancelled')"#),
             "{created}"
         );
         assert!(
-            created.contains("ORDER BY issues.created_at DESC"),
+            created.contains(r#"ORDER BY "issues"."created_at" DESC"#),
             "{created}"
         );
     }
@@ -283,7 +541,6 @@ mod tests {
 #[cfg(test)]
 mod live {
     use chrono::{TimeZone, Utc};
-    use sqlx::Row;
     use uuid::Uuid;
 
     use super::*;
@@ -322,14 +579,13 @@ mod live {
         let Some(db) = pool().await else { return };
         let world = seed_world(&db).await;
         seed_member(&db, &world).await;
-        // Bare arm (8 binds): the seeded issue matches by name.
+        // Bare arm: the seeded issue matches by name.
         let rows = search_issues(&db, "seed", &params(&world))
             .await
             .expect("bare");
         assert_eq!(rows.len(), 1);
-        let id: Uuid = rows[0].try_get("id").expect("id");
-        assert_eq!(id, world.issue_id);
-        // Full arm (10 binds): narrowed + open + since + rank + comments.
+        assert_eq!(rows[0].id, world.issue_id);
+        // Full arm: narrowed + open + since + rank + comments.
         let mut full = params(&world);
         full.project_id = Some(world.project_id);
         full.status = IssueSearchStatus::Open;
@@ -338,11 +594,10 @@ mod live {
         full.include_comments = true;
         let rows = search_issues(&db, "seed", &full).await.expect("full");
         assert_eq!(rows.len(), 1);
-        let rank: Option<f32> = rows[0].try_get("_rank").expect("rank");
-        assert!(rank.is_some());
+        assert!(rows[0].rank.is_some());
         // The seed has no description text, so no headline markers are
         // asserted — only that the annotation column decodes.
-        let _headline: Option<String> = rows[0].try_get("_headline").expect("headline");
+        let _headline: Option<String> = rows[0].headline.clone();
         // Created sort binds.
         let mut created = params(&world);
         created.sort = IssueSearchSort::Created;

@@ -7,12 +7,12 @@
 // cards. Group and entry clicks filter the cycle view through the
 // shared breakdown write; the burn-down and breakdown share one
 // measure. With no cycle covering today the panel becomes the empty
-// view. The list's filters narrow the hero with the groups: when the
-// current cycle fails the predicate the panel becomes the empty view.
-// Search narrows the groups below without touching the hero.
+// view. The list's filters narrow the grouped rows only; this hero
+// reads its own unfiltered query, so it stays on the cycle covering
+// today even when a filter excludes the current cycle.
 
 import { useQuery } from "@tanstack/react-query";
-import { selectActiveEstimate, type CycleRow as CycleRowData } from "@pidash/api-client";
+import { selectActiveEstimate } from "@pidash/api-client";
 import { ChevronDown } from "lucide-react";
 import * as React from "react";
 
@@ -47,8 +47,6 @@ export interface ActiveCycleHeroProps {
   onPeek: (cycleId: string) => void;
   /** The project in the address: the empty view's creation label. */
   currentProject: CycleProjectRef;
-  /** List-body row predicate; a rejected hero cycle falls to the empty view. */
-  cycleFilter?: ((cycle: CycleRowData) => boolean) | undefined;
 }
 
 export function ActiveCycleHero({
@@ -59,14 +57,12 @@ export function ActiveCycleHero({
   canMutate,
   onPeek,
   currentProject,
-  cycleFilter,
 }: ActiveCycleHeroProps): React.ReactElement {
   const hero = useQuery(heroQueryOptions(getAppClient(), workspaceSlug, projectId));
   const project = useProjectRow(workspaceSlug, projectId);
   const [expanded, setExpanded] = React.useState(true);
   const [measure, setMeasure] = React.useState<HeroMeasure>("issues");
-  const current = hero.data?.[0];
-  const shown = current !== undefined && (cycleFilter === undefined || cycleFilter(current)) ? current : undefined;
+  const shown = hero.data?.[0];
   const breakdown = useApplyBreakdownFilter({ workspaceSlug, projectId, cycleId: shown?.id ?? "" });
   const estimatesEnabled = project.data?.estimate !== null && project.data?.estimate !== undefined;
   const progress = useQuery({
@@ -144,6 +140,7 @@ export function ActiveCycleHero({
               cycleId={shown.id}
               startDate={shown.start_date}
               endDate={shown.end_date}
+              projectTimeZone={projectTimeZone}
               measure={activeMeasure}
               estimatesEnabled={estimatesEnabled}
               estimateType={estimateType}

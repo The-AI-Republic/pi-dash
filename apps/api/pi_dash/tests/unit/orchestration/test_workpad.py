@@ -38,6 +38,33 @@ def test_workpad_empty_by_default(issue):
 
 
 @pytest.mark.unit
+def test_agent_system_user_is_pi_dash_bot(db):
+    # §6.6 (decision 1): last name "Bot", explicit display name
+    # "Pi Dash Bot", username unchanged.
+    from pi_dash.orchestration import workpad
+
+    user = get_agent_system_user()
+    assert workpad.AGENT_USER_LAST_NAME == "Bot"
+    assert user.username == "pi_dash_agent"
+    assert user.first_name == "Pi Dash"
+    assert user.last_name == "Bot"
+    assert user.display_name == "Pi Dash Bot"
+    assert user.is_bot
+
+
+@pytest.mark.unit
+def test_bot_prompt_label_is_pi_dash_bot(db):
+    # §6.6 a.2: bot actors render as "AI agent: Pi Dash Bot".
+    from types import SimpleNamespace
+
+    from pi_dash.prompting.context import _comment_author_label
+
+    bot = SimpleNamespace(display_name="Pi Dash Bot", is_bot=True)
+    comment = SimpleNamespace(actor=bot, speaker_type="human", speaker_label="")
+    assert _comment_author_label(comment) == "AI agent: Pi Dash Bot"
+
+
+@pytest.mark.unit
 def test_set_workpad_persists_body(issue):
     set_workpad(issue, "## Agent Workpad\n\n### Phase\n- implementing\n")
     issue.refresh_from_db()

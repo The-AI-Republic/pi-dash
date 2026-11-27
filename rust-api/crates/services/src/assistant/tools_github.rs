@@ -541,9 +541,12 @@ pub fn review_success(
 // Token lookup (_find_token :48-82 + _maybe_decrypt :39-45)
 // ---------------------------------------------------------------------------
 
-/// Binding half (`github.py:52-65`): newest binding on a member project
-/// whose repository matches provider + namespace/name case-insensitively;
-/// the token is `provider_account.credential_config["token"]`.
+/// (`github.py:52-65`): newest binding on a member project whose
+/// repository matches provider + namespace/name case-insensitively; the
+/// token is `provider_account.credential_config["token"]`. NEWPIDASH-210:
+/// the legacy `GithubRepositorySync` fallback (`github.py:67-82`) is
+/// retired — migration 0152 backfilled a binding per sync row, so the
+/// binding read finds every project's token.
 /// (`*_iexact` → `UPPER()` comparisons, as in [`super::tools_issues`].)
 /// The member-projects subquery is [`super::tools_issues::MEMBER_PROJECTS_SQL`]
 /// inline, including its `projects.deleted_at` predicate; the outer
@@ -564,34 +567,6 @@ pub const BINDING_TOKEN_SQL: &str = "SELECT git_provider_accounts.credential_con
      AND UPPER(git_repositories.name) = UPPER($5) \
      AND git_repository_bindings.deleted_at IS NULL \
      ORDER BY git_repository_bindings.created_at DESC LIMIT 1";
-
-/// Sync fallback, GitHub only (`github.py:67-82`): newest sync on a member
-/// project whose repository matches owner/name; `access_token` wins over
-/// `token` (`creds.get("access_token") or creds.get("token")` — empty
-/// strings fall through to the next key).
-pub const SYNC_TOKEN_SQL: &str =
-    "SELECT github_repository_syncs.credentials \
-     FROM github_repository_syncs \
-     INNER JOIN github_repositories ON github_repositories.id = github_repository_syncs.repository_id \
-     WHERE github_repository_syncs.project_id IN (SELECT DISTINCT projects.id FROM projects \
-     INNER JOIN project_members ON (project_members.project_id = projects.id \
-     AND project_members.member_id = $1 AND project_members.is_active) \
-     INNER JOIN workspaces ON workspaces.id = projects.workspace_id \
-     WHERE workspaces.slug = $2 AND projects.deleted_at IS NULL) \
-     AND UPPER(github_repositories.owner) = UPPER($3) \
-     AND UPPER(github_repositories.name) = UPPER($4) \
-     AND github_repository_syncs.deleted_at IS NULL \
-     ORDER BY github_repository_syncs.created_at DESC LIMIT 1";
-
-/// Picks `access_token`, else `token`, skipping empties
-/// (`github.py:81`).
-pub fn pick_sync_token(access_token: Option<&str>, token: Option<&str>) -> Option<String> {
-    [access_token, token]
-        .into_iter()
-        .flatten()
-        .find(|value| !value.is_empty())
-        .map(str::to_owned)
-}
 
 /// `_maybe_decrypt` (`github.py:39-45`) over `decrypt_data`
 /// (`license/utils/encryption.py:34-43`): `decrypt_data` catches
@@ -843,14 +818,6 @@ mod tests {
     }
 
     #[test]
-    fn sync_token_prefers_access_token_skipping_empties() {
-        assert_eq!(pick_sync_token(Some("a"), Some("b")).as_deref(), Some("a"));
-        assert_eq!(pick_sync_token(Some(""), Some("b")).as_deref(), Some("b"));
-        assert_eq!(pick_sync_token(None, Some("")).as_deref(), None);
-        assert_eq!(pick_sync_token(None, None), None);
-    }
-
-    #[test]
     fn decrypt_failure_yields_empty_string_not_the_token() {
         // Ported bug #1: `decrypt_data` never raises (returns ""), so the
         // `except → return token` fallback is dead — undecryptable tokens
@@ -957,8 +924,7 @@ mod tests {
     #[test]
     fn token_subqueries_exclude_deleted_projects() {
         assert!(BINDING_TOKEN_SQL.contains("projects.deleted_at IS NULL"));
-        assert!(SYNC_TOKEN_SQL.contains("projects.deleted_at IS NULL"));
         assert!(BINDING_TOKEN_SQL.contains("git_repository_bindings.deleted_at IS NULL"));
-        assert!(SYNC_TOKEN_SQL.contains("github_repository_syncs.deleted_at IS NULL"));
+        assert!(!BINDING_TOKEN_SQL.contains("github_"));
     }
 }

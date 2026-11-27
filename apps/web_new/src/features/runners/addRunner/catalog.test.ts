@@ -8,27 +8,49 @@ import { describe, expect, it } from "vitest";
 
 import {
   AGENT_LABELS,
+  choicesForAgent,
   DEFAULT_MODEL_ID,
   DEFAULT_MODEL_LABEL,
   firstSupportedAgent,
   MODEL_CHOICES,
   modelContribution,
+  modelContributionFrom,
   PRESELECTED_MODEL,
+  preselectedId,
   RUNNER_AGENTS,
   selectedModelLabel,
+  selectedModelLabelFrom,
+  type CatalogRow,
 } from "./catalog.js";
 
 describe("agent list", () => {
-  it("offers the six CLIs in display order", () => {
-    expect(RUNNER_AGENTS).toEqual(["claude-code", "codex", "cursor-agent", "open-claw", "grok", "muse-code"]);
+  it("offers the seven CLIs in display order", () => {
+    expect(RUNNER_AGENTS).toEqual([
+      "claude-code",
+      "codex",
+      "cursor-agent",
+      "open-claw",
+      "grok",
+      "antigravity",
+      "muse-code",
+    ]);
     expect(RUNNER_AGENTS.map((agent) => AGENT_LABELS[agent])).toEqual([
       "Claude Code",
       "Codex",
       "Cursor",
       "OpenClaw",
       "Grok",
+      "Antigravity",
       "Muse Code",
     ]);
+  });
+
+  it("never offers the openhub catalog group (NEWPIDASH-302)", () => {
+    // openhub is a catalog group for the assistant, not a runner agent.
+    expect(RUNNER_AGENTS).not.toContain("openhub");
+    expect(MODEL_CHOICES).not.toHaveProperty("openhub");
+    expect(AGENT_LABELS).not.toHaveProperty("openhub");
+    expect(PRESELECTED_MODEL).not.toHaveProperty("openhub");
   });
 });
 
@@ -41,7 +63,9 @@ describe("Claude Code catalog (RUN-049)", () => {
   });
 
   it("emits claude-opus-5-5 for the new entry", () => {
-    expect(modelContribution("claude-code", "claude-opus-5-5")).toEqual({ model: "claude-opus-5-5" });
+    expect(modelContribution("claude-code", "claude-opus-5-5")).toEqual({
+      model: "claude-opus-5-5",
+    });
   });
 
   it("leaves Cursor's list untouched by the new Claude entry", () => {
@@ -71,6 +95,15 @@ describe("model lists", () => {
     expect(MODEL_CHOICES["muse-code"]).toHaveLength(1);
   });
 
+  it("offers Antigravity's documented models (NEWPIDASH-396)", () => {
+    const choices = MODEL_CHOICES["antigravity"];
+    expect(choices.map((choice) => choice.id)).toEqual([DEFAULT_MODEL_ID, "gemini-4-hydrogen", "gemini-4-neon"]);
+    expect(modelContribution("antigravity", "gemini-4-neon")).toEqual({
+      model: "gemini-4-neon",
+    });
+    expect(PRESELECTED_MODEL["antigravity"]).toBe(DEFAULT_MODEL_ID);
+  });
+
   it("emits no flags for the default sentinel or an unknown id", () => {
     expect(modelContribution("claude-code", DEFAULT_MODEL_ID)).toEqual({});
     expect(modelContribution("claude-code", "not-a-model")).toEqual({});
@@ -91,5 +124,80 @@ describe("machine gating", () => {
     expect(firstSupportedAgent([])).toBe("claude-code");
     expect(firstSupportedAgent(["grok", "codex"])).toBe("codex");
     expect(firstSupportedAgent(["unknown-agent"])).toBeNull();
+  });
+});
+
+describe("server catalog (NEWPIDASH-169)", () => {
+  const grokRows: CatalogRow[] = [
+    {
+      model: "grok-4.3",
+      label: "Grok 4.3",
+      reasoning_efforts: [],
+      sort_order: 0,
+      is_preselected: false,
+    },
+    {
+      model: "grok-new-1",
+      label: "Grok New 1",
+      reasoning_efforts: [],
+      sort_order: 1,
+      is_preselected: true,
+    },
+  ];
+  const codexRows: CatalogRow[] = [
+    {
+      model: "gpt-5.5",
+      label: "GPT-5.5",
+      reasoning_efforts: ["low", "high"],
+      sort_order: 0,
+      is_preselected: false,
+    },
+  ];
+
+  it("expands rows into choices with the sentinel first", () => {
+    const choices = choicesForAgent(grokRows);
+    expect(choices[0]).toEqual({ id: DEFAULT_MODEL_ID, label: DEFAULT_MODEL_LABEL });
+    expect(choices.slice(1)).toEqual([
+      { id: "grok-4.3", label: "Grok 4.3", model: "grok-4.3" },
+      { id: "grok-new-1", label: "Grok New 1", model: "grok-new-1" },
+    ]);
+  });
+
+  it("crosses effort rows and labels the effort", () => {
+    const choices = choicesForAgent(codexRows);
+    expect(choices.slice(1)).toEqual([
+      { id: "gpt-5.5:low", label: "GPT-5.5 (Low)", model: "gpt-5.5", reasoningEffort: "low" },
+      { id: "gpt-5.5:high", label: "GPT-5.5 (High)", model: "gpt-5.5", reasoningEffort: "high" },
+    ]);
+    expect(modelContributionFrom(choices, "gpt-5.5:high")).toEqual({
+      model: "gpt-5.5",
+      reasoningEffort: "high",
+    });
+    expect(selectedModelLabelFrom(choices, "gpt-5.5:high")).toBe("GPT-5.5 (High)");
+  });
+
+  it("resolves the preselected row to its first expanded choice", () => {
+    expect(preselectedId(grokRows)).toBe("grok-new-1");
+    expect(preselectedId([{ ...codexRows[0]!, is_preselected: true }])).toBe("gpt-5.5:low");
+    expect(preselectedId([{ ...grokRows[0]!, is_preselected: false }])).toBe(DEFAULT_MODEL_ID);
+  });
+});
+
+describe("Muse Code efforts", () => {
+  it("crosses a Muse row with its effort tiers and labels them", () => {
+    const choices = choicesForAgent([
+      {
+        model: "muse-spark",
+        label: "Muse Spark",
+        reasoning_efforts: ["high", "max"],
+        sort_order: 0,
+        is_preselected: true,
+      },
+    ]);
+    expect(choices.slice(1)).toEqual([
+      { id: "muse-spark:high", label: "Muse Spark (High)", model: "muse-spark", reasoningEffort: "high" },
+      { id: "muse-spark:max", label: "Muse Spark (Max)", model: "muse-spark", reasoningEffort: "max" },
+    ]);
+    expect(modelContributionFrom(choices, "muse-spark:max")).toEqual({ model: "muse-spark", reasoningEffort: "max" });
   });
 });

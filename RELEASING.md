@@ -50,6 +50,21 @@ gets a fix or feature on its own cadence.
    `pidash update --restart`" banner instead. See `runner/README.md`
    (Auto-update) for the full rendering matrix.
 
+### The built-in engine in the release
+
+Every runner release archive and the MSI carry the built-in agent engine
+(OpenAI Codex, renamed `pidash-agent-engine`) under `engine/<version>/`.
+The pinned upstream release is the one line in `runner/ENGINE_VERSION`
+(e.g. `rust-v0.153.4`); the desktop build scripts read the same file. The
+SHA-256 of each upstream asset for that tag is pinned in
+`runner/ENGINE_SHA256`. To move to a new Codex release, change both files in
+one PR (the comment at the top of `ENGINE_SHA256` says how to get the
+digests). The release workflow's "Stage built-in engine" step
+(`runner/scripts/stage_engine.py`) fetches the asset per target and refuses it
+unless it matches the pinned digest and the one in the upstream release
+metadata. The step needs `gh` with `GH_TOKEN`, which the workflow already
+provides.
+
 ## Cutting a platform release
 
 1. Land all platform-related PRs on `main`.

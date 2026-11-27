@@ -23,7 +23,7 @@ import pytest
 
 from _harness import broker_probe, celery_wire, config, taskspec
 from _harness import seed as seed_helpers
-from _harness.db import diff, snapshot, wait_for_condition as wait_for
+from _harness.db import diff, insert_row, snapshot, wait_for_condition as wait_for
 from _harness.sinks import HostileLengthSink, WildcardHttpProbe
 
 M = "pi_dash.bgtasks"
@@ -1906,3 +1906,190 @@ def test_issue_activity_triage_state_resolves_to_null(db_conn, broker_url):
     assert activity_block["new_identifier"] == str(todo_state["id"])
     # state_change preference + field=state sends one email log row.
     assert len(_added_rows(db_conn, "email_notification_logs", before)) == 1
+
+
+def test_issue_activity_deleted_writes_row(db_conn, broker_url):
+    """Issue deleted: one ``deleted the issue`` row (NEWPIDASH-134).
+
+    The app destroy (``base.py:741-753``) enqueues with
+    ``current_instance={}`` (a dict); ``delete_issue_activity``
+    (``issue_activities_task.py:642-663``) ignores it and writes the
+    row. This pins the Django oracle shape the Rust twin must match.
+    """
+    chain = seed_helpers.issue_chain(db_conn, "deletedactivity")
+    issue, owner, project = chain["issue"], chain["owner"], chain["project"]
+    epoch = 1728500000
+    before = snapshot(db_conn, ["issue_activities"])
+    celery_wire.publish(
+        f"{M}.issue_activities_task.issue_activity",
+        kwargs={
+            "type": "issue.activity.deleted",
+            "requested_data": json.dumps({"issue_id": str(issue["id"])}),
+            "current_instance": {},
+            "issue_id": str(issue["id"]),
+            "actor_id": str(owner["id"]),
+            "project_id": str(project["id"]),
+            "epoch": epoch,
+            "subscriber": False,
+            "notification": True,
+        },
+    )
+    (row,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="deleted issue_activities row",
+    )
+    assert row["comment"] == "deleted the issue"
+    assert row["verb"] == "deleted"
+    assert row["field"] == "issue"
+    assert row["issue_id"] == str(issue["id"])
+    assert row["project_id"] == str(project["id"])
+    assert row["actor_id"] == str(owner["id"])
+    assert row["epoch"] == epoch
+
+
+def test_issue_activity_assignee_subscribes_and_writes_row(db_conn, broker_url):
+    """Added assignee: one activity row + one subscriber row (NEWPIDASH-133).
+
+    ``update_issue_activity`` maps ``assignee_ids`` to ``track_assignees``
+    (``issue_activities_task.py:357-408``): the added assignee gets an
+    ``"added assignee "`` activity row and an ``IssueSubscriber`` row
+    bulk-created with ``ignore_conflicts``. The Rust port must write
+    both (the subscriber insert carries the model-default id and
+    ``auto_now*`` stamps); pre-fix it omits them, Postgres rejects the
+    insert, and neither row lands.
+    """
+    chain = seed_helpers.issue_chain(db_conn, "assignee")
+    issue, owner, project = chain["issue"], chain["owner"], chain["project"]
+    assignee = seed_helpers.user(db_conn, "assignee-assignee")
+    epoch = 1728500000
+    before = snapshot(db_conn, ["issue_activities", "issue_subscribers"])
+    celery_wire.publish(
+        f"{M}.issue_activities_task.issue_activity",
+        kwargs={
+            "type": "issue.activity.updated",
+            "requested_data": json.dumps({"assignee_ids": [str(assignee["id"])]}),
+            "current_instance": None,
+            "issue_id": str(issue["id"]),
+            "actor_id": str(owner["id"]),
+            "project_id": str(project["id"]),
+            "epoch": epoch,
+        },
+    )
+    (row,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="assignee issue_activities row",
+    )
+    assert row["field"] == "assignees"
+    assert row["verb"] == "updated"
+    assert row["comment"] == "added assignee "
+    assert row["old_value"] == ""
+    assert row["new_value"] == assignee["display_name"]
+    assert row["new_identifier"] == str(assignee["id"])
+    assert row["old_identifier"] is None
+    assert row["issue_id"] == str(issue["id"])
+    assert row["project_id"] == str(project["id"])
+    assert row["workspace_id"] == str(chain["workspace"]["id"])
+    assert row["actor_id"] == str(owner["id"])
+    assert row["epoch"] == epoch
+    (sub,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_subscribers", before) or None,
+        what="assignee issue_subscribers row",
+    )
+    assert sub["subscriber_id"] == str(assignee["id"])
+    assert sub["issue_id"] == str(issue["id"])
+    assert sub["project_id"] == str(project["id"])
+    assert sub["workspace_id"] == str(chain["workspace"]["id"])
+    assert sub["created_by_id"] == str(assignee["id"])
+    assert sub["updated_by_id"] == str(assignee["id"])
+    assert sub["deleted_at"] is None
+    assert sub["id"] is not None
+    assert sub["created_at"] is not None
+    assert sub["updated_at"] is not None
+
+
+def _relation_second_issue(db_conn, chain):
+    """A second issue (sequence_id 2) for relation payloads."""
+    return insert_row(
+        db_conn,
+        "issues",
+        {
+            "id": str(uuid.uuid4()),
+            "workspace_id": str(chain["workspace"]["id"]),
+            "project_id": str(chain["project"]["id"]),
+            "state_id": str(chain["state"]["id"]),
+            "name": "contract issue two",
+            "description_json": {},
+            "description_html": "<p></p>",
+            "priority": "none",
+            "complexity_score": 0,
+            "sequence_id": 2,
+            "is_draft": False,
+            "sort_order": 65534,
+            "git_work_branch": "",
+            "workpad": "",
+        },
+    )
+
+
+def _relation_rows(conn, before):
+    rows = _added_rows(conn, "issue_activities", before)
+    return rows if len(rows) == 2 else None
+
+
+def test_issue_activity_relation_create_writes_rows(db_conn, broker_url):
+    """Relation created: blocked_by forward + blocking mirror rows (NEWPIDASH-198).
+
+    ``create_issue_relation_activity`` (``issue_activities_task.py:1466-1513``)
+    resolves each side through ``Issue.objects.get`` and appends two rows:
+    the forward ``blocked_by`` row on the base issue (``new_value`` is the
+    related issue's ``f"{identifier}-{sequence_id}"`` label) and the mirror
+    ``blocking`` row on the related issue. This is the Django baseline the
+    Rust leg mirrors; the Django worker writes both rows on every backend.
+    """
+    chain = seed_helpers.issue_chain(db_conn, "relation")
+    issue, owner, project = chain["issue"], chain["owner"], chain["project"]
+    second = _relation_second_issue(db_conn, chain)
+    epoch = 1728500000
+    before = snapshot(db_conn, ["issue_activities"])
+    celery_wire.publish(
+        f"{M}.issue_activities_task.issue_activity",
+        kwargs={
+            "type": "issue_relation.activity.created",
+            "requested_data": json.dumps(
+                {"relation_type": "blocked_by", "issues": [str(second["id"])]}
+            ),
+            "current_instance": None,
+            "issue_id": str(issue["id"]),
+            "actor_id": str(owner["id"]),
+            "project_id": str(project["id"]),
+            "epoch": epoch,
+        },
+    )
+    rows = wait_for(
+        lambda: _relation_rows(db_conn, before),
+        what="relation issue_activities rows",
+    )
+    by_issue = {row["issue_id"]: row for row in rows}
+    assert set(by_issue) == {str(issue["id"]), str(second["id"])}
+    forward = by_issue[str(issue["id"])]
+    assert forward["field"] == "blocked_by"
+    assert forward["verb"] == "updated"
+    assert forward["comment"] == "added blocked_by relation"
+    assert forward["old_value"] == ""
+    assert forward["new_value"] == "CT-2"
+    assert forward["old_identifier"] == str(second["id"])
+    assert forward["project_id"] == str(project["id"])
+    assert forward["workspace_id"] == str(chain["workspace"]["id"])
+    assert forward["actor_id"] == str(owner["id"])
+    assert forward["epoch"] == epoch
+    mirror = by_issue[str(second["id"])]
+    assert mirror["field"] == "blocking"
+    assert mirror["verb"] == "updated"
+    assert mirror["comment"] == "added blocking relation"
+    assert mirror["old_value"] == ""
+    assert mirror["new_value"] == "CT-1"
+    assert mirror["old_identifier"] == str(issue["id"])
+    assert mirror["project_id"] == str(project["id"])
+    assert mirror["workspace_id"] == str(chain["workspace"]["id"])
+    assert mirror["actor_id"] == str(owner["id"])
+    assert mirror["epoch"] == epoch

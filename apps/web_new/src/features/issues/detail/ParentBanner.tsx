@@ -53,7 +53,7 @@ export function ParentBanner({
   issue,
   editable,
 }: ParentBannerProps): React.ReactElement | null {
-  const readOnly = !editable || issue.archived_at !== null || issue.is_synced;
+  const readOnly = !editable || issue.archived_at !== null;
   const parentId = issue.parent_id;
   const parent = useQuery(parentIssueQueryOptions(getAppClient(), workspaceSlug, projectId, parentId ?? ""));
   const parentProjectId = parent.data?.project_id ?? null;

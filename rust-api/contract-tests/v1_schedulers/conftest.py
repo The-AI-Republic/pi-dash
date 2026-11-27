@@ -94,6 +94,7 @@ def _seed_run(
             "thread_id": "seed-thread",
             # ``error_code`` is the ``code`` key of the bag (PDASHOSS01-187).
             "error_details": {"code": error_code} if error_code else {},
+            "failure_reason": "",
             "workspace_id": workspace_id,
             "pod_id": pod_id,
             "created_by_id": created_by_id,
@@ -106,6 +107,7 @@ def _seed_run(
             "phase_kind": phase_kind,
             "agent_metadata": {},
             "usage": {"input": 1, "output": 1, "total": 2},
+            "pin_kind": "locality",
             "started_at": started_at,
             "scheduler_binding_id": binding_id,
             "created_at": created_at,

@@ -19,6 +19,7 @@ import {
 } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
+import { archivesKeys } from "../../archives/index.js";
 import { issueKeys } from "../api/keys.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 
@@ -41,8 +42,11 @@ export function useBulkMutations({ workspaceSlug, projectId }: BulkMutationConte
   const refresh = (): void => {
     // The same layout is mounted by project, cycle, module and epic screens,
     // each under its own prefix beneath `lists` (see issueKeys.lists), so
-    // invalidate the whole list subtree rather than just `projectId`.
+    // invalidate the whole list subtree rather than just `projectId`. Bulk
+    // archive and delete move the archived count too, so the archives badge
+    // (ARCH-002) goes with the lists.
     void queryClient.invalidateQueries({ queryKey: issueKeys.lists(workspaceSlug) });
+    void queryClient.invalidateQueries({ queryKey: archivesKeys.all(workspaceSlug, projectId) });
   };
   const fail = (error: unknown): void => notifyError(BULK_FAILED_TITLE, bulkFailureDescription(error));
 

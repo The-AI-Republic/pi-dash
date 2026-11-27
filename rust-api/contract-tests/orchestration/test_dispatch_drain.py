@@ -123,6 +123,63 @@ def test_run_ai_assigns_to_idle_runner(api_client):
     _assert_assigned(body["id"], runner)
 
 
+def _fresh_engine(w, pod, *, pod_dispatch="pod_member"):
+    """Online engine runner (``desktop_bundled``) with a live session row."""
+    machine = world.uid()
+    _exec(
+        """INSERT INTO dev_machine
+           (id, owner_id, host_label, visibility, provisioning, last_seen_at, label, created_at,
+            updated_at)
+           VALUES (%s,%s,%s,0,'manual',now(),'',now(),now())""",
+        (machine, w.user_id, f"eng-{secrets.token_hex(4)}"),
+    )
+    runner = world.make_online_runner(w.user_id, w.workspace_id, pod)
+    _exec(
+        """UPDATE runner SET provisioning='desktop_bundled', pod_dispatch=%s,
+           dev_machine_id=%s, status='online', last_heartbeat_at=now()
+           WHERE id=%s""",
+        (pod_dispatch, machine, runner),
+    )
+    _exec(
+        "INSERT INTO runner_session (id, runner_id, protocol_version,"
+        " created_at, last_seen_at, revoked_at, revoked_reason)"
+        " VALUES (%s,%s,4,now(),now(),NULL,'')",
+        (world.uid(), runner),
+    )
+    return runner
+
+
+def test_run_ai_assigns_to_pod_member_engine(api_client):
+    """#2903: a pod-member engine ranks equally for run-ai dispatch."""
+    w, client = api_client
+    pod = world.make_pod(w.workspace_id, w.project_id, is_default=True)
+    engine = _fresh_engine(w, pod)
+    issue = world.make_issue(w, "runeng", "In Progress")
+
+    r = client.post_run_ai(w.workspace_slug, w.project_id, issue)
+    assert r.status_code == 201, r.text
+    _assert_assigned(r.json()["id"], engine)
+
+
+def test_run_ai_ignores_pinned_only_engine(api_client):
+    """#2903: a human run-ai bounces when only a pinned-only engine is in
+    the pod (preflight counts pod-member engines only)."""
+    w, client = api_client
+    pod = world.make_pod(w.workspace_id, w.project_id, is_default=True)
+    _fresh_engine(w, pod, pod_dispatch="pinned_only")
+    issue = world.make_issue(w, "runengpin", "In Progress")
+
+    r = client.post_run_ai(w.workspace_slug, w.project_id, issue)
+    assert r.status_code == 409, r.text
+    assert r.json()["reason"] == "no_eligible_runner"
+    assert (
+        _fetchone(
+            "SELECT count(*) AS n FROM agent_run WHERE work_item_id=%s", (issue,)
+        )["n"]
+        == 0
+    )
+
+
 def test_retick_assigns_to_idle_runner(api_client):
     """v1 re-tick assigns the new run in-request with an idle local runner."""
     w, client = api_client
@@ -137,6 +194,65 @@ def test_retick_assigns_to_idle_runner(api_client):
     assert body["granted"] is True, body
     assert body["run_id"] is not None, body
     _assert_assigned(body["run_id"], runner)
+
+
+def test_web_retick_grants_and_assigns(web_client):
+    """Web re-tick (the issue page's Re-tick button) grants and assigns in-request.
+
+    ``POST /api/runners/re-tick/`` used to proxy its ``re_tick_ticker`` tail
+    to Django, so the all-Rust stack (no Django upstream) answered 502
+    ``bad_gateway`` to every valid re-tick.
+    """
+    w, client = web_client
+    pod = world.make_pod(w.workspace_id, w.project_id, is_default=True)
+    runner = _fresh_runner(w.user_id, w.workspace_id, pod)
+    issue = world.make_issue(w, "webretick", "In Progress")
+    world.set_ticker(issue, used=10)  # spent pool: the grant dispatches now
+
+    r = client.post("/api/runners/re-tick/", json={"work_item": issue})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert list(body)[:3] == ["granted", "reason", "run_id"], body
+    assert body["granted"] is True, body
+    assert body["run_id"] is not None, body
+    for key in ("used", "tick_count", "max_ticks", "enabled", "pending_entry", "next_run_at"):
+        assert key in body, body
+    _assert_assigned(body["run_id"], runner)
+
+
+def test_web_retick_refuses_when_pool_not_spent(web_client):
+    """A re-tick with budget left is a 200 no-op, not a proxy."""
+    w, client = web_client
+    issue = world.make_issue(w, "webreticknoop", "In Progress")
+    world.set_ticker(issue, used=0)
+
+    r = client.post("/api/runners/re-tick/", json={"work_item": issue})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["granted"] is False, body
+    assert body["reason"] == "budget_not_exhausted", body
+    assert body["run_id"] is None, body
+    for key in ("used", "tick_count", "max_ticks", "enabled", "pending_entry", "next_run_at"):
+        assert key in body, body
+
+
+@pytest.mark.parametrize(
+    ("content", "status"),
+    [
+        (b"", 400),  # request.data == {}: work_item is required
+        (b"{not json", 400),  # DRF JSON parse error
+        (b"[]", 500),  # list has no .get (AttributeError)
+    ],
+)
+def test_web_retick_body_arms_never_502(web_client, content, status):
+    """Empty / malformed / non-object bodies are answered, never proxied."""
+    _w, client = web_client
+    r = client.post(
+        "/api/runners/re-tick/",
+        content=content,
+        headers={"Content-Type": "application/json"},
+    )
+    assert r.status_code == status, r.text
 
 
 def test_fire_tick_continuation_assigns(api_client, broker):

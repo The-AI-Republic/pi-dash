@@ -23,6 +23,10 @@ pub struct Model {
     pub updated_by_id: Option<Uuid>,
     pub user_id: Option<Uuid>,
     pub workspace_id: Option<Uuid>,
+    pub scope: String,
+    pub dev_machine_id: Option<Uuid>,
+    pub interactive_approval: bool,
+    pub api_token_id: Option<Uuid>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -59,11 +63,25 @@ pub enum Relation {
         on_delete = "NoAction"
     )]
     Workspaces,
+    #[sea_orm(
+        belongs_to = "super::api_tokens::Entity",
+        from = "Column::ApiTokenId",
+        to = "super::api_tokens::Column::Id",
+        on_update = "NoAction",
+        on_delete = "SetNull"
+    )]
+    ApiTokens,
 }
 
 impl Related<super::workspaces::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Workspaces.def()
+    }
+}
+
+impl Related<super::api_tokens::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::ApiTokens.def()
     }
 }
 

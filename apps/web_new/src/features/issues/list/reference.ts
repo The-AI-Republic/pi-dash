@@ -11,6 +11,7 @@ import * as React from "react";
 
 import { useMe } from "../../../core/session/index.js";
 import { useLabels } from "../labels/api.js";
+import { stateWorkflowOrder } from "./grouping.js";
 // Direct module imports keep the picker UI components out of the list's
 // first-route chunk; only the reference reads and option shaping load here.
 import { selectCycleOptions } from "../../../shared/pickers/cycles.js";
@@ -27,6 +28,9 @@ import {
 /** Dimension → id-to-name map for section titles. */
 export type GroupLabels = Partial<Record<string, ReadonlyMap<string, string>>>;
 
+/** Dimension → section key order; dimensions without one keep the envelope's. */
+export type GroupOrders = Partial<Record<string, readonly string[]>>;
+
 export interface ListReferenceInput {
   workspaceSlug: string;
   projectId: string;
@@ -36,6 +40,8 @@ export interface ListReferenceInput {
 
 export interface ListReferences {
   labels: GroupLabels;
+  /** Dimension → explicit section order (states: workflow order). */
+  orders: GroupOrders;
   /** Workflow states in server order (the strip reads names and glyphs). */
   stateRows: State[];
   /** Name lookups the strip uses on each row. */
@@ -78,6 +84,7 @@ export function useListReferences({ workspaceSlug, projectId, dimension }: ListR
 
   const stateRows = states.data ?? [];
   const stateNames = React.useMemo(() => nameMap(stateRows), [stateRows]);
+  const stateOrder = React.useMemo(() => stateWorkflowOrder(states.data ?? []), [states.data]);
 
   const memberRows = React.useMemo(() => {
     const options = selectMemberOptions({
@@ -129,6 +136,7 @@ export function useListReferences({ workspaceSlug, projectId, dimension }: ListR
 
   return {
     labels: labelsByDimension,
+    orders: { state: stateOrder },
     stateRows,
     stateNames,
     assigneeNames,

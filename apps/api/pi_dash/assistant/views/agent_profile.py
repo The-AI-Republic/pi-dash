@@ -46,6 +46,10 @@ class AgentModelProfileEndpoint(BaseAPIView):
 
         profile = agent_model_profile_for_user(request.user)
         enabled = managed_runner_is_enabled()
+        _apply_legacy_pause(
+            request.user,
+            "" if (enabled and profile.available) else ("engine_disabled" if not enabled else "profile_unavailable"),
+        )
         return Response(
             {
                 "managed_runner_enabled": enabled,
@@ -92,15 +96,20 @@ class AgentModelTokenEndpoint(BaseAPIView):
         except ManagedRunnerUnavailable as exc:
             # The client should have consulted the profile first; answer with
             # the same reason code it would have seen there.
+            _apply_legacy_pause(request.user, "profile_unavailable")
             return Response(
                 {"error": exc.code, "detail": str(exc)},
                 status=status.HTTP_409_CONFLICT,
             )
         except Exception as exc:  # noqa: BLE001 — classified below, never echoed raw
             code, http_status = _classify_credential_error(exc)
+            # Older desktop builds keep today's answer; only the pause is new.
+            if _is_wallet_error(exc):
+                _apply_legacy_pause(request.user, "wallet_empty")
             logger.warning("managed_runner.token_refresh_failed user=%s code=%s", request.user.id, code)
             return Response({"error": code}, status=http_status)
 
+        _apply_legacy_pause(request.user, "")
         # Audit the issuance, never the token.
         logger.info(
             "managed_runner.token_issued user=%s expires_at=%s",
@@ -127,3 +136,21 @@ def _classify_credential_error(exc: Exception) -> tuple[str, int]:
     if name in ("OpenHubAuthError", "SessionRevoked", "NoAIRepublicSession"):
         return "gateway_session_revoked", status.HTTP_401_UNAUTHORIZED
     return "gateway_unavailable", status.HTTP_503_SERVICE_UNAVAILABLE
+
+
+def _is_wallet_error(exc: Exception) -> bool:
+    lowered = type(exc).__name__.lower()
+    return "wallet" in lowered or "insufficient" in lowered or "paymentrequired" in lowered
+
+
+def _apply_legacy_pause(user, reason: str) -> None:
+    """Legacy desktop machines take ``wallet_empty`` / ``profile_unavailable``
+    / ``engine_disabled`` from these endpoints' outcomes, and recover from
+    the profile ones on success (built_engine_as_runner §9). Never fails the
+    request."""
+    try:
+        from pi_dash.runner.services.engine_state import apply_profile_outcome_to_legacy_machines
+
+        apply_profile_outcome_to_legacy_machines(user, reason)
+    except Exception:  # pragma: no cover - defensive
+        logger.exception("legacy engine pause update failed for user %s", getattr(user, "id", None))

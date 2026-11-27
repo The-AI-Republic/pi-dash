@@ -15,9 +15,9 @@
 //!
 //! * Finalize: lock the non-terminal row (`FOR UPDATE` + expected
 //!   filters), merge `done_payload` over the locked row, write,
-//!   maybe append the cloud-only terminal event, register
-//!   `_publish_effects` on commit. First-writer-wins: a second
-//!   concurrent finalize finds no row and reports `false`.
+//!   register `_publish_effects` on commit. First-writer-wins: a
+//!   second concurrent finalize finds no row and reports `false`.
+//!   (P3 step C deleted the cloud-only terminal-event append.)
 //! * Terminal effects: lock issue-then-run (matching issue moves and
 //!   `complete_project_move_handoff` — the order that prevents a
 //!   Postgres deadlock), run hooks once behind the
@@ -38,14 +38,15 @@
 //! Django runs in Python under the same `FOR UPDATE` lock.
 
 use chrono::{DateTime, Utc};
-use pidash_db::runner_runs::{agent_run, event, pod};
+use pidash_db::entity as orm;
+use pidash_db::runner_runs::{agent_run, pod};
 use pidash_db::tasks_ticker::models::scheduler_binding;
-use pidash_types::dispatch::AgentExecutorKind;
-use pidash_types::runner_runs::AgentRunStatus;
+use pidash_types::agent_runs::AgentExecutorKind;
+use pidash_types::runner_runs::{classify_failure, AgentRunStatus};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::lifecycle::{has_project_move_handoff, plan_failure_comment, CommentPlan};
+use super::lifecycle::{has_project_move_handoff, plan_failure_comment, FailureCommentPlan};
 use super::scheduler_hook::{plan_scheduler_hook, BindingFacts, SchedulerHookPlan};
 use super::{
     qualified_columns, LifecycleEffect, SetClause, SetValue, ISSUE_COLUMNS, PROJECT_COLUMNS,
@@ -110,7 +111,9 @@ pub enum FinalizeError {
 /// (`yielded_at` set) and the incoming one carries no `status` of its
 /// own — then the stored yield keys survive onto a copy of the
 /// incoming payload (or onto `{}` for a non-dict incoming). A present
-/// `status`, even null, suppresses the merge.
+/// `status`, even null, suppresses the merge. `finish` stores no keys of
+/// its own since the unified workpad (`.ai_design/unified_workpad/
+/// design.md` U2), so nothing beyond the yield keys is kept.
 pub fn merge_done_payload(existing: &Value, incoming: &Value) -> Value {
     let yielded = existing
         .as_object()
@@ -123,9 +126,9 @@ pub fn merge_done_payload(existing: &Value, incoming: &Value) -> Value {
     let mut merged = incoming.as_object().cloned().unwrap_or_default();
     if !merged.contains_key("status") {
         if let Some(stored) = existing.as_object() {
-            for key in YIELD_KEYS {
-                if let Some(value) = stored.get(key) {
-                    merged.insert(key.to_owned(), value.clone());
+            for key in YIELD_KEYS.iter() {
+                if let Some(value) = stored.get(*key) {
+                    merged.insert((*key).to_owned(), value.clone());
                 }
             }
         }
@@ -223,8 +226,50 @@ pub fn plan_finalize_values(
             }),
         }
     }
+    // Safety net for the canonical failure taxonomy (PDASHOSS01-183,
+    // `finalize_agent_run`): every FAILED row carries a non-empty
+    // `failure_reason`. Terminal frames classify earlier (with the
+    // runner's reason); cloud-side writers (Cloud Agent tasks, reapers,
+    // managed-runner expiry) land here with only `error` / `error_code`.
+    // A present-but-empty value is replaced in place, a missing one
+    // appended — the dict-assignment order. Runs before the fold, which
+    // removes the flat `error` / `error_code` clauses this reads.
+    if new_status == AgentRunStatus::Failed && !text_clause_truthy(&clauses, "failure_reason") {
+        let error = text_clause(&clauses, "error");
+        let error_code = text_clause(&clauses, "error_code");
+        let reason = SetValue::Text(classify_failure(&error, "", &error_code).value().to_owned());
+        match clauses
+            .iter_mut()
+            .find(|clause| clause.column == "failure_reason")
+        {
+            Some(existing) => existing.value = reason,
+            None => clauses.push(SetClause {
+                column: "failure_reason",
+                value: reason,
+            }),
+        }
+    }
     fold_error_details(&mut clauses);
     Ok(FinalizeValues { clauses })
+}
+
+/// `str(values.get(column) or "")` over the assembled clauses: the text
+/// value, `""` for an absent, null or non-text clause (every writer binds
+/// these columns as text).
+fn text_clause(clauses: &[SetClause], column: &str) -> String {
+    clauses
+        .iter()
+        .find(|clause| clause.column == column)
+        .and_then(|clause| match &clause.value {
+            SetValue::Text(text) => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// `values.get(column)` truthiness for a text column.
+fn text_clause_truthy(clauses: &[SetClause], column: &str) -> bool {
+    !text_clause(clauses, column).is_empty()
 }
 
 /// Merge the locked row's `done_payload` into the values
@@ -376,96 +421,6 @@ pub fn error_details_merge_sql(param: &str) -> String {
     )
 }
 
-/// Terminal-event existence (`finalize_agent_run:74`): cloud-only
-/// guard. Params: `$1` run id, `$2` kind (`terminal`).
-pub fn terminal_event_exists_sql() -> &'static str {
-    "SELECT 1 AS \"a\" FROM \"agent_run_event\" WHERE \
-     (\"agent_run_event\".\"agent_run_id\" = $1 AND \"agent_run_event\".\"kind\" = $2) LIMIT 1"
-}
-
-/// Terminal-event sequence (`finalize_agent_run:77`): current max, or
-/// no row. Param: `$1` run id.
-pub fn terminal_event_max_seq_sql() -> &'static str {
-    "SELECT \"agent_run_event\".\"seq\" FROM \"agent_run_event\" WHERE \
-     \"agent_run_event\".\"agent_run_id\" = $1 ORDER BY \"agent_run_event\".\"seq\" DESC LIMIT 1"
-}
-
-/// Terminal-event `INSERT` (`finalize_agent_run:79-84`): the id is a
-/// `BigAutoField` (default + `RETURNING`); `created_at` binds `now()`.
-/// Params: `$1` run id, `$2` seq, `$3` kind, `$4` payload, `$5` now.
-pub fn terminal_event_insert_sql() -> String {
-    let columns: Vec<String> = event::COLUMNS
-        .iter()
-        .filter(|c| **c != "id")
-        .map(|c| format!("\"{c}\""))
-        .collect();
-    let params = (1..=columns.len())
-        .map(|n| format!("${n}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "INSERT INTO \"{}\" ({}) VALUES ({}) RETURNING \"{}\".\"id\"",
-        event::TABLE,
-        columns.join(", "),
-        params,
-        event::TABLE
-    )
-}
-
-/// The terminal event row (`finalize_agent_run:76-84`): `seq` is max
-/// + 1 (or 1), `kind` is `terminal`, payload `{"status",
-/// "error_code"}`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TerminalEventPlan {
-    pub seq: i32,
-    pub payload: Value,
-}
-
-/// Plan the terminal event from the current max seq (or `None`).
-pub fn plan_terminal_event(
-    max_seq: Option<i32>,
-    new_status: AgentRunStatus,
-    error_code: &str,
-) -> TerminalEventPlan {
-    TerminalEventPlan {
-        seq: max_seq.unwrap_or(0) + 1,
-        payload: terminal_event_payload(new_status, error_code),
-    }
-}
-
-/// Terminal-event payload: `{"status": <value>, "error_code": <code>}`.
-pub fn terminal_event_payload(new_status: AgentRunStatus, error_code: &str) -> Value {
-    serde_json::json!({"status": new_status.value(), "error_code": error_code})
-}
-
-/// Terminal-event `INSERT` performer ([`terminal_event_insert_sql`]):
-/// append the planned cloud-only event for one finalized run.
-///
-/// `plan` is the [`plan_terminal_event`] row (`seq`, `{"status",
-/// "error_code"}` payload); `kind` binds `terminal`, `created_at`
-/// binds the caller's own `now` (each driver stamps its own clock,
-/// never hoisted across legs). The existence guard and max-seq read
-/// stay driver-side.
-pub async fn insert_terminal_event<'e, E>(
-    ex: E,
-    run_id: Uuid,
-    plan: TerminalEventPlan,
-    now: DateTime<Utc>,
-) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    sqlx::query(&terminal_event_insert_sql())
-        .bind(run_id)
-        .bind(plan.seq)
-        .bind("terminal")
-        .bind(plan.payload)
-        .bind(now)
-        .execute(ex)
-        .await
-        .map(|_| ())
-}
-
 /// `_publish_effects` (`agent_run_finalization.py:89-103`): the Celery
 /// emit first, then the inline terminal-effects run — each isolated,
 /// in order. The executing layer logs `failed to publish terminal
@@ -501,7 +456,7 @@ pub fn lock_issue_sql() -> String {
 /// `select_related("work_item", "work_item__state",
 /// "work_item__project", "scheduler_binding").filter(pk,
 /// status__in=terminal).first()` with `FOR UPDATE OF "agent_run"` —
-/// 41 + 34 + 46 + 18 + 22 columns. Param: `$1` run id, `$2..$6` the
+/// 42 + 34 + 46 + 18 + 22 columns. Param: `$1` run id, `$2..$6` the
 /// terminal values in tuple order (same set-ordering quirk as the
 /// finalize lock).
 pub fn lock_run_for_effects_sql() -> String {
@@ -530,7 +485,7 @@ pub fn update_hooks_marker_sql() -> &'static str {
 }
 
 /// Capacity re-read (`apply_terminal_effects:183`):
-/// `select_related("runner", "pod").get(pk)` — 40 + 10 + 31 columns,
+/// `select_related("runner", "pod").get(pk)` — 41 + 10 + 31 columns,
 /// `.get()` so no `LIMIT`. A missing row raises `DoesNotExist` (no
 /// guard in the source); the executing layer propagates it. Param:
 /// `$1` run id.
@@ -565,8 +520,14 @@ pub enum EffectsSql {
     LockRunForEffects,
     FailureCommentSavepoint,
     FailureCommentReread,
+    /// `consecutive_failure_streak` (PDASHOSS01-183): only for a run whose
+    /// re-read carries a non-empty `failure_reason`.
+    FailureCommentStreak,
     FailureCommentDedupeCheck,
     FailureCommentInserts,
+    /// The clock-stopped notification rows (PDASHOSS01-183): only when the
+    /// gate says the clock stopped and a receiver survives the filter.
+    FailureCommentNotify,
     FailureCommentRelease,
     SchedulerSavepoint,
     SchedulerUpdate,
@@ -581,20 +542,17 @@ pub enum EffectsSql {
 /// (skipped on handoff), scheduler hook (savepointed, when bound).
 #[derive(Debug, Clone, PartialEq)]
 pub struct HooksPlan {
-    pub failure_comment: Option<CommentPlan>,
+    pub failure_comment: Option<FailureCommentPlan>,
     pub orchestration: bool,
     pub scheduler: Option<SchedulerHookPlan>,
 }
 
-/// The capacity branch: cloud runs dispatch waiting work for the
-/// workspace; local runs drain runner and/or pod when set. Drains and
-/// dispatch run *before* the marker write, unisolated — a failure
-/// leaves the marker unset for the reconciler.
+/// The capacity branch: local runs drain runner and/or pod when set.
+/// Drains run *before* the marker write, unisolated — a failure
+/// leaves the marker unset for the reconciler. (P3 step C deleted
+/// the cloud dispatch arm.)
 #[derive(Debug, Clone, PartialEq)]
 pub enum CapacityPlan {
-    Cloud {
-        workspace_id: Uuid,
-    },
     Local {
         runner_id: Option<Uuid>,
         pod_id: Option<Uuid>,
@@ -602,13 +560,10 @@ pub enum CapacityPlan {
 }
 
 impl CapacityPlan {
-    /// The capacity effects in order: dispatch, or runner drain then
-    /// pod drain (each when its id is set).
+    /// The capacity effects in order: runner drain then pod drain
+    /// (each when its id is set).
     pub fn effects(&self) -> Vec<LifecycleEffect> {
         match self {
-            CapacityPlan::Cloud { workspace_id } => vec![LifecycleEffect::DispatchWaiting {
-                workspace_id: *workspace_id,
-            }],
             CapacityPlan::Local { runner_id, pod_id } => {
                 let mut effects = Vec::new();
                 if let Some(runner_id) = runner_id {
@@ -692,20 +647,22 @@ pub fn plan_terminal_effects(inputs: &TerminalEffectsInputs) -> TerminalEffectsO
         None
     } else {
         let failure_comment = if inputs.status == AgentRunStatus::Failed && !handoff {
-            // The savepoint pair always runs around the hook call;
-            // the reads only when the comment is not suppressed
-            // (suppression returns before any SQL). The inserts are
-            // additionally runtime-gated: a dedupe hit or a missing
-            // work item means silence after the reads.
+            // The savepoint pair always runs around the hook call, and
+            // so does the re-read: infra noise is only silenced once the
+            // clock effect says the clock keeps running. Everything after
+            // the re-read is runtime-gated: the clock-effect reads need a
+            // stored reason and an armed clock, a free-retry / infra gate,
+            // dedupe hit or missing work item means silence, and the
+            // notification needs a stopped clock plus a surviving receiver.
             statements.push(EffectsSql::FailureCommentSavepoint);
             let comment = plan_failure_comment(inputs.error, inputs.run_id);
-            if comment.is_some() {
-                statements.push(EffectsSql::FailureCommentReread);
-                statements.push(EffectsSql::FailureCommentDedupeCheck);
-                statements.push(EffectsSql::FailureCommentInserts);
-            }
+            statements.push(EffectsSql::FailureCommentReread);
+            statements.push(EffectsSql::FailureCommentStreak);
+            statements.push(EffectsSql::FailureCommentDedupeCheck);
+            statements.push(EffectsSql::FailureCommentInserts);
+            statements.push(EffectsSql::FailureCommentNotify);
             statements.push(EffectsSql::FailureCommentRelease);
-            comment
+            Some(comment)
         } else {
             None
         };
@@ -740,15 +697,9 @@ pub fn plan_terminal_effects(inputs: &TerminalEffectsInputs) -> TerminalEffectsO
         None
     } else {
         statements.push(EffectsSql::UpdateCapacityMarker);
-        Some(if inputs.executor_kind == AgentExecutorKind::CloudAgent {
-            CapacityPlan::Cloud {
-                workspace_id: inputs.workspace_id,
-            }
-        } else {
-            CapacityPlan::Local {
-                runner_id: inputs.runner_id,
-                pod_id: inputs.pod_id,
-            }
+        Some(CapacityPlan::Local {
+            runner_id: inputs.runner_id,
+            pod_id: inputs.pod_id,
         })
     };
 
@@ -759,6 +710,402 @@ pub fn plan_terminal_effects(inputs: &TerminalEffectsInputs) -> TerminalEffectsO
         capacity,
         statements,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// SeaORM finalize kernel
+// ---------------------------------------------------------------------------
+//
+// The statements above as SeaORM / sea-query builders, for drivers that run
+// on a pool (`sea_orm_connection`) or an open sqlx transaction
+// (`pidash_db::orm_tx::TxConn`). Same predicates, order, lock and binds as
+// the text twins; the full row decodes by name into the entity `Model`.
+
+/// The finalize lock statement ([`lock_run_for_finalize_sql`]): the
+/// non-terminal row by id, plus the expected runner / status when given,
+/// `ORDER BY created_at DESC LIMIT 1 FOR UPDATE`.
+pub fn lock_run_for_finalize_select(
+    run_id: Uuid,
+    expected_runner_id: Option<Uuid>,
+    expected_status: Option<AgentRunStatus>,
+) -> sea_orm::Select<orm::agent_run::Entity> {
+    use orm::agent_run::{Column, Entity};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+    let mut select = Entity::find().filter(Column::Id.eq(run_id)).filter(
+        Column::Status.is_not_in(
+            pidash_types::runner_runs::TERMINAL_RUN_STATUSES
+                .iter()
+                .map(AgentRunStatus::value),
+        ),
+    );
+    if let Some(runner_id) = expected_runner_id {
+        select = select.filter(Column::RunnerId.eq(runner_id));
+    }
+    if let Some(status) = expected_status {
+        select = select.filter(Column::Status.eq(status.value()));
+    }
+    select
+        .order_by_desc(Column::CreatedAt)
+        .limit(1)
+        .lock_exclusive()
+}
+
+/// Run the finalize lock: the locked full row, or `None` when the run is
+/// terminal already or misses an expected filter (first-writer-wins).
+pub async fn lock_run_for_finalize(
+    db: &impl sea_orm::ConnectionTrait,
+    run_id: Uuid,
+    expected_runner_id: Option<Uuid>,
+    expected_status: Option<AgentRunStatus>,
+) -> Result<Option<orm::agent_run::Model>, sea_orm::DbErr> {
+    lock_run_for_finalize_select(run_id, expected_runner_id, expected_status)
+        .one(db)
+        .await
+}
+
+/// `merge_error_details` over the row being updated
+/// ([`error_details_merge_sql`]): the stored bag (`{}` when not an
+/// object), minus every key the patch names, `||` the patch with its
+/// nulls stripped.
+pub fn error_details_merge_expr(patch: &Value) -> sea_orm::sea_query::SimpleExpr {
+    use orm::agent_run::Column;
+    use sea_orm::sea_query::{Alias, BinOper, Expr, Func, SimpleExpr};
+    let stored = Expr::col((orm::agent_run::Entity, Column::ErrorDetails));
+    let mut bag: SimpleExpr = Expr::case(
+        SimpleExpr::from(Func::cust(Alias::new("jsonb_typeof")).arg(stored.clone())).eq("object"),
+        stored,
+    )
+    .finally(Expr::val(Value::Object(Default::default())).cast_as(Alias::new("jsonb")))
+    .into();
+    if let Some(map) = patch.as_object() {
+        for key in map.keys() {
+            bag = bag.binary(BinOper::Sub, Expr::val(key.clone()));
+        }
+    }
+    bag.binary(
+        sea_orm::sea_query::extension::postgres::PgBinOper::Concatenate,
+        SimpleExpr::from(
+            Func::cust(Alias::new("jsonb_strip_nulls"))
+                .arg(Expr::val(patch.clone()).cast_as(Alias::new("jsonb"))),
+        ),
+    )
+}
+
+/// The finalize `UPDATE` statement ([`finalize_update_sql`]): `SET` in
+/// clause order on the locked primary key. `Now` clauses take `now`,
+/// `Null` clauses write SQL `NULL`, the `error_details` patch merges into
+/// the stored bag.
+pub fn finalize_update_statement(
+    values: &FinalizeValues,
+    run_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<sea_orm::UpdateMany<orm::agent_run::Entity>, sea_orm::DbErr> {
+    use orm::agent_run::{Column, Entity};
+    use sea_orm::sea_query::{Expr, Keyword, SimpleExpr};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let mut update = Entity::update_many();
+    for clause in &values.clauses {
+        let column: Column = clause.column.parse().map_err(|_| {
+            sea_orm::DbErr::Custom(format!("unknown agent_run column {}", clause.column))
+        })?;
+        let expr: SimpleExpr = match (&clause.value, clause.column) {
+            (SetValue::Json(patch), ERROR_DETAILS_COLUMN) => error_details_merge_expr(patch),
+            (SetValue::Null, _) => SimpleExpr::Keyword(Keyword::Null),
+            (SetValue::Now, _) => Expr::val(now).into(),
+            (SetValue::Text(text), _) => Expr::val(text.clone()).into(),
+            (SetValue::Json(json), _) => Expr::val(json.clone()).into(),
+        };
+        update = update.col_expr(column, expr);
+    }
+    Ok(update.filter(Column::Id.eq(run_id)))
+}
+
+/// Run the finalize `UPDATE`; returns the rows written.
+pub async fn finalize_update(
+    db: &impl sea_orm::ConnectionTrait,
+    values: &FinalizeValues,
+    run_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<u64, sea_orm::DbErr> {
+    Ok(finalize_update_statement(values, run_id, now)?
+        .exec(db)
+        .await?
+        .rows_affected)
+}
+
+// ---------------------------------------------------------------------------
+// SeaORM terminal-effects kernel
+// ---------------------------------------------------------------------------
+//
+// The `apply_terminal_effects` statements as SeaORM builders. Each one
+// reads only the columns its planner consumes; the `select_related`
+// legs Django adds to the locked fetch (issues, projects, states) and
+// the capacity re-read (runner) are 1:1 primary-key joins that cannot
+// change the row set, so they are not re-joined. The row locks, the
+// ordering, the `LIMIT`s and the predicates are the text twins'.
+
+/// Work-item pre-read ([`select_run_work_item_id_sql`]): `Some(work_item)`
+/// when the run row exists (the id itself may be `None`), `None` without
+/// a row.
+pub fn select_run_work_item_id_select(
+    run_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<Option<Uuid>>> {
+    use orm::agent_run::{Column, Entity};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+    Entity::find()
+        .select_only()
+        .column(Column::WorkItemId)
+        .filter(Column::Id.eq(run_id))
+        .order_by_desc(Column::CreatedAt)
+        .limit(1)
+        .into_tuple::<Option<Uuid>>()
+}
+
+/// Run [`select_run_work_item_id_select`].
+pub async fn select_run_work_item_id(
+    db: &impl sea_orm::ConnectionTrait,
+    run_id: Uuid,
+) -> Result<Option<Option<Uuid>>, sea_orm::DbErr> {
+    select_run_work_item_id_select(run_id).one(db).await
+}
+
+/// Issue lock ([`lock_issue_sql`]): the row by id with no soft-delete
+/// filter, `ORDER BY created_at DESC LIMIT 1 FOR UPDATE OF "issues"` —
+/// first in the issue→run lock order. Only the id is read.
+pub fn lock_issue_select(issue_id: Uuid) -> sea_orm::Selector<sea_orm::SelectGetableTuple<Uuid>> {
+    use orm::issues::{Column, Entity};
+    use sea_orm::sea_query::LockType;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait};
+    let mut select = Entity::find()
+        .select_only()
+        .column(Column::Id)
+        .filter(Column::Id.eq(issue_id))
+        .order_by_desc(Column::CreatedAt)
+        .limit(1);
+    QueryTrait::query(&mut select).lock_with_tables(LockType::Update, [Entity]);
+    select.into_tuple::<Uuid>()
+}
+
+/// Run [`lock_issue_select`]; the row (if any) stays locked for the
+/// transaction.
+pub async fn lock_issue(
+    db: &impl sea_orm::ConnectionTrait,
+    issue_id: Uuid,
+) -> Result<(), sea_orm::DbErr> {
+    lock_issue_select(issue_id).one(db).await.map(drop)
+}
+
+/// The locked effects row ([`lock_run_for_effects_sql`]): the planner
+/// facts off `agent_run` plus the bound scheduler binding's id and
+/// `last_error` (both `None` without a binding row — `LEFT JOIN`).
+#[derive(Debug, Clone, PartialEq, sea_orm::FromQueryResult)]
+pub struct EffectsLockRow {
+    pub status: String,
+    pub run_config: Value,
+    pub error_details: Value,
+    pub refusal_category: Option<String>,
+    pub scheduler_binding_id: Option<Uuid>,
+    pub terminal_hooks_applied_at: Option<DateTime<Utc>>,
+    pub terminal_capacity_released_at: Option<DateTime<Utc>>,
+    pub executor_kind: String,
+    pub runner_id: Option<Uuid>,
+    pub pod_id: Uuid,
+    pub workspace_id: Uuid,
+    pub binding_id: Option<Uuid>,
+    pub binding_last_error: Option<String>,
+}
+
+impl EffectsLockRow {
+    /// `AgentRun.error`: the `message` key of the bag, `""` when absent.
+    pub fn error(&self) -> &str {
+        agent_run::error_details_text(&self.error_details, agent_run::ERROR_DETAILS_MESSAGE)
+    }
+
+    /// The generated `refusal_category` (`COALESCE(.., '')`, never NULL
+    /// on the real table).
+    pub fn refusal_category(&self) -> &str {
+        self.refusal_category.as_deref().unwrap_or("")
+    }
+
+    /// The scheduler binding facts for the hook, when the join found
+    /// a row.
+    pub fn binding_facts(&self) -> Option<super::scheduler_hook::BindingFacts> {
+        self.binding_id
+            .map(|id| super::scheduler_hook::BindingFacts {
+                id,
+                last_error: self.binding_last_error.clone().unwrap_or_default(),
+            })
+    }
+}
+
+/// `agent_run.scheduler_binding_id -> scheduler_bindings.id` (trimmed
+/// from the entity, which keeps only the `last_run_id` edge).
+fn scheduler_binding_rel() -> sea_orm::RelationDef {
+    use sea_orm::EntityTrait;
+    orm::agent_run::Entity::belongs_to(orm::scheduler_bindings::Entity)
+        .from(orm::agent_run::Column::SchedulerBindingId)
+        .to(orm::scheduler_bindings::Column::Id)
+        .into()
+}
+
+/// `agent_run.pod_id -> pod.id` (trimmed from the entity).
+fn pod_rel() -> sea_orm::RelationDef {
+    use sea_orm::EntityTrait;
+    orm::agent_run::Entity::belongs_to(orm::pod::Entity)
+        .from(orm::agent_run::Column::PodId)
+        .to(orm::pod::Column::Id)
+        .into()
+}
+
+/// Effects lock ([`lock_run_for_effects_sql`]): the terminal row by id,
+/// `LEFT JOIN scheduler_bindings`, `ORDER BY created_at DESC LIMIT 1
+/// FOR UPDATE OF "agent_run"`.
+pub fn lock_run_for_effects_select(
+    run_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectModel<EffectsLockRow>> {
+    use orm::agent_run::{Column, Entity};
+    use sea_orm::sea_query::LockType;
+    use sea_orm::{
+        ColumnTrait, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
+    };
+    let mut select = Entity::find()
+        .select_only()
+        .columns([
+            Column::Status,
+            Column::RunConfig,
+            Column::ErrorDetails,
+            Column::RefusalCategory,
+            Column::SchedulerBindingId,
+            Column::TerminalHooksAppliedAt,
+            Column::TerminalCapacityReleasedAt,
+            Column::ExecutorKind,
+            Column::RunnerId,
+            Column::PodId,
+            Column::WorkspaceId,
+        ])
+        .column_as(orm::scheduler_bindings::Column::Id, "binding_id")
+        .column_as(
+            orm::scheduler_bindings::Column::LastError,
+            "binding_last_error",
+        )
+        .join(JoinType::LeftJoin, scheduler_binding_rel())
+        .filter(Column::Id.eq(run_id))
+        .filter(
+            Column::Status.is_in(
+                pidash_types::runner_runs::TERMINAL_RUN_STATUSES
+                    .iter()
+                    .map(AgentRunStatus::value),
+            ),
+        )
+        .order_by_desc(Column::CreatedAt)
+        .limit(1);
+    QueryTrait::query(&mut select).lock_with_tables(LockType::Update, [Entity]);
+    select.into_model::<EffectsLockRow>()
+}
+
+/// Run [`lock_run_for_effects_select`]: `None` when the run is not
+/// terminal (or gone).
+pub async fn lock_run_for_effects(
+    db: &impl sea_orm::ConnectionTrait,
+    run_id: Uuid,
+) -> Result<Option<EffectsLockRow>, sea_orm::DbErr> {
+    lock_run_for_effects_select(run_id).one(db).await
+}
+
+/// Hooks-marker write ([`update_hooks_marker_sql`]).
+pub fn update_hooks_marker_statement(
+    run_id: Uuid,
+    now: DateTime<Utc>,
+) -> sea_orm::UpdateMany<orm::agent_run::Entity> {
+    use orm::agent_run::{Column, Entity};
+    use sea_orm::sea_query::Expr;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    Entity::update_many()
+        .col_expr(Column::TerminalHooksAppliedAt, Expr::value(now))
+        .filter(Column::Id.eq(run_id))
+}
+
+/// Run [`update_hooks_marker_statement`]; returns the rows written (zero
+/// is Django's `DatabaseError` on a vanished row — the caller decides).
+pub async fn update_hooks_marker(
+    db: &impl sea_orm::ConnectionTrait,
+    run_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<u64, sea_orm::DbErr> {
+    Ok(update_hooks_marker_statement(run_id, now)
+        .exec(db)
+        .await?
+        .rows_affected)
+}
+
+/// The capacity re-read ([`select_run_for_capacity_sql`]): the release
+/// marker and the dispatch/drain facts.
+#[derive(Debug, Clone, PartialEq, Eq, sea_orm::FromQueryResult)]
+pub struct CapacityRow {
+    pub terminal_capacity_released_at: Option<DateTime<Utc>>,
+    pub executor_kind: String,
+    pub runner_id: Option<Uuid>,
+    pub pod_id: Uuid,
+    pub workspace_id: Uuid,
+}
+
+/// Capacity re-read ([`select_run_for_capacity_sql`]): `INNER JOIN pod`
+/// (the FK is `NOT NULL`, so the join keeps every row), `ORDER BY
+/// created_at DESC`, no `LIMIT` (`.get()`).
+pub fn select_run_for_capacity_select(
+    run_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectModel<CapacityRow>> {
+    use orm::agent_run::{Column, Entity};
+    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect};
+    Entity::find()
+        .select_only()
+        .columns([
+            Column::TerminalCapacityReleasedAt,
+            Column::ExecutorKind,
+            Column::RunnerId,
+            Column::PodId,
+            Column::WorkspaceId,
+        ])
+        .join(JoinType::InnerJoin, pod_rel())
+        .filter(Column::Id.eq(run_id))
+        .order_by_desc(Column::CreatedAt)
+        .into_model::<CapacityRow>()
+}
+
+/// Run [`select_run_for_capacity_select`]: `None` is Django's
+/// `DoesNotExist` (the caller raises).
+pub async fn select_run_for_capacity(
+    db: &impl sea_orm::ConnectionTrait,
+    run_id: Uuid,
+) -> Result<Option<CapacityRow>, sea_orm::DbErr> {
+    select_run_for_capacity_select(run_id).one(db).await
+}
+
+/// Capacity-marker write ([`update_capacity_marker_sql`]): conditional on
+/// the marker still being null.
+pub fn update_capacity_marker_statement(
+    run_id: Uuid,
+    now: DateTime<Utc>,
+) -> sea_orm::UpdateMany<orm::agent_run::Entity> {
+    use orm::agent_run::{Column, Entity};
+    use sea_orm::sea_query::Expr;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    Entity::update_many()
+        .col_expr(Column::TerminalCapacityReleasedAt, Expr::value(now))
+        .filter(Column::Id.eq(run_id))
+        .filter(Column::TerminalCapacityReleasedAt.is_null())
+}
+
+/// Run [`update_capacity_marker_statement`]; returns the rows written.
+pub async fn update_capacity_marker(
+    db: &impl sea_orm::ConnectionTrait,
+    run_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<u64, sea_orm::DbErr> {
+    Ok(update_capacity_marker_statement(run_id, now)
+        .exec(db)
+        .await?
+        .rows_affected)
 }
 
 #[cfg(test)]
@@ -822,6 +1169,27 @@ mod tests {
             merged,
             json!({"conclusion": "c", "status": "s", "yielded_at": "x"})
         );
+    }
+
+    #[test]
+    fn merge_done_payload_keeps_no_hand_off_through_completion() {
+        // `finish` writes the yield keys; the runner's COMPLETED frame (no
+        // `status` of its own) then replaces `done_payload`. The yield keys
+        // survive; an old row's `stage_handoff` does not, since nothing
+        // reads it since the unified workpad.
+        let stored = json!({
+            "status": "done",
+            "yielded_at": "2026-11-19T00:00:00Z",
+            "note": "moved to review",
+            "stage_handoff": "### Hand-off\n**Produced:** the PR.",
+        });
+        let merged = merge_done_payload(&stored, &json!({}));
+        assert_eq!(merged["status"], json!("done"));
+        assert_eq!(merged["note"], json!("moved to review"));
+        assert!(merged.get("stage_handoff").is_none(), "{merged}");
+        // An incoming `status` still suppresses the merge wholesale.
+        let suppressed = merge_done_payload(&stored, &json!({"status": "x"}));
+        assert_eq!(suppressed, json!({"status": "x"}));
     }
 
     // ------------------------------------------------------------------
@@ -1058,46 +1426,6 @@ mod tests {
         }
     }
 
-    // ------------------------------------------------------------------
-    // terminal event + publish
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn terminal_event_seq_and_payload() {
-        let fx = fixture();
-        let cloud = fx["finalize_agent_run"]["cloud"].clone();
-        let event = plan_terminal_event(None, AgentRunStatus::Completed, "E1");
-        assert_eq!(event.seq, 1);
-        assert_eq!(
-            event.payload,
-            json!({"status": "completed", "error_code": "E1"})
-        );
-        assert_eq!(
-            cloud["events"][0].get("payload"),
-            Some(&json!({"status": "completed", "error_code": "E1"}))
-        );
-        assert_eq!(
-            cloud["events"][0].get("seq").and_then(Value::as_i64),
-            Some(1)
-        );
-        assert_eq!(
-            cloud["events"][0].get("kind").and_then(Value::as_str),
-            Some("terminal")
-        );
-        // max + 1 over a gap.
-        assert_eq!(
-            plan_terminal_event(Some(5), AgentRunStatus::Completed, "").seq,
-            6
-        );
-        assert_eq!(
-            fx["finalize_agent_run"]
-                .get("cloud_seq_after_gap")
-                .and_then(|v| v.as_array().and_then(|a| a.first()))
-                .and_then(Value::as_i64),
-            Some(6)
-        );
-    }
-
     #[test]
     fn publish_effects_emit_then_inline() {
         assert_eq!(
@@ -1176,7 +1504,6 @@ mod tests {
         }
         if let Some(capacity) = &plan.capacity {
             match capacity {
-                CapacityPlan::Cloud { .. } => names.push("dispatch_waiting"),
                 CapacityPlan::Local { runner_id, pod_id } => {
                     if runner_id.is_some() {
                         names.push("drain_runner");
@@ -1248,7 +1575,12 @@ mod tests {
         };
         let hooks = plan.hooks.as_ref().expect("hooks run");
         let comment = hooks.failure_comment.as_ref().expect("failure comment");
-        assert!(comment.comment_html.contains("Run failed."));
+        assert_eq!(comment.detail, "boom detail");
+        assert!(comment
+            .render("", false, None)
+            .comment
+            .comment_html
+            .contains("Run failed."));
         assert!(hooks.orchestration);
         assert_eq!(
             effect_names(&plan),
@@ -1276,24 +1608,49 @@ mod tests {
                 LockRunForEffects,
                 FailureCommentSavepoint,
                 FailureCommentReread,
+                FailureCommentStreak,
                 FailureCommentDedupeCheck,
                 FailureCommentInserts,
+                FailureCommentNotify,
                 FailureCommentRelease,
                 UpdateHooksMarker,
                 SelectRunForCapacity,
                 UpdateCapacityMarker,
             ]
         );
-        // Suppressed detail: savepoint pair runs, reads do not.
+        // Infra detail (stalled): still re-read — it is only silenced
+        // once the clock effect says the clock keeps running (a backstop
+        // stop is reported). NEWPIDASH-253 (DIFF-42) drops the
+        // daemon-shutdown prefix, so daemon details are no longer infra.
         inputs.error = "daemon shutdown requested: restart";
         let outcome = plan_terminal_effects(&inputs);
         let TerminalEffectsOutcome::Applied(plan) = outcome else {
             panic!("expected Applied");
         };
-        assert_eq!(plan.hooks.as_ref().expect("hooks").failure_comment, None);
+        let comment = plan
+            .hooks
+            .as_ref()
+            .expect("hooks")
+            .failure_comment
+            .as_ref()
+            .expect("planned");
+        assert!(!comment.infra, "daemon detail posts (DIFF-42)");
+        inputs.error = "agent stalled: no events for >30s";
+        let outcome = plan_terminal_effects(&inputs);
+        let TerminalEffectsOutcome::Applied(plan) = outcome else {
+            panic!("expected Applied");
+        };
+        let comment = plan
+            .hooks
+            .as_ref()
+            .expect("hooks")
+            .failure_comment
+            .as_ref()
+            .expect("planned");
+        assert!(comment.infra);
         assert!(plan.statements.contains(&FailureCommentSavepoint));
         assert!(plan.statements.contains(&FailureCommentRelease));
-        assert!(!plan.statements.contains(&FailureCommentReread));
+        assert!(plan.statements.contains(&FailureCommentReread));
     }
 
     #[test]
@@ -1401,39 +1758,6 @@ mod tests {
     }
 
     #[test]
-    fn effects_cloud_dispatches_instead_of_draining() {
-        let fx = fixture();
-        let gold = effects_case(&fx, "cloud");
-        let mut inputs = effects_inputs(AgentRunStatus::Completed, &Value::Null);
-        inputs.executor_kind = AgentExecutorKind::CloudAgent;
-        inputs.runner_id = None;
-        inputs.pod_id = None;
-        let outcome = plan_terminal_effects(&inputs);
-        let TerminalEffectsOutcome::Applied(plan) = outcome else {
-            panic!("expected Applied");
-        };
-        assert!(matches!(plan.capacity, Some(CapacityPlan::Cloud { .. })));
-        assert_eq!(effect_names(&plan), ["orchestration", "dispatch_waiting"]);
-        assert_eq!(
-            gold.get("calls"),
-            Some(&json!(["orchestration", "dispatch_waiting"]))
-        );
-        let capacity = plan.capacity.expect("capacity");
-        assert_eq!(
-            capacity.effects(),
-            [LifecycleEffect::DispatchWaiting {
-                workspace_id: Uuid::nil()
-            }]
-        );
-        // Local drains degrade gracefully without ids.
-        let local = CapacityPlan::Local {
-            runner_id: None,
-            pod_id: None,
-        };
-        assert!(local.effects().is_empty());
-    }
-
-    #[test]
     fn effects_idempotency_markers_gate_branches() {
         let fx = fixture();
         // Hooks applied: capacity only.
@@ -1511,8 +1835,10 @@ mod tests {
 
     #[test]
     fn finalize_lock_sql_variants() {
+        // NEWPIDASH-241 T1: agent_run projections carry 45 columns
+        // (42 Django baseline + 3 native-owned); tails are unchanged.
         let bare = lock_run_for_finalize_sql(false, false);
-        assert_eq!(select_runs(&bare), vec![("\"agent_run\"".to_owned(), 39)]);
+        assert_eq!(select_runs(&bare), vec![("\"agent_run\"".to_owned(), 45)]);
         assert!(
             bare.ends_with(
                 " FROM \"agent_run\" WHERE (\"agent_run\".\"id\" = $1 AND NOT \
@@ -1570,26 +1896,6 @@ mod tests {
     }
 
     #[test]
-    fn terminal_event_sql_match_django() {
-        assert_eq!(
-            terminal_event_exists_sql(),
-            "SELECT 1 AS \"a\" FROM \"agent_run_event\" WHERE \
-             (\"agent_run_event\".\"agent_run_id\" = $1 AND \"agent_run_event\".\"kind\" = $2) LIMIT 1"
-        );
-        assert_eq!(
-            terminal_event_max_seq_sql(),
-            "SELECT \"agent_run_event\".\"seq\" FROM \"agent_run_event\" WHERE \
-             \"agent_run_event\".\"agent_run_id\" = $1 ORDER BY \"agent_run_event\".\"seq\" DESC LIMIT 1"
-        );
-        assert_eq!(
-            terminal_event_insert_sql(),
-            "INSERT INTO \"agent_run_event\" (\"agent_run_id\", \"seq\", \"kind\", \
-             \"payload\", \"created_at\") VALUES ($1, $2, $3, $4, $5) \
-             RETURNING \"agent_run_event\".\"id\""
-        );
-    }
-
-    #[test]
     fn effects_lock_sql_match_django_shapes() {
         assert_eq!(
             select_run_work_item_id_sql(),
@@ -1597,7 +1903,7 @@ mod tests {
              \"agent_run\".\"id\" = $1 ORDER BY \"agent_run\".\"created_at\" DESC LIMIT 1"
         );
         let issue = lock_issue_sql();
-        assert_eq!(select_runs(&issue), vec![("\"issues\"".to_owned(), 34)]);
+        assert_eq!(select_runs(&issue), vec![("\"issues\"".to_owned(), 35)]);
         assert!(
             issue.ends_with(
                 " FROM \"issues\" WHERE \"issues\".\"id\" = $1 ORDER BY \
@@ -1609,9 +1915,9 @@ mod tests {
         assert_eq!(
             select_runs(&fetch),
             vec![
-                ("\"agent_run\"".to_owned(), 39),
-                ("\"issues\"".to_owned(), 34),
-                ("\"projects\"".to_owned(), 46),
+                ("\"agent_run\"".to_owned(), 45),
+                ("\"issues\"".to_owned(), 35),
+                ("\"projects\"".to_owned(), 47),
                 ("\"states\"".to_owned(), 18),
                 ("\"scheduler_bindings\"".to_owned(), 22),
             ]
@@ -1630,7 +1936,7 @@ mod tests {
         assert_eq!(
             select_runs(&capacity),
             vec![
-                ("\"agent_run\"".to_owned(), 39),
+                ("\"agent_run\"".to_owned(), 45),
                 ("\"pod\"".to_owned(), 10),
                 ("\"runner\"".to_owned(), 31),
             ]
@@ -1694,5 +2000,238 @@ mod tests {
         );
         assert_eq!(scheduler_binding::COLUMNS.len(), 22);
         assert_eq!(pod::COLUMNS.len(), 10);
+    }
+
+    // ------------------------------------------------------------------
+    // Live kernel round trips (session temp tables, rolled back)
+    // ------------------------------------------------------------------
+
+    /// A one-connection pool on the scratch `DATABASE_URL`, or `None`
+    /// (skip) without one.
+    async fn temp_table_pool() -> Option<sqlx::PgPool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return None;
+        };
+        Some(
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&url)
+                .await
+                .expect("connect to scratch DATABASE_URL"),
+        )
+    }
+
+    /// Session temp copies that shadow the real tables for this
+    /// transaction (no constraints, no foreign keys, no generated
+    /// columns: the test seeds what the entities decode).
+    async fn temp_tables(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, tables: &[&str]) {
+        for table in tables {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&mut **tx)
+            .await
+            .expect("temp table");
+        }
+    }
+
+    /// Seed one `agent_run` row with every NOT NULL column the entity
+    /// decodes (the executor, status, runner, work item, parent and
+    /// `error_details` vary per test).
+    #[allow(clippy::too_many_arguments)]
+    async fn seed_run(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        id: Uuid,
+        status: &str,
+        executor_kind: &str,
+        runner_id: Option<Uuid>,
+        work_item_id: Option<Uuid>,
+        parent_run_id: Option<Uuid>,
+        scheduler_binding_id: Option<Uuid>,
+        pod_id: Uuid,
+        error_details: Value,
+    ) {
+        sqlx::query(
+            "INSERT INTO agent_run (id, workspace_id, created_by_id, pod_id, runner_id, \
+             work_item_id, parent_run_id, scheduler_binding_id, status, executor_kind, \
+             dispatch_attempts, cancel_reason, tool_plan, prompt, trigger, phase_kind, \
+             run_config, required_capabilities, thread_id, agent_metadata, error_details, \
+             llm_model, usage, created_at, done_payload) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, \
+             $9, $10, 0, '', '{}', '', 'direct', 'work', '{}', '[]', 'thread', '{}', $11, '', \
+             '{}', now(), NULL)",
+        )
+        .bind(id)
+        .bind(Uuid::new_v4())
+        .bind(Uuid::new_v4())
+        .bind(pod_id)
+        .bind(runner_id)
+        .bind(work_item_id)
+        .bind(parent_run_id)
+        .bind(scheduler_binding_id)
+        .bind(status)
+        .bind(executor_kind)
+        .bind(error_details)
+        .execute(&mut **tx)
+        .await
+        .expect("seed run");
+    }
+
+    /// The finalize kernel end to end on temp tables: expected-runner /
+    /// status gates, first-writer-wins, the `error_details` merge (keys
+    /// the patch names drop, nulls strip, the rest stays), the
+    /// idempotent cloud terminal event, then the effects lock, the
+    /// capacity re-read and both marker writes.
+    #[tokio::test]
+    async fn live_finalize_and_effects_kernel() {
+        let Some(pool) = temp_table_pool().await else {
+            return;
+        };
+        let mut tx = pool.begin().await.expect("begin");
+        temp_tables(
+            &mut tx,
+            &["agent_run", "scheduler_bindings", "pod", "issues"],
+        )
+        .await;
+        // `LIKE ... INCLUDING DEFAULTS` keeps the `BigAutoField` sequence.
+        sqlx::query(
+            "CREATE TEMP TABLE agent_run_event (LIKE public.agent_run_event INCLUDING DEFAULTS INCLUDING IDENTITY)",
+        )
+        .execute(&mut *tx)
+        .await
+        .expect("temp event table");
+        let run = Uuid::new_v4();
+        let pod_id = Uuid::new_v4();
+        let binding = Uuid::new_v4();
+        let issue = Uuid::new_v4();
+        sqlx::query("INSERT INTO pod (id, name, description, is_default, created_at, updated_at, workspace_id, project_id) VALUES ($1, 'p', '', true, now(), now(), $2, $3)")
+            .bind(pod_id).bind(Uuid::new_v4()).bind(Uuid::new_v4())
+            .execute(&mut *tx).await.expect("seed pod");
+        sqlx::query("INSERT INTO scheduler_bindings (id, last_error, created_at, updated_at) VALUES ($1, 'stale', now(), now())")
+            .bind(binding)
+            .execute(&mut *tx).await.expect("seed binding");
+        sqlx::query("INSERT INTO issues (id, created_at, updated_at, name, project_id, workspace_id) VALUES ($1, now(), now(), 'i', $2, $3)")
+            .bind(issue).bind(Uuid::new_v4()).bind(Uuid::new_v4())
+            .execute(&mut *tx).await.expect("seed issue");
+        seed_run(
+            &mut tx,
+            run,
+            "running",
+            "cloud_agent",
+            None,
+            Some(issue),
+            None,
+            Some(binding),
+            pod_id,
+            serde_json::json!({"x": 1, "message": "old", "code": "old"}),
+        )
+        .await;
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        // The expected-runner gate misses (runnerless cloud run); the
+        // expected-status gate passes.
+        assert!(
+            lock_run_for_finalize(&conn, run, Some(Uuid::new_v4()), None)
+                .await
+                .expect("lock")
+                .is_none()
+        );
+        let locked = lock_run_for_finalize(&conn, run, None, Some(AgentRunStatus::Running))
+            .await
+            .expect("lock")
+            .expect("non-terminal row");
+        assert_eq!(locked.executor_kind, "cloud_agent");
+        assert_eq!(locked.done_payload, None);
+        // `error` folds to null → the stored `message` key drops; `code`
+        // is replaced; `x` survives.
+        let values = plan_finalize_values(
+            AgentRunStatus::Failed,
+            &[
+                ("error_code", SetValue::Text("boom".to_owned())),
+                ("error", SetValue::Text(String::new())),
+                ("cancel_reason", SetValue::Text("r".to_owned())),
+            ],
+        )
+        .expect("plan");
+        let now = Utc::now();
+        assert_eq!(
+            finalize_update(&conn, &values, run, now)
+                .await
+                .expect("update"),
+            1
+        );
+        // First-writer-wins: the row is terminal now.
+        assert!(lock_run_for_finalize(&conn, run, None, None)
+            .await
+            .expect("lock")
+            .is_none());
+        // The effects lock sees the written row and the joined binding.
+        let effects = lock_run_for_effects(&conn, run)
+            .await
+            .expect("effects lock")
+            .expect("terminal row");
+        assert_eq!(effects.status, "failed");
+        assert_eq!(
+            effects.error_details,
+            serde_json::json!({"x": 1, "code": "boom"})
+        );
+        assert_eq!(effects.error(), "");
+        assert_eq!(effects.refusal_category(), "");
+        assert_eq!(
+            effects.binding_facts(),
+            Some(BindingFacts {
+                id: binding,
+                last_error: "stale".to_owned()
+            })
+        );
+        assert!(effects.terminal_hooks_applied_at.is_none());
+        assert_eq!(
+            select_run_work_item_id(&conn, run)
+                .await
+                .expect("work item"),
+            Some(Some(issue))
+        );
+        lock_issue(&conn, issue).await.expect("issue lock");
+        assert_eq!(
+            update_hooks_marker(&conn, run, now).await.expect("marker"),
+            1
+        );
+        let capacity = select_run_for_capacity(&conn, run)
+            .await
+            .expect("capacity")
+            .expect("row");
+        assert_eq!(capacity.pod_id, pod_id);
+        assert_eq!(capacity.executor_kind, "cloud_agent");
+        assert!(capacity.terminal_capacity_released_at.is_none());
+        assert_eq!(
+            update_capacity_marker(&conn, run, now)
+                .await
+                .expect("marker"),
+            1
+        );
+        // Conditional on the marker still being null.
+        assert_eq!(
+            update_capacity_marker(&conn, run, now)
+                .await
+                .expect("marker"),
+            0
+        );
+        assert!(lock_run_for_effects(&conn, run)
+            .await
+            .expect("effects lock")
+            .expect("row")
+            .terminal_hooks_applied_at
+            .is_some());
+        // A missing run: no work-item row, no capacity row.
+        assert_eq!(
+            select_run_work_item_id(&conn, Uuid::new_v4())
+                .await
+                .expect("miss"),
+            None
+        );
+        assert!(select_run_for_capacity(&conn, Uuid::new_v4())
+            .await
+            .expect("miss")
+            .is_none());
+        tx.rollback().await.expect("rollback");
     }
 }

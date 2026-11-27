@@ -69,12 +69,18 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use pidash_db::context::RequestContext;
+use pidash_db::entity::{
+    cycle_issues, cycles, issue_activities, issue_labels, issue_views, labels, module_issues,
+    modules, pages, pod, project_pages, project_user_properties, projects, states, workspaces,
+};
 use pidash_db::runner_runs::pod::NewProject;
 use pidash_services::app_project::ser_project::next_work_item_sequence;
-use pidash_services::orchestration::creation::{CreationError, STATE_SELECT_SQL};
+use pidash_services::orchestration::creation::{state_name_group, CreationError};
 use pidash_services::orchestration::entries::PreflightSeam;
 use pidash_services::tasks_cleanup::workspace_seed as logic;
-use pidash_types::orchestration::{is_ticking_state, StateRef};
+use pidash_types::orchestration::{phase_config_for, StateRef};
+use sea_orm::sea_query::Expr;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set};
 
 use crate::task_message::TaskMessage;
 use crate::worker::{Handler, Registry, Verdict};
@@ -549,22 +555,11 @@ impl RunInput {
     }
 }
 
-/// `get_default_agent_executor` (`core/agent_execution.py:26-31`):
-/// `DEFAULT_AGENT_EXECUTOR` (`settings/common.py:545`, itself
-/// `get_config("DEFAULT_AGENT_EXECUTOR", "local_runner")`) validated
-/// against the executor choices, else `local_runner`.
+/// `get_default_agent_executor` (`core/agent_execution.py:48-55`, #2903):
+/// always `local_runner`; the setting is ignored (reported by the
+/// `managed.W001` system check, not refused).
 pub fn default_agent_executor() -> String {
-    match std::env::var("DEFAULT_AGENT_EXECUTOR") {
-        Ok(value)
-            if matches!(
-                value.as_str(),
-                "local_runner" | "cloud_agent" | "managed_runner"
-            ) =>
-        {
-            value
-        }
-        _ => "local_runner".to_owned(),
-    }
+    "local_runner".to_owned()
 }
 
 /// What one [`run`] seeded, in orchestration order — the DB before/after
@@ -1230,15 +1225,13 @@ fn page_view_props() -> Value {
 /// Postgres [`SeedStore`]: the exact Django query shapes. Timestamps are
 /// one clock (`RunInput::now`) the way `auto_now_add`/`auto_now` stamp
 /// statement time; uuids are v4 like the model default. The dispatch
-/// inputs (`cloud`, `managed`, `toolsets`, `assistant_seam`) feed the
+/// inputs (`managed`, `assistant_seam`) feed the
 /// per-issue post-save fire ([`SeedStore::drive_seed_transition`]) —
 /// the `LiveFireTickSeam` field shape, worker-installed.
 pub struct PgSeedStore {
     pool: sqlx::PgPool,
     now: DateTime<Utc>,
-    cloud: pidash_db::config::CloudAgentSettings,
-    managed: pidash_db::config::ManagedRunnerSettings,
-    toolsets: std::sync::Arc<dyn pidash_services::extensions::CloudAgentToolsetsSeam>,
+    managed: pidash_db::config::PidashAgentSettings,
     assistant_seam: std::sync::Arc<dyn pidash_services::extensions::AssistantModelSeam>,
 }
 
@@ -1246,23 +1239,27 @@ impl PgSeedStore {
     pub fn new(
         pool: sqlx::PgPool,
         now: DateTime<Utc>,
-        cloud: pidash_db::config::CloudAgentSettings,
-        managed: pidash_db::config::ManagedRunnerSettings,
-        toolsets: std::sync::Arc<dyn pidash_services::extensions::CloudAgentToolsetsSeam>,
+        managed: pidash_db::config::PidashAgentSettings,
         assistant_seam: std::sync::Arc<dyn pidash_services::extensions::AssistantModelSeam>,
     ) -> Self {
         Self {
             pool,
             now,
-            cloud,
             managed,
-            toolsets,
             assistant_seam,
         }
     }
 
     fn db_err(e: sqlx::Error) -> String {
         e.to_string()
+    }
+
+    fn sea_err(e: sea_orm::DbErr) -> String {
+        e.to_string()
+    }
+
+    fn db(&self) -> sea_orm::DatabaseConnection {
+        pidash_db::pool::sea_orm_connection(&self.pool)
     }
 }
 
@@ -1286,18 +1283,30 @@ impl PreflightSeam for FixedPreflight {
         self.consulted = true;
         Ok(self.proceed)
     }
+
+    async fn pod_once_preflight(
+        &mut self,
+        _issue_id: uuid::Uuid,
+        _creator_id: uuid::Uuid,
+        _pod_id: uuid::Uuid,
+    ) -> Result<Option<String>, CreationError> {
+        Ok(None)
+    }
 }
 
 impl SeedStore for PgSeedStore {
     async fn workspace(&self, workspace_id: uuid::Uuid) -> Result<Option<WorkspaceRow>, String> {
         // `Workspace.objects.get`: default soft-delete manager.
-        let row: Option<(String, String)> = sqlx::query_as(
-            "SELECT name, timezone FROM workspaces WHERE id = $1 AND deleted_at IS NULL",
-        )
-        .bind(workspace_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(Self::db_err)?;
+        let db = self.db();
+        let row: Option<(String, String)> = workspaces::Entity::find()
+            .filter(workspaces::Column::Id.eq(workspace_id))
+            .filter(workspaces::Column::DeletedAt.is_null())
+            .select_only()
+            .columns([workspaces::Column::Name, workspaces::Column::Timezone])
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(Self::sea_err)?;
         Ok(row.map(|(name, timezone)| WorkspaceRow { name, timezone }))
     }
 
@@ -1305,15 +1314,22 @@ impl SeedStore for PgSeedStore {
         &self,
         workspace_id: uuid::Uuid,
     ) -> Result<Vec<WorkspaceMemberRow>, String> {
+        use pidash_db::entity::workspace_members;
         // `.values("member_id", "role")`, `-created_at` model ordering.
-        let rows: Vec<(uuid::Uuid, i16)> = sqlx::query_as(
-            "SELECT member_id, role FROM workspace_members
-             WHERE workspace_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC",
-        )
-        .bind(workspace_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(Self::db_err)?;
+        let db = self.db();
+        let rows: Vec<(uuid::Uuid, i16)> = workspace_members::Entity::find()
+            .filter(workspace_members::Column::WorkspaceId.eq(workspace_id))
+            .filter(workspace_members::Column::DeletedAt.is_null())
+            .order_by_desc(workspace_members::Column::CreatedAt)
+            .select_only()
+            .columns([
+                workspace_members::Column::MemberId,
+                workspace_members::Column::Role,
+            ])
+            .into_tuple()
+            .all(&db)
+            .await
+            .map_err(Self::sea_err)?;
         Ok(rows
             .into_iter()
             .map(|(member_id, role)| WorkspaceMemberRow { member_id, role })
@@ -1321,87 +1337,122 @@ impl SeedStore for PgSeedStore {
     }
 
     async fn default_project_exists(&self, workspace_id: uuid::Uuid) -> Result<bool, String> {
-        let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM projects
-             WHERE workspace_id = $1 AND is_default AND deleted_at IS NULL)",
-        )
-        .bind(workspace_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(Self::db_err)?;
-        Ok(exists)
+        let db = self.db();
+        Ok(projects::Entity::find()
+            .filter(projects::Column::WorkspaceId.eq(workspace_id))
+            .filter(projects::Column::IsDefault.eq(true))
+            .filter(projects::Column::DeletedAt.is_null())
+            .select_only()
+            .column(projects::Column::Id)
+            .limit(1)
+            .into_tuple::<uuid::Uuid>()
+            .one(&db)
+            .await
+            .map_err(Self::sea_err)?
+            .is_some())
     }
 
     async fn max_state_sequence(&self, project_id: uuid::Uuid) -> Result<Option<f64>, String> {
         // `StateManager`: triage excluded.
-        sqlx::query_scalar(
-            "SELECT MAX(sequence) FROM states
-             WHERE project_id = $1 AND deleted_at IS NULL AND \"group\" <> 'triage'",
-        )
-        .bind(project_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(Self::db_err)
+        let db = self.db();
+        states::Entity::find()
+            .filter(states::Column::ProjectId.eq(project_id))
+            .filter(states::Column::DeletedAt.is_null())
+            .filter(states::Column::Group.ne("triage".to_owned()))
+            .select_only()
+            .column_as(Expr::col(states::Column::Sequence).max(), "max_sequence")
+            .into_tuple::<Option<f64>>()
+            .one(&db)
+            .await
+            .map_err(Self::sea_err)
+            .map(Option::flatten)
     }
 
     async fn max_label_sort_order(&self, project_id: uuid::Uuid) -> Result<Option<f64>, String> {
-        sqlx::query_scalar(
-            "SELECT MAX(sort_order) FROM labels WHERE project_id = $1 AND deleted_at IS NULL",
-        )
-        .bind(project_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(Self::db_err)
+        let db = self.db();
+        labels::Entity::find()
+            .filter(labels::Column::ProjectId.eq(project_id))
+            .filter(labels::Column::DeletedAt.is_null())
+            .select_only()
+            .column_as(Expr::col(labels::Column::SortOrder).max(), "max_sort")
+            .into_tuple::<Option<f64>>()
+            .one(&db)
+            .await
+            .map_err(Self::sea_err)
+            .map(Option::flatten)
     }
 
     async fn min_cycle_sort_order(&self, project_id: uuid::Uuid) -> Result<Option<f64>, String> {
-        sqlx::query_scalar(
-            "SELECT MIN(sort_order) FROM cycles WHERE project_id = $1 AND deleted_at IS NULL",
-        )
-        .bind(project_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(Self::db_err)
+        let db = self.db();
+        cycles::Entity::find()
+            .filter(cycles::Column::ProjectId.eq(project_id))
+            .filter(cycles::Column::DeletedAt.is_null())
+            .select_only()
+            .column_as(Expr::col(cycles::Column::SortOrder).min(), "min_sort")
+            .into_tuple::<Option<f64>>()
+            .one(&db)
+            .await
+            .map_err(Self::sea_err)
+            .map(Option::flatten)
     }
 
     async fn min_module_sort_order(&self, project_id: uuid::Uuid) -> Result<Option<f64>, String> {
-        sqlx::query_scalar(
-            "SELECT MIN(sort_order) FROM modules WHERE project_id = $1 AND deleted_at IS NULL",
-        )
-        .bind(project_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(Self::db_err)
+        let db = self.db();
+        modules::Entity::find()
+            .filter(modules::Column::ProjectId.eq(project_id))
+            .filter(modules::Column::DeletedAt.is_null())
+            .select_only()
+            .column_as(Expr::col(modules::Column::SortOrder).min(), "min_sort")
+            .into_tuple::<Option<f64>>()
+            .one(&db)
+            .await
+            .map_err(Self::sea_err)
+            .map(Option::flatten)
     }
 
     async fn max_view_sort_order(&self, project_id: uuid::Uuid) -> Result<Option<f64>, String> {
-        sqlx::query_scalar(
-            "SELECT MAX(sort_order) FROM issue_views WHERE project_id = $1 AND deleted_at IS NULL",
-        )
-        .bind(project_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(Self::db_err)
+        let db = self.db();
+        issue_views::Entity::find()
+            .filter(issue_views::Column::ProjectId.eq(project_id))
+            .filter(issue_views::Column::DeletedAt.is_null())
+            .select_only()
+            .column_as(Expr::col(issue_views::Column::SortOrder).max(), "max_sort")
+            .into_tuple::<Option<f64>>()
+            .one(&db)
+            .await
+            .map_err(Self::sea_err)
+            .map(Option::flatten)
     }
 
     async fn max_issue_sequence(&self, project_id: uuid::Uuid) -> Result<Option<i64>, String> {
+        use pidash_db::entity::issue_sequences;
         // `SELECT pg_advisory_xact_lock` + max in one transaction, like
         // `Issue.save` (`issue.py:313-328`). The seeded project is brand
         // new, so no concurrent writer exists; the lock is parity, not
         // protection.
         let mut tx = self.pool.begin().await.map_err(Self::db_err)?;
+        // raw-sql: advisory xact lock needs the sqlx transaction; the builder cannot express it (playbook §6)
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(advisory_lock_key(project_id))
             .execute(&mut *tx)
             .await
             .map_err(Self::db_err)?;
-        let max: Option<i64> = sqlx::query_scalar(
-            "SELECT MAX(sequence) FROM issue_sequences WHERE project_id = $1 AND deleted_at IS NULL",
-        )
-        .bind(project_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(Self::db_err)?;
+        let max: Option<i64> = {
+            let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+            issue_sequences::Entity::find()
+                .filter(issue_sequences::Column::ProjectId.eq(project_id))
+                .filter(issue_sequences::Column::DeletedAt.is_null())
+                .select_only()
+                .column_as(
+                    Expr::col(issue_sequences::Column::Sequence).max(),
+                    "max_sequence",
+                )
+                .into_tuple::<Option<i64>>()
+                .one(&conn)
+                .await
+                .map_err(Self::sea_err)?
+                .flatten()
+        };
         tx.commit().await.map_err(Self::db_err)?;
         Ok(max)
     }
@@ -1411,18 +1462,22 @@ impl SeedStore for PgSeedStore {
         project_id: uuid::Uuid,
         state_id: uuid::Uuid,
     ) -> Result<Option<f64>, String> {
+        use pidash_db::entity::issues;
         // Plain `Issue.objects` scope: soft-delete only. (`issue_objects`
         // would exclude triage/archived/draft, but `Issue.save` queries
         // through `Issue.objects`.)
-        sqlx::query_scalar(
-            "SELECT MAX(sort_order) FROM issues
-             WHERE project_id = $1 AND state_id = $2 AND deleted_at IS NULL",
-        )
-        .bind(project_id)
-        .bind(state_id)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(Self::db_err)
+        let db = self.db();
+        issues::Entity::find()
+            .filter(issues::Column::ProjectId.eq(project_id))
+            .filter(issues::Column::StateId.eq(state_id))
+            .filter(issues::Column::DeletedAt.is_null())
+            .select_only()
+            .column_as(Expr::col(issues::Column::SortOrder).max(), "max_sort")
+            .into_tuple::<Option<f64>>()
+            .one(&db)
+            .await
+            .map_err(Self::sea_err)
+            .map(Option::flatten)
     }
 
     async fn last_cycle_end(
@@ -1431,26 +1486,32 @@ impl SeedStore for PgSeedStore {
     ) -> Result<Option<DateTime<Utc>>, String> {
         // `.order_by("-end_date").first()`: plain DESC, NULLS FIRST like
         // Django's ordering.
-        Ok(sqlx::query_scalar(
-            "SELECT end_date FROM cycles
-             WHERE project_id = $1 AND deleted_at IS NULL ORDER BY end_date DESC LIMIT 1",
-        )
-        .bind(project_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(Self::db_err)?
-        .flatten())
+        let db = self.db();
+        Ok(cycles::Entity::find()
+            .filter(cycles::Column::ProjectId.eq(project_id))
+            .filter(cycles::Column::DeletedAt.is_null())
+            .order_by_desc(cycles::Column::EndDate)
+            .select_only()
+            .column(cycles::Column::EndDate)
+            .limit(1)
+            .into_tuple::<Option<sea_orm::prelude::DateTimeWithTimeZone>>()
+            .one(&db)
+            .await
+            .map_err(Self::sea_err)?
+            .flatten()
+            .map(|ts| ts.with_timezone(&Utc)))
     }
 
     async fn state_group(&self, state_id: uuid::Uuid) -> Result<Option<String>, String> {
-        Ok(
-            sqlx::query_scalar("SELECT \"group\" FROM states WHERE id = $1")
-                .bind(state_id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(Self::db_err)?
-                .flatten(),
-        )
+        let db = self.db();
+        Ok(states::Entity::find_by_id(state_id)
+            .select_only()
+            .column(states::Column::Group)
+            .into_tuple::<Option<String>>()
+            .one(&db)
+            .await
+            .map_err(Self::sea_err)?
+            .flatten())
     }
 
     async fn default_pod_for_project(
@@ -1459,14 +1520,19 @@ impl SeedStore for PgSeedStore {
     ) -> Result<Option<uuid::Uuid>, String> {
         // `Pod.default_for_project_id` (`runner/models.py:174-176`):
         // `PodManager` excludes soft-deleted pods.
-        Ok(
-            sqlx::query_scalar("SELECT id FROM pod WHERE project_id = $1 AND is_default AND deleted_at IS NULL LIMIT 1")
-                .bind(project_id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(Self::db_err)?
-                .flatten(),
-        )
+        let db = self.db();
+        Ok(pod::Entity::find()
+            .filter(pod::Column::ProjectId.eq(project_id))
+            .filter(pod::Column::IsDefault.eq(true))
+            .filter(pod::Column::DeletedAt.is_null())
+            .select_only()
+            .column(pod::Column::Id)
+            .limit(1)
+            .into_tuple()
+            .one(&db)
+            .await
+            .map_err(Self::sea_err)?
+            .flatten())
     }
 
     async fn insert_bot_user(
@@ -1479,7 +1545,7 @@ impl SeedStore for PgSeedStore {
         // normalization; every other column at its model default.
         use pidash_services::domain::identity::{create_bot_user, NewBotUser};
         create_bot_user(
-            &self.pool,
+            &pidash_db::pool::sea_orm_connection(&self.pool),
             &NewBotUser {
                 id: None,
                 username,
@@ -1509,7 +1575,7 @@ impl SeedStore for PgSeedStore {
         let view_props = ws_default_props();
         let issue_props = ws_issue_props();
         add_seed(
-            &self.pool,
+            &pidash_db::pool::sea_orm_connection(&self.pool),
             &SeedMember {
                 workspace_id,
                 member_id,
@@ -1577,7 +1643,7 @@ impl SeedStore for PgSeedStore {
         let view_props = project_default_props();
         let preferences = default_preferences();
         add_seed(
-            &self.pool,
+            &pidash_db::pool::sea_orm_connection(&self.pool),
             &SeedProjectMember {
                 project_id,
                 workspace_id,
@@ -1602,30 +1668,28 @@ impl SeedStore for PgSeedStore {
     ) -> Result<uuid::Uuid, String> {
         // One `bulk_create` row (`:129-168`) with the FIXED literals.
         let actor = ctx_actor(ctx)?;
-        let id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO project_user_properties (created_at, updated_at, id,
-               display_properties, created_by_id, project_id, updated_by_id, user_id,
-               workspace_id, display_filters, filters, deleted_at, rich_filters,
-               preferences, sort_order)
-             VALUES ($1, $1, $2,
-               $3, $4, $5, NULL, $6,
-               $7, $8, $9, NULL, '{}',
-               $10, 65535)
-             RETURNING id",
-        )
-        .bind(self.now)
-        .bind(uuid::Uuid::new_v4())
-        .bind(sqlx::types::Json(logic::seed_display_properties()))
-        .bind(actor)
-        .bind(project_id)
-        .bind(user_id)
-        .bind(workspace_id)
-        .bind(sqlx::types::Json(logic::seed_display_filters()))
-        .bind(sqlx::types::Json(default_issue_filters()))
-        .bind(sqlx::types::Json(default_preferences()))
-        .fetch_one(&self.pool)
+        let id = uuid::Uuid::new_v4();
+        let db = self.db();
+        project_user_properties::Entity::insert(project_user_properties::ActiveModel {
+            created_at: Set(self.now.into()),
+            updated_at: Set(self.now.into()),
+            id: Set(id),
+            display_properties: Set(logic::seed_display_properties()),
+            created_by_id: Set(Some(actor)),
+            project_id: Set(project_id),
+            updated_by_id: Set(None),
+            user_id: Set(user_id),
+            workspace_id: Set(workspace_id),
+            display_filters: Set(logic::seed_display_filters()),
+            filters: Set(default_issue_filters()),
+            deleted_at: Set(None),
+            rich_filters: Set(serde_json::json!({})),
+            preferences: Set(default_preferences()),
+            sort_order: Set(65535.0),
+        })
+        .exec_without_returning(&db)
         .await
-        .map_err(Self::db_err)?;
+        .map_err(Self::sea_err)?;
         Ok(id)
     }
 
@@ -1639,7 +1703,7 @@ impl SeedStore for PgSeedStore {
         use pidash_services::domain::projects::states::{add_seed, SeedState};
         let actor = ctx_actor(ctx)?;
         add_seed(
-            &self.pool,
+            &pidash_db::pool::sea_orm_connection(&self.pool),
             &SeedState {
                 workspace_id,
                 project_id,
@@ -1665,26 +1729,28 @@ impl SeedStore for PgSeedStore {
         label: &LabelInsert,
     ) -> Result<uuid::Uuid, String> {
         let actor = ctx_actor(ctx)?;
-        let id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO labels (created_at, updated_at, id, name, description,
-               created_by_id, project_id, updated_by_id, workspace_id, parent_id,
-               color, sort_order, external_id, external_source, deleted_at)
-             VALUES ($1, $1, $2, $3, '',
-               $4, $5, NULL, $6, NULL,
-               $7, $8, NULL, NULL, NULL)
-             RETURNING id",
-        )
-        .bind(self.now)
-        .bind(uuid::Uuid::new_v4())
-        .bind(&label.name)
-        .bind(actor)
-        .bind(project_id)
-        .bind(workspace_id)
-        .bind(&label.color)
-        .bind(label.sort_order)
-        .fetch_one(&self.pool)
+        let id = uuid::Uuid::new_v4();
+        let db = self.db();
+        labels::Entity::insert(labels::ActiveModel {
+            created_at: Set(self.now.into()),
+            updated_at: Set(self.now.into()),
+            id: Set(id),
+            name: Set(label.name.clone()),
+            description: Set(String::new()),
+            created_by_id: Set(Some(actor)),
+            project_id: Set(Some(project_id)),
+            updated_by_id: Set(None),
+            workspace_id: Set(workspace_id),
+            parent_id: Set(None),
+            color: Set(label.color.clone()),
+            sort_order: Set(label.sort_order),
+            external_id: Set(None),
+            external_source: Set(None),
+            deleted_at: Set(None),
+        })
+        .exec_without_returning(&db)
         .await
-        .map_err(Self::db_err)?;
+        .map_err(Self::sea_err)?;
         Ok(id)
     }
 
@@ -1696,32 +1762,35 @@ impl SeedStore for PgSeedStore {
         cycle: &CycleInsert,
     ) -> Result<uuid::Uuid, String> {
         let actor = ctx_actor(ctx)?;
-        let id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO cycles (created_at, updated_at, id, name, description,
-               start_date, end_date, created_by_id, owned_by_id, project_id,
-               updated_by_id, workspace_id, view_props, sort_order, external_id,
-               external_source, progress_snapshot, archived_at, logo_props,
-               deleted_at, timezone, version)
-             VALUES ($1, $1, $2, $3, '',
-               $4, $5, $6, $6, $7,
-               NULL, $8, '{}', $9, NULL,
-               NULL, '{}', NULL, '{}',
-               NULL, $10, 1)
-             RETURNING id",
-        )
-        .bind(self.now)
-        .bind(uuid::Uuid::new_v4())
-        .bind(&cycle.name)
-        .bind(cycle.start_date)
-        .bind(cycle.end_date)
-        .bind(actor)
-        .bind(project_id)
-        .bind(workspace_id)
-        .bind(cycle.sort_order)
-        .bind(&cycle.timezone)
-        .fetch_one(&self.pool)
+        let id = uuid::Uuid::new_v4();
+        let db = self.db();
+        cycles::Entity::insert(cycles::ActiveModel {
+            created_at: Set(self.now.into()),
+            updated_at: Set(self.now.into()),
+            id: Set(id),
+            name: Set(cycle.name.clone()),
+            description: Set(String::new()),
+            start_date: Set(Some(cycle.start_date.into())),
+            end_date: Set(Some(cycle.end_date.into())),
+            created_by_id: Set(Some(actor)),
+            owned_by_id: Set(actor),
+            project_id: Set(project_id),
+            updated_by_id: Set(None),
+            workspace_id: Set(workspace_id),
+            view_props: Set(serde_json::json!({})),
+            sort_order: Set(cycle.sort_order),
+            external_id: Set(None),
+            external_source: Set(None),
+            progress_snapshot: Set(serde_json::json!({})),
+            archived_at: Set(None),
+            logo_props: Set(serde_json::json!({})),
+            deleted_at: Set(None),
+            timezone: Set(cycle.timezone.clone()),
+            version: Set(1),
+        })
+        .exec_without_returning(&db)
         .await
-        .map_err(Self::db_err)?;
+        .map_err(Self::sea_err)?;
         Ok(id)
     }
 
@@ -1733,33 +1802,35 @@ impl SeedStore for PgSeedStore {
         module: &ModuleInsert,
     ) -> Result<uuid::Uuid, String> {
         let actor = ctx_actor(ctx)?;
-        let id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO modules (created_at, updated_at, id, name, description,
-               description_text, description_html, start_date, target_date, status,
-               created_by_id, lead_id, project_id, updated_by_id, workspace_id,
-               view_props, sort_order, external_id, external_source, archived_at,
-               logo_props, deleted_at)
-             VALUES ($1, $1, $2, $3, $4,
-               NULL, NULL, $5, $6, $7,
-               $8, NULL, $9, NULL, $10,
-               '{}', $11, NULL, NULL, NULL,
-               '{}', NULL)
-             RETURNING id",
-        )
-        .bind(self.now)
-        .bind(uuid::Uuid::new_v4())
-        .bind(&module.name)
-        .bind(&module.description)
-        .bind(module.start_date)
-        .bind(module.target_date)
-        .bind(&module.status)
-        .bind(actor)
-        .bind(project_id)
-        .bind(workspace_id)
-        .bind(module.sort_order)
-        .fetch_one(&self.pool)
+        let id = uuid::Uuid::new_v4();
+        let db = self.db();
+        modules::Entity::insert(modules::ActiveModel {
+            created_at: Set(self.now.into()),
+            updated_at: Set(self.now.into()),
+            id: Set(id),
+            name: Set(module.name.clone()),
+            description: Set(module.description.clone()),
+            description_text: Set(None),
+            description_html: Set(None),
+            start_date: Set(Some(module.start_date)),
+            target_date: Set(Some(module.target_date)),
+            status: Set(module.status.clone()),
+            created_by_id: Set(Some(actor)),
+            lead_id: Set(None),
+            project_id: Set(project_id),
+            updated_by_id: Set(None),
+            workspace_id: Set(workspace_id),
+            view_props: Set(serde_json::json!({})),
+            sort_order: Set(module.sort_order),
+            external_id: Set(None),
+            external_source: Set(None),
+            archived_at: Set(None),
+            logo_props: Set(serde_json::json!({})),
+            deleted_at: Set(None),
+        })
+        .exec_without_returning(&db)
         .await
-        .map_err(Self::db_err)?;
+        .map_err(Self::sea_err)?;
         Ok(id)
     }
 
@@ -1773,7 +1844,7 @@ impl SeedStore for PgSeedStore {
         use pidash_services::domain::issues::{insert_seed_issue, SeedIssue};
         let actor = ctx_actor(ctx)?;
         insert_seed_issue(
-            &self.pool,
+            &pidash_db::pool::sea_orm_connection(&self.pool),
             &SeedIssue {
                 workspace_id,
                 project_id,
@@ -1800,13 +1871,11 @@ impl SeedStore for PgSeedStore {
         state_id: uuid::Uuid,
         now: DateTime<Utc>,
     ) -> Result<(), String> {
-        use crate::admission::RedisAdmissionCache;
         use crate::orchestration::live_inputs::{
             creator_universe, fetch_presence, gate_fn, gate_verdicts, profile_fn, JobsMatcher,
         };
         use crate::orchestration::{LiveCreationStore, StoreDeps};
-        use pidash_db::dispatch::status::AgentRunTrigger;
-        use pidash_services::dispatch::consume_admission_token;
+        use pidash_db::agent_runs::status::AgentRunTrigger;
         use pidash_services::orchestration::creation::{
             resolve_fallback_creator, resolve_pod_for_issue,
         };
@@ -1827,20 +1896,12 @@ impl SeedStore for PgSeedStore {
                 .map_err(Self::db_err)?,
         );
         let verdicts = std::sync::Arc::new(gate_verdicts(&self.assistant_seam, &presence).await);
-        let cloud = self.cloud.clone();
-        let managed = self.managed.clone();
-        let toolsets = self.toolsets.clone();
-        let now_unix_secs = now.timestamp();
         // Built fresh per store (probe, drive and bounce take owned
         // deps; the driver consults preflight at most once per drive).
         let make_deps = || StoreDeps {
-            cloud: cloud.clone(),
-            managed: managed.clone(),
-            cache: RedisAdmissionCache::from_env(),
+            managed: self.managed.clone(),
             has_usable_llm_config: gate_fn(verdicts.clone()),
-            toolsets: toolsets.clone(),
             llm_profile: profile_fn(presence.clone()),
-            now_unix_secs,
         };
         // `fire_state_transition` (`signals.py:74-107`): prior state
         // None (a create has no pre-save row), the seeded state, the
@@ -1853,6 +1914,8 @@ impl SeedStore for PgSeedStore {
             prev_state_id: None,
             current_state_id: Some(state_id),
             dispatch_immediate: true,
+            pod_once: false,
+
             moved_by_run: None,
             now,
             jitter_secs: 0.0,
@@ -1880,12 +1943,11 @@ impl SeedStore for PgSeedStore {
         // seam's state lookup (no soft-delete scope, like
         // `all_state_objects`); a lookup failure propagates like the
         // driver's own state reads below.
-        let seeded_state: Option<(uuid::Uuid, String, String)> = sqlx::query_as(STATE_SELECT_SQL)
-            .bind(state_id)
-            .fetch_optional(&self.pool)
+        let db = self.db();
+        let seeded_state: Option<(String, String)> = state_name_group(&db, state_id)
             .await
-            .map_err(Self::db_err)?;
-        let Some((_, seeded_name, seeded_group)) = seeded_state else {
+            .map_err(Self::sea_err)?;
+        let Some((seeded_name, seeded_group)) = seeded_state else {
             return Err(format!(
                 "workspace_seed: seeded state {state_id} has no states row"
             ));
@@ -1894,7 +1956,7 @@ impl SeedStore for PgSeedStore {
             group: &seeded_group,
             name: &seeded_name,
         };
-        let seed_ticking = is_ticking_state(Some(&seeded_ref));
+        let seed_ticking = phase_config_for(Some(&seeded_ref)).is_some();
         let mut tx = pidash_db::tx::Transaction::begin(&self.pool)
             .await
             .map_err(Self::db_err)?;
@@ -1904,6 +1966,7 @@ impl SeedStore for PgSeedStore {
             // without consulting preflight, exactly as in Python.
             (None, None, false)
         } else {
+            // raw-sql: transaction savepoint control has no SeaORM builder; the probe must run on the same tx
             sqlx::query("SAVEPOINT seed_preflight_probe")
                 .execute(&mut **tx.inner())
                 .await
@@ -1954,10 +2017,11 @@ impl SeedStore for PgSeedStore {
             // recovered; the savepoint rollback erases the probe's
             // writes, and its log lines are dropped (the re-run emits
             // the real bounce's lines once).
-            let (tx_back, _, _, _, _, _) = probe_store.into_parts();
+            let (tx_back, _, _, _) = probe_store.into_parts();
             tx = tx_back;
             match probed {
                 Ok(triple) => {
+                    // raw-sql: transaction savepoint rollback has no SeaORM builder; it erases the probe's writes on the same tx
                     sqlx::query("ROLLBACK TO SAVEPOINT seed_preflight_probe")
                         .execute(&mut **tx.inner())
                         .await
@@ -1987,8 +2051,7 @@ impl SeedStore for PgSeedStore {
             consulted: false,
         };
         let outcome = fire_state_transition(&mut drive_store, &mut stub, &request).await;
-        let (tx, pool, cache, mut dispatches, mut deferred, mut terminal_effects) =
-            drive_store.into_parts();
+        let (tx, pool, mut dispatches, mut terminal_effects) = drive_store.into_parts();
         // Only a state-*lookup* storage failure propagates (Python's
         // `try` wraps the handler call alone, `signals.py:89-98`): the
         // probe, the re-run and their `resolve_*` reads are handler
@@ -1999,7 +2062,7 @@ impl SeedStore for PgSeedStore {
         // Only a consulted stub owes the re-run: early returns
         // (parked, queued, no creator/pod, race lost) consult
         // nothing, and Python bounces on none of them.
-        let (tx, dispatches, deferred, terminal_effects) = if !proceed && stub.consulted {
+        let (tx, dispatches, terminal_effects) = if !proceed && stub.consulted {
             // The re-run IS the real bounce when it still says so
             // (same services fn, same tx, post-reconcile state);
             // when eligibility flipped concurrently it proceeds and
@@ -2051,13 +2114,12 @@ impl SeedStore for PgSeedStore {
                 Ok(())
             }
             .await;
-            let (tx, _, _, redispatches, redeferred, reterminal) = bounce_store.into_parts();
+            let (tx, _, redispatches, reterminal) = bounce_store.into_parts();
             match rerun_outcome {
                 Ok(()) => {
                     dispatches.extend(redispatches);
-                    deferred.extend(redeferred);
                     terminal_effects.extend(reterminal);
-                    (tx, dispatches, deferred, terminal_effects)
+                    (tx, dispatches, terminal_effects)
                 }
                 Err(error) => {
                     // The drive's writes go with the bounce's: roll the
@@ -2075,7 +2137,7 @@ impl SeedStore for PgSeedStore {
                 }
             }
         } else {
-            (tx, dispatches, deferred, terminal_effects)
+            (tx, dispatches, terminal_effects)
         };
         match outcome {
             FireOutcome::NoTransition => {
@@ -2100,7 +2162,7 @@ impl SeedStore for PgSeedStore {
                 // dispatch never fails the save.
                 for run_id in dispatches {
                     if let Err(error) =
-                        crate::dispatch::dispatch_agent_run(pool, &cloud, run_id, now).await
+                        crate::run_dispatch::dispatch_agent_run(pool, run_id, now).await
                     {
                         tracing::error!(
                             %error,
@@ -2109,9 +2171,6 @@ impl SeedStore for PgSeedStore {
                             "workspace_seed: post-commit dispatch failed; the save stands",
                         );
                     }
-                }
-                for consume in &deferred {
-                    consume_admission_token(&cache, consume);
                 }
                 if !terminal_effects.is_empty() {
                     // Python's transition never finalizes a run:
@@ -2137,7 +2196,7 @@ impl SeedStore for PgSeedStore {
         // from the project by `ProjectBaseModel.save`.
         use pidash_services::domain::issues::{insert_seed_issue_sequence, SeedIssueSequence};
         insert_seed_issue_sequence(
-            &self.pool,
+            &pidash_db::pool::sea_orm_connection(&self.pool),
             &SeedIssueSequence {
                 issue_id,
                 project_id,
@@ -2162,7 +2221,7 @@ impl SeedStore for PgSeedStore {
         // default `sequence = 1`.
         use pidash_services::domain::issues::{insert_seed_issue_sequence, SeedIssueSequence};
         insert_seed_issue_sequence(
-            &self.pool,
+            &pidash_db::pool::sea_orm_connection(&self.pool),
             &SeedIssueSequence {
                 issue_id,
                 project_id,
@@ -2184,27 +2243,33 @@ impl SeedStore for PgSeedStore {
         epoch_secs: f64,
     ) -> Result<uuid::Uuid, String> {
         // `.objects.create :300-308` without `created_by`: NULL audit.
-        let id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO issue_activities (created_at, updated_at, id, verb, field,
-               old_value, new_value, comment, attachments, created_by_id, issue_id,
-               issue_comment_id, project_id, updated_by_id, workspace_id, actor_id,
-               new_identifier, old_identifier, epoch, deleted_at)
-             VALUES ($1, $1, $2, 'created', NULL,
-               NULL, NULL, 'created the issue', '{}', NULL, $3,
-               NULL, $4, NULL, $5, $6,
-               NULL, NULL, $7, NULL)
-             RETURNING id",
-        )
-        .bind(self.now)
-        .bind(uuid::Uuid::new_v4())
-        .bind(issue_id)
-        .bind(project_id)
-        .bind(workspace_id)
-        .bind(actor_id)
-        .bind(epoch_secs)
-        .fetch_one(&self.pool)
+        let id = uuid::Uuid::new_v4();
+        let db = self.db();
+        issue_activities::Entity::insert(issue_activities::ActiveModel {
+            created_at: Set(self.now.into()),
+            updated_at: Set(self.now.into()),
+            id: Set(id),
+            verb: Set("created".to_owned()),
+            field: Set(None),
+            old_value: Set(None),
+            new_value: Set(None),
+            comment: Set("created the issue".to_owned()),
+            attachments: Set(Vec::new()),
+            created_by_id: Set(None),
+            issue_id: Set(Some(issue_id)),
+            issue_comment_id: Set(None),
+            project_id: Set(project_id),
+            updated_by_id: Set(None),
+            workspace_id: Set(workspace_id),
+            actor_id: Set(Some(actor_id)),
+            new_identifier: Set(None),
+            old_identifier: Set(None),
+            epoch: Set(Some(epoch_secs)),
+            deleted_at: Set(None),
+        })
+        .exec_without_returning(&db)
         .await
-        .map_err(Self::db_err)?;
+        .map_err(Self::sea_err)?;
         Ok(id)
     }
 
@@ -2218,22 +2283,23 @@ impl SeedStore for PgSeedStore {
     ) -> Result<uuid::Uuid, String> {
         // `.objects.create :312-318`: NULL audit (`BaseModel.save` wipes
         // the constructor arg, no crum user).
-        let id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO issue_labels (created_at, updated_at, id, created_by_id,
-               issue_id, label_id, project_id, updated_by_id, workspace_id, deleted_at)
-             VALUES ($1, $1, $2, NULL,
-               $3, $4, $5, NULL, $6, NULL)
-             RETURNING id",
-        )
-        .bind(self.now)
-        .bind(uuid::Uuid::new_v4())
-        .bind(issue_id)
-        .bind(label_id)
-        .bind(project_id)
-        .bind(workspace_id)
-        .fetch_one(&self.pool)
+        let id = uuid::Uuid::new_v4();
+        let db = self.db();
+        issue_labels::Entity::insert(issue_labels::ActiveModel {
+            created_at: Set(self.now.into()),
+            updated_at: Set(self.now.into()),
+            id: Set(id),
+            created_by_id: Set(None),
+            issue_id: Set(issue_id),
+            label_id: Set(label_id),
+            project_id: Set(project_id),
+            updated_by_id: Set(None),
+            workspace_id: Set(workspace_id),
+            deleted_at: Set(None),
+        })
+        .exec_without_returning(&db)
         .await
-        .map_err(Self::db_err)?;
+        .map_err(Self::sea_err)?;
         Ok(id)
     }
 
@@ -2247,22 +2313,23 @@ impl SeedStore for PgSeedStore {
     ) -> Result<uuid::Uuid, String> {
         // `.objects.create :322-328`: NULL audit (`BaseModel.save` wipes
         // the constructor arg, no crum user).
-        let id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO cycle_issues (created_at, updated_at, id, created_by_id,
-               cycle_id, issue_id, project_id, updated_by_id, workspace_id, deleted_at)
-             VALUES ($1, $1, $2, NULL,
-               $3, $4, $5, NULL, $6, NULL)
-             RETURNING id",
-        )
-        .bind(self.now)
-        .bind(uuid::Uuid::new_v4())
-        .bind(cycle_id)
-        .bind(issue_id)
-        .bind(project_id)
-        .bind(workspace_id)
-        .fetch_one(&self.pool)
+        let id = uuid::Uuid::new_v4();
+        let db = self.db();
+        cycle_issues::Entity::insert(cycle_issues::ActiveModel {
+            created_at: Set(self.now.into()),
+            updated_at: Set(self.now.into()),
+            id: Set(id),
+            created_by_id: Set(None),
+            cycle_id: Set(cycle_id),
+            issue_id: Set(issue_id),
+            project_id: Set(project_id),
+            updated_by_id: Set(None),
+            workspace_id: Set(workspace_id),
+            deleted_at: Set(None),
+        })
+        .exec_without_returning(&db)
         .await
-        .map_err(Self::db_err)?;
+        .map_err(Self::sea_err)?;
         Ok(id)
     }
 
@@ -2276,22 +2343,23 @@ impl SeedStore for PgSeedStore {
     ) -> Result<uuid::Uuid, String> {
         // `.objects.create :333-339`: NULL audit (`BaseModel.save` wipes
         // the constructor arg, no crum user).
-        let id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO module_issues (created_at, updated_at, id, created_by_id,
-               issue_id, module_id, project_id, updated_by_id, workspace_id, deleted_at)
-             VALUES ($1, $1, $2, NULL,
-               $3, $4, $5, NULL, $6, NULL)
-             RETURNING id",
-        )
-        .bind(self.now)
-        .bind(uuid::Uuid::new_v4())
-        .bind(issue_id)
-        .bind(module_id)
-        .bind(project_id)
-        .bind(workspace_id)
-        .fetch_one(&self.pool)
+        let id = uuid::Uuid::new_v4();
+        let db = self.db();
+        module_issues::Entity::insert(module_issues::ActiveModel {
+            created_at: Set(self.now.into()),
+            updated_at: Set(self.now.into()),
+            id: Set(id),
+            created_by_id: Set(None),
+            issue_id: Set(issue_id),
+            module_id: Set(module_id),
+            project_id: Set(project_id),
+            updated_by_id: Set(None),
+            workspace_id: Set(workspace_id),
+            deleted_at: Set(None),
+        })
+        .exec_without_returning(&db)
         .await
-        .map_err(Self::db_err)?;
+        .map_err(Self::sea_err)?;
         Ok(id)
     }
 
@@ -2304,34 +2372,39 @@ impl SeedStore for PgSeedStore {
         // `Page(...) :361-373`: bot owns AND audits (`updated_by_id` set,
         // unlike every other seeded row).
         let actor = ctx_actor(ctx)?;
-        let id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO pages (created_at, updated_at, id, name, description_json,
-               description_html, description_stripped, access, created_by_id,
-               owned_by_id, updated_by_id, workspace_id, color, archived_at, is_locked,
-               parent_id, view_props, logo_props, description_binary, is_global,
-               deleted_at, moved_to_page, moved_to_project, external_id,
-               external_source, sort_order)
-             VALUES ($1, $1, $2, $3, $4,
-               $5, $6, $7, $8,
-               $8, $8, $9, '', NULL, false,
-               NULL, $10, '{}', NULL, false,
-               NULL, NULL, NULL, NULL,
-               NULL, 65535)
-             RETURNING id",
-        )
-        .bind(self.now)
-        .bind(uuid::Uuid::new_v4())
-        .bind(&page.name)
-        .bind(sqlx::types::Json(page.description_json.clone()))
-        .bind(&page.description_html)
-        .bind(page.description_stripped.as_deref())
-        .bind(page.access)
-        .bind(actor)
-        .bind(workspace_id)
-        .bind(sqlx::types::Json(page_view_props()))
-        .fetch_one(&self.pool)
+        let id = uuid::Uuid::new_v4();
+        let db = self.db();
+        pages::Entity::insert(pages::ActiveModel {
+            created_at: Set(self.now.into()),
+            updated_at: Set(self.now.into()),
+            id: Set(id),
+            name: Set(page.name.clone()),
+            description_json: Set(page.description_json.clone()),
+            description_html: Set(page.description_html.clone()),
+            description_stripped: Set(page.description_stripped.clone()),
+            access: Set(page.access),
+            created_by_id: Set(Some(actor)),
+            owned_by_id: Set(actor),
+            updated_by_id: Set(Some(actor)),
+            workspace_id: Set(workspace_id),
+            color: Set(String::new()),
+            archived_at: Set(None),
+            is_locked: Set(false),
+            parent_id: Set(None),
+            view_props: Set(page_view_props()),
+            logo_props: Set(serde_json::json!({})),
+            description_binary: Set(None),
+            is_global: Set(false),
+            deleted_at: Set(None),
+            moved_to_page: Set(None),
+            moved_to_project: Set(None),
+            external_id: Set(None),
+            external_source: Set(None),
+            sort_order: Set(65535.0),
+        })
+        .exec_without_returning(&db)
         .await
-        .map_err(Self::db_err)?;
+        .map_err(Self::sea_err)?;
         Ok(id)
     }
 
@@ -2343,22 +2416,22 @@ impl SeedStore for PgSeedStore {
         page_id: uuid::Uuid,
     ) -> Result<uuid::Uuid, String> {
         let actor = ctx_actor(ctx)?;
-        let id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO project_pages (created_at, updated_at, id, created_by_id,
-               page_id, project_id, updated_by_id, workspace_id, deleted_at)
-             VALUES ($1, $1, $2, $3,
-               $4, $5, $3, $6, NULL)
-             RETURNING id",
-        )
-        .bind(self.now)
-        .bind(uuid::Uuid::new_v4())
-        .bind(actor)
-        .bind(page_id)
-        .bind(project_id)
-        .bind(workspace_id)
-        .fetch_one(&self.pool)
+        let id = uuid::Uuid::new_v4();
+        let db = self.db();
+        project_pages::Entity::insert(project_pages::ActiveModel {
+            created_at: Set(self.now.into()),
+            updated_at: Set(self.now.into()),
+            id: Set(id),
+            created_by_id: Set(Some(actor)),
+            page_id: Set(page_id),
+            project_id: Set(project_id),
+            updated_by_id: Set(Some(actor)),
+            workspace_id: Set(workspace_id),
+            deleted_at: Set(None),
+        })
+        .exec_without_returning(&db)
         .await
-        .map_err(Self::db_err)?;
+        .map_err(Self::sea_err)?;
         Ok(id)
     }
 
@@ -2370,34 +2443,35 @@ impl SeedStore for PgSeedStore {
         view: &ViewInsert,
     ) -> Result<uuid::Uuid, String> {
         let actor = ctx_actor(ctx)?;
-        let id: uuid::Uuid = sqlx::query_scalar(
-            "INSERT INTO issue_views (created_at, updated_at, id, name, description,
-               query, access, filters, created_by_id, project_id, updated_by_id,
-               workspace_id, display_filters, display_properties, sort_order,
-               logo_props, is_locked, owned_by_id, deleted_at, rich_filters, archived_at)
-             VALUES ($1, $1, $2, $3, $4,
-               $5, $6, $7, $8, $9, NULL,
-               $10, $11, $12, $13,
-               '{}', false, $8, NULL, $14, NULL)
-             RETURNING id",
-        )
-        .bind(self.now)
-        .bind(uuid::Uuid::new_v4())
-        .bind(&view.name)
-        .bind(&view.description)
-        .bind(sqlx::types::Json(view.query.clone()))
-        .bind(view.access)
-        .bind(sqlx::types::Json(view.filters.clone()))
-        .bind(actor)
-        .bind(project_id)
-        .bind(workspace_id)
-        .bind(sqlx::types::Json(view.display_filters.clone()))
-        .bind(sqlx::types::Json(view.display_properties.clone()))
-        .bind(view.sort_order)
-        .bind(sqlx::types::Json(view.rich_filters.clone()))
-        .fetch_one(&self.pool)
+        let id = uuid::Uuid::new_v4();
+        let db = self.db();
+        issue_views::Entity::insert(issue_views::ActiveModel {
+            created_at: Set(self.now.into()),
+            updated_at: Set(self.now.into()),
+            id: Set(id),
+            name: Set(view.name.clone()),
+            description: Set(view.description.clone()),
+            query: Set(view.query.clone()),
+            access: Set(view.access),
+            filters: Set(view.filters.clone()),
+            created_by_id: Set(Some(actor)),
+            project_id: Set(Some(project_id)),
+            updated_by_id: Set(None),
+            workspace_id: Set(workspace_id),
+            display_filters: Set(view.display_filters.clone()),
+            display_properties: Set(view.display_properties.clone()),
+            sort_order: Set(view.sort_order),
+            logo_props: Set(serde_json::json!({})),
+            is_locked: Set(false),
+            owned_by_id: Set(actor),
+            deleted_at: Set(None),
+            rich_filters: Set(view.rich_filters.clone()),
+            archived_at: Set(None),
+            anchor: Set(None),
+        })
+        .exec_without_returning(&db)
         .await
-        .map_err(Self::db_err)?;
+        .map_err(Self::sea_err)?;
         Ok(id)
     }
 }
@@ -2435,17 +2509,13 @@ pub fn register_workspace_seed(
     registry: &mut Registry,
     pool: sqlx::PgPool,
     seed_data_dir: PathBuf,
-    cloud: pidash_db::config::CloudAgentSettings,
-    managed: pidash_db::config::ManagedRunnerSettings,
-    toolsets: std::sync::Arc<dyn pidash_services::extensions::CloudAgentToolsetsSeam>,
+    managed: pidash_db::config::PidashAgentSettings,
     assistant_seam: std::sync::Arc<dyn pidash_services::extensions::AssistantModelSeam>,
 ) {
     let handler: Handler = Arc::new(move |job: crate::queue::JobRow| {
         let pool = pool.clone();
         let seed_data_dir = seed_data_dir.clone();
-        let cloud = cloud.clone();
         let managed = managed.clone();
-        let toolsets = toolsets.clone();
         let assistant_seam = assistant_seam.clone();
         Box::pin(async move {
             let workspace_id: uuid::Uuid = job
@@ -2456,7 +2526,7 @@ pub fn register_workspace_seed(
                 .and_then(|s| uuid::Uuid::parse_str(s).ok())
                 .ok_or_else(|| "workspace_seed: args[0] must be a workspace uuid".to_owned())?;
             let now = Utc::now();
-            let store = PgSeedStore::new(pool, now, cloud, managed, toolsets, assistant_seam);
+            let store = PgSeedStore::new(pool, now, managed, assistant_seam);
             let input = RunInput::now_for(&seed_data_dir, workspace_id, now);
             match run(&store, &input).await {
                 Ok(report) => {
@@ -3079,6 +3149,67 @@ mod tests {
             .expect_err("must fail");
         assert!(err.contains("KeyError") && err.contains("labels"), "{err}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn seaorm_members_order_desc() {
+        use pidash_db::entity::workspace_members;
+        use sea_orm::{DbBackend, QueryTrait};
+        let ws = uuid::Uuid::from_u128(1);
+        let sql = workspace_members::Entity::find()
+            .filter(workspace_members::Column::WorkspaceId.eq(ws))
+            .filter(workspace_members::Column::DeletedAt.is_null())
+            .order_by_desc(workspace_members::Column::CreatedAt)
+            .select_only()
+            .columns([
+                workspace_members::Column::MemberId,
+                workspace_members::Column::Role,
+            ])
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.contains("ORDER BY \"workspace_members\".\"created_at\" DESC"),
+            "members newest first: {sql}"
+        );
+        assert!(sql.contains("\"deleted_at\" IS NULL"), "{sql}");
+    }
+
+    #[test]
+    fn seaorm_state_max_excludes_triage() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let proj = uuid::Uuid::from_u128(2);
+        let sql = states::Entity::find()
+            .filter(states::Column::ProjectId.eq(proj))
+            .filter(states::Column::DeletedAt.is_null())
+            .filter(states::Column::Group.ne("triage".to_owned()))
+            .select_only()
+            .column_as(Expr::col(states::Column::Sequence).max(), "max_sequence")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("MAX(\"sequence\")"), "{sql}");
+        assert!(
+            sql.contains("\"group\" <>"),
+            "StateManager excludes triage: {sql}"
+        );
+    }
+
+    #[test]
+    fn seaorm_last_cycle_end_desc_limit() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let proj = uuid::Uuid::from_u128(3);
+        let sql = cycles::Entity::find()
+            .filter(cycles::Column::ProjectId.eq(proj))
+            .filter(cycles::Column::DeletedAt.is_null())
+            .order_by_desc(cycles::Column::EndDate)
+            .select_only()
+            .column(cycles::Column::EndDate)
+            .limit(1)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            sql.contains("ORDER BY \"cycles\".\"end_date\" DESC"),
+            "{sql}"
+        );
     }
 
     #[test]

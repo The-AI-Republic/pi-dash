@@ -1,14 +1,5 @@
 {
-  "state_groups": [
-    "backlog",
-    "unstarted",
-    "started",
-    "review",
-    "test",
-    "completed",
-    "cancelled",
-    "triage"
-  ],
+  "state_groups": ["backlog", "unstarted", "started", "review", "test", "completed", "cancelled", "triage"],
   "KIND_CODING_TASK": "coding-task",
   "DEFAULT_CADENCE_KEY": "impl",
   "CADENCE_FIELDS": {
@@ -74,7 +65,7 @@
     {
       "input": null,
       "case": "none-state",
-      "is_ticking_state": false,
+      "stage_runs_automatically": false,
       "phase_config_for": null,
       "template_name_for": "coding-task",
       "cadence_fields_for": {
@@ -89,7 +80,7 @@
         "name": "In Review"
       },
       "case": "registered:review",
-      "is_ticking_state": true,
+      "stage_runs_automatically": true,
       "phase_config_for": {
         "state_name": "In Review",
         "template_name": "review",
@@ -111,7 +102,7 @@
         "name": "Custom In Review"
       },
       "case": "custom-name-in-ticking-group:review",
-      "is_ticking_state": false,
+      "stage_runs_automatically": false,
       "phase_config_for": null,
       "template_name_for": "coding-task",
       "cadence_fields_for": {
@@ -126,7 +117,7 @@
         "name": "In Progress"
       },
       "case": "registered:started",
-      "is_ticking_state": true,
+      "stage_runs_automatically": true,
       "phase_config_for": {
         "state_name": "In Progress",
         "template_name": "coding-task",
@@ -148,7 +139,7 @@
         "name": "Custom In Progress"
       },
       "case": "custom-name-in-ticking-group:started",
-      "is_ticking_state": false,
+      "stage_runs_automatically": false,
       "phase_config_for": null,
       "template_name_for": "coding-task",
       "cadence_fields_for": {
@@ -163,7 +154,7 @@
         "name": "In Test"
       },
       "case": "registered:test",
-      "is_ticking_state": true,
+      "stage_runs_automatically": true,
       "phase_config_for": {
         "state_name": "In Test",
         "template_name": "test",
@@ -185,7 +176,7 @@
         "name": "Custom In Test"
       },
       "case": "custom-name-in-ticking-group:test",
-      "is_ticking_state": false,
+      "stage_runs_automatically": false,
       "phase_config_for": null,
       "template_name_for": "coding-task",
       "cadence_fields_for": {
@@ -200,7 +191,7 @@
         "name": "Some Backlog"
       },
       "case": "non-ticking-group:backlog",
-      "is_ticking_state": false,
+      "stage_runs_automatically": false,
       "phase_config_for": null,
       "template_name_for": "coding-task",
       "cadence_fields_for": {
@@ -215,7 +206,7 @@
         "name": "Some Unstarted"
       },
       "case": "non-ticking-group:unstarted",
-      "is_ticking_state": false,
+      "stage_runs_automatically": false,
       "phase_config_for": null,
       "template_name_for": "coding-task",
       "cadence_fields_for": {
@@ -230,7 +221,7 @@
         "name": "Some Completed"
       },
       "case": "non-ticking-group:completed",
-      "is_ticking_state": false,
+      "stage_runs_automatically": false,
       "phase_config_for": null,
       "template_name_for": "coding-task",
       "cadence_fields_for": {
@@ -245,7 +236,7 @@
         "name": "Some Cancelled"
       },
       "case": "non-ticking-group:cancelled",
-      "is_ticking_state": false,
+      "stage_runs_automatically": false,
       "phase_config_for": null,
       "template_name_for": "coding-task",
       "cadence_fields_for": {
@@ -260,7 +251,7 @@
         "name": "Some Triage"
       },
       "case": "non-ticking-group:triage",
-      "is_ticking_state": false,
+      "stage_runs_automatically": false,
       "phase_config_for": null,
       "template_name_for": "coding-task",
       "cadence_fields_for": {
@@ -275,7 +266,7 @@
         "name": "Whatever"
       },
       "case": "unknown-group",
-      "is_ticking_state": false,
+      "stage_runs_automatically": false,
       "phase_config_for": null,
       "template_name_for": "coding-task",
       "cadence_fields_for": {

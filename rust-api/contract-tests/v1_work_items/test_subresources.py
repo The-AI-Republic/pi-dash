@@ -438,6 +438,50 @@ def test_pr_link_create_list_delete(api, world, seeder):
     assert api.delete(sub_url(world, issue_id, "github", "pull-requests", link_id)).status_code == 204
 
 
+def test_pr_link_relink_stamps_updated_by(api, world, db):
+    """Idempotent relink re-saves the generic row, stamping updated_by.
+
+    Django's ``_ensure_code_review_link`` + ``save()`` (NEWPIDASH-229)
+    stamps ``updated_by_id`` from the request user even though no
+    field changes; a Rust relink that returned without an UPDATE left
+    the stamp unset. The response is identical either way, so only the
+    persisted cell proves the parity.
+    """
+    import random
+
+    issue_id = world["issue"]["id"]
+    pr_number = random.randint(100000, 999999)
+    payload = {
+        "repo_owner": "acme",
+        "repo_name": "web",
+        "pr_number": pr_number,
+        "url": f"https://github.com/acme/web/pull/{pr_number}",
+        "title": "Fix it",
+        "state": "open",
+        "merged": False,
+        "draft": False,
+    }
+    created = api.post(sub_url(world, issue_id, "github", "pull-requests"), json=payload)
+    assert created.status_code == 201, created.text
+    # The generic row is the audited one: Django returns the legacy
+    # link id (its own row) and stamps the generic mirror it ensures;
+    # Rust's response id is the generic row itself. Address the
+    # generic row by PR identity on both backends.
+    generic = (
+        "SELECT updated_by_id FROM git_code_review_links WHERE provider = 'github'"
+        " AND host_url = 'https://github.com' AND namespace = 'acme'"
+        " AND repo_name = 'web' AND external_iid = %s AND deleted_at IS NULL"
+    )
+    before = db.fetchone(generic, (str(pr_number),))
+    assert before is not None and before["updated_by_id"] is None
+    relink = api.post(sub_url(world, issue_id, "github", "pull-requests"), json=payload)
+    assert relink.status_code == 200, relink.text
+    assert relink.json()["id"] == created.json()["id"]
+    after = db.fetchone(generic, (str(pr_number),))
+    assert after is not None
+    assert str(after["updated_by_id"]) == str(world["owner"]["id"])
+
+
 def test_review_link_create_list_delete(api, world):
     """Fresh attach returns 201; re-attaching the same review is an idempotent 200."""
     import random
@@ -542,3 +586,107 @@ def test_comment_patch_recomputes_stripped_without_html(api, world, db):
         (row["description_id"],),
     )
     assert desc["description_stripped"] == "hello"
+
+
+def _identifier_url(world):
+    project_identifier = world["issue"]["url"].rsplit("/", 1)[-1].rsplit("-", 1)[0]
+    identifier = f"{project_identifier}-{world['issue']['sequence_id']}"
+    return f"/api/v1/workspaces/{world['workspace']['slug']}/work-items/{identifier}/"
+
+
+def test_issue_detail_code_reviews_empty(api, world):
+    """NEWPIDASH-366 (DIFF-68): an issue with no reviews renders `"code_reviews": []`.
+
+    Django (the ``django=`` arm) has no such key: the field is
+    new-system-only. Rust (the ``rust=`` arm) renders the empty list.
+    """
+    from _harness.diffs import expect
+
+    expected = expect("DIFF-68", django=None, rust=[])
+    for url in (issue_url(world, world["issue"]["id"]), _identifier_url(world)):
+        response = api.get(url)
+        assert response.status_code == 200, response.text
+        body = response.json()
+        if expected is None:
+            assert "code_reviews" not in body
+        else:
+            assert body["code_reviews"] == []
+
+
+def test_issue_detail_code_reviews(api, world, db, seeder):
+    """NEWPIDASH-366 (DIFF-68): detail carries attached reviews newest-first.
+
+    Two attached reviews (one merged, one open) both appear under
+    ``code_reviews`` with the stored ``state``/``merged``; a soft-deleted
+    review is excluded. Django (the ``django=`` arm) has no such key.
+    Rust renders the read-time join on both the by-pk detail and the
+    by-identifier lookup the CLI uses.
+    """
+    from _harness.diffs import expect
+
+    issue_id = world["issue"]["id"]
+    workspace_id = world["workspace"]["id"]
+    project_id = world["project"]["id"]
+    open_link = seeder.create_code_review_link(
+        workspace_id, project_id, issue_id, external_iid="101"
+    )
+    merged_link = seeder.create_code_review_link(
+        workspace_id, project_id, issue_id, external_iid="102"
+    )
+    dead_link = seeder.create_code_review_link(
+        workspace_id, project_id, issue_id, external_iid="103"
+    )
+    db.execute(
+        "UPDATE git_code_review_links SET url=%s, title='Open PR', state='open',"
+        " merged=false, draft=false, created_at='2026-03-01T00:00:00Z',"
+        " updated_at='2026-03-01T00:00:00Z' WHERE id=%s",
+        (
+            "https://github.com/contract-owner/contract-repo/pull/101",
+            open_link["id"],
+        ),
+    )
+    db.execute(
+        "UPDATE git_code_review_links SET url=%s, title='Merged PR', state='merged',"
+        " merged=true, draft=false, created_at='2026-04-01T00:00:00Z',"
+        " updated_at='2026-04-01T00:00:00Z' WHERE id=%s",
+        (
+            "https://github.com/contract-owner/contract-repo/pull/102",
+            merged_link["id"],
+        ),
+    )
+    db.execute(
+        "UPDATE git_code_review_links SET deleted_at=now() WHERE id=%s",
+        (dead_link["id"],),
+    )
+    expected = expect(
+        "DIFF-68",
+        django=None,
+        rust=[
+            {
+                "url": "https://github.com/contract-owner/contract-repo/pull/102",
+                "title": "Merged PR",
+                "state": "merged",
+                "merged": True,
+                "draft": False,
+                "provider": "github",
+                "external_iid": "102",
+            },
+            {
+                "url": "https://github.com/contract-owner/contract-repo/pull/101",
+                "title": "Open PR",
+                "state": "open",
+                "merged": False,
+                "draft": False,
+                "provider": "github",
+                "external_iid": "101",
+            },
+        ],
+    )
+    for url in (issue_url(world, issue_id), _identifier_url(world)):
+        response = api.get(url)
+        assert response.status_code == 200, response.text
+        body = response.json()
+        if expected is None:
+            assert "code_reviews" not in body
+        else:
+            assert body["code_reviews"] == expected

@@ -28,6 +28,20 @@ export function isRefreshCall(url: string): boolean {
 type RotationOutcome = "rotated" | "rejected" | "soft";
 
 /**
+ * Whether the desktop binary already refreshed this request in Rust. When it
+ * has, a 401 here is final (the session is dead) and the page must not run a
+ * second refresh.
+ */
+function nativeRefreshesSession(): boolean {
+  try {
+    const win = (globalThis as unknown as { window?: { __PIDASH_NATIVE_SESSION__?: { refresh?: unknown } } }).window;
+    return win?.__PIDASH_NATIVE_SESSION__?.refresh === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Share one rotation across the 401s that arrive while it is in flight.
  * A rejected rotation (401/403 response) means the session is dead; any
  * other non-success status is soft (it says nothing about the session);
@@ -59,6 +73,8 @@ export function createCloudRefreshMiddleware(): Middleware {
   return async (request, next) => {
     const answer = await next(request);
     if (answer.status !== 401 || isRefreshCall(request.url)) return answer;
+    // When the desktop binary already refreshed in Rust, a 401 is final.
+    if (nativeRefreshesSession()) return answer;
     let rotation: string;
     try {
       rotation = new URL(CLOUD_REFRESH_PATH, request.url).toString();

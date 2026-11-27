@@ -61,17 +61,21 @@ impl CursorValue {
 }
 
 /// `Cursor(value, offset, is_prev, has_results)`. `offset` is the page
-/// number; `value` is the page size the cursor was issued for.
+/// number; `value` is the page size the cursor was issued for. The page
+/// rides as `i128` so the `next`/`prev` step past `i64::MAX`/`i64::MIN`
+/// renders exactly like Django's unbounded ints (NEWPIDASH-345; the same
+/// `i128` step the intake paginators use). The DB window itself stays
+/// saturated in `i64` (`offset_window` / `grouped_window`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Cursor {
     pub value: CursorValue,
-    pub offset: i64,
+    pub offset: i128,
     pub is_prev: bool,
     pub has_results: Option<bool>,
 }
 
 impl Cursor {
-    pub fn new(value: CursorValue, offset: i64, is_prev: bool, has_results: bool) -> Self {
+    pub fn new(value: CursorValue, offset: i128, is_prev: bool, has_results: bool) -> Self {
         Self {
             value,
             offset,
@@ -108,7 +112,7 @@ impl Cursor {
         } else {
             parse_py_int(bits[0]).map(CursorValue::Int)?
         };
-        let offset = parse_py_int(bits[1])?;
+        let offset = parse_py_page(bits[1])?;
         let is_prev = parse_py_int(bits[2])? != 0;
         Ok(Self {
             value,
@@ -183,6 +187,35 @@ pub fn py_float_str(value: f64) -> String {
             format!("{}{mantissa}e{exp_text}", if negative { "-" } else { "" })
         }
     }
+}
+
+/// Unquote `sort_order` in serialized grouped rows: Django renders the
+/// float bare (`65535.0`, CPython `repr`), while the maps must carry it as
+/// a string for the grouping kernels (which never do math on it). The
+/// `py_float_str` text is always a bare-JSON-number-safe literal (digits,
+/// `e`, `+`, `-`, `.`, or `nan`/`inf` like the flat path emits), so
+/// splicing the quotes is exact.
+pub fn unquote_sort_order(results_json: &str) -> String {
+    let mut out = String::with_capacity(results_json.len());
+    let mut rest = results_json;
+    let marker = "\"sort_order\":\"";
+    while let Some(start) = rest.find(marker) {
+        let (head, tail) = rest.split_at(start + marker.len());
+        out.push_str(&head[..head.len() - 1]);
+        match tail.find('"') {
+            Some(end) => {
+                out.push_str(&tail[..end]);
+                rest = &tail[end + 1..];
+            }
+            None => {
+                out.push_str(tail);
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 impl std::fmt::Display for Cursor {
@@ -378,6 +411,20 @@ fn parse_py_int(raw: &str) -> Result<i64, PageError> {
     }
 }
 
+/// Python `int()` for the cursor page: the full `i128` range rides exactly
+/// so Django-issued cursors past `i64` (`...808:0`) parse back to the page
+/// they name instead of collapsing onto `i64::MAX` (NEWPIDASH-345). Only
+/// magnitudes past `i128` saturate; the DB window saturates far earlier
+/// (`i64`), so every saturated page still reads the same empty page.
+fn parse_py_page(raw: &str) -> Result<i128, PageError> {
+    match parse_py_int_value(raw) {
+        Some(PyInt::Small(value)) => Ok(value),
+        Some(PyInt::HugePositive) => Ok(i128::MAX),
+        Some(PyInt::HugeNegative) => Ok(i128::MIN),
+        None => Err(PageError::InvalidCursor),
+    }
+}
+
 /// CPython `float(text)`: surrounding `White_Space` stripped, one sign,
 /// PEP-515 `_` strictly between digits anywhere in the grammar (`1_0e1_0`
 /// ok; `1_.5`, `1._5`, `1_e5`, `1e_5` raise), ASCII + Unicode decimal digits
@@ -495,13 +542,28 @@ pub fn clamp_limit(limit: i64, max_limit: i64) -> i64 {
 }
 
 /// The `next` cursor: `Cursor(limit, page + 1, False, extra_rows > 0)`.
-pub fn next_cursor(limit: i64, page: i64, has_more: bool) -> Cursor {
-    Cursor::new(CursorValue::Int(limit), page + 1, false, has_more)
+/// The step runs in `i128` and saturates there (NEWPIDASH-345): Django's
+/// ints are unbounded, so the page past `i64::MAX` is `...808`, not a
+/// panic and not a wrap to a negative page.
+pub fn next_cursor(limit: i64, page: i128, has_more: bool) -> Cursor {
+    Cursor::new(
+        CursorValue::Int(limit),
+        page.saturating_add(1),
+        false,
+        has_more,
+    )
 }
 
 /// The `prev` cursor: `Cursor(limit, page - 1, True, page > 0)`.
-pub fn prev_cursor(limit: i64, page: i64) -> Cursor {
-    Cursor::new(CursorValue::Int(limit), page - 1, true, page > 0)
+/// Same `i128` step as [`next_cursor`]: the page below `i64::MIN` is
+/// `...809`, matching Django instead of panicking.
+pub fn prev_cursor(limit: i64, page: i128) -> Cursor {
+    Cursor::new(
+        CursorValue::Int(limit),
+        page.saturating_sub(1),
+        true,
+        page > 0,
+    )
 }
 
 /// `max_hits = math.ceil(count / limit)`; zero limit is Python's
@@ -530,19 +592,31 @@ fn saturate_offset(value: i128) -> i64 {
 /// The fetch window `OffsetPaginator.get_result` reads: `[offset, stop)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OffsetWindow {
-    pub page: i64,
+    pub page: i128,
     pub offset: i64,
     pub stop: i64,
 }
 
 pub fn offset_window(
     limit: i64,
-    page: i64,
+    page: i128,
     cursor_value: CursorValue,
     is_prev: bool,
     max_offset: Option<i64>,
 ) -> Result<OffsetWindow, PageError> {
-    let offset = saturate_offset(page as i128 * limit as i128);
+    // `page` rides `i128` (NEWPIDASH-345); the product can overflow `i128`
+    // only for astronomically huge pages no client echo can produce, and
+    // any overflow is a huge magnitude either way: saturate by sign.
+    let offset = match page.checked_mul(limit as i128) {
+        Some(product) => saturate_offset(product),
+        None => {
+            if (page > 0) == (limit > 0) {
+                i64::MAX
+            } else {
+                i64::MIN
+            }
+        }
+    };
     if let Some(max) = max_offset {
         if offset >= max {
             return Err(PageError::OffsetTooLarge);
@@ -551,11 +625,19 @@ pub fn offset_window(
     if offset < 0 {
         return Err(PageError::NegativeOffset);
     }
+    if limit < 0 {
+        // `results[:limit]` with a negative limit raises Django's
+        // `ValueError` for *every* `limit < 0` (`utils/paginator.py:169`),
+        // even when `stop >= offset` (the crafted `per_page=-3`,
+        // `cursor=-3:-2:0` case: offset 6, stop 4). Error here, before
+        // any handler casts `stop - offset` or slices `rows[start..stop]`.
+        return Err(PageError::NegativeSlice);
+    }
     let stop = saturate_offset(offset as i128 + limit as i128 + 1);
     if stop < 0 {
         // `queryset[offset:stop]` with a negative `stop`: Django raises
-        // `ValueError` on the lazy queryset (only reachable with `limit < 0`,
-        // since `offset >= 0` here).
+        // `ValueError` on the lazy queryset. Unreachable since the guard
+        // above holds `limit >= 0` and `offset >= 0`; kept as defense.
         return Err(PageError::NegativeSlice);
     }
     if !cursor_value.equals_limit(limit) && is_prev {
@@ -585,7 +667,7 @@ pub fn apply_offset_window<T: Clone>(fetched: &[T], limit: i64) -> Result<Vec<T>
 /// behave like Python instead of erroring.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GroupedWindow {
-    pub page: i64,
+    pub page: i128,
     pub offset: i64,
     pub stop: i64,
 }
@@ -633,13 +715,24 @@ fn trunc_saturate(bound: f64) -> Result<i64, PageError> {
 
 pub fn grouped_window(
     limit: i64,
-    page: i64,
+    page: i128,
     cursor_value: CursorValue,
     max_offset: Option<i64>,
 ) -> Result<GroupedWindow, PageError> {
     let stride = stride_or_limit(cursor_value, limit)?;
+    // Same huge-page saturation as `offset_window`: only astronomically
+    // huge pages can overflow `i128`, and any overflow is huge either way.
     let offset = match stride {
-        Stride::Int(stride) => saturate_offset(page as i128 * stride),
+        Stride::Int(stride) => match page.checked_mul(stride) {
+            Some(product) => saturate_offset(product),
+            None => {
+                if (page > 0) == (stride > 0) {
+                    i64::MAX
+                } else {
+                    i64::MIN
+                }
+            }
+        },
         Stride::Float(stride) => trunc_saturate(page as f64 * stride)?,
     };
     if let Some(max) = max_offset {
@@ -1218,6 +1311,19 @@ mod tests {
     }
 
     #[test]
+    fn sort_order_unquotes_exactly() {
+        assert_eq!(
+            unquote_sort_order(r#"{"a":1,"sort_order":"65535.0","b":[]}"#),
+            r#"{"a":1,"sort_order":65535.0,"b":[]}"#
+        );
+        assert_eq!(
+            unquote_sort_order(r#"[{"sort_order":"1e+20"}]"#),
+            r#"[{"sort_order":1e+20}]"#
+        );
+        assert_eq!(unquote_sort_order(r#"{"x":"y"}"#), r#"{"x":"y"}"#);
+    }
+
+    #[test]
     fn negative_limit_is_a_server_error_like_python() {
         // Oracle: `results[:limit]` with a negative limit runs on the lazy
         // queryset, so Django raises `ValueError` — no slice-trim happens.
@@ -1494,6 +1600,38 @@ mod tests {
     }
 
     #[test]
+    fn next_prev_cursor_at_i64_limits_do_not_overflow() {
+        // NEWPIDASH-345: `page + 1` overflowed at `i64::MAX` (panic in
+        // debug, wrapped cursor in release). Django's ints are unbounded
+        // and answer the empty page past the end.
+        assert_eq!(
+            next_cursor(1, 9223372036854775807, false).to_string(),
+            "1:9223372036854775808:0"
+        );
+        assert_eq!(
+            prev_cursor(1, 9223372036854775807).to_string(),
+            "1:9223372036854775806:1"
+        );
+        assert_eq!(
+            prev_cursor(1, -9223372036854775808).to_string(),
+            "1:-9223372036854775809:1"
+        );
+        // Django's own `next` past the end parses back to the page it
+        // names instead of collapsing onto `i64::MAX`.
+        let echoed = Cursor::from_string("1:9223372036854775808:0").unwrap();
+        assert_eq!(echoed.offset, 9223372036854775808i128);
+        assert_eq!(
+            next_cursor(1, echoed.offset, false).to_string(),
+            "1:9223372036854775809:0"
+        );
+        // The window at the extreme still reads the empty page past the end.
+        let window =
+            offset_window(1, 9223372036854775807, CursorValue::Int(1), false, None).unwrap();
+        assert_eq!(window.offset, i64::MAX);
+        assert_eq!(window.stop, i64::MAX);
+    }
+
+    #[test]
     fn offset_window_back_walk_is_a_server_error() {
         // Oracle: `results[-(limit + 1):]` runs on the lazy queryset, whose
         // negative indexing raises `ValueError` — the walk never returns rows.
@@ -1529,6 +1667,20 @@ mod tests {
             offset_window(-5, 0, CursorValue::Int(-5), false, None),
             Err(PageError::NegativeSlice)
         );
+        // PIDASHCONV-1718: crafted negative per_page + negative cursor page
+        // (`per_page=-3`, `cursor=-3:-2:0` => limit -3, page -2, offset 6,
+        // stop 4). `queryset[6:4]` is an empty slice in Django but
+        // `results[:limit]` with a negative limit always raises
+        // `ValueError`, so every `limit < 0` is a 500. The window must error
+        // before handlers cast `stop - offset` or slice `rows[start..stop]`.
+        assert_eq!(
+            offset_window(-3, -2, CursorValue::Int(-3), false, None),
+            Err(PageError::NegativeSlice)
+        );
+        assert_eq!(
+            offset_window(-1, 0, CursorValue::Int(-1), false, None),
+            Err(PageError::NegativeSlice)
+        );
         assert_eq!(max_hits(95, 50), Ok(2));
         assert_eq!(max_hits(100, 50), Ok(2));
         assert_eq!(max_hits(0, 50), Ok(0));
@@ -1539,8 +1691,14 @@ mod tests {
     fn offset_window_saturates_huge_products_to_an_empty_page() {
         // Oracle: Python ints never overflow; a huge offset slices past the
         // end and reads an empty 200 page.
-        let window =
-            offset_window(1000, i64::MAX, CursorValue::Int(i64::MAX), false, None).unwrap();
+        let window = offset_window(
+            1000,
+            i64::MAX as i128,
+            CursorValue::Int(i64::MAX),
+            false,
+            None,
+        )
+        .unwrap();
         assert_eq!(window.offset, i64::MAX);
         assert_eq!(window.stop, i64::MAX);
     }

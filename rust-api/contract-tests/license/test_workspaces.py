@@ -83,9 +83,7 @@ def test_create_workspace(admin_api, world):
 
 
 def test_create_workspace_seeds_builtin_schedulers(admin_api, world):
-    # PIDASHCONV-886: the Workspace post_save receiver
-    # (scheduler/signals.py) seeds the builtin catalog on every create,
-    # stamping created_by from the requesting user.
+    # NEWPIDASH-256: builtin catalog empty → no rows seeded.
     res = admin_api.post(
         "/api/instances/workspaces/", json={"name": "Seeded", "slug": "seeded"}
     )
@@ -97,31 +95,7 @@ def test_create_workspace_seeds_builtin_schedulers(admin_api, world):
             " from schedulers where workspace_id = %s order by slug;",
             (res.json()["id"],),
         ).fetchall()
-    assert [r[0] for r in rows] == ["fable-security-audit", "security-audit"]
-    want = {
-        "security-audit": (
-            "Security Audit",
-            "Scans the project for common security vulnerabilities and files"
-            " Pi Dash issues for any new findings.",
-            "6cba8b5a8c04221b8dfdc4a23a8de31c60abe14ec6e1483d7e814a39ff35376f",
-        ),
-        "fable-security-audit": (
-            "Claude Mythos/Fable System Security Audit",
-            "Comprehensive Fable-powered audit: scans the project for security"
-            " vulnerabilities and correctness bugs and files Pi Dash issues for"
-            " new findings.",
-            "63a696e7115b1724dd72b30ef575e76e4603a14c482aacdb48bef5f89f3b5b36",
-        ),
-    }
-    for slug, name, description, prompt, source, is_enabled, color, created_by, updated_by, deleted_at in rows:
-        assert (name, description) == want[slug][:2]
-        assert hashlib.sha256(prompt.encode()).hexdigest() == want[slug][2]
-        assert source == "builtin"
-        assert is_enabled is True
-        assert color == "#3b82f6"
-        assert str(created_by) == world["admin"]["id"]
-        assert updated_by is None
-        assert deleted_at is None
+    assert rows == []
 
 
 def test_create_workspace_requires_name_and_slug(admin_api):

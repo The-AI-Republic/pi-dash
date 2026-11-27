@@ -7,13 +7,14 @@
 import { useEffect } from "react";
 import useSWR from "swr";
 // pi dash imports
-import { PodService } from "@pi-dash/services";
-import type { IPod } from "@pi-dash/types";
+import { PodService, RunnerService } from "@pi-dash/services";
+import type { IPod, IRunner } from "@pi-dash/types";
 // local imports
 import type { TPodDropdownBaseProps } from "./base";
 import { PodDropdownBase } from "./base";
 
 const podService = new PodService();
+const runnerService = new RunnerService();
 
 type TPodDropdownProps = Omit<TPodDropdownBaseProps, "pods" | "isInitializing"> & {
   projectId: string | undefined;
@@ -21,16 +22,26 @@ type TPodDropdownProps = Omit<TPodDropdownBaseProps, "pods" | "isInitializing"> 
    * every new issue is pinned to a concrete pod rather than left to the
    * server-side fallback. */
   isForWorkItemCreation?: boolean;
+  /** Issue id for `assignable_for` eligibility (§7.4); "new" for the create form. */
+  assignableFor?: string;
 };
 
 export function PodDropdown(props: TPodDropdownProps) {
-  const { projectId, isForWorkItemCreation, value, onChange } = props;
+  const { projectId, isForWorkItemCreation, assignableFor, value, onChange } = props;
   // Pods are project-scoped; key the cache by project so switching the issue's
   // project refetches the right list.
   const { data: pods, isLoading } = useSWR<IPod[]>(
     projectId ? ["issue-pods", projectId] : null,
     projectId ? () => podService.list(undefined, projectId) : null
   );
+  const { data: runners } = useSWR<IRunner[]>(
+    projectId ? ["issue-runners", projectId, assignableFor ?? ""] : null,
+    projectId
+      ? () =>
+          runnerService.list(undefined, projectId, assignableFor ?? (props.isForWorkItemCreation ? "new" : undefined))
+      : null
+  );
+
   // Pre-select the project's default pod on create whenever the field is empty
   // and pods are loaded. Gating on `value` (not a once-only ref) means a
   // project switch or "create more" reset — which clears assigned_pod_id back
@@ -38,12 +49,10 @@ export function PodDropdown(props: TPodDropdownProps) {
   // or stranding the previous project's pod. The dropdown has no clear action,
   // so `value` only goes null via those resets, never by user intent → no loop.
   useEffect(() => {
-    // `value` holds the cloud sentinel when the target is the Cloud Agent —
-    // never overwrite that with a pod.
     if (!isForWorkItemCreation || value || !pods?.length) return;
     const defaultPod = pods.find((pod) => pod.is_default) ?? pods[0];
-    if (defaultPod) onChange(defaultPod.id);
+    if (defaultPod) onChange(`pod:${defaultPod.id}`);
   }, [isForWorkItemCreation, value, pods, onChange]);
 
-  return <PodDropdownBase {...props} pods={pods ?? []} isInitializing={isLoading} />;
+  return <PodDropdownBase {...props} pods={pods ?? []} runners={runners ?? []} isInitializing={isLoading} />;
 }
