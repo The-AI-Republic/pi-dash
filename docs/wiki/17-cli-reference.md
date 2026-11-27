@@ -349,7 +349,7 @@ child=$(pidash issue create --project ENG --title "Follow-up: flaky test" --outp
 pidash issue relate "$child" --blocked-by ENG-42
 ```
 
-The project is read (`GET projects/<ref>/`, the same identifier-or-UUID resolution the create uses) before the work item is created, so an unknown `--project` exits `4` without creating anything.
+The `identifier` is taken from the created item itself: from its `url` (`…/browse/ENG-123`), or, when the deployment sends no `url`, from a read of the item's project after the create. Creating needs no permission beyond the create itself. If the project can't be read either, the work item still exists: the JSON comes without `identifier` (exit `0`, with a note on stderr), and `--output id` exits `5` with an error naming the created item, so a script must not retry it blindly. An unknown `--project` exits `4` and creates nothing.
 
 ### `pidash issue list --project <P>`
 

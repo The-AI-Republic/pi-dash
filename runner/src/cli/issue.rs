@@ -593,11 +593,6 @@ async fn cmd_create(
     // fails fast without resolving the project.
     let description = load_description(&args.description, std::io::stdin())?;
     let project_ref = resolve_project_ref(client, paths, args.project.as_deref()).await?;
-    // Read the project before the POST: its canonical identifier builds the
-    // new item's `PROJ-123` key, and an unknown project fails here instead
-    // of after an issue was created. The detail route resolves the ref the
-    // same way the POST does, so this never rejects a ref the POST accepts.
-    let project_identifier = project::get_project(client, &project_ref).await?.identifier;
 
     // Resolve the network-dependent fields first, then hand the already-resolved
     // values to the pure body builder so the URL/body contract is unit-testable.
@@ -638,8 +633,10 @@ async fn cmd_create(
         "workspaces/{}/projects/{}/work-items/",
         client.env.workspace_slug, project_ref
     );
+    // The POST alone gates creation (an unknown project is its 404), so
+    // create needs no permission beyond the one the server checks for it.
     let resp = client.post(&path, &Value::Object(body)).await?;
-    let created = with_identifier(resp, &project_identifier);
+    let created = add_identifier(client, resp).await;
     match args.output {
         CreateOutput::Json => println!(
             "{}",
@@ -665,10 +662,58 @@ async fn cmd_create(
     Ok(())
 }
 
-/// Add the `PROJ-123` `identifier` to a created work item's payload, built
-/// from the project's identifier and the payload's `sequence_id`. A payload
-/// that already has an `identifier`, or has no `sequence_id`, is returned
-/// unchanged.
+/// Add the `PROJ-123` `identifier` to a created work item's payload. The key
+/// is taken, in order, from a server-sent `identifier`, from the item's own
+/// `url` (`.../browse/PROJ-123`), or, when the deployment sends no `url`,
+/// from a read of the item's project after the POST. Taking it from the
+/// created item keeps it in step with the `url` even if the project's
+/// identifier changes around the write. If none of these is available the
+/// payload is returned without an `identifier` and a note goes to stderr:
+/// the item exists, so this is not a failure of the create.
+async fn add_identifier(client: &ApiClient, created: Value) -> Value {
+    if created.get("identifier").is_some() {
+        return created;
+    }
+    let Some(seq) = created.get("sequence_id").and_then(Value::as_u64) else {
+        return created;
+    };
+    if let Some(prefix) = created
+        .get("url")
+        .and_then(Value::as_str)
+        .and_then(|url| project_identifier_from_url(url, seq))
+    {
+        let prefix = prefix.to_string();
+        return with_identifier(created, &prefix);
+    }
+    let project_ref = created
+        .get("project")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if let Some(project_ref) = project_ref {
+        match project::get_project(client, &project_ref).await {
+            Ok(project) => return with_identifier(created, &project.identifier),
+            Err(e) => eprintln!(
+                "note: the work item was created, but its identifier could not be \
+                 built: reading project {project_ref} failed: {}",
+                e.message
+            ),
+        }
+    }
+    created
+}
+
+/// The `PROJ` in a created item's browse `url` (`.../browse/PROJ-123`),
+/// provided the key there ends in the item's own `sequence_id`.
+fn project_identifier_from_url(url: &str, sequence_id: u64) -> Option<&str> {
+    let key = url.trim_end_matches('/').rsplit_once("/browse/")?.1;
+    let (prefix, seq) = key.rsplit_once('-')?;
+    (!prefix.is_empty() && !prefix.contains('/') && seq == sequence_id.to_string())
+        .then_some(prefix)
+}
+
+/// Add `identifier` = `<project_identifier>-<sequence_id>` to a created work
+/// item's payload. A payload that already has an `identifier`, or has no
+/// `sequence_id`, is returned unchanged.
 fn with_identifier(mut created: Value, project_identifier: &str) -> Value {
     if let Some(obj) = created.as_object_mut()
         && !obj.contains_key("identifier")
@@ -2180,6 +2225,41 @@ mod tests {
         let err = CreateArgsHarness::try_parse_from(["create", "--title", "T", "--output", "yaml"])
             .expect_err("unknown output");
         assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn project_identifier_from_url_reads_the_browse_key() {
+        let url = "https://app.example/acme/browse/ENG-123";
+        assert_eq!(project_identifier_from_url(url, 123), Some("ENG"));
+        assert_eq!(
+            project_identifier_from_url(&format!("{url}/"), 123),
+            Some("ENG")
+        );
+        assert_eq!(
+            project_identifier_from_url("https://x/acme/browse/ÉQUIPE-7", 7),
+            Some("ÉQUIPE")
+        );
+    }
+
+    #[test]
+    fn project_identifier_from_url_rejects_other_shapes() {
+        // Key for a different sequence, no browse segment, no prefix.
+        assert_eq!(
+            project_identifier_from_url("https://x/acme/browse/ENG-12", 123),
+            None
+        );
+        assert_eq!(
+            project_identifier_from_url("https://x/acme/ENG-123", 123),
+            None
+        );
+        assert_eq!(
+            project_identifier_from_url("https://x/acme/browse/-123", 123),
+            None
+        );
+        assert_eq!(
+            project_identifier_from_url("https://x/acme/browse/ENG/-123", 123),
+            None
+        );
     }
 
     #[test]

@@ -91,8 +91,11 @@ total_count, next_cursor, prev_cursor, next_page_results, results:
   an absolute `url` when the deployment has a web base URL) and an
   `identifier` (`PROJ-123`) — the key to use in comments and as the
   identifier argument of later issue commands. `--output id` prints only
-  the identifier and a newline, for scripts. An unknown project fails
-  before anything is created.
+  the identifier and a newline, for scripts. The identifier comes from the
+  created item's `url`, or, without one, from reading its project after the
+  create; if neither works, the JSON omits `identifier` and `--output id`
+  exits 5 naming the created item (do not retry it). An unknown project
+  exits 4 and creates nothing.
 - `pidash issue patch <identifier> --state <state-name>` — move another
   issue to a different state. The name is case-insensitive; the CLI
   resolves it to a UUID for you. You can also pass a state UUID directly.
