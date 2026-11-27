@@ -9,9 +9,9 @@ use anyhow::{Context, Result};
 
 use crate::config::schema::AgentKind;
 use crate::daemon::supervisor::RunnerSpawnCtx;
+use crate::ipc::protocol::{EngineRunnerInfo, EngineSettings};
 use crate::pidash_agent::provision::{AddPidashAgentRunner, add_engine_runner};
 use crate::pidash_agent::workdir;
-use crate::ipc::protocol::{EngineRunnerInfo, EngineSettings};
 
 impl RunnerSpawnCtx {
     /// `EngineRunnerAdd`: enrol, write the block, start it in-process.

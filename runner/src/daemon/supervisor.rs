@@ -5019,9 +5019,7 @@ impl AssignWorker {
                     } else {
                         self.crash_reason()
                     };
-                    let base = auth
-                        .map(|a| a.detail())
-                        .unwrap_or_else(|| format!("{e:#}"));
+                    let base = auth.map(|a| a.detail()).unwrap_or_else(|| format!("{e:#}"));
                     let detail = self.build_failure_detail(&base, &bridge).await;
                     hist.append(&HistoryEntry::Footer {
                         ts: Utc::now(),

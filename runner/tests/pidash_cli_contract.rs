@@ -2533,7 +2533,10 @@ fn states_fake_handler() -> Handler {
 async fn state_list(
     positional: Option<&str>,
     project: Option<&str>,
-) -> (Result<serde_json::Value, pidash::api_client::CliError>, Vec<String>) {
+) -> (
+    Result<serde_json::Value, pidash::api_client::CliError>,
+    Vec<String>,
+) {
     let fake = start_fake(states_fake_handler()).await;
     let client = client(&fake);
     let resp = pidash::cli::state::list_states(&client, positional, project, None, None).await;
@@ -2564,7 +2567,9 @@ async fn state_list_positional_project_uuid_lists_project_states() {
     assert_eq!(resp.expect("uuid positional succeeds")["count"], 2);
     assert_eq!(
         paths,
-        vec![format!("/api/v1/workspaces/acme/projects/{PROJECT_UUID}/states/")]
+        vec![format!(
+            "/api/v1/workspaces/acme/projects/{PROJECT_UUID}/states/"
+        )]
     );
 }
 
