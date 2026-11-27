@@ -583,7 +583,7 @@ pidash page unarchive 550e8400-e29b-41d4-a716-446655440000 --project ENG
 
 ### `pidash state list [PROJECT_OR_ISSUE] [--project <PROJ-or-UUID>]`
 
-List workflow states for a project. Without an argument, uses the current issue context from `PIDASH_ISSUE_IDENTIFIER`, then `PIDASH_PROJECT`. A positional argument shaped like `<PROJ>-<number>` is read as a work-item identifier; anything else is a project slug or UUID. `--project` takes the same forms as `issue list --project` and wins over the positional argument. An unknown project exits 4 with `project '<name>' not found`.
+List workflow states for a project. Without an argument, uses the current issue context from `PIDASH_ISSUE_IDENTIFIER`, then `PIDASH_PROJECT`. A positional argument shaped like `<PROJ>-<number>` is read as a work-item identifier; anything else is a project slug or UUID, so a project whose identifier itself looks like `<PROJ>-<number>` needs `--project`. `--project` takes the same forms as `issue list --project` and wins over the positional argument. An unknown project (slug or UUID) exits 4 with `project '<name>' not found`; a project you cannot access keeps the permission error (exit 3). A supplied but blank target exits 2 rather than falling back to the run context.
 
 ```
 pidash state list             # uses current issue context
