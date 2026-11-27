@@ -68,7 +68,9 @@ export function RunsScreen({ search, selectedRunId }: RunsScreenProps): React.Re
       <RunsList
         data={list.data}
         loading={list.isPending}
-        failed={list.isError && list.data === undefined}
+        // A failed read or refetch: RunsList shows it only when it has no
+        // rows to keep, so a cached empty page does not read as "No runs yet".
+        failed={list.isError}
         page={page}
         onPage={goToPage}
         onSelect={selectRun}

@@ -704,6 +704,7 @@ const agentRunSummary = {
   id: UUID,
   status: "completed",
   executor_kind: "local_runner",
+  queue_position: null,
   runner: null,
   runner_name: null,
   created_at: DT,

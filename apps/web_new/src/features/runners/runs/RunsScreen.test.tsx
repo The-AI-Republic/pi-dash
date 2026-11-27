@@ -173,6 +173,43 @@ describe("list load failure", () => {
     screen.getByRole("button", { name: "Try again" }).click();
     expect(refetch).toHaveBeenCalledTimes(1);
   });
+
+  it("shows the error when a refetch fails over a cached empty page", async () => {
+    const { RUNS_EMPTY_TEXT, RUNS_LOAD_FAILED_TEXT } = await import("./RunsList.js");
+    const refetch = vi.fn();
+    stubQueries({
+      list: {
+        data: { results: [], count: 0, total_count: 0, total_pages: 1, page: 1, per_page: 30 },
+        isPending: false,
+        isError: true,
+        refetch,
+      },
+    });
+    renderScreen(1);
+    expect(screen.getByRole("alert")).toHaveTextContent(RUNS_LOAD_FAILED_TEXT);
+    expect(screen.queryByText(RUNS_EMPTY_TEXT)).toBeNull();
+    screen.getByRole("button", { name: "Try again" }).click();
+    expect(refetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps cached rows visible when a refetch fails", () => {
+    stubQueries({
+      list: {
+        data: {
+          results: [
+            { id: "run-1", status: "running", prompt: "hello", started_at: null, created_at: "2024-01-01T00:00:00Z" },
+          ],
+          total_count: 1,
+          total_pages: 1,
+        },
+        isPending: false,
+        isError: true,
+        refetch: vi.fn(),
+      },
+    });
+    renderScreen(1);
+    expect(screen.getByText("hello")).toBeInTheDocument();
+  });
 });
 
 describe("detail states", () => {
