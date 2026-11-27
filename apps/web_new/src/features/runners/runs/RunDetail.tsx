@@ -30,8 +30,6 @@ export const RUN_DETAIL_LOADING_TEXT = "Fetching this run’s transcript…";
 export const RUN_DETAIL_UNAVAILABLE_TEXT =
   "No run with this id is reachable here. Check the address, or pick another run from the list.";
 export const RUN_CANCEL_TITLE = "Cancel run?";
-export const RUN_CANCEL_CLOUD_BODY =
-  "The cloud agent stops at its next safe interruption point, so it may take a moment to finish.";
 export const RUN_CANCEL_LOCAL_BODY =
   "The runner receives a stop request and ends the run as soon as it can acknowledge it.";
 export const RUN_CANCEL_FAILED_TITLE = "Couldn't cancel run";
@@ -42,11 +40,6 @@ export function canCancelRun(run: Pick<AgentRun, "status">): boolean {
   return !isTerminalRun(run.status) && run.status !== "cancel_requested";
 }
 
-/** Executor-specific consequence copy for the confirmation. */
-export function cancelBodyKind(kind: AgentRun["executor_kind"]): string {
-  return kind === "cloud_agent" ? RUN_CANCEL_CLOUD_BODY : RUN_CANCEL_LOCAL_BODY;
-}
-
 export interface RunDetailProps {
   state: "none" | "loading" | "loaded" | "unavailable";
   run: AgentRun | null;
@@ -55,9 +48,18 @@ export interface RunDetailProps {
   onCancel: (run: AgentRun) => Promise<boolean>;
   /** Scheduler base path for the back-link; null hides the row. */
   schedulerHref: (run: AgentRun) => string | null;
+  /** Executor badge text from the run's runner; the kind label when absent. */
+  executorText?: ((run: AgentRun) => string) | undefined;
 }
 
-export function RunDetail({ state, run, cancelling, onCancel, schedulerHref }: RunDetailProps): React.ReactElement {
+export function RunDetail({
+  state,
+  run,
+  cancelling,
+  onCancel,
+  schedulerHref,
+  executorText,
+}: RunDetailProps): React.ReactElement {
   const [cancelOpen, setCancelOpen] = React.useState(false);
   if (state === "none") {
     return (
@@ -95,7 +97,9 @@ export function RunDetail({ state, run, cancelling, onCancel, schedulerHref }: R
               <RunStatusBadge status={run.status} />
             </span>
             <span data-testid="run-executor">
-              <Badge tone={executorTone(run.executor_kind)}>{executorLabel(run.executor_kind)}</Badge>
+              <Badge tone={executorTone(run.executor_kind)}>
+                {executorText === undefined ? executorLabel(run.executor_kind) : executorText(run)}
+              </Badge>
             </span>
           </div>
         </div>
@@ -303,7 +307,7 @@ export function RunDetail({ state, run, cancelling, onCancel, schedulerHref }: R
         }
       >
         <div data-testid="run-cancel-body">
-          <p className="text-body text-(--text-muted)">{cancelBodyKind(run.executor_kind)}</p>
+          <p className="text-body text-(--text-muted)">{RUN_CANCEL_LOCAL_BODY}</p>
         </div>
       </Dialog>
     </div>

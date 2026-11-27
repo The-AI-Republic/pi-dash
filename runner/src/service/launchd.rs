@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 
-use crate::util::paths::Paths;
+use crate::util::paths::{Paths, SERVICE_ERR_LOG, SERVICE_OUT_LOG};
 
 const LABEL: &str = "so.pidash.daemon";
 
@@ -50,7 +50,13 @@ pub async fn write_unit(paths: &Paths) -> Result<()> {
     };
     // See `service::capture_install_time_path` for why we bake $PATH in.
     let path_env = super::capture_install_time_path().map(|p| xml_escape(&p));
-    let body = render_plist(&exe_str, &config, data.as_deref(), &logs, path_env.as_deref());
+    let body = render_plist(
+        &exe_str,
+        &config,
+        data.as_deref(),
+        &logs,
+        path_env.as_deref(),
+    );
     tokio::fs::write(&plist_path, body).await?;
     println!("installed launchd agent at {}", plist_path.display());
     Ok(())
@@ -101,12 +107,14 @@ fn render_plist(
   </dict>
   <key>KeepAlive</key><true/>
   <key>RunAtLoad</key><true/>
-  <key>StandardOutPath</key><string>{logs}/runner.out.log</string>
-  <key>StandardErrorPath</key><string>{logs}/runner.err.log</string>
+  <key>StandardOutPath</key><string>{logs}/{out_log}</string>
+  <key>StandardErrorPath</key><string>{logs}/{err_log}</string>
 </dict>
 </plist>
 "#,
         label = LABEL,
+        out_log = SERVICE_OUT_LOG,
+        err_log = SERVICE_ERR_LOG,
     )
 }
 
@@ -749,7 +757,9 @@ mod tests {
         assert!(is_not_loaded_error("Service not loaded"));
         // Real failures we MUST surface, not silently absorb:
         assert!(!is_not_loaded_error("Operation not permitted"));
-        assert!(!is_not_loaded_error("Bootstrap failed: 5: Input/output error"));
+        assert!(!is_not_loaded_error(
+            "Bootstrap failed: 5: Input/output error"
+        ));
         assert!(!is_not_loaded_error(""));
     }
 
@@ -779,7 +789,9 @@ mod tests {
         assert!(!is_already_loaded_error(
             "Load failed: 2: No such file or directory"
         ));
-        assert!(!is_already_loaded_error("Path had bad ownership/permissions"));
+        assert!(!is_already_loaded_error(
+            "Path had bad ownership/permissions"
+        ));
         assert!(!is_already_loaded_error(""));
     }
 

@@ -53,6 +53,12 @@ def test_github_app_status_verified_at_keeps_six_digits(admin, world, seeder):
         "UPDATE github_app_installations SET verified_at = %s, last_checked_at = %s WHERE id = %s",
         (STAMP_SQL, STAMP_SQL, installation["id"]),
     )
+    # During the 3/6 migration the generic row is the Rust leg's source
+    # (the 0173 backfill writes it the same way).
+    seeder.db.execute(
+        "UPDATE git_provider_accounts SET verified_at = %s, last_checked_at = %s WHERE external_account_id = %s AND auth_type = 'github_app'",
+        (STAMP_SQL, STAMP_SQL, str(installation["installation_id"])),
+    )
     body = admin.get("/api/users/me/integrations/github/app/").json()
     entry = next(item for item in body["workspaces"] if item["slug"] == world["workspace"]["slug"])
     assert entry["github_app"]["connected"] is True

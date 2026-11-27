@@ -25,6 +25,23 @@ import { assistantKeys } from "../api/keys.js";
 import { transcriptKey } from "../api/threadKeys.js";
 import { ThreadView, followTail, followTailWhileGrowing, isFollowingTail } from "./ThreadView.js";
 
+// The Tiptap input is covered in shared/editor/ChatInput.test.tsx; here a
+// textarea with the same contract keeps the focus on this surface's logic.
+vi.mock("../../../shared/editor/ChatInput.js", () => import("../../../testSupport/chatInputStub.js"));
+
+// Dictation ships hidden (DICTATION_UI_ENABLED); these suites switch it on
+// so the dormant UI stays covered, and pin the hidden default separately.
+const dictationUi = vi.hoisted(() => ({ enabled: true }));
+vi.mock("../../../shared/dictation/index.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../../shared/dictation/index.js")>();
+  return {
+    ...original,
+    get DICTATION_UI_ENABLED() {
+      return dictationUi.enabled;
+    },
+  };
+});
+
 const stream = vi.hoisted(() => ({
   subscriptions: [] as { close: () => void; handlers: { onEvent: (event: unknown) => void } }[],
 }));
@@ -153,7 +170,9 @@ function renderThread(options: HarnessOptions = {}) {
   const wsRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: "/$ws",
-    component: () => <ThreadView workspaceSlug="acme" threadId={THREAD_ID} state={options.state} configured />,
+    component: () => (
+      <ThreadView workspaceSlug="acme" threadId={THREAD_ID} state={options.state} configured config={KEYED} />
+    ),
   });
   const router = createRouter({
     routeTree: rootRoute.addChildren([wsRoute]),
@@ -635,6 +654,19 @@ describe("ThreadView dictation", () => {
     await screen.findByTestId("assistant-empty-hint");
     expect(screen.queryByTestId("assistant-mic")).not.toBeInTheDocument();
     expect(screen.queryByTestId("assistant-dictation-hint")).not.toBeInTheDocument();
+  });
+
+  it("hides the microphone and its setup hint while dictation is switched off", async () => {
+    dictationUi.enabled = false;
+    try {
+      stubDevices();
+      renderThread({ sttSeed: { ...STT_KEYED, has_api_key: false } });
+      await screen.findByTestId("assistant-composer");
+      expect(screen.queryByTestId("assistant-mic")).toBeNull();
+      expect(screen.queryByTestId("assistant-dictation-hint")).toBeNull();
+    } finally {
+      dictationUi.enabled = true;
+    }
   });
 
   it("offers the microphone once speech is configured", async () => {

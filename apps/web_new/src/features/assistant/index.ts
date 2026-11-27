@@ -25,12 +25,17 @@ export {
   ASSISTANT_CARD_SUGGESTIONS,
   ASSISTANT_COMPOSER_LABEL,
   ASSISTANT_HEADLINE,
+  ASSISTANT_MODEL_PICKER_LABEL,
   ASSISTANT_PLACEHOLDER,
   ASSISTANT_SEND_LABEL,
   ASSISTANT_STOP_LABEL,
-  CONVERSATION_RAIL_TITLE,
+  CHAT_HISTORY_TITLE,
   EMPTY_CONVERSATION_HINT,
   HANDOFF_FAILED_TITLE,
+  MODEL_PICKER_BLOCKED_BODY,
+  MODEL_PICKER_BLOCKED_TITLE,
+  MODEL_PICKER_FAILED_FALLBACK,
+  MODEL_PICKER_FAILED_TITLE,
   NEW_CONVERSATION_LABEL,
   NO_CONVERSATIONS,
   providerSettingsHref,
@@ -46,3 +51,11 @@ export type { LaneState } from "./lib/lane.js";
 export { conversationLabel, visibleConversations } from "./lib/labels.js";
 export { assistantLandingHref, assistantThreadHref, readPendingMessage } from "./lib/navigation.js";
 export type { PendingMessageState } from "./lib/navigation.js";
+export { OpenHubModelPicker } from "./components/OpenHubModelPicker.js";
+export type { OpenHubModelPickerProps } from "./components/OpenHubModelPicker.js";
+export {
+  OPENHUB_DEFAULT_MODEL,
+  pickerOptionLabel,
+  selectedOpenHubConnection,
+  shouldShowOpenHubPicker,
+} from "./lib/openhubPicker.js";

@@ -27,6 +27,7 @@ pub const AGENT_KINDS: &[&str] = &[
     "cursor-agent",
     "open-claw",
     "grok",
+    "antigravity",
     "muse-code",
 ];
 pub const LOG_LEVELS: &[&str] = &["trace", "debug", "info", "warn", "error"];
@@ -46,6 +47,8 @@ pub enum FieldId {
     OpenClawModelDefault,
     GrokBinary,
     GrokModelDefault,
+    AntigravityBinary,
+    AntigravityModelDefault,
     MuseCodeBinary,
     MuseCodeModelDefault,
     ApprovalAutoReadonly,
@@ -72,6 +75,8 @@ impl FieldId {
             FieldId::OpenClawModelDefault => "field:openclaw_model_default",
             FieldId::GrokBinary => "field:grok_binary",
             FieldId::GrokModelDefault => "field:grok_model_default",
+            FieldId::AntigravityBinary => "field:antigravity_binary",
+            FieldId::AntigravityModelDefault => "field:antigravity_model_default",
             FieldId::MuseCodeBinary => "field:muse_code_binary",
             FieldId::MuseCodeModelDefault => "field:muse_code_model_default",
             FieldId::ApprovalAutoReadonly => "field:approval_auto_readonly",
@@ -97,6 +102,8 @@ impl FieldId {
             "field:openclaw_model_default" => FieldId::OpenClawModelDefault,
             "field:grok_binary" => FieldId::GrokBinary,
             "field:grok_model_default" => FieldId::GrokModelDefault,
+            "field:antigravity_binary" => FieldId::AntigravityBinary,
+            "field:antigravity_model_default" => FieldId::AntigravityModelDefault,
             "field:muse_code_binary" => FieldId::MuseCodeBinary,
             "field:muse_code_model_default" => FieldId::MuseCodeModelDefault,
             "field:approval_auto_readonly" => FieldId::ApprovalAutoReadonly,
@@ -204,6 +211,18 @@ pub const FIELDS: &[FieldSpec] = &[
         kind: FieldKind::Text,
     },
     FieldSpec {
+        id: FieldId::AntigravityBinary,
+        label: "binary",
+        section: "Antigravity",
+        kind: FieldKind::Text,
+    },
+    FieldSpec {
+        id: FieldId::AntigravityModelDefault,
+        label: "model_default",
+        section: "Antigravity",
+        kind: FieldKind::Text,
+    },
+    FieldSpec {
         id: FieldId::MuseCodeBinary,
         label: "binary",
         section: "Muse Code",
@@ -253,6 +272,9 @@ pub fn field_agent_kind(id: FieldId) -> Option<AgentKind> {
         FieldId::CursorBinary | FieldId::CursorModelDefault => Some(AgentKind::CursorAgent),
         FieldId::OpenClawBinary | FieldId::OpenClawModelDefault => Some(AgentKind::OpenClaw),
         FieldId::GrokBinary | FieldId::GrokModelDefault => Some(AgentKind::Grok),
+        FieldId::AntigravityBinary | FieldId::AntigravityModelDefault => {
+            Some(AgentKind::Antigravity)
+        }
         FieldId::MuseCodeBinary | FieldId::MuseCodeModelDefault => Some(AgentKind::MuseCode),
         _ => None,
     }
@@ -315,16 +337,14 @@ pub fn display_value(cfg: &Config, id: FieldId, runner_idx: usize) -> String {
             AgentKind::CursorAgent => "cursor-agent".into(),
             AgentKind::OpenClaw => "open-claw".into(),
             AgentKind::Grok => "grok".into(),
+            AgentKind::Antigravity => "antigravity".into(),
             AgentKind::MuseCode => "muse-code".into(),
+            AgentKind::PidashAgent => "engine".into(),
         },
         FieldId::CodexBinary => runner.codex.binary.clone(),
         FieldId::CodexModelDefault => runner.codex.model_default.clone().unwrap_or_default(),
         FieldId::ClaudeBinary => runner.claude_code.binary.clone(),
-        FieldId::ClaudeModelDefault => runner
-            .claude_code
-            .model_default
-            .clone()
-            .unwrap_or_default(),
+        FieldId::ClaudeModelDefault => runner.claude_code.model_default.clone().unwrap_or_default(),
         FieldId::CursorBinary => runner.cursor_agent.binary.clone(),
         FieldId::CursorModelDefault => runner
             .cursor_agent
@@ -332,15 +352,15 @@ pub fn display_value(cfg: &Config, id: FieldId, runner_idx: usize) -> String {
             .clone()
             .unwrap_or_default(),
         FieldId::OpenClawBinary => runner.openclaw.binary.clone(),
-        FieldId::OpenClawModelDefault => {
-            runner.openclaw.model_default.clone().unwrap_or_default()
-        }
+        FieldId::OpenClawModelDefault => runner.openclaw.model_default.clone().unwrap_or_default(),
         FieldId::GrokBinary => runner.grok.binary.clone(),
         FieldId::GrokModelDefault => runner.grok.model_default.clone().unwrap_or_default(),
-        FieldId::MuseCodeBinary => runner.muse_code.binary.clone(),
-        FieldId::MuseCodeModelDefault => {
-            runner.muse_code.model_default.clone().unwrap_or_default()
+        FieldId::AntigravityBinary => runner.antigravity.binary.clone(),
+        FieldId::AntigravityModelDefault => {
+            runner.antigravity.model_default.clone().unwrap_or_default()
         }
+        FieldId::MuseCodeBinary => runner.muse_code.binary.clone(),
+        FieldId::MuseCodeModelDefault => runner.muse_code.model_default.clone().unwrap_or_default(),
         FieldId::ApprovalAutoReadonly => runner
             .approval_policy
             .auto_approve_readonly_shell
@@ -393,6 +413,10 @@ pub fn set_text_value(
             } else {
                 Some(s.to_string())
             };
+            // An effort only applies alongside an explicit model.
+            if runner.codex.model_default.is_none() {
+                runner.codex.effort_default = None;
+            }
         }
         FieldId::ClaudeBinary => {
             if s.trim().is_empty() {
@@ -406,6 +430,9 @@ pub fn set_text_value(
             } else {
                 Some(s.to_string())
             };
+            if runner.claude_code.model_default.is_none() {
+                runner.claude_code.effort_default = None;
+            }
         }
         FieldId::CursorBinary => {
             if s.trim().is_empty() {
@@ -446,6 +473,19 @@ pub fn set_text_value(
                 Some(s.to_string())
             };
         }
+        FieldId::AntigravityBinary => {
+            if s.trim().is_empty() {
+                return Err("binary cannot be empty".into());
+            }
+            runner.antigravity.binary = s.to_string();
+        }
+        FieldId::AntigravityModelDefault => {
+            runner.antigravity.model_default = if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            };
+        }
         FieldId::MuseCodeBinary => {
             if s.trim().is_empty() {
                 return Err("binary cannot be empty".into());
@@ -458,6 +498,9 @@ pub fn set_text_value(
             } else {
                 Some(s.to_string())
             };
+            if runner.muse_code.model_default.is_none() {
+                runner.muse_code.effort_default = None;
+            }
         }
         FieldId::AgentKind
         | FieldId::ApprovalAutoReadonly
@@ -503,8 +546,12 @@ pub fn cycle_enum(cfg: &mut Config, id: FieldId, runner_idx: usize) {
                 AgentKind::ClaudeCode => AgentKind::CursorAgent,
                 AgentKind::CursorAgent => AgentKind::OpenClaw,
                 AgentKind::OpenClaw => AgentKind::Grok,
-                AgentKind::Grok => AgentKind::MuseCode,
+                AgentKind::Grok => AgentKind::Antigravity,
+                AgentKind::Antigravity => AgentKind::MuseCode,
                 AgentKind::MuseCode => AgentKind::Codex,
+                // An engine runner is enrolled as one (`pidash runner add
+                // --agent engine`); its agent is not switchable here.
+                AgentKind::PidashAgent => AgentKind::PidashAgent,
             };
         }
         FieldId::LogLevel => {
@@ -539,14 +586,14 @@ pub fn differs(a: &Config, b: &Config) -> bool {
 
 pub fn runner_picker_bar(data: &AppData) -> Paragraph<'static> {
     let Some(working) = data.config_working.as_ref() else {
-        return Paragraph::new(Line::raw("")).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Runners "),
-        );
+        return Paragraph::new(Line::raw(""))
+            .block(Block::default().borders(Borders::ALL).title(" Runners "));
     };
     let total = working.runners.len();
-    let picked = data.picker_runner_index().unwrap_or(0).min(total.saturating_sub(1));
+    let picked = data
+        .picker_runner_index()
+        .unwrap_or(0)
+        .min(total.saturating_sub(1));
     let mut spans: Vec<Span<'static>> = Vec::new();
     for (i, r) in working.runners.iter().enumerate() {
         let label = format!(" {}. {} ", i + 1, r.name);
@@ -663,6 +710,11 @@ pub fn editable_lines(
             "Grok",
             AgentKind::Grok,
             [FieldId::GrokBinary, FieldId::GrokModelDefault],
+        ),
+        (
+            "Antigravity",
+            AgentKind::Antigravity,
+            [FieldId::AntigravityBinary, FieldId::AntigravityModelDefault],
         ),
     ] {
         if kind != selected_kind {
@@ -901,9 +953,7 @@ fn index_of(id: FieldId) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::schema::{
-        Config, DaemonConfig, RunnerConfig, WorkspaceSection,
-    };
+    use crate::config::schema::{Config, DaemonConfig, RunnerConfig, WorkspaceSection};
     use std::path::PathBuf;
     use uuid::Uuid;
 
@@ -923,11 +973,15 @@ mod tests {
             cursor_agent: Default::default(),
             openclaw: Default::default(),
             grok: Default::default(),
+            antigravity: Default::default(),
             muse_code: Default::default(),
             approval_policy: Default::default(),
         };
         runner.agent.kind = kind;
         Config {
+            engine: Default::default(),
+            auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://pidash.example".into(),
@@ -937,9 +991,35 @@ mod tests {
                 agent_observability_v1: false,
                 agent_watchdog: Default::default(),
                 auto_update: true,
+                max_concurrent_agent_runs: 3,
             },
             runners: vec![runner],
             cli: None,
+        }
+    }
+
+    #[test]
+    fn clearing_a_model_clears_its_effort() {
+        for kind in [AgentKind::Codex, AgentKind::ClaudeCode, AgentKind::MuseCode] {
+            let mut cfg = config_with_kind(kind);
+            let field = match kind {
+                AgentKind::Codex => FieldId::CodexModelDefault,
+                AgentKind::ClaudeCode => FieldId::ClaudeModelDefault,
+                _ => FieldId::MuseCodeModelDefault,
+            };
+            set_text_value(&mut cfg, field, "some-model", 0).unwrap();
+            *cfg.runners[0].effort_slot_mut(kind).unwrap() = Some("high".into());
+
+            // Changing to another model keeps the effort...
+            set_text_value(&mut cfg, field, "other-model", 0).unwrap();
+            assert_eq!(cfg.runners[0].configured_reasoning_effort(), Some("high"));
+            // ...clearing the model drops it.
+            set_text_value(&mut cfg, field, "", 0).unwrap();
+            assert_eq!(
+                cfg.runners[0].configured_reasoning_effort(),
+                None,
+                "{kind:?}"
+            );
         }
     }
 

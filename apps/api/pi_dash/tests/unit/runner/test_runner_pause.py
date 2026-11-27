@@ -128,16 +128,14 @@ def test_assignable_excludes_paused_offline_and_stale(db, create_user, workspace
 def test_follow_up_is_not_pinned_to_paused_runner(db, create_user, workspace, pod):
     runner = _make_runner(create_user, workspace, pod, paused=True)
     parent = _make_run(create_user, pod, runner=runner, status=AgentRunStatus.COMPLETED)
-    assert _pinned_runner_for(parent) is None
+    assert _pinned_runner_for(parent, creator=create_user, trigger=parent.trigger, issue=parent.work_item) is None
 
 
 @pytest.mark.unit
 def test_pin_release_sweep_frees_runs_pinned_to_paused_runner(db, create_user, workspace, pod):
     paused = _make_runner(create_user, workspace, pod, "paused", paused=True)
     other = _make_runner(create_user, workspace, pod, "other")
-    run = _make_run(
-        create_user, pod, pinned_runner=paused, created_at=timezone.now() - timezone.timedelta(hours=1)
-    )
+    run = _make_run(create_user, pod, pinned_runner=paused, created_at=timezone.now() - timezone.timedelta(hours=1))
 
     assert release_pins_on_offline_runners() == 1
     run.refresh_from_db()

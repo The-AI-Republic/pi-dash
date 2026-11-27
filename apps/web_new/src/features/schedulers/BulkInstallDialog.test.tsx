@@ -43,6 +43,7 @@ const SCHEDULER: Scheduler = {
   prompt: "Review the week",
   color: "#5e6ad2",
   source: "builtin",
+  is_builtin: false,
   is_enabled: true,
   active_binding_count: 0,
   created_at: "2026-10-01T00:00:00Z",
@@ -238,6 +239,20 @@ describe("BulkInstallDialog", { timeout: 30_000 }, () => {
     await user.clear(screen.getByLabelText("Search projects"));
     await user.type(screen.getByLabelText("Search projects"), "nothing");
     expect(within(listbox).getByText("No projects match your search.")).toBeInTheDocument();
+  });
+
+  it("hands the open-time focus to the schedule's start field", async () => {
+    // The kit's deferred pass would otherwise pick the header's Close
+    // button and could land after the reader clicked a control, stealing
+    // their input on a busy host (NEWFRONT-1055, 1058).
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    renderDialog();
+    const field = screen.getByLabelText("Starts at");
+    await waitFor(() => expect(field).toHaveFocus());
+    expect(screen.getByRole("button", { name: "Close dialog" })).not.toHaveFocus();
+    // Past the kit's deferred pass, the field still holds the caret.
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 100));
+    expect(field).toHaveFocus();
   });
 
   it("selects every unlocked target, then clears them", async () => {

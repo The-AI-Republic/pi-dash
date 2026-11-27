@@ -113,6 +113,15 @@ pub enum TickerDisarmReason {
     StopSignal,
     /// A human disabled the clock.
     UserDisabled,
+    /// The last run failed for a reason a retry cannot fix (expired agent
+    /// login, exhausted quota, missing binary, bad model — the
+    /// `NEEDS_HUMAN` failure policy, PDASHOSS01-183). Never auto-pauses;
+    /// Re-tick re-arms it without granting.
+    FailureNeedsHuman,
+    /// Backstop: `REPEATED_FAILURE_LIMIT` runs in a row failed with the
+    /// same `failure_reason`. Same recovery as
+    /// [`TickerDisarmReason::FailureNeedsHuman`].
+    RepeatedFailure,
 }
 
 impl TickerDisarmReason {
@@ -126,10 +135,13 @@ impl TickerDisarmReason {
             TickerDisarmReason::TerminalSignal => "terminal_signal",
             TickerDisarmReason::StopSignal => "stop_signal",
             TickerDisarmReason::UserDisabled => "user_disabled",
+            TickerDisarmReason::FailureNeedsHuman => "failure_needs_human",
+            TickerDisarmReason::RepeatedFailure => "repeated_failure",
         }
     }
 
-    /// All seven values in declaration order (matches `enums.json`).
+    /// All nine values in declaration order (`enums.json` plus the two
+    /// PDASHOSS01-183 failure-policy reasons, db migration 0177).
     pub const ALL: &[TickerDisarmReason] = &[
         TickerDisarmReason::None,
         TickerDisarmReason::LeftTickingState,
@@ -138,7 +150,19 @@ impl TickerDisarmReason {
         TickerDisarmReason::TerminalSignal,
         TickerDisarmReason::StopSignal,
         TickerDisarmReason::UserDisabled,
+        TickerDisarmReason::FailureNeedsHuman,
+        TickerDisarmReason::RepeatedFailure,
     ];
+
+    /// `_FAILURE_DISARM_REASONS` (`scheduling.py`, PDASHOSS01-183): the
+    /// stops the failure policy writes. Re-tick re-arms these without
+    /// granting budget; the deferred auto-pause never fires on them.
+    pub fn is_failure_stop(self) -> bool {
+        matches!(
+            self,
+            TickerDisarmReason::FailureNeedsHuman | TickerDisarmReason::RepeatedFailure
+        )
+    }
 }
 
 /// Error for unknown disarm-reason strings.
@@ -165,6 +189,8 @@ impl FromStr for TickerDisarmReason {
             "terminal_signal" => Ok(TickerDisarmReason::TerminalSignal),
             "stop_signal" => Ok(TickerDisarmReason::StopSignal),
             "user_disabled" => Ok(TickerDisarmReason::UserDisabled),
+            "failure_needs_human" => Ok(TickerDisarmReason::FailureNeedsHuman),
+            "repeated_failure" => Ok(TickerDisarmReason::RepeatedFailure),
             other => Err(UnknownDisarmReason(other.to_string())),
         }
     }
@@ -446,6 +472,50 @@ pub mod issue_agent_ticker {
         pub pending_entry_actor_id: Option<uuid::Uuid>,
         pub pending_entry_trigger: String,
         pub resume_parent_run_id: Option<uuid::Uuid>,
+    }
+
+    impl From<crate::entity::issue_agent_ticker::Model> for IssueAgentTicker {
+        fn from(row: crate::entity::issue_agent_ticker::Model) -> Self {
+            let at = |at: sea_orm::prelude::DateTimeWithTimeZone| at.with_timezone(&chrono::Utc);
+            Self {
+                id: row.id,
+                created_at: at(row.created_at),
+                updated_at: at(row.updated_at),
+                created_by_id: row.created_by_id,
+                updated_by_id: row.updated_by_id,
+                deleted_at: row.deleted_at.map(at),
+                issue_id: row.issue_id,
+                used: row.used,
+                granted: row.granted,
+                waited: row.waited,
+                user_disabled: row.user_disabled,
+                next_run_at: row.next_run_at.map(at),
+                last_tick_at: row.last_tick_at.map(at),
+                enabled: row.enabled,
+                disarm_reason: row.disarm_reason,
+                pending_entry: row.pending_entry,
+                pending_entry_free: row.pending_entry_free,
+                pending_entry_actor_id: row.pending_entry_actor_id,
+                pending_entry_trigger: row.pending_entry_trigger,
+                resume_parent_run_id: row.resume_parent_run_id,
+            }
+        }
+    }
+
+    /// `issue.agent_ticker` through `_base_manager` (no soft-delete
+    /// guard): every row for the issue, so callers can 500 on duplicates
+    /// as Django's `MultipleObjectsReturned` does.
+    pub async fn tickers_for_issue(
+        db: &impl sea_orm::ConnectionTrait,
+        issue_id: uuid::Uuid,
+    ) -> Result<Vec<IssueAgentTicker>, sea_orm::DbErr> {
+        use crate::entity::issue_agent_ticker;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        let rows = issue_agent_ticker::Entity::find()
+            .filter(issue_agent_ticker::Column::IssueId.eq(issue_id))
+            .all(db)
+            .await?;
+        Ok(rows.into_iter().map(IssueAgentTicker::from).collect())
     }
 
     impl IssueAgentTicker {
@@ -1049,7 +1119,7 @@ mod tests {
         let disarm: Vec<&str> = TickerDisarmReason::ALL.iter().map(|r| r.as_str()).collect();
         let expected: Vec<String> = values("ticker_disarm_reason");
         assert_eq!(disarm, expected);
-        assert_eq!(disarm.len(), 7);
+        assert_eq!(disarm.len(), 9);
         for reason in TickerDisarmReason::ALL {
             assert_eq!(TickerDisarmReason::from_str(reason.as_str()), Ok(*reason));
         }

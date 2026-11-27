@@ -29,7 +29,7 @@ from pi_dash.db.models.user import User
 AGENT_USERNAME = "pi_dash_agent"
 AGENT_USER_EMAIL = "agent@example.com"
 AGENT_USER_FIRST_NAME = "Pi Dash"
-AGENT_USER_LAST_NAME = "Agent"
+AGENT_USER_LAST_NAME = "Bot"
 
 
 class AgentUserCollisionError(RuntimeError):
@@ -56,6 +56,9 @@ def get_agent_system_user() -> User:
             "email": AGENT_USER_EMAIL,
             "first_name": AGENT_USER_FIRST_NAME,
             "last_name": AGENT_USER_LAST_NAME,
+            # P6a (decision 1): explicit display name, no longer the
+            # email-prefix derivation `User.save()` applies when blank.
+            "display_name": "Pi Dash Bot",
             "is_bot": True,
         },
     )

@@ -13,6 +13,10 @@ import * as React from "react";
 import { pageDisplayTitle } from "../lib/pageList.js";
 import { pageDeleteRehomedMessage } from "../lib/pageNested.js";
 
+/** A failed count read leaves the sentence out; the dialog stays usable. */
+export const PAGE_DELETE_COUNT_ERROR = "The sub-page count could not be loaded.";
+export const PAGE_DELETE_COUNT_RETRY = "Try again";
+
 export interface PageDeleteDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -21,9 +25,17 @@ export interface PageDeleteDialogProps {
   /**
    * Direct sub-pages the server re-homes to the top level (PAGE-089).
    * Undefined means the caller has not resolved the count yet; the confirm
-   * control stays disabled until it is known.
+   * control stays disabled until it is known, unless the read failed.
    */
   rehomedCount?: number | undefined;
+  /**
+   * The count read failed, so the sentence is unknown. The confirm control
+   * stays enabled (the old dialog never gated on a count) and the caller
+   * may offer `onRetryCount` to ask again.
+   */
+  countFailed?: boolean | undefined;
+  /** Ask for the count again after a failed read. */
+  onRetryCount?: (() => void) | undefined;
   /** The delete request is in flight; the confirm control holds it. */
   pending: boolean;
   onConfirm: () => void;
@@ -34,11 +46,14 @@ export function PageDeleteDialog({
   onOpenChange,
   pageName,
   rehomedCount,
+  countFailed,
+  onRetryCount,
   pending,
   onConfirm,
 }: PageDeleteDialogProps): React.ReactElement {
   const title = pageDisplayTitle(pageName);
   const countKnown = rehomedCount !== undefined;
+  const failed = !countKnown && countFailed === true;
   const rehomed = countKnown ? pageDeleteRehomedMessage(rehomedCount) : null;
   return (
     <Dialog
@@ -57,7 +72,7 @@ export function PageDeleteDialog({
             variant="danger"
             type="button"
             loading={pending}
-            disabled={pending || !countKnown}
+            disabled={pending || (!countKnown && !failed)}
             onClick={onConfirm}
           >
             {pending ? "Deleting…" : "Delete"}
@@ -70,9 +85,20 @@ export function PageDeleteDialog({
         deleted permanently. This action cannot be undone.
       </p>
       {!countKnown ? (
-        <p data-testid="page-delete-rehomed-loading" className="text-body mt-(--space-2) text-(--text-muted)">
-          Counting sub-pages…
-        </p>
+        failed ? (
+          <div data-testid="page-delete-rehomed-error" className="text-body mt-(--space-2) text-(--text-muted)">
+            <p>{PAGE_DELETE_COUNT_ERROR}</p>
+            {onRetryCount === undefined ? null : (
+              <Button variant="secondary" size="small" type="button" onClick={onRetryCount} className="mt-(--space-2)">
+                {PAGE_DELETE_COUNT_RETRY}
+              </Button>
+            )}
+          </div>
+        ) : (
+          <p data-testid="page-delete-rehomed-loading" className="text-body mt-(--space-2) text-(--text-muted)">
+            Counting sub-pages…
+          </p>
+        )
       ) : rehomed === null ? null : (
         <p data-testid="page-delete-rehomed" className="text-body mt-(--space-2) text-(--text)">
           {rehomed}

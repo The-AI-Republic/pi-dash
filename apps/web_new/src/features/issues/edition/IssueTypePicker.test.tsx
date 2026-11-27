@@ -6,7 +6,7 @@
 // registered provider, the trigger names the pick, "No type" clears
 // back to the project default, and a failed load reports in place.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -56,7 +56,7 @@ describe("IssueTypePicker", () => {
       />,
       { wrapper: wrapper(queryClient) }
     );
-    await user.click(screen.getByRole("button", { name: "No type" }));
+    await user.click(screen.getByRole("button", { name: "Issue type" }));
     await user.click(await screen.findByRole("option", { name: "Bug" }));
     expect(onTypeChange).toHaveBeenCalledWith("t-bug");
   });
@@ -78,7 +78,7 @@ describe("IssueTypePicker", () => {
       />,
       { wrapper: wrapper(queryClient) }
     );
-    await user.click(await screen.findByRole("button", { name: "Epic" }));
+    await user.click(await screen.findByRole("button", { name: "Issue type: Epic" }));
     await user.click(await screen.findByRole("option", { name: "No type" }));
     expect(onTypeChange).toHaveBeenCalledWith(null);
   });
@@ -101,9 +101,33 @@ describe("IssueTypePicker", () => {
       />,
       { wrapper: wrapper(queryClient) }
     );
-    await user.click(screen.getByRole("button", { name: "No type" }));
+    await user.click(screen.getByRole("button", { name: "Issue type" }));
     expect(await screen.findByRole("option", { name: "No type" })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "Bug" })).not.toBeInTheDocument();
+  });
+
+  it("shows the Field: Value tooltip on the chip", async () => {
+    const { queryClient } = setup();
+    render(
+      <IssueTypePicker
+        workspaceSlug="acme"
+        projectId="p-1"
+        disabled={false}
+        onTemplateApply={() => undefined}
+        propertyValues={{}}
+        onPropertyValuesChange={() => undefined}
+        typeId={null}
+        onTypeChange={() => undefined}
+      />,
+      { wrapper: wrapper(queryClient) }
+    );
+    const chip = screen.getByRole("button", { name: "Issue type" });
+    expect(chip).toHaveTextContent("No type");
+    fireEvent.focus(chip);
+    fireEvent.mouseEnter(chip);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "Issue type: No type — The kind of work this item represents."
+    );
   });
 
   it("reports a failed type load in place", async () => {
@@ -127,7 +151,7 @@ describe("IssueTypePicker", () => {
       />,
       { wrapper: wrapper(queryClient) }
     );
-    await user.click(screen.getByRole("button", { name: "No type" }));
+    await user.click(screen.getByRole("button", { name: "Issue type" }));
     expect(await screen.findByText("Issue types failed to load.")).toBeInTheDocument();
   });
 });

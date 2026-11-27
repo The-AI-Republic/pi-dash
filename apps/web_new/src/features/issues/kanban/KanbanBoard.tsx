@@ -62,6 +62,7 @@ import { useBoardCardMove } from "./mutations.js";
 import { useBoardDrag, type DraggedCard } from "./useBoardDrag.js";
 import type { BoardDropPoint, CardDropEdge } from "./dropTarget.js";
 import { boardDropRefusal, insertionIndexForDrop, MOVE_REFUSED_TITLE, planBoardMove } from "./drag.js";
+import { runBlockedReason } from "../runPolicy.js";
 import { creationBlockedInColumn, dropBlockedInColumn } from "../edition/workflow.js";
 import { copyCardLink } from "../peek/peekLink.js";
 import type { LayoutPeekProps } from "../peek/usePeekAddress.js";
@@ -188,6 +189,10 @@ export function KanbanBoard({
   };
   const groupDomain = prefs.groupBy === null ? undefined : domains[prefs.groupBy];
   const subDomain = subGroup === null ? undefined : domains[subGroup];
+  // Explicit axis order (states in workflow order, NEWPIDASH-46); axes
+  // without one keep the envelope's key order.
+  const groupOrder = prefs.groupBy === null ? undefined : refs.orders[prefs.groupBy];
+  const subOrder = subGroup === null ? undefined : refs.orders[subGroup];
   const read = useBoard(client, workspaceSlug, {
     entity,
     groupBy: prefs.groupBy,
@@ -200,6 +205,8 @@ export function KanbanBoard({
     subLabels,
     groupDomain,
     subDomain,
+    groupOrder,
+    subOrder,
   });
   const { data: projects } = useQuery(projectsQueryOptions(client, workspaceSlug));
   const { data: details } = useQuery(projectDetailsQueryOptions(client, workspaceSlug));
@@ -274,6 +281,33 @@ export function KanbanBoard({
   }
 
   /**
+   * Run-policy reason for one card's state move (NEWPIDASH-261):
+   * undefined unless the drop actually moves state (group or
+   * sub-group is `state` and the seat differs) for a viewer the
+   * policy refuses. Non-state drags (priority, labels, reorder)
+   * keep today's rules.
+   */
+  function runReasonFor(
+    issue: Pick<IssueListItem, "created_by" | "assignee_ids">,
+    sourceColumn: string,
+    sourceLane: string | null,
+    destColumn: string,
+    destLane: string | null
+  ): string | undefined {
+    const movesState =
+      (prefs.groupBy === "state" && destColumn !== sourceColumn) ||
+      (subGroup === "state" && (destLane ?? "") !== (sourceLane ?? ""));
+    if (!movesState) return undefined;
+    return runBlockedReason({
+      policy: projectDetails?.settings?.issue_run_policy,
+      viewerId: me.data?.id ?? null,
+      creatorId: issue.created_by,
+      assigneeIds: issue.assignee_ids,
+      memberRole: project?.member_role ?? null,
+    });
+  }
+
+  /**
    * One released drag: the delete zone hands the card to the delete
    * confirmation, a drop back onto its own seat stays silent, a refused
    * drop explains itself — even a reorder inside its own cell, and even
@@ -301,6 +335,17 @@ export function KanbanBoard({
       ...(workflowReasonFor(target.columnKey, dragged.issue.state_id) === undefined
         ? {}
         : { workflowBlockedReason: workflowReasonFor(target.columnKey, dragged.issue.state_id) }),
+      ...(runReasonFor(dragged.issue, dragged.groupKey, dragged.laneKey, target.columnKey, target.laneKey) === undefined
+        ? {}
+        : {
+            runBlockedReason: runReasonFor(
+              dragged.issue,
+              dragged.groupKey,
+              dragged.laneKey,
+              target.columnKey,
+              target.laneKey
+            ),
+          }),
     });
     const destCell = boardCellOf(board, target.columnKey, target.laneKey);
     if (destCell === null) {
@@ -350,6 +395,18 @@ export function KanbanBoard({
       ...(workflowReasonFor(columnKey, drag.dragged.issue.state_id) === undefined
         ? {}
         : { workflowBlockedReason: workflowReasonFor(columnKey, drag.dragged.issue.state_id) }),
+      ...(runReasonFor(drag.dragged.issue, drag.dragged.groupKey, drag.dragged.laneKey, columnKey, laneKey) ===
+      undefined
+        ? {}
+        : {
+            runBlockedReason: runReasonFor(
+              drag.dragged.issue,
+              drag.dragged.groupKey,
+              drag.dragged.laneKey,
+              columnKey,
+              laneKey
+            ),
+          }),
     });
     return refusal?.overlay ?? null;
   }

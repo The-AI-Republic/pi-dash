@@ -1015,23 +1015,25 @@ async fn create_server(
     }
     let id = uuid::Uuid::new_v4();
     let now = micros_now();
-    let saved = sqlx::query(
-        "INSERT INTO \"assistant_mcp_server\" \
-         (\"id\", \"user_id\", \"name\", \"url\", \"auth_header_encrypted\", \
-          \"is_enabled\", \"created_at\", \"updated_at\") \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $7) \
-         RETURNING \"created_at\", \"updated_at\"",
-    )
-    .bind(id)
-    .bind(actor.id)
-    .bind(&name)
-    .bind(&url)
-    .bind(&encrypted)
-    .bind(attrs.is_enabled.unwrap_or(true))
-    .bind(now)
-    .fetch_one(&pool)
-    .await;
-    use sqlx::Row as _;
+    let is_enabled = attrs.is_enabled.unwrap_or(true);
+    let saved = {
+        use sea_orm::{ActiveModelTrait, Set};
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        let model = pidash_db::entity::assistant_mcp_server::ActiveModel {
+            id: Set(id),
+            user_id: Set(actor.id),
+            name: Set(name.clone()),
+            url: Set(url.clone()),
+            auth_header_encrypted: Set(encrypted.clone()),
+            is_enabled: Set(is_enabled),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+        };
+        model
+            .insert(&db)
+            .await
+            .map_err(pidash_db::orm_tx::into_sqlx)
+    };
     let saved = match saved {
         Ok(row) => row,
         Err(sqlx::Error::Database(db)) if db.code().as_deref() == Some("23505") => {
@@ -1050,9 +1052,9 @@ async fn create_server(
                 name,
                 url,
                 auth_header_encrypted: encrypted,
-                is_enabled: attrs.is_enabled.unwrap_or(true),
-                created_at: saved.try_get("created_at").unwrap_or(now),
-                updated_at: saved.try_get("updated_at").unwrap_or(now),
+                is_enabled,
+                created_at: saved.created_at.with_timezone(&chrono::Utc),
+                updated_at: saved.updated_at.with_timezone(&chrono::Utc),
             },
             None,
             &actor.timezone,
@@ -1130,22 +1132,40 @@ async fn patch_server(
         return response;
     }
     row.updated_at = micros_now();
-    let saved = sqlx::query(
-        "UPDATE \"assistant_mcp_server\" SET \"name\" = $1, \"url\" = $2, \
-         \"is_enabled\" = $3, \"auth_header_encrypted\" = $4, \"updated_at\" = $5 \
-         WHERE \"id\" = $6 AND \"user_id\" = $7",
-    )
-    .bind(&row.name)
-    .bind(&row.url)
-    .bind(row.is_enabled)
-    .bind(&row.auth_header_encrypted)
-    .bind(row.updated_at)
-    .bind(server_id)
-    .bind(actor.id)
-    .execute(&pool)
-    .await;
+    let saved = {
+        use sea_orm::sea_query::Expr;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        pidash_db::entity::assistant_mcp_server::Entity::update_many()
+            .col_expr(
+                pidash_db::entity::assistant_mcp_server::Column::Name,
+                Expr::value(row.name.clone()),
+            )
+            .col_expr(
+                pidash_db::entity::assistant_mcp_server::Column::Url,
+                Expr::value(row.url.clone()),
+            )
+            .col_expr(
+                pidash_db::entity::assistant_mcp_server::Column::IsEnabled,
+                Expr::value(row.is_enabled),
+            )
+            .col_expr(
+                pidash_db::entity::assistant_mcp_server::Column::AuthHeaderEncrypted,
+                Expr::value(row.auth_header_encrypted.clone()),
+            )
+            .col_expr(
+                pidash_db::entity::assistant_mcp_server::Column::UpdatedAt,
+                Expr::value(row.updated_at),
+            )
+            .filter(pidash_db::entity::assistant_mcp_server::Column::Id.eq(server_id))
+            .filter(pidash_db::entity::assistant_mcp_server::Column::UserId.eq(actor.id))
+            .exec(&db)
+            .await
+            .map(|_| ())
+            .map_err(pidash_db::orm_tx::into_sqlx)
+    };
     match saved {
-        Ok(_) => {}
+        Ok(()) => {}
         Err(sqlx::Error::Database(db)) if db.code().as_deref() == Some("23505") => {
             return duplicate_name_response();
         }
@@ -1183,14 +1203,19 @@ async fn delete_server(
     if owned.is_none() {
         return empty_not_found();
     }
-    let deleted =
-        sqlx::query("DELETE FROM \"assistant_mcp_server\" WHERE \"id\" = $1 AND \"user_id\" = $2")
-            .bind(server_id)
-            .bind(actor.id)
-            .execute(&pool)
-            .await;
+    let deleted = {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        pidash_db::entity::assistant_mcp_server::Entity::delete_many()
+            .filter(pidash_db::entity::assistant_mcp_server::Column::Id.eq(server_id))
+            .filter(pidash_db::entity::assistant_mcp_server::Column::UserId.eq(actor.id))
+            .exec(&db)
+            .await
+            .map_err(pidash_db::orm_tx::into_sqlx)
+            .map(|_| ())
+    };
     match deleted {
-        Ok(_) => Response::builder()
+        Ok(()) => Response::builder()
             .status(StatusCode::NO_CONTENT)
             .header(axum::http::header::CONTENT_TYPE, "application/json")
             .body(axum::body::Body::empty())
@@ -1212,32 +1237,26 @@ async fn fetch_servers(
     pool: &sqlx::PgPool,
     user_id: &uuid::Uuid,
 ) -> Result<Vec<ServerRow>, Denial> {
-    let rows = sqlx::query(
-        "SELECT \"id\", \"name\", \"url\", \"auth_header_encrypted\", \
-         \"is_enabled\", \"created_at\", \"updated_at\" \
-         FROM \"assistant_mcp_server\" WHERE \"user_id\" = $1 \
-         ORDER BY \"created_at\" ASC",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    use sqlx::Row as _;
-    rows.iter()
-        .map(|row| {
-            Ok(ServerRow {
-                id: row.try_get("id").map_err(|_| Denial::ServerError)?,
-                name: row.try_get("name").map_err(|_| Denial::ServerError)?,
-                url: row.try_get("url").map_err(|_| Denial::ServerError)?,
-                auth_header_encrypted: row
-                    .try_get("auth_header_encrypted")
-                    .map_err(|_| Denial::ServerError)?,
-                is_enabled: row.try_get("is_enabled").map_err(|_| Denial::ServerError)?,
-                created_at: row.try_get("created_at").map_err(|_| Denial::ServerError)?,
-                updated_at: row.try_get("updated_at").map_err(|_| Denial::ServerError)?,
-            })
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let rows = pidash_db::entity::assistant_mcp_server::Entity::find()
+        .filter(pidash_db::entity::assistant_mcp_server::Column::UserId.eq(*user_id))
+        .order_by_asc(pidash_db::entity::assistant_mcp_server::Column::CreatedAt)
+        .all(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| ServerRow {
+            id: row.id,
+            name: row.name,
+            url: row.url,
+            auth_header_encrypted: row.auth_header_encrypted,
+            is_enabled: row.is_enabled,
+            created_at: row.created_at.with_timezone(&chrono::Utc),
+            updated_at: row.updated_at.with_timezone(&chrono::Utc),
         })
-        .collect()
+        .collect())
 }
 
 /// `_owned`: `.filter(id=…, user=…).first()` (`:124-125`).
@@ -1246,32 +1265,23 @@ async fn fetch_server(
     user_id: &uuid::Uuid,
     server_id: &uuid::Uuid,
 ) -> Result<Option<ServerRow>, Denial> {
-    let rows = sqlx::query(
-        "SELECT \"id\", \"name\", \"url\", \"auth_header_encrypted\", \
-         \"is_enabled\", \"created_at\", \"updated_at\" \
-         FROM \"assistant_mcp_server\" WHERE \"id\" = $1 AND \"user_id\" = $2",
-    )
-    .bind(server_id)
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    use sqlx::Row as _;
-    rows.first()
-        .map(|row| {
-            Ok(ServerRow {
-                id: row.try_get("id").map_err(|_| Denial::ServerError)?,
-                name: row.try_get("name").map_err(|_| Denial::ServerError)?,
-                url: row.try_get("url").map_err(|_| Denial::ServerError)?,
-                auth_header_encrypted: row
-                    .try_get("auth_header_encrypted")
-                    .map_err(|_| Denial::ServerError)?,
-                is_enabled: row.try_get("is_enabled").map_err(|_| Denial::ServerError)?,
-                created_at: row.try_get("created_at").map_err(|_| Denial::ServerError)?,
-                updated_at: row.try_get("updated_at").map_err(|_| Denial::ServerError)?,
-            })
-        })
-        .transpose()
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = pidash_db::entity::assistant_mcp_server::Entity::find()
+        .filter(pidash_db::entity::assistant_mcp_server::Column::Id.eq(*server_id))
+        .filter(pidash_db::entity::assistant_mcp_server::Column::UserId.eq(*user_id))
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.map(|row| ServerRow {
+        id: row.id,
+        name: row.name,
+        url: row.url,
+        auth_header_encrypted: row.auth_header_encrypted,
+        is_enabled: row.is_enabled,
+        created_at: row.created_at.with_timezone(&chrono::Utc),
+        updated_at: row.updated_at.with_timezone(&chrono::Utc),
+    }))
 }
 
 /// `.filter(user=…, name=…).exists()`, excluding one row for renames.
@@ -1281,42 +1291,35 @@ async fn name_taken(
     name: &str,
     exclude: Option<&uuid::Uuid>,
 ) -> Result<bool, Denial> {
-    use sqlx::Row as _;
-    let row = if let Some(exclude) = exclude {
-        sqlx::query(
-            "SELECT EXISTS(SELECT 1 FROM \"assistant_mcp_server\" \
-             WHERE \"user_id\" = $1 AND \"name\" = $2 AND \"id\" <> $3)",
-        )
-        .bind(user_id)
-        .bind(name)
-        .bind(exclude)
-        .fetch_one(pool)
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let mut query = pidash_db::entity::assistant_mcp_server::Entity::find()
+        .select_only()
+        .column(pidash_db::entity::assistant_mcp_server::Column::Id)
+        .filter(pidash_db::entity::assistant_mcp_server::Column::UserId.eq(*user_id))
+        .filter(pidash_db::entity::assistant_mcp_server::Column::Name.eq(name.to_owned()));
+    if let Some(exclude) = exclude {
+        query = query.filter(pidash_db::entity::assistant_mcp_server::Column::Id.ne(*exclude));
+    }
+    let row = query
+        .limit(1)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
         .await
-    } else {
-        sqlx::query(
-            "SELECT EXISTS(SELECT 1 FROM \"assistant_mcp_server\" \
-             WHERE \"user_id\" = $1 AND \"name\" = $2)",
-        )
-        .bind(user_id)
-        .bind(name)
-        .fetch_one(pool)
-        .await
-    };
-    row.map_err(|_| Denial::ServerError)?
-        .try_get::<bool, _>("exists")
-        .map_err(|_| Denial::ServerError)
+        .map_err(|_| Denial::ServerError)?;
+    Ok(row.is_some())
 }
 
 /// `.filter(user=…).count()` for the server cap.
 async fn server_count(pool: &sqlx::PgPool, user_id: &uuid::Uuid) -> Result<i64, Denial> {
-    use sqlx::Row as _;
-    sqlx::query("SELECT COUNT(*) AS \"count\" FROM \"assistant_mcp_server\" WHERE \"user_id\" = $1")
-        .bind(user_id)
-        .fetch_one(pool)
+    use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let count = pidash_db::entity::assistant_mcp_server::Entity::find()
+        .filter(pidash_db::entity::assistant_mcp_server::Column::UserId.eq(*user_id))
+        .count(&db)
         .await
-        .map_err(|_| Denial::ServerError)?
-        .try_get("count")
-        .map_err(|_| Denial::ServerError)
+        .map_err(|_| Denial::ServerError)?;
+    Ok(count as i64)
 }
 
 #[cfg(test)]
@@ -1720,5 +1723,79 @@ mod tests {
         let nulled =
             serde_json::to_string(&serialize_server(&row, None, &chrono_tz::UTC)).expect("json");
         assert!(nulled.ends_with("\"effective_tool_prefix\":null}"));
+    }
+
+    #[test]
+    fn fetch_servers_seaorm_shape_pins_filter_and_order() {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QueryTrait};
+        let sql = pidash_db::entity::assistant_mcp_server::Entity::find()
+            .filter(pidash_db::entity::assistant_mcp_server::Column::UserId.eq(uuid::Uuid::nil()))
+            .order_by_asc(pidash_db::entity::assistant_mcp_server::Column::CreatedAt)
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("assistant_mcp_server"), "table: {sql}");
+        assert!(sql.contains("user_id"), "user filter: {sql}");
+        assert!(sql.contains("ORDER BY"), "ordering: {sql}");
+    }
+
+    #[test]
+    fn enabled_servers_seaorm_shape_pins_filter_and_order() {
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait};
+        let sql = pidash_db::entity::assistant_mcp_server::Entity::find()
+            .select_only()
+            .columns([
+                pidash_db::entity::assistant_mcp_server::Column::Id,
+                pidash_db::entity::assistant_mcp_server::Column::Name,
+                pidash_db::entity::assistant_mcp_server::Column::Url,
+                pidash_db::entity::assistant_mcp_server::Column::AuthHeaderEncrypted,
+            ])
+            .filter(pidash_db::entity::assistant_mcp_server::Column::UserId.eq(uuid::Uuid::nil()))
+            .filter(pidash_db::entity::assistant_mcp_server::Column::IsEnabled.eq(true))
+            .order_by_asc(pidash_db::entity::assistant_mcp_server::Column::CreatedAt)
+            .order_by_asc(pidash_db::entity::assistant_mcp_server::Column::Id)
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(sql.contains("is_enabled"), "enabled filter: {sql}");
+        assert!(sql.contains("ORDER BY"), "ordering: {sql}");
+    }
+
+    #[tokio::test]
+    async fn live_mcp_server_roundtrip_via_seaorm() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        let user_id = uuid::Uuid::new_v4();
+        // Seed via the same SeaORM write the handler uses, read back via fetch_servers/fetch_server.
+        {
+            use sea_orm::{ActiveModelTrait, Set};
+            let db = pidash_db::pool::sea_orm_connection(&pool);
+            let now = chrono::Utc::now();
+            let row = pidash_db::entity::assistant_mcp_server::ActiveModel {
+                id: Set(uuid::Uuid::new_v4()),
+                user_id: Set(user_id),
+                name: Set("live-mcp".to_owned()),
+                url: Set("https://8.8.8.8/mcp".to_owned()),
+                auth_header_encrypted: Set(None),
+                is_enabled: Set(true),
+                created_at: Set(now.into()),
+                updated_at: Set(now.into()),
+            };
+            row.insert(&db).await.expect("insert mcp server");
+        }
+        let rows = fetch_servers(&pool, &user_id).await.expect("fetch_servers");
+        let hit = rows.iter().any(|r| r.name == "live-mcp");
+        assert!(hit, "seeded row must read back through fetch_servers");
+        assert!(
+            name_taken(&pool, &user_id, "live-mcp", None)
+                .await
+                .expect("name_taken"),
+            "name_taken"
+        );
     }
 }

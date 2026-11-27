@@ -7,7 +7,7 @@ import { AssistantLanding } from "./components/AssistantLanding.js";
 import { AssistantLayout } from "./components/AssistantLayout.js";
 import { Composer } from "./components/Composer.js";
 import { ConversationGate } from "./components/ConversationGate.js";
-import { ConversationRail } from "./components/ConversationRail.js";
+import { ConversationHistoryDialog } from "./components/ConversationHistoryDialog.js";
 import { SetupCard } from "./components/SetupCard.js";
 import {
   API_KEY_REMINDER,
@@ -27,7 +27,7 @@ describe("assistant feature public API", () => {
     expect(AssistantLayout).toBeTypeOf("function");
     expect(Composer).toBeTypeOf("function");
     expect(ConversationGate).toBeTypeOf("function");
-    expect(ConversationRail).toBeTypeOf("function");
+    expect(ConversationHistoryDialog).toBeTypeOf("function");
     expect(SetupCard).toBeTypeOf("function");
     expect(assistantKeys.all("acme")).toEqual(["ws", "acme", "assistant"]);
     expect(assistantConfigQueryOptions).toBeTypeOf("function");

@@ -288,6 +288,18 @@ pub enum ServerMsg {
     Assign {
         run_id: Uuid,
         work_item_id: Option<Uuid>,
+        /// Run context (NEWPIDASH-320 §6.3, §6.1): the issue and project
+        /// identifiers plus, for issue runs, the workpad snapshot.
+        /// Additive optional fields — old servers never send them and old
+        /// daemons ignore them, both via `#[serde(default)]`.
+        #[serde(default)]
+        issue_identifier: Option<String>,
+        #[serde(default)]
+        project_identifier: Option<String>,
+        #[serde(default)]
+        workpad_body: Option<String>,
+        #[serde(default)]
+        workpad_sha256: Option<String>,
         prompt: String,
         repo_url: Option<String>,
         repo_ref: Option<String>,
@@ -301,6 +313,14 @@ pub enum ServerMsg {
         expected_codex_model: Option<String>,
         approval_policy_overrides: Option<BTreeMap<String, serde_json::Value>>,
         deadline: Option<DateTime<Utc>>,
+        /// Attempt identity minted by the Rust matcher (NEWPIDASH-241):
+        /// the daemon echoes it on capacity/lifecycle/poll calls.
+        /// `None` from old servers; old daemons ignore the additive fields.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assignment_token: Option<Uuid>,
+        /// `0` legacy, `1` machine queue.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assignment_protocol: Option<u16>,
     },
     Cancel {
         run_id: Uuid,
@@ -418,6 +438,31 @@ pub enum MachineMsg {
     CreateRunner(CreateRunnerCmd),
     /// Reserved for config distribution; ack + ignore for now.
     ConfigPush {},
+    /// Cloud-driven edit of one runner's local settings (the web runner
+    /// edit form). Answered on the command-result endpoint like
+    /// [`MachineMsg::CreateRunner`].
+    ReconfigureRunner(ReconfigureRunnerCmd),
+}
+
+/// Payload of [`MachineMsg::ReconfigureRunner`]. `name` is the cloud's
+/// current name (so a rename made in the web follows to the local block);
+/// every other field is present only when it changes. `model` /
+/// `reasoning_effort` `""` mean the agent's own default.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReconfigureRunnerCmd {
+    #[serde(default)]
+    pub request_id: String,
+    pub runner_id: Uuid,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub working_dir: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 /// Payload of [`MachineMsg::CreateRunner`]. Mirrors the fields the web
@@ -445,6 +490,46 @@ pub struct CreateRunnerCmd {
     pub model: String,
     #[serde(default)]
     pub reasoning_effort: String,
+}
+
+/// Body of the machine session's poll, `POST /api/v1/runner/dev-machines/
+/// <mid>/sessions/<sid>/poll` — the machine session's heartbeat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MachinePollBody {
+    /// Stream ids of the messages handled since the last poll.
+    pub ack: Vec<String>,
+    /// The machine's Pi Dash Agent state (PIDESKAPP-121, design §8): the
+    /// server sets `DevMachine.engine_auto_pause_reason` from it. Absent
+    /// from daemons before the engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_state: Option<PidashAgentStateReport>,
+}
+
+/// `engine_state` in [`MachinePollBody`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PidashAgentStateReport {
+    /// `available` / `signed_out` / `expiring` / `unavailable`.
+    pub state: pidash_ipc::protocol::EngineState,
+    /// Why it is not available (`engine_sign_in_required`,
+    /// `gateway_session_revoked`, `wallet_empty`, `profile_unavailable`,
+    /// `engine_disabled`, or a local `engine_not_installed` /
+    /// `profile_pending`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    pub sign_in_state: pidash_ipc::protocol::EngineSignInState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_expires_at: Option<DateTime<Utc>>,
+}
+
+impl From<&pidash_ipc::protocol::EngineStatusInfo> for PidashAgentStateReport {
+    fn from(s: &pidash_ipc::protocol::EngineStatusInfo) -> Self {
+        Self {
+            state: s.state,
+            reason_code: s.reason_code.clone(),
+            sign_in_state: s.sign_in_state,
+            credential_expires_at: s.credential_expires_at,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -486,6 +571,13 @@ pub enum FailureReason {
     /// the run to FAILED via a deliberate signal instead of inferring it
     /// from the heartbeat reaper after the next reconnect.
     DaemonRestart,
+    /// The model declined the task (e.g. an ACP `stopReason: "refusal"`).
+    /// The wire string `"refusal"` is a cross-language contract: current
+    /// clouds route it to a terminal REFUSED status with a queryable
+    /// `refusal_category` instead of a generic FAILED; older clouds fall
+    /// back to FAILED, which is the same place these landed before this
+    /// variant existed (as `AgentCrash`). See PDASHOSS01-183.
+    Refusal,
     /// The runner rejected an `Assign` because it already has a run in
     /// flight (or an active chat turn). The cloud considers a runner free
     /// the moment its previous run goes terminal in the database — which
@@ -496,6 +588,15 @@ pub enum FailureReason {
     /// re-queue the run for a fresh dispatch; older clouds fail it — either
     /// way it is not silently stuck.
     AssignRejectedBusy,
+    /// The runner rejected an `Assign` before sending `Accept` because the
+    /// agent's credentials are missing (for example Muse's `META_API_KEY` or
+    /// `~/.config/muse/auth.json`, Claude's `ANTHROPIC_API_KEY`, etc.)
+    /// and starting the agent would fail at `run.lifecycle.started` and burn
+    /// a tick. The cloud re-queues the run for another runner without
+    /// charging the issue's tick budget, matching `AssignRejectedBusy`'s
+    /// requeue semantics but with a distinct wire name (`agent_auth_missing`)
+    /// so the case is distinguishable in telemetry.
+    AgentAuthMissing,
 }
 
 #[cfg(test)]
@@ -512,6 +613,29 @@ mod tests {
         let back: FailureReason =
             serde_json::from_value(serde_json::json!("assign_rejected_busy")).unwrap();
         assert_eq!(back, FailureReason::AssignRejectedBusy);
+    }
+
+    /// The `agent_auth_missing` NACK reuses the same requeue path as
+    /// `assign_rejected_busy` on both clouds; its wire name must stay stable
+    /// so the cloud can branch on it without failing the run.
+    #[test]
+    fn agent_auth_missing_wire_name_is_stable() {
+        let json = serde_json::to_value(FailureReason::AgentAuthMissing).unwrap();
+        assert_eq!(json, serde_json::json!("agent_auth_missing"));
+        let back: FailureReason =
+            serde_json::from_value(serde_json::json!("agent_auth_missing")).unwrap();
+        assert_eq!(back, FailureReason::AgentAuthMissing);
+    }
+
+    /// The cloud's RunFailed endpoint branches on the literal string
+    /// `"refusal"` to record a REFUSED run instead of a FAILED one — the
+    /// wire name is a cross-language contract, not an implementation detail.
+    #[test]
+    fn refusal_wire_name_is_stable() {
+        let json = serde_json::to_value(FailureReason::Refusal).unwrap();
+        assert_eq!(json, serde_json::json!("refusal"));
+        let back: FailureReason = serde_json::from_value(serde_json::json!("refusal")).unwrap();
+        assert_eq!(back, FailureReason::Refusal);
     }
 
     #[test]
@@ -613,6 +737,10 @@ mod tests {
         let msg = ServerMsg::Assign {
             run_id: Uuid::new_v4(),
             work_item_id: Some(Uuid::new_v4()),
+            issue_identifier: Some("FX-7".into()),
+            project_identifier: Some("FX".into()),
+            workpad_body: Some("# plan".into()),
+            workpad_sha256: Some("abc123".into()),
             prompt: "do the thing".into(),
             repo_url: Some("https://example.invalid/x.git".into()),
             repo_ref: Some("main".into()),
@@ -620,11 +748,43 @@ mod tests {
             expected_codex_model: None,
             approval_policy_overrides: None,
             deadline: None,
+            assignment_token: None,
+            assignment_protocol: None,
         };
         let env = Envelope::new(msg);
         let s = serde_json::to_string(&env).unwrap();
         let back: Envelope<ServerMsg> = serde_json::from_str(&s).unwrap();
         assert_eq!(back.version, WIRE_VERSION);
+    }
+
+    /// NEWPIDASH-320 §6.1, §6.3: run-context fields are additive — an old
+    /// server's `assign` (without them) still parses, with everything `None`.
+    #[test]
+    fn assign_without_run_context_parses_to_none() {
+        let body = serde_json::json!({
+            "type": "assign",
+            "run_id": "11111111-1111-1111-1111-111111111111",
+            "work_item_id": null,
+            "prompt": "do the thing",
+            "repo_url": null,
+            "repo_ref": null,
+        });
+        let msg: ServerMsg = serde_json::from_value(body).expect("old assign shape parses");
+        match msg {
+            ServerMsg::Assign {
+                issue_identifier,
+                project_identifier,
+                workpad_body,
+                workpad_sha256,
+                ..
+            } => {
+                assert!(issue_identifier.is_none());
+                assert!(project_identifier.is_none());
+                assert!(workpad_body.is_none());
+                assert!(workpad_sha256.is_none());
+            }
+            other => panic!("expected assign, got {other:?}"),
+        }
     }
 
     #[test]
@@ -682,5 +842,37 @@ mod tests {
             ClientMsg::Hello { runner_id, .. } => assert_eq!(runner_id, body_id),
             other => panic!("expected Hello, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn machine_poll_body_carries_the_engine_state() {
+        let body = MachinePollBody {
+            ack: vec!["1-0".into()],
+            engine_state: Some(PidashAgentStateReport {
+                state: pidash_ipc::protocol::EngineState::SignedOut,
+                reason_code: Some("engine_sign_in_required".into()),
+                sign_in_state: pidash_ipc::protocol::EngineSignInState::Expired,
+                credential_expires_at: None,
+            }),
+        };
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            serde_json::json!({
+                "ack": ["1-0"],
+                "engine_state": {
+                    "state": "signed_out",
+                    "reason_code": "engine_sign_in_required",
+                    "sign_in_state": "expired"
+                }
+            })
+        );
+        let legacy = MachinePollBody {
+            ack: vec![],
+            engine_state: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&legacy).unwrap(),
+            serde_json::json!({"ack": []})
+        );
     }
 }

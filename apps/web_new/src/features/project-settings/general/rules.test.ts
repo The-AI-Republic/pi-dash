@@ -26,7 +26,6 @@ import {
   EMBLEM_SIZE_MESSAGE,
   EMBLEM_TYPE_MESSAGE,
   emblemFileError,
-  executorChoices,
   generalConflictError,
   generalFormFrom,
   reseatGeneralForm,
@@ -48,6 +47,8 @@ import {
   selectCadence,
   shapeBudget,
   shapeIdentifier,
+  stagesChanged,
+  stagesFrom,
   uploadedEmblem,
   validateGeneralFields,
   type GeneralFormValues,
@@ -126,7 +127,6 @@ describe("generalFormFrom", () => {
       timezone: "Europe/Lisbon",
       baseBranch: "develop",
       repoUrl: "https://github.com/acme/site",
-      executor: "cloud_agent",
       ticking: true,
       budget: "7",
       noCap: false,
@@ -144,7 +144,7 @@ describe("generalFormFrom", () => {
     expect(form.cadence).toBe(CUSTOM_CADENCE_VALUE);
   });
 
-  it("normalizes visibility, an empty executor and a custom cadence", () => {
+  it("normalizes visibility and a custom cadence", () => {
     const form = generalFormFrom({
       ...STORED,
       network: 5,
@@ -152,7 +152,6 @@ describe("generalFormFrom", () => {
       agent_default_interval_seconds: 14_400,
     });
     expect(form.network).toBe(0);
-    expect(form.executor).toBe("local_runner");
     expect(form.cadence).toBe(CUSTOM_CADENCE_VALUE);
   });
 });
@@ -269,6 +268,60 @@ describe("budgetOnSave", () => {
   });
 });
 
+describe("stages", () => {
+  it("reads a missing key as Auto with both stages on", () => {
+    expect(stagesFrom(undefined)).toEqual({ stagesMode: "auto", reviewStage: true, testStage: true });
+    expect(stagesFrom({})).toEqual({ stagesMode: "auto", reviewStage: true, testStage: true });
+    expect(generalFormFrom(STORED)).toMatchObject({ stagesMode: "auto", reviewStage: true, testStage: true });
+  });
+
+  it("reads each stored shape onto the form", () => {
+    expect(stagesFrom({ agent_stages: { mode: "custom", review: false, test: true } })).toEqual({
+      stagesMode: "custom",
+      reviewStage: false,
+      testStage: true,
+    });
+    expect(stagesFrom({ agent_stages: { mode: "custom" } })).toEqual({
+      stagesMode: "custom",
+      reviewStage: true,
+      testStage: true,
+    });
+    // Auto keeps the stored toggles so they reappear under Customize.
+    expect(stagesFrom({ agent_stages: { mode: "auto", review: false, test: false } })).toEqual({
+      stagesMode: "auto",
+      reviewStage: false,
+      testStage: false,
+    });
+  });
+
+  it("detects a change against the stored setting", () => {
+    expect(stagesChanged(values(), STORED)).toBe(false);
+    expect(stagesChanged(values({ stagesMode: "custom" }), STORED)).toBe(true);
+    expect(stagesChanged(values({ testStage: false }), STORED)).toBe(true);
+  });
+
+  it("writes the whole key only when the stage setting changed", () => {
+    expect(buildGeneralPayload({ values: values(), cadenceDirty: false }).settings).toBeUndefined();
+    expect(
+      buildGeneralPayload({ values: values({ stagesMode: "auto" }), cadenceDirty: false, stagesDirty: true }).settings
+    ).toEqual({ agent_stages: { mode: "auto", review: true, test: true } });
+    expect(
+      buildGeneralPayload({
+        values: values({ stagesMode: "custom", reviewStage: false, testStage: true }),
+        cadenceDirty: false,
+        stagesDirty: true,
+      }).settings
+    ).toEqual({ agent_stages: { mode: "custom", review: false, test: true } });
+    expect(
+      buildGeneralPayload({
+        values: values({ stagesMode: "custom", reviewStage: false, testStage: false }),
+        cadenceDirty: false,
+        stagesDirty: true,
+      }).settings
+    ).toEqual({ agent_stages: { mode: "custom", review: false, test: false } });
+  });
+});
+
 describe("buildGeneralPayload", () => {
   it("carries the editable fields but never the repository URL", () => {
     const payload = buildGeneralPayload({ values: values({ name: "New name" }), cadenceDirty: false });
@@ -280,11 +333,12 @@ describe("buildGeneralPayload", () => {
       timezone: "Europe/Lisbon",
       base_branch: "develop",
       logo_props: STORED.logo_props,
-      default_agent_executor: "cloud_agent",
       agent_ticking_enabled: true,
       agent_default_max_ticks: 7,
     });
     expect("repo_url" in payload).toBe(false);
+    // Runner is the only executor: the tab never writes one.
+    expect("default_agent_executor" in payload).toBe(false);
   });
 
   it("leaves per-stage cadence out unless the picker moved", () => {
@@ -411,20 +465,6 @@ describe("repositoryBoundState", () => {
         repository: { clone_url_http: "https://git.test/acme/site.git" },
       })
     ).toBe("https://github.com/acme/site.git");
-  });
-});
-
-describe("executorChoices", () => {
-  it("disables only families the instance reports unavailable", () => {
-    expect(executorChoices([{ kind: "cloud_agent", available: true }])).toEqual([
-      { kind: "local_runner", label: "Local runner", disabled: false },
-      { kind: "cloud_agent", label: "Cloud agent", disabled: false },
-      { kind: "managed_runner", label: "Desktop agent", disabled: true },
-    ]);
-  });
-
-  it("keeps the local runner enabled even when the options disagree", () => {
-    expect(executorChoices([{ kind: "local_runner", available: false }])[0]?.disabled).toBe(false);
   });
 });
 

@@ -198,20 +198,43 @@ pub fn pod_from_row(row: &sqlx::postgres::PgRow) -> Result<Pod, sqlx::Error> {
 /// `Pod.default_for_project_id` (`models.py:174-176`): the active
 /// default pod for a project, or `None` (transient pre-signal
 /// window, or the default was soft-deleted without a promoted
-/// replacement). Callers pick the pool and pass an executor in;
-/// every executor is generic over `sqlx::Executor`.
-pub async fn default_for_project_id<'e, E>(
-    ex: E,
+/// replacement). Runs on a SeaORM connection — either
+/// `sea_orm_connection(&pool)` for pool callers or
+/// `TxConn::new(&mut tx)` for sqlx-transaction callers
+/// ([`DEFAULT_FOR_PROJECT_ID_SQL`] pins the statement shape).
+/// SeaORM form of [`DEFAULT_FOR_PROJECT_ID_SQL`]: the active default
+/// pod for a project, default-first then oldest, first row.
+pub fn default_for_project_id_select(
     project_id: uuid::Uuid,
-) -> Result<Option<Pod>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(DEFAULT_FOR_PROJECT_ID_SQL)
-        .bind(project_id)
-        .fetch_optional(ex)
-        .await?;
-    row.map(|r| pod_from_row(&r)).transpose()
+) -> sea_orm::Select<crate::entity::pod::Entity> {
+    use crate::entity::pod;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+    pod::Entity::find()
+        .filter(pod::Column::DeletedAt.is_null())
+        .filter(pod::Column::IsDefault.eq(true))
+        .filter(pod::Column::ProjectId.eq(project_id))
+        .order_by_desc(pod::Column::IsDefault)
+        .order_by_asc(pod::Column::CreatedAt)
+        .limit(1)
+}
+
+pub async fn default_for_project_id(
+    db: &impl sea_orm::ConnectionTrait,
+    project_id: uuid::Uuid,
+) -> Result<Option<Pod>, sea_orm::DbErr> {
+    let model = default_for_project_id_select(project_id).one(db).await?;
+    Ok(model.map(|m| Pod {
+        id: m.id,
+        workspace_id: m.workspace_id,
+        project_id: m.project_id,
+        name: m.name,
+        description: m.description,
+        created_by_id: m.created_by_id,
+        is_default: m.is_default,
+        deleted_at: m.deleted_at.map(|dt| dt.with_timezone(&chrono::Utc)),
+        created_at: m.created_at.with_timezone(&chrono::Utc),
+        updated_at: m.updated_at.with_timezone(&chrono::Utc),
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -279,10 +302,16 @@ pub async fn ensure_default_pod(
     if !project.created {
         return Ok(None);
     }
-    let exists: bool = sqlx::query_scalar(&pod_exists_for_project_sql())
-        .bind(project.id)
-        .fetch_one(pool)
-        .await?;
+    use crate::entity::pod;
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, Set};
+    let db = crate::pool::sea_orm_connection(pool);
+    let exists = pod::Entity::find()
+        .filter(pod::Column::ProjectId.eq(project.id))
+        .filter(pod::Column::DeletedAt.is_null())
+        .count(&db)
+        .await
+        .map_err(crate::orm_tx::into_sqlx)?
+        > 0;
     if exists {
         return Ok(None);
     }
@@ -291,20 +320,21 @@ pub async fn ensure_default_pod(
     let created_at = chrono::Utc::now();
     let updated_at = chrono::Utc::now();
     let pod_id = uuid::Uuid::new_v4();
-    if let Err(error) = sqlx::query(&insert_default_pod_sql())
-        .bind(pod_id)
-        .bind(project.workspace_id)
-        .bind(project.id)
-        .bind(default_pod_name(&project.identifier))
-        .bind(DEFAULT_POD_DESCRIPTION)
-        .bind(pod_created_by(project))
-        .bind(true)
-        .bind(None::<chrono::DateTime<chrono::Utc>>)
-        .bind(created_at)
-        .bind(updated_at)
-        .execute(pool)
-        .await
-    {
+    let result = pod::ActiveModel {
+        id: Set(pod_id),
+        workspace_id: Set(project.workspace_id),
+        project_id: Set(project.id),
+        name: Set(default_pod_name(&project.identifier)),
+        description: Set(DEFAULT_POD_DESCRIPTION.to_owned()),
+        created_by_id: Set(pod_created_by(project)),
+        is_default: Set(true),
+        deleted_at: Set(None),
+        created_at: Set(created_at.into()),
+        updated_at: Set(updated_at.into()),
+    }
+    .insert(&db)
+    .await;
+    if let Err(error) = result {
         tracing::error!(
             %error,
             project_id = %project.id,
@@ -496,6 +526,23 @@ mod tests {
         assert_eq!(live["returned"]["is_default"].as_bool(), Some(true));
         assert_eq!(live["objects_excludes"].as_bool(), Some(true));
         assert_eq!(live["all_objects_still_sees"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn default_selector_statement_shape() {
+        let sql = sea_orm::QueryTrait::build(
+            &default_for_project_id_select(uuid::Uuid::nil()),
+            sea_orm::DbBackend::Postgres,
+        )
+        .to_string();
+        assert!(sql.contains("FROM \"pod\""), "table: {sql}");
+        assert!(sql.contains("\"deleted_at\" IS NULL"), "soft scope: {sql}");
+        assert!(sql.contains("\"is_default\""), "default flag: {sql}");
+        assert!(
+            sql.contains("ORDER BY \"pod\".\"is_default\" DESC"),
+            "order: {sql}"
+        );
+        assert!(sql.contains("LIMIT 1"), "first-row: {sql}");
     }
 
     #[test]

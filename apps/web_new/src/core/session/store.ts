@@ -61,3 +61,25 @@ export function signOut(queryClient: QueryClient): void {
   queryClient.clear();
   useSessionStore.getState().markSignedOut();
 }
+
+/**
+ * Queries that describe the instance rather than any account (the startup
+ * answer the root gate branches on). They survive an ended session.
+ */
+function isAccountQueryKey(queryKey: readonly unknown[]): boolean {
+  return queryKey[0] !== "instance";
+}
+
+/**
+ * The server ended a session the client still remembered (a 401 for a
+ * cached user): forget that account the way a sign-out does. Every store
+ * resets and every account row leaves the cache, so the persistor's next
+ * save drops them from disk and the next account to sign in never opens
+ * on them (PIDESKAPP-194). The instance answer stays, so the startup gate
+ * does not re-run.
+ */
+export function endExpiredSession(queryClient: QueryClient): void {
+  resetRegisteredStores();
+  queryClient.removeQueries({ predicate: (query) => isAccountQueryKey(query.queryKey) });
+  useSessionStore.getState().markSignedOut();
+}

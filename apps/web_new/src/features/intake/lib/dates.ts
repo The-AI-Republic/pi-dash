@@ -4,18 +4,38 @@
 // Intake date-filter values (parity/specs/intake.md INT-010). Both date
 // sections share the same five options — four presets plus an explicit
 // range — and the same wire encoding: one `FROM;after,TO;before` pair
-// per parameter. Days are UTC calendar days: the parity scenarios pin
-// day strings the UTC clock produces, so the token builder reads the
-// UTC day rather than the viewer's local day.
+// per parameter. Days are the viewer's local calendar days, matching the
+// old app: the token builder reads the local day, and rows render the
+// local day of their timestamp.
 
 import { formatDay, formatMergedRange } from "../../issues/index.js";
 
-/** Day string of the UTC clock (`YYYY-MM-DD`). */
-export function todayUtcIsoDay(now: Date = new Date()): string {
-  return now.toISOString().slice(0, 10);
+/** Day string of the viewer's local clock (`YYYY-MM-DD`). */
+export function todayLocalIsoDay(now: Date = new Date()): string {
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
-/** Shift an ISO day by whole UTC days. */
+const ISO_DAY_ONLY_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/**
+ * Local calendar day (`YYYY-MM-DD`) of a timestamp in the viewer's
+ * timezone. Date-only values carry no time of day and pass through
+ * unchanged; anything unparseable falls back to its day prefix.
+ */
+export function timestampToLocalDay(value: string): string {
+  if (ISO_DAY_ONLY_PATTERN.test(value)) return value;
+  const instant = new Date(value);
+  if (Number.isNaN(instant.getTime())) return value.slice(0, 10);
+  const year = instant.getFullYear();
+  const month = String(instant.getMonth() + 1).padStart(2, "0");
+  const day = String(instant.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+/** Shift an ISO day by whole calendar days. */
 export function shiftIsoDay(iso: string, deltaDays: number): string {
   const shifted = new Date(`${iso}T00:00:00Z`);
   shifted.setUTCDate(shifted.getUTCDate() + deltaDays);
@@ -32,7 +52,7 @@ export function sameDayNextMonth(today: string): string {
   return new Date(Date.UTC(year, month, day)).toISOString().slice(0, 10);
 }
 
-/** Quick presets in section order, as UTC day offsets from today. */
+/** Quick presets in section order, as local day offsets from today. */
 export const INTAKE_DATE_PRESETS = [
   { id: "today", label: "Today", fromOffset: 0, toOffset: 0 },
   { id: "yesterday", label: "Yesterday", fromOffset: -1, toOffset: -1 },

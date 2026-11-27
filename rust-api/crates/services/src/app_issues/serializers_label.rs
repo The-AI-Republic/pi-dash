@@ -67,10 +67,10 @@
 //! (`postgresql/base.py` operators, `operations.py` `lookup_cast` /
 //! `prep_for_iexact_query`); the comparison stays DB-side because
 //! Python-casefolding and Postgres-`UPPER` disagree on some Unicode
-//! (e.g. `ß` vs `SS`). The `project_id=None` arm (`context.get` +
-//! Django `None → IS NULL`) is unreachable from the D-26 views, which
-//! always pass the URL `project_id` (`label.py:43,71`); only the
-//! `= $1` form is pinned here.
+//! (e.g. `ß` vs `SS`). [`label_name_conflict`] builds it through SeaORM
+//! (`name` is a `varchar`, so the `::text` cast changes nothing). The
+//! `project_id=None` arm (`context.get` + Django `None → IS NULL`) is
+//! the `PUT` path's (DRF's default context carries no `project_id`).
 //!
 //! Out of scope here (655's handler layer): the `Label.save()`
 //! `sort_order = max + 10000` override (`db/models/label.py:46-54`),
@@ -78,7 +78,13 @@
 //! is case-sensitive where the serializer is `iexact` — asymmetry kept),
 //! and the generic field errors (required / max-length / bad-UUID).
 
+use pidash_db::entity::labels;
+use sea_orm::sea_query::{Expr, Func};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QuerySelect, QueryTrait,
+};
 use serde::Serialize;
+use uuid::Uuid;
 
 /// App `LabelSerializer` wire keys (`issue.py:549-562`), in
 /// `Meta.fields` order.
@@ -158,21 +164,50 @@ pub const LABEL_NAME_ALREADY_EXISTS: &str = "LABEL_NAME_ALREADY_EXISTS";
 /// (probed byte-for-byte).
 pub const LABEL_NAME_CONFLICT_BODY: &str = "{\"name\":[\"LABEL_NAME_ALREADY_EXISTS\"]}";
 
-/// Django `.exists()` probe for the create arm of `validate_name`
-/// (`issue.py:564-572`): `labels` (`db_table`, `label.py:43`) with the
-/// `project_id` scope, the Postgres `iexact` spelling, and the
-/// `SoftDeletionManager` tombstone guard (`db/mixins.py:56-58`). `$1` is
-/// the context `project_id`, `$2` the raw candidate name.
-pub const LABEL_NAME_CONFLICT_PROBE_SQL: &str = "SELECT 1 FROM labels WHERE project_id = $1 AND UPPER(name::text) = UPPER($2) AND deleted_at IS NULL LIMIT 1";
+/// The `validate_name` duplicate probe (`issue.py:564-572`):
+/// `Label.objects` (the `SoftDeletionManager` tombstone guard,
+/// `db/mixins.py:56-58`) filtered to the context `project_id` (`None`
+/// renders `IS NULL`, the `PUT` path's empty context) and the Postgres
+/// `iexact` spelling (`UPPER(name) = UPPER(candidate)`), with the update
+/// arm's `.exclude(pk)` when `exclude` is set, as an `.exists()`.
+pub async fn label_name_conflict(
+    db: &impl ConnectionTrait,
+    project_id: Option<Uuid>,
+    name: &str,
+    exclude: Option<Uuid>,
+) -> Result<bool, DbErr> {
+    let hit: Option<Uuid> = label_name_conflict_query(project_id, name, exclude)
+        .into_tuple()
+        .one(db)
+        .await?;
+    Ok(hit.is_some())
+}
 
-/// Django `.exists()` probe for the update arm of `validate_name`
-/// (`issue.py:568-572`): the create probe plus the `.exclude(pk)`
-/// clause, which Django emits as `NOT (id = …)` (`id` is the PK, never
-/// null, so the `NOT` form and `<>` agree). `$3` is the instance pk.
-pub const LABEL_NAME_CONFLICT_EXCLUDING_SELF_PROBE_SQL: &str = "SELECT 1 FROM labels WHERE project_id = $1 AND UPPER(name::text) = UPPER($2) AND deleted_at IS NULL AND NOT (id = $3) LIMIT 1";
+fn label_name_conflict_query(
+    project_id: Option<Uuid>,
+    name: &str,
+    exclude: Option<Uuid>,
+) -> sea_orm::Select<labels::Entity> {
+    labels::Entity::find()
+        .select_only()
+        .column(labels::Column::Id)
+        .filter(match project_id {
+            Some(project_id) => labels::Column::ProjectId.eq(project_id),
+            None => labels::Column::ProjectId.is_null(),
+        })
+        .filter(
+            Expr::expr(Func::upper(Expr::col((
+                labels::Entity,
+                labels::Column::Name,
+            ))))
+            .eq(Func::upper(Expr::val(name.to_owned()))),
+        )
+        .filter(labels::Column::DeletedAt.is_null())
+        .apply_if(exclude, |query, pk| query.filter(labels::Column::Id.ne(pk)))
+}
 
 /// Mirrors `validate_name` (`issue.py:563-574`): `conflict` is the
-/// `*_PROBE_SQL` verdict for the candidate name. Returns the detail the
+/// [`label_name_conflict`] verdict for the candidate name. Returns the detail the
 /// handler renders as [`LABEL_NAME_CONFLICT_BODY`] with 400.
 pub fn validate_label_name(conflict: bool) -> Result<(), &'static str> {
     if conflict {
@@ -326,28 +361,70 @@ mod tests {
     }
 
     #[test]
-    fn conflict_probe_sql_pins_clauses() {
+    fn conflict_probe_pins_clauses() {
         // TRACE: issue.py:566 (.filter over Label.objects =
         // SoftDeletionManager, db/mixins.py:56-58; Postgres iexact =
-        // UPPER(name::text) = UPPER($n)); :568-569 (.exclude(pk) =
-        // NOT (id = …)).
-        for sql in [
-            LABEL_NAME_CONFLICT_PROBE_SQL,
-            LABEL_NAME_CONFLICT_EXCLUDING_SELF_PROBE_SQL,
-        ] {
-            assert!(sql.starts_with("SELECT 1 FROM labels WHERE "), "{sql}");
-            assert!(sql.contains("project_id = $1"), "{sql}");
-            assert!(sql.contains("UPPER(name::text) = UPPER($2)"), "{sql}");
-            assert!(sql.contains("deleted_at IS NULL"), "{sql}");
-            assert!(sql.ends_with("LIMIT 1"), "{sql}");
-        }
-        assert!(
-            !LABEL_NAME_CONFLICT_PROBE_SQL.contains("id = $3"),
-            "create arm has no exclude"
+        // UPPER(name) = UPPER(candidate)); :568-569 (.exclude(pk)).
+        let project = Uuid::nil();
+        let create = label_name_conflict_query(Some(project), "Bug", None)
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert_eq!(
+            create,
+            r#"SELECT "labels"."id" FROM "labels" WHERE "labels"."project_id" = '00000000-0000-0000-0000-000000000000' AND UPPER("labels"."name") = UPPER('Bug') AND "labels"."deleted_at" IS NULL"#
         );
+        let put = label_name_conflict_query(None, "Bug", Some(project))
+            .build(sea_orm::DbBackend::Postgres)
+            .to_string();
+        assert!(put.contains(r#""labels"."project_id" IS NULL"#), "{put}");
         assert!(
-            LABEL_NAME_CONFLICT_EXCLUDING_SELF_PROBE_SQL.contains("NOT (id = $3)"),
-            "update arm excludes self"
+            put.ends_with(r#"AND "labels"."id" <> '00000000-0000-0000-0000-000000000000'"#),
+            "{put}"
         );
+    }
+
+    /// The probe against a constraint-free temp table on a one-connection
+    /// pool: iexact, tombstones, project scope (incl. `IS NULL`), exclude.
+    #[tokio::test]
+    async fn live_label_name_conflict() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect");
+        sqlx::query("CREATE TEMP TABLE labels AS SELECT * FROM public.labels WITH NO DATA")
+            .execute(&pool)
+            .await
+            .expect("temp table");
+        let (project, live, orphan) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        sqlx::query(&format!(
+            "INSERT INTO labels (id, project_id, name, deleted_at) VALUES \
+             ('{live}', '{project}', 'Bug', NULL), \
+             (gen_random_uuid(), '{project}', 'Gone', now()), \
+             ('{orphan}', NULL, 'Loose', NULL)"
+        ))
+        .execute(&pool)
+        .await
+        .expect("seed");
+        let db = pidash_db::pool::sea_orm_connection(&pool);
+        let probe = |project_id, name: &'static str, exclude| {
+            let db = db.clone();
+            async move {
+                label_name_conflict(&db, project_id, name, exclude)
+                    .await
+                    .expect("probe")
+            }
+        };
+        assert!(probe(Some(project), "bUG", None).await);
+        assert!(!probe(Some(project), "gone", None).await);
+        assert!(!probe(Some(project), "bug", Some(live)).await);
+        assert!(!probe(Some(Uuid::new_v4()), "bug", None).await);
+        assert!(probe(None, "LOOSE", None).await);
+        assert!(!probe(None, "loose", Some(orphan)).await);
+        assert!(!probe(None, "bug", None).await);
     }
 }

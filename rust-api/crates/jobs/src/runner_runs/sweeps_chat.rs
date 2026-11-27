@@ -68,24 +68,28 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use sea_orm::sea_query::{Alias, Expr, Query, SimpleExpr};
+use sea_orm::{
+    ColumnTrait, Condition, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect,
+    RelationTrait,
+};
 use serde_json::{json, Value};
-use sqlx::{PgPool, Row};
+use sqlx::{Acquire, PgPool};
 use uuid::Uuid;
 
-use pidash_db::runner_enroll::columns::{dev_machine, runner as runner_cols};
-use pidash_db::runner_runs::{
-    agent_run, chat_dedupe, chat_event, chat_message, chat_session, run_dedupe, AgentChatMessage,
-    AgentChatSession,
-};
-use pidash_db::tasks_ticker::models::scheduler_binding;
+use pidash_db::entity as orm;
+use pidash_db::orm_tx::TxConn;
+use pidash_db::pool::sea_orm_connection;
+use pidash_db::runner_runs::{AgentChatMessage, AgentChatSession};
 use pidash_services::domain::comments as comment_domain;
 use pidash_services::integrations::serializers::isoformat;
 use pidash_services::runner_runs::chat::{self, ChatEffect, NewEventInputs};
+use pidash_services::runner_runs::failure_effects;
 use pidash_services::runner_runs::finalization::{self, TerminalEffectsInputs};
-use pidash_services::runner_runs::lifecycle::{self, LifecycleError, LiveStateUsageFacts};
-use pidash_services::runner_runs::scheduler_hook::{self, BindingFacts, SchedulerHookPlan};
-use pidash_services::runner_runs::{LifecycleEffect, SetValue};
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_services::runner_runs::lifecycle::{self, LifecycleError};
+use pidash_services::runner_runs::scheduler_hook::{self, SchedulerHookPlan};
+use pidash_services::runner_runs::LifecycleEffect;
+use pidash_types::agent_runs::AgentExecutorKind;
 use pidash_types::runner_runs::{
     classify_run_error, run_message_dedupe_ttl_secs, AgentChatMessageRole, AgentChatMessageStatus,
     AgentChatSessionStatus, AgentRunStatus, DevMachineInfo, RunErrorKind, RunnerInfo,
@@ -139,6 +143,11 @@ pub async fn emit_terminal_effects(pool: &PgPool, run_id: Uuid) -> Result<(), sq
 pub const STALL_THRESHOLD_SECS_DEFAULT: i64 = 360;
 /// `RUNNER_AGENT_OBSERVABILITY_STALE_SECS` default (`tasks.py:439`).
 pub const OBSERVABILITY_STALE_SECS_DEFAULT: i64 = 90;
+/// NEWPIDASH-262: an `ASSIGNED` run with `started_at IS NULL` older
+/// than this many seconds is considered lost (runner never polled).
+/// 180s = 3 minutes, >2× heartbeat grace (90s). Mirrors
+/// `pidash_services::runner_sessions::session_service::ASSIGNED_NEVER_STARTED_SECS`.
+pub const ASSIGNED_NEVER_STARTED_SECS: i64 = 180;
 
 /// Resolve a seconds setting: the env var under Django's setting name,
 /// or `default` when unset or unparsable (the F-09 `env_secs`
@@ -220,6 +229,12 @@ impl From<sqlx::Error> for SweepError {
     }
 }
 
+impl From<sea_orm::DbErr> for SweepError {
+    fn from(error: sea_orm::DbErr) -> Self {
+        SweepError::Db(pidash_db::orm_tx::into_sqlx(error))
+    }
+}
+
 impl From<LifecycleError> for SweepError {
     fn from(error: LifecycleError) -> Self {
         SweepError::Lifecycle(error)
@@ -249,12 +264,6 @@ pub trait RunnerRunsSeams: Send + Sync {
         &self,
         pod_id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>>;
-    /// `cloud_agent.dispatch.dispatch_waiting` (D-11). Unisolated: a
-    /// failure propagates and the capacity marker stays unset.
-    fn dispatch_waiting(
-        &self,
-        workspace_id: Uuid,
-    ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>>;
     /// `orchestration.service.complete_project_move_handoff` (D-12):
     /// after the hooks transaction, isolated.
     fn complete_project_move_handoff(
@@ -262,11 +271,14 @@ pub trait RunnerRunsSeams: Send + Sync {
         run_id: Uuid,
     ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>>;
     /// `orchestration.scheduling.maybe_disarm_on_terminal_signal`
-    /// (D-12), isolated.
+    /// (D-12), isolated. `Ok(true)` asks the caller to clear the run's
+    /// `thread_id` (the fresh-session lever) on its hooks transaction,
+    /// which holds the run row lock — the seam's own connection must not
+    /// write that row.
     fn disarm_on_terminal_signal(
         &self,
         run_id: Uuid,
-    ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>>;
+    ) -> Pin<Box<dyn Future<Output = Result<bool, SeamError>> + Send + '_>>;
     /// `orchestration.scheduling.maybe_apply_deferred_pause` (D-12),
     /// isolated.
     fn apply_deferred_pause(
@@ -291,36 +303,33 @@ pub trait RunnerRunsSeams: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// SQL builders owned by this layer
+// Statements owned by this layer (SeaORM builders)
 // ---------------------------------------------------------------------------
-
-/// `"table"."a", "table"."b", …` for a column list.
-fn qualified_columns(table: &str, columns: &[&str]) -> String {
-    columns
-        .iter()
-        .map(|column| format!("\"{table}\".\"{column}\""))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// Position of `column` in `columns` (`None` when the L2 list drifted).
-fn col_index(columns: &[&str], column: &str) -> Option<usize> {
-    columns.iter().position(|name| *name == column)
-}
-
-/// The dedupe `DELETE` (`tasks.py:210,221`): Django's collector
-/// fast-deletes these leaf tables (nothing references them — the FKs
-/// point from the dedupe rows at runs/sessions — and no delete
-/// signals are registered), so the source emits exactly this one
-/// `DELETE`. Param: `$1` the TTL cutoff.
-pub fn dedupe_delete_sql(table: &str) -> String {
-    format!("DELETE FROM \"{table}\" WHERE \"{table}\".\"created_at\" < $1")
-}
 
 /// The TTL cutoff both dedupe sweeps delete before
 /// (`timezone.now() - timedelta(seconds=ttl)`, `:209,220`).
 pub fn dedupe_cutoff(now: DateTime<Utc>, ttl_secs: i64) -> DateTime<Utc> {
     now - chrono::Duration::seconds(ttl_secs)
+}
+
+/// The run-dedupe `DELETE` (`tasks.py:210`): Django's collector
+/// fast-deletes this leaf table (nothing references it — the FKs point
+/// from the dedupe rows at runs — and no delete signals are
+/// registered), so the source emits exactly one `DELETE`.
+pub fn run_dedupe_delete_statement(
+    cutoff: DateTime<Utc>,
+) -> sea_orm::DeleteMany<orm::run_message_dedupe::Entity> {
+    use orm::run_message_dedupe::{Column, Entity};
+    Entity::delete_many().filter(Column::CreatedAt.lt(cutoff))
+}
+
+/// The chat-dedupe `DELETE` (`tasks.py:221`), same fast-delete shape as
+/// [`run_dedupe_delete_statement`].
+pub fn chat_dedupe_delete_statement(
+    cutoff: DateTime<Utc>,
+) -> sea_orm::DeleteMany<orm::chat_message_dedupe::Entity> {
+    use orm::chat_message_dedupe::{Column, Entity};
+    Entity::delete_many().filter(Column::CreatedAt.lt(cutoff))
 }
 
 /// The stall cutoffs (`tasks.py:440-442`): the agent-silence cutoff
@@ -336,219 +345,296 @@ pub fn stall_cutoffs(
     )
 }
 
-/// The stall candidate select (`tasks.py:462-472`): full `agent_run` +
-/// full `runner` (`select_related("runner")`) over the two `INNER
-/// JOIN`s. The `WHERE` order is Django's: the `status__in` filter,
-/// then the three live-state conjuncts in Q-sorted (alphabetical)
-/// order — `last_event_at`, `observed_run_id`, `updated_at` — then the
+/// One stall candidate (`tasks.py:462-472`): the run id plus the
+/// runner enrichment columns off the `select_related("runner")` join.
+/// `runner_id` is `Option` only for the source's dead
+/// `if run.runner is None` guard — the `INNER JOIN` never yields NULL.
+#[derive(Debug, Clone, PartialEq, Eq, sea_orm::FromQueryResult)]
+pub struct StallCandidate {
+    pub run_id: Uuid,
+    pub runner_id: Option<Uuid>,
+    pub runner_name: String,
+    pub runner_host_label: String,
+    pub runner_capabilities: Value,
+    pub runner_dev_machine_id: Option<Uuid>,
+}
+
+/// The stall candidate select (`tasks.py:462-472`) over the two `INNER
+/// JOIN`s. The `WHERE` order is Django's: the `status__in` filter, then
+/// the three live-state conjuncts in Q-sorted (alphabetical) order —
+/// `last_event_at`, `observed_run_id`, `updated_at` — then the
 /// `approvals_pending` OR, then the `agent_health IS NULL` backstop
 /// scope (watchdog runners own their own 24h/48h sweep, `:470`).
-/// Params: `$1`/`$2` the active statuses (`assigned`, `running`),
-/// `$3` the silence cutoff, `$4` the snapshot cutoff, `$5` zero.
 /// `NULL` `last_event_at` rows never match (`__lt` excludes `NULL`);
 /// `NULL` `approvals_pending` rows do (the `IS NULL` arm); only
 /// `NULL` `agent_health` rows match at all. Fixture: FX-RUN-07
 /// `candidate_sql`.
-pub fn stalled_candidate_sql() -> String {
-    format!(
-        "SELECT {}, {} FROM \"agent_run\" \
-         INNER JOIN \"runner\" ON (\"agent_run\".\"runner_id\" = \"runner\".\"id\") \
-         INNER JOIN \"runner_live_state\" ON (\"runner\".\"id\" = \"runner_live_state\".\"runner_id\") \
-         WHERE (\"agent_run\".\"status\" IN ($1, $2) \
-         AND \"runner_live_state\".\"last_event_at\" < $3 \
-         AND \"runner_live_state\".\"observed_run_id\" = (\"agent_run\".\"id\") \
-         AND \"runner_live_state\".\"updated_at\" >= $4 \
-         AND (\"runner_live_state\".\"approvals_pending\" = $5 \
-         OR \"runner_live_state\".\"approvals_pending\" IS NULL) \
-         AND \"runner_live_state\".\"agent_health\" IS NULL) \
-         ORDER BY \"agent_run\".\"created_at\" DESC",
-        qualified_columns(agent_run::TABLE, agent_run::COLUMNS),
-        qualified_columns(runner_cols::TABLE, runner_cols::COLUMNS),
-    )
+pub fn stalled_candidate_select(
+    cutoff: DateTime<Utc>,
+    snapshot_cutoff: DateTime<Utc>,
+) -> sea_orm::Selector<sea_orm::SelectModel<StallCandidate>> {
+    use orm::agent_run::{Column, Entity, Relation};
+    use orm::runner_live_state as live;
+    Entity::find()
+        .select_only()
+        .column_as(Column::Id, "run_id")
+        .column_as(orm::runner::Column::Id, "runner_id")
+        .column_as(orm::runner::Column::Name, "runner_name")
+        .column_as(orm::runner::Column::HostLabel, "runner_host_label")
+        .column_as(orm::runner::Column::Capabilities, "runner_capabilities")
+        .column_as(orm::runner::Column::DevMachineId, "runner_dev_machine_id")
+        .join(JoinType::InnerJoin, Relation::Runner.def())
+        .join(
+            JoinType::InnerJoin,
+            orm::runner::Relation::RunnerLiveState.def(),
+        )
+        .filter(Column::Status.is_in([
+            AgentRunStatus::Assigned.value(),
+            AgentRunStatus::Running.value(),
+        ]))
+        .filter(live::Column::LastEventAt.lt(cutoff))
+        .filter(Expr::col((live::Entity, live::Column::ObservedRunId)).equals((Entity, Column::Id)))
+        .filter(live::Column::UpdatedAt.gte(snapshot_cutoff))
+        .filter(
+            Condition::any()
+                .add(live::Column::ApprovalsPending.eq(0))
+                .add(live::Column::ApprovalsPending.is_null()),
+        )
+        .filter(live::Column::AgentHealth.is_null())
+        .order_by_desc(Column::CreatedAt)
+        .into_model::<StallCandidate>()
+}
+
+/// A candidate for the NEWPIDASH-262 assigned-never-started sweep:
+/// an `ASSIGNED` run that never started, assigned to a runner that
+/// never polled (so `started_at` is still NULL).
+#[derive(Debug, Clone, PartialEq, Eq, sea_orm::FromQueryResult)]
+pub struct AssignedNeverStartedCandidate {
+    pub run_id: Uuid,
+    pub runner_id: Option<Uuid>,
+    pub pod_id: Option<Uuid>,
+    pub assigned_at: Option<DateTime<Utc>>,
+    pub capacity_wait: Option<serde_json::Value>,
+    pub assignment_token: Option<Uuid>,
+}
+
+/// The assigned-never-started cutoff: `now - ASSIGNED_NEVER_STARTED_SECS`.
+/// Wall-clock only (part b of NEWPIDASH-262): a runner that never
+/// polled also never starts, and a runner that polls but reports idle
+/// for the whole window is equally lost. The 180s bound comfortably
+/// exceeds the 25s long-poll + processing, so healthy runners are
+/// never reaped.
+pub fn is_fresh_capacity_wait(
+    cw: &serde_json::Value,
+    token: Option<Uuid>,
+    now: DateTime<Utc>,
+) -> bool {
+    pidash_services::runner_runs::capacity::is_fresh_capacity_wait(cw, token, now)
+}
+
+pub fn assigned_never_started_cutoff(now: DateTime<Utc>) -> DateTime<Utc> {
+    now - chrono::Duration::seconds(ASSIGNED_NEVER_STARTED_SECS)
+}
+
+/// Candidate select for `ASSIGNED` / never-started runs: `status='assigned'`
+/// AND `started_at IS NULL` AND `assigned_at < cutoff`. Ordered oldest-first
+/// so the longest-waiting runs reap first. `assigned_at IS NOT NULL` is
+/// implied by the `<` (NULL never matches), but an assigned run without
+/// `assigned_at` is anomalous; it is excluded and left for the stall sweep.
+pub fn assigned_never_started_select(
+    cutoff: DateTime<Utc>,
+) -> sea_orm::Selector<sea_orm::SelectModel<AssignedNeverStartedCandidate>> {
+    use orm::agent_run::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .column_as(Column::Id, "run_id")
+        .column_as(Column::RunnerId, "runner_id")
+        .column_as(Column::PodId, "pod_id")
+        .column_as(Column::AssignedAt, "assigned_at")
+        .column_as(Column::CapacityWait, "capacity_wait")
+        .column_as(Column::AssignmentToken, "assignment_token")
+        .filter(Column::Status.eq(AgentRunStatus::Assigned.value()))
+        .filter(Column::StartedAt.is_null())
+        .filter(Column::AssignedAt.lt(cutoff))
+        .filter(Column::RunnerId.is_not_null())
+        .order_by_asc(Column::AssignedAt)
+        .into_model::<AssignedNeverStartedCandidate>()
+}
+
+/// A candidate for the NEWPIDASH-251 pre-start unconfirmed sweep:
+/// a `WAITING_FOR_WORKTREE` run assigned for longer than
+/// `ASSIGNED_NEVER_STARTED_SECS`, or a `RUNNING` run with no runner
+/// report (no `runner_live_state.observed_run_id`) for longer than
+/// the stall threshold. Both shapes hold the active-run guard while
+/// nothing will ever terminalize them (a lost pre-start failure
+/// report, or a runner that never confirmed). `QUEUED` is excluded
+/// by design (it is not yet assigned), as are the human-wait
+/// statuses (`cancel_requested`, `awaiting_*`).
+#[derive(Debug, Clone, PartialEq, Eq, sea_orm::FromQueryResult)]
+pub struct PreStartUnconfirmedCandidate {
+    pub run_id: Uuid,
+    pub runner_id: Option<Uuid>,
+    pub pod_id: Option<Uuid>,
+    pub status: String,
+    pub assigned_at: Option<DateTime<Utc>>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub capacity_wait: Option<serde_json::Value>,
+    pub assignment_token: Option<Uuid>,
+}
+
+/// The worktree-wait cutoff: `now - ASSIGNED_NEVER_STARTED_SECS`.
+/// Mirrors the assigned-never-started bound — a healthy worktree
+/// checkout completes well within 180s.
+pub fn pre_start_worktree_cutoff(now: DateTime<Utc>) -> DateTime<Utc> {
+    now - chrono::Duration::seconds(ASSIGNED_NEVER_STARTED_SECS)
+}
+
+/// The running-never-observed cutoff: `now - threshold_secs`.
+/// Mirrors the stall threshold (env `RUNNER_AGENT_STALL_THRESHOLD_SECS`,
+/// default 360s) so a runner that never reported is held to the
+/// same silence bound as one that went quiet.
+pub fn pre_start_running_cutoff(now: DateTime<Utc>, threshold_secs: i64) -> DateTime<Utc> {
+    now - chrono::Duration::seconds(threshold_secs)
+}
+
+/// `NOT EXISTS` a runner observation of this run: no
+/// `runner_live_state.observed_run_id = agent_run.id` row.
+fn not_observed_exists() -> SimpleExpr {
+    let sub = Query::select()
+        .expr_as(
+            SimpleExpr::Value(sea_orm::sea_query::Value::Int(Some(1))),
+            Alias::new("a"),
+        )
+        .from(Alias::new("runner_live_state"))
+        .and_where(
+            Expr::col((Alias::new("runner_live_state"), "observed_run_id"))
+                .equals((Alias::new("agent_run"), "id")),
+        )
+        .limit(1u64)
+        .to_owned();
+    Expr::exists(sub)
+}
+
+/// Candidate select for pre-start unconfirmed runs: runner-bound,
+/// never observed, and past the per-status bound. Ordered
+/// oldest-first by creation. `assigned_at`/`started_at` NULLs never
+/// match (`<` excludes NULL); anomalous rows stay for the other
+/// sweep arms (or manual triage), exactly like the assigned arm.
+pub fn pre_start_unconfirmed_select(
+    worktree_cutoff: DateTime<Utc>,
+    running_cutoff: DateTime<Utc>,
+) -> sea_orm::Selector<sea_orm::SelectModel<PreStartUnconfirmedCandidate>> {
+    use orm::agent_run::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .column_as(Column::Id, "run_id")
+        .column_as(Column::RunnerId, "runner_id")
+        .column_as(Column::PodId, "pod_id")
+        .column_as(Column::Status, "status")
+        .column_as(Column::AssignedAt, "assigned_at")
+        .column_as(Column::StartedAt, "started_at")
+        .column_as(Column::CapacityWait, "capacity_wait")
+        .column_as(Column::AssignmentToken, "assignment_token")
+        .filter(Column::RunnerId.is_not_null())
+        .filter(Condition::all().add(not_observed_exists()).not())
+        .filter(
+            Condition::any()
+                .add(
+                    Condition::all()
+                        .add(Column::Status.eq(AgentRunStatus::WaitingForWorktree.value()))
+                        .add(Column::AssignedAt.lt(worktree_cutoff)),
+                )
+                .add(
+                    Condition::all()
+                        .add(Column::Status.eq(AgentRunStatus::Running.value()))
+                        .add(Column::StartedAt.lt(running_cutoff)),
+                ),
+        )
+        .order_by_asc(Column::CreatedAt)
+        .into_model::<PreStartUnconfirmedCandidate>()
 }
 
 /// The terminal-effects batch select (`tasks.py:345-350`): terminal
 /// runs missing at least one marker, oldest `ended_at` first, capped
-/// at 100. Params: `$1..$5` the terminal values in L1 tuple order.
-/// Fixture: FX-RUN-07 `reconcile_terminal_effects.sql`.
-pub fn reconcile_terminal_candidate_sql() -> String {
-    "SELECT \"agent_run\".\"id\" FROM \"agent_run\" \
-     WHERE (\"agent_run\".\"status\" IN ($1, $2, $3, $4, $5) \
-     AND (\"agent_run\".\"terminal_hooks_applied_at\" IS NULL \
-     OR \"agent_run\".\"terminal_capacity_released_at\" IS NULL)) \
-     ORDER BY \"agent_run\".\"ended_at\" ASC LIMIT 100"
-        .to_string()
-}
-
-/// A dev-machine label read for error enrichment (`tasks.py` never
-/// issues it directly — it mirrors Django's lazy FK fetch when
-/// `enrich_run_error` reaches `_runner_location`, i.e. for
-/// auth-kind details only). Full row, like the lazy fetch. Param:
-/// `$1` the machine id.
-fn dev_machine_by_id_sql() -> String {
-    format!(
-        "SELECT {} FROM \"dev_machine\" WHERE \"dev_machine\".\"id\" = $1 LIMIT 1",
-        qualified_columns(dev_machine::TABLE, dev_machine::COLUMNS)
-    )
+/// at 100. Fixture: FX-RUN-07 `reconcile_terminal_effects.sql`.
+pub fn reconcile_terminal_candidate_select() -> sea_orm::Selector<sea_orm::SelectGetableTuple<Uuid>>
+{
+    use orm::agent_run::{Column, Entity};
+    Entity::find()
+        .select_only()
+        .column(Column::Id)
+        .filter(Column::Status.is_in(TERMINAL_RUN_STATUSES.iter().map(AgentRunStatus::value)))
+        .filter(
+            Condition::any()
+                .add(Column::TerminalHooksAppliedAt.is_null())
+                .add(Column::TerminalCapacityReleasedAt.is_null()),
+        )
+        .order_by_asc(Column::EndedAt)
+        .limit(100)
+        .into_tuple::<Uuid>()
 }
 
 // ---------------------------------------------------------------------------
-// Row mapping (L2 structs have no `FromRow`; joins need index mapping)
+// Row mapping (entity models into the L2 planner rows)
 // ---------------------------------------------------------------------------
-
-/// `AgentRun` id + the runner enrichment columns off a stall
-/// candidate row (`agent_run` 41 cols, then `runner` cols).
-struct StallCandidate {
-    run_id: Uuid,
-    runner_id: Option<Uuid>,
-    runner_name: String,
-    runner_host_label: String,
-    runner_capabilities: Value,
-    runner_dev_machine_id: Option<Uuid>,
-}
-
-fn map_stall_candidate(row: &sqlx::postgres::PgRow) -> Result<StallCandidate, SweepError> {
-    let base = agent_run::COLUMNS.len();
-    let at = |column: &str| -> Result<usize, SweepError> {
-        col_index(runner_cols::COLUMNS, column)
-            .map(|index| base + index)
-            .ok_or(SweepError::BadRow("runner column"))
-    };
-    Ok(StallCandidate {
-        run_id: row.try_get(0).map_err(SweepError::Db)?,
-        runner_id: row.try_get(at("id")?).map_err(SweepError::Db)?,
-        runner_name: row.try_get(at("name")?).map_err(SweepError::Db)?,
-        runner_host_label: row.try_get(at("host_label")?).map_err(SweepError::Db)?,
-        runner_capabilities: row.try_get(at("capabilities")?).map_err(SweepError::Db)?,
-        runner_dev_machine_id: row.try_get(at("dev_machine_id")?).map_err(SweepError::Db)?,
-    })
-}
 
 /// The locked finalize row's decision columns (`agent_run` only).
 struct FinalizeLocked {
-    executor_kind: AgentExecutorKind,
     done_payload: Option<Value>,
 }
 
-fn map_finalize_locked(row: &sqlx::postgres::PgRow) -> Result<FinalizeLocked, SweepError> {
-    let at = |column: &str| -> Result<usize, SweepError> {
-        col_index(agent_run::COLUMNS, column).ok_or(SweepError::BadRow("agent_run column"))
-    };
-    let executor_text: String = row.try_get(at("executor_kind")?).map_err(SweepError::Db)?;
+fn map_finalize_locked(row: &orm::agent_run::Model) -> Result<FinalizeLocked, SweepError> {
     Ok(FinalizeLocked {
-        executor_kind: AgentExecutorKind::from_value(&executor_text)
-            .ok_or(SweepError::BadRow("executor_kind"))?,
-        done_payload: row.try_get(at("done_payload")?).map_err(SweepError::Db)?,
+        done_payload: row.done_payload.clone(),
     })
 }
 
-/// The usage/model snapshot for `_usage_updates`
-/// (`live_state_by_runner_sql` column order, `lifecycle.rs:73-85`:
-/// `usage` 9th, `llm_model` 10th — verified against the SQL text in
-/// `live_state_facts_index_matches_planner_sql`).
-fn map_live_state_facts(row: &sqlx::postgres::PgRow) -> Result<LiveStateUsageFacts, SweepError> {
-    Ok(LiveStateUsageFacts {
-        usage: row.try_get(8).map_err(SweepError::Db)?,
-        llm_model: row.try_get(9).map_err(SweepError::Db)?,
-    })
-}
-
-/// A full chat session row (`session_lock_open_sql` column order).
-fn map_chat_session(row: &sqlx::postgres::PgRow) -> Result<AgentChatSession, SweepError> {
-    let at = |column: &str| -> Result<usize, SweepError> {
-        col_index(chat_session::COLUMNS, column).ok_or(SweepError::BadRow("chat session column"))
-    };
-    let status_text: String = row.try_get(at("status")?).map_err(SweepError::Db)?;
+/// A full chat session row as the L2 planner struct.
+fn map_chat_session(row: orm::agent_chat_session::Model) -> Result<AgentChatSession, SweepError> {
     Ok(AgentChatSession {
-        id: row.try_get(at("id")?).map_err(SweepError::Db)?,
-        workspace_id: row.try_get(at("workspace_id")?).map_err(SweepError::Db)?,
-        runner_id: row.try_get(at("runner_id")?).map_err(SweepError::Db)?,
-        created_by_id: row.try_get(at("created_by_id")?).map_err(SweepError::Db)?,
-        pod_id: row.try_get(at("pod_id")?).map_err(SweepError::Db)?,
-        status: AgentChatSessionStatus::from_value(&status_text)
+        id: row.id,
+        workspace_id: row.workspace_id,
+        runner_id: row.runner_id,
+        created_by_id: row.created_by_id,
+        pod_id: row.pod_id,
+        status: AgentChatSessionStatus::from_value(&row.status)
             .ok_or(SweepError::BadRow("chat session status"))?,
-        agent_kind: row.try_get(at("agent_kind")?).map_err(SweepError::Db)?,
-        local_thread_id: row
-            .try_get(at("local_thread_id")?)
-            .map_err(SweepError::Db)?,
-        local_session_id: row
-            .try_get(at("local_session_id")?)
-            .map_err(SweepError::Db)?,
-        cwd: row.try_get(at("cwd")?).map_err(SweepError::Db)?,
-        model: row.try_get(at("model")?).map_err(SweepError::Db)?,
-        active_turn_id: row.try_get(at("active_turn_id")?).map_err(SweepError::Db)?,
-        active_message_id: row
-            .try_get(at("active_message_id")?)
-            .map_err(SweepError::Db)?,
-        close_requested: row
-            .try_get(at("close_requested")?)
-            .map_err(SweepError::Db)?,
-        last_message_at: row
-            .try_get(at("last_message_at")?)
-            .map_err(SweepError::Db)?,
-        closed_at: row.try_get(at("closed_at")?).map_err(SweepError::Db)?,
-        error: row.try_get(at("error")?).map_err(SweepError::Db)?,
-        created_at: row.try_get(at("created_at")?).map_err(SweepError::Db)?,
-        updated_at: row.try_get(at("updated_at")?).map_err(SweepError::Db)?,
+        agent_kind: row.agent_kind,
+        local_thread_id: row.local_thread_id,
+        local_session_id: row.local_session_id,
+        cwd: row.cwd,
+        model: row.model,
+        active_turn_id: row.active_turn_id,
+        active_message_id: row.active_message_id,
+        close_requested: row.close_requested,
+        last_message_at: row.last_message_at.map(|at| at.with_timezone(&Utc)),
+        closed_at: row.closed_at.map(|at| at.with_timezone(&Utc)),
+        error: row.error,
+        created_at: row.created_at.with_timezone(&Utc),
+        updated_at: row.updated_at.with_timezone(&Utc),
     })
 }
 
-/// A full chat message row (explicit-lookup / assistant-probe order).
-fn map_chat_message(row: &sqlx::postgres::PgRow) -> Result<AgentChatMessage, SweepError> {
-    let at = |column: &str| -> Result<usize, SweepError> {
-        col_index(chat_message::COLUMNS, column).ok_or(SweepError::BadRow("chat message column"))
-    };
-    let role_text: String = row.try_get(at("role")?).map_err(SweepError::Db)?;
-    let status_text: String = row.try_get(at("status")?).map_err(SweepError::Db)?;
+/// A full chat message row as the L2 planner struct.
+fn map_chat_message(row: orm::agent_chat_message::Model) -> Result<AgentChatMessage, SweepError> {
     Ok(AgentChatMessage {
-        id: row.try_get(at("id")?).map_err(SweepError::Db)?,
-        session_id: row.try_get(at("session_id")?).map_err(SweepError::Db)?,
-        role: AgentChatMessageRole::from_value(&role_text)
+        id: row.id,
+        session_id: row.session_id,
+        role: AgentChatMessageRole::from_value(&row.role)
             .ok_or(SweepError::BadRow("chat message role"))?,
-        content: row.try_get(at("content")?).map_err(SweepError::Db)?,
-        content_parts: row.try_get(at("content_parts")?).map_err(SweepError::Db)?,
-        status: AgentChatMessageStatus::from_value(&status_text)
+        content: row.content,
+        content_parts: row.content_parts,
+        status: AgentChatMessageStatus::from_value(&row.status)
             .ok_or(SweepError::BadRow("chat message status"))?,
-        local_item_id: row.try_get(at("local_item_id")?).map_err(SweepError::Db)?,
-        local_turn_id: row.try_get(at("local_turn_id")?).map_err(SweepError::Db)?,
-        seq: row.try_get(at("seq")?).map_err(SweepError::Db)?,
-        created_at: row.try_get(at("created_at")?).map_err(SweepError::Db)?,
-        completed_at: row.try_get(at("completed_at")?).map_err(SweepError::Db)?,
+        local_item_id: row.local_item_id,
+        local_turn_id: row.local_turn_id,
+        seq: row.seq,
+        created_at: row.created_at.with_timezone(&Utc),
+        completed_at: row.completed_at.map(|at| at.with_timezone(&Utc)),
     })
 }
 
-/// The event re-read columns `_publish_event_by_id` needs
-/// (`chat_event` column order).
-struct ChatEventWire {
-    id: i64,
-    session_id: Uuid,
-    message_id: Option<Uuid>,
-    seq: i32,
-    kind: String,
-    payload: Value,
-    created_at: DateTime<Utc>,
-}
-
-fn map_chat_event_wire(row: &sqlx::postgres::PgRow) -> Result<ChatEventWire, SweepError> {
-    let at = |column: &str| -> Result<usize, SweepError> {
-        col_index(chat_event::COLUMNS, column).ok_or(SweepError::BadRow("chat event column"))
-    };
-    Ok(ChatEventWire {
-        id: row.try_get(at("id")?).map_err(SweepError::Db)?,
-        session_id: row.try_get(at("session_id")?).map_err(SweepError::Db)?,
-        message_id: row.try_get(at("message_id")?).map_err(SweepError::Db)?,
-        seq: row.try_get(at("seq")?).map_err(SweepError::Db)?,
-        kind: row.try_get(at("kind")?).map_err(SweepError::Db)?,
-        payload: row.try_get(at("payload")?).map_err(SweepError::Db)?,
-        created_at: row.try_get(at("created_at")?).map_err(SweepError::Db)?,
-    })
-}
-
-/// The locked effects row's hook facts (`lock_run_for_effects_sql`:
-/// `agent_run` cols first, then issues/projects/states, then the
-/// scheduler binding last). Binding columns ride at the tail, so only
-/// the binding length (a public L2 const) is needed — never the
-/// middle-join widths.
+/// The locked effects row's hook facts, off the L4 kernel row.
 struct EffectsLocked {
     status: AgentRunStatus,
     run_config: Value,
@@ -556,55 +642,24 @@ struct EffectsLocked {
     refusal_category: String,
     scheduler_binding_id: Option<Uuid>,
     hooks_applied: bool,
-    binding: Option<BindingFacts>,
+    binding: Option<scheduler_hook::BindingFacts>,
 }
 
-fn map_effects_locked(row: &sqlx::postgres::PgRow) -> Result<EffectsLocked, SweepError> {
-    let at = |column: &str| -> Result<usize, SweepError> {
-        col_index(agent_run::COLUMNS, column).ok_or(SweepError::BadRow("agent_run column"))
-    };
-    let status_text: String = row.try_get(at("status")?).map_err(SweepError::Db)?;
-    let hooks_at: Option<DateTime<Utc>> = row
-        .try_get(at("terminal_hooks_applied_at")?)
-        .map_err(SweepError::Db)?;
-    let error_details: Value = row.try_get(at("error_details")?).map_err(SweepError::Db)?;
-    let binding_base = row
-        .len()
-        .checked_sub(scheduler_binding::COLUMNS.len())
-        .ok_or(SweepError::BadRow("effects row width"))?;
-    let binding_at = |column: &str| -> Result<usize, SweepError> {
-        col_index(scheduler_binding::COLUMNS, column)
-            .map(|index| binding_base + index)
-            .ok_or(SweepError::BadRow("scheduler binding column"))
-    };
-    let binding_id: Option<Uuid> = row.try_get(binding_at("id")?).map_err(SweepError::Db)?;
-    let binding = match binding_id {
-        Some(id) => Some(BindingFacts {
-            id,
-            last_error: row
-                .try_get(binding_at("last_error")?)
-                .map_err(SweepError::Db)?,
-        }),
-        None => None,
-    };
+fn map_effects_locked(row: &finalization::EffectsLockRow) -> Result<EffectsLocked, SweepError> {
     Ok(EffectsLocked {
-        status: AgentRunStatus::from_value(&status_text).ok_or(SweepError::BadRow("status"))?,
-        run_config: row.try_get(at("run_config")?).map_err(SweepError::Db)?,
-        error: agent_run::error_details_text(&error_details, agent_run::ERROR_DETAILS_MESSAGE)
-            .to_owned(),
-        refusal_category: row
-            .try_get(at("refusal_category")?)
-            .map_err(SweepError::Db)?,
-        scheduler_binding_id: row
-            .try_get(at("scheduler_binding_id")?)
-            .map_err(SweepError::Db)?,
-        hooks_applied: hooks_at.is_some(),
-        binding,
+        status: AgentRunStatus::from_value(&row.status).ok_or(SweepError::BadRow("status"))?,
+        run_config: row.run_config.clone(),
+        error: row.error().to_owned(),
+        refusal_category: row.refusal_category().to_owned(),
+        scheduler_binding_id: row.scheduler_binding_id,
+        hooks_applied: row.terminal_hooks_applied_at.is_some(),
+        binding: row.binding_facts(),
     })
 }
 
-/// The capacity re-read facts (`select_run_for_capacity_sql`: only
-/// `agent_run` columns are consumed).
+/// The capacity facts (`select_run_for_capacity_sql`: only `agent_run`
+/// columns are consumed), off either the locked effects row or the
+/// post-commit re-read.
 struct CapacityFacts {
     executor_kind: AgentExecutorKind,
     runner_id: Option<Uuid>,
@@ -613,51 +668,62 @@ struct CapacityFacts {
     capacity_released: bool,
 }
 
-fn map_capacity_facts(row: &sqlx::postgres::PgRow) -> Result<CapacityFacts, SweepError> {
-    let at = |column: &str| -> Result<usize, SweepError> {
-        col_index(agent_run::COLUMNS, column).ok_or(SweepError::BadRow("agent_run column"))
-    };
-    let executor_text: String = row.try_get(at("executor_kind")?).map_err(SweepError::Db)?;
-    let released_at: Option<DateTime<Utc>> = row
-        .try_get(at("terminal_capacity_released_at")?)
-        .map_err(SweepError::Db)?;
-    Ok(CapacityFacts {
-        executor_kind: AgentExecutorKind::from_value(&executor_text)
-            .ok_or(SweepError::BadRow("executor_kind"))?,
-        runner_id: row.try_get(at("runner_id")?).map_err(SweepError::Db)?,
-        pod_id: row.try_get(at("pod_id")?).map_err(SweepError::Db)?,
-        workspace_id: row.try_get(at("workspace_id")?).map_err(SweepError::Db)?,
-        capacity_released: released_at.is_some(),
-    })
+impl CapacityFacts {
+    fn new(
+        executor_kind: &str,
+        runner_id: Option<Uuid>,
+        pod_id: Uuid,
+        workspace_id: Uuid,
+        released_at: Option<DateTime<Utc>>,
+    ) -> Result<Self, SweepError> {
+        Ok(CapacityFacts {
+            executor_kind: AgentExecutorKind::from_value(executor_kind)
+                .ok_or(SweepError::BadRow("executor_kind"))?,
+            runner_id,
+            pod_id: Some(pod_id),
+            workspace_id,
+            capacity_released: released_at.is_some(),
+        })
+    }
+}
+
+fn map_capacity_facts_locked(
+    row: &finalization::EffectsLockRow,
+) -> Result<CapacityFacts, SweepError> {
+    CapacityFacts::new(
+        &row.executor_kind,
+        row.runner_id,
+        row.pod_id,
+        row.workspace_id,
+        row.terminal_capacity_released_at,
+    )
+}
+
+fn map_capacity_facts(row: &finalization::CapacityRow) -> Result<CapacityFacts, SweepError> {
+    CapacityFacts::new(
+        &row.executor_kind,
+        row.runner_id,
+        row.pod_id,
+        row.workspace_id,
+        row.terminal_capacity_released_at,
+    )
 }
 
 // ---------------------------------------------------------------------------
 // Dedupe sweeps (`tasks.py:205-224`)
 // ---------------------------------------------------------------------------
 
-/// Delete rows of one dedupe table older than the TTL cutoff.
-/// Returns the deleted count.
-async fn sweep_dedupe_table(
-    pool: &PgPool,
-    table: &str,
-    now: &DateTime<Utc>,
-    ttl_secs: i64,
-) -> Result<u64, SweepError> {
-    let cutoff = dedupe_cutoff(*now, ttl_secs);
-    let done = sqlx::query(&dedupe_delete_sql(table))
-        .bind(cutoff)
-        .execute(pool)
-        .await?;
-    Ok(done.rows_affected())
-}
-
-/// `runner.sweep_run_message_dedupe` (`tasks.py:205-213`).
+/// `runner.sweep_run_message_dedupe` (`tasks.py:205-213`): delete rows
+/// older than the TTL cutoff. Returns the deleted count.
 pub async fn sweep_run_message_dedupe(
     pool: &PgPool,
     now: &DateTime<Utc>,
     ttl_secs: i64,
 ) -> Result<u64, SweepError> {
-    let deleted = sweep_dedupe_table(pool, run_dedupe::TABLE, now, ttl_secs).await?;
+    let deleted = run_dedupe_delete_statement(dedupe_cutoff(*now, ttl_secs))
+        .exec(&sea_orm_connection(pool))
+        .await?
+        .rows_affected;
     if deleted > 0 {
         tracing::info!("sweep_run_message_dedupe deleted {deleted} row(s)");
     }
@@ -671,7 +737,10 @@ pub async fn sweep_chat_message_dedupe(
     now: &DateTime<Utc>,
     ttl_secs: i64,
 ) -> Result<u64, SweepError> {
-    let deleted = sweep_dedupe_table(pool, chat_dedupe::TABLE, now, ttl_secs).await?;
+    let deleted = chat_dedupe_delete_statement(dedupe_cutoff(*now, ttl_secs))
+        .exec(&sea_orm_connection(pool))
+        .await?
+        .rows_affected;
     if deleted > 0 {
         tracing::info!("sweep_chat_message_dedupe deleted {deleted} row(s)");
     }
@@ -702,8 +771,8 @@ async fn sweep_active_turns(
     now: &DateTime<Utc>,
 ) -> Result<u64, SweepError> {
     let cutoff = chat::sweep_active_cutoff(*now);
-    let ids: Vec<Uuid> = sqlx::query_scalar(&chat::sweep_active_ids_sql(cutoff))
-        .fetch_all(pool)
+    let ids: Vec<Uuid> = chat::sweep_active_ids_select(cutoff)
+        .all(&sea_orm_connection(pool))
         .await?;
     let mut count = 0u64;
     for session_id in ids {
@@ -714,6 +783,14 @@ async fn sweep_active_turns(
     Ok(count)
 }
 
+/// What one locked sweep row planned and wrote, for the post-commit
+/// half of [`sweep_active_row`].
+struct SweptRow {
+    session: AgentChatSession,
+    event_ids: Vec<i64>,
+    queue_drain: bool,
+}
+
 /// One `sweep_active_turns` row (`chat.py:411-447`). Returns whether
 /// the row was swept (a lock miss returns `false`).
 async fn sweep_active_row(
@@ -722,25 +799,45 @@ async fn sweep_active_row(
     session_id: &Uuid,
 ) -> Result<bool, SweepError> {
     let mut tx = pool.begin().await?;
-    let locked = sqlx::query(&chat::session_lock_open_sql(*session_id))
-        .fetch_optional(&mut *tx)
-        .await?;
-    let Some(locked) = locked else {
-        tx.commit().await?;
+    let swept = {
+        let conn = TxConn::new(&mut tx);
+        sweep_active_row_locked(&conn, session_id).await?
+    };
+    tx.commit().await?;
+    let Some(swept) = swept else {
         return Ok(false);
     };
-    let session = map_chat_session(&locked)?;
+    for event_id in swept.event_ids {
+        publish_chat_event_by_id(pool, seams, event_id).await?;
+    }
+    if swept.queue_drain {
+        run_sweep_drain(seams, &swept.session).await;
+    }
+    Ok(true)
+}
+
+/// The locked half of one sweep row: lock, plan, write the message and
+/// session updates, append the events. `None` on a lock miss.
+async fn sweep_active_row_locked(
+    conn: &impl sea_orm::ConnectionTrait,
+    session_id: &Uuid,
+) -> Result<Option<SweptRow>, SweepError> {
+    let Some(locked) = chat::session_lock_open_select(*session_id)
+        .one(conn)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let session = map_chat_session(locked)?;
     // The explicit finalize target (`chat.py:343`): the session's
     // active message (the sweep passes no override).
     let target = chat::finalize_target_message_id(None, session.active_message_id);
     let explicit = match target {
-        Some(message_id) => {
-            sqlx::query(&chat::finalize_explicit_lookup_sql(session.id, message_id))
-                .fetch_optional(&mut *tx)
-                .await?
-                .map(|row| map_chat_message(&row))
-                .transpose()?
-        }
+        Some(message_id) => chat::finalize_explicit_lookup_select(session.id, message_id)
+            .one(conn)
+            .await?
+            .map(map_chat_message)
+            .transpose()?,
         None => None,
     };
     // The streaming assistant (`chat.py:322-332`): the turn-scoped
@@ -750,20 +847,17 @@ async fn sweep_active_row(
     let scoped = if session.active_turn_id.is_empty() {
         None
     } else {
-        sqlx::query(&chat::assistant_turn_scoped_sql(
-            session.id,
-            &session.active_turn_id,
-        ))
-        .fetch_optional(&mut *tx)
-        .await?
-        .map(|row| map_chat_message(&row))
-        .transpose()?
+        chat::assistant_turn_scoped_select(session.id, &session.active_turn_id)
+            .one(conn)
+            .await?
+            .map(map_chat_message)
+            .transpose()?
     };
     let fallback = if scoped.is_none() {
-        sqlx::query(&chat::assistant_fallback_sql(session.id))
-            .fetch_optional(&mut *tx)
+        chat::assistant_fallback_select(session.id)
+            .one(conn)
             .await?
-            .map(|row| map_chat_message(&row))
+            .map(map_chat_message)
             .transpose()?
     } else {
         None
@@ -774,32 +868,25 @@ async fn sweep_active_row(
     let mut clock = Utc::now;
     let plan = chat::plan_sweep_active_row(&session, explicit.as_ref(), assistant, &mut clock);
     for update in &plan.finalize.updates {
-        sqlx::query(&chat::message_status_update_sql(update))
-            .execute(&mut *tx)
+        chat::message_status_update_statement(update)
+            .exec(conn)
             .await?;
     }
-    sqlx::query(&chat::fail_session_update_sql(
-        session.id,
-        &plan,
-        Utc::now(),
-    ))
-    .execute(&mut *tx)
-    .await?;
+    chat::fail_session_update_statement(session.id, &plan, Utc::now())
+        .exec(conn)
+        .await?;
     let mut event_ids = Vec::with_capacity(plan.events.len());
     for event in &plan.events {
-        if append_event_is_duplicate(&mut tx, &session.id, event).await? {
+        if append_event_is_duplicate(conn, &session.id, event).await? {
             continue;
         }
-        event_ids.push(insert_chat_event(&mut tx, &session.id, event).await?);
+        event_ids.push(insert_chat_event(conn, &session.id, event).await?);
     }
-    tx.commit().await?;
-    for event_id in event_ids {
-        publish_chat_event_by_id(pool, seams, event_id).await?;
-    }
-    if plan.queue_drain {
-        run_sweep_drain(seams, &session).await;
-    }
-    Ok(true)
+    Ok(Some(SweptRow {
+        session,
+        event_ids,
+        queue_drain: plan.queue_drain,
+    }))
 }
 
 /// The `append_event_locked` dedupe probe (`chat.py:158-161`).
@@ -807,39 +894,38 @@ async fn sweep_active_row(
 /// probes — the planner guard is kept so the call shape stays the
 /// `append_event_locked` shape.
 async fn append_event_is_duplicate(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    conn: &impl sea_orm::ConnectionTrait,
     session_id: &Uuid,
     event: &NewEventInputs,
 ) -> Result<bool, SweepError> {
     if !chat::append_checks_dedupe(&event.source_key) {
         return Ok(false);
     }
-    let hit = sqlx::query(&chat::append_dedupe_check_sql(
-        *session_id,
-        &event.source_key,
-    ))
-    .fetch_optional(&mut **tx)
-    .await?;
-    Ok(hit.is_some())
+    Ok(
+        chat::append_dedupe_check_select(*session_id, &event.source_key)
+            .one(conn)
+            .await?
+            .is_some(),
+    )
 }
 
 /// The `append_event_locked` insert (`chat.py:162-169`): `MAX(seq)+1`
 /// under the session row lock, `created_at` from `auto_now_add`.
 /// Returns the new event id for the post-commit publish.
 async fn insert_chat_event(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    conn: &impl sea_orm::ConnectionTrait,
     session_id: &Uuid,
     event: &NewEventInputs,
 ) -> Result<i64, SweepError> {
-    let max: Option<i32> = sqlx::query_scalar(&chat::next_event_seq_sql(*session_id))
-        .fetch_one(&mut **tx)
-        .await?;
+    let max: Option<i32> = chat::next_event_seq_select(*session_id)
+        .one(conn)
+        .await?
+        .flatten();
     let seq = chat::next_seq_after_max(max);
-    let event_id: i64 =
-        sqlx::query_scalar(&chat::insert_event_sql(*session_id, seq, event, Utc::now()))
-            .fetch_one(&mut **tx)
-            .await?;
-    Ok(event_id)
+    let inserted = chat::insert_event_statement(*session_id, seq, event, Utc::now())
+        .exec(conn)
+        .await?;
+    Ok(inserted.last_insert_id)
 }
 
 /// `_publish_event_by_id` (`chat.py:174-177`): re-read the event row
@@ -851,17 +937,16 @@ async fn publish_chat_event_by_id(
     seams: &dyn RunnerRunsSeams,
     event_id: i64,
 ) -> Result<(), SweepError> {
-    let row = sqlx::query(&chat::publish_event_lookup_sql(event_id))
-        .fetch_optional(pool)
-        .await?;
-    let Some(row) = row else {
+    let Some(event) = chat::publish_event_lookup_select(event_id)
+        .one(&sea_orm_connection(pool))
+        .await?
+    else {
         return Ok(());
     };
-    let event = map_chat_event_wire(&row)?;
     let payload_json = chat::dumps_value(&event.payload);
     let session_id = event.session_id.to_string();
     let message_id = event.message_id.map(|id| id.to_string());
-    let created_at = isoformat(&event.created_at);
+    let created_at = isoformat(&event.created_at.with_timezone(&Utc));
     let parts = chat::EventParts {
         id: event.id,
         session_id: &session_id,
@@ -915,17 +1000,16 @@ async fn run_sweep_drain(seams: &dyn RunnerRunsSeams, session: &AgentChatSession
 /// older than 24h with zero messages, in one `UPDATE`. No ids, no
 /// write (`chat.py:492-493`).
 async fn sweep_empty_sessions(pool: &PgPool, now: &DateTime<Utc>) -> Result<u64, SweepError> {
+    let db = sea_orm_connection(pool);
     let cutoff = chat::sweep_empty_cutoff(*now);
-    let ids: Vec<Uuid> = sqlx::query_scalar(&chat::sweep_empty_ids_sql(cutoff))
-        .fetch_all(pool)
-        .await?;
+    let ids: Vec<Uuid> = chat::sweep_empty_ids_select(cutoff).all(&db).await?;
     if ids.is_empty() {
         return Ok(0);
     }
-    let done = sqlx::query(&chat::sweep_empty_close_sql(&ids, Utc::now()))
-        .execute(pool)
+    let done = chat::sweep_empty_close_statement(&ids, Utc::now())
+        .exec(&db)
         .await?;
-    Ok(done.rows_affected())
+    Ok(done.rows_affected)
 }
 
 // ---------------------------------------------------------------------------
@@ -937,10 +1021,29 @@ pub fn stall_error_detail(threshold_secs: i64) -> String {
     format!("agent stalled: no events for >{threshold_secs}s")
 }
 
+/// The assigned-never-started detail (NEWPIDASH-262 part b).
+pub fn assigned_never_started_detail(threshold_secs: i64) -> String {
+    format!("assigned run never started: runner never polled within >{threshold_secs}s")
+}
+
+/// The pre-start unconfirmed detail (NEWPIDASH-251): the run held
+/// its status with no runner report until the bound released it.
+/// The status and bound ride in the text so the issue activity
+/// comment says why, per the issue's acceptance.
+pub fn pre_start_unconfirmed_detail(status: &str, threshold_secs: i64) -> String {
+    let minutes = ((threshold_secs + 59) / 60).max(1);
+    format!(
+        "runner never confirmed this run (status={status}, no runner report >{threshold_secs}s); released after {minutes} minutes"
+    )
+}
+
 /// `runner.reconcile_stalled_runs`: reap silent `ASSIGNED`/`RUNNING`
-/// runs as `FAILED` via L4. Per-row guard: a failed reap logs and the
-/// sweep continues (`tasks.py:311-323`); a late (already-closed) row
-/// still counts as reaped (`:318` runs unconditionally).
+/// runs as `FAILED` via L4 (observed-run stall watchdog) plus, since
+/// NEWPIDASH-262, `ASSIGNED` / never-started runs older than
+/// `ASSIGNED_NEVER_STARTED_SECS` (runner never polled). Per-row guard:
+/// a failed reap logs and the sweep continues (`tasks.py:311-323`);
+/// a late (already-closed) row still counts as reaped
+/// (`:318` runs unconditionally).
 pub async fn reconcile_stalled_runs(
     pool: &PgPool,
     seams: &dyn RunnerRunsSeams,
@@ -949,20 +1052,13 @@ pub async fn reconcile_stalled_runs(
     freshness_secs: i64,
 ) -> Result<u64, SweepError> {
     let (cutoff, snapshot_cutoff) = stall_cutoffs(*now, threshold_secs, freshness_secs);
-    let rows = sqlx::query(&stalled_candidate_sql())
-        .bind(AgentRunStatus::Assigned.value())
-        .bind(AgentRunStatus::Running.value())
-        .bind(cutoff)
-        .bind(snapshot_cutoff)
-        .bind(0i32)
-        .fetch_all(pool)
+    let rows = stalled_candidate_select(cutoff, snapshot_cutoff)
+        .all(&sea_orm_connection(pool))
         .await?;
     let mut reaped = 0u64;
-    for row in &rows {
-        // The id is for the poison log line only; the row is mapped
-        // (and validated) inside the guarded reap.
-        let run_id: Uuid = row.try_get(0).unwrap_or(Uuid::nil());
-        match reap_stalled_row(pool, seams, row, threshold_secs).await {
+    for candidate in &rows {
+        let run_id = candidate.run_id;
+        match reap_stalled_row(pool, seams, candidate, threshold_secs).await {
             Ok(true) => reaped += 1,
             Ok(false) => {}
             Err(error) => tracing::error!(
@@ -971,12 +1067,282 @@ pub async fn reconcile_stalled_runs(
             ),
         }
     }
+    // NEWPIDASH-262 part b: ASSIGNED, started_at NULL, older than
+    // ASSIGNED_NEVER_STARTED_SECS — the runner never polled, so the
+    // run was never observed and the stall watchdog above misses it.
+    let assigned_cutoff = assigned_never_started_cutoff(*now);
+    let assigned_rows = assigned_never_started_select(assigned_cutoff)
+        .all(&sea_orm_connection(pool))
+        .await?;
+    for candidate in &assigned_rows {
+        let run_id = candidate.run_id;
+        // Skip runs the stall watchdog already reaped in this pass
+        // (same run_id can appear in both selects when the runner did
+        // observe it but never started).
+        if rows.iter().any(|r| r.run_id == run_id) {
+            continue;
+        }
+        match reap_assigned_never_started_row(pool, seams, candidate).await {
+            Ok(true) => reaped += 1,
+            Ok(false) => {}
+            Err(error) => tracing::error!(
+                %error,
+                "reconcile_stalled_runs: failed to reap assigned never-started run {run_id}"
+            ),
+        }
+    }
+    // NEWPIDASH-251: pre-start unconfirmed runs the stall watchdog
+    // misses by construction (never observed): WAITING_FOR_WORKTREE
+    // past 180s and RUNNING with no report past the stall threshold.
+    let worktree_cutoff = pre_start_worktree_cutoff(*now);
+    let running_cutoff = pre_start_running_cutoff(*now, threshold_secs);
+    let unconfirmed_rows = pre_start_unconfirmed_select(worktree_cutoff, running_cutoff)
+        .all(&sea_orm_connection(pool))
+        .await?;
+    for candidate in &unconfirmed_rows {
+        let run_id = candidate.run_id;
+        // Skip runs an earlier arm already reaped in this pass.
+        if rows.iter().any(|r| r.run_id == run_id)
+            || assigned_rows.iter().any(|r| r.run_id == run_id)
+        {
+            continue;
+        }
+        match reap_pre_start_unconfirmed_row(pool, seams, candidate, threshold_secs).await {
+            Ok(true) => reaped += 1,
+            Ok(false) => {}
+            Err(error) => tracing::error!(
+                %error,
+                "reconcile_stalled_runs: failed to reap pre-start unconfirmed run {run_id}"
+            ),
+        }
+    }
     if reaped > 0 {
         tracing::info!(
-            "reconcile_stalled_runs reaped {reaped} stalled run(s) (threshold={threshold_secs}s)"
+            "reconcile_stalled_runs reaped {reaped} stalled run(s) (threshold={threshold_secs}s, assigned-never-started>180s, pre-start-unconfirmed>180s/360s)"
         );
     }
     Ok(reaped)
+}
+
+/// One assigned-never-started row: fail it (`FAILED`) so the
+/// scheduler stops counting it as in flight and the run reaches a
+/// terminal state without manual action. Mirrors `reap_stalled_row`
+/// but with the assigned-never-started detail and no live-state
+/// requirement (the runner never observed the run).
+async fn reap_assigned_never_started_row(
+    pool: &PgPool,
+    seams: &dyn RunnerRunsSeams,
+    candidate: &AssignedNeverStartedCandidate,
+) -> Result<bool, SweepError> {
+    let Some(runner_id) = candidate.runner_id else {
+        return Ok(false);
+    };
+    // NEWPIDASH-241 T2: fresh authenticated same-attempt capacity waits
+    // remain protected beyond 180s; stale/wrong-token reports retain bounded recovery.
+    if let Some(cw) = candidate.capacity_wait.as_ref() {
+        if pidash_services::runner_runs::capacity::is_fresh_capacity_wait(
+            cw,
+            candidate.assignment_token,
+            Utc::now(),
+        ) {
+            return Ok(false);
+        }
+    }
+    // Recheck under row locks before finalizing (not just in the candidate query).
+    // Fetch the locked row's current assignment_token/capacity_wait; if it became fresh, skip.
+    if let Some(fresh) = {
+        use orm::agent_run::{Column, Entity};
+        let row = Entity::find()
+            .select_only()
+            .columns([Column::AssignmentToken, Column::CapacityWait])
+            .filter(Column::Id.eq(candidate.run_id))
+            .lock_exclusive()
+            .one(&sea_orm_connection(pool))
+            .await
+            .map_err(|_| SweepError::BadRow("recheck"))?;
+        if let Some(model) = row {
+            model
+                .capacity_wait
+                .as_ref()
+                .map(|cw| is_fresh_capacity_wait(cw, model.assignment_token, Utc::now()))
+        } else {
+            None
+        }
+    } {
+        if fresh {
+            return Ok(false);
+        }
+    }
+    let detail = assigned_never_started_detail(ASSIGNED_NEVER_STARTED_SECS);
+    // Live state: the runner never observed this run, so this is
+    // almost always None; asking is harmless.
+    let live =
+        lifecycle::live_state_usage_facts(&sea_orm_connection(pool), runner_id, candidate.run_id)
+            .await?;
+    let error_detail = Value::String(detail);
+    let null = Value::Null;
+    let inputs = lifecycle::TerminalUpdateInputs {
+        status: AgentRunStatus::Failed,
+        done_payload: &null,
+        error_detail: &error_detail,
+        runner_failure_reason: &null,
+        refusal_category: &null,
+        tokens: &null,
+        model: &null,
+        live: live.as_ref(),
+        runner: None,
+    };
+    let mut values = lifecycle::plan_terminal_finalize(&inputs)?;
+    run_finalize_transaction(pool, &candidate.run_id, &runner_id, &mut values).await?;
+    for effect in finalization::plan_publish_effects(candidate.run_id) {
+        match effect {
+            LifecycleEffect::PublishTerminalEffects { run_id } => {
+                if let Err(error) = enqueue(pool, &terminal_effects_job(&run_id)).await {
+                    tracing::error!(%error, "failed to publish terminal effects for run {run_id}");
+                }
+            }
+            LifecycleEffect::ApplyTerminalEffectsInline { run_id } => {
+                if let Err(error) = apply_agent_run_terminal_effects(pool, seams, &run_id).await {
+                    tracing::error!(%error, "failed to apply terminal effects for run {run_id}");
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(true)
+}
+
+/// Reap a single assigned-never-started run by id (used by tests).
+/// Returns whether the row was finalized.
+pub async fn reap_assigned_never_started_by_id(
+    pool: &PgPool,
+    seams: &dyn RunnerRunsSeams,
+    run_id: Uuid,
+) -> Result<bool, SweepError> {
+    let row = orm::agent_run::Entity::find_by_id(run_id)
+        .one(&sea_orm_connection(pool))
+        .await?;
+    let Some(run) = row else {
+        return Ok(false);
+    };
+    if run.status != AgentRunStatus::Assigned.value() || run.started_at.is_some() {
+        return Ok(false);
+    }
+    let Some(runner_id) = run.runner_id else {
+        return Ok(false);
+    };
+    let candidate = AssignedNeverStartedCandidate {
+        run_id,
+        runner_id: Some(runner_id),
+        pod_id: Some(run.pod_id),
+        assigned_at: run.assigned_at.map(|at| at.with_timezone(&Utc)),
+        capacity_wait: run.capacity_wait.clone(),
+        assignment_token: run.assignment_token,
+    };
+    reap_assigned_never_started_row(pool, seams, &candidate).await
+}
+
+/// One pre-start unconfirmed row (NEWPIDASH-251): fail it (`FAILED`)
+/// so the active-run guard releases without manual action. Same
+/// shape as the assigned-never-started reap (no live-state
+/// requirement — the runner never observed the run) but the detail
+/// carries the status and the bound that released it. Fresh
+/// capacity waits are protected exactly like the assigned arm
+/// (NEWPIDASH-241 T2).
+async fn reap_pre_start_unconfirmed_row(
+    pool: &PgPool,
+    seams: &dyn RunnerRunsSeams,
+    candidate: &PreStartUnconfirmedCandidate,
+    threshold_secs: i64,
+) -> Result<bool, SweepError> {
+    let Some(runner_id) = candidate.runner_id else {
+        return Ok(false);
+    };
+    let bound_secs = if candidate.status == AgentRunStatus::Running.value() {
+        threshold_secs
+    } else {
+        ASSIGNED_NEVER_STARTED_SECS
+    };
+    // Same fresh-capacity protection as the assigned arm.
+    if let Some(cw) = candidate.capacity_wait.as_ref() {
+        if pidash_services::runner_runs::capacity::is_fresh_capacity_wait(
+            cw,
+            candidate.assignment_token,
+            Utc::now(),
+        ) {
+            return Ok(false);
+        }
+    }
+    let detail = pre_start_unconfirmed_detail(&candidate.status, bound_secs);
+    let live =
+        lifecycle::live_state_usage_facts(&sea_orm_connection(pool), runner_id, candidate.run_id)
+            .await?;
+    let error_detail = Value::String(detail);
+    let null = Value::Null;
+    let inputs = lifecycle::TerminalUpdateInputs {
+        status: AgentRunStatus::Failed,
+        done_payload: &null,
+        error_detail: &error_detail,
+        runner_failure_reason: &null,
+        refusal_category: &null,
+        tokens: &null,
+        model: &null,
+        live: live.as_ref(),
+        runner: None,
+    };
+    let mut values = lifecycle::plan_terminal_finalize(&inputs)?;
+    run_finalize_transaction(pool, &candidate.run_id, &runner_id, &mut values).await?;
+    for effect in finalization::plan_publish_effects(candidate.run_id) {
+        match effect {
+            LifecycleEffect::PublishTerminalEffects { run_id } => {
+                if let Err(error) = enqueue(pool, &terminal_effects_job(&run_id)).await {
+                    tracing::error!(%error, "failed to publish terminal effects for run {run_id}");
+                }
+            }
+            LifecycleEffect::ApplyTerminalEffectsInline { run_id } => {
+                if let Err(error) = apply_agent_run_terminal_effects(pool, seams, &run_id).await {
+                    tracing::error!(%error, "failed to apply terminal effects for run {run_id}");
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(true)
+}
+
+/// Reap a single pre-start unconfirmed run by id (used by tests).
+/// Returns whether the row was finalized.
+pub async fn reap_pre_start_unconfirmed_by_id(
+    pool: &PgPool,
+    seams: &dyn RunnerRunsSeams,
+    run_id: Uuid,
+    threshold_secs: i64,
+) -> Result<bool, SweepError> {
+    let row = orm::agent_run::Entity::find_by_id(run_id)
+        .one(&sea_orm_connection(pool))
+        .await?;
+    let Some(run) = row else {
+        return Ok(false);
+    };
+    let in_scope = run.status == AgentRunStatus::WaitingForWorktree.value()
+        || run.status == AgentRunStatus::Running.value();
+    if !in_scope {
+        return Ok(false);
+    }
+    let Some(runner_id) = run.runner_id else {
+        return Ok(false);
+    };
+    let candidate = PreStartUnconfirmedCandidate {
+        run_id,
+        runner_id: Some(runner_id),
+        pod_id: Some(run.pod_id),
+        status: run.status.clone(),
+        assigned_at: run.assigned_at.map(|at| at.with_timezone(&Utc)),
+        started_at: run.started_at.map(|at| at.with_timezone(&Utc)),
+        capacity_wait: run.capacity_wait.clone(),
+        assignment_token: run.assignment_token,
+    };
+    reap_pre_start_unconfirmed_row(pool, seams, &candidate, threshold_secs).await
 }
 
 /// One stall row: `finalize_run_terminal(runner, id, FAILED,
@@ -986,21 +1352,17 @@ pub async fn reconcile_stalled_runs(
 async fn reap_stalled_row(
     pool: &PgPool,
     seams: &dyn RunnerRunsSeams,
-    row: &sqlx::postgres::PgRow,
+    candidate: &StallCandidate,
     threshold_secs: i64,
 ) -> Result<bool, SweepError> {
-    let candidate = map_stall_candidate(row)?;
     let Some(runner_id) = candidate.runner_id else {
         return Ok(false);
     };
     let detail = stall_error_detail(threshold_secs);
     // `_matching_live_state` (`run_lifecycle.py:73-77`).
-    let live_row = sqlx::query(&lifecycle::live_state_by_runner_sql())
-        .bind(candidate.run_id)
-        .bind(runner_id)
-        .fetch_optional(pool)
-        .await?;
-    let live = live_row.map(|row| map_live_state_facts(&row)).transpose()?;
+    let live =
+        lifecycle::live_state_usage_facts(&sea_orm_connection(pool), runner_id, candidate.run_id)
+            .await?;
     // `RunnerInfo` mirrors `enrich_run_error`'s evaluation order
     // (`diagnostics.py:149-160`): runner attributes are touched only
     // for auth-kind details, the dev-machine FK only inside
@@ -1041,6 +1403,9 @@ async fn reap_stalled_row(
         status: AgentRunStatus::Failed,
         done_payload: &null,
         error_detail: &error_detail,
+        // The stall reaper carries no runner reason (`tasks.py`'s
+        // `finalize_run_terminal` call passes none).
+        runner_failure_reason: &null,
         refusal_category: &null,
         tokens: &null,
         model: &null,
@@ -1072,24 +1437,18 @@ async fn reap_stalled_row(
 }
 
 /// The dev-machine labels `_runner_location` reads
-/// (`diagnostics.py:133-136`). A set-but-missing id raises, like
-/// Django's lazy FK fetch (`DoesNotExist` → the per-row guard).
+/// (`diagnostics.py:133-136`), off the lazy FK fetch of the full row. A
+/// set-but-missing id raises, like Django's `DoesNotExist` → the
+/// per-row guard.
 async fn fetch_dev_machine_labels(
     pool: &PgPool,
     machine_id: &Uuid,
 ) -> Result<(String, String), SweepError> {
-    let row = sqlx::query(&dev_machine_by_id_sql())
-        .bind(*machine_id)
-        .fetch_optional(pool)
+    let machine = orm::dev_machine::Entity::find_by_id(*machine_id)
+        .one(&sea_orm_connection(pool))
         .await?
         .ok_or(SweepError::Db(sqlx::Error::RowNotFound))?;
-    let at = |column: &str| -> Result<usize, SweepError> {
-        col_index(dev_machine::COLUMNS, column).ok_or(SweepError::BadRow("dev_machine column"))
-    };
-    Ok((
-        row.try_get(at("label")?).map_err(SweepError::Db)?,
-        row.try_get(at("host_label")?).map_err(SweepError::Db)?,
-    ))
+    Ok((machine.label, machine.host_label))
 }
 
 /// `finalize_agent_run` (`agent_run_finalization.py:47-87`): lock the
@@ -1104,86 +1463,26 @@ async fn run_finalize_transaction(
     values: &mut finalization::FinalizeValues,
 ) -> Result<(), SweepError> {
     let mut tx = pool.begin().await?;
-    let lock_sql = finalization::lock_run_for_finalize_sql(true, false);
-    let mut lock = sqlx::query(&lock_sql).bind(*run_id);
-    for status in TERMINAL_RUN_STATUSES {
-        lock = lock.bind(status.value());
-    }
-    lock = lock.bind(*runner_id);
-    let locked = lock.fetch_optional(&mut *tx).await?;
-    let Some(locked) = locked else {
-        tx.commit().await?;
-        tracing::info!("run_lifecycle: ignoring late terminal transition for closed run {run_id}");
-        return Ok(());
-    };
-    let facts = map_finalize_locked(&locked)?;
-    finalization::apply_done_payload_merge(
-        values,
-        facts.done_payload.as_ref().unwrap_or(&null_json()),
-    );
-    execute_finalize_update(&mut tx, values, run_id).await?;
-    if facts.executor_kind == AgentExecutorKind::CloudAgent {
-        let exists = sqlx::query(finalization::terminal_event_exists_sql())
-            .bind(*run_id)
-            .bind("terminal")
-            .fetch_optional(&mut *tx)
-            .await?
-            .is_some();
-        if !exists {
-            let max: Option<i32> = sqlx::query_scalar(finalization::terminal_event_max_seq_sql())
-                .bind(*run_id)
-                .fetch_optional(&mut *tx)
-                .await?
-                .flatten();
-            let plan = finalization::plan_terminal_event(
-                max,
-                AgentRunStatus::Failed,
-                &finalization::finalize_error_code(values),
+    {
+        let conn = TxConn::new(&mut tx);
+        let locked =
+            finalization::lock_run_for_finalize(&conn, *run_id, Some(*runner_id), None).await?;
+        let Some(locked) = locked else {
+            tx.commit().await?;
+            tracing::info!(
+                "run_lifecycle: ignoring late terminal transition for closed run {run_id}"
             );
-            sqlx::query(&finalization::terminal_event_insert_sql())
-                .bind(*run_id)
-                .bind(plan.seq)
-                .bind("terminal")
-                .bind(plan.payload)
-                .bind(Utc::now())
-                .execute(&mut *tx)
-                .await?;
-        }
+            return Ok(());
+        };
+        let facts = map_finalize_locked(&locked)?;
+        finalization::apply_done_payload_merge(
+            values,
+            facts.done_payload.as_ref().unwrap_or(&Value::Null),
+        );
+        let now = Utc::now();
+        finalization::finalize_update(&conn, values, *run_id, now).await?;
     }
     tx.commit().await?;
-    Ok(())
-}
-
-/// A shared JSON null for merges over a missing stored payload.
-fn null_json() -> Value {
-    Value::Null
-}
-
-/// The finalize `UPDATE` (`:71`): binds in clause order, the id last.
-/// `NULL` columns bind typed nulls (the markers are `timestamptz`);
-/// `Now` binds one `now()` per clause.
-async fn execute_finalize_update(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    values: &finalization::FinalizeValues,
-    run_id: &Uuid,
-) -> Result<(), SweepError> {
-    let update_sql = finalization::finalize_update_sql(values);
-    let mut query = sqlx::query(&update_sql);
-    for clause in &values.clauses {
-        match &clause.value {
-            SetValue::Null => match clause.column {
-                "terminal_hooks_applied_at" | "terminal_capacity_released_at" => {
-                    query = query.bind(None::<DateTime<Utc>>);
-                }
-                _ => return Err(SweepError::BadRow("null finalize column")),
-            },
-            SetValue::Now => query = query.bind(Utc::now()),
-            SetValue::Text(text) => query = query.bind(text.clone()),
-            SetValue::Json(value) => query = query.bind(value.clone()),
-        }
-    }
-    query = query.bind(*run_id);
-    query.execute(&mut **tx).await?;
     Ok(())
 }
 
@@ -1214,34 +1513,99 @@ pub async fn apply_agent_run_terminal_effects(
     run_id: &Uuid,
 ) -> Result<bool, SweepError> {
     let mut tx = pool.begin().await?;
-    let work_item_id: Option<Uuid> =
-        sqlx::query_scalar(finalization::select_run_work_item_id_sql())
-            .bind(*run_id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .flatten();
-    if let Some(work_item_id) = work_item_id {
-        sqlx::query(&finalization::lock_issue_sql())
-            .bind(work_item_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-    }
-    let lock_sql = finalization::lock_run_for_effects_sql();
-    let mut lock = sqlx::query(&lock_sql).bind(*run_id);
-    for status in TERMINAL_RUN_STATUSES {
-        lock = lock.bind(status.value());
-    }
-    let locked = lock.fetch_optional(&mut *tx).await?;
-    let Some(locked) = locked else {
-        tx.commit().await?;
+    let hooks = hooks_transaction(&mut tx, seams, run_id).await?;
+    tx.commit().await?;
+    let Some(hooks) = hooks else {
         return Ok(false);
     };
+    // Post-commit, in source order: the pending-entry fire (a `.delay`
+    // failure propagates — the hooks marker is already set, so the
+    // retry never re-registers it), then the isolated handoff.
+    if let Some(ticker_id) = hooks.pending_fire {
+        enqueue(
+            pool,
+            &NewJob::new(FIRE_TICK_TASK, json!([ticker_id.to_string()]), json!({})),
+        )
+        .await?;
+    }
+    if hooks.handoff_after_txn {
+        if let Err(error) = seams.complete_project_move_handoff(*run_id).await {
+            tracing::error!(%error, "failed to complete project-move handoff for run {run_id}");
+        }
+    }
+    // The capacity re-read (`.get()` — a missing row raises).
+    let db = sea_orm_connection(pool);
+    let cap_row = finalization::select_run_for_capacity(&db, *run_id)
+        .await?
+        .ok_or(SweepError::Db(sqlx::Error::RowNotFound))?;
+    let cap = map_capacity_facts(&cap_row)?;
+    let facts = &hooks.facts;
+    let capacity_outcome = finalization::plan_terminal_effects(&TerminalEffectsInputs {
+        run_id: *run_id,
+        status: facts.status,
+        run_config: &facts.run_config,
+        error: &facts.error,
+        refusal_category: &facts.refusal_category,
+        scheduler_binding: facts.binding.clone(),
+        hooks_applied: facts.hooks_applied,
+        capacity_released: cap.capacity_released,
+        executor_kind: cap.executor_kind,
+        runner_id: cap.runner_id,
+        pod_id: cap.pod_id,
+        workspace_id: cap.workspace_id,
+        work_item_present: hooks.work_item_id.is_some(),
+    });
+    // `NotTerminal` is unreachable here: the status is the locked
+    // row's, unchanged since the first plan. Skipping capacity is the
+    // safe direction (the marker stays unset for the reconciler).
+    let capacity = match capacity_outcome {
+        finalization::TerminalEffectsOutcome::Applied(plan) => plan.capacity,
+        finalization::TerminalEffectsOutcome::NotTerminal => None,
+    };
+    if let Some(plan) = capacity {
+        run_capacity_plan(pool, seams, &plan).await?;
+        finalization::update_capacity_marker(&db, *run_id, Utc::now()).await?;
+    }
+    Ok(true)
+}
+
+/// What the hooks transaction established, for the post-commit half.
+struct HooksOutcome {
+    facts: EffectsLocked,
+    work_item_id: Option<Uuid>,
+    pending_fire: Option<Uuid>,
+    handoff_after_txn: bool,
+}
+
+/// The hooks transaction body (`:115-168`): issue lock, run lock, the
+/// hooks branch behind the marker. `None` when the run is not terminal
+/// (the caller commits the empty transaction).
+async fn hooks_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    seams: &dyn RunnerRunsSeams,
+    run_id: &Uuid,
+) -> Result<Option<HooksOutcome>, SweepError> {
+    let (work_item_id, locked) = {
+        let conn = TxConn::new(&mut *tx);
+        let work_item_id: Option<Uuid> = finalization::select_run_work_item_id(&conn, *run_id)
+            .await?
+            .flatten();
+        if let Some(work_item_id) = work_item_id {
+            finalization::lock_issue(&conn, work_item_id).await?;
+        }
+        (
+            work_item_id,
+            finalization::lock_run_for_effects(&conn, *run_id).await?,
+        )
+    };
+    let Some(locked) = locked else {
+        return Ok(None);
+    };
     let facts = map_effects_locked(&locked)?;
-    // The composed plan, first with the locked-row facts (`agent_run`
-    // leads the locked row, so the capacity mapper reads here too).
-    // Only the hooks branch is consumed: capacity is re-planned after
-    // commit from the fresh re-read, with the same hooks inputs.
-    let locked_cap = map_capacity_facts(&locked)?;
+    // The composed plan, first with the locked-row facts. Only the
+    // hooks branch is consumed: capacity is re-planned after commit
+    // from the fresh re-read, with the same hooks inputs.
+    let locked_cap = map_capacity_facts_locked(&locked)?;
     let hooks_outcome = finalization::plan_terminal_effects(&TerminalEffectsInputs {
         run_id: *run_id,
         status: facts.status,
@@ -1259,15 +1623,12 @@ pub async fn apply_agent_run_terminal_effects(
     });
     let hooks_plan = match hooks_outcome {
         finalization::TerminalEffectsOutcome::Applied(plan) => plan,
-        finalization::TerminalEffectsOutcome::NotTerminal => {
-            tx.commit().await?;
-            return Ok(false);
-        }
+        finalization::TerminalEffectsOutcome::NotTerminal => return Ok(None),
     };
     let mut pending_fire = None;
     if let Some(hooks) = &hooks_plan.hooks {
         run_hooks_phase(
-            &mut tx,
+            tx,
             seams,
             run_id,
             &work_item_id,
@@ -1276,65 +1637,14 @@ pub async fn apply_agent_run_terminal_effects(
             &mut pending_fire,
         )
         .await?;
-        sqlx::query(finalization::update_hooks_marker_sql())
-            .bind(Utc::now())
-            .bind(*run_id)
-            .execute(&mut *tx)
-            .await?;
+        finalization::update_hooks_marker(&TxConn::new(&mut *tx), *run_id, Utc::now()).await?;
     }
-    tx.commit().await?;
-    // Post-commit, in source order: the pending-entry fire (a `.delay`
-    // failure propagates — the hooks marker is already set, so the
-    // retry never re-registers it), then the isolated handoff.
-    if let Some(ticker_id) = pending_fire {
-        enqueue(
-            pool,
-            &NewJob::new(FIRE_TICK_TASK, json!([ticker_id.to_string()]), json!({})),
-        )
-        .await?;
-    }
-    if hooks_plan.handoff_after_txn {
-        if let Err(error) = seams.complete_project_move_handoff(*run_id).await {
-            tracing::error!(%error, "failed to complete project-move handoff for run {run_id}");
-        }
-    }
-    // The capacity re-read (`.get()` — a missing row raises).
-    let cap_row = sqlx::query(&finalization::select_run_for_capacity_sql())
-        .bind(*run_id)
-        .fetch_one(pool)
-        .await?;
-    let cap = map_capacity_facts(&cap_row)?;
-    let capacity_outcome = finalization::plan_terminal_effects(&TerminalEffectsInputs {
-        run_id: *run_id,
-        status: facts.status,
-        run_config: &facts.run_config,
-        error: &facts.error,
-        refusal_category: &facts.refusal_category,
-        scheduler_binding: facts.binding.clone(),
-        hooks_applied: facts.hooks_applied,
-        capacity_released: cap.capacity_released,
-        executor_kind: cap.executor_kind,
-        runner_id: cap.runner_id,
-        pod_id: cap.pod_id,
-        workspace_id: cap.workspace_id,
-        work_item_present: work_item_id.is_some(),
-    });
-    // `NotTerminal` is unreachable here: the status is the locked
-    // row's, unchanged since the first plan. Skipping capacity is the
-    // safe direction (the marker stays unset for the reconciler).
-    let capacity = match capacity_outcome {
-        finalization::TerminalEffectsOutcome::Applied(plan) => plan.capacity,
-        finalization::TerminalEffectsOutcome::NotTerminal => None,
-    };
-    if let Some(plan) = capacity {
-        run_capacity_plan(seams, &plan).await?;
-        sqlx::query(finalization::update_capacity_marker_sql())
-            .bind(Utc::now())
-            .bind(*run_id)
-            .execute(pool)
-            .await?;
-    }
-    Ok(true)
+    Ok(Some(HooksOutcome {
+        facts,
+        work_item_id,
+        pending_fire,
+        handoff_after_txn: hooks_plan.handoff_after_txn,
+    }))
 }
 
 /// The hooks branch (`:134-167`): savepointed failure comment and
@@ -1353,8 +1663,18 @@ async fn run_hooks_phase(
         run_failure_comment_in_savepoint(tx, seams, run_id, hooks).await?;
     }
     if hooks.orchestration {
-        if let Err(error) = seams.disarm_on_terminal_signal(*run_id).await {
-            tracing::error!(%error, "orchestration.error: run-ended reconcile failed for run {run_id}");
+        match seams.disarm_on_terminal_signal(*run_id).await {
+            Ok(true) => {
+                let conn = TxConn::new(&mut *tx);
+                if let Err(error) = crate::orchestration::clear_run_thread_id(&conn, *run_id).await
+                {
+                    tracing::error!(%error, "orchestration.error: fresh-session thread clear failed for run {run_id}");
+                }
+            }
+            Ok(false) => {}
+            Err(error) => {
+                tracing::error!(%error, "orchestration.error: run-ended reconcile failed for run {run_id}");
+            }
         }
         if let Err(error) = seams.apply_deferred_pause(*run_id).await {
             tracing::error!(%error, "orchestration.error: deferred-pause failed for run {run_id}");
@@ -1377,74 +1697,74 @@ async fn run_hooks_phase(
 }
 
 /// The failure comment (`:136-147` + `_post_failure_comment:341-399`)
-/// behind a savepoint: success releases, failure rolls back to the
-/// savepoint (Django's `needs_rollback` path — a caught-inside error
-/// never poisons the enclosing transaction) and logs.
+/// behind a savepoint (an sqlx nested transaction): success releases,
+/// failure rolls back to the savepoint (Django's `needs_rollback` path
+/// — a caught-inside error never poisons the enclosing transaction)
+/// and logs.
 async fn run_failure_comment_in_savepoint(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     seams: &dyn RunnerRunsSeams,
     run_id: &Uuid,
     hooks: &finalization::HooksPlan,
 ) -> Result<(), SweepError> {
-    sqlx::query("SAVEPOINT sp_failure_comment")
-        .execute(&mut **tx)
-        .await?;
-    match post_failure_comment(tx, seams, run_id, hooks).await {
+    let mut savepoint = tx.begin().await?;
+    match post_failure_comment(&mut savepoint, seams, run_id, hooks).await {
         Ok(()) => {
-            sqlx::query("RELEASE SAVEPOINT sp_failure_comment")
-                .execute(&mut **tx)
-                .await?;
+            savepoint.commit().await?;
             Ok(())
         }
         Err(error) => {
             tracing::error!(%error, "run_lifecycle: failed to post failure comment for run {run_id}");
-            sqlx::query("ROLLBACK TO SAVEPOINT sp_failure_comment")
-                .execute(&mut **tx)
-                .await?;
+            savepoint.rollback().await?;
             Ok(())
         }
     }
 }
 
 /// Post the failure comment: re-read the run (a missing row or work
-/// item means silence), the speaker dedupe check (a hit means
-/// silence), then the comment + description inserts plus the
-/// link-back.
+/// item means silence), the per-reason gate (a free-retry failure below
+/// the backstop means silence, PDASHOSS01-183), the speaker dedupe check
+/// (a hit means silence), then the comment + description inserts plus
+/// the link-back, and — when the clock stopped — the clock-stopped
+/// notifications behind their own savepoint.
 async fn post_failure_comment(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     seams: &dyn RunnerRunsSeams,
     run_id: &Uuid,
     hooks: &finalization::HooksPlan,
 ) -> Result<(), SweepError> {
-    let Some(comment) = hooks.failure_comment.as_ref() else {
+    let Some(plan) = hooks.failure_comment.as_ref() else {
         return Ok(());
     };
-    let reread = sqlx::query(&lifecycle::failure_reread_sql())
-        .bind(*run_id)
-        .fetch_optional(&mut **tx)
-        .await?;
-    let Some(reread) = reread else {
+    let conn = TxConn::new(&mut *tx);
+    let Some(reread) = lifecycle::failure_reread(&conn, *run_id).await? else {
         return Ok(());
     };
-    let work_item_id: Option<Uuid> = reread
-        .try_get(
-            col_index(agent_run::COLUMNS, "work_item_id").ok_or(SweepError::BadRow("work_item"))?,
-        )
-        .map_err(SweepError::Db)?;
-    if work_item_id.is_none() {
+    if reread.work_item_id.is_none() {
         return Ok(());
     }
+    let failure_reason = reread.failure_reason.clone();
+    let runner_identity = reread.runner_identity();
     let ids = map_failure_comment_ids(&reread)?;
-    let duplicate = sqlx::query(lifecycle::comment_dedupe_exists_sql())
-        .bind(ids.issue_id)
-        .bind(*run_id)
-        .bind(lifecycle::CommentSpeaker::System.value())
-        .fetch_optional(&mut **tx)
-        .await?
-        .is_some();
+    // Route on the stored canonical reason (PDASHOSS01-183), predicting the
+    // `RUN_ENDED` failure policy that follows on this transaction.
+    let effect = failure_effects::failure_clock_effect(&conn, &reread).await?;
+    let clock_stopped = match lifecycle::failure_comment_gate(plan, &failure_reason, effect) {
+        lifecycle::FailureCommentGate::Suppress => return Ok(()),
+        lifecycle::FailureCommentGate::Post { clock_stopped } => clock_stopped,
+    };
+    let duplicate = lifecycle::comment_dedupe_exists(
+        &conn,
+        ids.issue_id,
+        *run_id,
+        lifecycle::CommentSpeaker::System,
+    )
+    .await?;
     if duplicate {
         return Ok(());
     }
+    let rendered = plan.render(&failure_reason, clock_stopped, runner_identity.as_ref());
+    let comment = &rendered.comment;
     let actor_id = seams.agent_system_user().await.map_err(SweepError::Seam)?;
     // Domain executor twins, in Django order. Ambient user nulls:
     // workers carry no `crum` user. Four `now()` reads keep their
@@ -1481,32 +1801,56 @@ async fn post_failure_comment(
         labels: &empty_list,
         edited_at: None,
     };
-    comment_domain::insert_comment_row(&mut **tx, &rows).await?;
-    comment_domain::insert_description_row(&mut **tx, &rows).await?;
-    comment_domain::link_comment_description(&mut **tx, rows.id, rows.description_id).await?;
+    comment_domain::insert_comment_row(&conn, &rows).await?;
+    comment_domain::insert_description_row(&conn, &rows).await?;
+    comment_domain::link_comment_description(&conn, rows.id, rows.description_id).await?;
+    if rendered.clock_stopped {
+        // Isolated like the source's `try/except`: a notification failure
+        // is logged and never drops the comment.
+        let mut savepoint = tx.begin().await?;
+        let notified = failure_effects::notify_clock_stopped(
+            &TxConn::new(&mut savepoint),
+            *run_id,
+            ids.issue_id,
+            &failure_reason,
+            &rendered.label,
+            &rendered.action,
+        )
+        .await;
+        match notified {
+            Ok(_) => {
+                savepoint.commit().await?;
+            }
+            Err(error) => {
+                tracing::error!(%error, "run_lifecycle: clock-stop notification failed for run {run_id}");
+                savepoint.rollback().await?;
+            }
+        }
+    }
     Ok(())
 }
 
-/// The ids the comment inserts need off the failure re-read row
-/// (`agent_run` cols, then `issues` in L4 `_meta` order: `id` 6th,
-/// `project_id` 7th, `workspace_id` 8th — verified against the SQL
-/// text in `failure_comment_ids_match_planner_sql`).
+/// The ids the comment inserts need off the failure re-read row: the
+/// joined issue's id / project / workspace (`select_related("work_item",
+/// "work_item__project")`).
 struct FailureCommentIds {
     issue_id: Uuid,
     project_id: Uuid,
     workspace_id: Uuid,
 }
 
-fn map_failure_comment_ids(row: &sqlx::postgres::PgRow) -> Result<FailureCommentIds, SweepError> {
-    let base = agent_run::COLUMNS.len();
-    let issue_id: Option<Uuid> = row.try_get(base + 5).map_err(SweepError::Db)?;
-    let Some(issue_id) = issue_id else {
+fn map_failure_comment_ids(
+    row: &lifecycle::FailureRereadRow,
+) -> Result<FailureCommentIds, SweepError> {
+    let (Some(issue_id), Some(project_id), Some(workspace_id)) =
+        (row.issue_id, row.issue_project_id, row.issue_workspace_id)
+    else {
         return Err(SweepError::BadRow("comment issue row"));
     };
     Ok(FailureCommentIds {
         issue_id,
-        project_id: row.try_get(base + 6).map_err(SweepError::Db)?,
-        workspace_id: row.try_get(base + 7).map_err(SweepError::Db)?,
+        project_id,
+        workspace_id,
     })
 }
 
@@ -1517,21 +1861,15 @@ async fn run_scheduler_hook_in_savepoint(
     run_id: &Uuid,
     hooks: &finalization::HooksPlan,
 ) -> Result<(), SweepError> {
-    sqlx::query("SAVEPOINT sp_scheduler_hook")
-        .execute(&mut **tx)
-        .await?;
-    match run_scheduler_hook_update(tx, hooks).await {
+    let mut savepoint = tx.begin().await?;
+    match run_scheduler_hook_update(&mut savepoint, hooks).await {
         Ok(()) => {
-            sqlx::query("RELEASE SAVEPOINT sp_scheduler_hook")
-                .execute(&mut **tx)
-                .await?;
+            savepoint.commit().await?;
             Ok(())
         }
         Err(error) => {
             tracing::error!(%error, "scheduler.terminate_hook: failed for run {run_id}");
-            sqlx::query("ROLLBACK TO SAVEPOINT sp_scheduler_hook")
-                .execute(&mut **tx)
-                .await?;
+            savepoint.rollback().await?;
             Ok(())
         }
     }
@@ -1564,13 +1902,14 @@ async fn update_scheduler_binding(
     binding_id: &Uuid,
     message: &str,
 ) -> Result<(), SweepError> {
-    let done = sqlx::query(scheduler_hook::scheduler_binding_update_sql())
-        .bind(message.to_owned())
-        .bind(Utc::now())
-        .bind(*binding_id)
-        .execute(&mut **tx)
-        .await?;
-    if done.rows_affected() == 0 {
+    let done = scheduler_hook::update_scheduler_binding(
+        &TxConn::new(&mut *tx),
+        *binding_id,
+        message,
+        Utc::now(),
+    )
+    .await?;
+    if done == 0 {
         return Err(SweepError::BadRow("scheduler binding row"));
     }
     Ok(())
@@ -1586,28 +1925,29 @@ async fn fire_pending_entry_lookup(
     let Some(work_item_id) = work_item_id else {
         return Ok(None);
     };
-    let found: Option<Uuid> = sqlx::query_scalar(lifecycle::ticker_pending_entry_sql())
-        .bind(*work_item_id)
-        .fetch_optional(&mut **tx)
-        .await?
-        .flatten();
-    Ok(found)
+    Ok(lifecycle::ticker_pending_entry(&TxConn::new(&mut *tx), *work_item_id).await?)
 }
 
 /// The capacity branch (`:184-198`): cloud runs dispatch waiting
-/// work; local runs drain runner and/or pod. Unisolated — a failure
+/// work; local runs release a stale-busy runner, then drain runner
+/// and/or pod. Unisolated — a failure
 /// propagates and the marker write below never runs.
 async fn run_capacity_plan(
+    pool: &PgPool,
     seams: &dyn RunnerRunsSeams,
     plan: &finalization::CapacityPlan,
 ) -> Result<(), SweepError> {
     match plan {
-        finalization::CapacityPlan::Cloud { workspace_id } => seams
-            .dispatch_waiting(*workspace_id)
-            .await
-            .map_err(SweepError::Seam),
         finalization::CapacityPlan::Local { runner_id, pod_id } => {
             if let Some(runner_id) = runner_id {
+                // `release_runner_if_idle` (PDASHOSS01-231): free a
+                // stale `busy` runner before the drains, or they can
+                // never assign it.
+                pidash_services::runner_sessions::live_drains::release_runner_if_idle(
+                    &pidash_db::pool::sea_orm_connection(pool),
+                    *runner_id,
+                )
+                .await?;
                 seams
                     .drain_runner(*runner_id)
                     .await
@@ -1626,12 +1966,9 @@ async fn run_capacity_plan(
 /// marker, oldest `ended_at` first, capped at 100. Returns the batch
 /// size.
 pub async fn reconcile_agent_run_terminal_effects(pool: &PgPool) -> Result<u64, SweepError> {
-    let candidate_sql = reconcile_terminal_candidate_sql();
-    let mut query = sqlx::query_scalar(&candidate_sql);
-    for status in TERMINAL_RUN_STATUSES {
-        query = query.bind(status.value());
-    }
-    let ids: Vec<Uuid> = query.fetch_all(pool).await?;
+    let ids: Vec<Uuid> = reconcile_terminal_candidate_select()
+        .all(&sea_orm_connection(pool))
+        .await?;
     for run_id in &ids {
         enqueue(pool, &terminal_effects_job(run_id)).await?;
     }
@@ -1792,22 +2129,6 @@ mod tests {
         serde_json::from_str(FIXTURE).expect("fixture parses")
     }
 
-    /// Collapse all whitespace runs to single spaces for SQL comparison.
-    fn squish(sql: &str) -> String {
-        sql.split_whitespace().collect::<Vec<_>>().join(" ")
-    }
-
-    /// The `SELECT` list of a `SELECT … FROM` statement, one entry per
-    /// top-level comma.
-    fn select_list(sql: &str) -> Vec<String> {
-        let upper = sql.to_ascii_uppercase();
-        let from = upper.find(" FROM ").expect("FROM in select");
-        let list = sql["SELECT ".len()..from].trim();
-        list.split(',')
-            .map(|entry| entry.trim().to_owned())
-            .collect()
-    }
-
     fn utc(year: i32, month: u32, day: u32, hour: u32, min: u32, sec: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(year, month, day, hour, min, sec)
             .single()
@@ -1896,6 +2217,106 @@ mod tests {
             stall_error_detail(360),
             "agent stalled: no events for >360s"
         );
+        // NEWPIDASH-262: assigned-never-started cutoff and detail.
+        assert_eq!(
+            assigned_never_started_cutoff(now),
+            now - chrono::Duration::seconds(ASSIGNED_NEVER_STARTED_SECS)
+        );
+        assert_eq!(ASSIGNED_NEVER_STARTED_SECS, 180);
+        assert_eq!(
+            assigned_never_started_detail(180),
+            "assigned run never started: runner never polled within >180s"
+        );
+        // NEWPIDASH-251: pre-start unconfirmed cutoffs and detail.
+        assert_eq!(
+            pre_start_worktree_cutoff(now),
+            now - chrono::Duration::seconds(ASSIGNED_NEVER_STARTED_SECS)
+        );
+        assert_eq!(
+            pre_start_running_cutoff(now, 360),
+            now - chrono::Duration::seconds(360)
+        );
+        assert_eq!(
+            pre_start_unconfirmed_detail("waiting_for_worktree", 180),
+            "runner never confirmed this run (status=waiting_for_worktree, no runner report >180s); released after 3 minutes"
+        );
+        assert_eq!(
+            pre_start_unconfirmed_detail("running", 360),
+            "runner never confirmed this run (status=running, no runner report >360s); released after 6 minutes"
+        );
+    }
+
+    #[test]
+    fn assigned_never_started_select_shape() {
+        // NEWPIDASH-262: status assigned, started_at NULL, assigned_at < cutoff.
+        let cutoff = utc(2026, 11, 14, 12, 0, 0);
+        let sql = pg_selector(assigned_never_started_select(cutoff));
+        for part in [
+            "\"agent_run\".\"status\" = 'assigned'",
+            "\"agent_run\".\"started_at\" IS NULL",
+            "\"agent_run\".\"assigned_at\" < '2026-11-14 12:00:00.000000 +00:00'",
+            "\"agent_run\".\"runner_id\" IS NOT NULL",
+        ] {
+            assert!(sql.contains(part), "{part} missing: {sql}");
+        }
+        assert!(
+            sql.contains(" ORDER BY \"agent_run\".\"assigned_at\" ASC"),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn assigned_never_started_reaps_timestamp_less_capacity_wait() {
+        // NEWPIDASH-399: both reap arms (assigned-never-started and
+        // pre-start-unconfirmed) gate on this wrapper. A waiting report
+        // with a matching token but no `reported_at` is not fresh, so a
+        // past-cutoff run carrying one is reclaimed like a run with a
+        // stale report; only a fresh timestamped report protects it.
+        let now = utc(2026, 11, 14, 12, 0, 0);
+        let tok = Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap();
+        let tok_str = tok.to_string();
+        let no_time = json!({
+            "phase": "waiting_for_capacity",
+            "assignment_token": tok_str,
+        });
+        assert!(!is_fresh_capacity_wait(&no_time, Some(tok), now));
+        let stale = json!({
+            "phase": "waiting_for_capacity",
+            "assignment_token": tok_str,
+            "reported_at": "2026-11-14T11:50:00+00:00",
+        });
+        assert!(!is_fresh_capacity_wait(&stale, Some(tok), now));
+        let fresh = json!({
+            "phase": "waiting_for_capacity",
+            "assignment_token": tok_str,
+            "reported_at": "2026-11-14T11:59:30+00:00",
+        });
+        assert!(is_fresh_capacity_wait(&fresh, Some(tok), now));
+    }
+
+    #[test]
+    fn pre_start_unconfirmed_select_shape() {
+        // NEWPIDASH-251: never-observed, runner-bound, per-status bound.
+        let worktree = utc(2026, 11, 14, 12, 0, 0);
+        let running = utc(2026, 11, 14, 11, 54, 0);
+        let sql = pg_selector(pre_start_unconfirmed_select(worktree, running));
+        for part in [
+            "\"agent_run\".\"runner_id\" IS NOT NULL",
+            "NOT EXISTS",
+            "\"runner_live_state\".\"observed_run_id\" = \"agent_run\".\"id\"",
+            "\"agent_run\".\"status\" = 'waiting_for_worktree'",
+            "\"agent_run\".\"assigned_at\" < '2026-11-14 12:00:00.000000 +00:00'",
+            "\"agent_run\".\"status\" = 'running'",
+            "\"agent_run\".\"started_at\" < '2026-11-14 11:54:00.000000 +00:00'",
+        ] {
+            assert!(sql.contains(part), "{part} missing: {sql}");
+        }
+        // Queued must never be reaped by this arm.
+        assert!(!sql.contains("'queued'"), "{sql}");
+        assert!(
+            sql.contains(" ORDER BY \"agent_run\".\"created_at\" ASC"),
+            "{sql}"
+        );
     }
 
     #[test]
@@ -1919,18 +2340,35 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // SQL pins
+    // Statement shapes
     // ------------------------------------------------------------------
+
+    fn pg_selector<S: sea_orm::SelectorTrait>(selector: sea_orm::Selector<S>) -> String {
+        selector
+            .into_statement(sea_orm::DbBackend::Postgres)
+            .to_string()
+    }
 
     #[test]
     fn dedupe_deletes_match_fast_delete_shape() {
+        let cutoff = utc(2026, 1, 2, 3, 4, 5);
         assert_eq!(
-            dedupe_delete_sql(run_dedupe::TABLE),
-            "DELETE FROM \"run_message_dedupe\" WHERE \"run_message_dedupe\".\"created_at\" < $1"
+            sea_orm::QueryTrait::build(
+                &run_dedupe_delete_statement(cutoff),
+                sea_orm::DbBackend::Postgres
+            )
+            .to_string(),
+            "DELETE FROM \"run_message_dedupe\" WHERE \"run_message_dedupe\".\"created_at\" < \
+             '2026-01-02 03:04:05.000000 +00:00'"
         );
         assert_eq!(
-            dedupe_delete_sql(chat_dedupe::TABLE),
-            "DELETE FROM \"chat_message_dedupe\" WHERE \"chat_message_dedupe\".\"created_at\" < $1"
+            sea_orm::QueryTrait::build(
+                &chat_dedupe_delete_statement(cutoff),
+                sea_orm::DbBackend::Postgres
+            )
+            .to_string(),
+            "DELETE FROM \"chat_message_dedupe\" WHERE \"chat_message_dedupe\".\"created_at\" < \
+             '2026-01-02 03:04:05.000000 +00:00'"
         );
         // The shared TTL key both sweeps read.
         assert_eq!(
@@ -1942,146 +2380,186 @@ mod tests {
     }
 
     #[test]
-    fn stall_candidate_select_lists_match_l2_order() {
-        let entries = select_list(&stalled_candidate_sql());
-        let mut expected = Vec::new();
-        expected.extend(
-            agent_run::COLUMNS
-                .iter()
-                .map(|column| format!("\"agent_run\".\"{column}\"")),
+    fn stall_candidate_statement_shape() {
+        let sql = pg_selector(stalled_candidate_select(
+            utc(2026, 10, 2, 22, 48, 9),
+            utc(2026, 10, 2, 22, 52, 39),
+        ));
+        // Projection: the run id plus the runner enrichment columns, each
+        // under its own alias.
+        assert!(
+            sql.starts_with(
+                "SELECT \"agent_run\".\"id\" AS \"run_id\", \"runner\".\"id\" AS \"runner_id\", \
+             \"runner\".\"name\" AS \"runner_name\", \"runner\".\"host_label\" AS \
+             \"runner_host_label\", \"runner\".\"capabilities\" AS \"runner_capabilities\", \
+             \"runner\".\"dev_machine_id\" AS \"runner_dev_machine_id\" FROM \"agent_run\" \
+             INNER JOIN \"runner\" ON \"agent_run\".\"runner_id\" = \"runner\".\"id\" \
+             INNER JOIN \"runner_live_state\" ON \"runner\".\"id\" = \
+             \"runner_live_state\".\"runner_id\" WHERE "
+            ),
+            "{sql}"
         );
-        expected.extend(
-            runner_cols::COLUMNS
-                .iter()
-                .map(|column| format!("\"runner\".\"{column}\"")),
+        // The Q-sorted conjunct order: statuses, silence, observed,
+        // freshness, the approvals OR, the watchdog scope.
+        let parts = [
+            "\"agent_run\".\"status\" IN ('assigned', 'running')",
+            "\"runner_live_state\".\"last_event_at\" < '2026-10-02 22:48:09.000000 +00:00'",
+            "\"runner_live_state\".\"observed_run_id\" = \"agent_run\".\"id\"",
+            "\"runner_live_state\".\"updated_at\" >= '2026-10-02 22:52:39.000000 +00:00'",
+            "(\"runner_live_state\".\"approvals_pending\" = 0 OR \
+             \"runner_live_state\".\"approvals_pending\" IS NULL)",
+            "\"runner_live_state\".\"agent_health\" IS NULL",
+        ];
+        let mut last = 0;
+        for part in parts {
+            let at = sql
+                .find(part)
+                .unwrap_or_else(|| panic!("{part} missing: {sql}"));
+            assert!(at > last, "{part} out of order: {sql}");
+            last = at;
+        }
+        assert!(
+            sql.ends_with("ORDER BY \"agent_run\".\"created_at\" DESC"),
+            "{sql}"
         );
-        assert_eq!(entries, expected);
-        assert_eq!(agent_run::COLUMNS.len(), 39);
-        assert_eq!(runner_cols::COLUMNS.len(), 31);
-    }
-
-    #[test]
-    fn stall_candidate_matches_fixture_modulo_literals() {
+        // The fixture's recorded statement joins the same two tables
+        // and carries the same conjuncts.
         let recorded = fixture()["reconcile_stalled_runs"]["candidate_sql"][0]
             .as_str()
             .expect("candidate_sql[0]")
             .to_owned();
-        // Literals → params in bind order: statuses, silence cutoff,
-        // snapshot cutoff, zero.
-        let normalized = recorded
-            .replace("'assigned'", "$1")
-            .replace("'running'", "$2")
-            .replacen("'2026-10-02 22:48:09.124690+00:00'::timestamptz", "$3", 1)
-            .replacen("'2026-10-02 22:52:39.124690+00:00'::timestamptz", "$4", 1)
-            .replace(
-                "\"runner_live_state\".\"approvals_pending\" = 0",
-                "\"runner_live_state\".\"approvals_pending\" = $5",
-            );
-        assert_eq!(squish(&stalled_candidate_sql()), squish(&normalized));
-        // The Q-sorted conjunct order survives normalization: silence
-        // first, then observed, then freshness — with the approvals OR
-        // and the watchdog scope (`agent_health IS NULL`) trailing in
-        // filter order.
-        let text = stalled_candidate_sql();
-        let silence = text
-            .find("\"runner_live_state\".\"last_event_at\" < $3")
-            .expect("silence");
-        let observed = text
-            .find("\"runner_live_state\".\"observed_run_id\" = (\"agent_run\".\"id\")")
-            .expect("observed");
-        let fresh = text
-            .find("\"runner_live_state\".\"updated_at\" >= $4")
-            .expect("freshness");
-        let approvals = text
-            .find("\"runner_live_state\".\"approvals_pending\" = $5")
-            .expect("approvals");
-        let health = text
-            .find("\"runner_live_state\".\"agent_health\" IS NULL")
-            .expect("health scope");
-        assert!(silence < observed && observed < fresh && fresh < approvals && approvals < health);
+        assert!(recorded.contains(
+            "INNER JOIN \"runner\" ON (\"agent_run\".\"runner_id\" = \"runner\".\"id\") \
+             INNER JOIN \"runner_live_state\" ON (\"runner\".\"id\" = \
+             \"runner_live_state\".\"runner_id\")"
+        ));
+        assert!(recorded.contains("\"runner_live_state\".\"agent_health\" IS NULL"));
     }
 
     #[test]
-    fn reconcile_candidate_matches_fixture_modulo_set_order() {
+    fn stall_candidate_fixture_parity_includes_pod_dispatch() {
+        let recorded = fixture()["reconcile_stalled_runs"]["candidate_sql"][0]
+            .as_str()
+            .expect("candidate_sql[0]")
+            .to_owned();
+        let select_list = recorded
+            .strip_prefix("SELECT ")
+            .and_then(|rest| rest.split_once(" FROM "))
+            .map(|(list, _)| list)
+            .expect("SELECT list");
+        let entries: Vec<&str> = select_list.split(", ").collect();
+        let mut agent_entries: Vec<&str> = entries
+            .iter()
+            .filter(|e| e.starts_with("\"agent_run\""))
+            .copied()
+            .collect();
+        // NEWPIDASH-241 T1: three native-owned columns appended beyond the Django baseline.
+        agent_entries.extend([
+            "\"agent_run\".\"assignment_token\"",
+            "\"agent_run\".\"assignment_protocol\"",
+            "\"agent_run\".\"capacity_wait\"",
+        ]);
+        let runner_entries: Vec<&str> = entries
+            .iter()
+            .filter(|e| e.starts_with("\"runner\""))
+            .copied()
+            .collect();
+        // NEWPIDASH-241 T1: 42 Django-baseline columns + 3 native-owned columns.
+        assert_eq!(agent_entries.len(), 45, "agent_run columns");
+        assert_eq!(
+            runner_entries.len(),
+            32,
+            "runner columns — pod_dispatch must be present"
+        );
+        let provisioning = runner_entries
+            .iter()
+            .position(|e| *e == "\"runner\".\"provisioning\"")
+            .expect("provisioning");
+        let pod_dispatch = runner_entries
+            .iter()
+            .position(|e| *e == "\"runner\".\"pod_dispatch\"")
+            .expect("pod_dispatch must be in fixture");
+        let visibility = runner_entries
+            .iter()
+            .position(|e| *e == "\"runner\".\"visibility\"")
+            .expect("visibility");
+        assert!(
+            provisioning < pod_dispatch && pod_dispatch < visibility,
+            "pod_dispatch between provisioning and visibility (Django field order #2903)"
+        );
+        let expected_runner: Vec<String> = pidash_db::runner_enroll::columns::runner::COLUMNS
+            .iter()
+            .map(|c| format!("\"runner\".\"{c}\""))
+            .collect();
+        assert_eq!(
+            runner_entries, expected_runner,
+            "runner column order must match Django field order"
+        );
+        let expected_agent: Vec<String> = pidash_db::runner_runs::agent_run::COLUMNS
+            .iter()
+            .map(|c| format!("\"agent_run\".\"{c}\""))
+            .collect();
+        assert_eq!(
+            agent_entries, expected_agent,
+            "agent_run column order must match Django field order"
+        );
+    }
+
+    #[test]
+    fn reconcile_candidate_statement_shape() {
+        let sql = pg_selector(reconcile_terminal_candidate_select());
+        assert!(sql.starts_with(
+            "SELECT \"agent_run\".\"id\" FROM \"agent_run\" WHERE \"agent_run\".\"status\" IN ("
+        ), "{sql}");
+        for status in TERMINAL_RUN_STATUSES {
+            assert!(sql.contains(&format!("'{}'", status.value())), "{sql}");
+        }
+        assert!(
+            sql.ends_with(
+                ") AND (\"agent_run\".\"terminal_hooks_applied_at\" IS NULL OR \
+             \"agent_run\".\"terminal_capacity_released_at\" IS NULL) \
+             ORDER BY \"agent_run\".\"ended_at\" ASC LIMIT 100"
+            ),
+            "{sql}"
+        );
+        // Django iterates a `set` for the `IN` list, so the recorded
+        // order varies per process; the surrounding statement is the
+        // same once the list is masked.
         let recorded = fixture()["reconcile_terminal_effects"]["sql"][0]
             .as_str()
             .expect("reconcile sql")
             .to_owned();
-        // Django iterates a `set` for the `IN` list, so the recorded
-        // order varies per process; the executor binds the L1 tuple
-        // order (semantics are order-free — the L4 ported quirk).
-        // Literals normalize to their L1 positions, preserving the
-        // recorded order — so the comparison below is order-free too:
-        // the same five params as a set, plus the same surrounding
-        // statement once the IN list is masked.
-        let mut normalized = recorded;
-        for (index, status) in TERMINAL_RUN_STATUSES.iter().enumerate() {
-            normalized =
-                normalized.replace(&format!("'{}'", status.value()), &format!("${}", index + 1));
-        }
-        let ours = squish(&reconcile_terminal_candidate_sql());
-        let theirs = squish(&normalized);
-        fn in_list(sql: &str) -> Vec<&str> {
-            let start = sql.find("IN (").expect("IN") + 4;
-            let end = sql[start..].find(')').expect("close") + start;
-            let mut items: Vec<&str> = sql[start..end].split(',').map(str::trim).collect();
-            items.sort_unstable();
-            items
-        }
-        assert_eq!(in_list(&ours), in_list(&theirs));
-        fn mask(sql: &str) -> String {
-            let start = sql.find("IN (").expect("IN") + 4;
-            let end = sql[start..].find(')').expect("close") + start;
-            format!("{}IN (?){}", &sql[..start], &sql[end..])
-        }
-        assert_eq!(mask(&ours), mask(&theirs));
+        assert!(recorded.ends_with(
+            "AND (\"agent_run\".\"terminal_hooks_applied_at\" IS NULL OR \
+             \"agent_run\".\"terminal_capacity_released_at\" IS NULL)) \
+             ORDER BY \"agent_run\".\"ended_at\" ASC LIMIT 100"
+        ));
     }
 
     #[test]
-    fn live_state_facts_index_matches_planner_sql() {
-        let entries = select_list(&lifecycle::live_state_by_runner_sql());
-        assert_eq!(
-            entries
-                .iter()
-                .position(|entry| entry == "\"runner_live_state\".\"usage\""),
-            Some(8)
-        );
-        assert_eq!(
-            entries
-                .iter()
-                .position(|entry| entry == "\"runner_live_state\".\"llm_model\""),
-            Some(9)
-        );
-    }
-
-    #[test]
-    fn failure_comment_ids_match_planner_sql() {
-        let entries = select_list(&lifecycle::failure_reread_sql());
-        let base = agent_run::COLUMNS.len();
-        assert_eq!(
-            entries
-                .iter()
-                .position(|entry| entry == "\"issues\".\"id\""),
-            Some(base + 5)
-        );
-        assert_eq!(
-            entries
-                .iter()
-                .position(|entry| entry == "\"issues\".\"project_id\""),
-            Some(base + 6)
-        );
-        assert_eq!(
-            entries
-                .iter()
-                .position(|entry| entry == "\"issues\".\"workspace_id\""),
-            Some(base + 7)
-        );
-    }
-
-    #[test]
-    fn scheduler_binding_tail_columns_exist() {
-        assert!(col_index(scheduler_binding::COLUMNS, "id").is_some());
-        assert!(col_index(scheduler_binding::COLUMNS, "last_error").is_some());
+    fn failure_comment_ids_need_the_whole_issue_row() {
+        let full = lifecycle::FailureRereadRow {
+            work_item_id: Some(Uuid::nil()),
+            issue_id: Some(Uuid::nil()),
+            issue_project_id: Some(Uuid::nil()),
+            issue_workspace_id: Some(Uuid::nil()),
+            failure_reason: String::new(),
+            phase_kind: String::new(),
+            issue_state_id: None,
+            runner_name: None,
+            runner_host_label: None,
+            machine_label: None,
+            machine_host_label: None,
+        };
+        assert!(map_failure_comment_ids(&full).is_ok());
+        let dangling = lifecycle::FailureRereadRow {
+            issue_id: None,
+            ..full
+        };
+        assert!(matches!(
+            map_failure_comment_ids(&dangling),
+            Err(SweepError::BadRow("comment issue row"))
+        ));
     }
 
     // ------------------------------------------------------------------
@@ -2151,12 +2629,6 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
             Box::pin(async move { Ok(()) })
         }
-        fn dispatch_waiting(
-            &self,
-            _workspace_id: Uuid,
-        ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
-            Box::pin(async move { Ok(()) })
-        }
         fn complete_project_move_handoff(
             &self,
             _run_id: Uuid,
@@ -2166,8 +2638,8 @@ mod tests {
         fn disarm_on_terminal_signal(
             &self,
             _run_id: Uuid,
-        ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
-            Box::pin(async move { Ok(()) })
+        ) -> Pin<Box<dyn Future<Output = Result<bool, SeamError>> + Send + '_>> {
+            Box::pin(async move { Ok(false) })
         }
         fn apply_deferred_pause(
             &self,
@@ -2305,13 +2777,6 @@ mod tests {
             self.record(json!({"fn": "drain_pod", "args": [pod_id.to_string()]}));
             Box::pin(async move { Ok(()) })
         }
-        fn dispatch_waiting(
-            &self,
-            workspace_id: Uuid,
-        ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
-            self.record(json!({"fn": "dispatch_waiting", "args": [workspace_id.to_string()]}));
-            Box::pin(async move { Ok(()) })
-        }
         fn complete_project_move_handoff(
             &self,
             run_id: Uuid,
@@ -2322,9 +2787,9 @@ mod tests {
         fn disarm_on_terminal_signal(
             &self,
             run_id: Uuid,
-        ) -> Pin<Box<dyn Future<Output = Result<(), SeamError>> + Send + '_>> {
+        ) -> Pin<Box<dyn Future<Output = Result<bool, SeamError>> + Send + '_>> {
             self.record(json!({"fn": "disarm", "args": [run_id.to_string()]}));
-            Box::pin(async move { Ok(()) })
+            Box::pin(async move { Ok(false) })
         }
         fn apply_deferred_pause(
             &self,

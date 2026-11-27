@@ -100,8 +100,8 @@
 //!   the default `ORDER BY` although only ids are consumed. Kept.
 
 use chrono::{DateTime, Utc};
+use pidash_db::entity as orm;
 use pidash_db::runner_enroll::columns::enums::RUNNER_STATUS_OFFLINE;
-use pidash_db::runner_enroll::columns::runner::TABLE as RUNNER_TABLE;
 use pidash_db::runner_runs::{
     chat_dedupe, chat_event, chat_message, chat_session, AgentChatMessage, AgentChatSession,
 };
@@ -324,39 +324,38 @@ pub fn next_seq_after_max(current_max: Option<i32>) -> i32 {
 }
 
 /// `next_event_seq` (`chat.py:218-224`): one past the session event
-/// max. Executor-generic so endpoint transactions and the overlay
-/// share it. Moved from the api chat endpoints (OVL-06
-/// PIDASHCONV-1544); the endpoints are thin callers. Re-exported
-/// through `pidash-sdk::ops`.
-pub async fn next_event_seq<'e, E>(ex: E, session_id: Uuid) -> Result<i32, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let max: Option<i32> =
-        sqlx::query_scalar(r#"SELECT MAX("seq") FROM "agent_chat_event" WHERE "session_id" = $1"#)
-            .bind(session_id)
-            .fetch_optional(ex)
-            .await?
-            .flatten();
+/// max. Runs on a SeaORM connection — either
+/// `sea_orm_connection(&pool)` for pool callers or
+/// `TxConn::new(&mut tx)` for sqlx-transaction callers. Moved from
+/// the api chat endpoints (OVL-06 PIDASHCONV-1544); the endpoints
+/// are thin callers. Re-exported through `pidash-sdk::ops`.
+pub async fn next_event_seq(
+    db: &impl sea_orm::ConnectionTrait,
+    session_id: Uuid,
+) -> Result<i32, sqlx::Error> {
+    let max: Option<i32> = next_event_seq_select(session_id)
+        .one(db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?
+        .flatten();
     Ok(next_seq_after_max(max))
 }
 
 /// `next_message_seq` (`chat.py:227-233`): one past the session
-/// message max. Executor-generic so endpoint transactions and the
-/// overlay share it. Moved from the api chat endpoints (OVL-06
-/// PIDASHCONV-1544); the endpoints are thin callers. Re-exported
-/// through `pidash-sdk::ops`.
-pub async fn next_message_seq<'e, E>(ex: E, session_id: Uuid) -> Result<i32, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let max: Option<i32> = sqlx::query_scalar(
-        r#"SELECT MAX("seq") FROM "agent_chat_message" WHERE "session_id" = $1"#,
-    )
-    .bind(session_id)
-    .fetch_optional(ex)
-    .await?
-    .flatten();
+/// message max. Runs on a SeaORM connection — either
+/// `sea_orm_connection(&pool)` for pool callers or
+/// `TxConn::new(&mut tx)` for sqlx-transaction callers. Moved from
+/// the api chat endpoints (OVL-06 PIDASHCONV-1544); the endpoints
+/// are thin callers. Re-exported through `pidash-sdk::ops`.
+pub async fn next_message_seq(
+    db: &impl sea_orm::ConnectionTrait,
+    session_id: Uuid,
+) -> Result<i32, sqlx::Error> {
+    let max: Option<i32> = next_message_seq_select(session_id)
+        .one(db)
+        .await
+        .map_err(pidash_db::orm_tx::into_sqlx)?
+        .flatten();
     Ok(next_seq_after_max(max))
 }
 
@@ -535,27 +534,6 @@ pub fn publish_frame(session_id: Uuid, event_json: &str) -> (String, String) {
     )
 }
 
-/// Re-read for `_publish_event_by_id` (`chat.py:174-177`): the event
-/// row by pk (a miss publishes nothing). Like
-/// [`append_dedupe_check_sql`], the FK half of the default ordering
-/// joins the session table for its `-last_message_at`,
-/// `-created_at`.
-pub fn publish_event_lookup_sql(event_id: i64) -> String {
-    format!(
-        "SELECT {} FROM \"{}\" INNER JOIN \"{}\" ON (\"{}\".\"session_id\" = \"{}\".\"id\") WHERE \"{}\".\"id\" = {} ORDER BY \"{}\".\"last_message_at\" DESC, \"{}\".\"created_at\" DESC, \"{}\".\"seq\" ASC LIMIT 1",
-        quoted_columns(chat_event::TABLE, chat_event::COLUMNS),
-        chat_event::TABLE,
-        chat_session::TABLE,
-        chat_event::TABLE,
-        chat_session::TABLE,
-        chat_event::TABLE,
-        event_id,
-        chat_session::TABLE,
-        chat_session::TABLE,
-        chat_event::TABLE,
-    )
-}
-
 /// `"table"."col", ...` in the given order.
 fn quoted_columns(table: &str, columns: &[&str]) -> String {
     columns
@@ -651,30 +629,6 @@ pub fn append_event_inputs(
 /// dedupes (`chat.py:158`).
 pub fn append_checks_dedupe(source_key: &str) -> bool {
     !source_key.is_empty()
-}
-
-/// The dedupe probe (`chat.py:159`): the session's event with this
-/// `source_key`, default ordering, first row. The `ORDER BY session`
-/// half of the model's `ordering = ["session", "seq"]` resolves
-/// through the related model's own ordering, so Django joins
-/// `agent_chat_session` and sorts by its `-last_message_at`,
-/// `-created_at` before the event's `seq`.
-pub fn append_dedupe_check_sql(session_id: Uuid, source_key: &str) -> String {
-    format!(
-        "SELECT {} FROM \"{}\" INNER JOIN \"{}\" ON (\"{}\".\"session_id\" = \"{}\".\"id\") WHERE (\"{}\".\"session_id\" = {} AND \"{}\".\"source_key\" = {}) ORDER BY \"{}\".\"last_message_at\" DESC, \"{}\".\"created_at\" DESC, \"{}\".\"seq\" ASC LIMIT 1",
-        quoted_columns(chat_event::TABLE, chat_event::COLUMNS),
-        chat_event::TABLE,
-        chat_session::TABLE,
-        chat_event::TABLE,
-        chat_session::TABLE,
-        chat_event::TABLE,
-        lit_uuid(session_id),
-        chat_event::TABLE,
-        lit_str(source_key),
-        chat_session::TABLE,
-        chat_session::TABLE,
-        chat_event::TABLE,
-    )
 }
 
 /// The event insert (`chat.py:162-169`): every concrete column in
@@ -933,23 +887,6 @@ pub fn session_lock_by_pk_sql(session_id: Uuid) -> String {
     )
 }
 
-/// Lock an OPEN session row by pk (`mark_warm_dispatch_failed` `:259`,
-/// sweep rows `:416`, release rows `:462`): the pk lock plus the
-/// `status = 'open'` guard.
-pub fn session_lock_open_sql(session_id: Uuid) -> String {
-    format!(
-        "SELECT {} FROM \"{}\" WHERE (\"{}\".\"id\" = {} AND \"{}\".\"status\" = '{}') ORDER BY \"{}\".\"last_message_at\" DESC, \"{}\".\"created_at\" DESC LIMIT 1 FOR UPDATE",
-        quoted_columns(chat_session::TABLE, chat_session::COLUMNS),
-        chat_session::TABLE,
-        chat_session::TABLE,
-        lit_uuid(session_id),
-        chat_session::TABLE,
-        AgentChatSessionStatus::Open.value(),
-        chat_session::TABLE,
-        chat_session::TABLE,
-    )
-}
-
 // ---------------------------------------------------------------------------
 // `mark_warm_dispatch_failed` (`chat.py:256-270`)
 // ---------------------------------------------------------------------------
@@ -1046,47 +983,6 @@ pub fn insert_message_sql(
 // `active_assistant_message_locked` (`chat.py:322-332`)
 // ---------------------------------------------------------------------------
 
-/// The turn-scoped assistant probe (`chat.py:329`): STREAMING
-/// assistants of the session on this `local_turn_id`, newest first.
-/// Django renders the one-`filter()` conditions alphabetically
-/// (`role`, `session_id`, `status` — verified live, independent of
-/// the Python kwarg order); the chained `.filter(local_turn_id)`
-/// appends last.
-pub fn assistant_turn_scoped_sql(session_id: Uuid, local_turn_id: &str) -> String {
-    format!(
-        "SELECT {} FROM \"{}\" WHERE (\"{}\".\"role\" = '{}' AND \"{}\".\"session_id\" = {} AND \"{}\".\"status\" = '{}' AND \"{}\".\"local_turn_id\" = {}) ORDER BY \"{}\".\"created_at\" DESC LIMIT 1",
-        quoted_columns(chat_message::TABLE, chat_message::COLUMNS),
-        chat_message::TABLE,
-        chat_message::TABLE,
-        AgentChatMessageRole::Assistant.value(),
-        chat_message::TABLE,
-        lit_uuid(session_id),
-        chat_message::TABLE,
-        AgentChatMessageStatus::Streaming.value(),
-        chat_message::TABLE,
-        lit_str(local_turn_id),
-        chat_message::TABLE,
-    )
-}
-
-/// The unscoped fallback probe (`chat.py:332`): newest STREAMING
-/// assistant of the session, whatever its turn. Same alphabetical
-/// condition order as [`assistant_turn_scoped_sql`].
-pub fn assistant_fallback_sql(session_id: Uuid) -> String {
-    format!(
-        "SELECT {} FROM \"{}\" WHERE (\"{}\".\"role\" = '{}' AND \"{}\".\"session_id\" = {} AND \"{}\".\"status\" = '{}') ORDER BY \"{}\".\"created_at\" DESC LIMIT 1",
-        quoted_columns(chat_message::TABLE, chat_message::COLUMNS),
-        chat_message::TABLE,
-        chat_message::TABLE,
-        AgentChatMessageRole::Assistant.value(),
-        chat_message::TABLE,
-        lit_uuid(session_id),
-        chat_message::TABLE,
-        AgentChatMessageStatus::Streaming.value(),
-        chat_message::TABLE,
-    )
-}
-
 /// `active_assistant_message_locked` (`chat.py:322-332`): the
 /// turn-scoped hit wins; otherwise the newest STREAMING assistant.
 /// The fallback stays lazy — it runs only when the scoped probe
@@ -1130,30 +1026,6 @@ pub fn finalize_target_message_id(
     session_active_message_id: Option<Uuid>,
 ) -> Option<Uuid> {
     message_id_override.or(session_active_message_id)
-}
-
-/// The explicit lookup (`chat.py:345`): the target message scoped to
-/// the session (a cross-session id silently matches nothing —
-/// FX-RUN-06 `dispatch_failed_rule`). Like
-/// [`append_dedupe_check_sql`], the FK half of the default ordering
-/// joins the session table for its `-last_message_at`,
-/// `-created_at`.
-pub fn finalize_explicit_lookup_sql(session_id: Uuid, message_id: Uuid) -> String {
-    format!(
-        "SELECT {} FROM \"{}\" INNER JOIN \"{}\" ON (\"{}\".\"session_id\" = \"{}\".\"id\") WHERE (\"{}\".\"id\" = {} AND \"{}\".\"session_id\" = {}) ORDER BY \"{}\".\"last_message_at\" DESC, \"{}\".\"created_at\" DESC, \"{}\".\"seq\" ASC LIMIT 1",
-        quoted_columns(chat_message::TABLE, chat_message::COLUMNS),
-        chat_message::TABLE,
-        chat_session::TABLE,
-        chat_message::TABLE,
-        chat_session::TABLE,
-        chat_message::TABLE,
-        lit_uuid(message_id),
-        chat_message::TABLE,
-        lit_uuid(session_id),
-        chat_session::TABLE,
-        chat_session::TABLE,
-        chat_message::TABLE,
-    )
 }
 
 /// The outcome of [`plan_finalize_active_messages`].
@@ -1444,42 +1316,6 @@ pub fn release_row_applies(session: &AgentChatSession) -> bool {
     turn_was_active(session)
 }
 
-/// The fail-flow session write (`save(update_fields)`,
-/// `chat.py:292,436,471`): clears the active turn, stores the
-/// planned error, closes when planned. `updated_at` is `auto_now`.
-/// `save()` renders `SET` in model field order, not `update_fields`
-/// order (verified live): `active_turn_id` before
-/// `active_message_id`, and `status`/`closed_at` slotted by their
-/// field positions when closing.
-pub fn fail_session_update_sql(
-    session_id: Uuid,
-    plan: &FailTurnPlan,
-    updated_at: DateTime<Utc>,
-) -> String {
-    let mut sets = format!(
-        "\"active_turn_id\" = '', \"active_message_id\" = NULL, \"error\" = {}, \"updated_at\" = {}",
-        lit_str(&plan.session_error),
-        lit_tstz(updated_at),
-    );
-    if plan.close_session {
-        let closed_at = plan.closed_at.expect("closed_at when closing");
-        sets = format!(
-            "\"status\" = '{}', \"active_turn_id\" = '', \"active_message_id\" = NULL, \"closed_at\" = {}, \"error\" = {}, \"updated_at\" = {}",
-            AgentChatSessionStatus::Closed.value(),
-            lit_tstz(closed_at),
-            lit_str(&plan.session_error),
-            lit_tstz(updated_at),
-        );
-    }
-    format!(
-        "UPDATE \"{}\" SET {} WHERE \"{}\".\"id\" = {}",
-        chat_session::TABLE,
-        sets,
-        chat_session::TABLE,
-        lit_uuid(session_id),
-    )
-}
-
 // ---------------------------------------------------------------------------
 // `complete_active_turn_locked` (`chat.py:359-400`)
 // ---------------------------------------------------------------------------
@@ -1626,22 +1462,6 @@ pub fn sweep_active_cutoff(now: DateTime<Utc>) -> DateTime<Utc> {
     now - chrono::Duration::seconds(CHAT_ACTIVE_TIMEOUT_SECS)
 }
 
-/// `sweep_active_turns` id select (`chat.py:405-410`): OPEN sessions
-/// with an active turn that are stale (`updated_at < cutoff`) or
-/// whose runner is OFFLINE (hence the `INNER JOIN`).
-pub fn sweep_active_ids_sql(cutoff: DateTime<Utc>) -> String {
-    format!(
-        "SELECT \"agent_chat_session\".\"id\" FROM \"agent_chat_session\" INNER JOIN \"{}\" ON (\"agent_chat_session\".\"runner_id\" = \"{}\".\"id\") WHERE (\"agent_chat_session\".\"status\" = '{}' AND ({}) AND (\"agent_chat_session\".\"updated_at\" < {} OR \"{}\".\"status\" = '{}')) ORDER BY \"agent_chat_session\".\"last_message_at\" DESC, \"agent_chat_session\".\"created_at\" DESC",
-        RUNNER_TABLE,
-        RUNNER_TABLE,
-        AgentChatSessionStatus::Open.value(),
-        ACTIVE_TURN_PREDICATE_SQL,
-        lit_tstz(cutoff),
-        RUNNER_TABLE,
-        RUNNER_STATUS_OFFLINE,
-    )
-}
-
 /// `release_active_chats_for_runner` id select (`chat.py:452-456`):
 /// the runner's OPEN sessions with an active turn (no staleness
 /// filter).
@@ -1660,35 +1480,313 @@ pub fn sweep_empty_cutoff(now: DateTime<Utc>) -> DateTime<Utc> {
     now - chrono::Duration::hours(24)
 }
 
-/// `sweep_empty_sessions` id select (`chat.py:485-491`): OPEN
-/// sessions created over 24h ago with zero messages (the `LEFT
-/// OUTER JOIN` + `IS NULL` is `messages__isnull=True`). The
-/// `ORDER BY` is pointless for an id list but ported
-/// (QUIRK-EMPTY-ORDER).
-pub fn sweep_empty_ids_sql(cutoff: DateTime<Utc>) -> String {
-    format!(
-        "SELECT \"agent_chat_session\".\"id\" FROM \"agent_chat_session\" LEFT OUTER JOIN \"agent_chat_message\" ON (\"agent_chat_session\".\"id\" = \"agent_chat_message\".\"session_id\") WHERE (\"agent_chat_session\".\"created_at\" < {} AND \"agent_chat_message\".\"id\" IS NULL AND \"agent_chat_session\".\"status\" = '{}') ORDER BY \"agent_chat_session\".\"last_message_at\" DESC, \"agent_chat_session\".\"created_at\" DESC",
-        lit_tstz(cutoff),
-        AgentChatSessionStatus::Open.value(),
-    )
+// ---------------------------------------------------------------------------
+// SeaORM statements
+// ---------------------------------------------------------------------------
+//
+// The chat statements as SeaORM / sea-query builders for the executing
+// drivers (`pidash_jobs::runner_runs::sweeps_chat` runs them on
+// `pidash_db::orm_tx::TxConn` over its per-row transaction). Same
+// predicates, joins, ordering, `LIMIT`s and locks as the Django text
+// they replace; the `%s`-less literal rendering the text twins used is
+// gone — values bind.
+
+/// The active-turn predicate ([`ACTIVE_TURN_PREDICATE_SQL`]) as a
+/// condition: `active_message_id IS NOT NULL OR active_turn_id <> ''`.
+pub fn active_turn_condition() -> sea_orm::Condition {
+    use orm::agent_chat_session::Column;
+    use sea_orm::ColumnTrait;
+    sea_orm::Condition::any()
+        .add(Column::ActiveMessageId.is_not_null())
+        .add(Column::ActiveTurnId.ne(""))
 }
 
-/// `sweep_empty_sessions` bulk close (`chat.py:494-497`): one
-/// `UPDATE` over the collected ids; the rowcount is the return
-/// value. The caller skips the call when `ids` is empty
-/// (`chat.py:492-493`).
-pub fn sweep_empty_close_sql(ids: &[Uuid], closed_at: DateTime<Utc>) -> String {
-    let ids = ids
-        .iter()
-        .map(|id| lit_uuid(*id))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "UPDATE \"agent_chat_session\" SET \"status\" = '{}', \"closed_at\" = {} WHERE \"agent_chat_session\".\"id\" IN ({})",
-        AgentChatSessionStatus::Closed.value(),
-        lit_tstz(closed_at),
-        ids,
+/// Lock an OPEN session row by pk (`mark_warm_dispatch_failed` `:259`,
+/// sweep rows `:416`, release rows `:462`): the full row behind the
+/// `status = 'open'` guard, default ordering, `LIMIT 1 FOR UPDATE`.
+pub fn session_lock_open_select(
+    session_id: Uuid,
+) -> sea_orm::Select<orm::agent_chat_session::Entity> {
+    use orm::agent_chat_session::{Column, Entity};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+    Entity::find()
+        .filter(Column::Id.eq(session_id))
+        .filter(Column::Status.eq(AgentChatSessionStatus::Open.value()))
+        .order_by_desc(Column::LastMessageAt)
+        .order_by_desc(Column::CreatedAt)
+        .limit(1)
+        .lock_exclusive()
+}
+
+/// The message default ordering (`ordering = ["session", "seq"]`): the
+/// `session` half resolves through the session model's own
+/// `-last_message_at`, `-created_at`, so Django joins the session table
+/// — the callers add that `INNER JOIN`.
+fn message_default_order(
+    select: sea_orm::Select<orm::agent_chat_message::Entity>,
+) -> sea_orm::Select<orm::agent_chat_message::Entity> {
+    use sea_orm::QueryOrder;
+    select
+        .order_by_desc(orm::agent_chat_session::Column::LastMessageAt)
+        .order_by_desc(orm::agent_chat_session::Column::CreatedAt)
+        .order_by_asc(orm::agent_chat_message::Column::Seq)
+}
+
+/// The explicit finalize lookup (`chat.py:345`): the target message
+/// scoped to the session (a cross-session id silently matches nothing —
+/// FX-RUN-06 `dispatch_failed_rule`), default ordering (session join),
+/// first row.
+pub fn finalize_explicit_lookup_select(
+    session_id: Uuid,
+    message_id: Uuid,
+) -> sea_orm::Select<orm::agent_chat_message::Entity> {
+    use orm::agent_chat_message::{Column, Entity, Relation};
+    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait};
+    message_default_order(
+        Entity::find()
+            .join(JoinType::InnerJoin, Relation::AgentChatSession.def())
+            .filter(Column::Id.eq(message_id))
+            .filter(Column::SessionId.eq(session_id)),
     )
+    .limit(1)
+}
+
+/// The turn-scoped assistant probe (`chat.py:329`): STREAMING assistants
+/// of the session on this `local_turn_id`, newest first.
+pub fn assistant_turn_scoped_select(
+    session_id: Uuid,
+    local_turn_id: &str,
+) -> sea_orm::Select<orm::agent_chat_message::Entity> {
+    use orm::agent_chat_message::Column;
+    use sea_orm::{ColumnTrait, QueryFilter};
+    assistant_fallback_select(session_id).filter(Column::LocalTurnId.eq(local_turn_id))
+}
+
+/// The unscoped fallback probe (`chat.py:332`): the newest STREAMING
+/// assistant of the session, whatever its turn.
+pub fn assistant_fallback_select(
+    session_id: Uuid,
+) -> sea_orm::Select<orm::agent_chat_message::Entity> {
+    use orm::agent_chat_message::{Column, Entity};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+    Entity::find()
+        .filter(Column::Role.eq(AgentChatMessageRole::Assistant.value()))
+        .filter(Column::SessionId.eq(session_id))
+        .filter(Column::Status.eq(AgentChatMessageStatus::Streaming.value()))
+        .order_by_desc(Column::CreatedAt)
+        .limit(1)
+}
+
+/// The message status write ([`message_status_update_sql`]) as a SeaORM
+/// statement: `SET status, completed_at WHERE pk`, unscoped by session.
+pub fn message_status_update_statement(
+    update: &MessageStatusUpdate,
+) -> sea_orm::UpdateMany<orm::agent_chat_message::Entity> {
+    use orm::agent_chat_message::{Column, Entity};
+    use sea_orm::sea_query::Expr;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    Entity::update_many()
+        .col_expr(Column::Status, Expr::value(update.status.value()))
+        .col_expr(Column::CompletedAt, Expr::value(update.completed_at))
+        .filter(Column::Id.eq(update.id))
+}
+
+/// The fail-flow session write (`save(update_fields)`,
+/// `chat.py:292,436,471`): clears the active turn, stores the planned
+/// error, closes when planned; `updated_at` is `auto_now`.
+pub fn fail_session_update_statement(
+    session_id: Uuid,
+    plan: &FailTurnPlan,
+    updated_at: DateTime<Utc>,
+) -> sea_orm::UpdateMany<orm::agent_chat_session::Entity> {
+    use orm::agent_chat_session::{Column, Entity};
+    use sea_orm::sea_query::{Expr, Keyword, SimpleExpr};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let mut update = Entity::update_many();
+    if plan.close_session {
+        let closed_at = plan.closed_at.expect("closed_at when closing");
+        update = update
+            .col_expr(
+                Column::Status,
+                Expr::value(AgentChatSessionStatus::Closed.value()),
+            )
+            .col_expr(Column::ClosedAt, Expr::value(closed_at));
+    }
+    update
+        .col_expr(Column::ActiveTurnId, Expr::value(String::new()))
+        .col_expr(Column::ActiveMessageId, SimpleExpr::Keyword(Keyword::Null))
+        .col_expr(Column::Error, Expr::value(plan.session_error.clone()))
+        .col_expr(Column::UpdatedAt, Expr::value(updated_at))
+        .filter(Column::Id.eq(session_id))
+}
+
+/// The event default ordering (`ordering = ["session", "seq"]`), like
+/// [`message_default_order`]: the callers add the session `INNER JOIN`.
+fn event_default_order(
+    select: sea_orm::Select<orm::agent_chat_event::Entity>,
+) -> sea_orm::Select<orm::agent_chat_event::Entity> {
+    use sea_orm::QueryOrder;
+    select
+        .order_by_desc(orm::agent_chat_session::Column::LastMessageAt)
+        .order_by_desc(orm::agent_chat_session::Column::CreatedAt)
+        .order_by_asc(orm::agent_chat_event::Column::Seq)
+}
+
+/// The dedupe probe (`chat.py:159`): the session's event with this
+/// `source_key`, default ordering (session join), first row.
+pub fn append_dedupe_check_select(
+    session_id: Uuid,
+    source_key: &str,
+) -> sea_orm::Select<orm::agent_chat_event::Entity> {
+    use orm::agent_chat_event::{Column, Entity, Relation};
+    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait};
+    event_default_order(
+        Entity::find()
+            .join(JoinType::InnerJoin, Relation::AgentChatSession.def())
+            .filter(Column::SessionId.eq(session_id))
+            .filter(Column::SourceKey.eq(source_key)),
+    )
+    .limit(1)
+}
+
+/// `next_event_seq_locked` ([`next_event_seq_sql`]) as a SeaORM
+/// statement: `MAX(seq)` over the session's events (`None` for an
+/// empty set; the caller adds one via [`next_seq_after_max`]).
+pub fn next_event_seq_select(
+    session_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<Option<i32>>> {
+    use orm::agent_chat_event::{Column, Entity};
+    use sea_orm::sea_query::Expr;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    Entity::find()
+        .select_only()
+        .column_as(Expr::col((Entity, Column::Seq)).max(), "seq__max")
+        .filter(Column::SessionId.eq(session_id))
+        .into_tuple::<Option<i32>>()
+}
+
+/// `next_message_seq_locked` ([`next_message_seq_sql`]) as a SeaORM
+/// statement: `MAX(seq)` over the session's messages (`None` for an
+/// empty set; the caller adds one via [`next_seq_after_max`]).
+pub fn next_message_seq_select(
+    session_id: Uuid,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<Option<i32>>> {
+    use orm::agent_chat_message::{Column, Entity};
+    use sea_orm::sea_query::Expr;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    Entity::find()
+        .select_only()
+        .column_as(Expr::col((Entity, Column::Seq)).max(), "seq__max")
+        .filter(Column::SessionId.eq(session_id))
+        .into_tuple::<Option<i32>>()
+}
+
+/// The event insert ([`insert_event_sql`]) as a SeaORM statement: every
+/// concrete column, the `BigAutoField` pk from the database (returned as
+/// `last_insert_id`).
+pub fn insert_event_statement(
+    session_id: Uuid,
+    seq: i32,
+    inputs: &NewEventInputs,
+    created_at: DateTime<Utc>,
+) -> sea_orm::Insert<orm::agent_chat_event::ActiveModel> {
+    use orm::agent_chat_event::{ActiveModel, Entity};
+    use sea_orm::{EntityTrait, NotSet, Set};
+    Entity::insert(ActiveModel {
+        id: NotSet,
+        seq: Set(seq),
+        source_key: Set(inputs.source_key.clone()),
+        kind: Set(inputs.kind.clone()),
+        payload: Set(inputs.payload.clone()),
+        created_at: Set(created_at.into()),
+        message_id: Set(inputs.message_id),
+        session_id: Set(session_id),
+    })
+}
+
+/// Re-read for `_publish_event_by_id` (`chat.py:174-177`): the event
+/// row by pk (a miss publishes nothing), default ordering (session
+/// join), first row.
+pub fn publish_event_lookup_select(
+    event_id: i64,
+) -> sea_orm::Select<orm::agent_chat_event::Entity> {
+    use orm::agent_chat_event::{Column, Entity, Relation};
+    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait};
+    event_default_order(
+        Entity::find()
+            .join(JoinType::InnerJoin, Relation::AgentChatSession.def())
+            .filter(Column::Id.eq(event_id)),
+    )
+    .limit(1)
+}
+
+/// `sweep_active_turns` id select (`chat.py:405-410`): OPEN sessions
+/// with an active turn that are stale (`updated_at < cutoff`) or whose
+/// runner is OFFLINE (hence the `INNER JOIN`), default ordering.
+pub fn sweep_active_ids_select(
+    cutoff: DateTime<Utc>,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<Uuid>> {
+    use orm::agent_chat_session::{Column, Entity, Relation};
+    use sea_orm::{
+        ColumnTrait, Condition, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect,
+        RelationTrait,
+    };
+    Entity::find()
+        .select_only()
+        .column(Column::Id)
+        .join(JoinType::InnerJoin, Relation::Runner.def())
+        .filter(Column::Status.eq(AgentChatSessionStatus::Open.value()))
+        .filter(active_turn_condition())
+        .filter(
+            Condition::any()
+                .add(Column::UpdatedAt.lt(cutoff))
+                .add(orm::runner::Column::Status.eq(RUNNER_STATUS_OFFLINE)),
+        )
+        .order_by_desc(Column::LastMessageAt)
+        .order_by_desc(Column::CreatedAt)
+        .into_tuple::<Uuid>()
+}
+
+/// `sweep_empty_sessions` id select (`chat.py:485-491`): OPEN sessions
+/// created over 24h ago with zero messages (the `LEFT JOIN` + `IS NULL`
+/// is `messages__isnull=True`). The `ORDER BY` is pointless for an id
+/// list but ported (QUIRK-EMPTY-ORDER).
+pub fn sweep_empty_ids_select(
+    cutoff: DateTime<Utc>,
+) -> sea_orm::Selector<sea_orm::SelectGetableTuple<Uuid>> {
+    use orm::agent_chat_session::{Column, Entity, Relation};
+    use sea_orm::{
+        ColumnTrait, EntityTrait, JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
+    };
+    Entity::find()
+        .select_only()
+        .column(Column::Id)
+        .join(JoinType::LeftJoin, Relation::AgentChatMessage.def())
+        .filter(Column::CreatedAt.lt(cutoff))
+        .filter(orm::agent_chat_message::Column::Id.is_null())
+        .filter(Column::Status.eq(AgentChatSessionStatus::Open.value()))
+        .order_by_desc(Column::LastMessageAt)
+        .order_by_desc(Column::CreatedAt)
+        .into_tuple::<Uuid>()
+}
+
+/// `sweep_empty_sessions` bulk close (`chat.py:494-497`): one `UPDATE`
+/// over the collected ids; the rowcount is the return value. The caller
+/// skips the call when `ids` is empty (`chat.py:492-493`).
+pub fn sweep_empty_close_statement(
+    ids: &[Uuid],
+    closed_at: DateTime<Utc>,
+) -> sea_orm::UpdateMany<orm::agent_chat_session::Entity> {
+    use orm::agent_chat_session::{Column, Entity};
+    use sea_orm::sea_query::Expr;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    Entity::update_many()
+        .col_expr(
+            Column::Status,
+            Expr::value(AgentChatSessionStatus::Closed.value()),
+        )
+        .col_expr(Column::ClosedAt, Expr::value(closed_at))
+        .filter(Column::Id.is_in(ids.iter().copied()))
 }
 
 #[cfg(test)]
@@ -2069,20 +2167,6 @@ mod tests {
         // Only non-empty source keys dedupe.
         assert!(append_checks_dedupe("sk-1"));
         assert!(!append_checks_dedupe(""));
-    }
-
-    #[test]
-    fn append_dedupe_check_sql_shape() {
-        let sql = append_dedupe_check_sql(uuid("9fe1b18d-4602-48c7-9352-0bee23df1f9d"), "sk-1");
-        assert!(sql.starts_with(
-            "SELECT \"agent_chat_event\".\"id\", \"agent_chat_event\".\"session_id\""
-        ));
-        assert!(sql.contains(
-            "FROM \"agent_chat_event\" INNER JOIN \"agent_chat_session\" ON (\"agent_chat_event\".\"session_id\" = \"agent_chat_session\".\"id\") WHERE (\"agent_chat_event\".\"session_id\" = '9fe1b18d460248c793520bee23df1f9d'::uuid AND \"agent_chat_event\".\"source_key\" = 'sk-1')"
-        ));
-        assert!(sql.ends_with(
-            "ORDER BY \"agent_chat_session\".\"last_message_at\" DESC, \"agent_chat_session\".\"created_at\" DESC, \"agent_chat_event\".\"seq\" ASC LIMIT 1"
-        ));
     }
 
     #[test]
@@ -2718,53 +2802,6 @@ mod tests {
     // -- sweeps ---------------------------------------------------------------
 
     #[test]
-    fn sweep_empty_sql_is_byte_exact() {
-        let fx = &fixture()["sweep_empty"];
-        let cutoff: DateTime<Utc> =
-            DateTime::parse_from_rfc3339("2026-10-01T22:52:02.927778+00:00")
-                .unwrap()
-                .with_timezone(&Utc);
-        assert_eq!(sweep_empty_ids_sql(cutoff), fx["sql"][0].as_str().unwrap());
-        let closed: DateTime<Utc> =
-            DateTime::parse_from_rfc3339("2026-10-02T22:52:02.928857+00:00")
-                .unwrap()
-                .with_timezone(&Utc);
-        assert_eq!(
-            sweep_empty_close_sql(&[uuid("1d271194-9131-4bfc-bc3f-cb6b36dfa173")], closed),
-            fx["sql"][1].as_str().unwrap()
-        );
-        assert_eq!(fx["returned"].as_u64(), Some(1));
-    }
-
-    #[test]
-    fn sweep_active_ids_prefix_matches_fixture() {
-        // The fixture truncates the statement at 200 chars; pin the
-        // recorded prefix (minus the cut-off token tail).
-        let recorded = fixture()["sweep_active_turns"]["first_sql"][0]
-            .as_str()
-            .expect("sql")
-            .to_owned();
-        let cutoff: DateTime<Utc> =
-            DateTime::parse_from_rfc3339("2026-10-02T22:22:02.927778+00:00")
-                .unwrap()
-                .with_timezone(&Utc);
-        let sql = sweep_active_ids_sql(cutoff);
-        assert!(sql.starts_with(&recorded[..recorded.len() - 4]), "{sql}");
-        assert!(sql.contains(
-            "INNER JOIN \"runner\" ON (\"agent_chat_session\".\"runner_id\" = \"runner\".\"id\")"
-        ));
-        assert!(sql.contains("\"agent_chat_session\".\"status\" = 'open'"));
-        assert!(sql.contains(ACTIVE_TURN_PREDICATE_SQL));
-        assert!(sql.contains("\"runner\".\"status\" = 'offline'"));
-        assert!(sql.ends_with("ORDER BY \"agent_chat_session\".\"last_message_at\" DESC, \"agent_chat_session\".\"created_at\" DESC"));
-        assert_eq!(CHAT_ACTIVE_TIMEOUT_SECS, 1800);
-        assert_eq!(
-            sweep_active_cutoff(stamp()),
-            stamp() - chrono::Duration::seconds(1800)
-        );
-    }
-
-    #[test]
     fn release_ids_prefix_matches_fixture() {
         let recorded = fixture()["release_active"]["first_sql"][0]
             .as_str()
@@ -2785,92 +2822,6 @@ mod tests {
             runner_has_active_chat_sql(uuid("cd871d43-1c13-4f30-a838-2495c1c4baac")),
             "SELECT 1 AS \"a\" FROM \"agent_chat_session\" WHERE (\"agent_chat_session\".\"runner_id\" = 'cd871d431c134f30a8382495c1c4baac'::uuid AND \"agent_chat_session\".\"status\" = 'open' AND (\"agent_chat_session\".\"active_message_id\" IS NOT NULL OR NOT (\"agent_chat_session\".\"active_turn_id\" = ''))) LIMIT 1"
         );
-    }
-
-    #[test]
-    fn lock_sql_shapes() {
-        let by_pk = session_lock_by_pk_sql(uuid("9fe1b18d-4602-48c7-9352-0bee23df1f9d"));
-        assert!(by_pk.contains("WHERE \"agent_chat_session\".\"id\" = '9fe1b18d460248c793520bee23df1f9d'::uuid ORDER BY"));
-        assert!(!by_pk.contains("\"status\" = 'open'"));
-        assert!(by_pk.ends_with("LIMIT 1 FOR UPDATE"));
-        let open = session_lock_open_sql(uuid("9fe1b18d-4602-48c7-9352-0bee23df1f9d"));
-        assert!(open.contains(
-            "WHERE (\"agent_chat_session\".\"id\" = '9fe1b18d460248c793520bee23df1f9d'::uuid AND \"agent_chat_session\".\"status\" = 'open')"
-        ));
-        assert!(open.ends_with("LIMIT 1 FOR UPDATE"));
-        // Full row in both locks.
-        for sql in [&by_pk, &open] {
-            assert!(sql.starts_with(
-                "SELECT \"agent_chat_session\".\"id\", \"agent_chat_session\".\"workspace_id\""
-            ));
-        }
-    }
-
-    #[test]
-    fn lookup_sql_shapes() {
-        let session = uuid("9fe1b18d-4602-48c7-9352-0bee23df1f9d");
-        let message = uuid("9d469513-f80c-4f0c-ab20-e5827f95c3f9");
-        let lookup = finalize_explicit_lookup_sql(session, message);
-        assert!(lookup.contains(&format!(
-            "FROM \"agent_chat_message\" INNER JOIN \"agent_chat_session\" ON (\"agent_chat_message\".\"session_id\" = \"agent_chat_session\".\"id\") WHERE (\"agent_chat_message\".\"id\" = {} AND \"agent_chat_message\".\"session_id\" = {})",
-            "'9d469513f80c4f0cab20e5827f95c3f9'::uuid",
-            "'9fe1b18d460248c793520bee23df1f9d'::uuid",
-        )));
-        assert!(lookup.ends_with("ORDER BY \"agent_chat_session\".\"last_message_at\" DESC, \"agent_chat_session\".\"created_at\" DESC, \"agent_chat_message\".\"seq\" ASC LIMIT 1"));
-        let scoped = assistant_turn_scoped_sql(session, "t1");
-        assert!(scoped.contains(
-            "WHERE (\"agent_chat_message\".\"role\" = 'assistant' AND \"agent_chat_message\".\"session_id\" = '9fe1b18d460248c793520bee23df1f9d'::uuid AND \"agent_chat_message\".\"status\" = 'streaming' AND \"agent_chat_message\".\"local_turn_id\" = 't1')"
-        ));
-        assert!(scoped.ends_with("ORDER BY \"agent_chat_message\".\"created_at\" DESC LIMIT 1"));
-        let fallback = assistant_fallback_sql(session);
-        assert!(!fallback.contains("local_turn_id\" ="));
-        assert!(fallback.ends_with("ORDER BY \"agent_chat_message\".\"created_at\" DESC LIMIT 1"));
-        let publish = publish_event_lookup_sql(47);
-        assert!(publish.contains(
-            "FROM \"agent_chat_event\" INNER JOIN \"agent_chat_session\" ON (\"agent_chat_event\".\"session_id\" = \"agent_chat_session\".\"id\") WHERE \"agent_chat_event\".\"id\" = 47"
-        ));
-        assert!(publish.ends_with("ORDER BY \"agent_chat_session\".\"last_message_at\" DESC, \"agent_chat_session\".\"created_at\" DESC, \"agent_chat_event\".\"seq\" ASC LIMIT 1"));
-    }
-
-    #[test]
-    fn update_sql_shapes() {
-        // Fail update without close: four SET columns.
-        let session = active_session();
-        let explicit = test_message("9d469513-f80c-4f0c-ab20-e5827f95c3f9", session.id);
-        let mut clock = || stamp();
-        let plan = plan_sweep_active_row(&session, Some(&explicit), None, &mut clock);
-        let sql = fail_session_update_sql(session.id, &plan, stamp());
-        assert!(sql.starts_with("UPDATE \"agent_chat_session\" SET \"active_turn_id\" = '', \"active_message_id\" = NULL, \"error\" = 'active chat turn timed out', \"updated_at\" = "));
-        assert!(!sql.contains("\"status\" ="));
-        assert!(sql.ends_with(&format!(
-            "WHERE \"agent_chat_session\".\"id\" = {}",
-            "'9fe1b18d460248c793520bee23df1f9d'::uuid"
-        )));
-        // Fail update with close: six SET columns.
-        let mut closing = active_session();
-        closing.close_requested = true;
-        let plan = plan_sweep_active_row(&closing, Some(&explicit), None, &mut clock);
-        let sql = fail_session_update_sql(closing.id, &plan, stamp());
-        assert!(sql.contains("SET \"status\" = 'closed', \"active_turn_id\" = '', \"active_message_id\" = NULL, \"closed_at\" = '2026-10-02 22:52:02.000000+00:00'::timestamptz, \"error\" = 'active chat turn timed out', \"updated_at\" ="));
-        // Message status write (shared finalize/complete shape).
-        let update = MessageStatusUpdate {
-            id: explicit.id,
-            status: AgentChatMessageStatus::Failed,
-            completed_at: stamp(),
-        };
-        assert_eq!(
-            message_status_update_sql(&update),
-            complete_message_update_sql(&update),
-        );
-        assert_eq!(
-            message_status_update_sql(&update),
-            "UPDATE \"agent_chat_message\" SET \"status\" = 'failed', \"completed_at\" = '2026-10-02 22:52:02.000000+00:00'::timestamptz WHERE \"agent_chat_message\".\"id\" = '9d469513f80c4f0cab20e5827f95c3f9'::uuid"
-        );
-        // Complete update always writes all six columns in model field order.
-        let plan =
-            plan_complete_active_turn(&session, AgentChatMessageStatus::Completed, None, stamp());
-        let sql = complete_session_update_sql(&session, &plan, stamp());
-        assert!(sql.contains("SET \"status\" = 'open', \"active_turn_id\" = '', \"active_message_id\" = NULL, \"last_message_at\" = '2026-10-02 22:52:02.000000+00:00'::timestamptz, \"closed_at\" = NULL, \"updated_at\" ="));
     }
 
     #[test]
@@ -2920,5 +2871,484 @@ mod tests {
             sweep_empty_cutoff(stamp()),
             stamp() - chrono::Duration::hours(24)
         );
+    }
+
+    // -- SeaORM statement shapes ------------------------------------------------
+
+    fn pg_select<E: sea_orm::EntityTrait>(select: sea_orm::Select<E>) -> String {
+        sea_orm::QueryTrait::build(&select, sea_orm::DbBackend::Postgres).to_string()
+    }
+
+    fn pg_selector<S: sea_orm::SelectorTrait>(selector: sea_orm::Selector<S>) -> String {
+        selector
+            .into_statement(sea_orm::DbBackend::Postgres)
+            .to_string()
+    }
+
+    fn pg_update<E: sea_orm::EntityTrait>(update: sea_orm::UpdateMany<E>) -> String {
+        sea_orm::QueryTrait::build(&update, sea_orm::DbBackend::Postgres).to_string()
+    }
+
+    const SESSION_ORDER: &str = "ORDER BY \"agent_chat_session\".\"last_message_at\" DESC, \
+                                 \"agent_chat_session\".\"created_at\" DESC";
+
+    #[test]
+    fn append_dedupe_check_statement_shape() {
+        let sql = pg_select(append_dedupe_check_select(
+            uuid("9fe1b18d-4602-48c7-9352-0bee23df1f9d"),
+            "sk-1",
+        ));
+        assert!(
+            sql.starts_with("SELECT \"agent_chat_event\".\"id\", \"agent_chat_event\".\"seq\""),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                "FROM \"agent_chat_event\" INNER JOIN \"agent_chat_session\" ON \
+             \"agent_chat_event\".\"session_id\" = \"agent_chat_session\".\"id\" WHERE \
+             \"agent_chat_event\".\"session_id\" = '9fe1b18d-4602-48c7-9352-0bee23df1f9d' AND \
+             \"agent_chat_event\".\"source_key\" = 'sk-1'"
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.ends_with(&format!(
+                "{SESSION_ORDER}, \"agent_chat_event\".\"seq\" ASC LIMIT 1"
+            )),
+            "{sql}"
+        );
+    }
+
+    #[test]
+    fn event_seq_and_insert_statement_shapes() {
+        let session = uuid("9fe1b18d-4602-48c7-9352-0bee23df1f9d");
+        assert_eq!(
+            pg_selector(next_event_seq_select(session)),
+            "SELECT MAX(\"agent_chat_event\".\"seq\") AS \"seq__max\" FROM \"agent_chat_event\" \
+             WHERE \"agent_chat_event\".\"session_id\" = '9fe1b18d-4602-48c7-9352-0bee23df1f9d'"
+        );
+        assert_eq!(
+            pg_selector(next_message_seq_select(session)),
+            "SELECT MAX(\"agent_chat_message\".\"seq\") AS \"seq__max\" FROM \"agent_chat_message\" \
+             WHERE \"agent_chat_message\".\"session_id\" = '9fe1b18d-4602-48c7-9352-0bee23df1f9d'"
+        );
+        let inputs = append_event_inputs(
+            "chat_started",
+            Some(&serde_json::json!({"a": 1})),
+            None,
+            "sk-1",
+        );
+        let sql = sea_orm::QueryTrait::build(
+            &insert_event_statement(session, 3, &inputs, stamp()),
+            sea_orm::DbBackend::Postgres,
+        )
+        .to_string();
+        assert!(sql.starts_with(
+            "INSERT INTO \"agent_chat_event\" (\"seq\", \"source_key\", \"kind\", \"payload\", \
+             \"created_at\", \"message_id\", \"session_id\") VALUES (3, 'sk-1', 'chat_started', \
+             E'{\\\"a\\\":1}', '2026-10-02 22:52:02.000000 +00:00', NULL, \
+             '9fe1b18d-4602-48c7-9352-0bee23df1f9d')"
+        ), "{sql}");
+        // The `BigAutoField` pk is not in the column list: the database
+        // mints it (SeaORM appends `RETURNING "id"` at execution).
+        assert!(!sql.contains("\"id\""), "{sql}");
+    }
+
+    #[test]
+    fn sweep_statement_shapes() {
+        let fx = &fixture()["sweep_empty"];
+        assert_eq!(fx["returned"].as_u64(), Some(1));
+        let cutoff: DateTime<Utc> =
+            DateTime::parse_from_rfc3339("2026-10-01T22:52:02.927778+00:00")
+                .unwrap()
+                .with_timezone(&Utc);
+        let empty = pg_selector(sweep_empty_ids_select(cutoff));
+        assert!(
+            empty.starts_with(
+                "SELECT \"agent_chat_session\".\"id\" FROM \"agent_chat_session\" LEFT JOIN \
+             \"agent_chat_message\" ON \"agent_chat_session\".\"id\" = \
+             \"agent_chat_message\".\"session_id\" WHERE \
+             \"agent_chat_session\".\"created_at\" < '2026-10-01 22:52:02.927778 +00:00' AND \
+             \"agent_chat_message\".\"id\" IS NULL AND \"agent_chat_session\".\"status\" = 'open'"
+            ),
+            "{empty}"
+        );
+        assert!(empty.ends_with(SESSION_ORDER), "{empty}");
+        let close = pg_update(sweep_empty_close_statement(
+            &[uuid("1d271194-9131-4bfc-bc3f-cb6b36dfa173")],
+            stamp(),
+        ));
+        assert_eq!(
+            close,
+            "UPDATE \"agent_chat_session\" SET \"status\" = 'closed', \
+             \"closed_at\" = '2026-10-02 22:52:02.000000 +00:00' WHERE \"agent_chat_session\".\"id\" IN \
+             ('1d271194-9131-4bfc-bc3f-cb6b36dfa173')"
+        );
+        let active = pg_selector(sweep_active_ids_select(cutoff));
+        assert!(active.starts_with(
+            "SELECT \"agent_chat_session\".\"id\" FROM \"agent_chat_session\" INNER JOIN \"runner\" \
+             ON \"agent_chat_session\".\"runner_id\" = \"runner\".\"id\" WHERE \
+             \"agent_chat_session\".\"status\" = 'open' AND \
+             (\"agent_chat_session\".\"active_message_id\" IS NOT NULL OR \
+             \"agent_chat_session\".\"active_turn_id\" <> '') AND \
+             (\"agent_chat_session\".\"updated_at\" < '2026-10-01 22:52:02.927778 +00:00' OR \
+             \"runner\".\"status\" = 'offline')"
+        ), "{active}");
+        assert!(active.ends_with(SESSION_ORDER), "{active}");
+        assert_eq!(CHAT_ACTIVE_TIMEOUT_SECS, 1800);
+        assert_eq!(
+            sweep_active_cutoff(stamp()),
+            stamp() - chrono::Duration::seconds(1800)
+        );
+    }
+
+    #[test]
+    fn lock_statement_shapes() {
+        let by_pk = session_lock_by_pk_sql(uuid("9fe1b18d-4602-48c7-9352-0bee23df1f9d"));
+        assert!(by_pk.contains("WHERE \"agent_chat_session\".\"id\" = '9fe1b18d460248c793520bee23df1f9d'::uuid ORDER BY"));
+        assert!(!by_pk.contains("\"status\" = 'open'"));
+        assert!(by_pk.ends_with("LIMIT 1 FOR UPDATE"));
+        assert!(by_pk.starts_with(
+            "SELECT \"agent_chat_session\".\"id\", \"agent_chat_session\".\"workspace_id\""
+        ));
+        let open = pg_select(session_lock_open_select(uuid(
+            "9fe1b18d-4602-48c7-9352-0bee23df1f9d",
+        )));
+        // Full row: the entity's columns.
+        assert!(
+            open.starts_with(
+                "SELECT \"agent_chat_session\".\"id\", \"agent_chat_session\".\"status\""
+            ),
+            "{open}"
+        );
+        assert!(
+            open.contains(
+                "WHERE \"agent_chat_session\".\"id\" = '9fe1b18d-4602-48c7-9352-0bee23df1f9d' AND \
+             \"agent_chat_session\".\"status\" = 'open'"
+            ),
+            "{open}"
+        );
+        assert!(
+            open.ends_with(&format!("{SESSION_ORDER} LIMIT 1 FOR UPDATE")),
+            "{open}"
+        );
+    }
+
+    #[test]
+    fn lookup_statement_shapes() {
+        let session = uuid("9fe1b18d-4602-48c7-9352-0bee23df1f9d");
+        let message = uuid("9d469513-f80c-4f0c-ab20-e5827f95c3f9");
+        let lookup = pg_select(finalize_explicit_lookup_select(session, message));
+        assert!(
+            lookup.contains(
+                "FROM \"agent_chat_message\" INNER JOIN \"agent_chat_session\" ON \
+             \"agent_chat_message\".\"session_id\" = \"agent_chat_session\".\"id\" WHERE \
+             \"agent_chat_message\".\"id\" = '9d469513-f80c-4f0c-ab20-e5827f95c3f9' AND \
+             \"agent_chat_message\".\"session_id\" = '9fe1b18d-4602-48c7-9352-0bee23df1f9d'"
+            ),
+            "{lookup}"
+        );
+        assert!(
+            lookup.ends_with(&format!(
+                "{SESSION_ORDER}, \"agent_chat_message\".\"seq\" ASC LIMIT 1"
+            )),
+            "{lookup}"
+        );
+        let scoped = pg_select(assistant_turn_scoped_select(session, "t1"));
+        assert!(
+            scoped.contains(
+                "WHERE \"agent_chat_message\".\"role\" = 'assistant' AND \
+             \"agent_chat_message\".\"session_id\" = '9fe1b18d-4602-48c7-9352-0bee23df1f9d' AND \
+             \"agent_chat_message\".\"status\" = 'streaming' AND \
+             \"agent_chat_message\".\"local_turn_id\" = 't1'"
+            ),
+            "{scoped}"
+        );
+        assert!(scoped.ends_with("ORDER BY \"agent_chat_message\".\"created_at\" DESC LIMIT 1"));
+        let fallback = pg_select(assistant_fallback_select(session));
+        assert!(!fallback.contains("local_turn_id\" ="));
+        assert!(fallback.ends_with("ORDER BY \"agent_chat_message\".\"created_at\" DESC LIMIT 1"));
+        let publish = pg_select(publish_event_lookup_select(47));
+        assert!(
+            publish.contains(
+                "FROM \"agent_chat_event\" INNER JOIN \"agent_chat_session\" ON \
+             \"agent_chat_event\".\"session_id\" = \"agent_chat_session\".\"id\" WHERE \
+             \"agent_chat_event\".\"id\" = 47"
+            ),
+            "{publish}"
+        );
+        assert!(
+            publish.ends_with(&format!(
+                "{SESSION_ORDER}, \"agent_chat_event\".\"seq\" ASC LIMIT 1"
+            )),
+            "{publish}"
+        );
+    }
+
+    #[test]
+    fn update_statement_shapes() {
+        // Fail update without close: four SET columns.
+        let session = active_session();
+        let explicit = test_message("9d469513-f80c-4f0c-ab20-e5827f95c3f9", session.id);
+        let mut clock = || stamp();
+        let plan = plan_sweep_active_row(&session, Some(&explicit), None, &mut clock);
+        let sql = pg_update(fail_session_update_statement(session.id, &plan, stamp()));
+        assert_eq!(
+            sql,
+            "UPDATE \"agent_chat_session\" SET \"active_turn_id\" = '', \
+             \"active_message_id\" = NULL, \"error\" = 'active chat turn timed out', \
+             \"updated_at\" = '2026-10-02 22:52:02.000000 +00:00' WHERE \
+             \"agent_chat_session\".\"id\" = '9fe1b18d-4602-48c7-9352-0bee23df1f9d'"
+        );
+        // Fail update with close: six SET columns.
+        let mut closing = active_session();
+        closing.close_requested = true;
+        let plan = plan_sweep_active_row(&closing, Some(&explicit), None, &mut clock);
+        let sql = pg_update(fail_session_update_statement(closing.id, &plan, stamp()));
+        assert!(
+            sql.starts_with(
+                "UPDATE \"agent_chat_session\" SET \"status\" = 'closed', \
+             \"closed_at\" = '2026-10-02 22:52:02.000000 +00:00', \"active_turn_id\" = '', \
+             \"active_message_id\" = NULL, \"error\" = 'active chat turn timed out', \
+             \"updated_at\" ="
+            ),
+            "{sql}"
+        );
+        // Message status write (shared finalize/complete shape), text and
+        // SeaORM twins.
+        let update = MessageStatusUpdate {
+            id: explicit.id,
+            status: AgentChatMessageStatus::Failed,
+            completed_at: stamp(),
+        };
+        assert_eq!(
+            message_status_update_sql(&update),
+            complete_message_update_sql(&update),
+        );
+        assert_eq!(
+            message_status_update_sql(&update),
+            "UPDATE \"agent_chat_message\" SET \"status\" = 'failed', \"completed_at\" = '2026-10-02 22:52:02.000000+00:00'::timestamptz WHERE \"agent_chat_message\".\"id\" = '9d469513f80c4f0cab20e5827f95c3f9'::uuid"
+        );
+        assert_eq!(
+            pg_update(message_status_update_statement(&update)),
+            "UPDATE \"agent_chat_message\" SET \"status\" = 'failed', \
+             \"completed_at\" = '2026-10-02 22:52:02.000000 +00:00' WHERE \
+             \"agent_chat_message\".\"id\" = '9d469513-f80c-4f0c-ab20-e5827f95c3f9'"
+        );
+        // Complete update always writes all six columns in model field order.
+        let plan =
+            plan_complete_active_turn(&session, AgentChatMessageStatus::Completed, None, stamp());
+        let sql = complete_session_update_sql(&session, &plan, stamp());
+        assert!(sql.contains("SET \"status\" = 'open', \"active_turn_id\" = '', \"active_message_id\" = NULL, \"last_message_at\" = '2026-10-02 22:52:02.000000+00:00'::timestamptz, \"closed_at\" = NULL, \"updated_at\" ="));
+    }
+
+    // ------------------------------------------------------------------
+    // Live statement round trip (session temp tables, rolled back)
+    // ------------------------------------------------------------------
+
+    /// The sweep statements on temp copies: the stale / offline id scan,
+    /// the open-session lock, the message probes, the status and fail
+    /// writes, the event seq + insert + dedupe + publish re-read, and the
+    /// empty-session scan + close.
+    #[tokio::test]
+    async fn live_chat_sweep_statements() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        let mut tx = pool.begin().await.expect("begin");
+        for table in ["agent_chat_session", "agent_chat_message", "runner"] {
+            sqlx::query(&format!(
+                "CREATE TEMP TABLE {table} AS SELECT * FROM public.{table} WITH NO DATA"
+            ))
+            .execute(&mut *tx)
+            .await
+            .expect("temp table");
+        }
+        // `LIKE ... INCLUDING DEFAULTS` keeps the `BigAutoField` sequence
+        // the insert's `RETURNING id` reads.
+        sqlx::query(
+            "CREATE TEMP TABLE agent_chat_event (LIKE public.agent_chat_event INCLUDING DEFAULTS INCLUDING IDENTITY)",
+        )
+        .execute(&mut *tx)
+        .await
+        .expect("temp event table");
+        let runner = Uuid::new_v4();
+        let active = Uuid::new_v4();
+        let empty = Uuid::new_v4();
+        let message = Uuid::new_v4();
+        sqlx::query("INSERT INTO runner (id, name, capabilities, status, os, arch, runner_version, protocol_version, created_at, updated_at, owner_id, workspace_id, pod_id, host_label, refresh_token_hash, refresh_token_fingerprint, refresh_token_generation, previous_refresh_token_hash, access_token_signing_key_version, enrollment_token_hash, enrollment_token_fingerprint, revoked_reason, visibility, dev_metadata, provisioning) VALUES ($1, 'r', '{}', 'offline', 'linux', 'x64', '1', 1, now(), now(), $2, $3, $4, 'h', '', '', 0, '', 1, '', '', '', 0, '{}', 'manual')")
+            .bind(runner).bind(Uuid::new_v4()).bind(Uuid::new_v4()).bind(Uuid::new_v4())
+            .execute(&mut *tx).await.expect("seed runner");
+        for (id, turn, message_id, created_at) in [
+            (active, "t1", Some(message), "now()"),
+            (empty, "", None, "now() - interval '2 days'"),
+        ] {
+            sqlx::query(&format!(
+                "INSERT INTO agent_chat_session (id, status, agent_kind, local_thread_id, \
+                 local_session_id, cwd, model, active_turn_id, active_message_id, \
+                 close_requested, error, created_at, updated_at, created_by_id, pod_id, \
+                 runner_id, workspace_id) VALUES ($1, 'open', 'codex', '', '', '', '', $2, $3, \
+                 false, '', {created_at}, {created_at}, $4, $5, $6, $7)"
+            ))
+            .bind(id)
+            .bind(turn)
+            .bind(message_id)
+            .bind(Uuid::new_v4())
+            .bind(Uuid::new_v4())
+            .bind(runner)
+            .bind(Uuid::new_v4())
+            .execute(&mut *tx)
+            .await
+            .expect("seed session");
+        }
+        sqlx::query("INSERT INTO agent_chat_message (id, role, content, content_parts, status, local_item_id, local_turn_id, seq, created_at, session_id) VALUES ($1, 'assistant', '', '[]', 'streaming', 'i1', 't1', 1, now(), $2)")
+            .bind(message).bind(active)
+            .execute(&mut *tx).await.expect("seed message");
+        let conn = pidash_db::orm_tx::TxConn::new(&mut tx);
+        // The runner is offline, so the fresh active session is swept too.
+        let ids = sweep_active_ids_select(Utc::now() - chrono::Duration::hours(1))
+            .all(&conn)
+            .await
+            .expect("active ids");
+        assert_eq!(ids, vec![active]);
+        let locked = session_lock_open_select(active)
+            .one(&conn)
+            .await
+            .expect("lock")
+            .expect("open row");
+        assert_eq!(locked.active_turn_id, "t1");
+        assert_eq!(locked.active_message_id, Some(message));
+        assert_eq!(
+            finalize_explicit_lookup_select(active, message)
+                .one(&conn)
+                .await
+                .expect("lookup")
+                .map(|row| row.id),
+            Some(message)
+        );
+        // A cross-session id silently matches nothing.
+        assert!(finalize_explicit_lookup_select(empty, message)
+            .one(&conn)
+            .await
+            .expect("lookup")
+            .is_none());
+        assert_eq!(
+            assistant_turn_scoped_select(active, "t1")
+                .one(&conn)
+                .await
+                .expect("scoped")
+                .map(|row| row.id),
+            Some(message)
+        );
+        assert!(assistant_turn_scoped_select(active, "t2")
+            .one(&conn)
+            .await
+            .expect("scoped")
+            .is_none());
+        assert_eq!(
+            assistant_fallback_select(active)
+                .one(&conn)
+                .await
+                .expect("fallback")
+                .map(|row| row.id),
+            Some(message)
+        );
+        let now = Utc::now();
+        let update = MessageStatusUpdate {
+            id: message,
+            status: AgentChatMessageStatus::Failed,
+            completed_at: now,
+        };
+        assert_eq!(
+            message_status_update_statement(&update)
+                .exec(&conn)
+                .await
+                .expect("message update")
+                .rows_affected,
+            1
+        );
+        let plan = FailTurnPlan {
+            finalize: FinalizePlan {
+                updates: vec![update],
+                returned_message_id: Some(message),
+            },
+            session_error: "active chat turn timed out".to_owned(),
+            close_session: true,
+            closed_at: Some(now),
+            events: Vec::new(),
+            queue_drain: true,
+        };
+        assert_eq!(
+            fail_session_update_statement(active, &plan, now)
+                .exec(&conn)
+                .await
+                .expect("fail update")
+                .rows_affected,
+            1
+        );
+        // Closed now: the open lock misses.
+        assert!(session_lock_open_select(active)
+            .one(&conn)
+            .await
+            .expect("lock")
+            .is_none());
+        // Events: MAX(seq) on an empty set, the insert, the re-read.
+        assert_eq!(
+            next_event_seq_select(active).one(&conn).await.expect("seq"),
+            Some(None)
+        );
+        let inputs = append_event_inputs(
+            "chat_failed",
+            Some(&serde_json::json!({"a": 1})),
+            None,
+            "sk-1",
+        );
+        let inserted = insert_event_statement(active, 1, &inputs, now)
+            .exec(&conn)
+            .await
+            .expect("insert event");
+        assert_eq!(
+            next_event_seq_select(active).one(&conn).await.expect("seq"),
+            Some(Some(1))
+        );
+        assert!(append_dedupe_check_select(active, "sk-1")
+            .one(&conn)
+            .await
+            .expect("dedupe")
+            .is_some());
+        assert!(append_dedupe_check_select(active, "sk-2")
+            .one(&conn)
+            .await
+            .expect("dedupe")
+            .is_none());
+        let published = publish_event_lookup_select(inserted.last_insert_id)
+            .one(&conn)
+            .await
+            .expect("publish lookup")
+            .expect("row");
+        assert_eq!(published.kind, "chat_failed");
+        assert_eq!(published.payload, serde_json::json!({"a": 1}));
+        assert_eq!(published.session_id, active);
+        // Empty sessions: only the old, messageless one.
+        let empties = sweep_empty_ids_select(Utc::now() - chrono::Duration::hours(24))
+            .all(&conn)
+            .await
+            .expect("empty ids");
+        assert_eq!(empties, vec![empty]);
+        assert_eq!(
+            sweep_empty_close_statement(&empties, now)
+                .exec(&conn)
+                .await
+                .expect("close")
+                .rows_affected,
+            1
+        );
+        tx.rollback().await.expect("rollback");
     }
 }

@@ -16,7 +16,7 @@ USER_CODE_RE = re.compile(r"^[BCDFGHJKLMNPQRSTVWXZ23456789]{4}-[BCDFGHJKLMNPQRST
 
 
 def test_start_shape_exact(api, web_base, db):
-    """The runner parses exactly these five fields; nothing may drift."""
+    """The runner parses exactly these fields; nothing may drift."""
     r = device_start(api)
     assert r.status_code == 200, r.text
     body = r.json()
@@ -26,7 +26,9 @@ def test_start_shape_exact(api, web_base, db):
         "verification_uri",
         "expires_in",
         "interval",
+        "scope",
     }
+    assert body["scope"] == "cli"
     assert isinstance(body["device_code"], str) and len(body["device_code"]) >= 32
     assert USER_CODE_RE.match(body["user_code"]), body["user_code"]
     assert body["verification_uri"] == f"{web_base}/auth/device/"
@@ -75,6 +77,8 @@ def test_full_lifecycle(api, seed, tenant_a, secret, db):
         "ok": True,
         "user_email": tenant_a["user"]["email"],
         "workspace_slug": tenant_a["workspace"]["slug"],
+        "scope": "cli",
+        "interactive": False,
     }
 
     # Honor the poll gap like the runner does (it polls every `interval`
@@ -123,7 +127,10 @@ def test_full_lifecycle(api, seed, tenant_a, secret, db):
         "workspace_slug",
         "dev_machine_id",
         "host_label",
+        "engine_sign_in_state",
     }
+    assert mt_body["engine_sign_in_state"] == "never"
+    assert "engine_credential" not in mt_body
     assert mt_body["machine_token"].startswith("mt_")
     assert mt_body["workspace_slug"] == tenant_a["workspace"]["slug"]
     assert mt_body["dev_machine_id"] == dev_machine_id

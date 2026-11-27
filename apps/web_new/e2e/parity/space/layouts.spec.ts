@@ -244,10 +244,10 @@ test(
   specTitle(ROW_023, "bug: NEWFRONT-454 list header count follows the server group total"),
   { tag: specTags(ROW_023) },
   async ({ driver, seed }) => {
-    // The header faithfully renders the server's per-group total — but that
-    // total wrongly excludes the intake-declined issue the rows still show
-    // (NEWFRONT-454). Intended: the header count always equals the rows
-    // beneath it. This pins the current render until the server is fixed.
+    // The header faithfully renders the server's per-group total. Django's
+    // total wrongly excludes the intake-pending issue the rows still show
+    // (NEWFRONT-454); the fixed Rust total counts every row (DIFF-52, see
+    // NEWPIDASH-276). Old pins the short total; new pins the truthful one.
     const anchor = requireAnchor(seed);
     const cookie = await signInSession(seed.email, seed.password);
     await driver.spaceOpenBoard(anchor, "?board=list");
@@ -259,7 +259,12 @@ test(
     if (serverGroup === undefined) throw new Error("[parity] public issues carry no populated group.");
     expect(populated.count).toBe(serverGroup.total);
     expect(populated.rows).toBe(Math.min(50, server.totalCount));
-    expect(server.totalCount).toBe(serverGroup.total + 1);
+    if (driver.target === "web_new") {
+      expect(server.totalCount).toBe(serverGroup.total);
+      expect(populated.count).toBe(populated.rows);
+    } else {
+      expect(server.totalCount).toBe(serverGroup.total + 1);
+    }
   }
 );
 
@@ -302,7 +307,8 @@ test(
   async ({ driver, seed }) => {
     // Same server miscount as the list header (NEWFRONT-454): the column
     // renders the short group total while the rows beneath include the
-    // intake-declined issue. Intended: count equals cards.
+    // intake-pending issue. The fixed Rust total counts every row (DIFF-52,
+    // see NEWPIDASH-276). Old pins the short total; new pins the truthful one.
     const anchor = requireAnchor(seed);
     const cookie = await signInSession(seed.email, seed.password);
     await driver.spaceOpenBoard(anchor, "?board=kanban");
@@ -314,7 +320,12 @@ test(
     if (serverGroup === undefined) throw new Error("[parity] public issues carry no populated group.");
     expect(populated.count).toBe(serverGroup.total);
     expect(populated.rows).toBe(Math.min(50, server.totalCount));
-    expect(server.totalCount).toBe(serverGroup.total + 1);
+    if (driver.target === "web_new") {
+      expect(server.totalCount).toBe(serverGroup.total);
+      expect(populated.count).toBe(populated.rows);
+    } else {
+      expect(server.totalCount).toBe(serverGroup.total + 1);
+    }
   }
 );
 

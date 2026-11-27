@@ -246,29 +246,34 @@ def test_app_gitea_returning_login_applies_save_effects(base_url: str):
         cleanup()
 
 
-def _google_save_update_sql() -> str:
-    """The google ``save_user_data`` UPDATE effects, backslashes stripped.
+def _google_save_update_body() -> str:
+    """The google ``save_user_data`` UPDATE body (SeaORM builder).
 
     Harness helper for the shape pin below; asserts its own premises so a
     refactor that moves the renderer fails loudly instead of matching
-    some other UPDATE. ORM-07 renders the statement in
-    ``login_stamps_sql`` (one shared renderer for every login path; the
-    google call site selects backfill/staff/updated_at), so the pin reads
-    the renderer body rather than a per-provider statement.
+    some other UPDATE. The shared renderer is ``login_stamps_update``
+    (one builder for every login path; the google call site selects
+    backfill/staff/updated_at), so the pin reads the renderer body
+    rather than a per-provider statement. (The raw-SQL
+    ``login_stamps_sql`` this helper used to read predates the SeaORM
+    refactor; the builder renders the same UPDATE.)
     """
     source = IDENTITY_RS.read_text()
-    fn_at = source.find("fn login_stamps_sql")
-    assert fn_at != -1, "harness: login_stamps_sql moved or was renamed"
+    fn_at = source.find("fn login_stamps_update(")
+    assert fn_at != -1, "harness: login_stamps_update moved or was renamed"
     end_at = source.find("\n}\n", fn_at)
-    assert end_at != -1, "harness: could not delimit login_stamps_sql"
+    assert end_at != -1, "harness: could not delimit login_stamps_update"
     # The renderer is defined once; the UPDATE skeleton plus the effect
-    # fragments all live in its body.
-    assert source.find("fn login_stamps_sql", fn_at + 1) == -1, (
-        "harness: second login_stamps_sql definition"
+    # fragments all live in its body. (The trailing "(" keeps the unit
+    # test ``login_stamps_update_shapes`` from counting as a second
+    # definition.)
+    assert source.find("fn login_stamps_update(", fn_at + 1) == -1, (
+        "harness: second login_stamps_update definition"
     )
     body = source[fn_at:end_at]
-    assert "UPDATE" in body and "WHERE" in body, (
-        "harness: no UPDATE..WHERE skeleton in login_stamps_sql"
+    assert ".col_expr(" in body and "update_many()" in body, (
+        "harness: no SeaORM update_many().col_expr() skeleton in"
+        " login_stamps_update"
     )
     return body.replace("\\", "")
 
@@ -278,18 +283,23 @@ def test_google_save_update_applies_save_effects():
 
     Google logins cannot run over HTTP on either backend (hardcoded
     ``https://`` URLs, no stub seam), so this file pins the UPDATE effects
-    instead (the PIDASHCONV-1084 pattern; ORM-07 renders them in the
-    shared ``login_stamps_sql``): the UPDATE must refresh
+    instead (the PIDASHCONV-1084 pattern; the SeaORM renderer is the
+    shared ``login_stamps_update``): the UPDATE must refresh
     ``updated_at``, backfill a blank ``display_name`` from the email local
     part, and sync ``is_staff`` from ``is_superuser``. FAILS on pre-fix
     code; runs identically in both backend runs. Behavior is pinned by the
     ``google_kernel_save_user_data_*`` live test in ``oauth_google.rs``.
     """
-    sql = _google_save_update_sql()
-    assert '"updated_at" =' in sql, "save UPDATE must refresh updated_at"
-    assert "split_part(" in sql and '"display_name" =' in sql, (
+    body = _google_save_update_body()
+    assert "C::UpdatedAt" in body, "save UPDATE must refresh updated_at"
+    assert "display_name_backfill_case()" in body, (
         "save UPDATE must backfill a blank display_name from the email local part"
     )
-    assert '"is_staff" = "is_staff" OR "is_superuser"' in sql, (
+    # The backfill's split_part("email", '@', 1) lives in the helper the
+    # body calls (SeaORM renders it via Alias::new("split_part")).
+    assert 'Alias::new("split_part")' in IDENTITY_RS.read_text(), (
+        "backfill must split the email local part via split_part"
+    )
+    assert "C::IsStaff" in body and "C::IsSuperuser" in body, (
         "save UPDATE must sync is_staff from is_superuser"
     )

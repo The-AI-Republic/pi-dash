@@ -36,10 +36,11 @@ export class RunnerService extends APIService {
    * whose pod belongs to that project. The ``workspaceId``-only form keeps the
    * workspace-wide aggregate behaviour.
    */
-  async list(workspaceId?: string, projectId?: string): Promise<IRunner[]> {
+  async list(workspaceId?: string, projectId?: string, assignableFor?: string): Promise<IRunner[]> {
     const query: Record<string, string> = {};
     if (workspaceId) query.workspace = workspaceId;
     if (projectId) query.project = projectId;
+    if (assignableFor) query.assignable_for = assignableFor;
     const params = Object.keys(query).length ? { params: query } : {};
     return this.get("/api/runners/", params)
       .then((r) => r?.data)

@@ -14,13 +14,13 @@ import * as React from "react";
 
 import { detailsUpdateInput, useSaveWorkspaceDetails } from "../api/mutations.js";
 import { useTimezoneList } from "../api/timezones.js";
+import { shareableAddress } from "../../../../shared/shell/shareLink.js";
 import {
   mergeTimezoneOptions,
   ORGANIZATION_SIZE_BANDS,
   ORGANIZATION_SIZE_PLACEHOLDER,
   timezoneChoiceLabel,
   validateWorkspaceDetailsName,
-  workspaceAddress,
 } from "../rules.js";
 
 /** Save control copy at rest and while the write is in flight (§3). */
@@ -63,7 +63,12 @@ export function WorkspaceDetailsForm({
   const save = useSaveWorkspaceDetails(workspaceSlug);
   const timezones = useTimezoneList();
   const choices = React.useMemo(() => mergeTimezoneOptions(timezones.data?.timezones ?? []), [timezones.data]);
-  const address = workspaceAddress(window.location.origin, workspaceSlug);
+  let address = `/${workspaceSlug}`;
+  try {
+    address = shareableAddress(`/${workspaceSlug}`);
+  } catch {
+    // No hosted origin: echo the site-relative path, never the bundle origin.
+  }
   const sizeValue = form.organizationSize === "" ? null : form.organizationSize;
 
   // A stored row arriving after the first render (or replaced by a save)

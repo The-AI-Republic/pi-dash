@@ -4,7 +4,8 @@
 # runs twice per matrix entry: first against live Django (oracle validity),
 # then against pidash-api serve with PIDASH_DJANGO_UPSTREAM pointing at that
 # same Django and EVERY PIDASH_RUST_* flag set to 1. One matrix job per suite
-# keeps failures attributable and each job under 30 minutes.
+# keeps failures attributable and bounds each job's duration (the job cap
+# is 60 minutes; the runner shard runs 421 tests per backend and needs ~35).
 #
 # The database and Redis are reset between the two runs (drop + recreate +
 # migrate, FLUSHDB): suites must see a pristine backend on both sides, and
@@ -51,7 +52,7 @@ concurrency:
 
 jobs:
   setup:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.suites.outputs.matrix }}
     steps:
@@ -73,8 +74,13 @@ jobs:
       fail-fast: false
       matrix:
         suite: ${{ fromJSON(needs.setup.outputs.matrix) }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    # The runner shard runs 421 contract tests against each backend
+    # (Django leg alone measured 659.59s on run 43127234676); with the
+    # cached Rust build and the two legs the job needs ~35 min, well
+    # past the old 30-min cap, which cancelled it mid-Rust-leg on every
+    # main run. 60 covers a cold cargo cache with headroom.
+    timeout-minutes: 60
     services:
       postgres:
         image: postgres:16

@@ -9,7 +9,8 @@
 // is in flight; cycle picks no-op on the current cycle and confirm with a
 // notice. The parent row opens a search dialog and can clear inline;
 // labels combine chips with the shared picker. Every row reads through
-// the shared issue PATCH, so guests and archived items stay disabled.
+// the shared issue PATCH, so guests and archived items stay disabled;
+// synced items keep their workflow rows editable.
 
 import { Button, cn, type ButtonVariant } from "@pidash/kit";
 import type { Issue } from "@pidash/api-client";
@@ -363,7 +364,7 @@ export function SidebarPropertiesB({
   stateGroup,
   editable,
 }: SidebarPropertiesBProps): React.ReactElement {
-  const disabled = !editable || issue.archived_at !== null || issue.is_synced;
+  const disabled = !editable || issue.archived_at !== null;
   const cycle = useIssueCycleWrite({
     workspaceSlug,
     projectId,

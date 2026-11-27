@@ -459,29 +459,23 @@ mod tests {
         validate_syntax("{% if missing %}yes{% endif %}").expect("undefined var parses");
     }
 
-    /// Dual-engine agreement over every stored section body (Porting
-    /// guide: "verified by rendering every stored template through both
-    /// engines"). Under an empty context the Jinja2 sandbox (3.1.6) renders
-    /// exactly the sections in [`EMPTY_CONTEXT_CLEAN`] and fails the rest
-    /// with `UndefinedError` (verified 2026-09-28; byte-identical text on
-    /// all 13 successes). This test locks the minijinja half; the Jinja2
-    /// half lives in
-    /// `rust-api/contract-tests/prompting/test_data_plane_dual_engine.py`.
-    /// Update both sides together when a section body changes.
+    /// Sections that render under an empty context (no template
+    /// variables, or only guarded ones); every other section fails with an
+    /// undefined-value error under the strict undefined behaviour. This
+    /// was a dual-engine agreement with the Jinja2 sandbox until the lean
+    /// workflow change made the Rust sections the source of truth (design
+    /// D13); it now pins only the minijinja side.
     const EMPTY_CONTEXT_CLEAN: &[&str] = &[
         "autonomy",
-        "cloud-direct-task",
-        "cloud-ending",
-        "cloud-execution-loop",
-        "cloud-review-loop",
-        "cloud-scheduler-intro",
-        "cloud-scheduler-loop",
-        "cloud-test-loop",
         "default-posture",
+        "general.execute",
+        "general.review",
+        "general.test",
         "guardrails",
-        "review-cycle",
+        "review",
         "scheduler-ending",
-        "test-cycle",
+        "session-framing",
+        "test",
     ];
 
     #[test]
@@ -505,22 +499,6 @@ mod tests {
         assert_eq!(clean, EMPTY_CONTEXT_CLEAN);
     }
 
-    /// Budget-block source: lines from `### Budget` to the end of the
-    /// embedded task-lifecycle body (self-contained: the `{% if tick %}`
-    /// opened on the runs line closes on the last line).
-    fn budget_block() -> String {
-        let section = crate::prompting::registry::all_sections()
-            .into_iter()
-            .find(|s| s.key == "task-lifecycle")
-            .expect("task-lifecycle section exists");
-        let lines: Vec<&str> = section.default_body.lines().collect();
-        let start = lines
-            .iter()
-            .position(|line| *line == "### Budget")
-            .expect("Budget head exists");
-        lines[start..].join("\n")
-    }
-
     /// A `tick_context`-shaped context with the waited/allowance arms set.
     fn tick_case(waited: i64, allowance: Value) -> Value {
         json!({
@@ -539,60 +517,36 @@ mod tests {
         })
     }
 
-    /// The "Runs used on this issue" sentence renders byte-identical to
-    /// Jinja2 for waited = 0/1/2 (PIDASHCONV-1073): JSON numbers must
-    /// reach minijinja as numbers, so `{% if tick.waited | default(0) %}`
-    /// treats 0 as falsy and `tick.waited | default(0) != 1` compares
-    /// numerically. The Jinja2 half asserting the same literals lives in
-    /// `rust-api/contract-tests/prompting/test_data_plane_dual_engine.py`
-    /// (`test_tick_sentence_waited_counts`); update both sides together
-    /// when the section body changes.
+    /// JSON numbers must reach minijinja as numbers (PIDASHCONV-1073), so
+    /// `{% if tick.waited | default(0) %}` treats 0 as falsy and
+    /// `tick.waited | default(0) != 1` compares numerically. The section
+    /// that first exercised this (`task-lifecycle`) was removed by the lean
+    /// workflow change; the template here keeps the regression covered.
     #[test]
-    fn tick_sentence_matches_jinja2_for_waited_counts() {
-        let block = budget_block();
-        let stem = "Runs used on this issue: **3 of 20** (17 remaining). This is one pool for the life of the issue, spent in any stage by runs the ticking system starts (timer ticks, and the run that follows a state move you make). Runs a human starts are free.";
-        let tail = "each of those raised the cap by one, so they are counted above and cost no net budget.";
-        let cases: &[(i64, String)] = &[
-            (0, stem.to_owned()),
-            (
-                1,
-                format!("{stem} You have ended 1 run by waiting on a blocker; {tail}"),
-            ),
-            (
-                2,
-                format!("{stem} You have ended 2 runs by waiting on a blocker; {tail}"),
-            ),
-        ];
-        for (waited, want) in cases {
-            let out = render(&block, &tick_case(*waited, Value::Null)).expect("renders");
-            let line = out.lines().nth(2).expect("runs sentence is line 3");
-            assert_eq!(
-                line, want,
-                "byte-identical tick sentence for waited={waited}"
-            );
+    fn tick_numbers_compare_numerically() {
+        let template = "{% if tick.waited | default(0) %}You have ended {{ tick.waited }} run{% if tick.waited | default(0) != 1 %}s{% endif %} by waiting.{% endif %}";
+        for (waited, want) in [
+            (0, ""),
+            (1, "You have ended 1 run by waiting."),
+            (2, "You have ended 2 runs by waiting."),
+        ] {
+            let out = render(template, &tick_case(waited, Value::Null)).expect("renders");
+            assert_eq!(out, want, "waited={waited}");
         }
     }
 
     /// Same defect class on the allowance arm: `tick.wait_allowance == 0`
-    /// must hold for a present 0 (PIDASHCONV-1073). Jinja2 half is
-    /// `test_tick_sentence_wait_allowance` in the dual-engine suite.
+    /// must hold for a present 0 (PIDASHCONV-1073).
     #[test]
-    fn wait_allowance_arm_matches_jinja2() {
-        let block = budget_block();
-        let stem = "When this issue has open blockers, they are information, not a gate — read them and decide for yourself whether the work can proceed (see \"Work item relationships\"). If it can, proceed and record the assumption. If it cannot, write down which blocker and why, call `pidash issue wait TP-12`, and yield `waiting_on_external`: the wait buys back this run's tick, so it costs no budget, and the next tick asks you again. Nothing watches the blocker for you — a blocker closing starts no run, and no one reads your workpad — so each tick you re-read and re-decide.";
-        let tail = " While the issue stays in its current state, Pi Dash re-invokes the agent about every 1 hour.";
-        let spent_clause = " **Your wait allowance is spent**: further waiting comes out of the pool above, so if you are still blocked, tell the human in a comment instead of waiting again.";
-        let cases: &[(i64, String)] = &[
-            (0, format!("{stem}{spent_clause}{tail}")),
-            (2, format!("{stem}{tail}")),
-        ];
-        for (allowance, want) in cases {
-            let out = render(&block, &tick_case(0, json!(*allowance))).expect("renders");
-            let line = out.lines().nth(4).expect("blockers paragraph is line 5");
-            assert_eq!(
-                line, want,
-                "byte-identical allowance arm for wait_allowance={allowance}"
-            );
+    fn wait_allowance_zero_is_a_present_number() {
+        let template = "{% if tick.wait_allowance | default(none) is not none and tick.wait_allowance == 0 %}spent{% else %}left{% endif %}";
+        for (allowance, want) in [
+            (json!(0), "spent"),
+            (json!(2), "left"),
+            (Value::Null, "left"),
+        ] {
+            let out = render(template, &tick_case(0, allowance.clone())).expect("renders");
+            assert_eq!(out, want, "wait_allowance={allowance}");
         }
     }
 
@@ -653,45 +607,10 @@ mod tests {
         );
     }
 
-    /// The whole cloud-capabilities section renders byte-identical to
-    /// Jinja2 with a realistic context (PIDASHCONV-1072). Same expected
-    /// text as the dual-engine contract test pins on the Python side.
-    #[test]
-    fn cloud_capabilities_section_renders_like_jinja2() {
-        let section =
-            crate::prompting::registry::get_section("cloud-capabilities").expect("section exists");
-        let text = render(
-            &section.default_body,
-            &json!({
-                "available_tools": ["pidash_get_current_issue"],
-                "unavailable_capabilities": ["filesystem", "shell", "worktree"],
-                "extra_toolsets": false,
-                "limits": django_default_limits(),
-            }),
-        )
-        .expect("renders");
-        assert_eq!(
-            text,
-            "## Capabilities\n\
-             \n\
-             Available tools:\n\
-             - `pidash_get_current_issue`\n\
-             \n\
-             Unavailable capabilities: filesystem, shell, worktree.\n\
-             Limits: {'model_requests': 25, 'tool_calls': 20, 'writes': 3, \
-             'input_tokens': 144000, 'output_tokens': 16000, \
-             'total_tokens': 160000, 'wall_seconds': 285}.\n\
-             \n\
-             You do not have a local filesystem, shell, worktree, repository \
-             checkout, or Pi Dash CLI. Do not invent or simulate them.\n"
-        );
-    }
-
     /// Numbers from a JSON context render as digits, not as the
     /// one-entry `$serde_json::private::Number` map the
     /// `arbitrary_precision` build converts them into (PIDASHCONV-1072).
-    /// Covers the `{{ limits.writes | default(0) }}` interpolation in
-    /// `cloud-write-policy.md` and the scalar legs (`tick.count`, …).
+    /// Covers the scalar legs (`tick.count`, …).
     #[test]
     fn scalar_numbers_render_as_digits() {
         let ctx = json!({ "limits": django_default_limits(), "x": 5 });

@@ -49,6 +49,13 @@ async function copyText(text: string, ok: string, fail: string): Promise<void> {
   }
 }
 
+/** The current page as a site-relative path, keeping query and fragment. */
+function currentPagePath(): string {
+  const location = globalThis.window?.location;
+  if (location === undefined) return "";
+  return `${location.pathname}${location.search ?? ""}${location.hash ?? ""}`;
+}
+
 export interface WorkItemPaletteInput {
   workspaceSlug: string;
   projectId: string;
@@ -300,10 +307,10 @@ export function useCyclePaletteContext(input: CyclePaletteInput): void {
   }, [mutations, favorites.data, input.cycleId, input.cycleName, input.favorite]);
   const copyUrl = React.useCallback(
     () =>
-      void copyText(
-        typeof window === "undefined" ? "" : window.location.href,
-        "Copied the cycle link.",
-        "Couldn't copy the cycle link."
+      void copyLinkWithToast(
+        currentPagePath(),
+        { copied: "Copied the cycle link.", failed: "Couldn't copy the cycle link." },
+        { success: notifySuccess, error: notifyError }
       ),
     []
   );
@@ -376,10 +383,10 @@ export function useModulePaletteContext(input: ModulePaletteInput): void {
   }, [mutations, favorites.data, input.moduleId]);
   const copyUrl = React.useCallback(
     () =>
-      void copyText(
-        typeof window === "undefined" ? "" : window.location.href,
-        "Copied the module link.",
-        "Couldn't copy the module link."
+      void copyLinkWithToast(
+        currentPagePath(),
+        { copied: "Copied the module link.", failed: "Couldn't copy the module link." },
+        { success: notifySuccess, error: notifyError }
       ),
     []
   );
@@ -465,10 +472,10 @@ export function usePagePaletteContext(input: PagePaletteInput): void {
   );
   const copyUrl = React.useCallback(
     () =>
-      void copyText(
-        typeof window === "undefined" ? "" : window.location.href,
-        "Copied the page link.",
-        "Couldn't copy the page link."
+      void copyLinkWithToast(
+        currentPagePath(),
+        { copied: "Copied the page link.", failed: "Couldn't copy the page link." },
+        { success: notifySuccess, error: notifyError }
       ),
     []
   );

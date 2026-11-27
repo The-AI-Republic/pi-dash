@@ -27,8 +27,6 @@
 //! |---|---|---|
 //! | `AssistantModelSeam` | `ee/assistant/model_provider.py` | api `CeAssistantSeam` | platform credentials (OpenHub lane) |
 //! | `SttSeam` | `ee/assistant/stt_provider.py` | `ByoSttSeam` | OpenHub relay endpoint |
-//! | `CloudAgentModelSeam` | `ee/cloud_agent/model_provider.py` | `CreatorModelSeam` | admission/model routing |
-//! | `CloudAgentToolsetsSeam` | `ee/cloud_agent/toolsets.py` | `NoExtraToolsets` | gateway toolsets |
 //! | `DesktopGate` (in `pidash-auth`) | `ee/authentication/desktop.py` | `SessionDesktopGate` | OIDC `client` claim |
 //! | `UserSettingsSchema` (in `user_settings`) | `ee/settings/user_settings.py` | `CeUserSettings` | extended schema |
 
@@ -43,33 +41,37 @@ use uuid::Uuid;
 /// `Arc<dyn AssistantModelSeam>` the serving state carries (the jobs
 /// registry's `Pin<Box<dyn Future>>` precedent — no new dependency).
 pub type SeamFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
-/// Reason codes from `managed_runner/errors.py::ManagedRunnerReason`,
+/// Reason codes from `managed_runner/errors.py::PidashAgentReason`,
 /// in the values the desktop profile endpoint actually serialises.
 pub mod reason {
     /// The viewer has no usable LLM configuration at all.
     pub const LLM_CONFIG_MISSING: &str = "llm_config_missing";
-    /// The viewer's provider is BYOK, which the desktop engine does not serve.
+    /// The viewer's provider is BYOK, which the Pi Dash Agent does not serve.
     pub const BYOK_UNSUPPORTED: &str = "byok_not_supported_on_desktop";
 }
 
 /// How the desktop agent engine should reach a model for one user
-/// (`ee/assistant/model_provider.py::AgentModelProfile`).
+/// (`ee/assistant/model_provider.py::PidashAgentProfile`).
 ///
 /// The credential itself is never part of this object — the desktop is
 /// handed it separately through the agent-token endpoint. `reason_code` is
 /// empty exactly when `available` is true. `top_up_url` is where a user
 /// adds credit for this lane; the overlay fills it, CE leaves it empty.
+/// `context_window` is the real context window for `model` when the cloud
+/// overlay knows it (NEWPIDASH-247); CE never fills it, so the engine falls
+/// back to its built-in catalog (if any) for known models.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AgentModelProfile {
+pub struct PidashAgentProfile {
     pub available: bool,
     pub lane: String,
     pub base_url: String,
     pub model: String,
     pub reason_code: String,
     pub top_up_url: String,
+    pub context_window: Option<u32>,
 }
 
-/// CE credential failure (`ManagedRunnerUnavailable`): raising rather than
+/// CE credential failure (`PidashAgentUnavailable`): raising rather than
 /// returning empty keeps the failure loud — a caller that ignored the
 /// profile must not silently receive a blank credential.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,10 +82,15 @@ pub struct CredentialUnavailable {
 
 /// Desktop-credential failure: the two `AgentModelTokenEndpoint.post`
 /// error arms (`agent_profile.py:87-99`). `Unavailable` is the
-/// `ManagedRunnerUnavailable` arm (the client should have consulted the
+/// `PidashAgentUnavailable` arm (the client should have consulted the
 /// profile first); `Classified` is the `_classify_credential_error` arm —
 /// the cloud seam's pre-classified gateway outcome. CE only ever produces
-/// `Unavailable`.
+/// `Unavailable`. `WalletEmpty` is the Pi Dash Agent's model-token
+/// classification (§8, `runner/views/engine.py:_classify_gateway_error`):
+/// the gateway's wallet ran out, so the engine pauses with
+/// `wallet_empty` (402). The legacy agent-token endpoint renders it as
+/// the transient arm it always rendered wallet failures as
+/// (`gateway_unavailable`, 503), so its response is unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CredentialError {
     /// Profile-refused: renders `409 {error: reason, detail}`.
@@ -92,6 +99,11 @@ pub enum CredentialError {
     /// `detail` key at `status` (401 `gateway_session_revoked` or 503
     /// `gateway_unavailable`).
     Classified { code: String, status: u16 },
+    /// Wallet-exhausted gateway failure (402 on the engine model-token
+    /// endpoint; `detail` is the classifier's exception name, never a
+    /// provider body). The legacy agent-token endpoint maps it to its
+    /// transient arm.
+    WalletEmpty { detail: String },
 }
 
 /// BYOK title inputs for [`TitleRequest`]: the caller's read of the user's
@@ -145,7 +157,10 @@ pub enum TitleError {
 /// The serving state carries one of these (`Arc<dyn AssistantModelSeam>`)
 /// and the non-turn HTTP callers consult it instead of the CE-concrete
 /// free functions, so the private crate implements this trait once and
-/// every caller follows. Turn-time model/toolset/label routing is NOT
+/// every caller follows. (P4: the execute-path `resolve_model_for_user`
+/// died with the retired run plane; the chat free function
+/// [`crate::assistant::seams::resolve_model_for_user`] stays.)
+/// Turn-time model/toolset/label routing is NOT
 /// here — it stays with the jobs `TurnSeam`, which already covers it.
 /// Methods are async with the user id because the overlay branches on the
 /// user's selected connection, which it reads itself; the CE defaults
@@ -164,41 +179,42 @@ pub trait AssistantModelSeam: Send + Sync + std::fmt::Debug {
         Box::pin(async move { crate::assistant::seams::has_usable_llm_config(has_api_key) })
     }
 
-    /// Describe the model endpoint the desktop engine may call. CE has
+    /// Describe the model endpoint the Pi Dash Agent may call. CE has
     /// exactly one lane, BYOK, which the desktop does not serve — so this
     /// is always unavailable; only the reason differs.
-    fn agent_model_profile(
+    fn pidash_agent_profile(
         &self,
         user_id: Uuid,
         has_api_key: bool,
-    ) -> SeamFuture<'_, AgentModelProfile> {
+    ) -> SeamFuture<'_, PidashAgentProfile> {
         let _ = user_id;
         Box::pin(async move {
-            let profile = crate::assistant::seams::agent_model_profile_for_user(has_api_key);
-            AgentModelProfile {
+            let profile = crate::assistant::seams::pidash_agent_profile_for_user(has_api_key);
+            PidashAgentProfile {
                 available: profile.available,
                 lane: profile.lane,
                 base_url: profile.base_url,
                 model: profile.model,
                 reason_code: profile.reason_code,
                 top_up_url: profile.top_up_url,
+                context_window: profile.context_window,
             }
         })
     }
 
-    /// Hand out the desktop engine's model credential for one user. CE has
+    /// Hand out the Pi Dash Agent's model credential for one user. CE has
     /// no lane the desktop can use, so there is nothing to hand out —
     /// always [`CredentialError::Unavailable`]. The overlay mints the
     /// user's own short-lived gateway credential here, answering
     /// [`CredentialError::Classified`] (its `_classify_credential_error`
     /// outcome) when the gateway fetch fails.
-    fn agent_model_credential(
+    fn pidash_agent_credential(
         &self,
         user_id: Uuid,
     ) -> SeamFuture<'_, Result<(String, String), CredentialError>> {
         let _ = user_id;
         Box::pin(async move {
-            crate::assistant::seams::agent_model_credential_for_user().map_err(|unavailable| {
+            crate::assistant::seams::pidash_agent_credential_for_user().map_err(|unavailable| {
                 CredentialError::Unavailable(CredentialUnavailable {
                     reason: unavailable.code,
                     message: unavailable.detail,
@@ -306,123 +322,6 @@ impl SttSeam for ByoSttSeam {}
 
 /// Overlay seam for `ee/cloud_agent/model_provider.py`.
 ///
-/// The Cloud Agent has no platform model config of its own: every run
-/// executes against its creator's LLM config — the same resolution path
-/// Pi Dash AI uses, so the two always agree. `model_owner_for_run` pins
-/// that routing decision; the model construction itself goes through the
-/// [`AssistantModelSeam`] once the assistant runtime is ported (D-06/D-11).
-pub trait CloudAgentModelSeam {
-    /// Whose LLM config this run executes against. CE always answers the
-    /// creator: `resolve_model_for_creator` delegates to
-    /// `resolve_model_for_user(run.created_by)`.
-    fn model_owner_for_run(&self, created_by: &str) -> String {
-        created_by.to_string()
-    }
-}
-
-/// CE cloud-agent model seam: the creator's config.
-pub struct CreatorModelSeam;
-
-impl CloudAgentModelSeam for CreatorModelSeam {}
-
-/// A named extra toolset offered to a run beyond its immutable tool plan.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExtraToolset {
-    pub name: String,
-}
-
-/// Which run the resolver builds toolsets for: identity plus the run's
-/// own `tool_plan.extra_toolsets` snapshot. The implementation reads
-/// whatever else it needs with its own handles.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ToolsetsRun {
-    pub run_id: Uuid,
-    pub creator_id: Uuid,
-    pub extra_toolsets: bool,
-}
-
-/// App tools entitled but unattachable: the drive appends this as an
-/// `extra_toolsets_unavailable` event (the "say what was dropped"
-/// obligation in the `toolsets.py` module docstring).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolsetsUnavailable {
-    pub provider: String,
-    pub reason: Option<String>,
-}
-
-/// One `resolve_extra_toolsets_for_run` answer: the toolsets plus, when
-/// the run was entitled to more than arrived, the report the drive
-/// appends. Never an error — extra tools are additive, so an outage
-/// costs the run its extra tools, never the run (the "degrade, never
-/// fail" obligation in the `toolsets.py` module docstring).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolsetsResolution {
-    pub toolsets: Vec<ExtraToolset>,
-    pub unavailable: Option<ToolsetsUnavailable>,
-}
-
-impl ToolsetsResolution {
-    /// No toolsets and nothing to report (the CE answer).
-    pub fn empty() -> Self {
-        Self {
-            toolsets: Vec::new(),
-            unavailable: None,
-        }
-    }
-}
-
-/// Overlay seam for `ee/cloud_agent/toolsets.py`.
-///
-/// A run's tools come from its immutable tool plan; deployments that can
-/// offer tools unknowable at plan time (discovered per-user, at connect
-/// time) attach them here instead — admitted only what the plan allows,
-/// degrading (never failing) on outage, and reporting what was dropped.
-///
-/// Boxed futures (not `impl Future`) keep the trait object-safe, so the
-/// binary carries one `Arc<dyn CloudAgentToolsetsSeam>` in its state and
-/// every creation/execution call site consults the same instance.
-pub trait CloudAgentToolsetsSeam: Debug + Send + Sync {
-    /// Whether the creator opted in to the extra toolsets
-    /// (`extra_toolsets_enabled_for`, `toolsets.py:23-32`). Read once at
-    /// run creation and snapshotted onto the plan, never consulted at
-    /// execution time. CE: nobody has — the CE settings schema declares
-    /// no such preference, so the creator is ignored and this is false.
-    /// Never fails: an unreadable preference degrades to off rather
-    /// than blocking run creation.
-    fn extra_toolsets_enabled(
-        &self,
-        creator_id: Uuid,
-    ) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
-        let _ = creator_id;
-        Box::pin(async { false })
-    }
-
-    /// Additional toolsets for the run
-    /// (`resolve_extra_toolsets_for_run`, `toolsets.py:34-36`). Honors
-    /// the snapshot in `run` rather than re-reading any preference, so
-    /// a mid-flight change cannot alter a run already in progress.
-    /// CE: none.
-    fn extra_toolsets(
-        &self,
-        run: &ToolsetsRun,
-    ) -> Pin<Box<dyn Future<Output = ToolsetsResolution> + Send + '_>> {
-        let _ = run;
-        Box::pin(async { ToolsetsResolution::empty() })
-    }
-
-    /// Name of the tool that fetches a deferred tool schema. CE: none, so
-    /// the prompt section naming it never renders.
-    fn schema_tool_name(&self) -> &'static str {
-        ""
-    }
-}
-
-/// CE cloud-agent toolsets: no extras.
-#[derive(Debug)]
-pub struct NoExtraToolsets;
-
-impl CloudAgentToolsetsSeam for NoExtraToolsets {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,14 +356,14 @@ mod tests {
     #[tokio::test]
     async fn ce_desktop_profile_is_never_available() {
         let seam = TestSeam;
-        let with_key = seam.agent_model_profile(user(), true).await;
+        let with_key = seam.pidash_agent_profile(user(), true).await;
         assert!(!with_key.available);
         assert_eq!(with_key.lane, "byok");
         assert_eq!(with_key.base_url, "");
         assert_eq!(with_key.model, "");
         assert_eq!(with_key.reason_code, reason::BYOK_UNSUPPORTED);
         assert_eq!(reason::BYOK_UNSUPPORTED, "byok_not_supported_on_desktop");
-        let without_key = seam.agent_model_profile(user(), false).await;
+        let without_key = seam.pidash_agent_profile(user(), false).await;
         assert!(!without_key.available);
         assert!(without_key.lane.is_empty());
         assert_eq!(without_key.reason_code, reason::LLM_CONFIG_MISSING);
@@ -476,7 +375,7 @@ mod tests {
     #[tokio::test]
     async fn ce_hands_out_no_desktop_credential() {
         let error = TestSeam
-            .agent_model_credential(user())
+            .pidash_agent_credential(user())
             .await
             .expect_err("CE has no desktop lane");
         let CredentialError::Unavailable(unavailable) = &error else {
@@ -551,27 +450,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn cloud_agent_run_uses_its_creators_config() {
-        assert_eq!(
-            CreatorModelSeam.model_owner_for_run("user-1"),
-            "user-1".to_string(),
-        );
-    }
-
-    #[tokio::test]
-    async fn ce_offers_no_extra_toolsets() {
-        let seam = NoExtraToolsets;
-        assert!(!seam.extra_toolsets_enabled(Uuid::nil()).await);
-        let run = ToolsetsRun {
-            run_id: Uuid::nil(),
-            creator_id: Uuid::nil(),
-            extra_toolsets: true,
-        };
-        assert_eq!(seam.extra_toolsets(&run).await, ToolsetsResolution::empty());
-        assert_eq!(seam.schema_tool_name(), "");
-    }
-
     /// A replacement seam behind the trait changes behaviour without
     /// touching callers — the overlay contract in miniature.
     #[derive(Debug)]
@@ -584,25 +462,26 @@ mod tests {
             Box::pin(async move { true })
         }
 
-        fn agent_model_profile(
+        fn pidash_agent_profile(
             &self,
             user_id: Uuid,
             has_api_key: bool,
-        ) -> SeamFuture<'_, AgentModelProfile> {
+        ) -> SeamFuture<'_, PidashAgentProfile> {
             let _ = (user_id, has_api_key);
             Box::pin(async move {
-                AgentModelProfile {
+                PidashAgentProfile {
                     available: true,
                     lane: "openhub".to_string(),
                     base_url: "https://gateway.example.com".to_string(),
                     model: "hub-default".to_string(),
                     reason_code: String::new(),
                     top_up_url: "https://gateway.example.com/account/credits".to_string(),
+                    context_window: None,
                 }
             })
         }
 
-        fn agent_model_credential(
+        fn pidash_agent_credential(
             &self,
             user_id: Uuid,
         ) -> SeamFuture<'_, Result<(String, String), CredentialError>> {
@@ -624,51 +503,12 @@ mod tests {
         }
     }
 
-    impl CloudAgentToolsetsSeam for OpenHubLikeSeam {
-        fn extra_toolsets_enabled(
-            &self,
-            _creator_id: Uuid,
-        ) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
-            Box::pin(async { true })
-        }
-
-        fn extra_toolsets(
-            &self,
-            run: &ToolsetsRun,
-        ) -> Pin<Box<dyn Future<Output = ToolsetsResolution> + Send + '_>> {
-            let snapshot = run.extra_toolsets;
-            Box::pin(async move {
-                if !snapshot {
-                    return ToolsetsResolution::empty();
-                }
-                ToolsetsResolution {
-                    toolsets: vec![ExtraToolset {
-                        name: "gateway".to_string(),
-                    }],
-                    unavailable: None,
-                }
-            })
-        }
-
-        fn schema_tool_name(&self) -> &'static str {
-            "acme_get_tool_schema"
-        }
-    }
-
-    fn title_request() -> TitleRequest {
-        TitleRequest {
-            user_id: user(),
-            description: "Fix the thing".to_string(),
-            byok: None,
-        }
-    }
-
     #[tokio::test]
     async fn replacement_seam_wins_behind_the_traits() {
         let seam = OpenHubLikeSeam;
         // Keyless yet usable: the gateway lane, not BYOK.
         assert!(seam.has_usable_llm_config(user(), false).await);
-        let profile = seam.agent_model_profile(user(), false).await;
+        let profile = seam.pidash_agent_profile(user(), false).await;
         assert!(profile.available);
         assert_eq!(profile.lane, "openhub");
         assert_eq!(profile.base_url, "https://gateway.example.com");
@@ -679,35 +519,23 @@ mod tests {
             "https://gateway.example.com/account/credits"
         );
         let (token, expires_at) = seam
-            .agent_model_credential(user())
+            .pidash_agent_credential(user())
             .await
             .expect("gateway credential");
         assert_eq!(token, "gateway-token");
         assert_eq!(expires_at, "2030-01-01T00:00:00Z");
+        fn title_request() -> TitleRequest {
+            TitleRequest {
+                user_id: user(),
+                description: "Fix the thing".to_string(),
+                byok: None,
+            }
+        }
         let title = seam
             .generate_title(title_request())
             .await
             .expect("cloud title");
         assert_eq!(title, "cloud title");
-        assert!(seam.extra_toolsets_enabled(Uuid::nil()).await);
-        let run = ToolsetsRun {
-            run_id: Uuid::nil(),
-            creator_id: Uuid::nil(),
-            extra_toolsets: true,
-        };
-        let resolved = seam.extra_toolsets(&run).await;
-        assert_eq!(resolved.toolsets.len(), 1);
-        assert!(resolved.unavailable.is_none());
-        assert_eq!(seam.schema_tool_name(), "acme_get_tool_schema");
-        // The snapshot still gates a replacement seam: a run admitted
-        // without extras resolves none even when the seam could offer.
-        let unsnapshotted = ToolsetsRun {
-            extra_toolsets: false,
-            ..run
-        };
-        assert_eq!(
-            seam.extra_toolsets(&unsnapshotted).await,
-            ToolsetsResolution::empty()
-        );
+        // The toolsets seam died in P4; model/credential/title survive.
     }
 }

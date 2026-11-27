@@ -3,7 +3,7 @@
 //! Agent run event model (D-15, stage 5).
 //!
 //! Ports `AgentRunEvent` (`apps/api/pi_dash/runner/models.py:1162-1176`):
-//! row struct + column list. D-11's `db::dispatch::event` keeps its
+//! row struct + column list. D-11's `db::agent_runs::event` keeps its
 //! own read shape of this table; this is the runner-domain full port.
 //!
 //! Fixture: `rust-api/fixtures/runner_runs/fx-run-02-models-runs.golden.json`

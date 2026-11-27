@@ -680,7 +680,7 @@ pub mod module_issue {
 /// (`crate::app_intake::models::intake_issue`, D-32),
 /// `issue_agent_ticker`
 /// (`crate::tasks_ticker::models::issue_agent_ticker`, D-10) and the
-/// `AgentRunStatus` enum (`crate::dispatch::status`, cited, no fixture).
+/// `AgentRunStatus` enum (`crate::agent_runs::status`, cited, no fixture).
 /// Query builders copy the literals below verbatim.
 pub mod foreign {
     /// Physical `agent_run` table (`runner/models.py`); D-26 reads the
@@ -820,8 +820,8 @@ mod tests {
     use super::issue_version;
     use super::module_issue;
     use super::OnDelete;
+    use crate::agent_runs::{agent_run, status::AgentRunStatus};
     use crate::app_intake::models::{intake_issue, IntakeIssueStatus};
-    use crate::dispatch::{agent_run, status::AgentRunStatus};
     use crate::soft_delete::active_condition;
     use crate::tasks_ticker::models::issue_agent_ticker;
     use crate::v1_cycles_modules::{cycle as d27_cycle, module as d27_module};

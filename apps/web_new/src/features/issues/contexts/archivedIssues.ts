@@ -166,7 +166,8 @@ export function useArchivedPages(
   groupBy: string | null,
   orderBy: string,
   labels: ReadonlyMap<string, string>,
-  showEmptyGroups: boolean
+  showEmptyGroups: boolean,
+  groupOrder: readonly string[] = []
 ): ArchivedPages {
   const grouped = serverGroupBy(groupBy) !== null;
   const resetKey = `${groupBy ?? "flat"}|${orderBy}|${richFiltersParam(expression) ?? ""}`;
@@ -224,16 +225,31 @@ export function useArchivedPages(
     if (firstGroupedPage !== undefined && isGroupedPage(firstGroupedPage)) {
       merged = mergeGroupedPage(
         merged,
-        groupedSections(firstGroupedPage, labels, { showEmptyGroups, dimension: groupBy })
+        groupedSections(firstGroupedPage, labels, { showEmptyGroups, dimension: groupBy, order: groupOrder }),
+        groupOrder
       );
     }
     for (let index = 0; index < sectionEntries.length; index++) {
       const page = sectionQueries[index]?.data;
       if (page === undefined || !isGroupedPage(page)) continue;
-      merged = mergeGroupedPage(merged, groupedSections(page, labels, { showEmptyGroups, dimension: groupBy }));
+      merged = mergeGroupedPage(
+        merged,
+        groupedSections(page, labels, { showEmptyGroups, dimension: groupBy, order: groupOrder }),
+        groupOrder
+      );
     }
     return merged;
-  }, [flatPages, firstGroupedPage, groupBy, grouped, labels, sectionEntries, sectionQueries, showEmptyGroups]);
+  }, [
+    flatPages,
+    firstGroupedPage,
+    groupBy,
+    grouped,
+    labels,
+    sectionEntries,
+    sectionQueries,
+    showEmptyGroups,
+    groupOrder,
+  ]);
   const flatLast = flatPages[flatPages.length - 1];
   const total = grouped ? sections.reduce((sum, section) => sum + section.total, 0) : (flatLast?.total_count ?? 0);
   const loadMore = React.useCallback(() => {

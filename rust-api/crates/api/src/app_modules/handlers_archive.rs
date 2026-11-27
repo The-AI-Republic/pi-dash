@@ -44,11 +44,16 @@
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::Router;
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ColumnTrait, EntityTrait, FromQueryResult, JoinType, QueryFilter, QuerySelect, RelationTrait,
+};
 use serde_json::{Map, Value};
 
+use pidash_db::entity::{modules, user_favorites, workspaces};
 use pidash_services::app_modules::queries;
 
 use super::gates;
@@ -56,11 +61,11 @@ use super::handlers_module_links::{
     actor_or_401, check_class_gate, fetch_class_facts, resolve_project_or_404,
 };
 use super::handlers_modules::{
-    annotation_selects, empty_response, fetch_assignee_distribution, fetch_burndown_chart,
-    fetch_estimate_type, fetch_json_maps, fetch_label_distribution, fetch_module_links,
-    fetch_sub_issues, json_response, parse_uuid_or_invalid, pool_of, render_distribution_array,
-    render_float, shape_link, shape_value, shift_datetime, HandlerResult, ASSIGNEE_COUNT_ORDER,
-    ASSIGNEE_ESTIMATE_ORDER, DETAIL_ROW_ORDER, MODULE_BASE_COLUMNS,
+    empty_response, fetch_archive_label_estimate, fetch_assignee_distribution,
+    fetch_burndown_chart, fetch_estimate_type, fetch_label_distribution, fetch_module_links,
+    fetch_sub_issues, is_noncanonical_uuid, json_response, parse_uuid_or_invalid, pool_of,
+    proxy_segment, render_distribution_array, render_float, shape_link, shape_value,
+    shift_datetime, HandlerResult, ASSIGNEE_COUNT_ORDER, ASSIGNEE_ESTIMATE_ORDER, DETAIL_ROW_ORDER,
 };
 use crate::app_issues::Denial;
 use crate::state::AppState;
@@ -114,6 +119,35 @@ fn gate_for(method: &str, path: &str) -> &'static gates::Gate {
     &gates::gate_for(method, path)
         .unwrap_or_else(|| panic!("D-28 gate for {method} {path}"))
         .gate
+}
+
+#[derive(Debug, FromQueryResult)]
+#[allow(dead_code)]
+struct ArchiveModuleRow {
+    id: uuid::Uuid,
+    status: String,
+    archived_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+    workspace_id: uuid::Uuid,
+}
+
+fn archive_module_select(
+    slug: &str,
+    project_id: &uuid::Uuid,
+    module_id: &uuid::Uuid,
+) -> sea_orm::Select<modules::Entity> {
+    modules::Entity::find()
+        .select_only()
+        .columns([
+            modules::Column::Id,
+            modules::Column::Status,
+            modules::Column::ArchivedAt,
+            modules::Column::WorkspaceId,
+        ])
+        .join(JoinType::InnerJoin, modules::Relation::Workspaces.def())
+        .filter(modules::Column::Id.eq(*module_id))
+        .filter(modules::Column::ProjectId.eq(*project_id))
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(modules::Column::DeletedAt.is_null())
 }
 
 // ---------------------------------------------------------------------------
@@ -208,41 +242,21 @@ async fn fetch_archived_rows(
     user_id: &uuid::Uuid,
     module_id: Option<&uuid::Uuid>,
 ) -> Result<Vec<Map<String, Value>>, Denial> {
-    use sqlx::Row;
-    let mut columns = MODULE_BASE_COLUMNS.join(", ");
-    columns.push_str(", ");
-    columns.push_str(&annotation_selects(false));
-    let mut sql = format!(
-        "SELECT row_to_json(__r)::text AS __row FROM (SELECT {columns} \
-         FROM modules m JOIN workspaces w ON w.id = m.workspace_id \
-         LEFT JOIN module_members ON module_members.module_id = m.id \
-         WHERE m.project_id = $1 AND w.slug = $2 AND m.deleted_at IS NULL \
-         AND m.archived_at IS NOT NULL"
-    );
-    if module_id.is_some() {
-        sql.push_str(" AND m.id = $4");
-    }
-    sql.push_str(" GROUP BY m.id ORDER BY ");
-    sql.push_str(&queries::MODULE_ORDER_SQL.replace("modules.", "m."));
-    sql.push_str(") AS __r");
-    let mut query = sqlx::query(&sql).bind(project_id).bind(slug).bind(user_id);
-    if let Some(id) = module_id {
-        query = query.bind(id);
-    }
-    let rows = query
-        .fetch_all(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        let text: String = row.try_get("__row").map_err(|_| Denial::ServerError)?;
-        let value: Value = serde_json::from_str(&text).map_err(|_| Denial::ServerError)?;
-        match value {
-            Value::Object(map) => out.push(map),
-            _ => return Err(Denial::ServerError),
-        }
-    }
-    Ok(out)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    // Archive queryset: archived rows, no soft-delete member filter
+    // (ported bug), detail id when scoped.
+    let rows =
+        crate::app_issues::list_engine::query_built::<super::handlers_modules::ModuleRowData>(
+            &db,
+            &super::handlers_modules::module_rows_statement(
+                slug, project_id, user_id, module_id, false, true, false,
+            ),
+        )
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(super::handlers_modules::module_row_map)
+        .collect())
 }
 
 /// Shared archive preamble: auth → rewrite → the `ProjectEntityPermission`
@@ -293,7 +307,14 @@ async fn archive_get(
     State(state): State<AppState>,
     Path((slug, project_raw, module_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:module_id>` 404 precedes auth).
+    if is_noncanonical_uuid(&module_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     match archive_context(
         &state,
         &slug,
@@ -321,30 +342,14 @@ async fn fetch_archive_module(
     slug: &str,
     project_id: &uuid::Uuid,
     module_id: &uuid::Uuid,
-) -> Result<Map<String, Value>, Denial> {
-    use sqlx::Row;
-    let row: Option<sqlx::postgres::PgRow> = sqlx::query(
-        r#"SELECT row_to_json(__r)::text AS __row FROM (
-             SELECT m.id, m.status, m.archived_at
-             FROM modules m JOIN workspaces w ON w.id = m.workspace_id
-             WHERE m.id = $1 AND m.project_id = $2 AND w.slug = $3
-             AND m.deleted_at IS NULL) AS __r"#,
-    )
-    .bind(module_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    let Some(row) = row else {
-        return Err(Denial::NotFound);
-    };
-    let text: String = row.try_get("__row").map_err(|_| Denial::ServerError)?;
-    let value: Value = serde_json::from_str(&text).map_err(|_| Denial::ServerError)?;
-    match value {
-        Value::Object(map) => Ok(map),
-        _ => Err(Denial::ServerError),
-    }
+) -> Result<ArchiveModuleRow, Denial> {
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    archive_module_select(slug, project_id, module_id)
+        .into_model::<ArchiveModuleRow>()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?
+        .ok_or(Denial::NotFound)
 }
 
 /// `str(timezone.now())` for the archive response (`archive.py:559`):
@@ -366,7 +371,14 @@ async fn archive_post(
     State(state): State<AppState>,
     Path((slug, project_raw, module_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:module_id>` 404 precedes auth).
+    if is_noncanonical_uuid(&module_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let context = match archive_context(
         &state,
         &slug,
@@ -387,9 +399,8 @@ async fn archive_post(
         ..
     } = context;
     let module_id = parse_uuid_or_invalid(&module_raw)?;
-    let row = fetch_archive_module(&pool, &slug, &project_id, &module_id).await?;
-    let status = row.get("status").and_then(|value| value.as_str());
-    if !matches!(status, Some("completed" | "cancelled")) {
+    let module = fetch_archive_module(&pool, &slug, &project_id, &module_id).await?;
+    if !matches!(module.status.as_str(), "completed" | "cancelled") {
         return Err(Denial::BadError(
             "Only completed or cancelled modules can be archived".to_owned(),
         ));
@@ -399,30 +410,30 @@ async fn archive_post(
     // favorites cleanup is the queryset `delete()` default: soft
     // (`deleted_at` only, no `updated_at` bump), across users.
     let now = chrono::Utc::now();
-    sqlx::query(
-        r#"UPDATE modules SET archived_at = $2, updated_at = $2, updated_by_id = $3
-           WHERE id = $1"#,
-    )
-    .bind(module_id)
-    .bind(now)
-    .bind(user_id)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    sqlx::query(
-        r#"UPDATE user_favorites uf SET deleted_at = $4
-           FROM workspaces w
-           WHERE uf.workspace_id = w.id AND w.slug = $1 AND uf.project_id = $2
-           AND uf.entity_type = 'module' AND uf.entity_identifier = $3
-           AND uf.deleted_at IS NULL"#,
-    )
-    .bind(&slug)
-    .bind(project_id)
-    .bind(module_id)
-    .bind(now)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    // SeaORM stores timestamptz; pass UTC explicitly to avoid naive drift.
+    let now_sea = now.fixed_offset();
+    modules::Entity::update_many()
+        .col_expr(modules::Column::ArchivedAt, Expr::value(Some(now_sea)))
+        .col_expr(modules::Column::UpdatedAt, Expr::value(now_sea))
+        .col_expr(modules::Column::UpdatedById, Expr::value(Some(user_id)))
+        .filter(modules::Column::Id.eq(module_id))
+        .exec(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    user_favorites::Entity::update_many()
+        .col_expr(
+            user_favorites::Column::DeletedAt,
+            Expr::value(Some(now_sea)),
+        )
+        .filter(user_favorites::Column::WorkspaceId.eq(module.workspace_id))
+        .filter(user_favorites::Column::ProjectId.eq(Some(project_id)))
+        .filter(user_favorites::Column::EntityType.eq("module"))
+        .filter(user_favorites::Column::EntityIdentifier.eq(Some(module_id)))
+        .filter(user_favorites::Column::DeletedAt.is_null())
+        .exec(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let mut out = String::from("{\"archived_at\":");
     out.push_str(&super::handlers_modules::json_string(&python_str_utc(&now)));
     out.push('}');
@@ -435,7 +446,14 @@ async fn archive_delete(
     State(state): State<AppState>,
     Path((slug, project_raw, module_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:module_id>` 404 precedes auth).
+    if is_noncanonical_uuid(&module_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let context = match archive_context(
         &state,
         &slug,
@@ -460,16 +478,19 @@ async fn archive_delete(
     let module_id = parse_uuid_or_invalid(&module_raw)?;
     fetch_archive_module(&pool, &slug, &project_id, &module_id).await?;
     let now = chrono::Utc::now();
-    sqlx::query(
-        r#"UPDATE modules SET archived_at = NULL, updated_at = $2, updated_by_id = $3
-           WHERE id = $1"#,
-    )
-    .bind(module_id)
-    .bind(now)
-    .bind(user_id)
-    .execute(&pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    let db = pidash_db::pool::sea_orm_connection(&pool);
+    let now_sea = now.fixed_offset();
+    modules::Entity::update_many()
+        .col_expr(
+            modules::Column::ArchivedAt,
+            Expr::value(None::<sea_orm::prelude::DateTimeWithTimeZone>),
+        )
+        .col_expr(modules::Column::UpdatedAt, Expr::value(now_sea))
+        .col_expr(modules::Column::UpdatedById, Expr::value(Some(user_id)))
+        .filter(modules::Column::Id.eq(module_id))
+        .exec(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     Ok(empty_response(StatusCode::NO_CONTENT))
 }
 
@@ -514,45 +535,9 @@ async fn archived_list(
 // Archived detail (the `else` branch of `get`, `archive.py:294-543`)
 // ---------------------------------------------------------------------------
 
-/// Label estimate-distribution over the archive queryset
-/// (`archive.py:386-391`): identical to the main label estimate query
-/// except the ported bugs — no `module_issues.deleted_at IS NULL` filter,
-/// and no `deleted_at` guard on the label M2M joins (PB-2035, PB-0102
-/// class: Django groups through the relations unfiltered).
-async fn fetch_archive_label_estimate(
-    pool: &sqlx::PgPool,
-    slug: &str,
-    project_id: &uuid::Uuid,
-    module_id: &uuid::Uuid,
-) -> Result<Vec<Map<String, Value>>, Denial> {
-    let total = queries::estimate_sum_sql(None);
-    let completed = queries::estimate_sum_sql(Some(true));
-    let pending = queries::estimate_sum_sql(Some(false));
-    // Same joins, grouping and ordering as the main label estimate
-    // query — only the `module_issues.deleted_at IS NULL` predicate is
-    // gone (the `:386-391` ported bug). The `issues` table stays
-    // unaliased: the shared guard/sum fragments reference its bare name,
-    // and Postgres hides the original name once a table is aliased.
-    let sql = format!(
-        "SELECT row_to_json(__r)::text AS __row FROM (
-           SELECT labels.name AS label_name, labels.color AS color,
-                  labels.id AS label_id, {total} AS total_estimates,
-                  {completed} AS completed_estimates, {pending} AS pending_estimates
-           FROM issues JOIN projects ON projects.id = issues.project_id
-           JOIN workspaces ON workspaces.id = issues.workspace_id
-           LEFT OUTER JOIN states ON states.id = issues.state_id
-           JOIN module_issues ON module_issues.issue_id = issues.id
-           LEFT JOIN estimate_points ON estimate_points.id = issues.estimate_point_id
-           LEFT JOIN issue_labels ON issue_labels.issue_id = issues.id
-           LEFT JOIN labels ON labels.id = issue_labels.label_id
-           WHERE {} AND workspaces.slug = $1 AND issues.project_id = $2
-           AND module_issues.module_id = $3
-           GROUP BY labels.name, labels.color, labels.id
-           ORDER BY labels.name) AS __r",
-        queries::issue_manager_guards_sql(),
-    );
-    fetch_json_maps(pool, &sql, slug, project_id, module_id).await
-}
+// `fetch_archive_label_estimate` lives on `handlers_modules` (SeaORM,
+// `distribution_scope` with `scope_deleted_guard=false`) and is imported
+// above; the archive detail calls it under the same name.
 
 /// `GET archived-modules/<pk>/`: the detail shell plus the
 /// estimate/distribution blocks. There is no 404: a miss answers 200 with
@@ -563,7 +548,14 @@ async fn archived_detail(
     State(state): State<AppState>,
     Path((slug, project_raw, pk_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
 ) -> HandlerResult {
+    // Routing first (Django's `<uuid:pk>` 404 precedes auth).
+    if is_noncanonical_uuid(&pk_raw) {
+        return Ok(proxy_segment(state, method, uri, headers).await);
+    }
     let context = match archive_context(
         &state,
         &slug,

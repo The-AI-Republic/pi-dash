@@ -43,9 +43,27 @@ export const DispatchWait = z.object({
   queued_at: nullableDateTime(),
   runner_last_seen_at: nullableDateTime(),
   runs_ahead: z.number(),
+  pause_reason: z.optional(z.nullable(z.string())),
+  expires_at: z.optional(nullableDateTime()),
   releasable: z.boolean(),
 });
 export type DispatchWait = z.infer<typeof DispatchWait>;
+
+/**
+ * Machine-level queue wait (NEWPIDASH-241 T7): distinct from dispatch_wait
+ * (cloud-level). Only phase/position/queued/reported/active/limit are
+ * workspace-visible; no admission/session IDs, no cross-workspace runner lists.
+ * Additive: old backends omit it, old clients ignore it.
+ */
+export const CapacityWait = z.object({
+  phase: z.string(),
+  queue_position: z.nullable(z.number()),
+  queued_at: z.nullable(z.string()),
+  reported_at: z.nullable(z.string()),
+  active: z.nullable(z.number()),
+  limit: z.nullable(z.number()),
+});
+export type CapacityWait = z.infer<typeof CapacityWait>;
 
 /** The per-issue continuation clock as the detail read carries it. */
 export const AgentTicker = z.object({
@@ -89,7 +107,9 @@ export const AgentRunSummary = z.object({
   id: uuid(),
   status: z.string(),
   executor_kind: z.string(),
-  queue_position: z.nullable(z.number()),
+  // Dropped with the worktree-pool columns (PDASHOSS01-156): current
+  // servers omit it, older ones still send it.
+  queue_position: z.optional(z.nullable(z.number())),
   runner: nullableUuid(),
   runner_name: z.nullable(z.string()),
   /**
@@ -100,10 +120,13 @@ export const AgentRunSummary = z.object({
   pinned_runner_name: z.optional(z.nullable(z.string())),
   pin_kind: z.optional(z.string()),
   dispatch_wait: z.optional(z.nullable(DispatchWait)),
+  capacity_wait: z.optional(z.nullable(CapacityWait)),
   created_at: nullableDateTime(),
   assigned_at: nullableDateTime(),
   started_at: nullableDateTime(),
   ended_at: nullableDateTime(),
+  cancel_requested_at: z.optional(nullableDateTime()),
+  cancel_reason: z.optional(z.string()),
   done_payload: z.unknown(),
   error: z.string(),
   error_code: z.string(),

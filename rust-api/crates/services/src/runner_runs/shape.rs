@@ -80,7 +80,7 @@ use pidash_types::runner_runs::{error_diagnostic, RunErrorDiagnostic};
 // ---------------------------------------------------------------------------
 
 /// `AgentRunSerializer.Meta.fields` (`serializers.py:294-329`).
-pub const RUN_WIRE_FIELDS: [&str; 33] = [
+pub const RUN_WIRE_FIELDS: [&str; 39] = [
     "id",
     "status",
     "executor_kind",
@@ -91,6 +91,11 @@ pub const RUN_WIRE_FIELDS: [&str; 33] = [
     "thread_id",
     "agent_metadata",
     "runner",
+    "pinned_runner",
+    "pinned_runner_name",
+    "pin_kind",
+    "dispatch_wait",
+    "capacity_wait",
     "work_item",
     "scheduler_binding",
     "scheduler_binding_detail",
@@ -105,6 +110,7 @@ pub const RUN_WIRE_FIELDS: [&str; 33] = [
     "done_payload",
     "error",
     "error_code",
+    "failure_reason",
     "error_diagnostic",
     "refusal_category",
     "llm_model",
@@ -115,6 +121,42 @@ pub const RUN_WIRE_FIELDS: [&str; 33] = [
     "tool_plan",
     "tool_calls",
 ];
+
+/// Project the stored `capacity_wait` to its presentation slice (T7).
+/// Only phase/position/queued/reported/active/limit are workspace-visible;
+/// never admission/session ids, tokens, or cross-workspace runner lists.
+/// Returns Null when no capacity state; stale values keep rendering last-known.
+pub fn capacity_wait_presentation(capacity_wait: &Value) -> Value {
+    let Some(obj) = capacity_wait.as_object() else {
+        return Value::Null;
+    };
+    let mut out = serde_json::Map::new();
+    out.insert(
+        "phase".to_string(),
+        obj.get("phase").cloned().unwrap_or(Value::Null),
+    );
+    out.insert(
+        "queue_position".to_string(),
+        obj.get("queue_position").cloned().unwrap_or(Value::Null),
+    );
+    out.insert(
+        "queued_at".to_string(),
+        obj.get("queued_at").cloned().unwrap_or(Value::Null),
+    );
+    out.insert(
+        "reported_at".to_string(),
+        obj.get("reported_at").cloned().unwrap_or(Value::Null),
+    );
+    out.insert(
+        "active".to_string(),
+        obj.get("active").cloned().unwrap_or(Value::Null),
+    );
+    out.insert(
+        "limit".to_string(),
+        obj.get("limit").cloned().unwrap_or(Value::Null),
+    );
+    Value::Object(out)
+}
 
 /// `AgentRunToolCallSerializer.Meta.fields` (`serializers.py:244-256`).
 pub const TOOL_CALL_WIRE_FIELDS: [&str; 11] = [
@@ -329,6 +371,11 @@ pub struct AgentRunView<'a> {
     pub thread_id: &'a str,
     pub agent_metadata: &'a Value,
     pub runner: Option<String>,
+    pub pinned_runner: Option<String>,
+    pub pinned_runner_name: Option<String>,
+    pub pin_kind: &'a str,
+    pub dispatch_wait: Value,
+    pub capacity_wait: Value,
     pub work_item: Option<String>,
     pub scheduler_binding: Option<String>,
     pub scheduler_binding_detail: Option<SchedulerBindingDetailView<'a>>,
@@ -343,6 +390,7 @@ pub struct AgentRunView<'a> {
     pub done_payload: Option<&'a Value>,
     pub error: &'a str,
     pub error_code: &'a str,
+    pub failure_reason: &'a str,
     pub error_diagnostic: Option<RunErrorDiagnostic>,
     pub refusal_category: &'a str,
     pub llm_model: &'a str,
@@ -352,6 +400,16 @@ pub struct AgentRunView<'a> {
     pub usage: &'a Value,
     pub tool_plan: &'a Value,
     pub tool_calls: Vec<ToolCallView<'a>>,
+}
+
+/// `pinned_runner_name` + `dispatch_wait` inputs (design §14.3), fetched
+/// by the caller (the name lookup and the wait build hit the DB):
+/// the name `None` when unpinned, `dispatch_wait` the computed object
+/// (`null` unless QUEUED + pinned) plus the release permission bit
+/// baked into its `releasable` key.
+pub struct AgentRunExtras {
+    pub pinned_runner_name: Option<String>,
+    pub dispatch_wait: Value,
 }
 
 /// Port of `AgentRunSerializer` for a list row (`serializers.py:260-330`
@@ -368,20 +426,23 @@ pub fn run_list_to_representation<'a>(
     pod: &'a PodMiniRow<'a>,
     tool_calls: &'a [AgentRunToolCall],
     binding: Option<&'a SchedulerBindingDetailRow<'a>>,
+    extras: &AgentRunExtras,
 ) -> AgentRunView<'a> {
-    run_to_representation(run, pod, tool_calls, binding, true)
+    run_to_representation(run, pod, tool_calls, binding, extras, true)
 }
 
 /// Port of `AgentRunSerializer` for the per-run detail
 /// (`serializers.py:260-330`): `error_diagnostic` runs
-/// `classify_run_error(run.error)` (`serializers.py:273`).
+/// `classify_run_error(run.error, failure_reason=run.failure_reason)`
+/// (`serializers.py:273`, PDASHOSS01-183).
 pub fn run_detail_to_representation<'a>(
     run: &'a AgentRun,
     pod: &'a PodMiniRow<'a>,
     tool_calls: &'a [AgentRunToolCall],
     binding: Option<&'a SchedulerBindingDetailRow<'a>>,
+    extras: &AgentRunExtras,
 ) -> AgentRunView<'a> {
-    run_to_representation(run, pod, tool_calls, binding, false)
+    run_to_representation(run, pod, tool_calls, binding, extras, false)
 }
 
 fn run_to_representation<'a>(
@@ -389,6 +450,7 @@ fn run_to_representation<'a>(
     pod: &'a PodMiniRow<'a>,
     tool_calls: &'a [AgentRunToolCall],
     binding: Option<&'a SchedulerBindingDetailRow<'a>>,
+    extras: &AgentRunExtras,
     is_list: bool,
 ) -> AgentRunView<'a> {
     AgentRunView {
@@ -402,6 +464,15 @@ fn run_to_representation<'a>(
         thread_id: &run.thread_id,
         agent_metadata: &run.agent_metadata,
         runner: uuid_opt_string(&run.runner_id),
+        pinned_runner: uuid_opt_string(&run.pinned_runner_id),
+        pinned_runner_name: extras.pinned_runner_name.clone(),
+        pin_kind: run.pin_kind.as_str(),
+        dispatch_wait: extras.dispatch_wait.clone(),
+        capacity_wait: capacity_wait_presentation(
+            run.capacity_wait
+                .as_ref()
+                .unwrap_or(&serde_json::Value::Null),
+        ),
         work_item: uuid_opt_string(&run.work_item_id),
         scheduler_binding: uuid_opt_string(&run.scheduler_binding_id),
         scheduler_binding_detail: binding.map(scheduler_binding_detail_to_representation),
@@ -416,7 +487,12 @@ fn run_to_representation<'a>(
         done_payload: run.done_payload.as_ref(),
         error: run.error(),
         error_code: run.error_code(),
-        error_diagnostic: error_diagnostic(Some(run.error()), is_list),
+        failure_reason: &run.failure_reason,
+        error_diagnostic: error_diagnostic(
+            Some(run.error()),
+            Some(run.failure_reason.as_str()),
+            is_list,
+        ),
         refusal_category: &run.refusal_category,
         llm_model: &run.llm_model,
         input_tokens: run.input_tokens,
@@ -836,6 +912,21 @@ mod tests {
             .collect()
     }
 
+    /// NEWPIDASH-241 T2: upgrade a captured Django run body with the
+    /// additive `capacity_wait` key at its wire position (after
+    /// `dispatch_wait`); order-preserving like the wire shape.
+    fn with_capacity_wait(body: &Value) -> Value {
+        let obj = body.as_object().expect("object");
+        let mut upgraded = serde_json::Map::new();
+        for (k, v) in obj {
+            upgraded.insert(k.clone(), v.clone());
+            if k == "dispatch_wait" {
+                upgraded.insert("capacity_wait".to_string(), Value::Null);
+            }
+        }
+        Value::Object(upgraded)
+    }
+
     fn dt(text: &str) -> DateTime<Utc> {
         text.parse().expect("fixture datetime")
     }
@@ -875,7 +966,8 @@ mod tests {
             created_by_id: uuid(body["created_by"].as_str().expect("created_by")),
             pod_id: uuid(body["pod"].as_str().expect("pod")),
             runner_id: uuid_opt(&body["runner"]),
-            pinned_runner_id: None,
+            pinned_runner_id: uuid_opt(&body["pinned_runner"]),
+            pin_kind: text(&body["pin_kind"]),
             work_item_id: uuid_opt(&body["work_item"]),
             scheduler_binding_id: uuid_opt(&body["scheduler_binding"]),
             parent_run_id: None,
@@ -891,6 +983,7 @@ mod tests {
             trigger: "direct".to_owned(),
             prompt_manifest: None,
             phase_kind: String::new(),
+            work_type: String::new(),
             run_config: json!({}),
             required_capabilities: json!([]),
             thread_id: text(&body["thread_id"]),
@@ -909,6 +1002,7 @@ mod tests {
                 ],
             ),
             refusal_category: text(&body["refusal_category"]),
+            failure_reason: text(&body["failure_reason"]),
             llm_model: text(&body["llm_model"]),
             usage: body["usage"].clone(),
             input_tokens: body["input_tokens"].as_i64(),
@@ -918,6 +1012,25 @@ mod tests {
             assigned_at: dt_opt(&body["assigned_at"]),
             started_at: dt_opt(&body["started_at"]),
             ended_at: dt_opt(&body["ended_at"]),
+            assignment_token: None,
+            assignment_protocol: 0,
+            capacity_wait: match &body["capacity_wait"] {
+                Value::Null => None,
+                v => Some(v.clone()),
+            },
+        }
+    }
+
+    /// The read-time extras behind a fixture run body (the name and
+    /// dispatch-wait objects the caller hands the serializer).
+    fn extras_of(body: &Value) -> AgentRunExtras {
+        AgentRunExtras {
+            pinned_runner_name: match &body["pinned_runner_name"] {
+                Value::Null => None,
+                Value::String(text) => Some(text.clone()),
+                _ => panic!("pinned_runner_name or null"),
+            },
+            dispatch_wait: body["dispatch_wait"].clone(),
         }
     }
 
@@ -960,14 +1073,15 @@ mod tests {
         let run = run_row(gold);
         let mini = MiniStorage::from_detail(&gold["pod_detail"]);
         let mini_row = mini.row();
-        let view = run_detail_to_representation(&run, &mini_row, &[], None);
+        let extras = extras_of(gold);
+        let view = run_detail_to_representation(&run, &mini_row, &[], None, &extras);
         let body = serde_json::to_value(&view).expect("serializes");
         assert_eq!(keys(&body), RUN_WIRE_FIELDS);
         assert_eq!(
             keys(&body["pod_detail"]),
             ["id", "name", "is_default", "project", "project_identifier"]
         );
-        assert_eq!(body.to_string(), gold.to_string());
+        assert_eq!(body.to_string(), with_capacity_wait(gold).to_string());
     }
 
     #[test]
@@ -976,12 +1090,13 @@ mod tests {
         let run = run_row(gold);
         let mini = MiniStorage::from_detail(&gold["pod_detail"]);
         let mini_row = mini.row();
-        let view = run_list_to_representation(&run, &mini_row, &[], None);
+        let extras = extras_of(gold);
+        let view = run_list_to_representation(&run, &mini_row, &[], None, &extras);
         let body = serde_json::to_value(&view).expect("serializes");
         assert_eq!(keys(&body), RUN_WIRE_FIELDS);
         // The list pins `error_diagnostic: null` even with `error` set…
         assert_eq!(body["error_diagnostic"], Value::Null);
-        assert_eq!(body.to_string(), gold.to_string());
+        assert_eq!(body.to_string(), with_capacity_wait(gold).to_string());
     }
 
     #[test]
@@ -991,11 +1106,24 @@ mod tests {
         run.error_details = json!({"message": "boom x"});
         let mini = MiniStorage::from_detail(&gold["pod_detail"]);
         let mini_row = mini.row();
-        let list = serde_json::to_value(run_list_to_representation(&run, &mini_row, &[], None))
-            .expect("serializes");
+        let extras = extras_of(gold);
+        let list = serde_json::to_value(run_list_to_representation(
+            &run,
+            &mini_row,
+            &[],
+            None,
+            &extras,
+        ))
+        .expect("serializes");
         assert_eq!(list["error_diagnostic"], Value::Null);
-        let detail = serde_json::to_value(run_detail_to_representation(&run, &mini_row, &[], None))
-            .expect("serializes");
+        let detail = serde_json::to_value(run_detail_to_representation(
+            &run,
+            &mini_row,
+            &[],
+            None,
+            &extras,
+        ))
+        .expect("serializes");
         assert_eq!(
             detail["error_diagnostic"],
             json!({
@@ -1009,9 +1137,14 @@ mod tests {
         // …and the detail renders `None` for an empty error (the
         // classifier returns `None` there; the list rule is separate).
         run.error_details = json!({});
-        let detail_empty =
-            serde_json::to_value(run_detail_to_representation(&run, &mini_row, &[], None))
-                .expect("serializes");
+        let detail_empty = serde_json::to_value(run_detail_to_representation(
+            &run,
+            &mini_row,
+            &[],
+            None,
+            &extras,
+        ))
+        .expect("serializes");
         assert_eq!(detail_empty["error_diagnostic"], Value::Null);
     }
 
@@ -1029,11 +1162,13 @@ mod tests {
             scheduler_slug: "nightly-audit",
             project_id: Some("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
         };
+        let extras = extras_of(gold);
         let body = serde_json::to_value(run_list_to_representation(
             &run,
             &mini_row,
             &[],
             Some(&binding),
+            &extras,
         ))
         .expect("serializes");
         assert_eq!(keys(&body), RUN_WIRE_FIELDS);
@@ -1057,6 +1192,7 @@ mod tests {
             &mini_row,
             &[],
             Some(&binding),
+            &extras,
         ))
         .expect("serializes");
         assert_eq!(
@@ -1087,8 +1223,15 @@ mod tests {
         assert_eq!(run.scheduler_binding_id, None);
         let mini = MiniStorage::from_detail(&gold["pod_detail"]);
         let mini_row = mini.row();
-        let body = serde_json::to_value(run_detail_to_representation(&run, &mini_row, &[], None))
-            .expect("serializes");
+        let extras = extras_of(gold);
+        let body = serde_json::to_value(run_detail_to_representation(
+            &run,
+            &mini_row,
+            &[],
+            None,
+            &extras,
+        ))
+        .expect("serializes");
         assert_eq!(body["scheduler_binding"], Value::Null);
         assert_eq!(body["scheduler_binding_detail"], Value::Null);
     }
@@ -1297,13 +1440,23 @@ mod tests {
             id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
             host_label: "h",
             label: "l",
+            engine_paused_by_owner: false,
+            engine_auto_pause_reason: "",
+            engine_team_runs: false,
+            engine_sign_in_state: "never",
+            engine_credential_expires_at: None,
         };
         let runner = RunnerRow {
             id: "e39ef475-5212-4de8-a5d0-e5fe8fd01f7b",
             name: "r1",
             status: "online",
             host_label: "h",
+            is_pidash_agent: false,
+            engine_paused: false,
+            dispatch_paused: false,
+            machine_display_name: "h",
             provisioning: "manual",
+            pod_dispatch: "pod_member",
             os: "linux",
             arch: "arm64",
             runner_version: "1.0",
@@ -1325,6 +1478,10 @@ mod tests {
             paused_by: None,
             created_at: "2026-10-02T23:03:54.579295Z",
             updated_at: "2026-10-02T23:03:54.579295Z",
+            assignable: None,
+            not_assignable_code: None,
+            is_busy: None,
+            queue_depth: None,
         };
         let body = serde_json::to_value(chat_session_to_representation(&session, &runner))
             .expect("serializes");

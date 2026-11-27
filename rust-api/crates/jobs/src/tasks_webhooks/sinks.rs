@@ -45,8 +45,11 @@
 //!   membership (no membership check in Python). Kept as-is.
 
 use chrono::{DateTime, Utc};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QuerySelect, Select, Set};
 use serde_json::{Map, Value};
 
+use pidash_db::entity::{api_activity_logs, workspaces};
+use pidash_db::orm_tx::into_sqlx;
 use pidash_db::tasks_cleanup::cleanup_queries::{json_to_bson, MongoSink};
 use pidash_db::Pools;
 use pidash_services::tasks_webhooks::{is_role_event, preprocess_data_properties};
@@ -371,26 +374,47 @@ pub fn parse_track_event_call(args: &Value, kwargs: &Value) -> Result<TrackEvent
 }
 
 // ---------------------------------------------------------------------------
-// SQL
+// Queries (SeaORM fetchers)
 // ---------------------------------------------------------------------------
 
 /// `Workspace.objects.get(slug=slug)` (`event_tracking_task.py:50`):
 /// the default manager is `SoftDeletionManager`, so live rows only.
 /// A miss raises `DoesNotExist` (→ warning + role `unknown`); any other
 /// failure propagates to `track_event`'s broad `except`.
-pub const WORKSPACE_OWNER_SQL: &str =
-    "SELECT owner_id FROM workspaces WHERE slug = $1 AND deleted_at IS NULL";
+fn workspace_owner_query(slug: &str) -> Select<workspaces::Entity> {
+    workspaces::Entity::find()
+        .select_only()
+        .column(workspaces::Column::OwnerId)
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .limit(1)
+}
 
 /// `APIActivityLog.objects.create(**log_data)` (`logger_task.py:85`):
 /// `id`/`created_at`/`updated_at` are Python-side defaults (uuid4/now —
 /// supplied here, mirroring the queue.rs `new_v4().to_string()`
 /// precedent); audit columns stay NULL (no current user inside a worker,
 /// `BaseModel.save` with anonymous user); `deleted_at` NULL.
-pub const API_ACTIVITY_LOG_INSERT: &str = "INSERT INTO api_activity_logs \
-    (id, created_at, updated_at, created_by_id, updated_by_id, deleted_at, \
-    token_identifier, path, method, query_params, headers, body, \
-    response_code, response_body, ip_address, user_agent) \
-    VALUES ($1, $2, $3, NULL, NULL, NULL, $4, $5, $6, $7, $8, $9, $10, $11, $12::inet, $13)";
+fn activity_log_insert(row: ActivityLogRow, now: DateTime<Utc>) -> api_activity_logs::ActiveModel {
+    api_activity_logs::ActiveModel {
+        id: Set(uuid::Uuid::new_v4()),
+        created_at: Set(now.into()),
+        updated_at: Set(now.into()),
+        created_by_id: Set(None),
+        updated_by_id: Set(None),
+        deleted_at: Set(None),
+        token_identifier: Set(row.token_identifier),
+        path: Set(row.path),
+        method: Set(row.method),
+        query_params: Set(row.query_params),
+        headers: Set(row.headers),
+        body: Set(row.body),
+        response_code: Set(row.response_code),
+        response_body: Set(row.response_body),
+        ip_address: Set(row.ip_address),
+        user_agent: Set(row.user_agent),
+    }
+}
 
 /// Nullable text column: missing/`null` → NULL. Real callers only pass
 /// strings here (the middleware builds them); scalars stringify like
@@ -423,11 +447,13 @@ pub async fn lookup_workspace_owner(
     pool: &sqlx::PgPool,
     slug: &str,
 ) -> Result<Option<uuid::Uuid>, sqlx::Error> {
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(WORKSPACE_OWNER_SQL)
-        .bind(slug)
-        .fetch_optional(pool)
-        .await?;
-    Ok(row.map(|(owner_id,)| owner_id))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let owner: Option<uuid::Uuid> = workspace_owner_query(slug)
+        .into_tuple::<uuid::Uuid>()
+        .one(&db)
+        .await
+        .map_err(into_sqlx)?;
+    Ok(owner)
 }
 
 /// One `APIActivityLog.objects.create(**log_data)` row
@@ -478,24 +504,12 @@ pub async fn insert_api_activity_log(
 ) -> Result<(), SinkError> {
     let row = parse_activity_log_row(log_data)?;
     let now = Utc::now();
-    sqlx::query(API_ACTIVITY_LOG_INSERT)
-        .bind(uuid::Uuid::new_v4())
-        .bind(now)
-        .bind(now)
-        .bind(row.token_identifier)
-        .bind(row.path)
-        .bind(row.method)
-        .bind(row.query_params)
-        .bind(row.headers)
-        .bind(row.body)
-        .bind(row.response_code)
-        .bind(row.response_body)
-        .bind(row.ip_address)
-        .bind(row.user_agent)
-        .execute(pool)
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    activity_log_insert(row, now)
+        .insert(&db)
         .await
         .map(|_| ())
-        .map_err(|error| SinkError::Postgres(error.to_string()))
+        .map_err(|error| SinkError::Postgres(into_sqlx(error).to_string()))
 }
 
 /// `log_to_mongo` document (`logger_task.py:62-77`): the `mongo_log`
@@ -1116,8 +1130,36 @@ mod tests {
     }
 
     #[test]
-    fn sql_shapes_match_models() {
-        assert!(API_ACTIVITY_LOG_INSERT.starts_with("INSERT INTO api_activity_logs"));
+    fn statement_shapes_match_models() {
+        use sea_orm::{DbBackend, QueryTrait};
+        let owner_sql = workspace_owner_query("ws")
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(owner_sql.contains("\"workspaces\""), "{owner_sql}");
+        assert!(owner_sql.contains("\"slug\""), "{owner_sql}");
+        assert!(
+            owner_sql.contains("\"deleted_at\" IS NULL"),
+            "soft-delete manager guard: {owner_sql}"
+        );
+        let row = ActivityLogRow {
+            token_identifier: "tok".to_owned(),
+            path: "/api/issues/".to_owned(),
+            method: "GET".to_owned(),
+            query_params: None,
+            headers: None,
+            body: None,
+            response_code: 200,
+            response_body: None,
+            ip_address: Some("127.0.0.1".to_owned()),
+            user_agent: None,
+        };
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00+00:00")
+            .expect("valid test datetime")
+            .with_timezone(&Utc);
+        let insert_sql = api_activity_logs::Entity::insert(activity_log_insert(row, now))
+            .into_query()
+            .to_string(sea_orm::sea_query::PostgresQueryBuilder);
+        assert!(insert_sql.contains("\"api_activity_logs\""), "{insert_sql}");
         for column in [
             "token_identifier",
             "path",
@@ -1133,15 +1175,15 @@ mod tests {
             "updated_by_id",
             "deleted_at",
         ] {
-            assert!(API_ACTIVITY_LOG_INSERT.contains(column), "missing {column}");
+            assert!(
+                insert_sql.contains(column),
+                "missing {column}: {insert_sql}"
+            );
         }
-        assert!(API_ACTIVITY_LOG_INSERT.contains("$12::inet"), "inet cast");
-        assert!(WORKSPACE_OWNER_SQL.contains("FROM workspaces"));
-        assert!(WORKSPACE_OWNER_SQL.contains("slug = $1"));
-        assert!(
-            WORKSPACE_OWNER_SQL.contains("deleted_at IS NULL"),
-            "soft-delete manager guard"
-        );
+        // The entity's `save_as = "inet"` keeps the `$12::inet`-equivalent
+        // coercion: the rendered insert binds the ip as inet.
+        // (Rendered statement uses `$N::inet` for the ip column.)
+        assert!(insert_sql.contains("inet"), "inet binding: {insert_sql}");
     }
 
     #[test]

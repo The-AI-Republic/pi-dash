@@ -162,7 +162,7 @@ describe("CreateProjectDialog", () => {
     expect(screen.getByRole("button", { name: "Project lead" })).toHaveTextContent("Lead");
     expect((screen.getByPlaceholderText("Project name") as HTMLInputElement).value).toBe("");
     expect((screen.getByPlaceholderText("Project ID") as HTMLInputElement).value).toBe("");
-    expect(screen.getByRole("button", { name: "Project template" })).toHaveTextContent("Blank project");
+    expect(screen.queryByRole("button", { name: "Project template" })).toBeNull();
     expect(screen.getByPlaceholderText("Project Context (Will be shown to AI agents)")).toBeInTheDocument();
     expect(screen.getByPlaceholderText("Repository URL, e.g. https://github.com/team/project")).toBeInTheDocument();
     expect(screen.getByPlaceholderText("Base branch (blank uses the remote default)")).toBeInTheDocument();

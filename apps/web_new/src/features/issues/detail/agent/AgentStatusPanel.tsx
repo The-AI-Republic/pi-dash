@@ -3,8 +3,9 @@
 // See the LICENSE file for details.
 // Agent status panel for the issue detail (parity/specs/issues.md §22,
 // ISS-164). Reads the issue's agent runs and continuation clock through
-// the pure view model, polls the issue read every fifteen seconds while
-// a run is in flight, and refreshes once at the next tick while idle.
+// the pure view model, re-reads the issue with its comments and activity
+// every fifteen seconds while a run is in flight, and refreshes once at
+// the next tick while idle.
 // Re-tick and abort ride the runners dispatch hooks; the panel only
 // decides when they show. Renders nothing without a run or a ticker.
 import { Badge, Button, Dialog, Tooltip } from "@pidash/kit";

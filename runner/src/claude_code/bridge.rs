@@ -41,19 +41,21 @@ pub struct Bridge {
 
 impl Bridge {
     pub async fn spawn(binary: &str, cwd: &Path, model_default: Option<String>) -> Result<Self> {
-        Self::spawn_with_resume(binary, cwd, model_default, None).await
+        Self::spawn_with_resume(binary, cwd, model_default, None, None).await
     }
 
     pub async fn spawn_with_resume(
         binary: &str,
         cwd: &Path,
         model_default: Option<String>,
+        effort_default: Option<String>,
         resume_session_id: Option<&str>,
     ) -> Result<Self> {
         let proc = ClaudeProcess::spawn(SpawnArgs {
             binary,
             cwd,
             model: model_default.as_deref(),
+            effort: effort_default.as_deref(),
             resume_session_id,
             bypass_permissions: true,
         })

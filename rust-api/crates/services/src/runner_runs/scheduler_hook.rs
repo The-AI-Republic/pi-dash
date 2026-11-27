@@ -104,6 +104,37 @@ pub fn scheduler_binding_update_sql() -> &'static str {
      WHERE \"scheduler_bindings\".\"id\" = $3"
 }
 
+/// Binding `UPDATE` ([`scheduler_binding_update_sql`]) as a SeaORM
+/// statement: `last_error = message, updated_at = now` on the binding.
+pub fn scheduler_binding_update_statement(
+    binding_id: Uuid,
+    message: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> sea_orm::UpdateMany<pidash_db::entity::scheduler_bindings::Entity> {
+    use pidash_db::entity::scheduler_bindings::{Column, Entity};
+    use sea_orm::sea_query::Expr;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    Entity::update_many()
+        .col_expr(Column::LastError, Expr::value(message.to_owned()))
+        .col_expr(Column::UpdatedAt, Expr::value(now))
+        .filter(Column::Id.eq(binding_id))
+}
+
+/// Run [`scheduler_binding_update_statement`]; returns the rows written
+/// (zero is Django's `DatabaseError` on a missing row — the caller
+/// decides).
+pub async fn update_scheduler_binding(
+    db: &impl sea_orm::ConnectionTrait,
+    binding_id: Uuid,
+    message: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<u64, sea_orm::DbErr> {
+    Ok(scheduler_binding_update_statement(binding_id, message, now)
+        .exec(db)
+        .await?
+        .rows_affected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

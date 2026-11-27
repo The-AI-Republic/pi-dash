@@ -694,6 +694,7 @@ mod tests {
             cursor_agent: Default::default(),
             openclaw: Default::default(),
             grok: Default::default(),
+            antigravity: Default::default(),
             muse_code: Default::default(),
             approval_policy: Default::default(),
         }
@@ -701,6 +702,9 @@ mod tests {
 
     fn config(runners: Vec<RunnerConfig>) -> Config {
         Config {
+            engine: Default::default(),
+            auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: "https://pidash.example".into(),
@@ -710,6 +714,7 @@ mod tests {
                 agent_observability_v1: false,
                 agent_watchdog: Default::default(),
                 auto_update: true,
+                max_concurrent_agent_runs: 3,
             },
             runners,
             cli: None,
@@ -732,6 +737,7 @@ mod tests {
             next_retry_at: None,
             disconnect_reason: None,
             cloud_deleted_confirmations: 0,
+            workspace_signed_out: false,
             observability: None,
         }
     }
@@ -743,6 +749,7 @@ mod tests {
                 connected: true,
                 uptime_secs: 0,
                 update: None,
+                run_queue: None,
             },
             runners: names.iter().map(|name| snapshot(name)).collect(),
         }

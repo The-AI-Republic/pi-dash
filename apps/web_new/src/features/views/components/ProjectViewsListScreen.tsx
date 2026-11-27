@@ -16,6 +16,7 @@ import * as React from "react";
 import { getAppClient } from "../../../core/api/client.js";
 import { useMe, useWorkspace } from "../../../core/session/index.js";
 import { useDocumentHead } from "../../../shared/shell/index.js";
+import { usePickerProjectMembers } from "../../../shared/pickers/index.js";
 import { useProjectRoles, useProjectRow } from "../../auth/index.js";
 import { preloadRichFilterBuilder } from "../../issues/index.js";
 import { isProjectAdmin, workspaceMembersQueryOptions } from "../../projects/index.js";
@@ -69,6 +70,7 @@ export function ProjectViewsListScreen({
   });
   const roles = useProjectRoles(workspaceSlug);
   const members = useQuery(workspaceMembersQueryOptions(getAppClient(), workspaceSlug));
+  const projectMembers = usePickerProjectMembers(workspaceSlug, projectId, project.isSuccess && !gateOff);
   const { workspace } = useWorkspace(workspaceSlug);
   const me = useMe();
   const [createOpen, setCreateOpen] = React.useState(false);
@@ -142,6 +144,16 @@ export function ProjectViewsListScreen({
   // explicit prop when a host overrides it, else the screen's own dialog.
   const openCreateView = onCreateView ?? (() => setCreateOpen(true));
   const selfId = me.data?.id ?? null;
+  // Created by offers project members only (VIEW-006): the workspace
+  // directory joined to project memberships via the user id set; both
+  // reads gate the menu's loading state.
+  const creatorMembers =
+    members.data === undefined || projectMembers.data === undefined
+      ? undefined
+      : (() => {
+          const ids = new Set(projectMembers.data.map((row) => row.member));
+          return members.data.filter((entry) => ids.has(entry.member.id));
+        })();
   return (
     <section
       aria-label={PROJECT_VIEWS_CRUMB}
@@ -157,7 +169,7 @@ export function ProjectViewsListScreen({
         filterControl={
           <ProjectViewsFilterMenu
             filters={filters}
-            members={members.data}
+            members={creatorMembers}
             selfId={selfId}
             onFiltersChange={setFilters}
           />

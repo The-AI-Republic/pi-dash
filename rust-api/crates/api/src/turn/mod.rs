@@ -6,16 +6,17 @@
 //! shapes, and the error classifier live in the jobs crate; everything
 //! here is the live wiring behind the seam:
 //!
-//! * [`history`] — the `model_messages` codec: pydantic-ai 1.107
-//!   `ModelMessage` JSON <-> the loop's message model, plus the
-//!   retry-feedback renderer for replayed validation errors.
+//! * `pidash_jobs::cloud_agent::history` — the `model_messages` codec:
+//!   pydantic-ai 1.107 `ModelMessage` JSON <-> the loop's message model,
+//!   plus the retry-feedback renderer for replayed validation errors.
 //! * [`mcp_client`] — the MCP tool-server client (PIDASHCONV-1112):
 //!   JSON-RPC `initialize` / `tools/list` / `tools/call` over Streamable
 //!   HTTP with the legacy SSE fallback, the fail-open `ResilientToolset`
 //!   policy, tool-name prefixing, and per-call timeouts.
-//! * Provider streaming (PIDASHCONV-1111), local tools (1113), the agent
-//!   loop, and the live seam (863) land behind the same `turn` root;
-//!   each cites its Python source at the top.
+//! * The chat engine (`pidash_jobs::cloud_agent`: provider streaming,
+//!   the agent loop) lives in the jobs crate since P2; the live seam
+//!   (863), local tools (1113) and the MCP client land behind the same
+//!   `turn` root; each cites its Python source at the top.
 //!
 //! Reuse rule: foundation pieces that are `pub` and constructible from
 //! this crate are reused (`Lane`, `ToolCall`, usage, `KeyResolver`,
@@ -25,17 +26,16 @@
 //! pydantic-ai sources and the
 //! `fixtures/assistant/turn-runtime/` captures.
 //!
-//! Nothing here is wired into `worker()` yet — PIDASHCONV-863 does the
-//! wiring — so this module is a tested library until then.
+//! Live seam (PIDASHCONV-863): [`live::LiveTurnSeam`] implements the
+//! assistant turn seam and is composed by the binary in
+//! `bin/pidash-api/src/inventory.rs`; the agent loop serves
+//! `assistant.run_turn` end to end.
 //!
-//! Local tools layer (PIDASHCONV-1113): the 17 local tool schemas +
+//! Local tools layer (PIDASHCONV-1113): the 18 local tool schemas +
 //! executors (`assistant/tools/*.py` port). Each layer merges as its own
-//! tested module; PIDASHCONV-863 wires them into `worker()` (agent loop,
-//! live seam, parity flip, replay proof). Until then this tree is
-//! exercised by its unit tests only.
+//! tested module and is exercised by its unit tests plus the assistant
+//! contract suite.
 
-pub mod agent;
-pub mod history;
 pub mod instructions;
 pub mod live;
 pub mod mcp_client;
@@ -43,9 +43,6 @@ pub mod mcp_client;
 mod mcp_parity;
 #[cfg(test)]
 mod mcp_stub;
-#[cfg(test)]
-mod replay;
-pub mod streaming;
 pub mod tool_args;
 pub mod tool_schemas;
 pub mod tools_local;

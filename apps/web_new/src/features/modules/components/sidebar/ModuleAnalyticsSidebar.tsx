@@ -20,7 +20,7 @@ import { X } from "lucide-react";
 import * as React from "react";
 
 import { getAppClient } from "../../../../core/api/client.js";
-import { useProjectRoles } from "../../../auth/index.js";
+import { useProjectRoles, useProjectRow } from "../../../auth/index.js";
 import {
   DateRangePicker,
   SidebarRow,
@@ -116,6 +116,7 @@ export function ModuleAnalyticsSidebar({
 
   const detail = useQuery(moduleSidebarDetailQueryOptions(client, workspaceSlug, projectId, moduleId, archived));
   const estimates = useQuery(moduleSidebarEstimatesQueryOptions(client, workspaceSlug, projectId));
+  const project = useProjectRow(workspaceSlug, projectId);
 
   if (detail.data === undefined) {
     if (detail.isError) {
@@ -139,7 +140,7 @@ export function ModuleAnalyticsSidebar({
       readOnly={readOnly}
       archived={archived || isArchivedRecord(detail.data)}
       editor={editor}
-      showPoints={showsModulePoints(estimates.data)}
+      showPoints={showsModulePoints(estimates.data, project.data?.estimate ?? null)}
       progress={progress}
       onClose={onClose}
       client={client}

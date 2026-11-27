@@ -162,18 +162,11 @@ async fn workspace_role(
     user_id: &Uuid,
     slug: &str,
 ) -> Result<Option<i32>, Denial> {
-    let row: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT wm.role FROM workspace_members wm
-           JOIN workspaces w ON w.id = wm.workspace_id
-           WHERE wm.member_id = $1 AND w.slug = $2
-           AND wm.is_active AND wm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|(role,)| i32::from(role)))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let role = crate::app_issues::access::workspace_role(&db, slug, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(role.map(i32::from))
 }
 
 /// Active project role for `(user, project_id, slug)`, or `None`.
@@ -184,19 +177,11 @@ async fn project_role(
     project_id: &Uuid,
     slug: &str,
 ) -> Result<Option<i32>, Denial> {
-    let row: Option<(i16,)> = sqlx::query_as(
-        r#"SELECT pm.role FROM project_members pm
-           JOIN workspaces w ON w.id = pm.workspace_id
-           WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
-           AND pm.is_active AND pm.deleted_at IS NULL"#,
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    Ok(row.map(|(role,)| i32::from(role)))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let role = crate::app_issues::access::project_role(&db, slug, *project_id, *user_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(role.map(i32::from))
 }
 
 fn workspace_facts(slug: &str, role: Option<i32>) -> AllowFacts {
@@ -251,14 +236,19 @@ async fn config_value(
     key: &str,
     env_default: Option<String>,
 ) -> Result<Option<String>, Denial> {
-    let row: Option<(Option<String>, bool)> = sqlx::query_as(
-        r#"SELECT value, is_encrypted FROM instance_configurations
-           WHERE key = $1 AND deleted_at IS NULL"#,
-    )
-    .bind(key)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    use pidash_db::entity::instance_configurations;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<(Option<String>, bool)> = instance_configurations::Entity::find()
+        .select_only()
+        .column(instance_configurations::Column::Value)
+        .column(instance_configurations::Column::IsEncrypted)
+        .filter(instance_configurations::Column::Key.eq(key))
+        .filter(instance_configurations::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     match row {
         Some((Some(value), true)) => {
             let keyring = pidash_db::config::encryption::Keyring::from_secret(secret_key);
@@ -509,15 +499,32 @@ type ProjectRow = (
 /// `Workspace.objects.get(slug=slug)` (`:170`) — 404 when missing
 /// (`handle_exception`: `{"error":"The required object does not exist."}`).
 async fn fetch_workspace(pool: &sqlx::PgPool, slug: &str) -> Result<WorkspaceLite, Denial> {
-    let row: Option<WorkspaceRow> = sqlx::query_as(
-        r#"SELECT w.id, w.name, w.slug, w.logo, w.logo_asset_id, fa.entity_type
-               FROM workspaces w LEFT JOIN file_assets fa ON fa.id = w.logo_asset_id
-               WHERE w.slug = $1 AND w.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    use pidash_db::entity::{file_assets, workspaces};
+    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<WorkspaceRow> = workspaces::Entity::find()
+        .select_only()
+        .columns([
+            workspaces::Column::Id,
+            workspaces::Column::Name,
+            workspaces::Column::Slug,
+            workspaces::Column::Logo,
+            workspaces::Column::LogoAssetId,
+        ])
+        .column_as(file_assets::Column::EntityType, "entity_type")
+        .join(
+            JoinType::LeftJoin,
+            workspaces::Entity::belongs_to(file_assets::Entity)
+                .from(workspaces::Column::LogoAssetId)
+                .to(file_assets::Column::Id)
+                .into(),
+        )
+        .filter(workspaces::Column::Slug.eq(slug))
+        .filter(workspaces::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let (id, name, slug, logo, logo_asset_id, logo_asset_entity) = row.ok_or(Denial::NotFound)?;
     Ok(WorkspaceLite {
         id,
@@ -531,16 +538,37 @@ async fn fetch_workspace(pool: &sqlx::PgPool, slug: &str) -> Result<WorkspaceLit
 
 /// `Project.objects.get(pk=project_id)` (`:171`) — 404 when missing.
 async fn fetch_project(pool: &sqlx::PgPool, project_id: &Uuid) -> Result<ProjectLite, Denial> {
-    let row: Option<ProjectRow> = sqlx::query_as(
-        r#"SELECT p.id, p.identifier, p.name, p.cover_image, p.cover_image_asset_id,
-                  fa.entity_type, p.logo_props, p.description, p.is_default
-           FROM projects p LEFT JOIN file_assets fa ON fa.id = p.cover_image_asset_id
-           WHERE p.id = $1 AND p.deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
+    use pidash_db::entity::{file_assets, projects};
+    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect};
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row: Option<ProjectRow> = projects::Entity::find()
+        .select_only()
+        .columns([
+            projects::Column::Id,
+            projects::Column::Identifier,
+            projects::Column::Name,
+            projects::Column::CoverImage,
+            projects::Column::CoverImageAssetId,
+        ])
+        .column_as(file_assets::Column::EntityType, "entity_type")
+        .columns([
+            projects::Column::LogoProps,
+            projects::Column::Description,
+            projects::Column::IsDefault,
+        ])
+        .join(
+            JoinType::LeftJoin,
+            projects::Entity::belongs_to(file_assets::Entity)
+                .from(projects::Column::CoverImageAssetId)
+                .to(file_assets::Column::Id)
+                .into(),
+        )
+        .filter(projects::Column::Id.eq(*project_id))
+        .filter(projects::Column::DeletedAt.is_null())
+        .into_tuple()
+        .one(&db)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let (
         id,
         identifier,
@@ -655,17 +683,11 @@ async fn resolve_project_id(pool: &sqlx::PgPool, slug: &str, raw: &str) -> Resul
         return Ok(id);
     }
     let normalized = normalize_resolve_identifier(raw);
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
-           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(slug)
-    .bind(normalized)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError.into_response())?;
-    row.map(|(id,)| id)
-        .ok_or_else(|| raw_body(StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY))
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    let row = crate::app_issues::access::project_id_by_identifier(&db, slug, &normalized)
+        .await
+        .map_err(|_| Denial::ServerError.into_response())?;
+    row.ok_or_else(|| raw_body(StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY))
 }
 
 // ---------------------------------------------------------------------------

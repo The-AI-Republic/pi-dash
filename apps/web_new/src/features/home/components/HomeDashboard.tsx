@@ -47,7 +47,11 @@ export function HomeDashboard({
   });
   if (workspace === undefined) return null;
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-(--space-8) px-(--space-6) py-(--space-8)">
+    // min-h-full + justify-center: the column fills the shell's scrolling
+    // <main> and centers the greeting and composer vertically. When the
+    // quickstart or widgets make it taller than the viewport it grows and
+    // scrolls from the top as before.
+    <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col justify-center gap-(--space-8) px-(--space-6) py-(--space-8)">
       <HomeGreeting />
       <HomeAssistantCard workspaceSlug={workspaceSlug} />
       {/* Remount per workspace so the checklist re-reads that workspace's

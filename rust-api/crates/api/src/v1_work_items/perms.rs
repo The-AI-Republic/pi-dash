@@ -57,11 +57,12 @@
 //!   run ownership: ANY active run on the issue named by the header
 //!   refuses — even a run the caller may not speak for (fixture
 //!   `foreign_active_on_issue_refused`).
-//! * BUG-7 (kernel) `ProjectMemberPermission` SAFE is workspace-scoped,
-//!   not project-scoped (`project.py:62-65`: no `project_id` filter) —
-//!   any active project membership in the workspace reads every label
-//!   list. Handlers must fetch that one fact without a `project_id`
-//!   filter; see [`decide`].
+//! * Label routes carry `ProjectEntityPermission` (PDASHOSS01-239): they
+//!   used to carry `ProjectMemberPermission`, whose POST arm checked the
+//!   *workspace* role and whose SAFE arm was workspace-scoped (the former
+//!   BUG-7), so create disagreed with update/delete. All three label write
+//!   verbs now check the caller's *project* role, like every other D-18
+//!   write.
 //! * The epic text counts 38 `work_item` routes; `api/urls/work_item.py`
 //!   holds 39 (12 deprecated `issues/` twins + 27 `work-items/`). The
 //!   table below pins all 39 plus the 2 label and 3 page routes.
@@ -129,8 +130,6 @@ pub enum V1WorkItemsGate {
     ProjectEntity,
     /// `ProjectLitePermission` (`project.py:133-143`).
     ProjectLite,
-    /// `ProjectMemberPermission` (`project.py:56-82`).
-    ProjectMember,
     /// `IsAuthenticated` only: declared on `AgentRunYieldAPIEndpoint`
     /// (`views/issue.py:1266`), inherited from `BaseAPIView`
     /// (`views/base.py:103`) on the attachment and search endpoints.
@@ -302,7 +301,6 @@ pub fn gate_for(route: V1WorkItemsRoute, _method: &str) -> V1WorkItemsGate {
         R::OldCommentList | R::OldCommentDetail | R::CommentList | R::CommentDetail => {
             G::ProjectLite
         }
-        R::LabelList | R::LabelDetail => G::ProjectMember,
         R::OldSearch
         | R::OldAttachmentList
         | R::OldAttachmentDetail
@@ -328,11 +326,8 @@ pub fn gate_for(route: V1WorkItemsRoute, _method: &str) -> V1WorkItemsGate {
 /// Fetch-scoping traps the handler layer must honor (the decision functions
 /// themselves are scope-correct only when the facts are fetched as below):
 ///
-/// * `ProjectMemberPermission` SAFE (label list/detail reads) uses the
-///   **workspace-scoped** `is_project_member`: `ProjectMember` filtered by
-///   `(workspace__slug, member, is_active)` with **no** `project_id`
-///   (BUG-7, `project.py:62-65`). Every other project fact on every other
-///   gate adds `project_id=view.project_id`.
+/// * Every project fact on every gate is filtered by
+///   `project_id=view.project_id`.
 /// * `ProjectEntityPermission` SAFE on the by-identifier routes
 ///   ([`V1WorkItemsRoute::ByIdentifier`] /
 ///   [`V1WorkItemsRoute::OldByIdentifier`]) reads
@@ -340,9 +335,6 @@ pub fn gate_for(route: V1WorkItemsRoute, _method: &str) -> V1WorkItemsGate {
 ///   `view.project_id` (`project.py:91-98`): `WorkspaceIssueAPIEndpoint`
 ///   is the only D-18 class with a `project_identifier` property
 ///   (`views/issue.py:202-204`).
-/// * `ProjectMemberPermission` POST (label create) reads
-///   `has_workspace_admin_or_member` from `WorkspaceMember`, not
-///   `ProjectMember` (`project.py:67-73`).
 pub fn decide(
     gate: V1WorkItemsGate,
     method: &str,
@@ -352,7 +344,6 @@ pub fn decide(
     match gate {
         V1WorkItemsGate::ProjectEntity => project::decide_project_entity(method, scope, facts),
         V1WorkItemsGate::ProjectLite => project::decide_project_lite(scope, facts),
-        V1WorkItemsGate::ProjectMember => project::decide_project_member(method, scope, facts),
         // The base `IsAuthenticated` already passed, so the authenticated
         // caller reaches the handler body.
         V1WorkItemsGate::AuthOnly => true,
@@ -545,6 +536,28 @@ pub fn active_run_of_caller(
         .filter(|run| run.work_item_id == Some(issue_id))
         .find(|run| run.status.is_active() && run_belongs_to(user_id, Some(run)))
         .map(|run| run.id)
+}
+
+/// Whether the lean-workflow agent-move gate applies to a state patch:
+/// the move is attributed to a run on this issue (NEWPIDASH-338 item 3).
+/// An explicit header proves it through the header run's own row; the
+/// headerless inference only ever resolves the caller's active run on
+/// this issue, so an attributed move with no header row is one too.
+/// Anything unattributed (`moved_by_run` unset) is a human move and skips
+/// the gate — as does a header naming a run that lives elsewhere.
+pub fn is_own_issue_run(
+    moved_by_run: Option<Uuid>,
+    header_run_work_item: Option<Uuid>,
+    header_present: bool,
+    issue_id: Uuid,
+) -> bool {
+    if moved_by_run.is_none() {
+        return false;
+    }
+    match header_run_work_item {
+        Some(work_item) => work_item == issue_id,
+        None => !header_present,
+    }
 }
 
 /// A refused human-only lever: always 403 with
@@ -886,11 +899,11 @@ mod tests {
             (R::GithubPrDetail, &["DELETE"], G::ProjectEntity),
             (R::CodeReviewList, &["GET", "POST"], G::ProjectEntity),
             (R::CodeReviewDetail, &["DELETE"], G::ProjectEntity),
-            (R::LabelList, &["GET", "POST"], G::ProjectMember),
+            (R::LabelList, &["GET", "POST"], G::ProjectEntity),
             (
                 R::LabelDetail,
                 &["GET", "PATCH", "DELETE"],
-                G::ProjectMember,
+                G::ProjectEntity,
             ),
             (R::PageList, &["GET", "POST"], G::ProjectEntity),
             (R::PageDetail, &["GET", "PATCH"], G::ProjectEntity),
@@ -1132,6 +1145,29 @@ mod tests {
     }
 
     #[test]
+    fn own_issue_run_covers_headerless_attribution() {
+        // NEWPIDASH-338 item 3: the agent-move gate applies whenever the
+        // move is attributed to a run, however derived.
+        let run = Uuid::parse_str("32bbc5d2-1407-45d8-8df2-266935de26e7").unwrap();
+        // Explicit header naming a run on this issue: gated (as before).
+        assert!(is_own_issue_run(Some(run), Some(issue()), true, issue()));
+        // Headerless inference: attributed, no header row — still gated.
+        assert!(is_own_issue_run(Some(run), None, false, issue()));
+        // Unattributed moves are human: never gated.
+        assert!(!is_own_issue_run(None, None, false, issue()));
+        assert!(!is_own_issue_run(None, Some(issue()), true, issue()));
+        // A header naming a run that lives elsewhere: not this issue.
+        assert!(!is_own_issue_run(
+            Some(run),
+            Some(other_issue()),
+            true,
+            issue()
+        ));
+        // A present-but-unusable header with no attribution: not gated.
+        assert!(!is_own_issue_run(None, None, true, issue()));
+    }
+
+    #[test]
     fn refuse_agent_action_replay() {
         let m = matrix(&fixture(), "refuse_agent_action");
         assert_eq!(m.as_object().unwrap().len(), 7);
@@ -1276,6 +1312,53 @@ mod tests {
     }
 
     #[test]
+    fn label_writes_check_the_project_role() {
+        // PDASHOSS01-239: create, update and delete all read the project
+        // role, never the workspace role.
+        use V1WorkItemsGate as G;
+        use V1WorkItemsRoute as R;
+        // Workspace GUEST, project MEMBER: every label verb passes.
+        let mut ws_guest_project_member = project_facts();
+        ws_guest_project_member.is_workspace_member = true;
+        ws_guest_project_member.is_project_member = true;
+        ws_guest_project_member.has_project_admin_or_member = true;
+        // Workspace MEMBER, project GUEST: every label write is refused.
+        let mut ws_member_project_guest = project_facts();
+        project_guest(&mut ws_member_project_guest);
+        for (route, method) in [
+            (R::LabelList, "GET"),
+            (R::LabelList, "POST"),
+            (R::LabelDetail, "GET"),
+            (R::LabelDetail, "PATCH"),
+            (R::LabelDetail, "DELETE"),
+        ] {
+            let gate = gate_for(route, method);
+            assert_eq!(gate, G::ProjectEntity, "{route:?} {method}");
+            assert!(
+                decide(gate, method, &scope(), &ws_guest_project_member),
+                "{route:?} {method} ws-guest/project-member"
+            );
+            let safe = method == "GET";
+            assert_eq!(
+                decide(gate, method, &scope(), &ws_member_project_guest),
+                safe,
+                "{route:?} {method} ws-member/project-guest"
+            );
+        }
+        // Membership in another project of the workspace no longer reads
+        // this project's labels.
+        let mut other_project_member = project_facts();
+        other_project_member.is_workspace_member = true;
+        other_project_member.has_workspace_admin_or_member = true;
+        assert!(!decide(
+            gate_for(R::LabelList, "GET"),
+            "GET",
+            &scope(),
+            &other_project_member
+        ));
+    }
+
+    #[test]
     fn permission_matrix_replay() {
         use V1WorkItemsGate as G;
         let m = matrix(&fixture(), "permission_matrix");
@@ -1319,16 +1402,16 @@ mod tests {
                 true,
             ),
             (
-                "guest_label_create_memberperm",
-                G::ProjectMember,
+                "guest_label_create_entity",
+                G::ProjectEntity,
                 "POST",
                 &label_guest,
                 false,
             ),
-            ("guest_label_list", G::ProjectMember, "GET", &guest, true),
+            ("guest_label_list", G::ProjectEntity, "GET", &guest, true),
             (
                 "outsider_label_list",
-                G::ProjectMember,
+                G::ProjectEntity,
                 "GET",
                 &outsider,
                 false,
@@ -1367,7 +1450,7 @@ mod tests {
             ("guest_create_entity", false),
             ("member_create_entity", true),
             ("guest_comment_create_lite", true),
-            ("guest_label_create_memberperm", false),
+            ("guest_label_create_entity", false),
             ("guest_label_list", true),
             ("outsider_label_list", false),
             ("inactive_member_list", false),

@@ -62,14 +62,15 @@ use std::sync::Arc;
 
 use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::{Map, Value};
-use sqlx::postgres::PgRow;
-use sqlx::Row;
 use uuid::Uuid;
 
 use pidash_db::context::RequestContext;
+use pidash_db::orm_tx::{into_sqlx, TxConn};
 use pidash_db::tasks_cleanup::version_queries as q;
 use pidash_services::tasks_cleanup::versions as v;
 use pidash_types::ids::{UserId, WorkspaceId};
+use sea_orm::{ConnectionTrait, DbBackend, QueryResult};
+use sea_query::{Expr, SimpleExpr};
 
 use crate::queue::{enqueue, enqueue_exec, JobRow, NewJob};
 use crate::worker::{Handler, HandlerError, Registry, Verdict};
@@ -478,41 +479,48 @@ pub fn py_eq(live: &LiveValue, value: &Value) -> bool {
 }
 
 /// Read one `issues` column as a [`LiveValue`] for the diff.
-pub fn issue_live_value(row: &PgRow, column: &str) -> Result<LiveValue, sqlx::Error> {
+pub fn issue_live_value(row: &QueryResult, column: &str) -> Result<LiveValue, sqlx::Error> {
     match column {
         "id" | "project_id" | "workspace_id" | "parent_id" | "state_id" | "estimate_point_id"
         | "type_id" | "assigned_pod_id" => {
-            let id: Uuid = row.try_get(column)?;
+            let id: Uuid = row.try_get_by(column).map_err(into_sqlx)?;
             Ok(LiveValue::Uuid(id))
         }
         "created_by_id" | "updated_by_id" | "snoozed_by_id" => Ok(row
-            .try_get::<Option<Uuid>, _>(column)?
+            .try_get_by::<Option<Uuid>, _>(column)
+            .map_err(into_sqlx)?
             .map_or(LiveValue::Null, LiveValue::Uuid)),
         "created_at" | "updated_at" | "completed_at" => {
-            let dt: Option<DateTime<Utc>> = row.try_get(column)?;
+            let dt: Option<DateTime<Utc>> = row.try_get_by(column).map_err(into_sqlx)?;
             Ok(dt.map_or(LiveValue::Null, LiveValue::DateTime))
         }
         "deleted_at" => Ok(row
-            .try_get::<Option<DateTime<Utc>>, _>(column)?
+            .try_get_by::<Option<DateTime<Utc>>, _>(column)
+            .map_err(into_sqlx)?
             .map_or(LiveValue::Null, LiveValue::DateTime)),
         "start_date" | "target_date" | "archived_at" | "snoozed_at" => Ok(row
-            .try_get::<Option<NaiveDate>, _>(column)?
+            .try_get_by::<Option<NaiveDate>, _>(column)
+            .map_err(into_sqlx)?
             .map_or(LiveValue::Null, LiveValue::Date)),
         "point" | "complexity_score" | "sequence_id" => Ok(row
-            .try_get::<Option<i32>, _>(column)?
+            .try_get_by::<Option<i32>, _>(column)
+            .map_err(into_sqlx)?
             .map_or(LiveValue::Null, |n| LiveValue::Int(i64::from(n)))),
         "sort_order" => Ok(row
-            .try_get::<Option<f64>, _>(column)?
+            .try_get_by::<Option<f64>, _>(column)
+            .map_err(into_sqlx)?
             .map_or(LiveValue::Null, LiveValue::Float)),
         "is_draft" => {
-            let b: bool = row.try_get(column)?;
+            let b: bool = row.try_get_by(column).map_err(into_sqlx)?;
             Ok(LiveValue::Bool(b))
         }
         "description_json" => Ok(row
-            .try_get::<Option<Value>, _>(column)?
+            .try_get_by::<Option<Value>, _>(column)
+            .map_err(into_sqlx)?
             .map_or(LiveValue::Null, LiveValue::Json)),
         "description_binary" => Ok(row
-            .try_get::<Option<Vec<u8>>, _>(column)?
+            .try_get_by::<Option<Vec<u8>>, _>(column)
+            .map_err(into_sqlx)?
             .map_or(LiveValue::Null, LiveValue::Bytes)),
         // The `Issue` many-to-manys (`columns.json`): `getattr` returns the
         // related manager, which never equals a payload list — these keys
@@ -521,7 +529,8 @@ pub fn issue_live_value(row: &PgRow, column: &str) -> Result<LiveValue, sqlx::Er
         // in producer payloads.)
         "assignees" | "labels" => Ok(LiveValue::Bytes(Vec::new())),
         _ => Ok(row
-            .try_get::<Option<String>, _>(column)?
+            .try_get_by::<Option<String>, _>(column)
+            .map_err(into_sqlx)?
             .map_or(LiveValue::Null, LiveValue::Str)),
     }
 }
@@ -565,75 +574,79 @@ fn version_column_kind(column: &str) -> Option<VersionColumnKind> {
 // Row mapping (PgRow → service snapshots)
 // ---------------------------------------------------------------------------
 
-fn row_issue_snapshot(row: &PgRow) -> Result<v::IssueSnapshot, String> {
+fn row_issue_snapshot(row: &QueryResult) -> Result<v::IssueSnapshot, String> {
     let get = |col: &str| -> Result<String, String> {
-        row.try_get::<Option<String>, _>(col)
+        row.try_get_by::<Option<String>, _>(col)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("null {col}"))
     };
     let get_uuid_opt = |col: &str| -> Result<Option<Uuid>, String> {
-        let raw: Option<Uuid> = row.try_get(col).map_err(|e| e.to_string())?;
+        let raw: Option<Uuid> = row.try_get_by(col).map_err(|e| e.to_string())?;
         Ok(raw)
     };
     Ok(v::IssueSnapshot {
-        workspace_id: row.try_get("workspace_id").map_err(|e| e.to_string())?,
-        project_id: row.try_get("project_id").map_err(|e| e.to_string())?,
+        workspace_id: row.try_get_by("workspace_id").map_err(|e| e.to_string())?,
+        project_id: row.try_get_by("project_id").map_err(|e| e.to_string())?,
         created_by: get_uuid_opt("created_by_id")?,
         updated_by: get_uuid_opt("updated_by_id")?,
-        id: row.try_get("id").map_err(|e| e.to_string())?,
+        id: row.try_get_by("id").map_err(|e| e.to_string())?,
         parent: get_uuid_opt("parent_id")?,
         state: get_uuid_opt("state_id")?,
         estimate_point: get_uuid_opt("estimate_point_id")?,
         name: get("name")?,
         priority: get("priority")?,
-        start_date: row.try_get("start_date").map_err(|e| e.to_string())?,
-        target_date: row.try_get("target_date").map_err(|e| e.to_string())?,
-        sequence_id: row.try_get("sequence_id").map_err(|e| e.to_string())?,
-        sort_order: row.try_get("sort_order").map_err(|e| e.to_string())?,
-        completed_at: row.try_get("completed_at").map_err(|e| e.to_string())?,
-        archived_at: row.try_get("archived_at").map_err(|e| e.to_string())?,
-        is_draft: row.try_get("is_draft").map_err(|e| e.to_string())?,
+        start_date: row.try_get_by("start_date").map_err(|e| e.to_string())?,
+        target_date: row.try_get_by("target_date").map_err(|e| e.to_string())?,
+        sequence_id: row.try_get_by("sequence_id").map_err(|e| e.to_string())?,
+        sort_order: row.try_get_by("sort_order").map_err(|e| e.to_string())?,
+        completed_at: row.try_get_by("completed_at").map_err(|e| e.to_string())?,
+        archived_at: row.try_get_by("archived_at").map_err(|e| e.to_string())?,
+        is_draft: row.try_get_by("is_draft").map_err(|e| e.to_string())?,
         external_source: row
-            .try_get::<Option<String>, _>("external_source")
+            .try_get_by::<Option<String>, _>("external_source")
             .map_err(|e| e.to_string())?,
         external_id: row
-            .try_get::<Option<String>, _>("external_id")
+            .try_get_by::<Option<String>, _>("external_id")
             .map_err(|e| e.to_string())?,
         type_id: get_uuid_opt("type_id")?,
     })
 }
 
-fn row_description_snapshot(row: &PgRow) -> Result<v::DescriptionSnapshot, String> {
+fn row_description_snapshot(row: &QueryResult) -> Result<v::DescriptionSnapshot, String> {
     Ok(v::DescriptionSnapshot {
-        workspace_id: row.try_get("workspace_id").map_err(|e| e.to_string())?,
-        project_id: row.try_get("project_id").map_err(|e| e.to_string())?,
-        created_by: row.try_get("created_by_id").map_err(|e| e.to_string())?,
-        updated_by: row.try_get("updated_by_id").map_err(|e| e.to_string())?,
-        issue_id: row.try_get("id").map_err(|e| e.to_string())?,
+        workspace_id: row.try_get_by("workspace_id").map_err(|e| e.to_string())?,
+        project_id: row.try_get_by("project_id").map_err(|e| e.to_string())?,
+        created_by: row.try_get_by("created_by_id").map_err(|e| e.to_string())?,
+        updated_by: row.try_get_by("updated_by_id").map_err(|e| e.to_string())?,
+        issue_id: row.try_get_by("id").map_err(|e| e.to_string())?,
         binary: row
-            .try_get("description_binary")
+            .try_get_by("description_binary")
             .map_err(|e| e.to_string())?,
-        html: row.try_get("description_html").map_err(|e| e.to_string())?,
+        html: row
+            .try_get_by("description_html")
+            .map_err(|e| e.to_string())?,
         stripped: row
-            .try_get("description_stripped")
+            .try_get_by("description_stripped")
             .map_err(|e| e.to_string())?,
         json: row
-            .try_get::<Option<Value>, _>("description_json")
+            .try_get_by::<Option<Value>, _>("description_json")
             .map_err(|e| e.to_string())?
             .unwrap_or(Value::Null),
     })
 }
 
-fn row_page_snapshot(row: &PgRow) -> Result<v::PageSnapshot, String> {
+fn row_page_snapshot(row: &QueryResult) -> Result<v::PageSnapshot, String> {
     Ok(v::PageSnapshot {
-        workspace_id: row.try_get("workspace_id").map_err(|e| e.to_string())?,
-        id: row.try_get("id").map_err(|e| e.to_string())?,
+        workspace_id: row.try_get_by("workspace_id").map_err(|e| e.to_string())?,
+        id: row.try_get_by("id").map_err(|e| e.to_string())?,
         binary: row
-            .try_get("description_binary")
+            .try_get_by("description_binary")
             .map_err(|e| e.to_string())?,
-        html: row.try_get("description_html").map_err(|e| e.to_string())?,
+        html: row
+            .try_get_by("description_html")
+            .map_err(|e| e.to_string())?,
         json: row
-            .try_get::<Option<Value>, _>("description_json")
+            .try_get_by::<Option<Value>, _>("description_json")
             .map_err(|e| e.to_string())?
             .unwrap_or(Value::Null),
     })
@@ -659,45 +672,42 @@ fn ctx_for(workspace_id: Uuid, actor: Option<Uuid>) -> RequestContext {
     )
 }
 
-fn bind_issue_version_row<'a>(
-    mut query: sqlx::query::Query<'a, sqlx::Postgres, sqlx::postgres::PgArguments>,
-    row: &'a v::NewIssueVersion,
-) -> sqlx::query::Query<'a, sqlx::Postgres, sqlx::postgres::PgArguments> {
-    query = query
-        .bind(row.created_at)
-        .bind(row.updated_at)
-        .bind(row.created_by)
-        .bind(row.updated_by)
-        .bind(None::<DateTime<Utc>>)
-        .bind(row.id)
-        .bind(row.project_id)
-        .bind(row.workspace_id)
-        .bind(row.parent)
-        .bind(row.state)
-        .bind(row.estimate_point)
-        .bind(row.name.clone())
-        .bind(row.priority.clone())
-        .bind(row.start_date)
-        .bind(row.target_date)
-        .bind(row.assignees.clone())
-        .bind(row.sequence_id)
-        .bind(row.labels.clone())
-        .bind(row.sort_order)
-        .bind(row.completed_at)
-        .bind(row.archived_at)
-        .bind(row.is_draft)
-        .bind(row.external_source.clone())
-        .bind(row.external_id.clone())
-        .bind(row.type_id)
-        .bind(row.cycle)
-        .bind(row.modules.clone())
-        .bind(sqlx::types::Json(row.properties.clone()))
-        .bind(sqlx::types::Json(row.meta.clone()))
-        .bind(row.last_saved_at)
-        .bind(row.issue_id)
-        .bind(row.activity_id)
-        .bind(row.owned_by_id);
-    query
+fn issue_version_row_exprs(row: &v::NewIssueVersion) -> Vec<SimpleExpr> {
+    vec![
+        Expr::value(row.created_at),
+        Expr::value(row.updated_at),
+        Expr::value(row.created_by),
+        Expr::value(row.updated_by),
+        Expr::value(None::<DateTime<Utc>>),
+        Expr::value(row.id),
+        Expr::value(row.project_id),
+        Expr::value(row.workspace_id),
+        Expr::value(row.parent),
+        Expr::value(row.state),
+        Expr::value(row.estimate_point),
+        Expr::value(row.name.clone()),
+        Expr::value(row.priority.clone()),
+        Expr::value(row.start_date),
+        Expr::value(row.target_date),
+        Expr::value(row.assignees.clone()),
+        Expr::value(row.sequence_id),
+        Expr::value(row.labels.clone()),
+        Expr::value(row.sort_order),
+        Expr::value(row.completed_at),
+        Expr::value(row.archived_at),
+        Expr::value(row.is_draft),
+        Expr::value(row.external_source.clone()),
+        Expr::value(row.external_id.clone()),
+        Expr::value(row.type_id),
+        Expr::value(row.cycle),
+        Expr::value(row.modules.clone()),
+        Expr::value(row.properties.clone()),
+        Expr::value(row.meta.clone()),
+        Expr::value(row.last_saved_at),
+        Expr::value(row.issue_id),
+        Expr::value(row.activity_id),
+        Expr::value(row.owned_by_id),
+    ]
 }
 
 async fn insert_issue_version_rows(
@@ -706,37 +716,34 @@ async fn insert_issue_version_rows(
     rows: &[v::NewIssueVersion],
 ) -> Result<(), sqlx::Error> {
     for chunk in rows.chunks(v::ISSUE_VERSION_BULK_BATCH_SIZE) {
-        let sql = q::bulk_insert_sql("issue_versions", &q::ISSUE_VERSION_COLUMNS, chunk.len());
-        let mut query = sqlx::query(&sql);
-        for row in chunk {
-            query = bind_issue_version_row(query, row);
-        }
-        query.execute(&mut *conn).await?;
+        let values: Vec<Vec<SimpleExpr>> = chunk.iter().map(issue_version_row_exprs).collect();
+        let stmt = q::bulk_insert_stmt("issue_versions", &q::ISSUE_VERSION_COLUMNS, values);
+        let tx = TxConn::new(&mut *conn);
+        tx.execute(DbBackend::Postgres.build(&stmt))
+            .await
+            .map_err(into_sqlx)?;
     }
     Ok(())
 }
 
-fn bind_description_version_row<'a>(
-    mut query: sqlx::query::Query<'a, sqlx::Postgres, sqlx::postgres::PgArguments>,
-    row: &'a v::NewDescriptionVersion,
-) -> sqlx::query::Query<'a, sqlx::Postgres, sqlx::postgres::PgArguments> {
-    query = query
-        .bind(row.created_at)
-        .bind(row.updated_at)
-        .bind(row.created_by)
-        .bind(row.updated_by)
-        .bind(None::<DateTime<Utc>>)
-        .bind(row.id)
-        .bind(row.project_id)
-        .bind(row.workspace_id)
-        .bind(row.issue_id)
-        .bind(row.binary.clone())
-        .bind(row.html.clone())
-        .bind(row.stripped.clone())
-        .bind(sqlx::types::Json(row.json.clone()))
-        .bind(row.last_saved_at)
-        .bind(row.owned_by_id);
-    query
+fn description_version_row_exprs(row: &v::NewDescriptionVersion) -> Vec<SimpleExpr> {
+    vec![
+        Expr::value(row.created_at),
+        Expr::value(row.updated_at),
+        Expr::value(row.created_by),
+        Expr::value(row.updated_by),
+        Expr::value(None::<DateTime<Utc>>),
+        Expr::value(row.id),
+        Expr::value(row.project_id),
+        Expr::value(row.workspace_id),
+        Expr::value(row.issue_id),
+        Expr::value(row.binary.clone()),
+        Expr::value(row.html.clone()),
+        Expr::value(row.stripped.clone()),
+        Expr::value(row.json.clone()),
+        Expr::value(row.last_saved_at),
+        Expr::value(row.owned_by_id),
+    ]
 }
 
 async fn insert_description_version_rows(
@@ -744,19 +751,20 @@ async fn insert_description_version_rows(
     _ctx: &RequestContext,
     rows: &[v::NewDescriptionVersion],
 ) -> Result<(), sqlx::Error> {
-    // Django passes no `batch_size` to `bulk_create` (`:105`), but sqlx
+    // Django passes no `batch_size` to `bulk_create` (`:105`), but Postgres
     // caps bind params at u16::MAX, so chunk like the issue-version path.
     for chunk in rows.chunks(v::ISSUE_VERSION_BULK_BATCH_SIZE) {
-        let sql = q::bulk_insert_sql(
+        let values: Vec<Vec<SimpleExpr>> =
+            chunk.iter().map(description_version_row_exprs).collect();
+        let stmt = q::bulk_insert_stmt(
             "issue_description_versions",
             &q::ISSUE_DESCRIPTION_VERSION_COLUMNS,
-            chunk.len(),
+            values,
         );
-        let mut query = sqlx::query(&sql);
-        for row in chunk {
-            query = bind_description_version_row(query, row);
-        }
-        query.execute(&mut *conn).await?;
+        let tx = TxConn::new(&mut *conn);
+        tx.execute(DbBackend::Postgres.build(&stmt))
+            .await
+            .map_err(into_sqlx)?;
     }
     Ok(())
 }
@@ -766,25 +774,31 @@ async fn insert_page_version_row(
     _ctx: &RequestContext,
     row: &v::NewPageVersion,
 ) -> Result<(), sqlx::Error> {
-    let sql = q::insert_sql("page_versions", &q::PAGE_VERSION_COLUMNS);
-    sqlx::query(&sql)
-        .bind(row.created_at)
-        .bind(row.updated_at)
-        .bind(None::<Uuid>)
-        .bind(None::<Uuid>)
-        .bind(None::<DateTime<Utc>>)
-        .bind(row.id)
-        .bind(row.workspace_id)
-        .bind(row.page_id)
-        .bind(row.last_saved_at)
-        .bind(row.owned_by_id)
-        .bind(row.binary.clone())
-        .bind(row.html.clone())
-        .bind(row.stripped.clone())
-        .bind(sqlx::types::Json(row.json.clone()))
-        .bind(sqlx::types::Json(row.sub_pages_data.clone()))
-        .execute(&mut *conn)
-        .await?;
+    let stmt = q::insert_stmt(
+        "page_versions",
+        &q::PAGE_VERSION_COLUMNS,
+        vec![vec![
+            Expr::value(row.created_at),
+            Expr::value(row.updated_at),
+            Expr::value(None::<Uuid>),
+            Expr::value(None::<Uuid>),
+            Expr::value(None::<DateTime<Utc>>),
+            Expr::value(row.id),
+            Expr::value(row.workspace_id),
+            Expr::value(row.page_id),
+            Expr::value(row.last_saved_at),
+            Expr::value(row.owned_by_id),
+            Expr::value(row.binary.clone()),
+            Expr::value(row.html.clone()),
+            Expr::value(row.stripped.clone()),
+            Expr::value(row.json.clone()),
+            Expr::value(row.sub_pages_data.clone()),
+        ]],
+    );
+    let tx = TxConn::new(&mut *conn);
+    tx.execute(DbBackend::Postgres.build(&stmt))
+        .await
+        .map_err(into_sqlx)?;
     Ok(())
 }
 
@@ -795,16 +809,22 @@ async fn update_description_version_row(
     snapshot: &v::DescriptionSnapshot,
     now: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
-    let sql = q::update_fields_sql("issue_description_versions", &q::DESCRIPTION_UPDATE_COLUMNS);
-    sqlx::query(&sql)
-        .bind(sqlx::types::Json(snapshot.json.clone()))
-        .bind(snapshot.html.clone())
-        .bind(snapshot.binary.clone())
-        .bind(snapshot.stripped.clone())
-        .bind(now)
-        .bind(id)
-        .execute(&mut *conn)
-        .await?;
+    let stmt = q::update_fields_stmt(
+        "issue_description_versions",
+        &q::DESCRIPTION_UPDATE_COLUMNS,
+        vec![
+            Expr::value(snapshot.json.clone()),
+            Expr::value(snapshot.html.clone()),
+            Expr::value(snapshot.binary.clone()),
+            Expr::value(snapshot.stripped.clone()),
+            Expr::value(now),
+        ],
+        id,
+    );
+    let tx = TxConn::new(&mut *conn);
+    tx.execute(DbBackend::Postgres.build(&stmt))
+        .await
+        .map_err(into_sqlx)?;
     Ok(())
 }
 
@@ -814,37 +834,36 @@ async fn update_page_version_row(
     id: Uuid,
     update: &v::PageVersionUpdate,
 ) -> Result<(), sqlx::Error> {
-    let sql = q::update_fields_sql("page_versions", &q::PAGE_VERSION_UPDATE_COLUMNS);
-    sqlx::query(&sql)
-        .bind(update.html.clone())
-        .bind(update.binary.clone())
-        .bind(sqlx::types::Json(update.json.clone()))
-        .bind(update.stripped.clone())
-        .bind(sqlx::types::Json(update.sub_pages_data.clone()))
-        .bind(update.updated_at)
-        .bind(id)
-        .execute(&mut *conn)
-        .await?;
+    let stmt = q::update_fields_stmt(
+        "page_versions",
+        &q::PAGE_VERSION_UPDATE_COLUMNS,
+        vec![
+            Expr::value(update.html.clone()),
+            Expr::value(update.binary.clone()),
+            Expr::value(update.json.clone()),
+            Expr::value(update.stripped.clone()),
+            Expr::value(update.sub_pages_data.clone()),
+            Expr::value(update.updated_at),
+        ],
+        id,
+    );
+    let tx = TxConn::new(&mut *conn);
+    tx.execute(DbBackend::Postgres.build(&stmt))
+        .await
+        .map_err(into_sqlx)?;
     Ok(())
 }
 
 /// Bind one payload value for the dead-path coalesce update, converting
 /// the way Django field `to_python` coerces on `save()`; `Err` mirrors the
 /// `FieldError`/`ValidationError` the broad `except` swallows.
-fn push_version_value(
-    builder: &mut sqlx::QueryBuilder<'_, sqlx::Postgres>,
-    column: &str,
-    value: &Value,
-) -> Result<(), String> {
+fn push_version_value(column: &str, value: &Value) -> Result<SimpleExpr, String> {
     let kind =
         version_column_kind(column).ok_or_else(|| format!("not a version column: {column}"))?;
     match kind {
         VersionColumnKind::Uuid => match value {
             Value::String(s) => match Uuid::parse_str(s) {
-                Ok(id) => {
-                    builder.push_bind(id);
-                    Ok(())
-                }
+                Ok(id) => Ok(Expr::value(id)),
                 Err(_) => Err(format!("bad uuid for {column}")),
             },
             _ => Err(format!("bad uuid for {column}")),
@@ -861,16 +880,12 @@ fn push_version_value(
                         _ => return Err(format!("bad uuid in {column}")),
                     }
                 }
-                builder.push_bind(ids);
-                Ok(())
+                Ok(Expr::value(ids))
             }
             _ => Err(format!("bad uuid list for {column}")),
         },
         VersionColumnKind::Text => match value {
-            Value::String(s) => {
-                builder.push_bind(s.clone());
-                Ok(())
-            }
+            Value::String(s) => Ok(Expr::value(s.clone())),
             _ => Err(format!("bad text for {column}")),
         },
         VersionColumnKind::Int => match value.as_i64() {
@@ -878,49 +893,33 @@ fn push_version_value(
                 let narrowed: i32 = n
                     .try_into()
                     .map_err(|_| format!("int out of range for {column}"))?;
-                builder.push_bind(narrowed);
-                Ok(())
+                Ok(Expr::value(narrowed))
             }
             None => Err(format!("bad int for {column}")),
         },
         VersionColumnKind::Float => match value.as_f64() {
-            Some(f) => {
-                builder.push_bind(f);
-                Ok(())
-            }
+            Some(f) => Ok(Expr::value(f)),
             None => Err(format!("bad float for {column}")),
         },
         VersionColumnKind::Bool => match value.as_bool() {
-            Some(b) => {
-                builder.push_bind(b);
-                Ok(())
-            }
+            Some(b) => Ok(Expr::value(b)),
             None => Err(format!("bad bool for {column}")),
         },
         VersionColumnKind::Date => match value {
             Value::String(s) => match NaiveDate::parse_from_str(s, "%Y-%m-%d") {
-                Ok(d) => {
-                    builder.push_bind(d);
-                    Ok(())
-                }
+                Ok(d) => Ok(Expr::value(d)),
                 Err(_) => Err(format!("bad date for {column}")),
             },
             _ => Err(format!("bad date for {column}")),
         },
         VersionColumnKind::DateTime => match value {
             Value::String(s) => match parse_task_datetime(s) {
-                Some(dt) => {
-                    builder.push_bind(dt);
-                    Ok(())
-                }
+                Some(dt) => Ok(Expr::value(dt)),
                 None => Err(format!("bad datetime for {column}")),
             },
             _ => Err(format!("bad datetime for {column}")),
         },
-        VersionColumnKind::Json => {
-            builder.push_bind(sqlx::types::Json(value.clone()));
-            Ok(())
-        }
+        VersionColumnKind::Json => Ok(Expr::value(value.clone())),
     }
 }
 
@@ -982,16 +981,18 @@ async fn fetch_latest_owner(
     conn: &mut sqlx::postgres::PgConnection,
     issue_id: Uuid,
 ) -> Result<Option<LatestOwner>, sqlx::Error> {
-    let row: Option<PgRow> = sqlx::query(q::LATEST_ISSUE_VERSION_OWNER_SQL)
-        .bind(issue_id)
-        .fetch_optional(&mut *conn)
-        .await?;
+    let stmt = q::latest_issue_version_owner_stmt(issue_id);
+    let tx = TxConn::new(&mut *conn);
+    let row: Option<QueryResult> = tx
+        .query_one(DbBackend::Postgres.build(&stmt))
+        .await
+        .map_err(into_sqlx)?;
     row.map(|row| {
         Ok(LatestOwner {
-            id: row.try_get("id")?,
-            username: row.try_get("username")?,
-            email: row.try_get("email")?,
-            last_saved_at: row.try_get("last_saved_at")?,
+            id: row.try_get_by("id").map_err(into_sqlx)?,
+            username: row.try_get_by("username").map_err(into_sqlx)?,
+            email: row.try_get_by("email").map_err(into_sqlx)?,
+            last_saved_at: row.try_get_by("last_saved_at").map_err(into_sqlx)?,
         })
     })
     .transpose()
@@ -1005,15 +1006,18 @@ struct LatestVersion {
 
 async fn fetch_latest_version(
     conn: &mut sqlx::postgres::PgConnection,
-    sql: &str,
-    fk: Uuid,
+    stmt: sea_query::SelectStatement,
 ) -> Result<Option<LatestVersion>, sqlx::Error> {
-    let row: Option<PgRow> = sqlx::query(sql).bind(fk).fetch_optional(&mut *conn).await?;
+    let tx = TxConn::new(&mut *conn);
+    let row: Option<QueryResult> = tx
+        .query_one(DbBackend::Postgres.build(&stmt))
+        .await
+        .map_err(into_sqlx)?;
     row.map(|row| {
         Ok(LatestVersion {
-            id: row.try_get("id")?,
-            owned_by_id: row.try_get("owned_by_id")?,
-            last_saved_at: row.try_get("last_saved_at")?,
+            id: row.try_get_by("id").map_err(into_sqlx)?,
+            owned_by_id: row.try_get_by("owned_by_id").map_err(into_sqlx)?,
+            last_saved_at: row.try_get_by("last_saved_at").map_err(into_sqlx)?,
         })
     })
     .transpose()
@@ -1023,11 +1027,18 @@ async fn fetch_admin_member(
     conn: &mut sqlx::postgres::PgConnection,
     project_id: Uuid,
 ) -> Result<Option<Uuid>, sqlx::Error> {
-    let row: Option<PgRow> = sqlx::query(q::ADMIN_FALLBACK_SQL)
-        .bind(project_id)
-        .fetch_optional(&mut *conn)
-        .await?;
-    row.map(|row| row.try_get("member_id")).transpose()
+    let stmt = q::admin_fallback_stmt(project_id);
+    let tx = TxConn::new(&mut *conn);
+    let row: Option<QueryResult> = tx
+        .query_one(DbBackend::Postgres.build(&stmt))
+        .await
+        .map_err(into_sqlx)?;
+    match row {
+        None => Ok(None),
+        Some(row) => row
+            .try_get_by::<Option<Uuid>, _>("member_id")
+            .map_err(into_sqlx),
+    }
 }
 
 async fn fetch_related(
@@ -1039,22 +1050,16 @@ async fn fetch_related(
     if ids.is_empty() {
         return Ok(related);
     }
-    macro_rules! fetch_bound {
-        ($sql:expr) => {{
-            let sql = $sql;
-            let mut query = sqlx::query(&sql);
-            for id in ids {
-                query = query.bind(*id);
-            }
-            query.fetch_all(&mut *conn).await
-        }};
-    }
     // Cycle map: `Meta.ordering` (`created_at DESC`); the dict
     // comprehension keeps the last row per issue over this order.
-    let rows = fetch_bound!(q::cycle_issues_sql(ids.len()))?;
+    let tx = TxConn::new(&mut *conn);
+    let rows = tx
+        .query_all(DbBackend::Postgres.build(&q::cycle_issues_stmt(ids)))
+        .await
+        .map_err(into_sqlx)?;
     for row in rows {
-        let issue: Uuid = row.try_get("issue_id")?;
-        let cycle: Option<Uuid> = row.try_get("cycle_id")?;
+        let issue: Uuid = row.try_get_by("issue_id").map_err(into_sqlx)?;
+        let cycle: Option<Uuid> = row.try_get_by("cycle_id").map_err(into_sqlx)?;
         related
             .cycle_issues
             .insert(issue.to_string(), cycle.map(|c| c.to_string()));
@@ -1065,13 +1070,16 @@ async fn fetch_related(
         ("issue_labels", "label_id", 1),
         ("module_issues", "module_id", 2),
     ] {
-        let rows: Vec<PgRow> =
-            fetch_bound!(q::related_in_sql(table, "issue_id", value_col, ids.len()))?;
+        let stmt = q::related_in_stmt(table, "issue_id", value_col, ids);
+        let rows: Vec<QueryResult> = tx
+            .query_all(DbBackend::Postgres.build(&stmt))
+            .await
+            .map_err(into_sqlx)?;
         let pairs: Vec<(String, String)> = rows
             .iter()
             .map(|row| {
-                let issue: Uuid = row.try_get("issue_id")?;
-                let value: Uuid = row.try_get(value_col)?;
+                let issue: Uuid = row.try_get_by::<Uuid, _>("issue_id").map_err(into_sqlx)?;
+                let value: Uuid = row.try_get_by::<Uuid, _>(value_col).map_err(into_sqlx)?;
                 Ok((issue.to_string(), value.to_string()))
             })
             .collect::<Result<_, sqlx::Error>>()?;
@@ -1083,12 +1091,16 @@ async fn fetch_related(
         }
     }
     // Latest activity per issue.
-    let rows: Vec<PgRow> = fetch_bound!(q::activities_sql(ids.len()))?;
+    let stmt = q::activities_stmt(ids);
+    let rows: Vec<QueryResult> = tx
+        .query_all(DbBackend::Postgres.build(&stmt))
+        .await
+        .map_err(into_sqlx)?;
     let pairs: Vec<(String, String)> = rows
         .iter()
         .map(|row| {
-            let issue: Uuid = row.try_get("issue_id")?;
-            let activity: Uuid = row.try_get("id")?;
+            let issue: Uuid = row.try_get_by::<Uuid, _>("issue_id").map_err(into_sqlx)?;
+            let activity: Uuid = row.try_get_by::<Uuid, _>("id").map_err(into_sqlx)?;
             Ok((issue.to_string(), activity.to_string()))
         })
         .collect::<Result<_, sqlx::Error>>()?;
@@ -1205,18 +1217,18 @@ async fn update_issue_version(
         .chain(["last_saved_at".to_string()])
         .collect();
     let refs: Vec<&str> = columns.iter().map(String::as_str).collect();
-    let mut builder = sqlx::QueryBuilder::new(q::update_fields_sql("issue_versions", &refs));
+    let mut values: Vec<SimpleExpr> = Vec::with_capacity(changed.len() + 1);
     for key in changed {
         let value = payload.get(key).unwrap_or(&Value::Null);
-        if push_version_value(&mut builder, key, value).is_err() {
-            return Ok(());
+        match push_version_value(key, value) {
+            Ok(expr) => values.push(expr),
+            Err(_) => return Ok(()),
         }
     }
-    builder.push_bind(now);
-    builder.push_bind(version_id);
-    builder
-        .build()
-        .execute(pool)
+    values.push(Expr::value(now));
+    let stmt = q::update_fields_stmt("issue_versions", &refs, values, version_id);
+    let db = pidash_db::pool::sea_orm_connection(pool);
+    db.execute(DbBackend::Postgres.build(&stmt))
         .await
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -1233,24 +1245,36 @@ pub async fn run_sync_issue_versions(
 ) -> Result<(), String> {
     let now = Utc::now();
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-    let total: i64 = sqlx::query_scalar(q::ISSUE_COUNT_SQL)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
+    let total = {
+        let tx_conn = TxConn::new(&mut tx);
+        let row = tx_conn
+            .query_one(DbBackend::Postgres.build(&q::issue_count_stmt()))
+            .await
+            .map_err(|e| e.to_string())?;
+        let total: i64 = row
+            .ok_or_else(|| "version task: missing issue count".to_string())?
+            .try_get_by("__count")
+            .map_err(|e| e.to_string())?;
+        total
+    };
     let window = match v::batch_window(total, batch_size, offset) {
         Some(window) => window,
         None => return Ok(()),
     };
-    let rows = sqlx::query(&q::issues_batch_sql(window.limit, offset))
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
+    let rows = {
+        let tx_conn = TxConn::new(&mut tx);
+        let stmt = q::issues_batch_stmt(window.limit, offset);
+        tx_conn
+            .query_all(DbBackend::Postgres.build(&stmt))
+            .await
+            .map_err(|e| e.to_string())?
+    };
     if rows.is_empty() {
         return Ok(());
     }
     let ids: Vec<Uuid> = rows
         .iter()
-        .map(|row| row.try_get("id"))
+        .map(|row| row.try_get_by("id"))
         .collect::<Result<_, _>>()
         .map_err(|e| e.to_string())?;
     let related = fetch_related(&mut tx, &ids)
@@ -1335,25 +1359,38 @@ pub async fn run_sync_description_versions(
 ) -> Result<(), String> {
     let now = Utc::now();
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-    let total: i64 = sqlx::query_scalar(q::ISSUE_COUNT_SQL)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
+    let total = {
+        let tx_conn = TxConn::new(&mut tx);
+        let row = tx_conn
+            .query_one(DbBackend::Postgres.build(&q::issue_count_stmt()))
+            .await
+            .map_err(|e| e.to_string())?;
+        let total: i64 = row
+            .ok_or_else(|| "version task: missing issue count".to_string())?
+            .try_get_by("__count")
+            .map_err(|e| e.to_string())?;
+        total
+    };
     let window = match v::batch_window(total, batch_size, offset) {
         Some(window) => window,
         None => return Ok(()),
     };
-    let rows = sqlx::query(&q::issues_batch_limited_sql(window.limit, offset))
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
+    let rows = {
+        let tx_conn = TxConn::new(&mut tx);
+        let stmt = q::issues_batch_limited_stmt(window.limit, offset);
+        tx_conn
+            .query_all(DbBackend::Postgres.build(&stmt))
+            .await
+            .map_err(|e| e.to_string())?
+    };
     if rows.is_empty() {
         return Ok(());
     }
     let mut grouped: Vec<(Uuid, Vec<v::NewDescriptionVersion>)> = Vec::new();
     for row in &rows {
-        let workspace_id: Option<Uuid> = row.try_get("workspace_id").map_err(|e| e.to_string())?;
-        let project_id: Option<Uuid> = row.try_get("project_id").map_err(|e| e.to_string())?;
+        let workspace_id: Option<Uuid> =
+            row.try_get_by("workspace_id").map_err(|e| e.to_string())?;
+        let project_id: Option<Uuid> = row.try_get_by("project_id").map_err(|e| e.to_string())?;
         let (workspace_id, project_id) = match (workspace_id, project_id) {
             (Some(w), Some(p)) => (w, p),
             _ => {
@@ -1455,7 +1492,7 @@ pub async fn run_description_task(
     }
     let now = Utc::now();
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-    let latest = fetch_latest_version(&mut tx, &q::latest_description_version_sql(), issue_id)
+    let latest = fetch_latest_version(&mut tx, q::latest_description_version_stmt(issue_id))
         .await
         .map_err(|e| e.to_string())?;
     let (has, owned, age) = match &latest {
@@ -1529,7 +1566,7 @@ pub async fn run_track_page_version(
     let now = Utc::now();
     let ctx = ctx_for(snapshot.workspace_id, Some(user));
     let mut conn = pool.acquire().await.map_err(|e| e.to_string())?;
-    let latest = fetch_latest_version(&mut conn, &q::latest_page_version_sql(), page_id)
+    let latest = fetch_latest_version(&mut conn, q::latest_page_version_stmt(page_id))
         .await
         .map_err(|e| e.to_string())?;
     let coalesce = match &latest {
@@ -1554,24 +1591,29 @@ pub async fn run_track_page_version(
             .await
             .map_err(|e| e.to_string())?;
     }
-    let count: i64 = sqlx::query_scalar(q::PAGE_VERSION_COUNT_SQL)
-        .bind(page_id)
-        .fetch_one(pool)
+    let orm = pidash_db::pool::sea_orm_connection(pool);
+    let count_row = orm
+        .query_one(DbBackend::Postgres.build(&q::page_version_count_stmt(page_id)))
         .await
         .map_err(|e| e.to_string())?;
+    let count: i64 = count_row
+        .ok_or_else(|| "version task: missing page version count".to_string())?
+        .try_get_by("__count")
+        .map_err(|e| e.to_string())?;
     if v::prune_needed(count) {
-        let oldest: Option<Uuid> = sqlx::query_scalar(q::OLDEST_PAGE_VERSION_ID_SQL)
-            .bind(page_id)
-            .fetch_optional(pool)
+        let oldest_row = orm
+            .query_one(DbBackend::Postgres.build(&q::oldest_page_version_id_stmt(page_id)))
             .await
             .map_err(|e| e.to_string())?;
+        let oldest: Option<Uuid> = match oldest_row {
+            Some(row) => Some(row.try_get_by("id").map_err(|e| e.to_string())?),
+            None => None,
+        };
         if let Some(id) = oldest {
             // `.first().delete()` on a `SoftDeleteModel` stamps
             // `deleted_at` — it never removes the row.
-            sqlx::query(q::PRUNE_PAGE_VERSION_BY_ID_SQL)
-                .bind(now)
-                .bind(id)
-                .execute(pool)
+            let stmt = q::prune_page_version_by_id_stmt(now, id);
+            orm.execute(DbBackend::Postgres.build(&stmt))
                 .await
                 .map_err(|e| e.to_string())?;
         }
@@ -2086,5 +2128,101 @@ mod tests {
         assert!(parse_task_datetime("2026-09-28 06:00:00").is_some());
         assert!(parse_task_datetime("2026-09-28").is_some());
         assert_eq!(parse_task_datetime("not-a-date"), None);
+    }
+
+    #[test]
+    fn version_insert_statements_pin_bulk_shape() {
+        // TASK-CLEANUP-1: bulk-insert statements keep the `_meta`-order
+        // columns with one value group per row (chunked at 1000 by the
+        // caller, like `bulk_create(batch_size=1000)`).
+        let row = v::NewIssueVersion {
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            created_by: None,
+            updated_by: None,
+            id: Uuid::now_v7(),
+            project_id: Some(Uuid::now_v7()),
+            workspace_id: Some(Uuid::now_v7()),
+            parent: None,
+            state: None,
+            estimate_point: None,
+            name: "x".to_owned(),
+            priority: "none".to_owned(),
+            start_date: None,
+            target_date: None,
+            assignees: vec![],
+            sequence_id: 1,
+            labels: vec![],
+            sort_order: 65535.0,
+            completed_at: None,
+            archived_at: None,
+            is_draft: false,
+            external_source: None,
+            external_id: None,
+            type_id: None,
+            cycle: None,
+            modules: vec![],
+            properties: Value::Null,
+            meta: Value::Null,
+            last_saved_at: Utc::now(),
+            issue_id: Uuid::now_v7(),
+            activity_id: None,
+            owned_by_id: Uuid::now_v7(),
+        };
+        let stmt = q::bulk_insert_stmt(
+            "issue_versions",
+            &q::ISSUE_VERSION_COLUMNS,
+            vec![issue_version_row_exprs(&row)],
+        );
+        let sql = stmt.to_string(sea_orm::sea_query::PostgresQueryBuilder);
+        assert!(sql.starts_with("INSERT INTO \"issue_versions\" (\"created_at\""));
+        assert!(sql.contains("\"owned_by_id\""), "{sql}");
+        assert_eq!(sql.matches(" VALUES ").count(), 1, "{sql}");
+        // One value group per row.
+        let two = q::bulk_insert_stmt(
+            "issue_versions",
+            &q::ISSUE_VERSION_COLUMNS,
+            vec![issue_version_row_exprs(&row), issue_version_row_exprs(&row)],
+        )
+        .to_string(sea_orm::sea_query::PostgresQueryBuilder);
+        assert!(two.contains("), ("), "{two}");
+    }
+
+    #[test]
+    fn coalesce_update_statement_shapes() {
+        // TASK-CLEANUP-1: the dead-path coalesce `update_fields` path
+        // keeps its SET list and PK filter through the statement builder.
+        let id = Uuid::now_v7();
+        let now = Utc::now();
+        let expr = push_version_value("name", &Value::String("n".to_owned())).unwrap();
+        let stmt = q::update_fields_stmt(
+            "issue_versions",
+            &["name", "last_saved_at"],
+            vec![expr, Expr::value(now)],
+            id,
+        );
+        let sql = stmt.to_string(sea_orm::sea_query::PostgresQueryBuilder);
+        assert!(sql.starts_with("UPDATE \"issue_versions\" SET"));
+        assert!(sql.contains("\"name\" ="), "{sql}");
+        assert!(sql.contains("\"last_saved_at\" ="), "{sql}");
+        assert!(sql.contains("\"id\" ="), "{sql}");
+        // Unknown columns abort (`Ok(())` path), like Django `FieldError`.
+        assert!(push_version_value("nope", &Value::String("x".to_owned())).is_err());
+    }
+
+    #[test]
+    fn latest_owner_statement_pins_join() {
+        // TASK-CLEANUP-1: the coalesce owner join (`str(owned_by)` bug
+        // compatibility) keeps the id + username/email projection.
+        let id = Uuid::now_v7();
+        let sql = q::latest_issue_version_owner_stmt(id)
+            .to_string(sea_orm::sea_query::PostgresQueryBuilder);
+        assert!(sql.contains("INNER JOIN"), "{sql}");
+        assert!(sql.contains("\"username\""), "{sql}");
+        assert!(sql.contains("\"email\""), "{sql}");
+        assert!(
+            sql.ends_with("ORDER BY \"last_saved_at\" DESC LIMIT 1"),
+            "{sql}"
+        );
     }
 }

@@ -18,7 +18,10 @@ the migrate-time seed and the workspace-create seeder leave behind.
   source, and prompts the seeder writes.
 """
 
-BUILTIN_SLUGS = ("security-audit", "fable-security-audit")
+# NEWPIDASH-256: catalog is empty — new workspaces seed no schedulers.
+# The seeder mechanism is kept (ensure no-ops) but no prod template is
+# inserted.
+BUILTIN_SLUGS: tuple[str, ...] = ()
 
 
 def test_prompt_template_globals_seeded(seed):
@@ -104,15 +107,5 @@ def test_workspace_create_seeds_builtin_schedulers(api, seed, tenant_a,
             (workspace_id,),
         )
         rows = cur.fetchall()
-    assert sorted(row[0] for row in rows) == sorted(BUILTIN_SLUGS)
-    for _slug, source, is_enabled, length in rows:
-        assert source == "builtin"
-        assert is_enabled is True
-        assert length > 100
-    with seed.conn.cursor() as cur:
-        cur.execute(
-            "SELECT prompt FROM schedulers"
-            " WHERE workspace_id = %s AND slug = 'security-audit'",
-            (workspace_id,),
-        )
-        assert "Scan this project's source code" in cur.fetchone()[0]
+    # NEWPIDASH-256: empty catalog → no rows seeded.
+    assert rows == []
