@@ -18,7 +18,7 @@ pub mod pidash_agent_cmd;
 pub mod label;
 // `pub` so the CLI contract tests can drive the page subcommands directly.
 pub mod page;
-mod project;
+pub mod project;
 mod reconnect;
 mod remove;
 pub mod resolve;
