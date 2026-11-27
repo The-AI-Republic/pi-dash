@@ -402,6 +402,7 @@ pub struct PatchArgs {
     #[arg(long, conflicts_with_all = ["add_label", "remove_label"])]
     pub clear_labels: bool,
 
+
     /// Record the git branch this issue's work lives on, so later agent runs
     /// check it out instead of cutting a new one. Set it only after the
     /// branch exists on the remote. `--git-work-branch ""` clears it.
@@ -1341,6 +1342,7 @@ pub async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliErr
 
     let labels = resolve_label_patch(client, &issue, &args).await?;
 
+
     let runner = if args.clear_runner {
         RunnerPatch::Clear
     } else if let Some(ref runner) = args.runner {
@@ -1903,10 +1905,7 @@ mod tests {
     fn pagination_note_stays_silent_when_the_field_is_absent() {
         // Servers predating `next_page_results` in the envelope: a complete
         // list and a truncated one are indistinguishable, so say nothing.
-        assert_eq!(
-            pagination_note(&json!({"count": 1000, "results": []})),
-            None
-        );
+        assert_eq!(pagination_note(&json!({"count": 1000, "results": []})), None);
     }
 
     #[test]

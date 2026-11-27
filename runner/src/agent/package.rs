@@ -106,7 +106,9 @@ impl AgentPackage {
             AgentKind::Antigravity => runner.antigravity.binary = executable,
             AgentKind::MuseCode => runner.muse_code.binary = executable,
             AgentKind::PidashAgent => {
-                anyhow::bail!("the Pi Dash Agent ships with pidash; it cannot be an agent package")
+                anyhow::bail!(
+                    "the Pi Dash Agent ships with pidash; it cannot be an agent package"
+                )
             }
         }
         runner.agent.kind = self.protocol;
