@@ -93,12 +93,27 @@ pub async fn resolve_project(
     project_ref: &str,
 ) -> Result<ProjectRow, CliError> {
     let needle = project_ref.trim();
-    let needle_upper = needle.to_uppercase();
     let projects = list_projects(client).await?;
     projects
         .into_iter()
-        .find(|p| p.id == needle || p.identifier.to_uppercase() == needle_upper)
+        .find(|p| project_matches(p, needle))
         .ok_or_else(|| CliError::new(EXIT_NOT_FOUND, format!("project {needle:?} not found")))
+}
+
+/// Whether `needle` names `project`: its identifier (case-insensitive) or
+/// its UUID in any spelling the server accepts (any case, with or without
+/// hyphens), compared as parsed UUIDs rather than strings.
+fn project_matches(project: &ProjectRow, needle: &str) -> bool {
+    if project.identifier.eq_ignore_ascii_case(needle) || project.id == needle {
+        return true;
+    }
+    match (
+        uuid::Uuid::parse_str(&project.id),
+        uuid::Uuid::parse_str(needle),
+    ) {
+        (Ok(id), Ok(wanted)) => id == wanted,
+        _ => false,
+    }
 }
 
 pub async fn default_project(client: &ApiClient) -> Result<Option<ProjectRow>, CliError> {
@@ -170,4 +185,35 @@ fn project_rows_from_value(resp: Value) -> Result<Vec<ProjectRow>, CliError> {
     }
     serde_json::from_value(resp)
         .map_err(|e| CliError::new(EXIT_UNKNOWN, format!("invalid project list JSON: {e}")))
+}
+
+#[cfg(test)]
+mod project_match_tests {
+    use super::*;
+
+    fn row(id: &str, identifier: &str) -> ProjectRow {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "identifier": identifier, "name": "n"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn project_matches_identifier_case_insensitively() {
+        let p = row("00000000-0000-0000-0000-0000000000aa", "ENG");
+        assert!(project_matches(&p, "eng"));
+        assert!(project_matches(&p, "ENG"));
+        assert!(!project_matches(&p, "OPS"));
+    }
+
+    #[test]
+    fn project_matches_any_uuid_spelling() {
+        let p = row("0000000a-0000-0000-0000-0000000000aa", "ENG");
+        assert!(project_matches(&p, "0000000a-0000-0000-0000-0000000000aa"));
+        assert!(project_matches(&p, "0000000A-0000-0000-0000-0000000000AA"));
+        let unhyphenated = "0000000A-0000-0000-0000-0000000000AA".replace('-', "");
+        assert!(project_matches(&p, &unhyphenated));
+        assert!(!project_matches(&p, "not-a-uuid"));
+        assert!(!project_matches(&p, "0000000b-0000-0000-0000-0000000000aa"));
+    }
 }

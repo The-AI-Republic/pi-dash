@@ -2011,6 +2011,31 @@ async fn issue_create_output_id_prints_only_the_identifier() {
 }
 
 #[tokio::test]
+async fn issue_create_accepts_an_uppercase_project_uuid() {
+    let fake = start_fake(issue_create_handler()).await;
+    let upper = ISSUE_PROJECT_ID.to_uppercase();
+
+    let out = run_pidash(
+        &fake,
+        &[
+            "issue",
+            "create",
+            "--project",
+            &upper,
+            "--title",
+            "X",
+            "--output",
+            "id",
+        ],
+        "",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    assert_eq!(out.stdout, "ENG-123\n");
+}
+
+#[tokio::test]
 async fn issue_create_unknown_project_exits_not_found_without_creating() {
     let fake = start_fake(issue_create_handler()).await;
 
