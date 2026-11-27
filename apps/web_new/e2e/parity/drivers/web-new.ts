@@ -153,6 +153,7 @@ import type {
   RunnersEditPodForm,
   RunnersPodTile,
   RunnersRail,
+  RunnersRailGeometry,
   RunnersRowActions,
   RunnersTab,
   RunnersTableRow,
@@ -273,6 +274,7 @@ import type {
   CloudAssistantAddFill,
   CloudAssistantAddFormFacts,
   CloudAssistantConnectionFacts,
+  CloudAssistantModelBudgetFacts,
   WsSettingsApiTokenBackup,
   WsSettingsApiTokenRow,
   SettingsGeneralField,
@@ -1481,6 +1483,20 @@ export class WebNewDriver implements ParityDriver {
       .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
+  async submitEmailExpectingError(email: string): Promise<number> {
+    const page = this.page;
+    const emailField = page.getByPlaceholder("name@company.com").first();
+    await emailField.fill(email);
+    const emailForm = page.locator("form", { has: emailField });
+    const [response] = await Promise.all([
+      page.waitForResponse((res) => res.url().includes("/auth/email-check/"), {
+        timeout: WebNewDriver.WAIT_MS,
+      }),
+      this.cardSubmit(emailForm).click(),
+    ]);
+    return response.status();
+  }
+
   async submitPassword(password: string): Promise<void> {
     const page = this.page;
     const passwordField = page.getByPlaceholder("Enter password");
@@ -1780,6 +1796,16 @@ export class WebNewDriver implements ParityDriver {
     await this.page.goto(`/accounts/reset-password?${query.toString()}`);
     // Exact: the show/hide toggle ("Show new password") would also match.
     await this.page.getByLabel("New password", { exact: true }).waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async fillNewPasswordFields(password: string, confirmPassword: string): Promise<void> {
+    await this.page.getByLabel("New password", { exact: true }).fill(password);
+    await this.page.getByLabel("Confirm password", { exact: true }).fill(confirmPassword);
+  }
+
+  async newPasswordSubmitEnabled(): Promise<boolean> {
+    const form = this.page.locator("form", { has: this.page.getByLabel("New password", { exact: true }) });
+    return this.cardSubmit(form).isEnabled();
   }
 
   async submitNewPassword(password: string, confirmPassword: string): Promise<void> {
@@ -3494,9 +3520,11 @@ export class WebNewDriver implements ParityDriver {
   // the link dialog reports validation through an alert.
 
   async homeAllOffVisible(): Promise<boolean> {
-    const empty = this.page.getByTestId("home-all-off").first();
-    if ((await empty.count()) === 0) return false;
-    return empty.isVisible().catch(() => false);
+    // NEWPIDASH-301 (DIFF-39): the new home renders no all-off
+    // illustration — an all-widgets-off home shows only the composer
+    // while Manage widgets stays reachable. The oracle home keeps its
+    // guidance illustration (see web.ts).
+    return false;
   }
 
   private homeLinksSection(): Locator {
@@ -5119,6 +5147,11 @@ export class WebNewDriver implements ParityDriver {
     }
     await this.page.locator(`[data-widget-action="${name}"]`).first().click({ timeout: WebNewDriver.WAIT_MS });
   }
+  async widgetActionDisabled(name: string): Promise<boolean> {
+    const button = this.page.locator(`[data-widget-action="${name}"]`).first();
+    await button.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return (await button.isDisabled()) as boolean;
+  }
   async postComment(_text: string): Promise<void> {
     return todo("postComment");
   }
@@ -5762,6 +5795,18 @@ export class WebNewDriver implements ParityDriver {
     await this.page.waitForFunction((text) => !document.body.innerText.includes(text), title, {
       timeout: WebNewDriver.WAIT_MS,
     });
+  }
+
+  async codeReviewAttachVisible(): Promise<boolean> {
+    const input = this.page.getByPlaceholder("Paste a pull request or merge request URL").first();
+    const count = await input.count();
+    if (count === 0) return false;
+    return await input.isVisible().catch(() => true);
+  }
+
+  async codeReviewDetachVisible(): Promise<boolean> {
+    const buttons = this.page.locator('[data-widget-root="Code reviews"] [data-widget-row] button');
+    return (await buttons.count()) > 0;
   }
 
   async worklogCreateVisible(): Promise<boolean> {
@@ -7664,6 +7709,55 @@ export class WebNewDriver implements ParityDriver {
     return texts.map((text) => text.trim()).filter((text) => text.length > 0);
   }
 
+  /** The overflow slide-over row carrying a project name. */
+  private overflowRow(projectName: string): Locator {
+    return this.page
+      .getByTestId("projects-overflow-panel")
+      .locator("li[data-overflow-row]")
+      .filter({ hasText: projectName })
+      .first();
+  }
+
+  async isOverflowRowOpen(projectName: string): Promise<boolean> {
+    const row = this.overflowRow(projectName);
+    const toggle = row.getByTestId("project-row-toggle");
+    if ((await toggle.count()) > 0) {
+      return (await toggle.first().getAttribute("aria-expanded")) === "true";
+    }
+    return (await row.getByTestId("project-subnav-link").count()) > 0;
+  }
+
+  async setOverflowRowOpen(projectName: string, open: boolean): Promise<void> {
+    // Same drive-until-agree as the sidebar rows: the panel mounts its
+    // rows asynchronously after the projects fetch.
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      if ((await this.isOverflowRowOpen(projectName)) === open) return;
+      await this.overflowRow(projectName).getByTestId("project-row-toggle").click({ timeout: 10_000 });
+    }
+    await expect.poll(() => this.isOverflowRowOpen(projectName), { timeout: 10_000 }).toBe(open);
+  }
+
+  async openOverflowQuickMenu(projectName: string): Promise<void> {
+    const row = this.overflowRow(projectName);
+    await row.hover();
+    await row.getByTestId("project-row-menu").click();
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: 10_000 });
+  }
+
+  async overflowSubnavLinks(): Promise<{ text: string; href: string | null }[]> {
+    const links = this.page.getByTestId("projects-overflow-panel").getByTestId("project-subnav-link");
+    const count = await links.count();
+    const rows: { text: string; href: string | null }[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const link = links.nth(index);
+      rows.push({
+        text: ((await link.innerText().catch(() => "")) ?? "").trim(),
+        href: await link.getAttribute("href").catch(() => null),
+      });
+    }
+    return rows;
+  }
+
   async isOverflowEmptyStateVisible(): Promise<boolean> {
     const empty = this.page.getByTestId("projects-overflow-empty");
     return (await empty.count()) > 0 && (await empty.first().isVisible());
@@ -9043,6 +9137,17 @@ export class WebNewDriver implements ParityDriver {
     // The inline panel closes on outside mousedown; a top-left click
     // lands far from the centered top-bar field.
     await this.page.mouse.click(5, 5);
+  }
+
+  async topBarSearchWidth(): Promise<number | null> {
+    const box = await this.topBarSearchInput().boundingBox();
+    return box?.width ?? null;
+  }
+
+  async topBarSearchRect(): Promise<{ x: number; width: number } | null> {
+    const box = await this.topBarSearchInput().boundingBox();
+    if (box === null) return null;
+    return { x: box.x, width: box.width };
   }
 
   // Shared empty-state kit tiers (NEWFRONT-294, SHELL-104). The reader
@@ -13727,6 +13832,21 @@ export class WebNewDriver implements ParityDriver {
     };
   }
 
+  async runnersRailGeometry(): Promise<RunnersRailGeometry> {
+    const rail = this.runnersRailRoot();
+    await rail.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // The content pane is the rail's sibling main in both apps.
+    const railBox = await rail.boundingBox();
+    const contentBox = await rail.locator("xpath=../main").first().boundingBox();
+    if (railBox === null || contentBox === null) throw new Error("[parity] runners rail or content pane has no box.");
+    return {
+      viewportHeight: await this.page.evaluate(() => window.innerHeight),
+      railTop: railBox.y,
+      railBottom: railBox.y + railBox.height,
+      contentBottom: contentBox.y + contentBox.height,
+    };
+  }
+
   // Pod tiles, the create/edit modals and the delete confirm (NEWFRONT-542,
   // RUN-012–015). Tiles are the labelled filter buttons; each sits in a
   // container with its overflow menu. The dialogs are the area's own; the
@@ -14152,7 +14272,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async desktopRuntimeApprovalModeVisible(): Promise<boolean> {
-    return (await this.page.getByRole("group", { name: "Approval mode" }).count()) > 0;
+    return (await this.page.getByRole("combobox", { name: "Approval mode" }).count()) > 0;
   }
 
   async desktopRuntimeRuntimeBannerVisible(): Promise<boolean> {
@@ -14355,7 +14475,16 @@ export class WebNewDriver implements ParityDriver {
     if (input.handle !== undefined) await dialog.getByLabel("Handle").fill(input.handle);
     if (input.description !== undefined) await dialog.getByLabel("Description").fill(input.description);
     if (input.prompt !== undefined) await dialog.getByLabel("Base prompt").fill(input.prompt);
-    if (input.color !== undefined) await dialog.getByLabel("Color").fill(input.color);
+    if (input.color !== undefined) {
+      // Presets are one-click swatches; anything else goes through the
+      // synced custom-color input behind the "More" overflow.
+      const swatch = dialog.getByRole("button", { name: `Scheduler color ${input.color.toLowerCase()}` });
+      if ((await swatch.count()) > 0) {
+        await swatch.click();
+      } else {
+        await dialog.getByLabel("Custom color").fill(input.color);
+      }
+    }
   }
 
   async schedulerSetDefinitionEnabled(enabled: boolean): Promise<void> {
@@ -14372,7 +14501,7 @@ export class WebNewDriver implements ParityDriver {
       handle: await dialog.getByLabel("Handle").inputValue(),
       description: await dialog.getByLabel("Description").inputValue(),
       prompt: await dialog.getByLabel("Base prompt").inputValue(),
-      color: await dialog.getByLabel("Color").inputValue(),
+      color: await dialog.getByLabel("Custom color").inputValue(),
       enabled: (await toggle.getAttribute("aria-checked")) === "true",
     };
   }
@@ -14754,7 +14883,8 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async devMachinesOpenDelete(name: string): Promise<void> {
-    await this.devMachinesOpenAction(name, "Delete");
+    // The rebuild labels the delete action "Remove this computer".
+    await this.devMachinesOpenAction(name, "Remove this computer");
   }
 
   private devMachinesDialog(): Locator {
@@ -16523,6 +16653,16 @@ export class WebNewDriver implements ParityDriver {
       tabs.push({ label, active: (await tab.getAttribute("aria-current").catch(() => null)) === "page" });
     }
     return tabs;
+  }
+
+  async schedulerSectionNewPlacement(): Promise<{ inTabRow: boolean; total: number }> {
+    // The tab row is the element holding the "Scheduler views" navigation.
+    const row = this.schedulerTabs().locator("xpath=..");
+    const control = { name: "New Scheduler", exact: true } as const;
+    return {
+      inTabRow: await this.isShown(row.getByRole("button", control)),
+      total: await this.page.getByRole("button", control).count(),
+    };
   }
 
   async schedulerSectionOpenTab(tab: "List" | "Calendar"): Promise<void> {
@@ -18325,9 +18465,21 @@ export class WebNewDriver implements ParityDriver {
   /** GPT-editor request bodies observed since the driver started. */
   private assistantGptSeen: { prompt: string; task: string }[] = [];
 
-  /** The shared composer textarea (landing and conversation share it). */
+  /**
+   * The shared composer box (landing and conversation share it): the
+   * Tiptap chat input's contenteditable textbox, matched by its
+   * aria-placeholder since it has no native placeholder.
+   */
   private assistantComposerBox() {
-    return this.page.locator('textarea[placeholder*="Ask Pi Dash to do something"]');
+    return this.page.locator('[role="textbox"][aria-placeholder*="Ask Pi Dash to do something"]');
+  }
+
+  /**
+   * The plain-text draft of a chat input. A contenteditable has no
+   * inputValue; the input mirrors its draft string onto its frame.
+   */
+  private async assistantChatDraft(box: Locator): Promise<string> {
+    return box.evaluate((node) => node.closest("[data-chat-input]")?.getAttribute("data-draft") ?? "");
   }
 
   /** The composer's send action (icon-only, so it is labelled). */
@@ -18335,9 +18487,62 @@ export class WebNewDriver implements ParityDriver {
     return this.page.locator('button[aria-label="Send message"]').first();
   }
 
-  /** The assistant rail beside the landing and conversation routes. */
-  private assistantSidebar() {
-    return this.page.locator('[data-testid="assistant-rail"]').first();
+  /**
+   * The Chat History button in the assistant page header. The conversation
+   * uses the full width (NEWPIDASH-337): the history opens from here, not
+   * from a persistent rail.
+   */
+  private assistantHistoryButton() {
+    return this.page
+      .locator('[data-testid="assistant-layout"]')
+      .first()
+      .getByRole("button", { name: "Chat History" })
+      .first();
+  }
+
+  /**
+   * The history dialog; present only while open. Its thread rows keep the
+   * rail's contract (newest-first links, untitled fallback, archived
+   * hidden, open-row highlight, resolved-empty placeholder, refused reads
+   * show neither rows nor placeholder).
+   */
+  private assistantHistoryDialog() {
+    return this.page.locator('[data-testid="assistant-history-dialog"]').first();
+  }
+
+  /**
+   * The dialog root, named by the dialog title. The content div above can
+   * collapse to zero size when it holds nothing (a refused guest read
+   * renders neither rows nor the placeholder), so open/closed checks key
+   * on the root, which is always sized while open and detached while
+   * closed.
+   */
+  private assistantHistoryDialogRoot() {
+    return this.page.getByRole("dialog", { name: "Chat History", exact: true }).first();
+  }
+
+  /** Open the history dialog unless it is already open. */
+  private async assistantEnsureHistoryOpen(): Promise<void> {
+    if (
+      await this.assistantHistoryDialogRoot()
+        .isVisible()
+        .catch(() => false)
+    )
+      return;
+    await this.assistantHistoryButton().click();
+    await this.assistantHistoryDialogRoot().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  /** Close the history dialog when a read left it open (it blocks the page). */
+  private async assistantEnsureHistoryClosed(): Promise<void> {
+    if (
+      !(await this.assistantHistoryDialogRoot()
+        .isVisible()
+        .catch(() => false))
+    )
+      return;
+    await this.page.keyboard.press("Escape");
+    await this.assistantHistoryDialogRoot().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
 
   /**
@@ -18352,14 +18557,28 @@ export class WebNewDriver implements ParityDriver {
     await this.page.locator(`${selector}[data-settled="true"]`).first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  /** The dashboard card's single-line entry input. */
+  /**
+   * The dashboard card's entry composer. The new home renders a
+   * multi-line Tiptap chat input with the Ask action inside its box
+   * (NEWPIDASH-301, DIFF-39), while the oracle home keeps its
+   * single-line input.
+   */
   private assistantHomeCardInput() {
-    return this.page.locator('input[placeholder*="Ask Pi Dash to do something"]');
+    return this.page.locator('#home-assistant-card [role="textbox"][aria-placeholder*="Ask Pi Dash to do something"]');
   }
 
   /** The dashboard card root: the card shell around the entry input. */
   private assistantHomeCard() {
     return this.page.locator("#home-assistant-card").first();
+  }
+
+  /**
+   * The recent-conversations section. The new home renders recents as
+   * their own section below the composer (NEWPIDASH-301, DIFF-39),
+   * while the oracle home lists them inside the card.
+   */
+  private assistantRecentConversations() {
+    return this.page.locator('[data-testid="home-recent-conversations"]').first();
   }
 
   /** The conversation's scrolling body that holds the transcript. */
@@ -18421,7 +18640,9 @@ export class WebNewDriver implements ParityDriver {
   }
   async assistantLandingComposerVisible(): Promise<boolean> {
     return this.isShown(
-      this.page.locator('[data-testid="assistant-landing"] textarea[placeholder*="Ask Pi Dash to do something"]')
+      this.page.locator(
+        '[data-testid="assistant-landing"] [role="textbox"][aria-placeholder*="Ask Pi Dash to do something"]'
+      )
     );
   }
   async assistantSetupCard(): Promise<{ title: string; body: string; button: string } | null> {
@@ -18458,7 +18679,7 @@ export class WebNewDriver implements ParityDriver {
     await this.assistantComposerBox().first().fill(text);
   }
   async assistantDraftValue(): Promise<string> {
-    return this.assistantComposerBox().first().inputValue();
+    return this.assistantChatDraft(this.assistantComposerBox().first());
   }
   async assistantPressEnter(): Promise<void> {
     await this.assistantComposerBox().first().press("Enter");
@@ -18622,7 +18843,8 @@ export class WebNewDriver implements ParityDriver {
       .click();
   }
   async assistantSidebarThreads(): Promise<AssistantSidebarThread[]> {
-    const links = this.assistantSidebar().locator("nav a");
+    await this.assistantEnsureHistoryOpen();
+    const links = this.assistantHistoryDialog().locator("nav a");
     const total = await links.count();
     const out: AssistantSidebarThread[] = [];
     for (let i = 0; i < total; i++) {
@@ -18636,8 +18858,8 @@ export class WebNewDriver implements ParityDriver {
     return out;
   }
   async assistantSidebarEmptyVisible(): Promise<boolean> {
-    return this.page
-      .locator('[data-testid="assistant-rail"]')
+    await this.assistantEnsureHistoryOpen();
+    return this.assistantHistoryDialog()
       .getByText("No conversations yet.", { exact: true })
       .first()
       .isVisible()
@@ -18647,10 +18869,17 @@ export class WebNewDriver implements ParityDriver {
       );
   }
   async assistantClickNewChat(): Promise<void> {
-    await this.assistantSidebar().getByRole("link", { name: "New chat" }).click();
+    // The dialog's backdrop blocks the page while open, so a read that
+    // left it open has to close first.
+    await this.assistantEnsureHistoryClosed();
+    await this.page.locator('[data-testid="assistant-layout"]').first().getByRole("link", { name: "New chat" }).click();
   }
   async assistantClickSidebarThread(index: number): Promise<void> {
-    await this.assistantSidebar().locator("nav a").nth(index).click();
+    await this.assistantEnsureHistoryOpen();
+    await this.assistantHistoryDialog().locator("nav a").nth(index).click();
+    // Picking a row navigates and closes the dialog; wait for the close so
+    // the next read sees the thread, not the backdrop.
+    await this.assistantHistoryDialogRoot().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
   async assistantCardVisible(): Promise<boolean> {
     return (await this.assistantHomeCardInput().count()) > 0;
@@ -18659,7 +18888,7 @@ export class WebNewDriver implements ParityDriver {
     await this.assistantHomeCardInput().first().fill(text);
   }
   async assistantCardDraftValue(): Promise<string> {
-    return this.assistantHomeCardInput().first().inputValue();
+    return this.assistantChatDraft(this.assistantHomeCardInput().first());
   }
   async assistantCardPressEnter(): Promise<void> {
     await this.assistantHomeCardInput().first().press("Enter");
@@ -18680,9 +18909,10 @@ export class WebNewDriver implements ParityDriver {
   }
   async assistantCardRecents(): Promise<{ title: string; href: string }[]> {
     if (!(await this.assistantCardVisible())) return [];
-    // Only the recents list counts: the keyless setup reminder is also an
-    // anchor inside the card and must not displace the newest thread.
-    const links = this.assistantHomeCard().locator("ul a");
+    // Only the sibling recents section counts: it lives outside the card
+    // (NEWPIDASH-301, DIFF-39), so the keyless setup link inside the card
+    // can never displace the newest thread.
+    const links = this.assistantRecentConversations().locator("ul a");
     const total = await links.count();
     const out: { title: string; href: string }[] = [];
     for (let i = 0; i < total; i++) {
@@ -18695,7 +18925,7 @@ export class WebNewDriver implements ParityDriver {
     return out;
   }
   async assistantCardClickRecent(index: number): Promise<void> {
-    await this.assistantHomeCard().locator("ul a").nth(index).click();
+    await this.assistantRecentConversations().locator("ul a").nth(index).click();
   }
   async assistantStubStream(threadId: string, frames: AssistantStreamFrame[]): Promise<void> {
     this.assistantStreamFrames.set(threadId, frames);
@@ -19043,44 +19273,69 @@ export class WebNewDriver implements ParityDriver {
     return [...this.assistantTranscribeSeen];
   }
   async assistantSidebarButtons(): Promise<string[]> {
-    const sidebar = this.assistantSidebar();
-    if ((await sidebar.count()) === 0) return [];
-    return sidebar.locator("button").allInnerTexts();
+    // The history dialog is links-only (no close button of its own), so a
+    // closed dialog and an open one both report no buttons.
+    const dialog = this.assistantHistoryDialog();
+    if ((await dialog.count()) === 0) return [];
+    return dialog.locator("button").allInnerTexts();
   }
   async assistantThreadManagementControls(): Promise<string[]> {
-    // The assistant layout (sidebar + outlet) must offer no thread
-    // rename/archive/delete affordance; the report names any violator.
+    // The assistant layout (header + outlet) must offer no thread
+    // rename/archive/delete affordance; the report names any violator. An
+    // open history dialog is portaled outside the layout, so it is scanned
+    // too — history reads in the negative specs leave it open.
+    const hits: string[] = [];
+    const scan = async (scope: Locator): Promise<void> => {
+      const candidates = scope.locator("button, a");
+      const total = await candidates.count();
+      for (let i = 0; i < total; i += 1) {
+        const text = ((await candidates.nth(i).textContent()) ?? "").trim().toLowerCase();
+        if (text.includes("rename") || text.includes("archive") || text.includes("delete")) hits.push(text);
+      }
+    };
     const layout = this.page.locator('[data-testid="assistant-layout"]').first();
     if ((await layout.count()) === 0) return [];
-    const candidates = layout.locator("button, a");
-    const total = await candidates.count();
-    const hits: string[] = [];
-    for (let i = 0; i < total; i += 1) {
-      const text = ((await candidates.nth(i).textContent()) ?? "").trim().toLowerCase();
-      if (text.includes("rename") || text.includes("archive") || text.includes("delete")) hits.push(text);
-    }
+    await scan(layout);
+    const dialog = this.assistantHistoryDialog();
+    if (
+      await this.assistantHistoryDialogRoot()
+        .isVisible()
+        .catch(() => false)
+    )
+      await scan(dialog);
     return hits;
   }
   async assistantSidebarHeader(): Promise<string | null> {
-    const header = this.assistantSidebar().locator('[data-testid="assistant-rail-header"]').first();
-    if ((await header.count()) === 0) return null;
+    // The history surface's label: the header button that opens it. Null
+    // where the button is absent (the desktop local chat has no server
+    // history). An open history dialog hides the header behind aria-hidden
+    // while the modal is open, so a read that left it open closes first.
+    await this.assistantEnsureHistoryClosed();
+    const button = this.assistantHistoryButton();
+    if ((await button.count()) === 0) return null;
     // textContent: innerText would apply CSS text transforms.
-    const text = ((await header.textContent()) ?? "").trim();
+    const text = ((await button.textContent()) ?? "").trim();
     return text === "" ? null : text;
   }
   async assistantSidebarRowKinds(): Promise<{ newChat: string | null; rows: string[] }> {
-    const sidebar = this.assistantSidebar();
-    if ((await sidebar.count()) === 0) return { newChat: null, rows: [] };
-    const links = sidebar.locator(":scope a, :scope button");
+    // New chat lives in the page header; thread rows live in the history
+    // dialog. Both stay links, never buttons, on the new app as on the old.
+    // An open history dialog hides the header behind aria-hidden while the
+    // modal is open, so the header link is read with the dialog closed and
+    // the rows with it open.
+    await this.assistantEnsureHistoryClosed();
+    const layout = this.page.locator('[data-testid="assistant-layout"]').first();
+    if ((await layout.count()) === 0) return { newChat: null, rows: [] };
+    const newChatLink = layout.getByRole("link", { name: "New chat" }).first();
+    const newChat =
+      (await newChatLink.count()) > 0 ? await newChatLink.evaluate((element) => element.tagName.toLowerCase()) : null;
+    if ((await this.assistantHistoryButton().count()) === 0) return { newChat, rows: [] };
+    await this.assistantEnsureHistoryOpen();
+    const links = this.assistantHistoryDialog().locator("nav a");
     const total = await links.count();
-    let newChat: string | null = null;
     const rows: string[] = [];
     for (let i = 0; i < total; i += 1) {
-      const node = links.nth(i);
-      const tag = await node.evaluate((element) => element.tagName.toLowerCase());
-      const text = ((await node.textContent()) ?? "").trim();
-      if (text === "New chat") newChat = tag;
-      else rows.push(tag);
+      rows.push(await links.nth(i).evaluate((element) => element.tagName.toLowerCase()));
     }
     return { newChat, rows };
   }
@@ -20648,6 +20903,24 @@ export class WebNewDriver implements ParityDriver {
   }
   async archivesCyclesOpenPeek(name: string): Promise<void> {
     await this.openArchivedCyclePeek(name);
+  }
+  async archivesCyclesClickRow(name: string): Promise<void> {
+    // Row body click: archived rows render a button that opens the peek,
+    // live rows (not used here) would link to detail. Click the name's
+    // owning button and wait for the peek panel, as a user would.
+    const row = this.cycleRowRoot(name);
+    const nameLocator = row.getByText(name, { exact: true }).first();
+    const button = nameLocator.locator("xpath=ancestor::button[1]");
+    if ((await button.count()) > 0) {
+      await button.first().click({ timeout: WebNewDriver.WAIT_MS });
+    } else {
+      // Fallback for live rows (not expected on the archived tab): click the link.
+      await row.locator("a").first().click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.page.waitForFunction(() => new URL(location.href).searchParams.has("peekCycle"), undefined, {
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await this.archivedCyclePeekPanel().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
   async archivesCyclesOpenPeekLink(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
     await this.page.goto(`/${workspaceSlug}/projects/${projectId}/archives/cycles?peekCycle=${cycleId}`);
@@ -22328,6 +22601,38 @@ export class WebNewDriver implements ParityDriver {
       await this.page.keyboard.press("Escape");
     }
     await expect.poll(() => this.archivesPeekParamName(), { timeout: WebNewDriver.WAIT_MS }).toBeNull();
+  }
+  async archivesPeekQuickActionNames(): Promise<string[]> {
+    const panel = this.archivesPeekPanel();
+    const trigger = panel.getByTestId("detail-menu-trigger").first();
+    const visibleItems = this.page.locator('[role="menuitem"]:visible');
+    for (let attempt = 0; ; attempt++) {
+      await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+      try {
+        await visibleItems.first().waitFor({ timeout: 5000 });
+        break;
+      } catch {
+        if (attempt >= 2) throw new Error("[parity] archived peek quick-action menu did not open.");
+      }
+    }
+    const names = (await visibleItems.allTextContents()).map((t) => t.trim()).filter((t) => t.length > 0);
+    await this.page.keyboard.press("Escape").catch(() => {});
+    return names;
+  }
+  async archivesPeekChoose(entry: string): Promise<void> {
+    const panel = this.archivesPeekPanel();
+    const trigger = panel.getByTestId("detail-menu-trigger").first();
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    const item = this.page.getByRole("menuitem").filter({ hasText: entry }).first();
+    await item.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await item.click({ timeout: WebNewDriver.WAIT_MS });
+  }
+  async archivesPeekCopyLink(): Promise<void> {
+    // The archived peek header carries its own copy-link control beside
+    // the row-menu trigger; it writes the archived detail address.
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    const panel = this.archivesPeekPanel();
+    await panel.getByRole("button", { name: "Copy work item link" }).first().click({ timeout: WebNewDriver.WAIT_MS });
   }
   async archivesDetailBannerText(): Promise<string | null> {
     return this.archivesDetailBannerRead();
@@ -29245,6 +29550,15 @@ export class WebNewDriver implements ParityDriver {
       .nth(index)
       .click({ timeout: WebNewDriver.WAIT_MS });
     await this.page.waitForURL(/\/cycles\/[^/]+\/?$/, { timeout: WebNewDriver.WAIT_MS });
+  }
+  async cyclesHeroTapBreakdownEntryByText(entryText: string): Promise<void> {
+    // No navigation wait: the no-assignee row carries no click action,
+    // so the scenario asserts the address stays on the list.
+    await this.cyclesHeroBreakdownCard()
+      .locator('[data-testid="hero-breakdown-entry"]')
+      .filter({ hasText: entryText })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async cyclesHeroOpenWorkspaceActives(workspaceSlug: string): Promise<void> {
     await this.page.goto(`/${workspaceSlug}/active-cycles`, { waitUntil: "domcontentloaded" });
@@ -41312,6 +41626,24 @@ export class WebNewDriver implements ParityDriver {
   async wsSettingsWideViewport(): Promise<void> {
     await this.page.setViewportSize({ width: 1280, height: 800 });
   }
+  async wsSettingsContentBox(): Promise<{
+    x: number;
+    width: number;
+    parentX: number;
+    parentWidth: number;
+  } | null> {
+    const column = this.page.getByTestId("settings-page-content");
+    if ((await column.count()) === 0) return null;
+    const box = await column.boundingBox();
+    const parentBox = await column.locator("xpath=..").boundingBox();
+    if (box === null || parentBox === null) return null;
+    return { x: box.x, width: box.width, parentX: parentBox.x, parentWidth: parentBox.width };
+  }
+  async wsSettingsContentGutter(): Promise<number> {
+    const facts = await this.wsSettingsContentBox();
+    if (facts === null) return 0;
+    return facts.x - facts.parentX;
+  }
   async wsSettingsGeneralVisible(): Promise<boolean> {
     const form = this.page.getByTestId("workspace-general-form").first();
     if ((await form.count()) === 0) return false;
@@ -50973,6 +51305,37 @@ export class WebNewDriver implements ParityDriver {
     return text === "" ? null : text;
   }
 
+  // --- Cloud assistant model budget (NEWPIDASH-150). New-app-only: the
+  // --- OSS oracle has no free-quota picker, so the old-app driver throws.
+  async cloudAssistantModelBudget(title: string): Promise<CloudAssistantModelBudgetFacts> {
+    const card = await this.cloudAssistantCardByTitle(title);
+    const select = card.locator("select").first();
+    const value = (await select.count()) > 0 ? await select.inputValue() : "";
+    const options = select.locator("option");
+    const optionCount = await options.count();
+    const facts = [];
+    for (let index = 0; index < optionCount; index++) {
+      const option = options.nth(index);
+      facts.push({
+        value: (await option.getAttribute("value")) ?? "",
+        text: this.cloudNorm(await option.innerText()),
+        // Locator.isDisabled() reports false for a disabled <option>
+        // (probed: property true, attribute present, isDisabled false),
+        // so read the attribute the picker renders.
+        disabled: (await option.getAttribute("disabled")) !== null,
+      });
+    }
+    const noticeLocator = card.getByText("needs credit on the free plan", { exact: false }).first();
+    let notice: string | null = null;
+    if ((await noticeLocator.count()) > 0 && (await noticeLocator.isVisible().catch(() => false))) {
+      // The match is the notice <p> itself, whose own text is the notice.
+      notice = this.cloudNorm(await noticeLocator.innerText());
+    }
+    const topUp = card.getByRole("link", { name: "Top up" }).first();
+    const topUpHref = (await topUp.count()) > 0 ? ((await topUp.getAttribute("href")) ?? null) : null;
+    return { title, value, options: facts, notice, topUpHref };
+  }
+
   private cloudProfileTabLabels(): string[] {
     return [
       "Profile",
@@ -51664,39 +52027,11 @@ export class WebNewDriver implements ParityDriver {
     return ((await created.innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
   }
   /** Executor kinds to the labels the target picker shows (mirrors EXECUTOR_OPTIONS). */
-  private static readonly generalExecutorLabels: Record<string, string> = {
-    local_runner: "Local runner",
-    cloud_agent: "Cloud agent",
-    managed_runner: "Desktop agent",
-  };
-
-  private generalExecutorListbox() {
-    return this.page.getByRole("listbox", { name: "Default execution target" });
-  }
-
-  async settingsGeneralExecutorValue(): Promise<string> {
-    // The trigger reads the label; the contract wants the kind.
-    const shown = this.page.getByTestId("general-executor").first();
-    await shown.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
-    const label = ((await shown.innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
-    const entries = Object.entries(WebNewDriver.generalExecutorLabels);
-    return entries.find(([, shown2]) => shown2 === label)?.[0] ?? label;
-  }
-  async settingsGeneralExecutorOptionDisabled(value: string): Promise<boolean> {
-    const label = WebNewDriver.generalExecutorLabels[value] ?? value;
-    await this.page.getByTestId("general-executor-trigger").click({ timeout: WebNewDriver.WAIT_MS });
-    const option = this.generalExecutorListbox().getByRole("option", { name: label });
-    await option.waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
-    const disabled = await option.isDisabled();
-    await this.page.keyboard.press("Escape");
-    await this.generalExecutorListbox().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
-    return disabled;
-  }
-  async settingsGeneralSetExecutor(value: string): Promise<void> {
-    const label = WebNewDriver.generalExecutorLabels[value] ?? value;
-    await this.page.getByTestId("general-executor-trigger").click({ timeout: WebNewDriver.WAIT_MS });
-    await this.generalExecutorListbox().getByRole("option", { name: label }).click({ timeout: WebNewDriver.WAIT_MS });
-    await this.generalExecutorListbox().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+  async settingsGeneralExecutorPresent(): Promise<boolean> {
+    // The ticking switch renders with the form, so once it shows, an
+    // executor control would have rendered too.
+    await this.page.getByTestId("general-ticking").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return (await this.page.getByTestId("general-executor-trigger").count()) > 0;
   }
   async settingsGeneralTickingOn(): Promise<boolean> {
     const toggle = this.page.getByTestId("general-ticking");
@@ -53969,6 +54304,54 @@ export class WebNewDriver implements ParityDriver {
     const row = this.page.getByText(name, { exact: true });
     if ((await row.count()) === 0) return false;
     return row.first().isVisible();
+  }
+
+  private viewsDetailMenuTrigger(): Locator {
+    return this.page.getByTestId("project-view-detail-menu-trigger");
+  }
+
+  async viewsDetailMenuOpen(): Promise<void> {
+    const trigger = this.viewsDetailMenuTrigger();
+    await trigger.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async viewsDetailMenuItems(): Promise<string[]> {
+    const menu = this.page.getByRole("menu");
+    await menu.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const texts = await menu.getByRole("menuitem").allInnerTexts();
+    return texts.map((text) => text.replace(/\s+/g, " ").trim()).filter((text) => text.length > 0);
+  }
+
+  async viewsDetailMenuPick(item: string): Promise<void> {
+    const menu = this.page.getByRole("menu");
+    await menu.getByRole("menuitem", { name: item }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await menu.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+  }
+
+  async viewsDetailCopyLink(): Promise<string> {
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.viewsDetailMenuOpen();
+    await this.viewsDetailMenuPick("Copy link");
+    await expect
+      .poll(() => this.page.evaluate(() => navigator.clipboard.readText()), {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .not.toBe("");
+    return this.page.evaluate(() => navigator.clipboard.readText());
+  }
+
+  async viewsDetailMenuOpenNewTabHref(): Promise<string> {
+    await this.viewsDetailMenuOpen();
+    const menu = this.page.getByRole("menu");
+    const [popup] = await Promise.all([
+      this.page.waitForEvent("popup", { timeout: WebNewDriver.WAIT_MS }),
+      menu.getByRole("menuitem", { name: "Open in new tab" }).first().click({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    const href = popup.url();
+    await popup.close().catch(() => undefined);
+    return href;
   }
 
   // --- Workspace views list, CRUD and detail (VIEW-029-040) ---------------

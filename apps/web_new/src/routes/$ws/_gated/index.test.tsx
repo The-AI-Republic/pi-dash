@@ -64,7 +64,6 @@ vi.mock("../../../features/home/components/HomeWidgetStack.js", async (importOri
       projects: unknown;
       quicklinks?: React.ReactNode;
       manageWidgets?: (controls: { open: boolean; onOpenChange: (open: boolean) => void }) => React.ReactNode;
-      emptyState?: React.ReactNode;
     }) => (
       <div
         data-testid="widget-stack"
@@ -76,7 +75,6 @@ vi.mock("../../../features/home/components/HomeWidgetStack.js", async (importOri
           open: false,
           onOpenChange: () => {},
         })}
-        {props.emptyState}
       </div>
     ),
   };
@@ -90,9 +88,6 @@ vi.mock("../../../features/home/components/ManageWidgetsDialog.js", () => ({
   ManageWidgetsDialog: (props: { workspaceSlug: string; open: boolean }) => (
     <div data-testid="manage-slot" data-slug={props.workspaceSlug} data-open={String(props.open)} />
   ),
-}));
-vi.mock("../../../features/home/components/HomeAllOffState.js", () => ({
-  HomeAllOffState: () => <div data-testid="all-off-slot" />,
 }));
 
 import { assistantKeys } from "../../../features/assistant/index.js";
@@ -191,13 +186,13 @@ describe("workspace home route", () => {
     expect(screen.queryByRole("heading", { name: "New project" })).toBeNull();
   });
 
-  it("fills the stack's quicklinks, manage-widgets, and empty slots", async () => {
+  it("fills the stack's quicklinks and manage-widgets slots (no all-off slot since NEWPIDASH-301)", async () => {
     renderHome();
     expect(await screen.findByTestId("widget-stack")).toBeInTheDocument();
     expect(screen.getByTestId("quicklinks-slot")).toHaveAttribute("data-slug", "acme");
     expect(screen.getByTestId("manage-slot")).toHaveAttribute("data-slug", "acme");
     expect(screen.getByTestId("manage-slot")).toHaveAttribute("data-open", "false");
-    expect(screen.getByTestId("all-off-slot")).toBeInTheDocument();
+    expect(screen.queryByTestId("all-off-slot")).not.toBeInTheDocument();
   });
 
   it("warms the assistant card reads in its loader", async () => {

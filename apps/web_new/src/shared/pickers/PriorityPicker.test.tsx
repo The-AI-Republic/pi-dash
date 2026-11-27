@@ -85,3 +85,20 @@ describe("PriorityPicker", () => {
     expect(screen.getByRole("button", { name: "Medium" })).toBeDisabled();
   });
 });
+
+describe("PriorityPicker chip", () => {
+  it("names the level with the property, None included", () => {
+    const { rerender } = render(<PriorityPicker value="none" onChange={() => undefined} chip label="Priority" />);
+    const unset = screen.getByRole("button", { name: "Priority: None" });
+    expect(unset).toHaveTextContent("None");
+    expect(unset.querySelector("svg")).not.toBeNull();
+    rerender(<PriorityPicker value="high" onChange={() => undefined} chip label="Priority" />);
+    expect(screen.getByRole("button", { name: "Priority: High" })).toHaveTextContent("High");
+  });
+
+  it("opens the list from the chip", () => {
+    render(<PriorityPicker value="none" onChange={() => undefined} chip label="Priority" />);
+    fireEvent.click(screen.getByRole("button", { name: "Priority: None" }));
+    expect(optionNames()).toEqual(["Urgent", "High", "Medium", "Low", "None"]);
+  });
+});

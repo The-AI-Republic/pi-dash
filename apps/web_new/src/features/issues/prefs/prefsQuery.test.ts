@@ -3,6 +3,8 @@
 // See the LICENSE file for details.
 import type { ApiClient } from "@pidash/api-client";
 import { describe, expect, it } from "vitest";
+import { createMemoryStore } from "../../../core/platform/index.js";
+import { createCachePersistor, createQueryClient } from "../../../core/query/index.js";
 import { issueKeys } from "../api/keys.js";
 import type { IssuesEntity } from "./entities.js";
 import { entityPrefsKeyPart, prefsQueryOptions, readEntityPrefs } from "./prefsQuery.js";
@@ -54,5 +56,32 @@ describe("prefsQueryOptions", () => {
     expect(options.staleTime).toBe(Number.POSITIVE_INFINITY);
     expect(options.refetchOnWindowFocus).toBe(false);
     expect(options.refetchOnReconnect).toBe(false);
+  });
+});
+
+describe("prefs record restored from the desktop cache", () => {
+  it("is read again before a save merges over it", async () => {
+    // A save builds its patch from fetchQuery(prefsQueryOptions). A record
+    // restored at launch may predate a change made on another device, so
+    // that fetchQuery must read the server rather than serve the snapshot.
+    const storage = createMemoryStore();
+    const writer = createQueryClient();
+    writer.setQueryData(issueKeys.prefs("acme", "project", "pid"), { display_filters: { layout: "list" } });
+    const persistor = createCachePersistor(writer, storage, { saveDelayMs: 1 });
+    await persistor.save();
+    persistor.stop();
+
+    const reader = createQueryClient();
+    const loader = createCachePersistor(reader, storage, { saveDelayMs: 1 });
+    await loader.restore();
+    loader.stop();
+
+    const calls: { method: string; url: string }[] = [];
+    await reader.fetchQuery(prefsQueryOptions(stubClient(calls), "acme", PROJECT));
+    expect(calls).toEqual([{ method: "GET", url: "/api/workspaces/acme/projects/pid/user-properties/" }]);
+
+    // Once read, the record is current for the session again.
+    await reader.fetchQuery(prefsQueryOptions(stubClient(calls), "acme", PROJECT));
+    expect(calls).toHaveLength(1);
   });
 });

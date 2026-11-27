@@ -93,6 +93,19 @@ export const PAGE_PREVIEW_BAR_WIDTH_PX: Record<PageHeadingLevel, number> = { 1: 
 export interface PageAssetScope {
   workspaceSlug: string;
   projectId: string | null;
+  /** API origin; omitted legs stay app-relative (same origin on the web). */
+  apiBaseUrl?: string | undefined;
+}
+
+/** Join a rooted asset leg to the API origin, when one is given. */
+function withApiBase(path: string, scope: PageAssetScope): string {
+  if (scope.apiBaseUrl === undefined || scope.apiBaseUrl === "") return path;
+  return `${scope.apiBaseUrl.replace(/\/+$/, "")}${path}`;
+}
+
+/** True for a rooted leg the API serves bytes at (the only rooted API form). */
+function isRootedAssetPath(path: string): boolean {
+  return path.startsWith("/api/assets/");
 }
 
 function parseHtml(html: string): Document | null {
@@ -134,11 +147,14 @@ export function assetFileName(source: string): string {
 export function pageAssetViewHref(source: string, scope: PageAssetScope): string {
   const stored = normalizeSource(source);
   if (stored === "") return "";
+  if (isRootedAssetPath(stored)) return withApiBase(stored, scope);
   if (ABSOLUTE_SOURCE.test(stored)) return stored;
   const assetId = encodeURIComponent(stored);
-  return scope.projectId === null
-    ? `/api/assets/v2/workspaces/${scope.workspaceSlug}/${assetId}/`
-    : `/api/assets/v2/workspaces/${scope.workspaceSlug}/projects/${scope.projectId}/${assetId}/`;
+  const path =
+    scope.projectId === null
+      ? `/api/assets/v2/workspaces/${scope.workspaceSlug}/${assetId}/`
+      : `/api/assets/v2/workspaces/${scope.workspaceSlug}/projects/${scope.projectId}/${assetId}/`;
+  return withApiBase(path, scope);
 }
 
 /**
@@ -151,13 +167,16 @@ export function pageAssetDownloadHref(source: string, scope: PageAssetScope): st
   if (stored === "") return "";
   const served = assetViewPrefix(scope);
   if (stored.startsWith(served) && stored.endsWith("/")) {
-    return `${served}download/${stored.slice(served.length)}`;
+    return withApiBase(`${served}download/${stored.slice(served.length)}`, scope);
   }
+  if (isRootedAssetPath(stored)) return withApiBase(stored, scope);
   if (ABSOLUTE_SOURCE.test(stored)) return stored;
   const assetId = encodeURIComponent(stored);
-  return scope.projectId === null
-    ? `/api/assets/v2/workspaces/${scope.workspaceSlug}/download/${assetId}/`
-    : `/api/assets/v2/workspaces/${scope.workspaceSlug}/projects/${scope.projectId}/download/${assetId}/`;
+  const path =
+    scope.projectId === null
+      ? `/api/assets/v2/workspaces/${scope.workspaceSlug}/download/${assetId}/`
+      : `/api/assets/v2/workspaces/${scope.workspaceSlug}/projects/${scope.projectId}/download/${assetId}/`;
+  return withApiBase(path, scope);
 }
 
 /**

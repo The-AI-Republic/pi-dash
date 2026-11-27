@@ -1,0 +1,258 @@
+//! GitHub PR-link list/detail reads (PDASHOSS01-355: generic git_code_review_links, GitHub-shaped via namespace mapping).
+//!
+//! Verbatim moves of the `pidash-api` handler SQL (OVL-05 pattern,
+//! PIDASHCONV-1661) plus the MCP tool querysets (Rule 5: queries on OSS
+//! tables live here). The v1 handlers call these and map
+//! [`Error`](super::Error) onto their denial type.
+
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use super::{DbError, Error};
+
+/// PR-link list rows in fixture order (`github_pr.py:37-49`, fixture
+/// `github_pr_list_queryset`): the join-span form verbatim — soft-delete
+/// scope on the link table only, `DISTINCT`, `-created_at`. `$1` slug,
+/// `$2` project id, `$3` issue id, `$4` member id. (Moved from the v1
+/// work-items handlers by PIDASHCONV-1661.)
+pub const PR_LIST_SQL: &str = r#"SELECT DISTINCT "git_code_review_links"."created_at", "git_code_review_links"."updated_at", "git_code_review_links"."created_by_id", "git_code_review_links"."updated_by_id", "git_code_review_links"."deleted_at", "git_code_review_links"."id", "git_code_review_links"."project_id", "git_code_review_links"."workspace_id", "git_code_review_links"."issue_id", "git_code_review_links"."namespace" AS "repo_owner", "git_code_review_links"."repo_name" AS "repo_name", CAST("git_code_review_links"."external_iid" AS INTEGER) AS "pr_number", "git_code_review_links"."url", "git_code_review_links"."title", CASE WHEN "git_code_review_links"."state" = 'merged' THEN 'closed' ELSE "git_code_review_links"."state" END AS "state", "git_code_review_links"."merged", "git_code_review_links"."draft", "git_code_review_links"."remote_updated_at" AS "pr_updated_at" FROM "git_code_review_links" INNER JOIN "workspaces" ON ("git_code_review_links"."workspace_id" = "workspaces"."id") INNER JOIN "projects" ON ("git_code_review_links"."project_id" = "projects"."id") INNER JOIN "project_members" ON ("projects"."id" = "project_members"."project_id") WHERE ("git_code_review_links"."deleted_at" IS NULL AND "workspaces"."slug" = $1 AND "git_code_review_links"."project_id" = $2 AND "git_code_review_links"."issue_id" = $3 AND "project_members"."is_active" AND "project_members"."member_id" = $4 AND "projects"."archived_at" IS NULL AND "git_code_review_links"."provider" = 'github' AND "git_code_review_links"."host_url" = 'https://github.com') ORDER BY "git_code_review_links"."created_at" DESC"#;
+
+/// PR-link detail scope + pk (`github_pr.py:86-98`, fixture
+/// `github_pr_detail_queryset`): no archived guard, no `DISTINCT`,
+/// `Meta.ordering` (`-created_at`). `$5` pk. (Moved from the v1
+/// work-items handlers by PIDASHCONV-1661.)
+pub const PR_DETAIL_SQL: &str = r#"SELECT "git_code_review_links"."created_at", "git_code_review_links"."updated_at", "git_code_review_links"."created_by_id", "git_code_review_links"."updated_by_id", "git_code_review_links"."deleted_at", "git_code_review_links"."id", "git_code_review_links"."project_id", "git_code_review_links"."workspace_id", "git_code_review_links"."issue_id", "git_code_review_links"."namespace" AS "repo_owner", "git_code_review_links"."repo_name" AS "repo_name", CAST("git_code_review_links"."external_iid" AS INTEGER) AS "pr_number", "git_code_review_links"."url", "git_code_review_links"."title", CASE WHEN "git_code_review_links"."state" = 'merged' THEN 'closed' ELSE "git_code_review_links"."state" END AS "state", "git_code_review_links"."merged", "git_code_review_links"."draft", "git_code_review_links"."remote_updated_at" AS "pr_updated_at" FROM "git_code_review_links" INNER JOIN "workspaces" ON ("git_code_review_links"."workspace_id" = "workspaces"."id") INNER JOIN "projects" ON ("git_code_review_links"."project_id" = "projects"."id") INNER JOIN "project_members" ON ("projects"."id" = "project_members"."project_id") WHERE ("git_code_review_links"."deleted_at" IS NULL AND "workspaces"."slug" = $1 AND "git_code_review_links"."project_id" = $2 AND "git_code_review_links"."issue_id" = $3 AND "project_members"."is_active" AND "project_members"."member_id" = $4 AND "git_code_review_links"."id" = $5 AND "git_code_review_links"."provider" = 'github' AND "git_code_review_links"."host_url" = 'https://github.com') ORDER BY "git_code_review_links"."created_at" DESC LIMIT 1"#;
+
+/// One PR link in the v1 detail scope, or `None` (the DELETE
+/// path's 404 branch).
+pub async fn fetch_pr_detail_row(
+    pool: &PgPool,
+    slug: &str,
+    project_id: &Uuid,
+    issue_id: &Uuid,
+    actor_id: &Uuid,
+    pk: &Uuid,
+) -> Result<Option<sqlx::postgres::PgRow>, Error> {
+    let row = sqlx::query(PR_DETAIL_SQL)
+        .bind(slug)
+        .bind(project_id)
+        .bind(issue_id)
+        .bind(actor_id)
+        .bind(pk)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| DbError::new("pr detail fetch", error))?;
+    Ok(row)
+}
+
+/// `GithubPullRequestLink.objects.filter(...).order_by("-created_at")`
+/// (`pi_dash_cloud/mcp/tools.py:1258-1262`): base-manager soft-delete
+/// scope only (the FK traversal carries no related-manager guards),
+/// `-created_at` order, `[:limit]` slice. `$1` slug, `$2` project id,
+/// `$3` issue id, `$4` limit. The caller checked membership before
+/// calling. (Moved from the MCP read tools by PIDASHCONV-1661.)
+pub const PR_LINK_LIST_SQL: &str = "SELECT l.id, l.issue_id, l.project_id, l.workspace_id, \
+     l.namespace AS repo_owner, l.repo_name, CAST(l.external_iid AS INTEGER) AS pr_number, \
+     l.url, l.title, CASE WHEN l.state = 'merged' THEN 'closed' ELSE l.state END AS state, l.merged, l.draft, \
+     l.remote_updated_at AS pr_updated_at, l.created_at, l.updated_at, l.created_by_id \
+     FROM git_code_review_links AS l \
+     INNER JOIN workspaces ON workspaces.id = l.workspace_id \
+     WHERE l.deleted_at IS NULL \
+       AND workspaces.slug = $1 \
+       AND l.project_id = $2 \
+       AND l.issue_id = $3 \
+       AND l.provider = 'github' \
+       AND l.host_url = 'https://github.com' \
+     ORDER BY l.created_at DESC LIMIT $4";
+
+/// Full re-read of one link for serialization (attach's
+/// `_serialize_model(serializer, link)` over the model instance).
+/// (Moved from the MCP read tools by PIDASHCONV-1661.)
+pub const PR_LINK_BY_ID_SQL: &str = "SELECT l.id, l.issue_id, l.project_id, l.workspace_id, \
+     l.namespace AS repo_owner, l.repo_name, CAST(l.external_iid AS INTEGER) AS pr_number, \
+     l.url, l.title, CASE WHEN l.state = 'merged' THEN 'closed' ELSE l.state END AS state, l.merged, l.draft, \
+     l.remote_updated_at AS pr_updated_at, l.created_at, l.updated_at, l.created_by_id \
+     FROM git_code_review_links AS l \
+     WHERE l.deleted_at IS NULL AND l.id = $1 AND l.provider = 'github' AND l.host_url = 'https://github.com'";
+
+/// PR links of one issue in the MCP tool scope ([`PR_LINK_LIST_SQL`]).
+/// The `count` echoes the SLICED length, like Python's `len(links)`.
+pub async fn fetch_pr_link_list(
+    pool: &PgPool,
+    workspace_slug: &str,
+    project_id: Uuid,
+    issue_id: Uuid,
+    limit: i64,
+) -> Result<Vec<sqlx::postgres::PgRow>, Error> {
+    let rows = sqlx::query(PR_LINK_LIST_SQL)
+        .bind(workspace_slug)
+        .bind(project_id)
+        .bind(issue_id)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| DbError::new("pr-link-list", error))?;
+    Ok(rows)
+}
+
+/// One PR link by pk ([`PR_LINK_BY_ID_SQL`]), or `None`.
+pub async fn fetch_pr_link_by_id(
+    pool: &PgPool,
+    id: &Uuid,
+) -> Result<Option<sqlx::postgres::PgRow>, Error> {
+    let row = sqlx::query(PR_LINK_BY_ID_SQL)
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| DbError::new("pr-link-by-id", error))?;
+    Ok(row)
+}
+
+#[cfg(test)]
+mod live {
+    use sqlx::Row;
+
+    use super::*;
+    use crate::read::test_support::{pool, seed_world};
+
+    async fn seed_member(pool: &PgPool, world: &crate::read::test_support::World) {
+        sqlx::query(
+            "INSERT INTO project_members (id, role, project_id, workspace_id, member_id, \
+             view_props, default_props, sort_order, preferences, is_active, created_at, updated_at) \
+             VALUES ($1, 20, $2, $3, $4, '{}', '{}', 65535, '{}', true, now(), now())",
+        )
+        .bind(Uuid::new_v4())
+        .bind(world.project_id)
+        .bind(world.workspace_id)
+        .bind(world.user_id)
+        .execute(pool)
+        .await
+        .expect("seed member");
+    }
+
+    async fn seed_link(
+        pool: &PgPool,
+        world: &crate::read::test_support::World,
+        pr_number: i32,
+        created_secs_ago: i32,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        // Fresh repo identity per seed: live rows are unique per
+        // (provider, host_url, namespace, repo_name, external_iid), and seeds persist
+        // across runs.
+        let owner = format!("o-{}", Uuid::new_v4().simple());
+        sqlx::query(
+            "INSERT INTO git_code_review_links \
+             (id, provider, host_url, namespace, repo_name, repo_external_id, external_id, external_iid, \
+             url, title, state, merged, draft, \
+             issue_id, project_id, workspace_id, created_at, updated_at, metadata) \
+             VALUES ($1, 'github', 'https://github.com', $2, 'r', '', '', $3::text, \
+             'https://example.test/pr', 'T', 'open', false, false, \
+             $4, $5, $6, now() - make_interval(secs => $7), now(), '{}')",
+        )
+        .bind(id)
+        .bind(&owner)
+        .bind(pr_number)
+        .bind(world.issue_id)
+        .bind(world.project_id)
+        .bind(world.workspace_id)
+        .bind(created_secs_ago)
+        .execute(pool)
+        .await
+        .expect("seed link");
+        id
+    }
+
+    #[tokio::test]
+    async fn pr_link_reads_hit_miss_and_limit() {
+        let Some(db) = pool().await else { return };
+        let world = seed_world(&db).await;
+        seed_member(&db, &world).await;
+        let first = seed_link(&db, &world, 7, 60).await;
+        let second = seed_link(&db, &world, 8, 0).await;
+        // MCP list: newest first, sliced.
+        let rows = fetch_pr_link_list(
+            &db,
+            &world.workspace_slug,
+            world.project_id,
+            world.issue_id,
+            10,
+        )
+        .await
+        .expect("list");
+        assert_eq!(rows.len(), 2);
+        let head: Uuid = rows[0].try_get("id").expect("id");
+        assert_eq!(head, second);
+        let one = fetch_pr_link_list(
+            &db,
+            &world.workspace_slug,
+            world.project_id,
+            world.issue_id,
+            1,
+        )
+        .await
+        .expect("limited");
+        assert_eq!(one.len(), 1);
+        // By-id re-read.
+        let row = fetch_pr_link_by_id(&db, &first)
+            .await
+            .expect("by-id")
+            .expect("row");
+        let number: i32 = row.try_get("pr_number").expect("pr_number");
+        assert_eq!(number, 7);
+        let missing = fetch_pr_link_by_id(&db, &Uuid::new_v4())
+            .await
+            .expect("by-id miss");
+        assert!(missing.is_none());
+        // v1 detail scope: member-guarded hit, unknown pk miss.
+        let row = fetch_pr_detail_row(
+            &db,
+            &world.workspace_slug,
+            &world.project_id,
+            &world.issue_id,
+            &world.user_id,
+            &first,
+        )
+        .await
+        .expect("detail")
+        .expect("row");
+        let number: i32 = row.try_get("pr_number").expect("pr_number");
+        assert_eq!(number, 7);
+        let missing = fetch_pr_detail_row(
+            &db,
+            &world.workspace_slug,
+            &world.project_id,
+            &world.issue_id,
+            &world.user_id,
+            &Uuid::new_v4(),
+        )
+        .await
+        .expect("detail miss");
+        assert!(missing.is_none());
+    }
+}
+
+// PrLinkDbRow stub for compatibility with sdk surface (PrLinkDbRow expected by read/mod.rs).
+// The PgRow functions are the actual data path; this type is for the sdk surface
+// that expects a typed row. It is not used by the PgRow fetchers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrLinkDbRow {
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub id: uuid::Uuid,
+    pub repo_owner: String,
+    pub repo_name: String,
+    pub pr_number: i32,
+    pub url: String,
+    pub title: String,
+    pub state: String,
+    pub merged: bool,
+    pub draft: bool,
+    pub pr_updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub created_by_id: Option<uuid::Uuid>,
+    pub issue_id: uuid::Uuid,
+    pub project_id: uuid::Uuid,
+    pub updated_by_id: Option<uuid::Uuid>,
+    pub workspace_id: uuid::Uuid,
+}

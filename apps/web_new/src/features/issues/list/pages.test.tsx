@@ -242,6 +242,34 @@ describe("useListPages", () => {
     expect(result.current.hasMore).toBe(false);
   });
 
+  it("orders grouped sections by the passed workflow order (NEWPIDASH-39)", async () => {
+    const client = hookClient(() =>
+      groupedEnvelope({
+        todo: { rows: [row("todo-1", 1)], total: 1 },
+        backlog: { rows: [row("backlog-1", 2)], total: 1 },
+        done: { rows: [], total: 0 },
+      })
+    );
+    const order = ["backlog", "todo", "done"];
+    const { result } = renderHook(
+      () =>
+        useListPages(
+          "acme",
+          { scope: "project", projectId: PROJECT },
+          "state",
+          "sort_order",
+          new Map(),
+          true,
+          true,
+          {},
+          order
+        ),
+      { wrapper: wrapper(client) }
+    );
+    await waitFor(() => expect(result.current.isPending).toBe(false));
+    expect(result.current.sections.map((section) => section.key)).toEqual(["backlog", "todo", "done"]);
+  });
+
   it("reports the section whose next page is in flight", async () => {
     let release: ((value: Record<string, unknown>) => void) | undefined;
     const client = hookClient((url) => {

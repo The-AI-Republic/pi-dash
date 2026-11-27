@@ -24,6 +24,9 @@ import { specTags, specTitle } from "../helpers/tags";
 const STRONG_PASSWORD = "Tq7!mZ2@kP9#xR";
 const OTHER_STRONG_PASSWORD = "Nb4@gH8$kL1!zQ";
 const WEAK_PASSWORD = "weakpass1";
+// Three of the four classes (upper, lower, digit; no punctuation): the old
+// gate blocks it, so the new gate must too (NEWPIDASH-19).
+const THREE_OF_FOUR_PASSWORD = "Password1";
 
 // The scratch stack throttles auth endpoints at 30/minute per IP
 // (authentication scope: email-check, code generate, forgot-password), and
@@ -221,6 +224,11 @@ test(
       expect(await driver.authEmailValue()).toBe(email);
     });
 
+    await test.step("a three-of-four secret stays blocked without posting", async () => {
+      await driver.fillNewPasswordFields(THREE_OF_FOUR_PASSWORD, THREE_OF_FOUR_PASSWORD);
+      await expect.poll(() => driver.newPasswordSubmitEnabled(), { timeout: 10_000 }).toBe(false);
+    });
+
     await test.step("a strong matching secret resets the password", async () => {
       await driver.submitNewPassword(OTHER_STRONG_PASSWORD, OTHER_STRONG_PASSWORD);
       expect(await driver.currentPath()).toMatch(/^\/(sign-in)?(\?.*)?$/);
@@ -295,6 +303,11 @@ test(
       await test.step("the passwordless user reaches the set-password form", async () => {
         await driver.openSetPassword();
         expect(await driver.currentPath()).toMatch(/set-password/);
+      });
+
+      await test.step("a three-of-four secret stays blocked without posting", async () => {
+        await driver.fillNewPasswordFields(THREE_OF_FOUR_PASSWORD, THREE_OF_FOUR_PASSWORD);
+        await expect.poll(() => driver.newPasswordSubmitEnabled(), { timeout: 10_000 }).toBe(false);
       });
     } finally {
       await setSmtpConfigured(false);

@@ -109,12 +109,13 @@ service layer also carries legacy provider-specific equivalents and a
 sync-toggle/unbind pair used by the repository tab (PSET-051); the
 General tab uses only the generic binding family.
 
-Pinned bug NEWFRONT-395: on a stack with no git provider connected
-the bind refusal returns unauthorized and trips the global session
-handling, which reloads the page instead of rendering the intended
-bind-failed notice — the failure surfaces as silence with no state
-change. Slices must preserve this divergent case as the oracle pins
-it.
+A bind refusal must surface inline as a bind-failed notice carrying
+the backend message verbatim, with no navigation and no state change.
+On a stack with no git provider connected the refusal returns
+unauthorized, which the old app's global session handling turns into
+a page reload instead, so the failure surfaces as silence
+(NEWFRONT-395); the new frontend implements the intended inline
+failure.
 
 ## Execution target and automated-run policy (PSET-009)
 

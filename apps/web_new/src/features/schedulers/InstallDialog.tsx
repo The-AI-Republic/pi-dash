@@ -24,6 +24,7 @@ import { eligibleDefinitions } from "./installResults.js";
 import { useInstallSchedulerBinding } from "./installData.js";
 import { DEFAULT_OUTCOME_MODE, OutcomeModeField, type OutcomeMode } from "./OutcomeModeField.js";
 import { PodField } from "./PodField.js";
+import { SchedulerColorField } from "./SchedulerColorField.js";
 import type { SchedulePayload } from "./schedule.js";
 import { emptySchedule } from "./schedule.js";
 import { ScheduleFields, useScheduleDraft } from "./ScheduleFields.js";
@@ -406,12 +407,10 @@ export function InstallForm({
             {...(definitionErrors.prompt === undefined ? {} : { error: definitionErrors.prompt })}
             onChange={(event) => changeDefinition("prompt", event.target.value)}
           />
-          <Input
-            label="Color"
-            type="color"
+          <SchedulerColorField
             value={definition.color}
             disabled={pending}
-            onChange={(event) => changeDefinition("color", event.target.value)}
+            onChange={(color) => changeDefinition("color", color)}
           />
         </div>
       )}

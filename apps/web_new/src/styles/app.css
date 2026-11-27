@@ -282,3 +282,19 @@
     width: 100%;
   }
 }
+
+/* Sidebar section titles (NEWPIDASH-4): the Projects/More/Favorites
+   headers carry a --border band via `bg-(--border)`, but that token is
+   mid-tone in the two high-contrast themes while the captions stay
+   --text-muted (≈1.35:1 / ≈1.55:1), breaking their documented "every
+   text pair clears WCAG AA" guarantee. The band is dropped there so the
+   titles sit on the sidebar surface exactly as before. This must live in
+   the utilities layer: the components layer would lose to the
+   `bg-(--border)` utility by cascade order, while here the higher
+   specificity of the theme-anchored selectors wins. */
+@layer utilities {
+  [data-theme="light-contrast"] .sidebar-section-header,
+  [data-theme="dark-contrast"] .sidebar-section-header {
+    background-color: transparent;
+  }
+}

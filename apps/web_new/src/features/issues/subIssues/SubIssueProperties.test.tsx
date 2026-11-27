@@ -304,3 +304,40 @@ describe("SubIssuePropertyControls writers", () => {
     );
   });
 });
+
+describe("closed-trigger visibility (NEWPIDASH-119)", () => {
+  function renderWithPickerStubs(options: { row?: SubIssueItem } = {}) {
+    stubPickers();
+    const actions: SubIssueRowActions = { isBusy: () => false, write: vi.fn() };
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    return render(
+      <QueryClientProvider client={client}>
+        <SubIssuePropertyControls
+          workspaceSlug={WS}
+          projectId={PROJECT}
+          row={options.row ?? row()}
+          properties={defaultDisplayProperties()}
+          editable
+          merged={false}
+          overdue={false}
+          actions={actions}
+        />
+      </QueryClientProvider>
+    );
+  }
+
+  it("names the closed state trigger once its state loads, before opening", async () => {
+    renderWithPickerStubs({ row: row({ state_id: STATE }) });
+    expect(await screen.findByRole("button", { name: "In progress" }, { timeout: 5000 })).toBeInTheDocument();
+  });
+
+  it("shows the row priority on its closed trigger", () => {
+    renderWithPickerStubs({ row: row({ priority: "high" }) });
+    expect(screen.getByRole("button", { name: "Priority: high" })).toBeInTheDocument();
+  });
+
+  it("shows assignee avatars on the closed trigger once members load, before opening", async () => {
+    renderWithPickerStubs({ row: row({ assignee_ids: [MEMBER] }) });
+    expect(await screen.findByRole("button", { name: "Ada L" }, { timeout: 5000 })).toBeInTheDocument();
+  });
+});

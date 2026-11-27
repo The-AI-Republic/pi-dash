@@ -21,6 +21,7 @@ import {
 
 import { getAppClient } from "../../../core/api/client.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/toaster.js";
+import { sidebarKeys } from "../../sidebar/index.js";
 import {
   PAGE_ARCHIVE_FAILED_TITLE,
   PAGE_ARCHIVED_TITLE,
@@ -139,6 +140,11 @@ export function usePageSubtreeArchive(
       onChange?.(variables.archived);
       if (variables.archived) {
         notifySuccess(PAGE_ARCHIVED_TITLE);
+        // Shelving clears the favourite alongside the page, so the sidebar
+        // favourites the old app drops at once must be re-read too
+        // (NEWPIDASH-347): the list rows archive through this hook, not the
+        // flat one.
+        void queryClient.invalidateQueries({ queryKey: sidebarKeys.favorites(workspaceSlug) });
       } else if (restoreDetaches(variables.rows ?? rows, variables.row)) {
         notifySuccess(PAGE_RESTORE_TO_TOP_TITLE);
       } else {

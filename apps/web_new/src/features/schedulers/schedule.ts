@@ -36,11 +36,44 @@ export function defaultStartLocal(now: Date = new Date()): string {
   return toLocalInput(start);
 }
 
-/** datetime-local wall time (browser zone) to the UTC instant the API stores. */
-export function localStartToIso(local: string): string {
+/**
+ * The second instant behind an ambiguous wall time, if the browser zone
+ * repeats that wall time (a DST fall-back). The first occurrence is what
+ * `new Date(local)` resolves to; the repeat lands within two hours after
+ * it in every real zone, so a quarter-hour scan finds it.
+ */
+function repeatedHourAlternate(parsed: Date, local: string): Date | null {
+  const base = parsed.getTime();
+  for (let step = 1; step <= 8; step += 1) {
+    const candidate = new Date(base + step * 15 * 60_000);
+    if (toLocalInput(candidate) === local) return candidate;
+  }
+  return null;
+}
+
+/**
+ * datetime-local wall time (browser zone) to the UTC instant the API
+ * stores. The edit dialog passes the stored instant as `originalIso` so
+ * the round trip is lossless: an untouched input saves the stored instant
+ * back unchanged, and an ambiguous wall time inside a repeated hour keeps
+ * the occurrence whose offset matches the stored one. Without an original
+ * (the create path) an ambiguous wall time resolves to its first
+ * occurrence, as before.
+ */
+export function localStartToIso(local: string, originalIso?: string): string {
   if (local.trim() === "") return "";
   const parsed = new Date(local);
   if (Number.isNaN(parsed.getTime())) return "";
+  if (originalIso !== undefined && originalIso !== "") {
+    const original = new Date(originalIso);
+    if (!Number.isNaN(original.getTime())) {
+      if (local === toLocalInput(original)) return original.toISOString();
+      const alternate = repeatedHourAlternate(parsed, local);
+      if (alternate !== null && alternate.getTimezoneOffset() === original.getTimezoneOffset()) {
+        return alternate.toISOString();
+      }
+    }
+  }
   return parsed.toISOString();
 }
 
@@ -101,9 +134,9 @@ export interface SchedulePayload {
   enabled: boolean;
 }
 
-export function schedulePayload(value: ScheduleValue): SchedulePayload {
+export function schedulePayload(value: ScheduleValue, originalIso?: string): SchedulePayload {
   return {
-    dtstart: localStartToIso(value.startsAt),
+    dtstart: localStartToIso(value.startsAt, originalIso),
     tzid: value.timeZone || DEFAULT_TZID,
     rrule: value.rrule.trim(),
     extra_context: value.projectContext.trim(),

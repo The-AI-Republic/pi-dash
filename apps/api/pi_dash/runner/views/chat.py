@@ -250,11 +250,12 @@ class AgentChatWarmEndpoint(APIView):
                 return Response({"error": unavailable}, status=status.HTTP_409_CONFLICT)
             if session.active_message_id is not None or session.active_turn_id:
                 return Response({"ok": True, "skipped": "chat_turn_active"})
-            # Chat is accepted concurrently with an issue run: the runner serves
-            # chat in a dedicated worktree, isolated from the issue pool (design
-            # make_chat_issue_parallel_working §3.4). "Busy" still gates ISSUE
-            # assignment in the matcher, but no longer blocks chat. Offline /
-            # revoked / paused runners are still rejected above via
+            # Chat is accepted here even while the runner is busy, but it does
+            # not run alongside the issue run: server-routed chat shares the
+            # runner's working folder, so the runner refuses the turn with
+            # chat_failed {code: runner_busy} (a warm is skipped with reason
+            # runner_busy) until the run ends (design built_engine_as_runner
+            # §12.1). Offline / revoked / paused runners are rejected above via
             # _runner_unavailable_error().
             chat_service.enqueue_chat_warm_after_commit(
                 runner.id,
@@ -309,11 +310,12 @@ class AgentChatMessageListEndpoint(APIView):
             unavailable = _runner_unavailable_error(runner)
             if unavailable:
                 return Response({"error": unavailable}, status=status.HTTP_409_CONFLICT)
-            # Chat is accepted concurrently with an issue run: the runner serves
-            # chat in a dedicated worktree, isolated from the issue pool (design
-            # make_chat_issue_parallel_working §3.4). "Busy" still gates ISSUE
-            # assignment in the matcher, but no longer blocks chat. Offline /
-            # revoked / paused runners are still rejected above via
+            # Chat is accepted here even while the runner is busy, but it does
+            # not run alongside the issue run: server-routed chat shares the
+            # runner's working folder, so the runner refuses the turn with
+            # chat_failed {code: runner_busy} (a warm is skipped with reason
+            # runner_busy) until the run ends (design built_engine_as_runner
+            # §12.1). Offline / revoked / paused runners are rejected above via
             # _runner_unavailable_error().
             if session.active_message_id is not None or session.active_turn_id:
                 return Response(

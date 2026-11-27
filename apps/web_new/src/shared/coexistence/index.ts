@@ -11,3 +11,17 @@ export {
   normalizePathPrefix,
   resolveLinkKind,
 } from "./migrated-routes.js";
+export { classifyDesktopRoute, currentAddress, hostedAddressFor } from "./desktopHandOff.js";
+export type { DesktopRouteVerdict } from "./desktopHandOff.js";
+export {
+  DesktopHostedScreen,
+  HOSTED_SCREEN_FAILURE_HEADING,
+  HOSTED_SCREEN_HEADING,
+  HOSTED_SCREEN_MOVING,
+  HOSTED_SCREEN_NO_ADDRESS,
+  HOSTED_SCREEN_OPENED,
+  HOSTED_SCREEN_REFUSED,
+  HOSTED_SCREEN_RETRY,
+  HOSTED_SCREEN_TITLE,
+  hostedScreenAddressFor,
+} from "./DesktopHostedScreen.js";

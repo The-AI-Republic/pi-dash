@@ -23,11 +23,23 @@ from pi_dash.scheduler.builtins import (
 
 @pytest.mark.unit
 def test_ensure_creates_one_row_per_builtin(workspace):
+    # Prod catalog is empty after NEWPIDASH-256: no rows are seeded.
     ensure_builtin_schedulers(workspace)
     rows = Scheduler.objects.filter(workspace=workspace)
-    assert rows.count() == len(BUILTINS)
+    assert rows.count() == len(BUILTINS) == 0
     slugs = set(rows.values_list("slug", flat=True))
-    assert slugs == {b.slug for b in BUILTINS}
+    assert slugs == {b.slug for b in BUILTINS} == set()
+    # The mechanics still hold with a test-only catalog entry — the
+    # ensure loop is catalog-driven, not hardcoded to prod slugs.
+    test_builtin = BuiltinScheduler(
+        slug="test-only-builtin",
+        name="Test Only",
+        description="",
+        prompt="prompt",
+    )
+    ensure_builtin_schedulers(workspace, builtins=[test_builtin])
+    rows = Scheduler.objects.filter(workspace=workspace, slug="test-only-builtin")
+    assert rows.count() == 1
 
 
 @pytest.mark.unit
@@ -43,21 +55,32 @@ def test_ensure_is_idempotent(workspace):
 def test_ensure_updates_existing_row(workspace, create_user):
     """If a workspace already has a builtin row with stale prompt text,
     ensure_builtin_schedulers refreshes it."""
-    # The ``post_save(Workspace)`` signal already seeded the builtins for
-    # this workspace, so we can't create a fresh ``security-audit`` row —
-    # the conditional unique constraint would reject it. Mutate the seeded
-    # row to look stale instead, then call ``ensure_builtin_schedulers`` to
-    # confirm the refresh path repaints it.
-    stale = Scheduler.objects.get(workspace=workspace, slug="security-audit")
+    # Prod catalog is empty after NEWPIDASH-256, so no rows are seeded
+    # by the post_save signal. Exercise the refresh path with a
+    # test-only catalog entry instead of relying on a prod slug.
+    test_builtin = BuiltinScheduler(
+        slug="test-refresh-builtin",
+        name="Test Refresh",
+        description="",
+        prompt="original prompt",
+    )
+    ensure_builtin_schedulers(workspace, builtins=[test_builtin])
+    stale = Scheduler.objects.get(workspace=workspace, slug="test-refresh-builtin")
     stale.name = "Stale name"
     stale.prompt = "Stale prompt"
     stale.save(update_fields=["name", "prompt", "updated_at"])
 
-    ensure_builtin_schedulers(workspace)
-    row = Scheduler.objects.get(workspace=workspace, slug="security-audit")
-    builtin = next(b for b in BUILTINS if b.slug == "security-audit")
-    assert row.name == builtin.name
-    assert row.prompt == builtin.prompt
+    refreshed = BuiltinScheduler(
+        slug="test-refresh-builtin",
+        name="Test Refresh Updated",
+        description="updated",
+        prompt="refreshed prompt",
+    )
+    ensure_builtin_schedulers(workspace, builtins=[refreshed])
+    row = Scheduler.objects.get(workspace=workspace, slug="test-refresh-builtin")
+    assert row.name == "Test Refresh Updated"
+    assert row.prompt == "refreshed prompt"
+    assert row.source == "builtin"
 
 
 @pytest.mark.unit

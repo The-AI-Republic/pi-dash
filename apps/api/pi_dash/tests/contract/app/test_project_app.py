@@ -95,9 +95,14 @@ class TestProjectAPIPost(TestProjectBase):
         # "In Review" state (PR B) and later the "In Test" state (see
         # ``pi_dash/db/models/state.py``); the default manager filters
         # triage out, so a freshly-created project ends up with seven.
+        # NEWPIDASH-305 added "AI Completed" (completed group, between
+        # "In Test" and "Done"), so now eight.
         states = State.objects.filter(project=project)
-        assert states.count() == 7
-        expected_states = ["Backlog", "Todo", "In Progress", "In Review", "In Test", "Done", "Cancelled"]
+        assert states.count() == 8
+        expected_states = [
+            "Backlog", "Todo", "In Progress", "In Review", "In Test",
+            "AI Completed", "Done", "Cancelled",
+        ]
         state_names = list(states.values_list("name", flat=True))
         assert set(state_names) == set(expected_states)
 

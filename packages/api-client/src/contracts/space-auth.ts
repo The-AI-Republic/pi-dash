@@ -37,9 +37,8 @@ export type SpaceMagicGenerate = z.infer<typeof SpaceMagicGenerate>;
 /**
  * Auth refusal codes the spaces card models, by name, with the server's
  * numeric code beside each. The card maps the number to a step and a
- * banner; it never shows the number. Rate limiting (5900) and a Gitea
- * configuration failure (5112) are deliberately absent — see
- * parity/specs/space.md §5.4.
+ * banner; it never shows the number. A Gitea configuration failure
+ * (5112) is deliberately absent — see parity/specs/space.md §5.4.
  */
 export const SPACE_AUTH_ERROR_CODES = {
   INVALID_EMAIL: 5005,
@@ -76,6 +75,7 @@ export const SPACE_AUTH_ERROR_CODES = {
   GITLAB_OAUTH_PROVIDER_ERROR: 5121,
   GITHUB_USER_NOT_IN_ORG: 5122,
   INSTANCE_NOT_CONFIGURED: 5000,
+  RATE_LIMIT_EXCEEDED: 5900,
 } as const;
 
 export type SpaceAuthErrorCode = keyof typeof SPACE_AUTH_ERROR_CODES;

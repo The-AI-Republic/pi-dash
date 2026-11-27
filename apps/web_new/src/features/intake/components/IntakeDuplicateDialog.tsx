@@ -47,6 +47,11 @@ export function IntakeDuplicateDialog({
   onPick,
 }: IntakeDuplicateDialogProps): React.ReactElement {
   const [query, setQuery] = React.useState("");
+  // The search field takes the dialog's open-time focus. Left to the kit's
+  // default, the deferred initial-focus pass picks the header's Close
+  // button and can land after the reader has clicked into the field, eating
+  // their keystrokes on a busy host (NEWFRONT-1055, 1058).
+  const searchRef = React.useRef<HTMLInputElement | null>(null);
   const debounced = useDebouncedValue(query.trim(), DUPLICATE_SEARCH_DEBOUNCE_MS);
   const search = useDuplicateTargetSearch(workspaceSlug, projectId, debounced, open);
   const candidates = excludeCurrentTarget(search.data ?? [], currentIssueId);
@@ -59,6 +64,7 @@ export function IntakeDuplicateDialog({
       title={DUPLICATE_DIALOG_TITLE}
       description="Search the project's work items for the original request."
       open={open}
+      initialFocus={searchRef}
       onOpenChange={(next) => {
         if (!next) onCancel();
       }}
@@ -73,6 +79,7 @@ export function IntakeDuplicateDialog({
           {DUPLICATE_SEARCH_LABEL}
         </label>
         <input
+          ref={searchRef}
           id="intake-duplicate-search"
           type="search"
           value={query}

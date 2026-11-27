@@ -59,6 +59,15 @@ pub struct RunnerInstance {
     /// runner's working copy. Observed by the assign lane (supervisor.rs) so a
     /// managed run and a local chat never modify the same working copy at once.
     pub chat_active: Arc<AtomicBool>,
+    /// The workspace dev-machine token this instance authenticates with
+    /// (`None` for an offline instance or one that uses legacy per-runner
+    /// refresh credentials). Compared with the workspace's current token
+    /// to tell when the runner must restart, or is signed out.
+    pub machine_token: Option<String>,
+    /// Built with no credential at all: its workspace has no token on this
+    /// machine and the runner has no legacy per-runner credentials. The
+    /// instance runs no cloud loops and reports `workspace_signed_out`.
+    pub workspace_signed_out: bool,
 }
 
 impl RunnerInstance {
@@ -116,6 +125,9 @@ impl RunnerInstance {
         // config so auto-update, observability, and IPC status reflect
         // operator settings instead of schema defaults.
         let state = StateHandle::new(crate::config::schema::Config {
+            engine: Default::default(),
+            auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon,
             runners: vec![config.clone()],
@@ -145,6 +157,8 @@ impl RunnerInstance {
             engine_version: Arc::new(tokio::sync::RwLock::new(None)),
             chat_sessions: crate::ipc::chat::ChatRegistry::new(),
             chat_active: Arc::new(AtomicBool::new(false)),
+            machine_token: None,
+            workspace_signed_out: false,
         }
     }
 
@@ -184,6 +198,7 @@ mod tests {
             cursor_agent: CursorAgentSection::default(),
             openclaw: Default::default(),
             grok: Default::default(),
+            antigravity: Default::default(),
             muse_code: Default::default(),
             approval_policy: ApprovalPolicySection::default(),
         }
@@ -205,6 +220,7 @@ mod tests {
         let daemon = DaemonConfig {
             cloud_url: "https://cloud.example".into(),
             auto_update: false,
+            max_concurrent_agent_runs: 3,
             ..Default::default()
         };
 

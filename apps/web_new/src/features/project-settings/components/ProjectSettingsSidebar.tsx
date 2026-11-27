@@ -5,8 +5,8 @@
 // A grouped, role-filtered rail: a header with the way back to the issue
 // board, the project mark and the viewer's role, then one group per
 // surviving tab group. Entries link to slash-terminated addresses and the
-// canonical form carries the selected marker; the equivalent no-slash
-// address renders the same tab with nothing marked (bug NEWFRONT-396).
+// tab's own address carries the selected marker in either slash form
+// (NEWFRONT-396 fixed the no-slash form marking nothing).
 
 import { Link, useLinkProps, type UseLinkPropsOptions } from "@tanstack/react-router";
 import { ArrowLeft } from "lucide-react";
@@ -40,7 +40,7 @@ function hrefLinkProps(href: string): RouterLinkProps {
  * `aria-current` for every fuzzy ancestor match, which would mark General
  * on each sub-tab; building the link through `useLinkProps` keeps
  * navigation and preload semantics while this component decides the
- * single current entry from the slash-sensitive `active` flag.
+ * single current entry from the slash-insensitive `active` flag.
  */
 function RailLink({
   href,

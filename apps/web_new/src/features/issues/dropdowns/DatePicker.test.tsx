@@ -190,3 +190,33 @@ describe("DatePicker", () => {
     ).toEqual(["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]);
   });
 });
+
+describe("DatePicker chip", () => {
+  it("shows the placeholder while empty and the day with the property once set", async () => {
+    const { rerender } = render(
+      <DatePicker label="Start date" placeholder="Start date" value={null} onChange={() => {}} chip />
+    );
+    expect(screen.getByRole("button", { name: "Start date" })).toHaveTextContent("Start date");
+    rerender(<DatePicker label="Start date" placeholder="Start date" value="2026-10-15" onChange={() => {}} chip />);
+    const chip = screen.getByRole("button", { name: "Start date: Oct 15, 2026" });
+    expect(chip).toHaveTextContent("Oct 15, 2026");
+    expect(chip).not.toHaveAttribute("title");
+    fireEvent.focus(chip);
+    fireEvent.mouseEnter(chip);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "Start date: Oct 15, 2026 — When work on this item begins."
+    );
+  });
+
+  it("opens the calendar from the chip", () => {
+    render(<DatePicker label="Start date" placeholder="Start date" value={null} onChange={() => {}} chip />);
+    fireEvent.click(screen.getByTestId("date-picker-trigger"));
+    expect(screen.getByTestId("date-picker-calendar")).toBeInTheDocument();
+  });
+
+  it("keeps the overdue day red in the chip", () => {
+    render(<DatePicker label="Due date" placeholder="Due date" value="2026-10-15" onChange={() => {}} chip overdue />);
+    const chip = screen.getByRole("button", { name: "Due date: Oct 15, 2026" });
+    expect(chip.querySelector("span.truncate")?.className).toContain("text-(--danger)");
+  });
+});

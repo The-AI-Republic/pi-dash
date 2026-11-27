@@ -55,8 +55,10 @@ pub struct Args {
     #[arg(long)]
     pub model: Option<String>,
 
-    /// Codex reasoning-effort tier (``low`` / ``medium`` / ``high`` /
-    /// ``xhigh``). Only applies when ``--agent codex``.
+    /// Reasoning-effort tier, used together with ``--model``. Applies to
+    /// ``--agent codex`` (``low`` … ``xhigh``), ``--agent claude-code``
+    /// (``low`` … ``max``) and ``--agent muse-code``
+    /// (``none`` … ``ultra``).
     #[arg(long)]
     pub reasoning_effort: Option<String>,
 
@@ -190,7 +192,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         .unwrap_or_else(|| paths.runner_dir(resp.runner_id).join("workspace"));
 
     let agent_kind = args.agent.unwrap_or_default();
-    let (codex, claude_code, cursor_agent, openclaw, grok, muse_code) =
+    let (codex, claude_code, cursor_agent, openclaw, grok, antigravity, muse_code) =
         crate::cli::runner_ops::agent_sections_for(
             agent_kind,
             args.model.as_deref(),
@@ -209,6 +211,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
         cursor_agent,
         openclaw,
         grok,
+        antigravity,
         muse_code,
         approval_policy: Default::default(),
     };
@@ -222,6 +225,9 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
             cfg
         }
         None => Config {
+            engine: Default::default(),
+            auth: Default::default(),
+            auth_event: None,
             version: 2,
             daemon: DaemonConfig {
                 cloud_url: args.url.clone(),
@@ -231,6 +237,7 @@ pub async fn run(args: Args, paths: &Paths) -> Result<()> {
                 agent_observability_v1: false,
                 agent_watchdog: Default::default(),
                 auto_update: true,
+                max_concurrent_agent_runs: 3,
             },
             runners: vec![new_runner_block],
             cli: None,
@@ -527,6 +534,7 @@ pub async fn enroll_additional_runner(
         cursor_agent: Default::default(),
         openclaw: Default::default(),
         grok: Default::default(),
+        antigravity: Default::default(),
         muse_code: Default::default(),
         approval_policy: Default::default(),
     };
@@ -636,8 +644,8 @@ fn read_line() -> Option<String> {
 mod tests {
     use super::*;
     use crate::config::schema::{
-        AgentSection, ApprovalPolicySection, ClaudeCodeSection, CursorAgentSection, CodexSection, RunnerConfig,
-        WorkspaceSection,
+        AgentSection, ApprovalPolicySection, ClaudeCodeSection, CodexSection, CursorAgentSection,
+        RunnerConfig, WorkspaceSection,
     };
     use std::path::PathBuf;
 
@@ -670,6 +678,7 @@ mod tests {
             cursor_agent: CursorAgentSection::default(),
             openclaw: crate::config::schema::OpenClawSection::default(),
             grok: crate::config::schema::GrokSection::default(),
+            antigravity: crate::config::schema::AntigravitySection::default(),
             muse_code: crate::config::schema::MuseCodeSection::default(),
             approval_policy: ApprovalPolicySection::default(),
         }

@@ -17,7 +17,8 @@ import { Globe, ImagePlus, Lock, MessageSquarePlus } from "lucide-react";
 import * as React from "react";
 import type { CommentAccess } from "@pidash/api-client";
 
-import { CommentRichTextEditor, type RichTextEditorHandle } from "../../../shared/editor/index.js";
+import { getAppClient } from "../../../core/api/client.js";
+import { CommentRichTextEditor, descriptionAssetSrc, type RichTextEditorHandle } from "../../../shared/editor/index.js";
 import { COMMENT_IMAGE_UPLOADED_STATUS, isCommentBodyEmpty } from "./model.js";
 import { useUploadCommentImage } from "./api.js";
 import { CommentMentionSuggestions, useCommentMentionPicker } from "./MentionSuggestions.js";
@@ -48,7 +49,13 @@ export interface CommentComposerProps {
    * Comment & Run (ISS-193): post the draft, then dispatch a continuation
    * run. Absent on surfaces without runs; disabled until dispatch can act.
    */
-  commentAndRun?: { submit: (input: ComposerPost) => Promise<unknown>; disabled: boolean } | undefined;
+  commentAndRun?:
+    | {
+        submit: (input: ComposerPost) => Promise<unknown>;
+        disabled: boolean;
+        disabledReason?: string | undefined;
+      }
+    | undefined;
 }
 
 export function CommentComposer({
@@ -112,8 +119,12 @@ export function CommentComposer({
       .mutateAsync({ file })
       .then((image) => {
         assetsRef.current = [...assetsRef.current, image.assetId];
-        // The editor may have unmounted while the upload was out.
-        handleRef.current?.insertImage(image.src, { storedSrc: image.assetId, status: COMMENT_IMAGE_UPLOADED_STATUS });
+        // The editor may have unmounted while the upload was out. The paint
+        // source joins the API origin while the stored id stays the id.
+        handleRef.current?.insertImage(
+          descriptionAssetSrc(image.src, { workspaceSlug, projectId, apiBaseUrl: getAppClient().baseUrl }),
+          { storedSrc: image.assetId, status: COMMENT_IMAGE_UPLOADED_STATUS }
+        );
       })
       .catch(() => undefined)
       .finally(() => {
@@ -221,6 +232,7 @@ export function CommentComposer({
             loading={sending}
             disabled={commentAndRun.disabled || empty || busy}
             onClick={() => void post(commentAndRun.submit)}
+            {...(commentAndRun.disabledReason === undefined ? {} : { title: commentAndRun.disabledReason })}
           >
             <span className="flex items-center gap-(--space-1)">
               <MessageSquarePlus size={14} strokeWidth={1.5} aria-hidden="true" />

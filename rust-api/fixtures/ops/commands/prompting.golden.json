@@ -1,0 +1,25 @@
+{
+  "_fixture": "F37-09",
+  "_note": "Prompting revalidate command. Sources: prompting/management/commands/revalidate_section_overrides.py:1-68; validation prompting/validation.py:323. The legacy reseed_default/review/test_template commands, seed.py:200-308 semantics and fragments/__init__.py assembly were removed in NEWPIDASH-404 (nothing reads prompt_template.body at run time).",
+  "bugs": [],
+  "commands": {
+    "revalidate_section_overrides": {
+      "args": [
+        { "flag": "--clear", "help": "Clear needs_attention on overrides that now validate cleanly.", "store": "true" }
+      ],
+      "exit_codes": { "0": "always (no raises)" },
+      "guarantee": "never deletes or deactivates a row (:5-12 docstring)",
+      "help": "Re-validate active prompt-section overrides; flag broken ones. (:24)",
+      "loop": {
+        "clear_branch": "clean + needs_attention + --clear -> needs_attention=False, save(update_fields=['needs_attention','updated_at']), cleared++ (:61-64, silent)",
+        "flag_branch": "broken + not already flagged -> needs_attention=True, save(update_fields=['needs_attention','updated_at']), flagged++, WARNING 'flagged {workspace_id}/{section_key} (user={user_id}): {detail}' (:54-60)",
+        "missing_key_rule": "section_key not in registry.REGISTRY -> broken WITHOUT rendering, detail='section key no longer exists' (:40-41)",
+        "scan": "PromptSectionOverride.objects.filter(is_active=True).iterator() (:36); checked++ per row",
+        "source": "revalidate_section_overrides.py:33-68",
+        "validate_call": "validate_override(section_key, body, workspace, user) (validation.py:323); OverrideValidationError -> broken, detail=str(exc) (:43-52). Already-flagged broken rows stay flagged silently (no recount)."
+      },
+      "source": "prompting/management/commands/revalidate_section_overrides.py:23-68",
+      "summary": "checked {checked} active override(s): {flagged} newly flagged, {cleared} cleared. (style.SUCCESS, :66-68)"
+    }
+  }
+}

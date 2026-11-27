@@ -27,7 +27,7 @@ vi.mock("@tanstack/react-router", () => ({
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { authKeys } from "../../auth/index.js";
-import { jsonResponse, makeMember, makeView, VIEWS_OWNER_ID } from "../testing.js";
+import { jsonResponse, makeMember, makeProjectMember, makeView, VIEWS_OWNER_ID } from "../testing.js";
 import { ProjectViewsListScreen } from "./ProjectViewsListScreen.js";
 
 const PROJECT_ID = "223e4567-e89b-12d3-a456-426614174001";
@@ -94,6 +94,9 @@ beforeEach(() => {
     if (url.endsWith(`/api/workspaces/acme/projects/${PROJECT_ID}/views/`)) {
       harness.viewsCalls += 1;
       return jsonResponse(url, 200, harness.views);
+    }
+    if (url.endsWith(`/api/workspaces/acme/projects/${PROJECT_ID}/members/`)) {
+      return jsonResponse(url, 200, [makeProjectMember(VIEWS_OWNER_ID, PROJECT_ID)]);
     }
     if (url.endsWith("/api/workspaces/acme/members/")) {
       return jsonResponse(url, 200, [makeMember(VIEWS_OWNER_ID)]);

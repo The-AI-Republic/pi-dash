@@ -344,3 +344,46 @@ describe("StatePicker", () => {
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
 });
+
+describe("StatePicker chip", () => {
+  it("names the project default while untouched, without writing it", async () => {
+    const { queryClient } = harness(STATES);
+    const onChange = vi.fn();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <StatePicker
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          value={null}
+          onChange={onChange}
+          chip
+          label="State"
+          placeholder="State"
+          fallbackToDefault
+          preload
+        />
+      </QueryClientProvider>
+    );
+    expect(await screen.findByRole("button", { name: "State: Todo" })).toHaveTextContent("Todo");
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("shows the placeholder without the fallback and opens from the chip", async () => {
+    const { queryClient } = harness(STATES);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <StatePicker
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          value={null}
+          onChange={() => undefined}
+          chip
+          label="State"
+          placeholder="State"
+        />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "State" }));
+    expect(await screen.findByRole("option", { name: "Todo" })).toBeInTheDocument();
+  });
+});

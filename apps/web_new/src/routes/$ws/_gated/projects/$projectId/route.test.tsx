@@ -54,6 +54,14 @@ vi.mock("../../../../../features/modules/palette/ModulePaletteEntries.js", async
   };
 });
 
+// The cycles palette entries load on their own chunk too (CYC-014).
+vi.mock("../../../../../features/cycles/palette/CyclesPaletteEntries.js", async () => {
+  const ReactModule = await import("react");
+  return {
+    CyclesPaletteEntries: () => ReactModule.createElement("div", { "data-testid": "cycles-palette-entries" }),
+  };
+});
+
 const PROJECT_ID = "223e4567-e89b-12d3-a456-426614174001";
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
 
@@ -129,7 +137,7 @@ function userPropertiesPayload(preference: string) {
   };
 }
 
-function renderLayout(detailStatus: number): void {
+function renderLayout(detailStatus: number, leaf: "issues" | "runners" = "issues"): void {
   const apiClient = createAppClient("https://api.test", async (url) => {
     let status = 404;
     let body = "{}";
@@ -186,12 +194,25 @@ function renderLayout(detailStatus: number): void {
     path: "issues",
     component: () => <p>Issues page</p>,
   });
+  // Same id as the file route (NEWPIDASH-3): `/$ws/_gated/projects/$projectId/runners`.
+  const runnersRoute = createRoute({
+    getParentRoute: () => layoutRoute,
+    path: "runners",
+    component: () => <Outlet />,
+  });
+  const runnersIndexRoute = createRoute({
+    getParentRoute: () => runnersRoute,
+    path: "/",
+    component: () => <p>AI Workers page</p>,
+  });
   const router = createRouter({
     routeTree: rootRoute.addChildren([
-      wsRoute.addChildren([gatedRoute.addChildren([layoutRoute.addChildren([leafRoute])])]),
+      wsRoute.addChildren([
+        gatedRoute.addChildren([layoutRoute.addChildren([leafRoute, runnersRoute.addChildren([runnersIndexRoute])])]),
+      ]),
     ]),
     context: { queryClient, apiClient },
-    history: createMemoryHistory({ initialEntries: [`/acme/projects/${PROJECT_ID}/issues`] }),
+    history: createMemoryHistory({ initialEntries: [`/acme/projects/${PROJECT_ID}/${leaf}`] }),
   });
   render(
     <QueryClientProvider client={queryClient}>
@@ -224,6 +245,25 @@ describe("project layout", () => {
     expect(screen.getByText("Issues page")).toBeInTheDocument();
   });
 
+  // NEWPIDASH-3: the AI Workers area fills the window below the tab strip;
+  // every other tab keeps the plain stacking.
+  it("stacks the tab strip and the AI Workers area in a full-height column", async () => {
+    renderLayout(200, "runners");
+    const strip = await screen.findByTestId("project-tab-strip");
+    const column = screen.getByTestId("project-full-height-page");
+    expect(column).toHaveClass("flex", "h-full", "min-h-0", "flex-col");
+    expect(column).toContainElement(strip);
+    expect(column).toContainElement(screen.getByText("AI Workers page"));
+  });
+
+  it("adds no column around other tabs", async () => {
+    renderLayout(200);
+    const strip = await screen.findByTestId("project-tab-strip");
+    expect(screen.queryByTestId("project-full-height-page")).toBeNull();
+    expect(strip.closest("[data-testid='project-full-height-page']")).toBeNull();
+    expect(screen.getByText("Issues page")).toBeInTheDocument();
+  });
+
   it("renders the denial screen for refused projects", async () => {
     renderLayout(409);
     await screen.findByRole("heading", { name: "You haven't joined this project yet" });
@@ -239,6 +279,12 @@ describe("project layout", () => {
   it("mounts the modules palette entries beside the views ones (MOD-037)", async () => {
     renderLayout(200);
     await screen.findByTestId("modules-palette-entries");
+    expect(screen.getByText("Issues page")).toBeInTheDocument();
+  });
+
+  it("mounts the cycles palette entries beside the others (CYC-014)", async () => {
+    renderLayout(200);
+    await screen.findByTestId("cycles-palette-entries");
     expect(screen.getByText("Issues page")).toBeInTheDocument();
   });
 

@@ -1,0 +1,56 @@
+{
+  "PORT_NOTE_lock_leak": "base_api-missing early return (:167-168) returns WITHOUT release_lock: the lock holder's key lives until ex=300 expiry. Port verbatim.",
+  "PORT_NOTE_template": "issue-updates.html reads {{current_site}} (logo img, live) and {{total_updates}}/{{total_comments}} (inside an HTML comment, dead text) which the task never sends: Django renders '' so the logo src is relative '/static/logos/Logo.png'. Proven by rendered golden. Port verbatim.",
+  "_fixture": "F-SEND",
+  "_method": "source-derived record (needs Redis + DB + SMTP; live path covered by oracle stack tests). Call shapes transcribed verbatim.",
+  "_ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "_sources": [
+    "apps/api/pi_dash/bgtasks/email_notification_task.py:33-43 (locks)",
+    "apps/api/pi_dash/bgtasks/email_notification_task.py:130-150 (mention/html)",
+    "apps/api/pi_dash/bgtasks/email_notification_task.py:152-306 (task)"
+  ],
+  "base_api": "ri.get(str(issue_id)).decode() if present else None; absent -> silent return",
+  "comment_branch": "appends {\"actor_comments\": comment, \"actor_detail\": {avatar_url: base_api+avatar, first_name, last_name}}",
+  "context_keys": [
+    "data",
+    "summary",
+    "actors_involved (len of set)",
+    "issue{issue_identifier,name,issue_url}",
+    "receiver{email}",
+    "issue_url",
+    "project_url",
+    "workspace (slug)",
+    "project (name)",
+    "user_preference ({base}/{slug}/settings/account/notifications/)",
+    "comments",
+    "entity_type='issue'"
+  ],
+  "exceptions": [
+    "send-block Exception -> log_exception, release, return",
+    "(Issue.DoesNotExist, User.DoesNotExist) -> release, return (no log)",
+    "outer Exception -> log_exception, release, return"
+  ],
+  "issue_url": "{base}/{workspace_slug}/projects/{project_id}/issues/{issue_id}",
+  "lock": {
+    "acquire": "redis.set(lock_id, \"true\", nx=True, ex=expire_time=300)",
+    "contended": "log \"Duplicate email received skipping\", return (no release needed)",
+    "lock_id": "send_email_notif_{issue_id}_{receiver_id}_{sorted_ids_joined_by_underscore}",
+    "release": "redis.delete(lock_id)"
+  },
+  "mention_branch": "mention new/old_value passed through process_html_content, then appended like comment",
+  "mention_helpers": {
+    "process_html_content": "None -> None; else [process_mention(h) for h in content]",
+    "process_mention": "find_all('mention-component'); entity_identifier -> User.objects.get(pk) (DoesNotExist propagates to task except); replace with '@'+display_name; return str(soup)"
+  },
+  "per_actor": "total_changes += len(changes); comment=changes.pop(\"comment\", False); mention=changes.pop(\"mention\", False); activity_time=changes.pop(\"activity_time\") (KeyError if a payload lacks it -> outer except: release lock, return); formatted = strptime(activity_time, \"%Y-%m-%d %H:%M:%S\").strftime(\"%H:%M %p\")",
+  "reads": [
+    "User.objects.get(pk=receiver_id)",
+    "Issue.objects.get(pk=issue_id)",
+    "User.objects.get(pk=actor_id) per actor",
+    "get_email_configuration() -> 7-tuple (HOST, USER, PASSWORD, PORT, TLS, SSL, FROM)"
+  ],
+  "smtp": "get_connection(host, int(port), username, password, use_tls==(\"1\" string compare), use_ssl==(\"1\")); EmailMultiAlternatives(subject, body=text, from EMAIL_FROM, to=[receiver.email]); attach_alternative(html); send(); log 'Email Sent Successfully'",
+  "subject": "{project.identifier}-{sequence_id} {remove_unwanted_characters(issue.name)}",
+  "success_write": "EmailNotificationLog.objects.filter(pk__in=email_notification_ids).update(sent_at=timezone.now())",
+  "template_rows": "{\"actor_detail\", \"changes\" (residual after pops), \"issue_details\": {name, identifier: PROJECT-SEQ}, \"activity_time\"}"
+}

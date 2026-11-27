@@ -1,0 +1,1802 @@
+//! Prompt composition: override resolution into assembled prompts.
+//!
+//! Port of `apps/api/pi_dash/prompting/composer.py` (514 lines), scoped to
+//! the lines this issue owns:
+//!
+//! * `composer.py:31-36` (source consts) — [`SOURCE_DEFAULT`],
+//!   [`SOURCE_WORKSPACE`], [`SOURCE_DRAFT`].
+//! * `composer.py:38-82` (`ResolvedSection` / `ManifestEntry` /
+//!   `ComposedPrompt`) — [`ResolvedSection`], [`ManifestEntry`],
+//!   [`ComposedPrompt`].
+//! * `composer.py:84-92` (`effective_customizability`) —
+//!   [`effective_customizability`].
+//! * `composer.py:100-147` (`load_override_index` / `_lookup_override`) —
+//!   [`OverrideRow`], [`build_override_index`]: the services layer holds no
+//!   database handle (no `sqlx` in this crate), so the Django ORM query is
+//!   split at the seam every sibling port uses — the DB edge issues the
+//!   equivalent `WHERE` (see the contract on [`build_override_index`]) and
+//!   hands the rows over; filtering, scoping and precedence live here as
+//!   pure code with the same semantics. The single-section direct-query
+//!   fallback (`_lookup_override` with no index) owns to that DB edge:
+//!   callers always pass the preloaded index (`FIX-compose` asserts the two
+//!   paths agree: `precedence.index_vs_fallback_same`).
+//! * `composer.py:150-201` (`resolve_section`) — [`resolve_section`]. The
+//!   `project` parameter is accepted-and-ignored in Python (the §9.4 seam
+//!   for a future project-level rung); it is dropped here, not carried as
+//!   a dead argument.
+//! * `composer.py:204-230` (`_assemble`) — [`assemble`].
+//! * `composer.py:233-283` (culprit attribution) — [`PromptComposeError`]:
+//!   `renderer::PromptRenderError` has no public constructor (it is only
+//!   built at the renderer boundary), so attribution wraps the engine
+//!   detail string in this local error type. Messages are identical to
+//!   Python; only the Rust type name differs. The Jinja-lineno fast path
+//!   (`_find_culprit_section` via `exc.lineno`) cannot cross that
+//!   boundary — the detail string carries no line — so attribution runs
+//!   the isolation loop (re-render each non-default section alone; the
+//!   first failure is the culprit), which is also Python's path for the
+//!   common `UndefinedError` case that carries no lineno.
+//! * `composer.py:286-321` (`compose`), `347-364` (`compile_template`)
+//!   — [`compose`], [`compile_template`].
+//!
+//! P3 step B deleted `compose_cloud` (`composer.py:324-344`) with
+//! the retired cloud plane.
+//! * `composer.py:372-380` (`_user_for_run`) — [`user_id_for_run`]: the
+//!   `run_is_human_triggered` predicate owns to the runner layer, so this
+//!   takes its boolean result plus the triggering user's id.
+//!
+//! Out of scope (context layer, PIDASHCONV-142): the turn builders
+//! (`composer.py:383+` — `build_first_turn`, `build_first_turn_context`,
+//! `build_scheduler_turn`, `build_direct_turn`).
+//!
+//! Ported bugs (translate, don't redesign — from the `bugs` array of
+//! `FIX-compose`): none in this file's lines. The recorded bug (local
+//! `build_first_turn` stamps `run.prompt_manifest` as a bare list while
+//! the cloud path stamps a versioned dict, `composer.py:398-414`) lives in
+//! the turn builders and travels with PIDASHCONV-142.
+//!
+//! Semantic traps watched: `str.strip()` strips U+001C–U+001F on top of
+//! Unicode whitespace (replicated in [`assemble`]); `len(candidate)`
+//! counts chars (see `validation.rs`);
+//! `if draft_overrides:` treats an empty dict as absent; `f"user:{id}"`
+//! labels use the requesting user's id, not the row's.
+
+use std::collections::{BTreeMap, HashMap};
+
+use serde::Serialize;
+
+use super::{recipes, registry, renderer, work_types};
+
+/// Manifest/source label for a registry-default section body
+/// (`composer.py:32`).
+pub const SOURCE_DEFAULT: &str = "default";
+/// Manifest/source label for a workspace-level override body
+/// (`composer.py:33`).
+pub const SOURCE_WORKSPACE: &str = "workspace";
+/// Manifest/source label for an unsaved preview-draft body
+/// (`composer.py:35`). The version is unchanged (the draft is unversioned).
+pub const SOURCE_DRAFT: &str = "draft";
+
+/// A section after override resolution, ready to assemble
+/// (`composer.py:38-47`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedSection {
+    pub key: String,
+    pub title: String,
+    pub customizable: String,
+    pub body: String,
+    /// `"default" | "workspace" | "user:<id>"` (or `"draft"` / `"candidate"`
+    /// for preview / validation substitutes).
+    pub source: String,
+    /// The override row version; `0` for the registry default.
+    pub version: i64,
+}
+
+/// One section's provenance + position in the assembled template body
+/// (`composer.py:50-67`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ManifestEntry {
+    pub section_key: String,
+    pub source: String,
+    pub version: i64,
+    pub line_start: i64,
+    pub line_end: i64,
+}
+
+impl ManifestEntry {
+    /// `to_dict` (`composer.py:60-67`): wire order is declaration order.
+    pub fn to_dict(&self) -> serde_json::Value {
+        serde_json::json!({
+            "section_key": self.section_key,
+            "source": self.source,
+            "version": self.version,
+            "line_start": self.line_start,
+            "line_end": self.line_end,
+        })
+    }
+}
+
+/// Result of composing a kind: rendered text + provenance + raw template
+/// (`composer.py:70-81`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComposedPrompt {
+    pub text: String,
+    pub manifest: Vec<ManifestEntry>,
+    pub template_body: String,
+    pub resolved: Vec<ResolvedSection>,
+}
+
+impl ComposedPrompt {
+    /// `manifest_dicts` (`composer.py:79-81`).
+    pub fn manifest_dicts(&self) -> Vec<serde_json::Value> {
+        self.manifest.iter().map(ManifestEntry::to_dict).collect()
+    }
+}
+
+/// The customizability tier that actually applies for a workspace
+/// (`composer.py:84-92`). Today the static registry flag — the §9.2 seam
+/// for dynamic per-workspace admin-locking, which lands here without
+/// touching the resolver or callers. The workspace id is accepted and
+/// ignored, exactly like Python's `workspace` parameter.
+pub fn effective_customizability<'a>(
+    section: &'a registry::PromptSection<'a>,
+    _workspace_id: Option<&str>,
+) -> &'a str {
+    section.customizable
+}
+
+/// One active-override row as handed over by the DB edge
+/// (`PromptSectionOverride` columns read by `load_override_index`,
+/// `composer.py:100-122`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverrideRow {
+    pub workspace_id: String,
+    pub section_key: String,
+    pub body: String,
+    pub version: i64,
+    pub is_active: bool,
+    /// `None` for workspace-level rows; `Some` for personal (user-scope) rows.
+    pub user_id: Option<String>,
+}
+
+/// Override-index scopes (`composer.py:96-97`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum OverrideScope {
+    User,
+    Workspace,
+}
+
+/// Bulk-loaded active overrides keyed by `(scope, section_key)`
+/// (`composer.py:100-122`). `BTreeMap` keeps the fixture's sorted order.
+pub type OverrideIndex = BTreeMap<(OverrideScope, String), OverrideRow>;
+
+/// Bulk-load active overrides for a scope into `{(scope, key): row}`
+/// (`composer.py:100-122`).
+///
+/// Same SQL semantics as the Django query, executed by the caller (the DB
+/// edge) and filtered here:
+///
+/// ```sql
+/// -- workspace_id set, user_id set (FIX-compose `sql.load_override_index_scoped`):
+/// WHERE is_active AND workspace_id = :ws
+///   AND (user_id IS NULL OR user_id = :user)
+/// -- user_id None (FIX-compose `sql.load_override_index_all_active`):
+/// WHERE is_active AND workspace_id = :ws AND user_id IS NULL
+/// ```
+///
+/// `workspace_id = None` (no workspace context, e.g. a global preview)
+/// returns the empty index without touching rows (`composer.py:108-109`).
+/// The partial-unique constraints guarantee at most one active row per
+/// (scope, key), so later rows simply overwrite earlier ones, as in Python.
+pub fn build_override_index(
+    workspace_id: Option<&str>,
+    user_id: Option<&str>,
+    rows: &[OverrideRow],
+) -> OverrideIndex {
+    let mut index = OverrideIndex::new();
+    let Some(workspace_id) = workspace_id else {
+        return index;
+    };
+    for row in rows {
+        if !row.is_active || row.workspace_id != workspace_id {
+            continue;
+        }
+        let scope = match (&row.user_id, user_id) {
+            (None, _) => OverrideScope::Workspace,
+            (Some(row_user), Some(uid)) if row_user == uid => OverrideScope::User,
+            _ => continue,
+        };
+        index.insert((scope, row.section_key.clone()), row.clone());
+    }
+    index
+}
+
+/// Resolve the `(scope, row)` for `key` from a preloaded index
+/// (`composer.py:125-133`, index branch). Personal scope wins when the
+/// caller passes a user; otherwise only the workspace row is consulted.
+fn lookup_override<'a>(
+    user_id: Option<&str>,
+    key: &str,
+    index: &'a OverrideIndex,
+) -> (OverrideScope, Option<&'a OverrideRow>) {
+    if user_id.is_some() {
+        if let Some(row) = index.get(&(OverrideScope::User, key.to_owned())) {
+            return (OverrideScope::User, Some(row));
+        }
+    }
+    (
+        OverrideScope::Workspace,
+        index.get(&(OverrideScope::Workspace, key.to_owned())),
+    )
+}
+
+/// Resolve one section's body via the precedence chain
+/// (`composer.py:150-201`): user override → workspace override → registry
+/// default. Locked sections skip the chain entirely. `section` lets a
+/// caller that already fetched the registry entry skip the lookup, as in
+/// Python.
+pub fn resolve_section(
+    key: &str,
+    workspace_id: Option<&str>,
+    user_id: Option<&str>,
+    index: &OverrideIndex,
+    section: Option<&registry::PromptSection<'_>>,
+) -> Result<ResolvedSection, registry::PromptRegistryError> {
+    let section: &registry::PromptSection<'_> = match section {
+        Some(section) => section,
+        None => registry::get_section(key)?,
+    };
+    let default = ResolvedSection {
+        key: section.key.to_owned(),
+        title: section.title.to_owned(),
+        customizable: section.customizable.to_owned(),
+        body: section.default_body.clone(),
+        source: SOURCE_DEFAULT.to_owned(),
+        version: 0,
+    };
+    let tier = effective_customizability(section, workspace_id);
+    if tier == registry::CUSTOMIZABLE_LOCKED {
+        return Ok(default);
+    }
+    if workspace_id.is_none() {
+        // No workspace context (e.g. a global preview): defaults only.
+        return Ok(default);
+    }
+    // Personal (user-scope) overrides only apply to the fully-open tier. A
+    // `workspace`-tier section is admin-governed: even if a stale personal
+    // row survives a tier downgrade, it must not resolve.
+    let lookup_user = if tier == registry::CUSTOMIZABLE_OVERRIDABLE {
+        user_id
+    } else {
+        None
+    };
+    let (scope, row) = lookup_override(lookup_user, key, index);
+    match row {
+        Some(row) => {
+            // `f"user:{user.id}"` (`composer.py:192`): the requesting
+            // user's id, not the row's.
+            let source = match scope {
+                OverrideScope::User => format!("user:{}", lookup_user.unwrap_or_default()),
+                OverrideScope::Workspace => SOURCE_WORKSPACE.to_owned(),
+            };
+            Ok(ResolvedSection {
+                key: section.key.to_owned(),
+                title: section.title.to_owned(),
+                customizable: section.customizable.to_owned(),
+                body: row.body.clone(),
+                source,
+                version: row.version,
+            })
+        }
+        None => Ok(default),
+    }
+}
+
+/// Concatenate resolved sections, tracking each one's line range
+/// (`composer.py:204-230`). Mirrors the legacy `fragments.assemble`:
+/// strip each body, join with a blank line, append a trailing newline.
+/// The line ranges index the assembled (pre-render) template so a Jinja
+/// error lineno maps back to its section.
+pub fn assemble(resolved: &[ResolvedSection]) -> (String, Vec<ManifestEntry>) {
+    // Python `str.strip()` also strips U+001C–U+001F, which Rust's
+    // `char::is_whitespace` (Unicode White_Space) does not.
+    let parts: Vec<String> = resolved
+        .iter()
+        .map(|r| {
+            r.body
+                .trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
+                .to_owned()
+        })
+        .collect();
+    let template_body = parts.join("\n\n") + "\n";
+    let mut manifest = Vec::with_capacity(resolved.len());
+    let mut line: i64 = 1;
+    for (r, part) in resolved.iter().zip(parts.iter()) {
+        let n_lines = part.matches('\n').count() as i64 + 1;
+        let line_start = line;
+        let line_end = line + n_lines - 1;
+        manifest.push(ManifestEntry {
+            section_key: r.key.clone(),
+            source: r.source.clone(),
+            version: r.version,
+            line_start,
+            line_end,
+        });
+        // The "\n\n" join inserts exactly one blank line between parts.
+        line = line_end + 2;
+    }
+    (template_body, manifest)
+}
+
+/// Render failure with section/source attribution (`composer.py:266-283`).
+/// The display string is the whole contract: handlers log it and the
+/// fixture asserts it byte for byte.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct PromptComposeError {
+    message: String,
+}
+
+impl PromptComposeError {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    /// The attributed failure message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+/// Best-effort: identify which section caused a render failure
+/// (`composer.py:233-263`, isolation half). Re-render each *overridden*
+/// section in isolation with the same context; the first that raises is
+/// the culprit. Defaults are validated in CI — suspect overrides first.
+/// A `None` context disables the probe, as in Python.
+fn find_culprit_section(
+    resolved: &[ResolvedSection],
+    manifest: &[ManifestEntry],
+    context: Option<&serde_json::Value>,
+) -> Option<ManifestEntry> {
+    let context = context?;
+    let by_key: HashMap<&str, &ManifestEntry> = manifest
+        .iter()
+        .map(|e| (e.section_key.as_str(), e))
+        .collect();
+    for section in resolved {
+        if section.source == SOURCE_DEFAULT {
+            continue;
+        }
+        if renderer::render(&section.body, context).is_err() {
+            return by_key.get(section.key.as_str()).cloned().cloned();
+        }
+    }
+    None
+}
+
+/// Re-wrap a render failure's detail string with section/source
+/// attribution (`composer.py:266-283`).
+fn attributed_detail(
+    detail: &str,
+    manifest: &[ManifestEntry],
+    resolved: &[ResolvedSection],
+    context: Option<&serde_json::Value>,
+) -> String {
+    if let Some(culprit) = find_culprit_section(resolved, manifest, context) {
+        return format!(
+            "section '{}' (source={}, v{}) failed to render: {detail}",
+            culprit.section_key, culprit.source, culprit.version
+        );
+    }
+    let overridden: Vec<&ManifestEntry> = manifest
+        .iter()
+        .filter(|e| e.source != SOURCE_DEFAULT)
+        .collect();
+    if !overridden.is_empty() {
+        let srcs = overridden
+            .iter()
+            .map(|e| format!("{}({})", e.section_key, e.source))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!("prompt render failed (active overrides: {srcs}): {detail}");
+    }
+    detail.to_owned()
+}
+
+/// The recipe for `kind` on `executor_kind` with its slots filled for
+/// `work_type` (`work_types.expand(recipes.recipe_for(...), work_type or
+/// DEFAULT_WORK_TYPE)`).
+fn expanded_recipe(
+    kind: &str,
+    executor_kind: Option<&str>,
+    work_type: Option<&str>,
+) -> Result<Vec<&'static str>, PromptComposeError> {
+    let recipe = recipes::recipe_for(kind, executor_kind)
+        .map_err(|e| PromptComposeError::new(e.message()))?;
+    let work_type = work_type
+        .filter(|key| !key.is_empty())
+        .unwrap_or(work_types::DEFAULT_WORK_TYPE);
+    work_types::expand(recipe, work_type).map_err(|e| PromptComposeError::new(e.message()))
+}
+
+/// Resolve, assemble, and render the recipe for `kind`
+/// (`composer.py:286-321`). Raises [`PromptComposeError`] (attributed to
+/// the failing section) when rendering fails.
+///
+/// `draft_overrides` (section key → body) substitutes an *unsaved* body
+/// for the resolved one before assembly; keys outside this recipe are
+/// ignored, and an empty map is the same as absent (`if
+/// draft_overrides:`). A draft keeps its resolved version and is labeled
+/// [`SOURCE_DRAFT`].
+///
+/// `work_type` fills the recipe's slots ([`work_types::expand`]); `None`
+/// means the default work type.
+///
+/// Unknown kinds / sections / work types surface message-preserving
+/// [`PromptComposeError`]s (Python propagates `RecipeNotFound` /
+/// `PromptRegistryError` / `WorkTypeError` as-is; there are no typed
+/// catchers yet, so the message is the contract).
+#[allow(clippy::too_many_arguments)]
+pub fn compose(
+    kind: &str,
+    workspace_id: Option<&str>,
+    user_id: Option<&str>,
+    index: &OverrideIndex,
+    context: &serde_json::Value,
+    draft_overrides: Option<&HashMap<String, String>>,
+    executor_kind: Option<&str>,
+    work_type: Option<&str>,
+) -> Result<ComposedPrompt, PromptComposeError> {
+    let recipe = expanded_recipe(kind, executor_kind, work_type)?;
+    let mut resolved = Vec::with_capacity(recipe.len());
+    for key in recipe {
+        resolved.push(
+            resolve_section(key, workspace_id, user_id, index, None)
+                .map_err(|e| PromptComposeError::new(e.message()))?,
+        );
+    }
+    if let Some(drafts) = draft_overrides {
+        if !drafts.is_empty() {
+            for r in &mut resolved {
+                if let Some(body) = drafts.get(&r.key) {
+                    r.body = body.clone();
+                    r.source = SOURCE_DRAFT.to_owned();
+                }
+            }
+        }
+    }
+    let (template_body, manifest) = assemble(&resolved);
+    match renderer::render(&template_body, context) {
+        Ok(text) => Ok(ComposedPrompt {
+            text,
+            manifest,
+            template_body,
+            resolved,
+        }),
+        Err(err) => Err(PromptComposeError::new(attributed_detail(
+            err.message(),
+            &manifest,
+            &resolved,
+            Some(context),
+        ))),
+    }
+}
+
+pub fn compile_template(
+    kind: &str,
+    workspace_id: Option<&str>,
+    user_id: Option<&str>,
+    index: &OverrideIndex,
+    work_type: Option<&str>,
+) -> Result<ComposedPrompt, PromptComposeError> {
+    let recipe = expanded_recipe(kind, None, work_type)?;
+    let mut resolved = Vec::with_capacity(recipe.len());
+    for key in recipe {
+        resolved.push(
+            resolve_section(key, workspace_id, user_id, index, None)
+                .map_err(|e| PromptComposeError::new(e.message()))?,
+        );
+    }
+    let (template_body, manifest) = assemble(&resolved);
+    Ok(ComposedPrompt {
+        text: template_body.clone(),
+        manifest,
+        template_body,
+        resolved,
+    })
+}
+
+/// The user id whose overrides apply to a run (`composer.py:372-380`).
+///
+/// Human-triggered runs resolve with the triggering user's id; automatic
+/// runs (tick, scheduler beat, system-bot) resolve workspace + defaults
+/// only. The `run_is_human_triggered(run)` predicate owns to the runner
+/// layer — this takes its boolean result — and ids cross here as strings,
+/// since this crate never sees the ORM run object.
+pub fn user_id_for_run(human_triggered: bool, created_by_user_id: Option<&str>) -> Option<&str> {
+    if human_triggered {
+        created_by_user_id
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::project_settings::{AgentStages, AgentStagesMode};
+    use crate::prompting::context;
+    use serde_json::Value;
+
+    const WORKSPACE_ID: &str = "204fd67f-6485-47a0-98e2-079bd6b34202";
+    const USER_ID: &str = "19a3bb94-30b3-4e62-8116-edea68ffe7eb";
+
+    fn fixture() -> Value {
+        let path = format!(
+            "{}/../../fixtures/prompting/FIX-compose.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("golden exists"))
+            .expect("golden parses")
+    }
+
+    fn compose_data(fixture: &Value) -> &Value {
+        fixture
+            .get("data")
+            .and_then(|data| data.get("compose"))
+            .expect("fixture carries data.compose")
+    }
+
+    fn precedence_data(fixture: &Value) -> &Value {
+        fixture
+            .get("data")
+            .and_then(|data| data.get("precedence"))
+            .expect("fixture carries data.precedence")
+    }
+
+    fn row(section_key: &str, body: &str, version: i64, user_id: Option<&str>) -> OverrideRow {
+        OverrideRow {
+            workspace_id: WORKSPACE_ID.to_owned(),
+            section_key: section_key.to_owned(),
+            body: body.to_owned(),
+            version,
+            is_active: true,
+            user_id: user_id.map(str::to_owned),
+        }
+    }
+
+    /// The `FIX-compose` precedence world: a personal + a workspace row on
+    /// `autonomy` (overridable), a personal row on `intro` (locked — a
+    /// stale row surviving a tier downgrade), and a personal row on
+    /// `repo-context`.
+    fn precedence_rows() -> Vec<OverrideRow> {
+        vec![
+            row("autonomy", "PERSONAL autonomy", 1, Some(USER_ID)),
+            row("autonomy", "WORKSPACE autonomy", 2, None),
+            row("intro", "STALE PERSONAL intro", 9, Some(USER_ID)),
+            row("repo-context", "PERSONAL repo-context", 3, Some(USER_ID)),
+        ]
+    }
+
+    fn populated_issue_context() -> Value {
+        crate::prompting::validation::sample_contexts(recipes::KIND_CODING_TASK)
+            .into_iter()
+            .next()
+            .expect("populated sample first")
+    }
+
+    #[test]
+    fn source_consts_match_fixture() {
+        let golden = fixture();
+        let consts = &compose_data(&golden)["source_consts"];
+        assert_eq!(consts["default"], Value::String(SOURCE_DEFAULT.to_owned()));
+        assert_eq!(
+            consts["workspace"],
+            Value::String(SOURCE_WORKSPACE.to_owned())
+        );
+        assert_eq!(consts["draft"], Value::String(SOURCE_DRAFT.to_owned()));
+    }
+
+    #[test]
+    fn effective_customizability_is_the_registry_flag() {
+        // `FIX-compose: effective_customizability_is_registry_flag`.
+        let golden = fixture();
+        assert!(
+            compose_data(&golden)["effective_customizability_is_registry_flag"]
+                .as_bool()
+                .expect("bool")
+        );
+        let section = registry::get_section("autonomy").expect("autonomy exists");
+        assert_eq!(effective_customizability(section, None), "overridable");
+        assert_eq!(
+            effective_customizability(section, Some(WORKSPACE_ID)),
+            "overridable"
+        );
+    }
+
+    #[test]
+    fn build_override_index_applies_sql_semantics() {
+        let mut rows = precedence_rows();
+        rows.push(OverrideRow {
+            is_active: false,
+            ..row("autonomy", "INACTIVE autonomy", 7, None)
+        });
+        rows.push(OverrideRow {
+            workspace_id: "other-workspace".to_owned(),
+            ..row("autonomy", "OTHER WS autonomy", 8, None)
+        });
+        rows.push(OverrideRow {
+            user_id: Some("other-user".to_owned()),
+            ..row("autonomy", "OTHER USER autonomy", 9, Some("other-user"))
+        });
+        let index = build_override_index(Some(WORKSPACE_ID), Some(USER_ID), &rows);
+        let keys: Vec<String> = index
+            .keys()
+            .map(|(scope, key)| {
+                format!(
+                    "{}:{key}",
+                    match scope {
+                        OverrideScope::User => "user",
+                        OverrideScope::Workspace => "workspace",
+                    }
+                )
+            })
+            .collect();
+        // Inactive rows, foreign workspaces and other users' personal rows
+        // never enter the index.
+        assert_eq!(
+            keys,
+            vec![
+                "user:autonomy",
+                "user:intro",
+                "user:repo-context",
+                "workspace:autonomy"
+            ]
+        );
+        // No requesting user: personal rows are excluded, like the
+        // `user_id IS NULL` variant of the fixture SQL.
+        let index = build_override_index(Some(WORKSPACE_ID), None, &rows);
+        assert!(index
+            .keys()
+            .all(|(scope, _)| *scope == OverrideScope::Workspace));
+        // No workspace context: defaults only, no query at all.
+        assert!(build_override_index(None, Some(USER_ID), &rows).is_empty());
+    }
+
+    #[test]
+    fn resolve_personal_beats_workspace() {
+        // `FIX-compose / precedence.personal_beats_workspace`.
+        let golden = fixture();
+        let expected = &precedence_data(&golden)["personal_beats_workspace"];
+        let index = build_override_index(Some(WORKSPACE_ID), Some(USER_ID), &precedence_rows());
+        let resolved = resolve_section("autonomy", Some(WORKSPACE_ID), Some(USER_ID), &index, None)
+            .expect("resolves");
+        assert_eq!(resolved.body, expected["body"].as_str().expect("body"));
+        assert_eq!(
+            resolved.source,
+            expected["source"].as_str().expect("source")
+        );
+        assert_eq!(
+            resolved.version,
+            expected["version"].as_i64().expect("version")
+        );
+        assert_eq!(resolved.key, "autonomy");
+    }
+
+    #[test]
+    fn resolve_workspace_when_no_personal() {
+        // `FIX-compose / precedence.workspace_when_no_personal`.
+        let golden = fixture();
+        let expected = &precedence_data(&golden)["workspace_when_no_personal"];
+        let rows: Vec<OverrideRow> = precedence_rows()
+            .into_iter()
+            .filter(|r| r.user_id.is_none())
+            .collect();
+        let index = build_override_index(Some(WORKSPACE_ID), Some(USER_ID), &rows);
+        let resolved = resolve_section("autonomy", Some(WORKSPACE_ID), Some(USER_ID), &index, None)
+            .expect("resolves");
+        assert_eq!(resolved.body, expected["body"].as_str().expect("body"));
+        assert_eq!(resolved.source, "workspace");
+        assert_eq!(
+            resolved.version,
+            expected["version"].as_i64().expect("version")
+        );
+    }
+
+    #[test]
+    fn resolve_automatic_runs_ignore_personal() {
+        // `FIX-compose / precedence.automatic_runs_workspace_only`:
+        // automatic runs pass no user, so the workspace row wins even
+        // though a personal row exists.
+        let golden = fixture();
+        let expected = &precedence_data(&golden)["automatic_runs_workspace_only"];
+        let index = build_override_index(Some(WORKSPACE_ID), None, &precedence_rows());
+        let resolved =
+            resolve_section("autonomy", Some(WORKSPACE_ID), None, &index, None).expect("resolves");
+        assert_eq!(resolved.body, expected["body"].as_str().expect("body"));
+        assert_eq!(
+            resolved.source,
+            expected["source"].as_str().expect("source")
+        );
+    }
+
+    #[test]
+    fn resolve_locked_ignores_stale_personal() {
+        // `FIX-compose / precedence.locked_ignores_stale_personal`: `intro`
+        // is locked, so the stale personal row must not resolve.
+        let index = build_override_index(Some(WORKSPACE_ID), Some(USER_ID), &precedence_rows());
+        let resolved = resolve_section("intro", Some(WORKSPACE_ID), Some(USER_ID), &index, None)
+            .expect("resolves");
+        assert_eq!(resolved.source, SOURCE_DEFAULT);
+        assert_eq!(resolved.version, 0);
+        assert_eq!(
+            resolved.body,
+            registry::get_section("intro")
+                .expect("intro exists")
+                .default_body
+        );
+    }
+
+    #[test]
+    fn resolve_no_workspace_returns_default() {
+        // `FIX-compose / precedence.no_workspace_defaults_only`.
+        let index = build_override_index(Some(WORKSPACE_ID), Some(USER_ID), &precedence_rows());
+        let resolved =
+            resolve_section("autonomy", None, Some(USER_ID), &index, None).expect("resolves");
+        assert_eq!(resolved.source, SOURCE_DEFAULT);
+        assert_eq!(resolved.version, 0);
+    }
+
+    #[test]
+    fn resolve_workspace_tier_ignores_personal() {
+        // Tier gate (`composer.py:189`): a `workspace`-tier section never
+        // resolves a personal row, even a live one. No workspace-tier
+        // section ships today (31 locked, 7 overridable), so the section
+        // comes in through the `section` parameter, exactly as a caller
+        // that already fetched the registry entry would pass it.
+        let section = registry::PromptSection {
+            key: "synthetic",
+            title: "Synthetic",
+            customizable: registry::CUSTOMIZABLE_WORKSPACE,
+            default_body: "DEFAULT".to_owned(),
+        };
+        let mut rows = precedence_rows();
+        rows.push(row("synthetic", "STALE PERSONAL", 5, Some(USER_ID)));
+        rows.push(row("synthetic", "WORKSPACE BODY", 6, None));
+        let index = build_override_index(Some(WORKSPACE_ID), Some(USER_ID), &rows);
+        let resolved = resolve_section(
+            "synthetic",
+            Some(WORKSPACE_ID),
+            Some(USER_ID),
+            &index,
+            Some(&section),
+        )
+        .expect("resolves");
+        assert_eq!(resolved.source, SOURCE_WORKSPACE);
+        assert_eq!(resolved.body, "WORKSPACE BODY");
+    }
+
+    #[test]
+    fn assemble_matches_fixture() {
+        // `FIX-compose / compose.assemble_body + assemble_manifest`.
+        let golden = fixture();
+        let data = compose_data(&golden);
+        let resolved = vec![
+            ResolvedSection {
+                key: "a".to_owned(),
+                title: "A".to_owned(),
+                customizable: "overridable".to_owned(),
+                body: "line1\nline2".to_owned(),
+                source: SOURCE_DEFAULT.to_owned(),
+                version: 0,
+            },
+            ResolvedSection {
+                key: "b".to_owned(),
+                title: "B".to_owned(),
+                customizable: "workspace".to_owned(),
+                body: "solo".to_owned(),
+                source: SOURCE_WORKSPACE.to_owned(),
+                version: 4,
+            },
+        ];
+        let (body, manifest) = assemble(&resolved);
+        assert_eq!(body, data["assemble_body"].as_str().expect("body"));
+        let dicts: Vec<Value> = manifest.iter().map(ManifestEntry::to_dict).collect();
+        assert_eq!(
+            dicts,
+            *data["assemble_manifest"].as_array().expect("manifest")
+        );
+        // Empty recipe edge: `"".join + "\n"`, no manifest rows.
+        let (body, manifest) = assemble(&[]);
+        assert_eq!(body, "\n");
+        assert!(manifest.is_empty());
+        // `str.strip()` parity: U+001C–U+001F strip like whitespace.
+        let resolved = vec![ResolvedSection {
+            key: "a".to_owned(),
+            title: "A".to_owned(),
+            customizable: "overridable".to_owned(),
+            body: "x\u{1c}".to_owned(),
+            source: SOURCE_DEFAULT.to_owned(),
+            version: 0,
+        }];
+        assert_eq!(assemble(&resolved).0, "x\n");
+    }
+
+    #[test]
+    fn compose_defaults_manifest_matches_fixture() {
+        // `FIX-compose / compose.compose_manifest_* + compose_first_manifest_entry`.
+        let golden = fixture();
+        let data = compose_data(&golden);
+        let index = OverrideIndex::new();
+        let composed = compose(
+            recipes::KIND_CODING_TASK,
+            Some(WORKSPACE_ID),
+            Some(USER_ID),
+            &index,
+            &populated_issue_context(),
+            None,
+            None,
+            None,
+        )
+        .expect("defaults compose");
+        assert_eq!(
+            composed.manifest.len(),
+            data["compose_manifest_entry_count"]
+                .as_u64()
+                .expect("count") as usize
+        );
+        assert_eq!(composed.resolved.len(), composed.manifest.len());
+        assert!(
+            data["compose_manifest_all_default"]
+                .as_bool()
+                .expect("bool"),
+            "no overrides active"
+        );
+        assert!(composed.manifest.iter().all(|e| e.source == SOURCE_DEFAULT));
+        assert_eq!(
+            composed.manifest_dicts()[0],
+            data["compose_first_manifest_entry"].clone()
+        );
+        assert!(composed
+            .text
+            .contains("Pi Dash is a project management tool"));
+        assert!(
+            !composed.text.contains("{{") && !composed.text.contains("{%"),
+            "compose_defaults_no_jinja_left"
+        );
+    }
+
+    #[test]
+    fn compose_draft_renders_and_labels_source() {
+        // `FIX-compose / compose.draft_renders_value + draft_source_label`.
+        let index = OverrideIndex::new();
+        let mut drafts = HashMap::new();
+        drafts.insert("intro".to_owned(), "Hello {{ workspace.slug }}!".to_owned());
+        // Keys outside the recipe are ignored, like Python's per-resolved
+        // membership check.
+        drafts.insert("not-a-section".to_owned(), "ignored".to_owned());
+        let composed = compose(
+            recipes::KIND_CODING_TASK,
+            Some(WORKSPACE_ID),
+            Some(USER_ID),
+            &index,
+            &populated_issue_context(),
+            Some(&drafts),
+            None,
+            None,
+        )
+        .expect("draft composes");
+        assert!(composed.text.contains("Hello sample-ws!"));
+        let intro = composed
+            .resolved
+            .iter()
+            .find(|r| r.key == "intro")
+            .expect("intro");
+        assert_eq!(intro.source, SOURCE_DRAFT);
+        assert_eq!(intro.version, 0);
+        // An empty draft map is the same as absent (`if draft_overrides:`).
+        let composed = compose(
+            recipes::KIND_CODING_TASK,
+            Some(WORKSPACE_ID),
+            Some(USER_ID),
+            &index,
+            &populated_issue_context(),
+            Some(&HashMap::new()),
+            None,
+            None,
+        )
+        .expect("empty drafts compose");
+        assert!(composed.resolved.iter().all(|r| r.source == SOURCE_DEFAULT));
+    }
+
+    #[test]
+    fn compose_draft_bad_attr_matches_fixture() {
+        // `FIX-compose / compose.draft_bad_attr_error`: error attribution
+        // golden — the isolation probe pins the draft section.
+        let golden = fixture();
+        let index = OverrideIndex::new();
+        let mut drafts = HashMap::new();
+        drafts.insert("intro".to_owned(), "broken {{ nope_xyz }}".to_owned());
+        let err = compose(
+            recipes::KIND_CODING_TASK,
+            Some(WORKSPACE_ID),
+            Some(USER_ID),
+            &index,
+            &populated_issue_context(),
+            Some(&drafts),
+            None,
+            None,
+        )
+        .expect_err("bad draft fails");
+        // Attribution wrapper is byte-exact; the trailing engine detail
+        // is engine-specific prose (minijinja says `undefined value (in
+        // <string>:1)` where Jinja says `'nope_xyz' is undefined` —
+        // renderer engine-message caveat), so split it off.
+        let golden_message = compose_data(&golden)["draft_bad_attr_error"]
+            .as_str()
+            .expect("golden message")
+            .split_once(": ")
+            .expect("prefix")
+            .1
+            .to_owned();
+        let head = golden_message
+            .split_once("failed to render: ")
+            .expect("wrapper")
+            .0;
+        assert!(
+            err.message()
+                .starts_with(&format!("{head}failed to render: ")),
+            "unexpected message: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn compile_template_returns_raw_body() {
+        // `FIX-compose / compose.compile_*`: markers intact, text is the
+        // assembled body.
+        let golden = fixture();
+        let data = compose_data(&golden);
+        assert!(data["compile_has_jinja_markers"].as_bool().expect("bool"));
+        assert!(data["compile_text_equals_template_body"]
+            .as_bool()
+            .expect("bool"));
+        let index = OverrideIndex::new();
+        let compiled = compile_template(
+            recipes::KIND_CODING_TASK,
+            Some(WORKSPACE_ID),
+            Some(USER_ID),
+            &index,
+            None,
+        )
+        .expect("compiles");
+        assert!(compiled.text.contains("{{"));
+        assert_eq!(compiled.text, compiled.template_body);
+        assert_eq!(compiled.manifest.len(), compiled.resolved.len());
+    }
+
+    #[test]
+    fn compose_unknown_kind_reports_recipe_message() {
+        let err = compose(
+            "nope",
+            Some(WORKSPACE_ID),
+            Some(USER_ID),
+            &OverrideIndex::new(),
+            &populated_issue_context(),
+            None,
+            None,
+            None,
+        )
+        .expect_err("unknown kind fails");
+        assert_eq!(err.message(), "no recipe for kind 'nope'");
+    }
+
+    #[test]
+    fn user_id_for_run_matrix() {
+        // `composer.py:372-380` + `precedence.automatic_runs_workspace_only`.
+        assert_eq!(user_id_for_run(true, Some(USER_ID)), Some(USER_ID));
+        assert_eq!(user_id_for_run(true, None), None);
+        assert_eq!(user_id_for_run(false, Some(USER_ID)), None);
+    }
+
+    /// Compose `kind` with Django's own populated sample context
+    /// (`test_composer.py::_ctx(kind)` = `sample_contexts(kind)[0]`).
+    fn composed_text(kind: &str) -> String {
+        let ctx = crate::prompting::validation::sample_contexts(kind)
+            .into_iter()
+            .next()
+            .expect("populated sample first");
+        compose(
+            kind,
+            None,
+            None,
+            &OverrideIndex::new(),
+            &ctx,
+            None,
+            None,
+            None,
+        )
+        .unwrap_or_else(|err| panic!("{kind} composes: {}", err.message()))
+        .text
+    }
+
+    #[test]
+    fn scheduler_prompt_documents_run_yield_without_the_ticking_clock() {
+        // A scheduler run may report its outcome (PDASHOSS01-276) but has no
+        // issue clock: the scheduler variant must not mention --stop-ticking
+        // at all (lean workflow), nor carry the issue-run wording.
+        let body = composed_text(recipes::KIND_SCHEDULER);
+        assert!(body.contains("pidash run yield --outcome"));
+        assert!(body.contains(r#""run_kind": "scheduler""#));
+        assert!(body.contains("nothing it reports disables the schedule"));
+        assert!(!body.contains("--stop-ticking"));
+        assert!(!body.contains("the issue's ticking clock"));
+        assert!(!body.contains("pidash run finish"));
+    }
+
+    fn composed_text_with_work_type(kind: &str, work_type: &str) -> String {
+        let ctx = crate::prompting::validation::sample_contexts(kind)
+            .into_iter()
+            .next()
+            .expect("populated sample first");
+        compose_ctx(kind, work_type, &ctx)
+    }
+
+    fn compose_ctx(kind: &str, work_type: &str, ctx: &Value) -> String {
+        compose(
+            kind,
+            None,
+            None,
+            &OverrideIndex::new(),
+            ctx,
+            None,
+            None,
+            Some(work_type),
+        )
+        .unwrap_or_else(|err| panic!("{kind} composes: {}", err.message()))
+        .text
+    }
+
+    const ISSUE_KINDS: [&str; 3] = [
+        recipes::KIND_CODING_TASK,
+        recipes::KIND_REVIEW,
+        recipes::KIND_TEST,
+    ];
+
+    /// Lean workflow acceptance (design §13 issue C): no built-in issue-run
+    /// section mentions `--stop-ticking` or `parent_done_payload`, every
+    /// issue run carries the workpad (unified workpad design U1), and
+    /// `pidash run yield` survives
+    /// only in the lifecycle's old-runner fallback line (D11).
+    #[test]
+    fn issue_run_prompts_drop_the_retired_end_of_run_commands() {
+        for kind in ISSUE_KINDS {
+            for work_type in work_types::keys() {
+                let body = composed_text_with_work_type(kind, work_type);
+                // `--stop-ticking` survives only in the old-runner fallback
+                // (D11), where `yield` is the only way to stop the clock.
+                for line in body.lines().filter(|line| line.contains("--stop-ticking")) {
+                    assert!(
+                        line.contains("If `pidash run finish` is not a known command"),
+                        "{kind}/{work_type}: {line}"
+                    );
+                }
+                assert!(
+                    body.contains("pidash run finish --to"),
+                    "{kind}/{work_type}"
+                );
+                let yield_lines: Vec<&str> = body
+                    .lines()
+                    .filter(|line| line.contains("pidash run yield"))
+                    .collect();
+                assert_eq!(yield_lines.len(), 1, "{kind}/{work_type}: {yield_lines:?}");
+                assert!(
+                    yield_lines[0].contains("If `pidash run finish` is not a known command"),
+                    "{kind}/{work_type}: yield only in the fallback"
+                );
+                // Every issue run reads and writes the workpad.
+                assert!(body.contains("pidash workpad update"), "{kind}/{work_type}");
+                assert!(body.contains("### Keep in mind"), "{kind}/{work_type}");
+                assert!(!body.contains("workpad_body"), "{kind}/{work_type}");
+                let template =
+                    compile_template(kind, None, None, &OverrideIndex::new(), Some(work_type))
+                        .expect("compiles")
+                        .text;
+                // The stage hand-off is gone from every template. The
+                // in-flight sentence in review and test (an earlier run's
+                // hand-off comment) is the only mention left.
+                for retired in [
+                    "--handoff-file",
+                    "{{ handoff }}",
+                    "### Hand-off",
+                    "### Path to done",
+                ] {
+                    assert!(!template.contains(retired), "{kind}/{work_type}: {retired}");
+                }
+                for line in body.lines().filter(|line| line.contains("hand-off")) {
+                    assert!(
+                        kind != recipes::KIND_CODING_TASK
+                            && line.contains(
+                                "an earlier run may have posted a hand-off in the comments"
+                            ),
+                        "{kind}/{work_type}: {line}"
+                    );
+                }
+                assert!(
+                    !template.contains("parent_done_payload"),
+                    "{kind}/{work_type}"
+                );
+                for line in template
+                    .lines()
+                    .filter(|line| line.contains("--stop-ticking"))
+                {
+                    assert!(
+                        line.contains("If `pidash run finish` is not a known command"),
+                        "{kind}/{work_type}: {line}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The fallback for a runner without `finish` still stops the clock for
+    /// `waiting_on_human` / `blocked`, and posts no hand-off for any kind.
+    #[test]
+    fn old_runner_fallback_stops_the_clock() {
+        let coding = composed_text_with_work_type(recipes::KIND_CODING_TASK, "software");
+        let fallback = coding
+            .lines()
+            .find(|line| line.contains("If `pidash run finish` is not a known command"))
+            .expect("fallback line");
+        assert!(fallback.contains("pidash run yield --outcome <result>"));
+        assert!(fallback.contains(
+            "adding `--stop-ticking` when the result is `waiting_on_human` or `blocked`"
+        ));
+        assert!(
+            !fallback.contains("hand-off"),
+            "no hand-off since the unified workpad"
+        );
+        let review = composed_text_with_work_type(recipes::KIND_REVIEW, "software");
+        let fallback = review
+            .lines()
+            .find(|line| line.contains("If `pidash run finish` is not a known command"))
+            .expect("fallback line");
+        assert!(!fallback.contains("hand-off"), "no stage writes one");
+    }
+
+    /// Auto never offers a stage the project lacks (it would cost the agent
+    /// a refused `finish` and a retry).
+    #[test]
+    fn auto_does_not_offer_a_missing_stage() {
+        use crate::prompting::context::{stages_context, ProjectStateView};
+        let state = |name: &str, group: &str| ProjectStateView {
+            name: name.to_owned(),
+            group: group.to_owned(),
+            description: None,
+        };
+        let no_test = vec![
+            state("In Progress", "started"),
+            state("In Review", "review"),
+            state("AI Completed", "completed"),
+        ];
+        let ctx = stages_context(
+            &AgentStages::default(),
+            &no_test,
+            Some("In Progress"),
+            Some("started"),
+        );
+        assert_eq!(ctx["review"], Value::Bool(true));
+        assert_eq!(ctx["test"], Value::Bool(false));
+        assert_eq!(
+            ctx["path"],
+            serde_json::json!(["In Progress", "In Review", "AI Completed"])
+        );
+        let mut sample = crate::prompting::validation::sample_contexts(recipes::KIND_CODING_TASK)
+            .into_iter()
+            .next()
+            .expect("sample");
+        sample["stages"] = ctx;
+        let body = compose_ctx(recipes::KIND_CODING_TASK, "software", &sample);
+        assert!(body.contains("- **In Review** — the work product can be wrong"));
+        assert!(!body.contains("- **In Test** — the work product has behaviour"));
+    }
+
+    /// The five project settings of design §7 as `(label, stages,
+    /// enabled stage names)`.
+    fn five_settings() -> Vec<(&'static str, AgentStages, Vec<&'static str>)> {
+        let custom = |review, test| AgentStages {
+            mode: AgentStagesMode::Custom,
+            review,
+            test,
+        };
+        vec![
+            ("custom, both off", custom(false, false), vec![]),
+            (
+                "custom, review only",
+                custom(true, false),
+                vec!["In Review"],
+            ),
+            ("custom, test only", custom(false, true), vec!["In Test"]),
+            (
+                "custom, both on",
+                custom(true, true),
+                vec!["In Review", "In Test"],
+            ),
+            ("auto", AgentStages::default(), vec!["In Review", "In Test"]),
+        ]
+    }
+
+    /// The populated sample for `kind`, sitting in that kind's stage, with
+    /// `stages` built from `agent_stages` and every other mention of a
+    /// stage name in the sample data neutralised (so the assertions below
+    /// see only what the sections themselves say).
+    fn stage_context(kind: &str, agent_stages: &AgentStages, final_state: bool) -> Value {
+        let mut ctx = crate::prompting::validation::sample_contexts(kind)
+            .into_iter()
+            .next()
+            .expect("populated sample first");
+        let (state, group) = match kind {
+            recipes::KIND_REVIEW => ("In Review", "review"),
+            recipes::KIND_TEST => ("In Test", "test"),
+            _ => ("In Progress", "started"),
+        };
+        ctx["issue"]["state"] = Value::from(state);
+        ctx["issue"]["state_group"] = Value::from(group);
+        if !final_state {
+            let states: Vec<Value> = ctx["issue"]["project_states"]
+                .as_array()
+                .expect("states")
+                .iter()
+                .filter(|s| s["name"] != "AI Completed")
+                .cloned()
+                .collect();
+            ctx["issue"]["project_states"] = Value::Array(states);
+        }
+        let views: Vec<context::ProjectStateView> = ctx["issue"]["project_states"]
+            .as_array()
+            .expect("states")
+            .iter()
+            .map(|s| context::ProjectStateView {
+                name: s["name"].as_str().expect("name").to_owned(),
+                group: s["group"].as_str().expect("group").to_owned(),
+                description: None,
+            })
+            .collect();
+        ctx["stages"] = context::stages_context(agent_stages, &views, Some(state), Some(group));
+        ctx["parent"]["state"] = Value::from("Todo");
+        ctx["blocked_by"][0]["state"] = Value::from("Todo");
+        // Neutralise the sample comments, like every other stage-name
+        // mention in the sample data.
+        ctx["comments_section"] =
+            Value::from("### Comment 1 — Human: Sample at 2026-01-01\n\nHello.");
+        ctx
+    }
+
+    /// Drop the "Available states" listing: it is project data (every
+    /// state the project has), not a section naming a stage.
+    fn without_state_listing(body: &str) -> String {
+        body.lines()
+            .filter(|line| !(line.starts_with("- **") && line.contains("** (group: `")))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Design §10.1: for each of the five settings, the composed coding,
+    /// review and test prompts name exactly the enabled stages; a disabled
+    /// stage's name appears nowhere in the lifecycle section; the manual
+    /// branch renders in a stage whose runs are switched off.
+    #[test]
+    fn composed_prompts_name_exactly_the_enabled_stages() {
+        let lifecycle = &registry::get_section("lifecycle")
+            .expect("lifecycle")
+            .default_body;
+        for (label, agent_stages, enabled) in five_settings() {
+            for kind in ISSUE_KINDS {
+                let ctx = stage_context(kind, &agent_stages, true);
+                let mut path = vec!["In Progress"];
+                path.extend(enabled.iter().copied());
+                path.push("AI Completed");
+                let path_line = format!("Path in this project: {}.", path.join(" → "));
+                let section = renderer::render(lifecycle, &ctx).expect("lifecycle renders");
+                assert!(section.contains(&path_line), "{label}/{kind}: {section}");
+                let own_state = ctx["issue"]["state"].as_str().expect("state");
+                let runs_here = ctx["stages"]["current_runs_automatically"]
+                    .as_bool()
+                    .expect("bool");
+                assert_eq!(
+                    runs_here,
+                    own_state == "In Progress" || enabled.contains(&own_state),
+                    "{label}/{kind}"
+                );
+                assert_eq!(
+                    section.contains("Agent runs are switched off for this stage"),
+                    !runs_here,
+                    "{label}/{kind}: manual-run branch"
+                );
+                for work_type in work_types::keys() {
+                    let body = without_state_listing(&compose_ctx(kind, work_type, &ctx));
+                    for stage in ["In Review", "In Test"] {
+                        // A manual run in a disabled stage names the stage it
+                        // sits in ("You are in …"), and nothing else does.
+                        let expected = enabled.contains(&stage) || stage == own_state;
+                        assert_eq!(
+                            body.contains(stage),
+                            expected,
+                            "{label}/{kind}/{work_type}: {stage}"
+                        );
+                        if !enabled.contains(&stage) {
+                            let mentions = section.matches(stage).count();
+                            let allowed = usize::from(stage == own_state);
+                            assert_eq!(mentions, allowed, "{label}/{kind}: {stage} in lifecycle");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// NEWPIDASH-338 item 2: a run in a non-stage state is not told
+    /// agent runs are "switched off" for the stage. That paragraph is
+    /// only for a registered stage the project switched off; Todo,
+    /// Backlog, Paused and custom states get no such sentence.
+    #[test]
+    fn non_stage_states_are_not_called_switched_off() {
+        use crate::prompting::context::{stages_context, ProjectStateView};
+        let state = |name: &str, group: &str| ProjectStateView {
+            name: name.to_owned(),
+            group: group.to_owned(),
+            description: None,
+        };
+        let states = vec![
+            state("Todo", "unstarted"),
+            state("In Progress", "started"),
+            state("In Review", "review"),
+            state("In Test", "test"),
+            state("AI Completed", "completed"),
+        ];
+        let custom = |review: bool, test: bool| AgentStages {
+            mode: AgentStagesMode::Custom,
+            review,
+            test,
+        };
+        // (state, group, stages, runs_automatically, switched_off)
+        let cases = vec![
+            ("Todo", "unstarted", AgentStages::default(), false, false),
+            ("Backlog", "backlog", AgentStages::default(), false, false),
+            ("Paused", "backlog", AgentStages::default(), false, false),
+            ("Triage X", "triage", AgentStages::default(), false, false),
+            ("Done", "completed", AgentStages::default(), false, false),
+            ("In Review", "review", custom(false, true), false, true),
+            ("In Test", "test", custom(true, false), false, true),
+            ("In Review", "review", AgentStages::default(), true, false),
+            ("In Progress", "started", custom(false, false), true, false),
+        ];
+        for (name, group, stages, runs, off) in cases {
+            let ctx = stages_context(&stages, &states, Some(name), Some(group));
+            assert_eq!(ctx["current_runs_automatically"], Value::Bool(runs));
+            assert_eq!(
+                ctx["current_stage_switched_off"],
+                Value::Bool(off),
+                "{name}"
+            );
+        }
+        // The Done-when case: a coding-task prompt rendered for an issue
+        // in Todo contains no "switched off".
+        let lifecycle = &registry::get_section("lifecycle")
+            .expect("lifecycle")
+            .default_body;
+        let mut ctx = stage_context(recipes::KIND_CODING_TASK, &AgentStages::default(), true);
+        ctx["issue"]["state"] = Value::from("Todo");
+        ctx["issue"]["state_group"] = Value::from("unstarted");
+        let views: Vec<ProjectStateView> = ctx["issue"]["project_states"]
+            .as_array()
+            .expect("states")
+            .iter()
+            .map(|s| ProjectStateView {
+                name: s["name"].as_str().expect("name").to_owned(),
+                group: s["group"].as_str().expect("group").to_owned(),
+                description: None,
+            })
+            .collect();
+        ctx["stages"] = stages_context(
+            &AgentStages::default(),
+            &views,
+            Some("Todo"),
+            Some("unstarted"),
+        );
+        let section = renderer::render(lifecycle, &ctx).expect("lifecycle renders");
+        assert!(
+            !section.contains("switched off"),
+            "Todo prompt names no switched-off stage"
+        );
+    }
+
+    /// NEWPIDASH-305 fallback: with no "AI Completed" state the path ends
+    /// at the last enabled stage and the run is told to wait on a person.
+    #[test]
+    fn lifecycle_without_final_state_waits_on_a_person() {
+        let lifecycle = &registry::get_section("lifecycle")
+            .expect("lifecycle")
+            .default_body;
+        for (label, agent_stages, _) in five_settings() {
+            let ctx = stage_context(recipes::KIND_CODING_TASK, &agent_stages, false);
+            assert!(ctx["stages"]["final_state"].is_null());
+            let section = renderer::render(lifecycle, &ctx).expect("renders");
+            assert!(!section.contains("→ AI Completed"), "{label}");
+            assert!(
+                section.contains("This project has no \"AI Completed\" state"),
+                "{label}"
+            );
+            assert!(
+                !section.contains("**none**"),
+                "{label}: no null leaks: {section}"
+            );
+        }
+    }
+
+    #[test]
+    fn coding_task_split_gate_parks_parent_in_todo() {
+        let body = composed_text(recipes::KIND_CODING_TASK);
+        assert!(body.contains("no deeper splits unless a person asks"));
+        assert!(body.contains("finish with `--to \"Todo\" --result done`"));
+        assert!(
+            body.contains("could someone build child B correctly without seeing child A's work")
+        );
+    }
+
+    #[test]
+    fn coding_task_leaves_the_note() {
+        let body = composed_text(recipes::KIND_CODING_TASK);
+        assert!(body.contains("## Step 1 — Workpad"));
+        assert!(body.contains("### Step 7 — Leave the note"));
+        assert!(body.contains(
+            "A move to review or test is refused until this run has updated the workpad."
+        ));
+        assert!(!body.contains("--handoff-file"));
+    }
+
+    /// Unified workpad U1: review and test read the same workpad, and
+    /// the run history, with no hand-off block.
+    #[test]
+    fn review_and_test_read_the_workpad_and_history() {
+        for kind in [recipes::KIND_REVIEW, recipes::KIND_TEST] {
+            let body = composed_text(kind);
+            assert!(body.contains("\n## Workpad\n"), "{kind}");
+            assert!(!body.contains("Step 1 — Workpad"), "{kind}");
+            assert!(body.contains("The workpad so far:"), "{kind}");
+            assert!(body.contains("Runs so far on this issue"), "{kind}");
+            assert!(body.contains("- 2026-01-01 In Progress: done"), "{kind}");
+            assert!(
+                !body.contains("Hand-off from the In Progress run"),
+                "{kind}"
+            );
+            // Review and test are not gated: no refusal sentence.
+            assert!(!body.contains("refused until this run"), "{kind}");
+        }
+        // No workpad yet: the section says how to start one.
+        let mut ctx = crate::prompting::validation::sample_contexts(recipes::KIND_REVIEW)
+            .into_iter()
+            .next()
+            .expect("sample");
+        ctx["workpad_body"] = Value::from("");
+        let body = compose_ctx(recipes::KIND_REVIEW, "software", &ctx);
+        assert!(body.contains("There is no workpad yet."));
+        assert!(!body.contains("The workpad so far:"));
+    }
+
+    /// Design §9.1: the review and test rules that change behaviour on hard
+    /// work survive the rewrite.
+    #[test]
+    fn review_and_test_keep_the_behaviour_changing_rules() {
+        let review = composed_text_with_work_type(recipes::KIND_REVIEW, "software");
+        let test = composed_text_with_work_type(recipes::KIND_TEST, "software");
+        for (kind, body) in [("review", &review), ("test", &test)] {
+            for phrase in [
+                "git fetch origin",
+                "git merge origin/<base>",
+                "never rebase, never force-push",
+                "send the issue back to In Progress",
+                "If nothing has changed since your last pass, write no comment.",
+                "Move back to In Progress",
+            ] {
+                assert!(body.contains(phrase), "{kind} carries {phrase:?}");
+            }
+        }
+        assert!(review.contains("Drop any you cannot confirm."));
+        assert!(test.contains("Drop what you cannot reproduce."));
+        assert!(test.contains("support a verdict but are not one"));
+        assert!(test.contains("discovered, never assumed"));
+    }
+
+    #[test]
+    fn general_review_and_test_have_no_sync_step() {
+        for kind in [recipes::KIND_REVIEW, recipes::KIND_TEST] {
+            let body = composed_text_with_work_type(kind, "general");
+            assert!(!body.contains("git fetch origin"), "{kind} has no fetch");
+            assert!(!body.contains("git merge origin"), "{kind} has no merge");
+        }
+    }
+
+    /// Rendered-size budgets for the software recipes, excluding the
+    /// rendered `pidash-cli` section (design §9.6). Lower a budget when a
+    /// section shrinks; do not raise one without a design note.
+    const SIZE_BUDGETS: [(&str, usize); 3] = [
+        (recipes::KIND_CODING_TASK, 26_000),
+        (recipes::KIND_REVIEW, 12_000),
+        (recipes::KIND_TEST, 13_000),
+    ];
+
+    /// `(kind, rendered bytes without pidash-cli, budget)`.
+    fn measured_sizes() -> Vec<(&'static str, usize, usize)> {
+        let cli = &registry::get_section("pidash-cli")
+            .expect("pidash-cli")
+            .default_body;
+        SIZE_BUDGETS
+            .iter()
+            .map(|(kind, budget)| {
+                let ctx = crate::prompting::validation::sample_contexts(kind)
+                    .into_iter()
+                    .next()
+                    .expect("populated sample first");
+                let total = compose_ctx(kind, "software", &ctx).len();
+                let cli_len = renderer::render(cli, &ctx).expect("cli renders").len();
+                (*kind, total - cli_len, *budget)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rendered_prompts_stay_within_size_budgets() {
+        for (kind, size, budget) in measured_sizes() {
+            eprintln!("{kind}: {size} bytes without pidash-cli (budget {budget})");
+            assert!(
+                size <= budget,
+                "{kind}: {size} bytes exceeds budget {budget}"
+            );
+        }
+    }
+
+    /// Rendered `pidash-cli` section budget (NEWPIDASH-325 §6.6): the core
+    /// stays at most 6 KB for every kind, on the populated sample context.
+    const CLI_SECTION_BUDGET: usize = 6_000;
+
+    /// Whole-prompt budgets on the populated sample issue (NEWPIDASH-325
+    /// §6.6): the lean change shrank each step, and the CLI rewrite shrinks
+    /// them again (about 7k tokens per step). Lower a budget when the
+    /// prompt shrinks; do not raise one without a design note.
+    const WHOLE_PROMPT_BUDGETS: [(&str, usize); 3] = [
+        (recipes::KIND_CODING_TASK, 30_000),
+        (recipes::KIND_REVIEW, 18_000),
+        (recipes::KIND_TEST, 19_000),
+    ];
+
+    /// Rendered `pidash-cli` section bytes per kind.
+    fn measured_cli_sizes() -> Vec<(&'static str, usize)> {
+        let cli = &registry::get_section("pidash-cli")
+            .expect("pidash-cli")
+            .default_body;
+        [
+            recipes::KIND_CODING_TASK,
+            recipes::KIND_REVIEW,
+            recipes::KIND_TEST,
+            recipes::KIND_SCHEDULER,
+        ]
+        .iter()
+        .map(|kind| {
+            let ctx = crate::prompting::validation::sample_contexts(kind)
+                .into_iter()
+                .next()
+                .expect("populated sample first");
+            let len = renderer::render(cli, &ctx).expect("cli renders").len();
+            (*kind, len)
+        })
+        .collect()
+    }
+
+    #[test]
+    fn rendered_cli_section_stays_within_budget() {
+        for (kind, size) in measured_cli_sizes() {
+            eprintln!("{kind}: pidash-cli section {size} bytes (budget {CLI_SECTION_BUDGET})");
+            assert!(
+                size <= CLI_SECTION_BUDGET,
+                "{kind}: pidash-cli section {size} bytes exceeds budget {CLI_SECTION_BUDGET}"
+            );
+        }
+    }
+
+    #[test]
+    fn rendered_whole_prompts_stay_within_budgets() {
+        for (kind, budget) in WHOLE_PROMPT_BUDGETS {
+            let ctx = crate::prompting::validation::sample_contexts(kind)
+                .into_iter()
+                .next()
+                .expect("populated sample first");
+            let size = compose_ctx(kind, "software", &ctx).len();
+            eprintln!("{kind}: whole prompt {size} bytes (budget {budget})");
+            assert!(
+                size <= budget,
+                "{kind}: whole prompt {size} bytes exceeds budget {budget}"
+            );
+        }
+    }
+
+    /// Rendered-prompt fixtures for the runner-side prompt↔CLI contract
+    /// test (NEWPIDASH-325 §6.9): one file per recipe kind, with stage
+    /// settings covering Auto and a switched-off stage (scheduler kinds
+    /// have no stages, so they render the populated and minimal samples).
+    /// The runner test parses every `pidash …` line in these files with the
+    /// real clap `Command`, so a prompt change that teaches an unparsable
+    /// command fails there. Regenerate with
+    /// `UPDATE_PROMPT_FIXTURES=1 cargo test -p pidash-services prompting::composer::`
+    /// after an intended prompt change; otherwise the checked-in files must
+    /// match byte for byte (`fixtures/prompting/rendered/`).
+    const RENDERED_ISSUE_KINDS: [&str; 3] = [
+        recipes::KIND_CODING_TASK,
+        recipes::KIND_REVIEW,
+        recipes::KIND_TEST,
+    ];
+
+    /// `(fixture file stem, kind, context)`: the Auto render plus the
+    /// switched-off-stage render per issue kind, and both scheduler
+    /// samples. The switched-off variant keeps the populated sample's
+    /// data and flips the stage settings (no review/test stages, and the
+    /// current-stage-switched-off branch for review/test), so the export
+    /// covers both lifecycle branches; `agent_decides` is false there so
+    /// the no-choice branch renders too.
+    fn rendered_fixture_cases() -> Vec<(String, &'static str, Value)> {
+        let mut cases = Vec::new();
+        for kind in RENDERED_ISSUE_KINDS {
+            let auto = crate::prompting::validation::sample_contexts(kind)
+                .into_iter()
+                .next()
+                .expect("populated sample first");
+            cases.push((format!("{kind}-auto"), kind, auto.clone()));
+            let mut off = auto;
+            off["stages"] = serde_json::json!({
+                "agent_decides": false,
+                "review": false,
+                "test": false,
+                "path": ["In Progress", "AI Completed"],
+                "current_runs_automatically": false,
+                "current_stage_switched_off": kind != recipes::KIND_CODING_TASK,
+                "final_state": "AI Completed",
+            });
+            cases.push((format!("{kind}-switchedoff"), kind, off));
+        }
+        let mut scheduler = crate::prompting::validation::sample_contexts(recipes::KIND_SCHEDULER);
+        let minimal = scheduler.pop().expect("minimal scheduler sample");
+        let populated = scheduler.pop().expect("populated scheduler sample");
+        cases.push((
+            "scheduler-populated".to_owned(),
+            recipes::KIND_SCHEDULER,
+            populated,
+        ));
+        cases.push((
+            "scheduler-minimal".to_owned(),
+            recipes::KIND_SCHEDULER,
+            minimal,
+        ));
+        cases
+    }
+
+    fn rendered_fixture_path(stem: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(format!(
+            "{}/../../fixtures/prompting/rendered/{stem}.md",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+    }
+
+    #[test]
+    fn rendered_prompts_match_fixtures() {
+        let regenerate = std::env::var("UPDATE_PROMPT_FIXTURES").as_deref() == Ok("1");
+        for (stem, kind, ctx) in rendered_fixture_cases() {
+            let text = compose(
+                kind,
+                None,
+                None,
+                &OverrideIndex::new(),
+                &ctx,
+                None,
+                None,
+                None,
+            )
+            .unwrap_or_else(|err| panic!("{stem} composes: {}", err.message()))
+            .text;
+            let path = rendered_fixture_path(&stem);
+            if regenerate {
+                std::fs::create_dir_all(path.parent().expect("rendered dir"))
+                    .expect("rendered dir creatable");
+                std::fs::write(&path, &text).expect("fixture writable");
+                eprintln!("{stem}: regenerated ({} bytes)", text.len());
+            } else {
+                let expected = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+                    panic!("{stem}: missing fixture; regenerate with UPDATE_PROMPT_FIXTURES=1")
+                });
+                assert_eq!(
+                    text, expected,
+                    "{stem}: rendered prompt changed; regenerate with UPDATE_PROMPT_FIXTURES=1"
+                );
+            }
+        }
+    }
+
+    /// Chat variant of the `pidash-cli` section (NEWPIDASH-402): the runner
+    /// renders the same source file with `run.kind == "chat"` and injects
+    /// it into the first turn of every runner chat session. The chat text
+    /// keeps the auth line, output contract, `pidash docs` pointer and
+    /// command index, and drops the run-only material (env defaults,
+    /// workpad, `run finish` / `run yield`, `issue wait`, lifecycle).
+    /// It renders from a minimal context — no issue or project — so an
+    /// unguarded `{{ issue.* }}` / `{{ project.* }}` reference in a
+    /// chat-taken branch fails here rather than in the runner.
+    #[test]
+    fn chat_cli_section_renders_without_issue_or_project() {
+        let cli = &registry::get_section("pidash-cli")
+            .expect("pidash-cli")
+            .default_body;
+        let ctx = serde_json::json!({
+            "run": {
+                "kind": "chat",
+                "rendered_at": "2026-11-25T08:05:46Z",
+            },
+        });
+        let body = renderer::render(cli, &ctx).expect("chat renders");
+        for kept in [
+            "## Pi Dash CLI (`pidash`)",
+            "already authenticated **as this runner's owner**",
+            "Every command prints one JSON document",
+            "Run `pidash docs <topic>`",
+            "### Other commands",
+            "There is no current issue or run",
+            "Nothing is pre-loaded",
+            "state list unavailable",
+            "`pidash issue list --project <PROJ>",
+            "`pidash issue create --project <PROJ>",
+            "`pidash state list",
+            "say so in chat instead of calling it",
+        ] {
+            assert!(body.contains(kept), "chat carries {kept:?}");
+        }
+        for dropped in [
+            "PIDASH_ISSUE_IDENTIFIER",
+            "PIDASH_RUN_ID",
+            "plus this run's id",
+            "workpad",
+            "pidash run finish",
+            "pidash run yield",
+            "run_kind",
+            "issue wait",
+            "Blocking the run",
+            "Lifecycle",
+            "already shown below",
+        ] {
+            assert!(!body.contains(dropped), "chat drops {dropped:?}");
+        }
+        assert!(
+            body.len() <= CLI_SECTION_BUDGET,
+            "chat pidash-cli section {} bytes exceeds budget {CLI_SECTION_BUDGET}",
+            body.len()
+        );
+    }
+
+    #[test]
+    fn attribution_without_context_returns_detail() {
+        // No context disables the probe (`composer.py:253-254`); with no
+        // overrides active the detail passes through unchanged.
+        let resolved = vec![ResolvedSection {
+            key: "intro".to_owned(),
+            title: "Intro".to_owned(),
+            customizable: "locked".to_owned(),
+            body: "hi".to_owned(),
+            source: SOURCE_DEFAULT.to_owned(),
+            version: 0,
+        }];
+        let (_, manifest) = assemble(&resolved);
+        assert_eq!(
+            attributed_detail("boom", &manifest, &resolved, None),
+            "boom"
+        );
+        assert!(find_culprit_section(&resolved, &manifest, None).is_none());
+    }
+}

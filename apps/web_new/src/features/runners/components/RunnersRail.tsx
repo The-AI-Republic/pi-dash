@@ -12,14 +12,14 @@ import { Bot, LayoutDashboard } from "lucide-react";
 import * as React from "react";
 
 import type { Runner } from "@pidash/api-client";
-import type { LocalContact } from "../chat/localContact.js";
+import type { PidashAgentContact } from "../chat/localContact.js";
 import { runnersBase, type RunnersScopeInput } from "../scope.js";
 import { runnerDisplayStatus } from "../status.js";
 import { RunnerStatusDot } from "./RunnerStatusBadge.js";
 
 /** Rail header: the canonical area name (D27, RUN-004/RUN-005). */
 export const RAIL_HEADER = "AI Workers";
-export const BUILTIN_SECTION_HEADER = "Built-in";
+export const PIDASH_AGENT_SECTION_HEADER = "Built-in";
 
 /** Chat address for one runner; plain string per the router's Link typing. */
 export function chatHref(base: string, runnerId: string): string {
@@ -32,7 +32,7 @@ export interface RunnersRailProps {
   /** Project scope picks the narrower empty-state sentence. */
   isProjectScope: boolean;
   /** The built-in local contact (desktop only; empty elsewhere). */
-  localContacts?: readonly LocalContact[];
+  localContacts?: readonly PidashAgentContact[];
 }
 
 export function RunnersRail({
@@ -46,12 +46,17 @@ export function RunnersRail({
     <aside
       aria-label="AI Workers navigation"
       data-testid="runners-rail"
-      className="flex w-64 shrink-0 flex-col border-r border-(--border) bg-(--surface)"
+      className="flex min-h-0 w-64 shrink-0 flex-col border-r border-(--border) bg-(--surface)"
     >
-      <div className="text-emphasis flex h-12 items-center border-b border-(--border) px-(--space-4) font-semibold text-(--text)">
+      <div className="text-emphasis flex h-12 shrink-0 items-center border-b border-(--border) px-(--space-4) font-semibold text-(--text)">
         {RAIL_HEADER}
       </div>
-      <nav className="flex flex-col gap-(--space-1) p-(--space-2)">
+      {/* The rail's own scroll region: a long runner list scrolls here while
+          the header stays put and the content pane keeps its position. */}
+      <nav
+        data-testid="runners-rail-scroll"
+        className="flex min-h-0 flex-1 flex-col gap-(--space-1) overflow-y-auto p-(--space-2)"
+      >
         <Link
           to={base}
           activeOptions={{ exact: true }}
@@ -63,7 +68,7 @@ export function RunnersRail({
         {localContacts.length === 0 ? null : (
           <>
             <div className="text-meta mt-(--space-2) px-(--space-2) font-semibold tracking-wide text-(--text-muted) uppercase">
-              {BUILTIN_SECTION_HEADER}
+              {PIDASH_AGENT_SECTION_HEADER}
             </div>
             {localContacts.map((contact) =>
               contact.unavailableReason === null ? (

@@ -258,14 +258,19 @@ export function PageDetailScreen({
     [mark]
   );
   // The rename path hands the title's committed value straight to the
-  // mutation; `mutate` is stable, so the header does not re-render for it.
+  // mutation. The commit is bound to the page open now, so the blur the
+  // route fires while leaving a page still renames that page.
   const saveName = rename.mutate;
 
   // The pane reads the canvas, so headings, counts and assets follow
   // typing; before the canvas paints, the stored body stands in (PAGE-046).
   const canvasRef = React.useRef<HTMLDivElement | null>(null);
   const storedHtml = page?.description_html ?? "";
-  const live = useLivePageDocument(canvasRef, storedHtml, { workspaceSlug, projectId });
+  const live = useLivePageDocument(canvasRef, storedHtml, {
+    workspaceSlug,
+    projectId,
+    apiBaseUrl: getAppClient().baseUrl,
+  });
   const paneDocument = live.document;
   const openPane = (): void => {
     onSearchChange(paneSearch(search, "outline"));
@@ -296,10 +301,17 @@ export function PageDetailScreen({
   // The options menu drives the same shared writes as the list row menu
   // (PAGE-057/059/060): duplication, visibility, shelve/restore and delete.
   // The lock control and the star own their hooks inside the header.
-  const headerTarget = { workspaceSlug, projectId, page: { id: pageId, name: page?.name ?? "" } };
+  // The header carries the open page's parenthood so a restore under a
+  // still-shelved parent reports the detach to the top level (PAGE-088);
+  // the trail pool already holds every row the notice must consult.
+  const headerTarget = {
+    workspaceSlug,
+    projectId,
+    page: { id: pageId, name: page?.name ?? "", parent: page?.parent ?? null, parent_id: page?.parent_id },
+  };
   const duplicate = useDuplicatePage(workspaceSlug, projectId);
   const visibility = usePageVisibilityWrite(headerTarget);
-  const archive = usePageArchiveWrite(headerTarget);
+  const archive = usePageArchiveWrite(headerTarget, { rows: trailPool });
   const deletion = usePageDeleteWrite(headerTarget);
   const [deleteOpen, setDeleteOpen] = React.useState(false);
   // A shelved page never reports its subtree size through the row, so the
@@ -315,6 +327,9 @@ export function PageDetailScreen({
     })
   );
   const deleteCount = knownDeleteCount ?? deleteChildren.data?.length;
+  // A rejected children read is not a pending one: the dialog stays
+  // confirmable and names the failure instead of counting forever.
+  const deleteCountFailed = knownDeleteCount === undefined && deleteChildren.isError;
 
   // The skeleton is a cold-load surface: one committed paint of the
   // placeholder, then the stored body, and never again for this page in
@@ -342,7 +357,7 @@ export function PageDetailScreen({
     formattingBarVisible({ editable: capabilities.canEdit, stickyToolbar: preferences.sticky_toolbar });
   const canvasWidth = pageCanvasWidth({ fullWidth: preferences.full_width, paneOpen });
   const resolveAsset = React.useCallback(
-    (src: string) => descriptionAssetSrc(src, { workspaceSlug, projectId }),
+    (src: string) => descriptionAssetSrc(src, { workspaceSlug, projectId, apiBaseUrl: getAppClient().baseUrl }),
     [workspaceSlug, projectId]
   );
 
@@ -375,6 +390,15 @@ export function PageDetailScreen({
       queryKey: pageKeys.version(workspaceSlug, projectId, pageId, versionId),
     });
   };
+
+  // A failed history read keeps the pane: asking again drops the rejected
+  // answer so the read flies afresh and the skeleton returns. The pane
+  // reports the failure instead of loading forever.
+  const retryVersions = React.useCallback((): void => {
+    void queryClient.invalidateQueries({
+      queryKey: pageKeys.versions(workspaceSlug, projectId, pageId),
+    });
+  }, [queryClient, workspaceSlug, projectId, pageId]);
 
   // Restore is the live document taking the snapshot's body: the editor
   // reports the write through its own update, so the draft seam and the
@@ -672,6 +696,9 @@ export function PageDetailScreen({
           document={paneDocument}
           actors={actors}
           versions={search.paneTab === "info" ? versions.data : undefined}
+          {...(search.paneTab === "info" && versions.isError
+            ? { versionsFailed: true, onRetryVersions: retryVersions }
+            : {})}
           versionMembers={versionMembers}
           onSelectTab={openPaneTab}
           onClose={closePane}
@@ -685,6 +712,7 @@ export function PageDetailScreen({
         onOpenChange={setDeleteOpen}
         pageName={page.name}
         {...(deleteCount === undefined ? {} : { rehomedCount: deleteCount })}
+        {...(deleteCountFailed ? { countFailed: true, onRetryCount: () => void deleteChildren.refetch() } : {})}
         pending={deletion.pending}
         onConfirm={() => {
           deletion.remove({

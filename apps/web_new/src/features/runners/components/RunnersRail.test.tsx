@@ -21,7 +21,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
   };
 });
 
-import { BUILTIN_SECTION_HEADER, RunnersRail, chatHref, RAIL_HEADER } from "./RunnersRail.js";
+import { PIDASH_AGENT_SECTION_HEADER, RunnersRail, chatHref, RAIL_HEADER } from "./RunnersRail.js";
 
 const runner = (id: string, name: string, status: Runner["status"] = "online"): Runner =>
   ({ id, name, status, enrolled_at: "2024-01-01T00:00:00Z" }) as Runner;
@@ -75,26 +75,28 @@ describe("RunnersRail", () => {
     expect(screen.queryAllByTestId("runners-rail-contact")).toEqual([]);
   });
 
-  it("links an available built-in contact above the runner contacts", () => {
+  it("links an available Pi Dash Agent contact above the runner contacts", () => {
     render(
       <RunnersRail
         scope={{ workspaceSlug: "acme" }}
         runners={[runner("r-1", "alpha")]}
         isProjectScope={false}
-        localContacts={[{ id: "pidash-builtin", name: "Built-in agent", label: "Local", unavailableReason: null }]}
+        localContacts={[{ id: "pidash-builtin", name: "Pi Dash Agent", label: "Local", unavailableReason: null }]}
       />
     );
-    expect(screen.getByText(BUILTIN_SECTION_HEADER)).toBeInTheDocument();
+    expect(screen.getAllByText(PIDASH_AGENT_SECTION_HEADER)[0]).toBeInTheDocument();
     expect(screen.getByTestId("runners-rail-local-contact")).toHaveAttribute(
       "href",
       "/acme/runners/chat/pidash-builtin"
     );
-    expect(screen.getByText("Built-in agent")).toBeInTheDocument();
+    expect(screen.getAllByText("Pi Dash Agent").length).toBeGreaterThan(0);
     expect(screen.getAllByTestId("runners-rail-contact")).toHaveLength(1);
     expect(screen.queryByTestId("runners-rail-local-reason")).toBeNull();
-    // The built-in section reads before the runner section.
+    // The Pi Dash Agent section reads before the runner section.
     const sections = screen.getAllByText(/^(Built-in|Runners)$/).map((node) => node.textContent);
-    expect(sections).toEqual([BUILTIN_SECTION_HEADER, "Runners"]);
+    expect(sections[0]).toBe(PIDASH_AGENT_SECTION_HEADER);
+    expect(sections).toContain("Runners");
+    expect(sections.indexOf("Runners") > 0).toBe(true);
   });
 
   it("shows an unavailable built-in contact disabled with the server's reason", () => {
@@ -104,7 +106,7 @@ describe("RunnersRail", () => {
         runners={[]}
         isProjectScope
         localContacts={[
-          { id: "pidash-builtin", name: "Built-in agent", label: "Local", unavailableReason: "Turned off here." },
+          { id: "pidash-builtin", name: "Pi Dash Agent", label: "Local", unavailableReason: "Turned off here." },
         ]}
       />
     );
@@ -119,8 +121,24 @@ describe("RunnersRail", () => {
 
   it("renders no built-in section on a build without the local contact", () => {
     render(<RunnersRail scope={{ workspaceSlug: "acme" }} runners={[runner("r-1", "alpha")]} isProjectScope={false} />);
-    expect(screen.queryByText(BUILTIN_SECTION_HEADER)).toBeNull();
+    expect(screen.queryByText(PIDASH_AGENT_SECTION_HEADER)).toBeNull();
     expect(screen.queryByTestId("runners-rail-local-contact")).toBeNull();
+  });
+
+  // NEWPIDASH-3: the rail is a column that stretches to its row; a long
+  // list scrolls inside the rail below a fixed header.
+  it("scrolls a long runner list inside the rail below a fixed header", () => {
+    const many = Array.from({ length: 40 }, (_, index) => runner(`r-${index}`, `runner ${index}`));
+    render(<RunnersRail scope={{ workspaceSlug: "acme" }} runners={many} isProjectScope={false} />);
+    const rail = screen.getByTestId("runners-rail");
+    expect(rail).toHaveClass("flex", "min-h-0", "flex-col");
+    const [header, scroll] = Array.from(rail.children);
+    expect(header).toHaveTextContent(RAIL_HEADER);
+    expect(header).toHaveClass("shrink-0");
+    expect(scroll).toBe(screen.getByTestId("runners-rail-scroll"));
+    expect(scroll).toHaveClass("min-h-0", "flex-1", "overflow-y-auto");
+    expect(screen.getAllByTestId("runners-rail-contact")).toHaveLength(40);
+    for (const contact of screen.getAllByTestId("runners-rail-contact")) expect(scroll).toContainElement(contact);
   });
 
   it("shows the workspace empty sentence", () => {

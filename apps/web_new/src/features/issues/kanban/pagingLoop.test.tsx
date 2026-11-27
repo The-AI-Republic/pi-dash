@@ -47,6 +47,7 @@ vi.mock("../../../core/session/index.js", async (importOriginal) => ({
 vi.mock("../list/reference.js", () => ({
   useListReferences: () => ({
     labels: mocks.groupLabels,
+    orders: {},
     stateRows: [],
     stateNames: new Map(),
     assigneeNames: new Map(),

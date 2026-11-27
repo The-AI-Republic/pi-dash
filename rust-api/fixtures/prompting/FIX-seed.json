@@ -1,0 +1,20 @@
+{
+  "bugs": [],
+  "data": {
+    "commands": {
+      "revalidate_clear_run": "checked 4 active override(s): 0 newly flagged, 1 cleared.",
+      "revalidate_cleared_after_fix": true,
+      "revalidate_first_run": "checked 4 active override(s): 2 newly flagged, 0 cleared.",
+      "revalidate_flagged_broken": true,
+      "revalidate_flagged_detail": "first run flagged 2 rows: (1) intro/personal (locked section can never validate -> OverrideValidationError) and (2) autonomy/outsider (BROKEN {{ oops_xyz }} undefined var); workspace + member autonomy rows passed. Clear run after fixing (2) to the registry default: 0 newly flagged, 1 cleared; locked intro row stays flagged.",
+      "trace": "revalidate_section_overrides.py (handle: iterate active, unknown-key or OverrideValidationError -> needs_attention=True; --clear resets clean rows; never deletes/deactivates)"
+    }
+  },
+  "fixture_id": "FIX-seed",
+  "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world). NEWPIDASH-404: seed/reseed half removed (nothing reads prompt_template.body at run time); only the revalidate half remains.",
+  "notes": [
+    "revalidate never deletes/deactivates; a locked section's override can never validate so --clear leaves it flagged."
+  ],
+  "ported_from": "0a6fb8eca0f459802045f22e02af5748a6bdc768",
+  "trace": ["prompting/management/commands/revalidate_section_overrides.py (handle: flag/clear needs_attention)"]
+}

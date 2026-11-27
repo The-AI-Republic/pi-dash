@@ -8,6 +8,8 @@ import {
   deriveSchedulerHandle,
   emptySchedulerDefinition,
   hasSchedulerDefinitionErrors,
+  isSchedulerSwatchColor,
+  SCHEDULER_COLOR_SWATCHES,
   validateSchedulerDefinition,
 } from "./definition.js";
 
@@ -67,5 +69,18 @@ describe("scheduler definition rules", () => {
     expect(validateSchedulerDefinition({ ...emptySchedulerDefinition(), name: "Name", prompt: "Prompt" }).slug).toBe(
       "Enter a handle."
     );
+  });
+
+  it("defaults to the first of sixteen preset swatches", () => {
+    expect(SCHEDULER_COLOR_SWATCHES).toHaveLength(16);
+    expect(DEFAULT_SCHEDULER_COLOR).toBe(SCHEDULER_COLOR_SWATCHES[0]);
+    expect(DEFAULT_SCHEDULER_COLOR).toBe("#3b82f6");
+  });
+
+  it("recognizes swatch colors case-insensitively", () => {
+    expect(isSchedulerSwatchColor("#3b82f6")).toBe(true);
+    expect(isSchedulerSwatchColor("#F59E0B")).toBe(true);
+    expect(isSchedulerSwatchColor("#112233")).toBe(false);
+    expect(isSchedulerSwatchColor("")).toBe(false);
   });
 });

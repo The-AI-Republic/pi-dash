@@ -148,7 +148,15 @@ describe("spaceAuthReducer", () => {
 
   it("leaves unknown request failures silent", () => {
     const before = state({ email: "ada@example.com" });
-    expect(spaceAuthReducer(before, { type: "requestFailed", code: "5900" })).toBe(before);
+    expect(spaceAuthReducer(before, { type: "requestFailed", code: "9999" })).toBe(before);
+  });
+
+  it("banners a throttled request on the calling step and keeps the address and mode", () => {
+    const before = state({ step: "code", mode: "sign-in", email: "ada@example.com" });
+    expect(spaceAuthReducer(before, { type: "requestFailed", code: "5900" })).toEqual({
+      ...before,
+      banner: { message: "Too many attempts. Wait a moment and try again." },
+    });
   });
 
   it("applies later error codes like initial ones", () => {
@@ -157,6 +165,11 @@ describe("spaceAuthReducer", () => {
       mode: "sign-up",
       email: "",
       banner: { message: "That code isn't valid. Check your email and try again." },
+    });
+    const throttled = state({ step: "code", mode: "sign-in", email: "ada@example.com" });
+    expect(spaceAuthReducer(throttled, { type: "errorCode", code: "5900" })).toEqual({
+      ...throttled,
+      banner: { message: "Too many attempts. Wait a moment and try again." },
     });
     const before = state();
     expect(spaceAuthReducer(before, { type: "errorCode", code: "9999" })).toBe(before);

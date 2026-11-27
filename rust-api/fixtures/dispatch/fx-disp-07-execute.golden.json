@@ -1,0 +1,27 @@
+{
+  "fixture_id": "FX-DISP-07",
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "trace": [
+    "apps/api/pi_dash/cloud_agent/tasks.py:31-66 (_claim)",
+    "apps/api/pi_dash/cloud_agent/tasks.py:69-72 (_fail)",
+    "apps/api/pi_dash/cloud_agent/tasks.py:75-208 (run_cloud_agent)",
+    "apps/api/pi_dash/cloud_agent/tasks.py:211-236 (scan_queued_runs)",
+    "apps/api/pi_dash/cloud_agent/tasks.py:239-260 (sweep_stale_runs)",
+    "apps/api/pi_dash/managed_runner/tasks.py:31-61 (expire_waiting_runs)",
+    "apps/api/pi_dash/cloud_agent/runtime.py:18-76 (execute)",
+    "apps/api/pi_dash/cloud_agent/runtime.py:79-88 (_usage_report)",
+    "apps/api/pi_dash/celery.py:156-186 (settings-backed beat entries)",
+    "apps/api/pi_dash/settings/common.py:531-590 (MANAGED/CLOUD defaults + settings keys)"
+  ],
+  "method": "_usage_report executed verbatim (exec of runtime.py:79-88 def, dataclass + plain-object probes). Claim/fail/sweep SQL + result rows recorded as ORM shapes verbatim from source (no live DB; compiler-form SQL, shape-derived rows per precedent). Beat entries read verbatim from celery.py with interval settings keys from settings/common.py. Outcome state machine read verbatim from run_cloud_agent.",
+  "expire_waiting_runs": {
+    "cutoff": "now - MANAGED_RUNNER_QUEUED_MAX_AGE_SECS",
+    "shape": "QUEUED managed rows older than cutoff (first 500): finalize FAILED expected_status=QUEUED {error_code: desktop_not_connected, error: 'never came online...'}; returns expired count"
+  },
+  "beat_entries_owned": {
+    "managed-runner-expire-waiting-runs": {
+      "task": "managed_runner.expire_waiting_runs",
+      "settings_key": "MANAGED_RUNNER_SWEEP_INTERVAL_SECONDS"
+    }
+  }
+}

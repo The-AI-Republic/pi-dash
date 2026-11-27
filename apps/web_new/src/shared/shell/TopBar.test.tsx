@@ -60,6 +60,13 @@ describe("TopBar composition", () => {
     expect(screen.queryByText("Community", { exact: true })).not.toBeInTheDocument();
     expect(screen.queryByText("Pro", { exact: true })).not.toBeInTheDocument();
   });
+
+  it("lets the search cell yield below the box rest width (NEWPIDASH-7)", () => {
+    renderBar({ searchBox: <input type="search" placeholder="Search commands" /> });
+    const cell = screen.getByPlaceholderText("Search commands").parentElement!;
+    expect(cell.className).toContain("min-w-0");
+    expect(cell.className).not.toContain("shrink-0");
+  });
 });
 
 describe("sidebar toggle", () => {
@@ -160,12 +167,13 @@ describe("TopBar platform chrome", () => {
     expect(header.className).not.toContain("select-none");
   });
 
-  it("syncs the window title through the desktop drag region", () => {
+  it("syncs the window title on desktop with no drag region", () => {
     const setTitle = vi.fn();
     platform.window = { trafficLightInset: true, setTitle };
     renderBar();
     const header = screen.getByRole("banner");
-    expect(header).toHaveAttribute("data-tauri-drag-region", "true");
+    expect(header).not.toHaveAttribute("data-tauri-drag-region");
+    expect(header.className).not.toContain("select-none");
     expect(header.className).toContain("pl-20");
     expect(setTitle).toHaveBeenCalledWith("Atlas — Pi Dash");
   });

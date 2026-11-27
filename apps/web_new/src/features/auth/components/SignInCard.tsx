@@ -12,7 +12,7 @@
 // return-path conventions.
 
 import { Button, IconButton, Input, Popover, Spinner } from "@pidash/kit";
-import type { SignInResult } from "@pidash/api-client";
+import { isApiError, type SignInResult } from "@pidash/api-client";
 import { X } from "lucide-react";
 import * as React from "react";
 
@@ -249,6 +249,26 @@ export function SignInCard({
     setMode(nextMode);
   };
 
+  /**
+   * Banner for a failed auth request. A recognized server code reads the
+   * catalog (banner plus the step and mode that can fix it); a code the
+   * catalog does not model leaves the card silent, as the old card does;
+   * anything without a server code keeps the connectivity message.
+   */
+  const failRequest = (
+    error: unknown,
+    address: string,
+    fallback: { message: string; step: SignInStep; mode: AuthMode }
+  ) => {
+    const code = isApiError(error) ? String(error.code) : "";
+    if (/^\d+$/.test(code)) {
+      const mapped = describeAuthError(code, fallback.mode, address);
+      if (mapped) fail(mapped.message, mapped.step, mapped.mode, mapped.action ?? null);
+      return;
+    }
+    fail(fallback.message, fallback.step, fallback.mode);
+  };
+
   const submitEmail = (event: React.FormEvent) => {
     event.preventDefault();
     setBanner(null);
@@ -262,14 +282,15 @@ export function SignInCard({
               setMode(nextMode);
               setStep("code");
             },
-            onError: () => fail(CODE_SEND_MESSAGE, "email", homeMode),
+            onError: (error) =>
+              failRequest(error, address, { message: CODE_SEND_MESSAGE, step: "email", mode: homeMode }),
           });
         } else {
           setMode(nextMode);
           setStep("password");
         }
       },
-      onError: () => fail(NETWORK_MESSAGE, "email", homeMode),
+      onError: (error) => failRequest(error, address, { message: NETWORK_MESSAGE, step: "email", mode: homeMode }),
     });
   };
 
@@ -289,7 +310,8 @@ export function SignInCard({
         fail(failure.message, failure.step, failure.mode, failure.action);
       }
     };
-    const onError = () => fail(NETWORK_MESSAGE, "password", mode);
+    const onError = (error: unknown) =>
+      failRequest(error, address, { message: NETWORK_MESSAGE, step: "password", mode });
     if (mode === "sign-up") {
       passwordSignUp.mutate(
         { email: address, password, confirmPassword: confirm, ...nextPathInput },
@@ -312,7 +334,7 @@ export function SignInCard({
         fail(failure.message, failure.step, failure.mode, failure.action);
       }
     };
-    const onError = () => fail(NETWORK_MESSAGE, "code", mode);
+    const onError = (error: unknown) => failRequest(error, address, { message: NETWORK_MESSAGE, step: "code", mode });
     if (mode === "sign-up") {
       magicSignUp.mutate({ email: address, code: code.trim(), ...nextPathInput }, { onSuccess, onError });
     } else {
@@ -328,7 +350,7 @@ export function SignInCard({
         setLastSentAt(Date.now());
         setNow(Date.now());
       },
-      onError: () => fail(CODE_SEND_MESSAGE, "code", mode),
+      onError: (error) => failRequest(error, email.trim(), { message: CODE_SEND_MESSAGE, step: "code", mode }),
     });
   };
 
@@ -336,7 +358,7 @@ export function SignInCard({
     setBanner(null);
     magicGenerate.mutate(email.trim(), {
       onSuccess: () => setStep("code"),
-      onError: () => fail(CODE_SEND_MESSAGE, "password", mode),
+      onError: (error) => failRequest(error, email.trim(), { message: CODE_SEND_MESSAGE, step: "password", mode }),
     });
   };
 

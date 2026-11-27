@@ -361,8 +361,12 @@ The server keeps the dev server's same-origin topology (`/api` and
 `/live` its live server) and the production file rule
 (`try_files $uri/index.html $uri /__spa-fallback.html`), so scenarios
 prove what production serves. `PARITY_NEW_PORT` moves the port and
-`PARITY_NEW_DIST=desktop` serves the desktop build instead. Keep the
-dev server for local iteration:
+`PARITY_NEW_DIST=desktop` serves the desktop build instead — build it
+first with `PIDASH_TARGET=desktop pnpm --filter web_new build:desktop`,
+exporting `VITE_WEB_BASE_URL` (the stack's oracle origin) so the desktop
+bundle's shareable links and its browser hand-off for screens it does not
+carry resolve; without it those refuse rather than guess an origin. Keep
+the dev server for local iteration:
 
 ```sh
 pnpm --filter web_new dev   # :3010, hot transform for one scenario at a time

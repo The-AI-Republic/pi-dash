@@ -41,9 +41,11 @@ test.describe("desktop launch to cached relaunch", () => {
     const seededRow = page.getByRole("article").filter({ hasText: "Contract issue one" });
     await expect(seededRow).toBeVisible();
 
-    // The served bundle is the desktop target: the title bar is a drag
-    // region and the location is mirrored in the document title.
-    await expect(page.locator("header[data-tauri-drag-region]")).toBeVisible();
+    // The served bundle is the desktop target: the header renders without a
+    // drag region (the shell keeps a native title bar) and the location is
+    // mirrored in the document title.
+    await expect(page.locator("header")).toBeVisible();
+    await expect(page.locator("header[data-tauri-drag-region]")).toHaveCount(0);
     await expect.poll(() => page.title(), { timeout: 15_000 }).toContain("Pi Dash");
 
     // Wait for the debounced cache write before simulating the relaunch, and

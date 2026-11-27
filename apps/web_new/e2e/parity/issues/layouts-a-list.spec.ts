@@ -186,6 +186,58 @@ test(
   }
 );
 
+test(
+  specTitle(["ISS-008"], "state sections follow the workflow order"),
+  { tag: specTags(["ISS-008"]) },
+  async ({ driver, seed }) => {
+    // NEWPIDASH-39: sections read in workflow order (state group, then
+    // sequence), whatever order the grouped response lists its buckets in.
+    test.setTimeout(720_000);
+    const session = await signInSession(seed.email, seed.password);
+    const suffix = uniqueSuffix();
+    const created: string[] = [];
+    const moved: string[] = [];
+    const todoId = (await serverListStates(seed.workspaceSlug, seed.projectId, session)).find(
+      (state) => state.name === "Todo"
+    )?.id;
+    expect(todoId).toBeDefined();
+    try {
+      // Created in reverse workflow order so creation order cannot pass for workflow order.
+      const doneName = `Parity Shipped ${suffix}`;
+      const startedName = `Parity Doing ${suffix}`;
+      const backlogName = `Parity Someday ${suffix}`;
+      created.push(await serverCreateState(seed.workspaceSlug, seed.projectId, doneName, "completed", session));
+      created.push(await serverCreateState(seed.workspaceSlug, seed.projectId, startedName, "started", session));
+      created.push(await serverCreateState(seed.workspaceSlug, seed.projectId, backlogName, "backlog", session));
+      const seeded = (await serverIssues(seed.workspaceSlug, seed.projectId, session)).filter((row) =>
+        seed.issueNames.includes(row.name)
+      );
+      expect(seeded.length).toBeGreaterThanOrEqual(2);
+      await serverPatchIssue(seed.workspaceSlug, seed.projectId, seeded[0]!.id, { state_id: created[2] }, session);
+      moved.push(seeded[0]!.id);
+      await serverPatchIssue(seed.workspaceSlug, seed.projectId, seeded[1]!.id, { state_id: created[1] }, session);
+      moved.push(seeded[1]!.id);
+      await serverPatchProjectUserProperties(seed.workspaceSlug, seed.projectId, session, {
+        display_filters: { layout: "list", group_by: "state", order_by: "sort_order", show_empty_groups: true },
+      });
+      await driver.openAuthenticated(
+        `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`,
+        sessionBrowserCookies(session)
+      );
+      await expect
+        .poll(async () => driver.layoutsListGroups(), { timeout: 300_000 })
+        .toEqual([backlogName, "Todo", startedName, doneName]);
+    } finally {
+      for (const id of moved) {
+        await serverPatchIssue(seed.workspaceSlug, seed.projectId, id, { state_id: todoId }, session).catch(() => {});
+      }
+      for (const id of created)
+        await serverDeleteState(seed.workspaceSlug, seed.projectId, id, session).catch(() => {});
+      await resetPrefs(seed.workspaceSlug, seed.projectId, session);
+    }
+  }
+);
+
 test(specTitle(["ISS-009"], "hide and show empty groups"), { tag: specTags(["ISS-009"]) }, async ({ driver, seed }) => {
   test.setTimeout(720_000);
   const session = await signInSession(seed.email, seed.password);

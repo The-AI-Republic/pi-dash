@@ -97,16 +97,16 @@ test(
       expect(await driver.settingsGeneralFieldValue("baseBranch")).toBe(String(record["base_branch"] ?? ""));
     });
 
-    await test.step("network, timezone and execution defaults match the server record", async () => {
+    await test.step("network, timezone and run-policy defaults match the server record", async () => {
       // Visibility network renders by numeric key (0 Private, 2 Public).
       const networkLabels: Record<number, string> = { 0: "Private", 2: "Public" };
       const networkLabel = networkLabels[Number(record["network"] ?? 0)] ?? "";
       expect(networkLabel).not.toBe("");
       expect(await driver.settingsGeneralNetworkText()).toContain(networkLabel);
       expect(await driver.settingsGeneralTimezoneText()).toContain(String(record["timezone"] ?? ""));
-      expect(await driver.settingsGeneralExecutorValue()).toBe(
-        String(record["default_agent_executor"] ?? "local_runner")
-      );
+      // Runner is the only executor (built-in engine design §6): the tab
+      // offers no default execution target; the default pod decides.
+      expect(await driver.settingsGeneralExecutorPresent()).toBe(false);
       expect(await driver.settingsGeneralBudgetValue()).toBe(String(record["agent_default_max_ticks"] ?? ""));
       const cadenceSeconds = Number(record["agent_default_interval_seconds"] ?? 10800);
       const cadenceText = await driver.settingsGeneralCadenceText();

@@ -7,7 +7,7 @@
 // open-in-new-tab links, the chosen parent tag and its remove control.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { IssueSearchHit } from "@pidash/api-client";
 import * as React from "react";
@@ -195,5 +195,22 @@ describe("ParentPicker empty and error states", () => {
     );
     await user.click(screen.getByRole("button", { name: "Add parent" }));
     expect(await screen.findByText("Couldn't search work items.")).toBeInTheDocument();
+  });
+
+  it("renders the add trigger and the tag at the chip height", () => {
+    setup();
+    expect(screen.getByRole("button", { name: "Add parent" }).className).toContain("h-6");
+  });
+
+  it("shows the Field: Value tooltip on the parent tag", async () => {
+    setup({ value: PARENT });
+    const tag = screen.getByTestId("parent-tag");
+    expect(tag.className).toContain("h-6");
+    expect(tag).not.toHaveAttribute("title");
+    fireEvent.focus(tag);
+    fireEvent.mouseEnter(tag);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "Parent: ATL-12 Parent work — The work item this one breaks down from."
+    );
   });
 });

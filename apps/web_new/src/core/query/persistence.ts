@@ -12,7 +12,11 @@
 // launch could sit inside a read's `staleTime` and never refetch — another
 // member's archive, restore or edit would stay invisible until the entry
 // aged out. Restore therefore marks every entry stale so its first
-// subscriber refetches while the saved rows stay on screen.
+// subscriber refetches while the saved rows stay on screen. Ageing the
+// timestamp is not enough on its own: a read with `staleTime: Infinity`
+// (display prefs, project states) never goes stale by time, so the entry
+// is also restored invalidated, which counts as stale whatever the
+// staleTime and clears on the first successful read.
 //
 // One store, one disk file, many accounts: the desktop profile survives a
 // sign-out only until the next person signs in, so a query whose rows
@@ -107,11 +111,29 @@ function restorableQuery(entry: DehydratedState["queries"][number]): boolean {
 }
 
 /**
- * One restored entry, aged so the read counts as stale: the saved rows
- * still paint, and the first subscriber fetches the live answer over them.
+ * The `dataUpdatedAt` a restored entry carries until a read of this
+ * process replaces it. A live read always stamps the current time, so the
+ * value doubles as the "restored, never confirmed" marker.
+ */
+const RESTORED_DATA_UPDATED_AT = 0;
+
+/**
+ * One restored entry, aged and invalidated so the read counts as stale
+ * even under `staleTime: Infinity`: the saved rows still paint, and the
+ * first subscriber (or fetchQuery) fetches the live answer over them.
  */
 function stalePreview(entry: DehydratedState["queries"][number]): DehydratedState["queries"][number] {
-  return { ...entry, state: { ...entry.state, dataUpdatedAt: 0 } };
+  return { ...entry, state: { ...entry.state, dataUpdatedAt: RESTORED_DATA_UPDATED_AT, isInvalidated: true } };
+}
+
+/**
+ * True when the entry's data came from disk and no read of this process
+ * has answered it yet (a failed refetch keeps the marker). Such data may
+ * paint, but it is no answer for a decision such as a route gate: the
+ * session that wrote it may be long gone (PIDESKAPP-194).
+ */
+export function isRestoredPreview(state: { data: unknown; dataUpdatedAt: number } | undefined): boolean {
+  return state !== undefined && state.data !== undefined && state.dataUpdatedAt === RESTORED_DATA_UPDATED_AT;
 }
 
 export function createCachePersistor(

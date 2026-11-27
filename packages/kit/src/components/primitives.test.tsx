@@ -5,7 +5,6 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { Avatar } from "./Avatar";
 import { Badge } from "./Badge";
-import { Kbd } from "./Kbd";
 import { Skeleton } from "./Skeleton";
 import { Spinner } from "./Spinner";
 
@@ -31,15 +30,6 @@ describe("Skeleton", () => {
     const node = container.firstElementChild!;
     expect(node).toHaveAttribute("aria-hidden", "true");
     expect(node).toHaveStyle({ width: "120px", height: "16px" });
-  });
-});
-
-describe("Kbd", () => {
-  it("names the full shortcut and shows each key", () => {
-    render(<Kbd keys={["mod", "K"]} />);
-    expect(screen.getByLabelText("mod+K", { selector: "span" })).toBeInTheDocument();
-    expect(screen.getByText("mod", { selector: "kbd" })).toBeInTheDocument();
-    expect(screen.getByText("K", { selector: "kbd" })).toBeInTheDocument();
   });
 });
 

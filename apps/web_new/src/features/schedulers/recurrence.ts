@@ -23,11 +23,12 @@ export const WEEKDAY_LABELS: Record<WeekdayCode, string> = {
 };
 
 /** The repeat unit; `none` is the single firing at the start. */
-export const REPEAT_UNITS = ["none", "day", "week", "month", "year"] as const;
+export const REPEAT_UNITS = ["none", "hour", "day", "week", "month", "year"] as const;
 export type RepeatUnit = (typeof REPEAT_UNITS)[number];
 
 export const UNIT_LABELS: Record<RepeatUnit, string> = {
   none: "Does not repeat",
+  hour: "Hour",
   day: "Day",
   week: "Week",
   month: "Month",
@@ -35,6 +36,7 @@ export const UNIT_LABELS: Record<RepeatUnit, string> = {
 };
 
 const FREQUENCY_BY_UNIT: Record<Exclude<RepeatUnit, "none">, string> = {
+  hour: "HOURLY",
   day: "DAILY",
   week: "WEEKLY",
   month: "MONTHLY",
@@ -304,6 +306,31 @@ function startOfWeekFallback(state: RecurrenceState): WeekdayCode {
 /** Switch the unit while keeping the shared count and ends. */
 export function withUnit(state: RecurrenceState, unit: RepeatUnit): RecurrenceState {
   return { ...state, unit };
+}
+
+/** Largest hourly step the builder offers; longer steps belong to Day. */
+export const MAX_HOUR_INTERVAL = 23;
+
+/**
+ * Inline error for the repeat count, or null when it needs none. Only the
+ * hour unit is range-checked: the other units serialize with a clamp, while
+ * an hourly step past a day usually means the Day unit was meant.
+ */
+export function intervalError(state: RecurrenceState): string | null {
+  if (state.unit !== "hour") return null;
+  if (!Number.isInteger(state.interval) || state.interval < 1 || state.interval > MAX_HOUR_INTERVAL) {
+    return `Use a whole number from 1 to ${MAX_HOUR_INTERVAL}; longer steps fit the Day unit.`;
+  }
+  return null;
+}
+
+/**
+ * Helper line under the repeat row for the hour unit. Hourly firings are
+ * anchored on the start date and time, so there is nothing more to pick:
+ * no weekday or month-day options.
+ */
+export function hourlyHelper(interval: number): string {
+  return interval === 1 ? "Runs every hour from the start time" : `Runs every ${interval} hours from the start time`;
 }
 
 /** Switch the monthly form, seeding it from whatever the other form holds. */

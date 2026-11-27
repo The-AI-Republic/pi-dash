@@ -5,14 +5,16 @@
 // through the project access gate: members see the page, everyone else
 // gets the join, no-access, or not-found screen keyed off the
 // details-fetch status plus admin standing. Members also get the
-// project tab strip above the page in tabbed mode, and the views and
-// modules palette entries (VIEW-042, MOD-037) on every project page.
+// project tab strip above the page in tabbed mode, and the views,
+// modules and cycles palette entries (VIEW-042, MOD-037, CYC-014) on
+// every project page.
 
-import { createFileRoute, Outlet } from "@tanstack/react-router";
+import { createFileRoute, Outlet, useRouterState } from "@tanstack/react-router";
 import * as React from "react";
 
 import { ProjectAccessGate } from "../../../../../features/auth/components/ProjectAccessGate.js";
 import { ProjectTabStrip } from "../../../../../features/projects/components/ProjectTabStrip.js";
+import { isProjectRunnersRouteId } from "../../../../../features/runners/routeId.js";
 // Deferred below the initial chain (NEWFRONT-871, size gate): the entries
 // only register palette commands and their jump page, so they can land
 // after the layout paints — the same shape the workspace entries take in
@@ -30,6 +32,13 @@ const ModulePaletteEntries = React.lazy(() =>
     default: module.ModulePaletteEntries,
   }))
 );
+// Same shape for the cycles entries: they register one command, and
+// the create dialog they can open stays in its own chunk.
+const CyclesPaletteEntries = React.lazy(() =>
+  import("../../../../../features/cycles/palette/CyclesPaletteEntries.js").then((module) => ({
+    default: module.CyclesPaletteEntries,
+  }))
+);
 
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId")({
   component: ProjectLayoutComponent,
@@ -37,6 +46,19 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId")({
 
 function ProjectLayoutComponent(): React.ReactElement {
   const { ws, projectId } = Route.useParams();
+  // The AI Workers area fills the window below the tab strip (NEWPIDASH-3):
+  // on its routes the strip and the page share a full-height column, so
+  // the area takes what the strip leaves. Every other tab keeps the plain
+  // stacking it always had.
+  const fullHeightPage = useRouterState({
+    select: (state) => state.matches.some((match) => isProjectRunnersRouteId(match.routeId)),
+  });
+  const page = (
+    <>
+      <ProjectTabStrip workspaceSlug={ws} projectId={projectId} />
+      <Outlet />
+    </>
+  );
   return (
     <ProjectAccessGate slug={ws} projectId={projectId}>
       {/* The entries carry their own boundary: they register nothing visible,
@@ -48,8 +70,16 @@ function ProjectLayoutComponent(): React.ReactElement {
       <React.Suspense fallback={null}>
         <ModulePaletteEntries workspaceSlug={ws} projectId={projectId} />
       </React.Suspense>
-      <ProjectTabStrip workspaceSlug={ws} projectId={projectId} />
-      <Outlet />
+      <React.Suspense fallback={null}>
+        <CyclesPaletteEntries workspaceSlug={ws} projectId={projectId} />
+      </React.Suspense>
+      {fullHeightPage ? (
+        <div data-testid="project-full-height-page" className="flex h-full min-h-0 flex-col">
+          {page}
+        </div>
+      ) : (
+        page
+      )}
     </ProjectAccessGate>
   );
 }

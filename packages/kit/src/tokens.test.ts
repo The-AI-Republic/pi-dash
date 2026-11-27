@@ -69,12 +69,6 @@ describe("tokens.css", () => {
     expect(light.get("--accent-hover")).toBe("#4f5bc4");
     expect(light.get("--accent-subtle")).toBe("#eef0fb");
     expect(light.get("--on-accent")).toBe("#ffffff");
-    // Primary buttons are Google blue (NEWFRONT-1052), defined once on
-    // :root so every theme inherits them; the indigo accent above is
-    // untouched because it must keep its AA contrast.
-    expect(light.get("--button-primary")).toBe("#4285f4");
-    expect(light.get("--button-primary-hover")).toBe("#3367d6");
-    expect(light.get("--on-button-primary")).toBe("#ffffff");
     expect(light.get("--success")).toBe("#2f9e5b");
     expect(light.get("--warning")).toBe("#d9912b");
     expect(light.get("--danger")).toBe("#e5484d");
@@ -109,6 +103,10 @@ describe("tokens.css", () => {
     expect(darkContrast.get("--border")).toBe("#a1a1aa");
     expect(darkContrast.get("--accent")).toBe("#a5abf5");
     expect(darkContrast.get("--on-accent")).toBe("#000000");
+  });
+
+  it("defines the settings content column width", () => {
+    expect(light.get("--settings-content-max")).toBe("56.25rem");
   });
 
   it("maps the custom theme to the engine's palette variables (SHELL-095)", () => {

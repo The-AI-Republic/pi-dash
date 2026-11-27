@@ -115,6 +115,25 @@ describe("CycleRow", async () => {
     expect(link).toHaveTextContent("Cycle 7");
   });
 
+  it("opens the peek from the row body when the cycle is archived instead of linking", async () => {
+    const onPeek = vi.fn();
+    await renderRow({ cycle: upcomingRow({ name: "Archived alpha", archived_at: "2026-03-01T00:00:00Z" }), onPeek });
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+    const bodyButton = screen.getByText("Archived alpha").closest("button");
+    expect(bodyButton).not.toBeNull();
+    fireEvent.click(bodyButton as HTMLElement);
+    expect(onPeek).toHaveBeenCalledWith(CYCLES_CYCLE_ID);
+  });
+
+  it("keeps the live row a link that does not call onPeek", async () => {
+    const onPeek = vi.fn();
+    await renderRow({ cycle: upcomingRow({ name: "Live alpha", archived_at: null }), onPeek });
+    const link = screen.getByRole("link");
+    expect(link).toHaveTextContent("Live alpha");
+    expect(link).toHaveAttribute("href", `/acme/projects/${CYCLES_PROJECT_ID}/cycles/${CYCLES_CYCLE_ID}`);
+    expect(onPeek).not.toHaveBeenCalled();
+  });
+
   it("shows the ring, marker, dates, count, and creator plus assignees on upcoming rows", async () => {
     await renderRow({ cycle: upcomingRow() });
     expect(screen.getByRole("img", { name: "0% complete" })).toBeInTheDocument();

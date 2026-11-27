@@ -493,7 +493,13 @@ actions their owners may use.
 
 The title is an in-place editable heading at the top of the canvas. Typing
 saves over `PATCH .../pages/{pageId}/` immediately (debounced keystrokes,
-outside the body path). The cap is **255** characters with a live count
+outside the body path). Saves are **serialised per page**: at most one
+rename is on the wire, and a name typed while it is in flight waits behind
+it, replacing any older waiting name, so the last keystroke is always the
+last write the server sees (NEWFRONT-358 — the old build's overlapping
+PATCHes left a prefix on the server after a burst). A superseded save
+neither updates the cache nor raises a notice; only the final name's
+failure is reported. The cap is **255** characters with a live count
 that is visible only while the field is focused. Enter does not insert a
 newline: it moves the caret to the start of the body. Read-only pages render
 the title as static heading text with the fallback label for an empty name.

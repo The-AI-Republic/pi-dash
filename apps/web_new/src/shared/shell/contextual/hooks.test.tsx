@@ -10,6 +10,7 @@ import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { platform } from "../../../core/platform/index.js";
 import {
   clearCommands,
   clearPalettePages,
@@ -157,7 +158,9 @@ describe("contextual mounting hooks", () => {
     resetAppClient();
     clearCommands();
     clearPalettePages();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    window.history.replaceState(null, "", "/");
   });
 
   it("registers the work-item group while mounted and unregisters after", async () => {
@@ -586,8 +589,10 @@ describe("contextual mounting hooks", () => {
   });
 
   it("copies cycle, module and page links with confirmation toasts", async () => {
+    window.history.replaceState(null, "", "/acme/projects/project-1/cycles/123?tab=overview");
     const writeText = vi.fn(async () => undefined);
     vi.stubGlobal("navigator", { clipboard: { writeText } });
+    vi.spyOn(platform, "shareableUrl").mockImplementation((path: string) => `https://app.example.test${path}`);
     function CycleHost(): React.ReactElement {
       useCyclePaletteContext({
         workspaceSlug: "acme",
@@ -650,9 +655,47 @@ describe("contextual mounting hooks", () => {
       await findCommand(`context.page.${UUID}.copy-url`)!.run();
     });
     expect(writeText).toHaveBeenCalledTimes(3);
-    expect(writeText).toHaveBeenCalledWith(window.location.href);
+    // PIDESKAPP-197: the entries copy the hosted address, never the Tauri
+    // webview origin a desktop build sits behind.
+    expect(writeText).toHaveBeenCalledWith("https://app.example.test/acme/projects/project-1/cycles/123?tab=overview");
+    expect(writeText).not.toHaveBeenCalledWith(window.location.href);
     expect(await screen.findByText("Copied the cycle link.")).toBeInTheDocument();
     expect(await screen.findByText("Copied the module link.")).toBeInTheDocument();
     expect(await screen.findByText("Copied the page link.")).toBeInTheDocument();
+  });
+
+  it("toasts a failure instead of copying a dead link when no hosted origin is available", async () => {
+    const writeText = vi.fn(async () => undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    vi.spyOn(platform, "shareableUrl").mockImplementation(() => {
+      throw new Error("A hosted web origin is required to create a shareable link.");
+    });
+    function CycleHost(): React.ReactElement {
+      useCyclePaletteContext({
+        workspaceSlug: "acme",
+        projectId: "project-1",
+        cycleId: UUID,
+        cycleName: "Sprint 1",
+        archived: false,
+        favorite: false,
+        standing: { memberRole: 15, archived: false },
+        refresh: async () => undefined,
+      });
+      return <div />;
+    }
+    const { queryClient } = harness();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ToastHost manager={getToastManager()} />
+        <CycleHost />
+      </QueryClientProvider>
+    );
+    await waitFor(() => expect(findCommand(`context.cycle.${UUID}.copy-url`)).toBeDefined());
+    await act(async () => {
+      await findCommand(`context.cycle.${UUID}.copy-url`)!.run();
+    });
+    expect(await screen.findByText("Couldn't copy the cycle link.")).toBeInTheDocument();
+    expect(writeText).not.toHaveBeenCalled();
+    expect(screen.queryByText("Copied the cycle link.")).toBeNull();
   });
 });

@@ -1,0 +1,22 @@
+{
+  "fixture_id": "FX-DISP-06",
+  "ported_from": "01a93e17216faea7bfc156b0f864cbbe420d1c52",
+  "trace": [
+    "apps/api/pi_dash/cloud_agent/creation.py:11-89 (execution_fields)",
+    "apps/api/pi_dash/cloud_agent/creation.py:92-145 (_managed_execution_fields + _MANAGED_REFUSAL_DETAIL)",
+    "apps/api/pi_dash/cloud_agent/creation.py:148-152 (dispatch_after_commit)",
+    "apps/api/pi_dash/cloud_agent/creation.py:155-177 (lock_cloud_creation_capacity)",
+    "apps/api/pi_dash/cloud_agent/dispatch.py:20-48 (dispatch_waiting)",
+    "apps/api/pi_dash/cloud_agent/dispatch.py:51-58 (_publish)",
+    "apps/api/pi_dash/cloud_agent/dispatch.py:61-70 (dispatch_agent_run)",
+    "apps/api/pi_dash/cloud_agent/events.py:9-25 (append)"
+  ],
+  "method": "DB before/after + sweep SQL recorded as ORM shapes verbatim from source (no live DB on this runner: full boot needs Postgres + app registry; SQL below is compiler-form, rows are shape-derived per the assistant-fixture precedent). Pure branches (local_runner fields, error-code truncation, event-cap arithmetic) mirror executed vectors from FX-DISP-01/04/05.",
+  "execution_fields": {
+    "local_runner": {
+      "executor_kind": "<resolved>",
+      "tool_plan": {}
+    }
+  },
+  "dispatch_after_commit": "transaction.on_commit(lambda: dispatch_agent_run(run_id))"
+}

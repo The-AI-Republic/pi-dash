@@ -268,6 +268,8 @@ interface PeekExtras {
   onNestedChange?: (selection: { issueId: string; projectId: string; nestingLevel: number }) => void;
   /** Mount the resolving peek behind a host that writes peek params (ISS-167). */
   resolve?: boolean;
+  /** Seed one code-review link so the Code reviews section mounts. */
+  withCodeReview?: boolean;
 }
 
 interface PeekHarness {
@@ -395,7 +397,39 @@ function renderPeek(extras: PeekExtras = {}): PeekHarness {
         })
       );
     }
-    if (url.includes("/issue-links/") || url.includes("/attachments/") || url.includes("/code-reviews/")) {
+    if (url.includes("/issue-links/") || url.includes("/attachments/")) {
+      return answer(200, "[]");
+    }
+    if (url.includes("/code-reviews/")) {
+      if (extras.withCodeReview === true) {
+        return answer(
+          200,
+          JSON.stringify([
+            {
+              id: "423e4567-e89b-12d3-a456-426614174003",
+              issue: ISSUE,
+              provider: "github",
+              host_url: "https://github.com",
+              namespace: "octocat",
+              repo_name: "hello",
+              repo_external_id: "1",
+              external_id: "2",
+              external_iid: "1",
+              url: "https://github.com/octocat/hello/pull/1",
+              title: "octocat/hello#1",
+              state: "open",
+              merged: false,
+              draft: false,
+              remote_updated_at: null,
+              metadata: {},
+              created_at: "2026-10-18T00:00:00Z",
+              updated_at: "2026-10-18T00:00:00Z",
+              created_by: null,
+              created_by_detail: null,
+            },
+          ])
+        );
+      }
       return answer(200, "[]");
     }
     if (url.includes("/history/") || url.includes("/reactions/")) {
@@ -777,6 +811,22 @@ describe("IssuePeek loaded", () => {
     });
     expect(await screen.findByRole("button", { name: "Unsubscribe" })).toBeInTheDocument();
   });
+
+  it("refreshes comments and activity with the detail (ISS-164)", async () => {
+    const user = userEvent.setup();
+    const { queryClient } = renderPeek({ details: {} });
+    // The agent-status poll rides this shared refresh, so a comment posted
+    // while a run is active joins the feed without a reload.
+    await screen.findByRole("button", { name: "Subscribe" });
+    const spy = vi.spyOn(queryClient, "invalidateQueries");
+    await user.click(screen.getByRole("button", { name: "Subscribe" }));
+    await waitFor(() => {
+      expect(spy).toHaveBeenCalledWith({ queryKey: issueKeys.comments(SLUG, PROJECT, ISSUE) });
+    });
+    expect(spy).toHaveBeenCalledWith({ queryKey: issueKeys.activity(SLUG, PROJECT, ISSUE) });
+    expect(spy).toHaveBeenCalledWith({ queryKey: issueKeys.detail(SLUG, ISSUE) });
+    spy.mockRestore();
+  });
 });
 
 describe("IssuePeek modes", () => {
@@ -803,6 +853,26 @@ describe("IssuePeek modes", () => {
     await user.click(screen.getByRole("button", { name: "Display mode" }));
     await user.click(await screen.findByRole("menuitem", { name: "Full screen" }));
     expect(await screen.findByRole("complementary", { name: "Properties" })).toBeInTheDocument();
+  });
+
+  it("places Properties above Activity in narrow layout (NEWPIDASH-233)", async () => {
+    vi.stubGlobal("matchMedia", () => ({
+      matches: true,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+    const user = userEvent.setup();
+    renderPeek({ details: {} });
+    const properties = await screen.findByRole("region", { name: "Properties" });
+    const activity = document.querySelector('[data-slot="activity"]') as HTMLElement;
+    expect(properties.compareDocumentPosition(activity)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    await user.click(screen.getByRole("button", { name: "Display mode" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Full screen" }));
+    const fullLayout = await screen.findByTestId("peek-full-layout");
+    expect(fullLayout).toHaveStyle({ gridTemplateAreas: '"main" "sidebar" "activity"' });
+    const fullProperties = screen.getByRole("complementary", { name: "Properties" });
+    const fullActivity = document.querySelector('[data-slot="activity"]') as HTMLElement;
+    expect(fullProperties.compareDocumentPosition(fullActivity)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   });
 });
 
@@ -1099,6 +1169,34 @@ describe("IssuePeek standing", () => {
     expect(await screen.findByRole("heading", { name: "Fix login" })).toBeInTheDocument();
   });
 
+  it("disables the sub-work-item and attachment entries on archived issues", async () => {
+    renderPeek({ details: {}, archivedIssue: true });
+    expect(await screen.findByRole("heading", { name: "Fix login" })).toBeInTheDocument();
+    const widgets = await screen.findByTestId("issue-detail-widgets");
+    expect(within(widgets).getByRole("button", { name: "Add sub-work item" })).toBeDisabled();
+    const actions = await within(widgets).findAllByRole("button", { name: "Attach" });
+    const attach = actions.find((node) => node.getAttribute("data-widget-action") === "Attach");
+    expect(attach).toBeDefined();
+    expect(attach as HTMLElement).toBeDisabled();
+  });
+
+  it("keeps Code reviews read-only on an archived issue in the peek", async () => {
+    renderPeek({ details: {}, archivedIssue: true, withCodeReview: true });
+    expect(await screen.findByText("Code reviews")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "octocat/hello#1" })).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Paste a pull request or merge request URL")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Detach/ })).not.toBeInTheDocument();
+    const section = document.querySelector('[data-widget-root="Code reviews"]');
+    expect(section).not.toBeNull();
+    expect(within(section as HTMLElement).queryByRole("button", { name: "Attach" })).not.toBeInTheDocument();
+  });
+
+  it("keeps Code reviews writable on an open issue in the peek", async () => {
+    renderPeek({ details: {}, withCodeReview: true });
+    expect(await screen.findByPlaceholderText("Paste a pull request or merge request URL")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Detach octocat\/hello#1/ })).toBeInTheDocument();
+  });
+
   it("shows an archived item's set estimate read-only (NEWFRONT-349 intended, EST-022)", async () => {
     renderPeek({ details: {}, archivedIssue: true, estimates: true, estimatePoint: ESTIMATE_POINT_TWO });
     await screen.findByTestId("issue-preview");
@@ -1136,10 +1234,10 @@ describe("IssuePeek standing", () => {
     expect(await screen.findByRole("heading", { name: "Fix login" })).toBeInTheDocument();
   });
 
-  it("hides the menu on synced issues", async () => {
+  it("shows the menu on synced issues", async () => {
     renderPeek({ details: {}, syncedIssue: true });
     expect(await screen.findByRole("button", { name: "Copy work item link" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Work item actions" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Work item actions" })).toBeInTheDocument();
   });
 
   it("renders an epic peek with its own widget title", async () => {

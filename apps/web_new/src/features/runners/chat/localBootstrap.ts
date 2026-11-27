@@ -8,7 +8,7 @@
 
 import { getAppClient } from "../../../core/api/client.js";
 import { platform } from "../../../core/platform/index.js";
-import { getRuntimeAccount, ensureChatRuntime } from "../runtime/service.js";
+import { getModelTopUpUrl, getRuntimeAccount, ensureChatRuntime, refreshModelCredential } from "../runtime/service.js";
 import { storedApprovalMode } from "./approvalCopy.js";
 import { createLocalChatTransport } from "./localTransport.js";
 import { setChatTransport } from "./transport.js";
@@ -39,7 +39,14 @@ export function registerLocalChatTransport(): void {
           workspaceSlug: workspaceSlugFromPath(globalThis.location.pathname),
           client: getAppClient(),
           runtime: platform.agentRuntime,
+          cli: platform.cliSetup,
         }),
+      refreshModelCredential: () =>
+        refreshModelCredential({
+          client: getAppClient(),
+          runtime: platform.agentRuntime,
+        }),
+      topUpUrl: getModelTopUpUrl,
     })
   );
 }

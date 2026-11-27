@@ -39,17 +39,4 @@ describe("IconButton", () => {
     );
     expect(screen.getByRole("button", { name: "Close" }).className).toContain("focus-visible:outline-2");
   });
-
-  it("paints the primary variant Google blue", () => {
-    render(
-      <IconButton label="Add" variant="primary">
-        <X size={16} strokeWidth={1.5} />
-      </IconButton>
-    );
-    const button = screen.getByRole("button", { name: "Add" });
-    expect(button.className).toContain("bg-(--button-primary)");
-    expect(button.className).toContain("text-(--on-button-primary)");
-    expect(button.className).toContain("hover:bg-(--button-primary-hover)");
-    expect(button.className).not.toContain("bg-(--accent)");
-  });
 });

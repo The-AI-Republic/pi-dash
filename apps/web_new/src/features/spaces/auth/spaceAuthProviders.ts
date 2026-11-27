@@ -3,8 +3,9 @@
 // See the LICENSE file for details.
 // Third-party sign-in buttons for the spaces auth card
 // (parity/specs/space.md SPC-062). A button renders exactly when the
-// instance enables its provider; activating one starts the provider flow
-// at the workspace provider path carrying the encoded return address.
+// instance enables its provider; activating one starts the space-scoped
+// provider flow at /auth/spaces/<provider>/ carrying the encoded return
+// address, so the callback returns the visitor to the board position.
 // The compact monograms are original glyphs: brand artwork stays with
 // the old app, which is reference-only.
 import type { SpaceAuthMode } from "./spaceAuthMachine.js";
@@ -57,6 +58,6 @@ export function resolveSpaceAuthProviders(
   return KNOWN_PROVIDERS.filter((provider) => enabled[provider.id]).map((provider) => ({
     ...provider,
     label: `${invitation} ${provider.name}`,
-    href: `/auth/${provider.id}/${suffix}`,
+    href: `/auth/spaces/${provider.id}/${suffix}`,
   }));
 }

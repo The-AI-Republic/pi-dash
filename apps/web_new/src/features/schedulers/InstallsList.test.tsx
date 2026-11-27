@@ -159,6 +159,13 @@ describe("formatters", () => {
 });
 
 describe("InstallsList", () => {
+  it("leaves the header without a creation control when the host supplies none", async () => {
+    setup({ role: ROLE_ADMIN, projectRole: 20, props: { onCreate: undefined } });
+    await screen.findByText("Weekly review");
+    expect(screen.getByRole("heading", { name: "Schedulers" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "New Scheduler" })).not.toBeInTheDocument();
+  });
+
   it("lists installs with schedule, runs, switch and update time", async () => {
     setup({ role: ROLE_ADMIN, projectRole: 20 });
     const table = await screen.findByRole("table", { name: "Installed schedulers" });
