@@ -2502,3 +2502,101 @@ async fn issue_patch_add_and_remove_share_one_label_lookup() {
     assert_eq!(label_gets, 1, "add + remove must share one label lookup");
     assert_eq!(recorded.len(), 3, "expected issue GET, labels GET, PATCH");
 }
+
+// ---- `state list` project forms (PDASHOSS01-403) ----
+
+const STATES_BODY: &str = r#"{"count":2,"results":[{"id":"s1","name":"Todo","group":"unstarted"},{"id":"s2","name":"Done","group":"completed"}]}"#;
+const PROJECT_UUID: &str = "e509f5c9-c6fd-4b1a-a89c-8cb863610500";
+
+/// Fake that serves states for project `OPENHUB` (and its UUID) and 404s
+/// everything else, like the server does for an unknown project.
+fn states_fake_handler() -> Handler {
+    Box::new(|req| {
+        let known = [
+            "/api/v1/workspaces/acme/projects/OPENHUB/states/".to_string(),
+            format!("/api/v1/workspaces/acme/projects/{PROJECT_UUID}/states/"),
+        ];
+        if known.contains(&req.path) {
+            CannedResponse::ok(STATES_BODY)
+        } else if req.path == "/api/v1/workspaces/acme/work-items/OPENHUB-7/" {
+            CannedResponse::ok(format!(r#"{{"id":"i7","project":"{PROJECT_UUID}"}}"#))
+        } else {
+            CannedResponse {
+                status: 404,
+                status_text: "Not Found",
+                body: r#"{"error":"Project not found"}"#.into(),
+            }
+        }
+    })
+}
+
+async fn state_list(
+    positional: Option<&str>,
+    project: Option<&str>,
+) -> (Result<serde_json::Value, pidash::api_client::CliError>, Vec<String>) {
+    let fake = start_fake(states_fake_handler()).await;
+    let client = client(&fake);
+    let resp = pidash::cli::state::list_states(&client, positional, project, None, None).await;
+    let paths = fake
+        .recorded
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| r.path.clone())
+        .collect();
+    (resp, paths)
+}
+
+#[tokio::test]
+async fn state_list_positional_project_slug_lists_project_states() {
+    let (resp, paths) = state_list(Some("OPENHUB"), None).await;
+    let resp = resp.expect("slug positional succeeds");
+    assert_eq!(resp["results"][0]["name"], "Todo");
+    assert_eq!(
+        paths,
+        vec!["/api/v1/workspaces/acme/projects/OPENHUB/states/"]
+    );
+}
+
+#[tokio::test]
+async fn state_list_positional_project_uuid_lists_project_states() {
+    let (resp, paths) = state_list(Some(PROJECT_UUID), None).await;
+    assert_eq!(resp.expect("uuid positional succeeds")["count"], 2);
+    assert_eq!(
+        paths,
+        vec![format!("/api/v1/workspaces/acme/projects/{PROJECT_UUID}/states/")]
+    );
+}
+
+#[tokio::test]
+async fn state_list_project_flag_slug_lists_project_states() {
+    let (resp, paths) = state_list(None, Some("OPENHUB")).await;
+    assert_eq!(resp.expect("--project succeeds")["count"], 2);
+    assert_eq!(
+        paths,
+        vec!["/api/v1/workspaces/acme/projects/OPENHUB/states/"]
+    );
+}
+
+#[tokio::test]
+async fn state_list_positional_issue_identifier_still_resolves_its_project() {
+    let (resp, paths) = state_list(Some("OPENHUB-7"), None).await;
+    assert_eq!(resp.expect("issue positional succeeds")["count"], 2);
+    assert_eq!(
+        paths,
+        vec![
+            "/api/v1/workspaces/acme/work-items/OPENHUB-7/".to_string(),
+            format!("/api/v1/workspaces/acme/projects/{PROJECT_UUID}/states/"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn state_list_unknown_project_names_the_project() {
+    for (positional, flag) in [(Some("NOPE"), None), (None, Some("NOPE"))] {
+        let (resp, _) = state_list(positional, flag).await;
+        let err = resp.expect_err("unknown project fails");
+        assert_eq!(err.exit_code, EXIT_NOT_FOUND);
+        assert_eq!(err.message, "project 'NOPE' not found");
+    }
+}
