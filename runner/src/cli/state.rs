@@ -135,9 +135,11 @@ pub async fn list_states(
     }
     // Both servers check project membership on the states route before
     // they check that a UUID exists, so an unknown UUID answers 403. Ask
-    // project detail (workspace-member readable) whether it exists, and
-    // keep the 403 unless that says 404: a real denial must stay one.
-    if err.status == Some(403) && looks_like_uuid(&name) {
+    // project detail whether the project is visible. Detail hides secret
+    // projects from non-members, so its 404 cannot tell a missing project
+    // from a hidden one: name the project but keep the 403 (exit 3), never
+    // claim "not found". A visible project keeps the server's own 403.
+    if err.status == Some(403) && is_project_uuid(&name) {
         let detail = format!(
             "workspaces/{}/projects/{}/",
             client.env.workspace_slug, name
@@ -145,10 +147,22 @@ pub async fn list_states(
         if let Err(probe) = client.get(&detail).await
             && probe.exit_code == EXIT_NOT_FOUND
         {
-            return Err(project_not_found(&name, probe));
+            let mut hidden = CliError::new(
+                err.exit_code,
+                format!("project '{name}' not found or not accessible"),
+            );
+            hidden.detail = err.detail;
+            hidden.status = err.status;
+            return Err(hidden);
         }
     }
     Err(err)
+}
+
+/// A project UUID in either spelling both servers accept: hyphenated
+/// (36 chars) or compact (32 hex chars).
+fn is_project_uuid(s: &str) -> bool {
+    matches!(s.len(), 32 | 36) && uuid::Uuid::try_parse(s).is_ok()
 }
 
 fn project_not_found(name: &str, source: CliError) -> CliError {
