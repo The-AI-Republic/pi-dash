@@ -116,16 +116,26 @@ function BulkProjectPicker({ projects, selection, loading, onChange }: PickerPro
   // Escape inside the open popup closes the popup only: stopping the event
   // here keeps the enclosing dialog from treating it as its own dismissal,
   // and focus returns to the trigger so a second Escape closes the dialog.
+  // An Escape that cancels an input method's composition is kept from the
+  // dialog too, but otherwise left to the input method: the popup stays open.
   function onKeyDown(event: React.KeyboardEvent<HTMLDivElement>): void {
     if (!open || event.key !== "Escape") return;
-    event.preventDefault();
     event.stopPropagation();
+    if (event.nativeEvent.isComposing) return;
+    event.preventDefault();
     setOpen(false);
     triggerRef.current?.focus();
   }
 
+  // Focus moving to another control outside the picker closes the popup, so
+  // Escape from there belongs to the dialog without dropping a hidden popup.
+  function onBlur(event: React.FocusEvent<HTMLDivElement>): void {
+    const next = event.relatedTarget;
+    if (open && next !== null && !event.currentTarget.contains(next)) setOpen(false);
+  }
+
   return (
-    <div ref={rootRef} className="relative flex flex-col gap-(--space-2)" onKeyDown={onKeyDown}>
+    <div ref={rootRef} className="relative flex flex-col gap-(--space-2)" onKeyDown={onKeyDown} onBlur={onBlur}>
       <span className="text-body font-medium text-(--text)">Projects</span>
       <button
         ref={triggerRef}

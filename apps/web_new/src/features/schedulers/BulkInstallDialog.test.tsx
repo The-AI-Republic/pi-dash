@@ -513,6 +513,53 @@ describe("BulkInstallDialog", { timeout: 30_000 }, () => {
     expect(contracts.createSchedulerBinding).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["the trigger", () => screen.getByRole("button", { name: /project/ })],
+    ["a project checkbox", () => screen.getByLabelText(/Alpha/)],
+    ["the select-all button", () => screen.getByRole("button", { name: "Select all" })],
+  ])("closes only the picker on Escape with focus on %s", async (_label, target) => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    const { user, onClose } = renderDialog();
+    const listbox = await openPicker(user);
+    await waitFor(() => expect(within(listbox).getByLabelText(/Alpha/)).not.toBeDisabled());
+    target().focus();
+
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("listbox", { name: "Projects" })).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: /project/ })).toHaveFocus();
+  });
+
+  it("leaves Escape to the input method while search text is being composed", async () => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    const { user, onClose } = renderDialog();
+    await openPicker(user);
+    const search = screen.getByLabelText("Search projects");
+    search.focus();
+
+    const event = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true, isComposing: true });
+    search.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(screen.getByRole("listbox", { name: "Projects" })).toBeInTheDocument();
+    expect(search).toHaveFocus();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("closes the picker when focus leaves it, so a later Escape is the dialog's", async () => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    const { user } = renderDialog();
+    await user.type(await screen.findByLabelText("Project context (optional)"), "Keep me");
+    await openPicker(user);
+    screen.getByLabelText("Search projects").focus();
+
+    screen.getByLabelText("Project context (optional)").focus();
+
+    await waitFor(() => expect(screen.queryByRole("listbox", { name: "Projects" })).not.toBeInTheDocument());
+    expect(screen.getByLabelText("Project context (optional)")).toHaveValue("Keep me");
+  });
+
   it("lets the cancel button close without writing", async () => {
     contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA })]);
     const { user, onClose } = renderDialog();
