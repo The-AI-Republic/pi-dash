@@ -2502,3 +2502,112 @@ async fn issue_patch_add_and_remove_share_one_label_lookup() {
     assert_eq!(label_gets, 1, "add + remove must share one label lookup");
     assert_eq!(recorded.len(), 3, "expected issue GET, labels GET, PATCH");
 }
+
+// ---- `pidash issue busy` (PDASHOSS01-407) ----
+
+const BUSY_RUN: &str = "c5752d81-5007-42f7-b633-863dc50dbc05";
+
+fn busy_issue_body(active_run: Option<&str>, git_work_branch: &str) -> String {
+    let run = match active_run {
+        Some(block) => format!(r#","active_run":{block}"#),
+        None => String::new(),
+    };
+    format!(
+        r#"{{"id":"00000000-0000-0000-0000-000000000007","project":"00000000-0000-0000-0000-0000000000aa","name":"handler","git_work_branch":"{git_work_branch}"{run}}}"#
+    )
+}
+
+fn running_block(branch: Option<&str>) -> String {
+    let branch = match branch {
+        Some(b) => format!(r#""{b}""#),
+        None => "null".to_string(),
+    };
+    format!(
+        r#"{{"id":"{BUSY_RUN}","status":"running","runner_id":"b71fe111-2222-3333-4444-555566667777","created_at":"2026-11-27T14:34:17+00:00","assigned_at":"2026-11-27T14:34:18+00:00","started_at":"2026-11-27T14:34:20+00:00","age_seconds":60,"runner_last_heartbeat_at":"2026-11-27T14:35:10+00:00","branch":{branch}}}"#
+    )
+}
+
+#[tokio::test]
+async fn issue_busy_reports_the_owning_run_and_its_branch() {
+    let body = busy_issue_body(Some(&running_block(Some("pi-dash/eng-7"))), "pi-dash/eng-7");
+    let fake = start_fake(Box::new(move |req| {
+        assert_eq!(req.method, "GET");
+        assert_eq!(req.path, "/api/v1/workspaces/acme/work-items/ENG-7/");
+        CannedResponse::ok(body.clone())
+    }))
+    .await;
+    let out = pidash::cli::issue::issue_busy(&client(&fake), "ENG-7")
+        .await
+        .expect("issue busy");
+    assert_eq!(out["issue"], "ENG-7");
+    assert_eq!(out["busy"], serde_json::json!(true));
+    assert_eq!(out["owned_by_caller"], serde_json::json!(false));
+    assert_eq!(out["branch"], "pi-dash/eng-7");
+    assert_eq!(out["active_run"]["id"], BUSY_RUN);
+    assert_eq!(out["active_run"]["status"], "running");
+    assert_eq!(
+        out["active_run"]["runner_last_heartbeat_at"],
+        "2026-11-27T14:35:10+00:00"
+    );
+    let advice = out["advice"].as_str().unwrap();
+    assert!(advice.contains(BUSY_RUN), "{advice}");
+    assert!(advice.contains("pi-dash/eng-7"), "{advice}");
+    assert!(advice.contains("comment on ENG-7"), "{advice}");
+    // Read-only: one GET, no write.
+    assert_eq!(fake.recorded.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn issue_busy_is_not_busy_for_the_run_that_owns_the_issue() {
+    let body = busy_issue_body(Some(&running_block(Some("pi-dash/eng-7"))), "pi-dash/eng-7");
+    let fake = start_fake(Box::new(move |_req| CannedResponse::ok(body.clone()))).await;
+    let out = pidash::cli::issue::issue_busy(&client_for_run(&fake, BUSY_RUN), "ENG-7")
+        .await
+        .expect("issue busy");
+    assert_eq!(out["busy"], serde_json::json!(false));
+    assert_eq!(out["owned_by_caller"], serde_json::json!(true));
+    assert_eq!(out["branch"], "pi-dash/eng-7");
+}
+
+#[tokio::test]
+async fn issue_busy_is_busy_for_a_different_run() {
+    let body = busy_issue_body(Some(&running_block(None)), "");
+    let fake = start_fake(Box::new(move |_req| CannedResponse::ok(body.clone()))).await;
+    let out = pidash::cli::issue::issue_busy(
+        &client_for_run(&fake, "11111111-2222-3333-4444-555555555555"),
+        "ENG-7",
+    )
+    .await
+    .expect("issue busy");
+    assert_eq!(out["busy"], serde_json::json!(true));
+    assert_eq!(out["owned_by_caller"], serde_json::json!(false));
+    // No branch recorded anywhere yet.
+    assert_eq!(out["branch"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn issue_busy_falls_back_to_the_issue_branch_on_an_older_server() {
+    // A server whose `active_run` block has no `branch` key: the issue's
+    // `git_work_branch` names the branch.
+    let block = running_block(None).replace(r#","branch":null"#, "");
+    let body = busy_issue_body(Some(&block), "feat/pinned");
+    let fake = start_fake(Box::new(move |_req| CannedResponse::ok(body.clone()))).await;
+    let out = pidash::cli::issue::issue_busy(&client(&fake), "ENG-7")
+        .await
+        .expect("issue busy");
+    assert_eq!(out["busy"], serde_json::json!(true));
+    assert_eq!(out["branch"], "feat/pinned");
+}
+
+#[tokio::test]
+async fn issue_busy_is_free_without_an_active_run() {
+    let body = busy_issue_body(None, "pi-dash/eng-7");
+    let fake = start_fake(Box::new(move |_req| CannedResponse::ok(body.clone()))).await;
+    let out = pidash::cli::issue::issue_busy(&client(&fake), "ENG-7")
+        .await
+        .expect("issue busy");
+    assert_eq!(out["busy"], serde_json::json!(false));
+    assert_eq!(out["owned_by_caller"], serde_json::json!(false));
+    assert_eq!(out["active_run"], serde_json::Value::Null);
+    assert_eq!(out["branch"], "pi-dash/eng-7");
+}

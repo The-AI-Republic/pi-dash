@@ -241,7 +241,7 @@ mod tests {
 
     #[test]
     fn daemon_wiring_removes_old_versions_beside_the_resolved_engine() {
-        use super::super::locate::{PidashAgentSource, Layout, ResolvedPidashAgent};
+        use super::super::locate::{Layout, PidashAgentSource, ResolvedPidashAgent};
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("lib/pidash/engine");
         let old = version_dir(&root, "0.150.0");

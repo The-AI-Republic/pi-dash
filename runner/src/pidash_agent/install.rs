@@ -574,7 +574,11 @@ mod tests {
     fn stage_archive_tree(top: &Path, version: &str, windows: bool, linux: bool) -> PathBuf {
         let dir = top.join("engine").join(version);
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join(crate::pidash_agent::binary_name(windows)), b"new engine").unwrap();
+        fs::write(
+            dir.join(crate::pidash_agent::binary_name(windows)),
+            b"new engine",
+        )
+        .unwrap();
         for helper in super::helper_names(windows, linux) {
             fs::write(dir.join(helper), b"helper").unwrap();
         }

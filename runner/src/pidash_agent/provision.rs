@@ -252,8 +252,8 @@ pub async fn status_without_daemon(paths: &Paths) -> Result<EngineStatusInfo> {
 mod tests {
     use super::*;
     use crate::config::schema::{CliSection, Config, DaemonConfig, PidashAgentCredential};
-    use crate::pidash_agent::test_server::{self, Handler};
     use crate::ipc::protocol::EngineSignInState;
+    use crate::pidash_agent::test_server::{self, Handler};
     use std::sync::Arc;
 
     fn paths(root: &std::path::Path) -> Paths {

@@ -209,11 +209,12 @@ mod tests {
             (401, r#"{"detail":"machine_token_expired"}"#, false),
             (500, r#"{"error":"unavailable"}"#, false),
         ] {
-            let handler: crate::pidash_agent::test_server::Handler = std::sync::Arc::new(move |req| {
-                assert_eq!(req.method, "POST");
-                assert_eq!(req.bearer(), Some("mt_machine"));
-                (status, body.to_string())
-            });
+            let handler: crate::pidash_agent::test_server::Handler =
+                std::sync::Arc::new(move |req| {
+                    assert_eq!(req.method, "POST");
+                    assert_eq!(req.bearer(), Some("mt_machine"));
+                    (status, body.to_string())
+                });
             let server = crate::pidash_agent::test_server::start(handler).await;
             assert_eq!(
                 revoke_runner(&server.url, "mt_machine", &Uuid::new_v4())

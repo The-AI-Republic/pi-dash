@@ -43,6 +43,19 @@ pub enum IssueCommand {
         /// Project-scoped identifier, e.g. `ENG-42`.
         identifier: String,
     },
+    /// Check whether an agent run owns the issue's branch before you push to
+    /// it. Reads the issue's `active_run` (the run occupying the issue's one
+    /// run slot) and its working branch, and prints `{issue, busy,
+    /// owned_by_caller, branch, active_run, advice}`. `busy` is true while
+    /// another run is active on the issue: do not push to `branch` — comment
+    /// on the issue instead. A run checking its own issue
+    /// (`PIDASH_RUN_ID` == `active_run.id`) gets `busy: false,
+    /// owned_by_caller: true`. Read-only: it takes no lock. Always exits 0
+    /// on a successful read; check `busy`.
+    Busy {
+        /// Project-scoped identifier, e.g. `ENG-42`.
+        identifier: String,
+    },
     /// Create a new work item under a project. If `--project` is omitted,
     /// the CLI uses PIDASH_PROJECT_ID, local config default_project, or
     /// the workspace default project from Pi Dash cloud.
@@ -402,7 +415,6 @@ pub struct PatchArgs {
     #[arg(long, conflicts_with_all = ["add_label", "remove_label"])]
     pub clear_labels: bool,
 
-
     /// Record the git branch this issue's work lives on, so later agent runs
     /// check it out instead of cutting a new one. Set it only after the
     /// branch exists on the remote. `--git-work-branch ""` clears it.
@@ -524,6 +536,7 @@ pub async fn run(args: IssueArgs, paths: &crate::util::paths::Paths) -> i32 {
 
     let result = match args.command {
         IssueCommand::Get { identifier } => cmd_get(&client, &identifier).await,
+        IssueCommand::Busy { identifier } => cmd_busy(&client, &identifier).await,
         IssueCommand::Create(a) => cmd_create(&client, paths, a).await,
         IssueCommand::List(a) => cmd_list(&client, a).await,
         IssueCommand::Patch(p) => cmd_patch(&client, p).await,
@@ -561,6 +574,80 @@ async fn cmd_get(client: &ApiClient, identifier: &str) -> Result<(), CliError> {
 /// yields a payload without it.
 pub async fn get_issue(client: &ApiClient, identifier: &str) -> Result<Value, CliError> {
     Ok(resolve_issue(client, identifier).await?.raw)
+}
+
+async fn cmd_busy(client: &ApiClient, identifier: &str) -> Result<(), CliError> {
+    let report = issue_busy(client, identifier).await?;
+    println!(
+        "{}",
+        serde_json::to_string(&report).expect("serialize JSON value")
+    );
+    Ok(())
+}
+
+/// One by-identifier GET, then [`busy_report`] against the caller's own
+/// run id (`PIDASH_RUN_ID`).
+pub async fn issue_busy(client: &ApiClient, identifier: &str) -> Result<Value, CliError> {
+    let issue = resolve_issue(client, identifier).await?;
+    Ok(busy_report(
+        &issue.raw,
+        identifier,
+        client.env.run_id.as_deref(),
+    ))
+}
+
+/// The `pidash issue busy` document, built from the issue-detail payload.
+///
+/// `active_run` is the server's block verbatim (`null` when the payload has
+/// none — no run occupies the slot, or the server predates the block).
+/// `branch` is the run's working branch when the server reports one
+/// (`active_run.branch`), else the issue's `git_work_branch`, else `null`.
+/// Any active run other than the caller's own makes the branch busy, from
+/// `queued` on: a queued run is about to check that branch out.
+pub fn busy_report(raw: &Value, identifier: &str, caller_run_id: Option<&str>) -> Value {
+    let non_empty = |v: Option<&Value>| {
+        v.and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let active_run = raw
+        .get("active_run")
+        .filter(|v| v.is_object())
+        .cloned()
+        .unwrap_or(Value::Null);
+    let run_id = non_empty(active_run.get("id"));
+    let branch =
+        non_empty(active_run.get("branch")).or_else(|| non_empty(raw.get("git_work_branch")));
+    let owned_by_caller = match (run_id.as_deref(), caller_run_id) {
+        (Some(run), Some(caller)) => run.eq_ignore_ascii_case(caller.trim()),
+        _ => false,
+    };
+    let busy = run_id.is_some() && !owned_by_caller;
+    let advice = if owned_by_caller {
+        "this run owns the issue; push to its branch as usual".to_string()
+    } else if busy {
+        let status = non_empty(active_run.get("status")).unwrap_or_else(|| "active".to_string());
+        let run = run_id.as_deref().unwrap_or_default();
+        match branch.as_deref() {
+            Some(b) => format!(
+                "agent run {run} ({status}) owns branch {b}: do not push to it; comment on {identifier} instead"
+            ),
+            None => format!(
+                "agent run {run} ({status}) is working on {identifier}: do not push to its branch; comment on the issue instead"
+            ),
+        }
+    } else {
+        "no agent run is active on this issue; the branch is free".to_string()
+    };
+    serde_json::json!({
+        "issue": identifier,
+        "busy": busy,
+        "owned_by_caller": owned_by_caller,
+        "branch": branch,
+        "active_run": active_run,
+        "advice": advice,
+    })
 }
 
 async fn cmd_create(
@@ -1342,7 +1429,6 @@ pub async fn cmd_patch(client: &ApiClient, args: PatchArgs) -> Result<(), CliErr
 
     let labels = resolve_label_patch(client, &issue, &args).await?;
 
-
     let runner = if args.clear_runner {
         RunnerPatch::Clear
     } else if let Some(ref runner) = args.runner {
@@ -1905,7 +1991,10 @@ mod tests {
     fn pagination_note_stays_silent_when_the_field_is_absent() {
         // Servers predating `next_page_results` in the envelope: a complete
         // list and a truncated one are indistinguishable, so say nothing.
-        assert_eq!(pagination_note(&json!({"count": 1000, "results": []})), None);
+        assert_eq!(
+            pagination_note(&json!({"count": 1000, "results": []})),
+            None
+        );
     }
 
     #[test]
