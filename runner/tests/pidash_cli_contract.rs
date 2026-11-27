@@ -2599,3 +2599,86 @@ async fn state_list_unknown_project_names_the_project() {
         assert_eq!(err.message, "project 'NOPE' not found");
     }
 }
+
+const MISSING_UUID: &str = "00000000-0000-4000-8000-000000000000";
+const DENIED_UUID: &str = "11111111-1111-4111-8111-111111111111";
+
+/// Like the real servers: the states route checks project membership
+/// before existence, so any UUID the caller is not a member of gets 403.
+/// Project detail then tells a missing project (404) from a denied one.
+fn states_forbidden_handler() -> Handler {
+    Box::new(|req| {
+        let forbidden = CannedResponse {
+            status: 403,
+            status_text: "Forbidden",
+            body: r#"{"detail":"You do not have permission to perform this action."}"#.into(),
+        };
+        if req.path == format!("/api/v1/workspaces/acme/projects/{MISSING_UUID}/") {
+            CannedResponse {
+                status: 404,
+                status_text: "Not Found",
+                body: r#"{"error":"Project not found"}"#.into(),
+            }
+        } else if req.path == format!("/api/v1/workspaces/acme/projects/{DENIED_UUID}/") {
+            CannedResponse::ok(format!(r#"{{"id":"{DENIED_UUID}","identifier":"ENG"}}"#))
+        } else {
+            forbidden
+        }
+    })
+}
+
+async fn state_list_forbidden(
+    positional: Option<&str>,
+    project: Option<&str>,
+) -> (
+    Result<serde_json::Value, pidash::api_client::CliError>,
+    Vec<String>,
+) {
+    let fake = start_fake(states_forbidden_handler()).await;
+    let client = client(&fake);
+    let resp = pidash::cli::state::list_states(&client, positional, project, None, None).await;
+    let paths = fake
+        .recorded
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| r.path.clone())
+        .collect();
+    (resp, paths)
+}
+
+#[tokio::test]
+async fn state_list_unknown_project_uuid_names_the_project() {
+    for (positional, flag) in [(Some(MISSING_UUID), None), (None, Some(MISSING_UUID))] {
+        let (resp, paths) = state_list_forbidden(positional, flag).await;
+        let err = resp.expect_err("unknown uuid fails");
+        assert_eq!(err.exit_code, EXIT_NOT_FOUND);
+        assert_eq!(err.message, format!("project '{MISSING_UUID}' not found"));
+        assert_eq!(
+            paths,
+            vec![
+                format!("/api/v1/workspaces/acme/projects/{MISSING_UUID}/states/"),
+                format!("/api/v1/workspaces/acme/projects/{MISSING_UUID}/"),
+            ]
+        );
+    }
+}
+
+#[tokio::test]
+async fn state_list_denied_project_uuid_keeps_the_permission_error() {
+    let (resp, _) = state_list_forbidden(Some(DENIED_UUID), None).await;
+    let err = resp.expect_err("denied uuid fails");
+    assert_eq!(err.exit_code, EXIT_AUTH);
+    assert_eq!(err.status, Some(403));
+    assert_eq!(
+        err.message,
+        "HTTP 403 Forbidden: permission denied: You do not have permission to perform this action."
+    );
+}
+
+#[tokio::test]
+async fn state_list_denied_project_slug_does_not_probe_project_detail() {
+    let (resp, paths) = state_list_forbidden(Some("ENG"), None).await;
+    assert_eq!(resp.expect_err("denied slug fails").exit_code, EXIT_AUTH);
+    assert_eq!(paths, vec!["/api/v1/workspaces/acme/projects/ENG/states/"]);
+}
