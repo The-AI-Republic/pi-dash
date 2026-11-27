@@ -4,6 +4,7 @@
 
 # Python imports
 import uuid
+from datetime import timezone as dt_timezone
 
 # Django imports
 from django.http import QueryDict
@@ -182,6 +183,14 @@ class IssueSerializer(BaseSerializer):
     #: can see. Without a viewer the block is omitted rather than leaking
     #: titles from projects the caller may not belong to.
     RELATIONS_VIEWER_CONTEXT = "relations_viewer"
+
+    #: Context flag set by the single-issue GETs (detail, by-identifier and
+    #: the external-id lookup). Those payloads then carry ``active_run``: the
+    #: run occupying the issue's one-active-run slot, with its working branch
+    #: and its runner's last heartbeat (PDASHOSS01-407), so ``pidash issue
+    #: busy`` can tell an outside agent the branch is owned. Absent when no
+    #: run is active. Same keys and formats as the Rust API.
+    ACTIVE_RUN_CONTEXT = "include_active_run"
 
     def __init__(self, *args, **kwargs):
         # ``BaseSerializer`` consumes ``fields``; remember which plain names
@@ -609,7 +618,54 @@ class IssueSerializer(BaseSerializer):
 
             data["relations"] = grouped_relations(instance, member_project_issues(viewer, instance.workspace.slug))
 
+        if (
+            self.context.get(self.ACTIVE_RUN_CONTEXT)
+            and not isinstance(self.parent, serializers.ListSerializer)
+            and (not self._requested_fields or "active_run" in self._requested_fields)
+        ):
+            summary = active_run_summary(instance)
+            if summary is not None:
+                data["active_run"] = summary
+
         return data
+
+
+def _utc_isoformat(moment):
+    return None if moment is None else moment.astimezone(dt_timezone.utc).isoformat()
+
+
+def _active_run_branch(issue_branch, run_config):
+    """The issue's ``git_work_branch`` when set (a run records the branch it
+    cuts there), else the branch pinned in the run's ``run_config`` at
+    dispatch, else ``None``. Blank values fall through."""
+    branch = (issue_branch or "").strip()
+    if branch:
+        return branch
+    pinned = (run_config or {}).get("git_work_branch") if isinstance(run_config, dict) else None
+    if isinstance(pinned, str) and pinned.strip():
+        return pinned.strip()
+    return None
+
+
+def active_run_summary(issue):
+    """The ``active_run`` block for one issue, or ``None`` when idle."""
+    from pi_dash.orchestration.service import _active_run_for
+
+    run = _active_run_for(issue)
+    if run is None:
+        return None
+    runner = run.runner if run.runner_id else None
+    return {
+        "id": str(run.id),
+        "status": run.status,
+        "runner_id": str(run.runner_id) if run.runner_id else None,
+        "created_at": _utc_isoformat(run.created_at),
+        "assigned_at": _utc_isoformat(run.assigned_at),
+        "started_at": _utc_isoformat(run.started_at),
+        "age_seconds": max(0, int((timezone.now() - run.created_at).total_seconds())),
+        "runner_last_heartbeat_at": _utc_isoformat(runner.last_heartbeat_at if runner else None),
+        "branch": _active_run_branch(issue.git_work_branch, run.run_config),
+    }
 
 
 class IssueLiteSerializer(BaseSerializer):

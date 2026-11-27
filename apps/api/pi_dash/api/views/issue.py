@@ -262,7 +262,10 @@ class WorkspaceIssueAPIEndpoint(BaseAPIView):
                     issue,
                     fields=self.fields,
                     expand=self.expand,
-                    context={IssueSerializer.RELATIONS_VIEWER_CONTEXT: request.user},
+                    context={
+                        IssueSerializer.RELATIONS_VIEWER_CONTEXT: request.user,
+                        IssueSerializer.ACTIVE_RUN_CONTEXT: True,
+                    },
                 ).data,
                 status=status.HTTP_200_OK,
             )
@@ -353,7 +356,12 @@ class IssueListCreateAPIEndpoint(BaseAPIView):
                 project_id=project_id,
             )
             return Response(
-                IssueSerializer(issue, fields=self.fields, expand=self.expand).data,
+                IssueSerializer(
+                    issue,
+                    fields=self.fields,
+                    expand=self.expand,
+                    context={IssueSerializer.ACTIVE_RUN_CONTEXT: True},
+                ).data,
                 status=status.HTTP_200_OK,
             )
 
@@ -607,7 +615,10 @@ class IssueDetailAPIEndpoint(BaseAPIView):
                 issue,
                 fields=self.fields,
                 expand=self.expand,
-                context={IssueSerializer.RELATIONS_VIEWER_CONTEXT: request.user},
+                context={
+                    IssueSerializer.RELATIONS_VIEWER_CONTEXT: request.user,
+                    IssueSerializer.ACTIVE_RUN_CONTEXT: True,
+                },
             ).data,
             status=status.HTTP_200_OK,
         )
