@@ -2502,3 +2502,229 @@ async fn issue_patch_add_and_remove_share_one_label_lookup() {
     assert_eq!(label_gets, 1, "add + remove must share one label lookup");
     assert_eq!(recorded.len(), 3, "expected issue GET, labels GET, PATCH");
 }
+
+// ---- `state list` project forms (PDASHOSS01-403) ----
+
+const STATES_BODY: &str = r#"{"count":2,"results":[{"id":"s1","name":"Todo","group":"unstarted"},{"id":"s2","name":"Done","group":"completed"}]}"#;
+const PROJECT_UUID: &str = "e509f5c9-c6fd-4b1a-a89c-8cb863610500";
+
+/// Fake that serves states for project `ENG` (and its UUID) and 404s
+/// everything else, like the server does for an unknown project.
+fn states_fake_handler() -> Handler {
+    Box::new(|req| {
+        let known = [
+            "/api/v1/workspaces/acme/projects/ENG/states/".to_string(),
+            format!("/api/v1/workspaces/acme/projects/{PROJECT_UUID}/states/"),
+        ];
+        if known.contains(&req.path) {
+            CannedResponse::ok(STATES_BODY)
+        } else if req.path == "/api/v1/workspaces/acme/work-items/ENG-7/" {
+            CannedResponse::ok(format!(r#"{{"id":"i7","project":"{PROJECT_UUID}"}}"#))
+        } else {
+            CannedResponse {
+                status: 404,
+                status_text: "Not Found",
+                body: r#"{"error":"Project not found"}"#.into(),
+            }
+        }
+    })
+}
+
+async fn state_list(
+    positional: Option<&str>,
+    project: Option<&str>,
+) -> (
+    Result<serde_json::Value, pidash::api_client::CliError>,
+    Vec<String>,
+) {
+    let fake = start_fake(states_fake_handler()).await;
+    let client = client(&fake);
+    let resp = pidash::cli::state::list_states(&client, positional, project, None, None).await;
+    let paths = fake
+        .recorded
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| r.path.clone())
+        .collect();
+    (resp, paths)
+}
+
+#[tokio::test]
+async fn state_list_positional_project_slug_lists_project_states() {
+    let (resp, paths) = state_list(Some("ENG"), None).await;
+    let resp = resp.expect("slug positional succeeds");
+    assert_eq!(resp["results"][0]["name"], "Todo");
+    assert_eq!(paths, vec!["/api/v1/workspaces/acme/projects/ENG/states/"]);
+}
+
+#[tokio::test]
+async fn state_list_positional_project_uuid_lists_project_states() {
+    let (resp, paths) = state_list(Some(PROJECT_UUID), None).await;
+    assert_eq!(resp.expect("uuid positional succeeds")["count"], 2);
+    assert_eq!(
+        paths,
+        vec![format!(
+            "/api/v1/workspaces/acme/projects/{PROJECT_UUID}/states/"
+        )]
+    );
+}
+
+#[tokio::test]
+async fn state_list_project_flag_slug_lists_project_states() {
+    let (resp, paths) = state_list(None, Some("ENG")).await;
+    assert_eq!(resp.expect("--project succeeds")["count"], 2);
+    assert_eq!(paths, vec!["/api/v1/workspaces/acme/projects/ENG/states/"]);
+}
+
+#[tokio::test]
+async fn state_list_positional_issue_identifier_still_resolves_its_project() {
+    let (resp, paths) = state_list(Some("ENG-7"), None).await;
+    assert_eq!(resp.expect("issue positional succeeds")["count"], 2);
+    assert_eq!(
+        paths,
+        vec![
+            "/api/v1/workspaces/acme/work-items/ENG-7/".to_string(),
+            format!("/api/v1/workspaces/acme/projects/{PROJECT_UUID}/states/"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn state_list_unknown_project_names_the_project() {
+    for (positional, flag) in [(Some("NOPE"), None), (None, Some("NOPE"))] {
+        let (resp, _) = state_list(positional, flag).await;
+        let err = resp.expect_err("unknown project fails");
+        assert_eq!(err.exit_code, EXIT_NOT_FOUND);
+        assert_eq!(err.message, "project 'NOPE' not found");
+    }
+}
+
+const MISSING_UUID: &str = "00000000-0000-4000-8000-000000000000";
+const MISSING_UUID_COMPACT: &str = "00000000000040008000000000000000";
+const SECRET_UUID: &str = "22222222-2222-4222-8222-222222222222";
+const DENIED_UUID: &str = "11111111-1111-4111-8111-111111111111";
+
+/// Like the real servers: the states route checks project membership
+/// before existence, so any UUID the caller is not a member of gets 403.
+/// Project detail hides secret projects from non-members, so it answers
+/// 404 for both a missing project and a secret one the caller has not
+/// joined; only a visible project (`DENIED_UUID`) answers 200.
+fn states_forbidden_handler() -> Handler {
+    Box::new(|req| {
+        let forbidden = CannedResponse {
+            status: 403,
+            status_text: "Forbidden",
+            body: r#"{"detail":"You do not have permission to perform this action."}"#.into(),
+        };
+        let hidden = [MISSING_UUID, MISSING_UUID_COMPACT, SECRET_UUID]
+            .map(|id| format!("/api/v1/workspaces/acme/projects/{id}/"));
+        if hidden.contains(&req.path) {
+            CannedResponse {
+                status: 404,
+                status_text: "Not Found",
+                body: r#"{"error":"Project not found"}"#.into(),
+            }
+        } else if req.path == format!("/api/v1/workspaces/acme/projects/{DENIED_UUID}/") {
+            CannedResponse::ok(format!(r#"{{"id":"{DENIED_UUID}","identifier":"ENG"}}"#))
+        } else {
+            forbidden
+        }
+    })
+}
+
+async fn state_list_forbidden(
+    positional: Option<&str>,
+    project: Option<&str>,
+) -> (
+    Result<serde_json::Value, pidash::api_client::CliError>,
+    Vec<String>,
+) {
+    let fake = start_fake(states_forbidden_handler()).await;
+    let client = client(&fake);
+    let resp = pidash::cli::state::list_states(&client, positional, project, None, None).await;
+    let paths = fake
+        .recorded
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| r.path.clone())
+        .collect();
+    (resp, paths)
+}
+
+/// States 403 + detail 404 cannot tell a missing project from a secret
+/// one the caller has not joined, so the error names the project but
+/// stays a permission error (exit 3, HTTP 403), never "not found".
+fn assert_hidden_project_error(
+    resp: Result<serde_json::Value, pidash::api_client::CliError>,
+    name: &str,
+) {
+    let err = resp.expect_err("hidden or missing uuid fails");
+    assert_eq!(err.exit_code, EXIT_AUTH);
+    assert_eq!(err.status, Some(403));
+    assert_eq!(
+        err.message,
+        format!("project '{name}' not found or not accessible")
+    );
+}
+
+#[tokio::test]
+async fn state_list_unknown_project_uuid_names_the_project() {
+    for (positional, flag) in [(Some(MISSING_UUID), None), (None, Some(MISSING_UUID))] {
+        let (resp, paths) = state_list_forbidden(positional, flag).await;
+        assert_hidden_project_error(resp, MISSING_UUID);
+        assert_eq!(
+            paths,
+            vec![
+                format!("/api/v1/workspaces/acme/projects/{MISSING_UUID}/states/"),
+                format!("/api/v1/workspaces/acme/projects/{MISSING_UUID}/"),
+            ]
+        );
+    }
+}
+
+#[tokio::test]
+async fn state_list_secret_project_uuid_is_not_reported_as_missing() {
+    for (positional, flag) in [(Some(SECRET_UUID), None), (None, Some(SECRET_UUID))] {
+        let (resp, _) = state_list_forbidden(positional, flag).await;
+        assert_hidden_project_error(resp, SECRET_UUID);
+    }
+}
+
+#[tokio::test]
+async fn state_list_compact_project_uuid_takes_the_uuid_error_path() {
+    for (positional, flag) in [
+        (Some(MISSING_UUID_COMPACT), None),
+        (None, Some(MISSING_UUID_COMPACT)),
+    ] {
+        let (resp, paths) = state_list_forbidden(positional, flag).await;
+        assert_hidden_project_error(resp, MISSING_UUID_COMPACT);
+        assert_eq!(
+            paths,
+            vec![
+                format!("/api/v1/workspaces/acme/projects/{MISSING_UUID_COMPACT}/states/"),
+                format!("/api/v1/workspaces/acme/projects/{MISSING_UUID_COMPACT}/"),
+            ]
+        );
+    }
+}
+
+#[tokio::test]
+async fn state_list_denied_project_uuid_keeps_the_permission_error() {
+    let (resp, _) = state_list_forbidden(Some(DENIED_UUID), None).await;
+    let err = resp.expect_err("denied uuid fails");
+    assert_eq!(err.exit_code, EXIT_AUTH);
+    assert_eq!(err.status, Some(403));
+    assert_eq!(
+        err.message,
+        "HTTP 403 Forbidden: permission denied: You do not have permission to perform this action."
+    );
+}
+
+#[tokio::test]
+async fn state_list_denied_project_slug_does_not_probe_project_detail() {
+    let (resp, paths) = state_list_forbidden(Some("ENG"), None).await;
+    assert_eq!(resp.expect_err("denied slug fails").exit_code, EXIT_AUTH);
+    assert_eq!(paths, vec!["/api/v1/workspaces/acme/projects/ENG/states/"]);
+}
