@@ -18,7 +18,8 @@
 //!   lifecycle order.
 //! * Assignees are the live `issue_assignees` rows ordered by
 //!   `(created_at, id)`; `active_run` is the newest (`created_at DESC, id
-//!   DESC`) run in `NON_TERMINAL_STATUSES`.
+//!   DESC`) run in `ACTIVE_RUN_STATUSES` (Django's matcher
+//!   `NON_TERMINAL_STATUSES`; not the `jobs` set of that name).
 
 use std::collections::{HashMap, HashSet};
 
@@ -189,10 +190,16 @@ pub async fn issue_tree(
     let mut frontier = vec![source.id];
     let mut truncated = false;
     while !frontier.is_empty() && !truncated {
+        // Only the remaining budget plus one row (to detect truncation),
+        // distinct and excluding visited ids, so a wide level stays bounded.
+        let remaining = NODE_LIMIT + 1 - seen.len();
         let level = node_select(visible_pool_query(slug, user_id))
+            .distinct()
             .filter(issues::Column::ParentId.is_in(frontier.clone()))
+            .filter(issues::Column::Id.is_not_in(seen.iter().copied()))
             .order_by_asc(issues::Column::SequenceId)
             .order_by_asc(issues::Column::Id)
+            .limit(remaining as u64 + 1)
             .into_model::<NodeRow>()
             .all(&db)
             .await
@@ -256,6 +263,8 @@ pub async fn issue_tree(
     Ok(out)
 }
 
+/// Depth-first pre-order over `children_of` with an explicit stack (a
+/// chain can be [`NODE_LIMIT`] deep).
 fn walk(
     children_of: &HashMap<Uuid, Vec<NodeRow>>,
     parent_id: Uuid,
@@ -263,9 +272,19 @@ fn walk(
     depth: u64,
     nodes: &mut Vec<(NodeRow, String, u64)>,
 ) {
-    for child in children_of.get(&parent_id).into_iter().flatten() {
-        nodes.push((child.clone(), parent_ident.to_owned(), depth));
-        walk(children_of, child.id, &child.identifier(), depth + 1, nodes);
+    let mut stack: Vec<(&NodeRow, String, u64)> = children_of
+        .get(&parent_id)
+        .into_iter()
+        .flatten()
+        .rev()
+        .map(|child| (child, parent_ident.to_owned(), depth))
+        .collect();
+    while let Some((child, ident, level)) = stack.pop() {
+        let child_ident = child.identifier();
+        for grandchild in children_of.get(&child.id).into_iter().flatten().rev() {
+            stack.push((grandchild, child_ident.clone(), level + 1));
+        }
+        nodes.push((child.clone(), ident, level));
     }
 }
 
@@ -356,6 +375,60 @@ async fn fetch_active_runs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn node(seq: i32, parent: Option<Uuid>) -> NodeRow {
+        NodeRow {
+            id: Uuid::new_v4(),
+            parent_id: parent,
+            name: format!("n{seq}"),
+            priority: "none".to_owned(),
+            sequence_id: seq,
+            project_identifier: "T".to_owned(),
+            state_name: None,
+            state_group: None,
+        }
+    }
+
+    #[test]
+    fn walk_is_depth_first_pre_order_with_sibling_order_kept() {
+        let root = node(1, None);
+        let a = node(2, Some(root.id));
+        let b = node(3, Some(root.id));
+        let a1 = node(4, Some(a.id));
+        let mut children_of: HashMap<Uuid, Vec<NodeRow>> = HashMap::new();
+        children_of.insert(root.id, vec![a.clone(), b.clone()]);
+        children_of.insert(a.id, vec![a1.clone()]);
+        let mut nodes = Vec::new();
+        walk(&children_of, root.id, &root.identifier(), 1, &mut nodes);
+        let got: Vec<(String, String, u64)> = nodes
+            .iter()
+            .map(|(n, p, d)| (n.name.clone(), p.clone(), *d))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("n2".to_owned(), "T-1".to_owned(), 1),
+                ("n4".to_owned(), "T-2".to_owned(), 2),
+                ("n3".to_owned(), "T-1".to_owned(), 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn walk_handles_a_chain_at_the_node_limit() {
+        let root = node(0, None);
+        let mut children_of: HashMap<Uuid, Vec<NodeRow>> = HashMap::new();
+        let mut parent = root.id;
+        for seq in 1..=i32::try_from(NODE_LIMIT).unwrap() {
+            let child = node(seq, Some(parent));
+            parent = child.id;
+            children_of.insert(child.parent_id.unwrap(), vec![child]);
+        }
+        let mut nodes = Vec::new();
+        walk(&children_of, root.id, &root.identifier(), 1, &mut nodes);
+        assert_eq!(nodes.len(), NODE_LIMIT);
+        assert_eq!(nodes.last().unwrap().2, NODE_LIMIT as u64);
+    }
 
     #[test]
     fn rollup_counts_cancelled_as_done_and_keeps_every_group() {
