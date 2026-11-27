@@ -31,7 +31,8 @@ Shape::
 - ``active_run`` is the newest non-terminal agent run on the child.
 - Children the caller cannot see (a project they are not an active member
   of) and archived, draft, triage or deleted ones are left out, the same
-  rows ``member_project_issues`` yields.
+  rows ``member_project_issues`` yields. A hidden child's subtree is cut
+  off with it, even where a grandchild would be visible.
 - At most :data:`NODE_LIMIT` children are listed and walked; past that
   ``truncated`` is true and the rollup covers only the listed ones. A parent
   cycle in the data cannot loop: each item is visited once.
@@ -94,7 +95,12 @@ def issue_tree(issue: Issue, visible, *, recursive: bool = False) -> Dict[str, A
     # Breadth-first fetch, one query per level.
     while frontier and not truncated:
         depth += 1
-        level = [row for row in base.filter(parent_id__in=frontier).order_by("sequence_id", "id") if row.id not in seen]
+        # Fetch only the remaining budget plus one row (to detect truncation),
+        # skipping already-visited items, so a wide level stays bounded.
+        remaining = NODE_LIMIT - (len(seen) - 1)
+        level = list(
+            base.filter(parent_id__in=frontier).exclude(id__in=seen).order_by("sequence_id", "id")[: remaining + 1]
+        )
         frontier = []
         for row in level:
             if len(seen) - 1 >= NODE_LIMIT:
@@ -106,13 +112,14 @@ def issue_tree(issue: Issue, visible, *, recursive: bool = False) -> Dict[str, A
         if not recursive:
             break
 
-    # Depth-first pre-order with siblings by sequence_id.
-    def walk(parent: Issue, level: int) -> None:
-        for child in children_of.get(parent.id, []):
-            nodes.append((child, _identifier(parent), level))
-            walk(child, level + 1)
-
-    walk(issue, 1)
+    # Depth-first pre-order with siblings by sequence_id. An explicit stack,
+    # not recursion: a chain near NODE_LIMIT deep would exceed Python's
+    # recursion limit.
+    stack = [(child, issue, 1) for child in reversed(children_of.get(issue.id, []))]
+    while stack:
+        child, parent, level = stack.pop()
+        nodes.append((child, _identifier(parent), level))
+        stack.extend((grandchild, child, level + 1) for grandchild in reversed(children_of.get(child.id, [])))
 
     ids = [node.id for node, _, _ in nodes]
     assignees: Dict[Any, List[Dict[str, Any]]] = {}

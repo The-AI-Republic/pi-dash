@@ -202,3 +202,54 @@ class TestIssueTree:
             "00000000-0000-0000-0000-000000000000/tree/"
         )
         assert api_key_client.get(url).status_code == http_status.HTTP_404_NOT_FOUND
+
+    def test_recursive_accepts_1_and_0(self, api_key_client, workspace, make_issue):
+        epic = make_issue("Epic")
+        a = make_issue("a", parent=epic)
+        make_issue("a1", parent=a)
+        assert api_key_client.get(_url(workspace.slug, epic, "?recursive=1")).json()["rollup"]["total"] == 2
+        flat = api_key_client.get(_url(workspace.slug, epic, "?recursive=0")).json()
+        assert flat["recursive"] is False
+        assert flat["rollup"]["total"] == 1
+
+    def test_stateless_child_counts_as_open(self, api_key_client, workspace, make_issue):
+        epic = make_issue("Epic")
+        child = make_issue("no state", parent=epic)
+        Issue.objects.filter(pk=child.pk).update(state=None)
+        body = api_key_client.get(_url(workspace.slug, epic)).json()
+        assert body["children"][0]["state"] is None
+        assert body["children"][0]["state_group"] is None
+        assert body["rollup"]["total"] == 1
+        assert body["rollup"]["open"] == 1
+        assert body["rollup"]["done"] == 0
+
+    def test_past_node_limit_is_truncated(self, api_key_client, workspace, make_issue, monkeypatch):
+        from pi_dash.orchestration import issue_tree
+
+        monkeypatch.setattr(issue_tree, "NODE_LIMIT", 3)
+        epic = make_issue("Epic")
+        a = make_issue("a", parent=epic, group="completed")
+        make_issue("b", parent=epic)
+        make_issue("a1", parent=a)
+        make_issue("a2", parent=a)
+        body = api_key_client.get(_url(workspace.slug, epic, "?recursive=true")).json()
+        assert body["truncated"] is True
+        assert [c["name"] for c in body["children"]] == ["a", "a1", "b"]
+        assert body["rollup"]["total"] == 3
+        assert body["rollup"]["done"] == 1
+        flat = api_key_client.get(_url(workspace.slug, epic)).json()
+        assert flat["truncated"] is False
+
+    def test_deep_chain_at_the_cap_is_not_a_500(self, api_key_client, workspace, make_issue):
+        # One level per node: deeper than Python's default recursion limit
+        # once the request frames are counted.
+        epic = make_issue("Epic")
+        parent = epic
+        for i in range(1000):
+            parent = make_issue(f"c{i}", parent=parent)
+        resp = api_key_client.get(_url(workspace.slug, epic, "?recursive=true"))
+        assert resp.status_code == http_status.HTTP_200_OK
+        body = resp.json()
+        assert len(body["children"]) == 1000
+        assert body["children"][-1]["depth"] == 1000
+        assert body["truncated"] is False
