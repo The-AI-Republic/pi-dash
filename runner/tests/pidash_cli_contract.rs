@@ -414,6 +414,61 @@ async fn issue_relations_reads_the_grouped_route() {
     assert_eq!(out["relations"]["blocking"][0]["identifier"], "ENG-9");
 }
 
+const ENG_7_TREE: &str = r#"{"issue":{"id":"00000000-0000-0000-0000-000000000007","identifier":"ENG-7","name":"epic","state":"In Progress","state_group":"started","priority":"none"},"recursive":false,"rollup":{"total":3,"done":2,"open":1,"by_state_group":{"backlog":0,"unstarted":0,"started":1,"review":0,"test":0,"completed":1,"cancelled":1}},"children":[{"id":"8","identifier":"ENG-8","name":"done","state":"Done","state_group":"completed","priority":"none","parent":"ENG-7","depth":1,"assignees":[],"active_run":null},{"id":"9","identifier":"ENG-9","name":"wip","state":"In Progress","state_group":"started","priority":"high","parent":"ENG-7","depth":1,"assignees":[{"id":"u1","display_name":"ada"}],"active_run":{"id":"r1","status":"running"}},{"id":"10","identifier":"ENG-10","name":"dropped","state":"Cancelled","state_group":"cancelled","priority":"none","parent":"ENG-7","depth":1,"assignees":[],"active_run":null}],"truncated":false}"#;
+
+#[tokio::test]
+async fn issue_tree_reads_the_tree_route_and_passes_the_rollup_through() {
+    let fake = start_fake(Box::new(|req| {
+        if req.path.ends_with("/work-items/ENG-7/") {
+            return CannedResponse::ok(ENG_7);
+        }
+        assert_eq!(req.method, "GET");
+        assert_eq!(
+            req.path,
+            "/api/v1/workspaces/acme/projects/00000000-0000-0000-0000-0000000000aa/work-items/00000000-0000-0000-0000-000000000007/tree/"
+        );
+        CannedResponse::ok(ENG_7_TREE)
+    }))
+    .await;
+    let client = client(&fake);
+    let out = pidash::cli::issue::issue_tree(&client, "ENG-7", false, false)
+        .await
+        .expect("tree");
+    let expected: serde_json::Value = serde_json::from_str(ENG_7_TREE).unwrap();
+    assert_eq!(out, expected);
+    assert_eq!(out["rollup"]["done"], 2);
+    assert_eq!(out["children"][1]["active_run"]["status"], "running");
+}
+
+#[tokio::test]
+async fn issue_tree_recursive_open_queries_recursive_and_keeps_open_children() {
+    let fake = start_fake(Box::new(|req| {
+        if req.path.ends_with("/work-items/ENG-7/") {
+            return CannedResponse::ok(ENG_7);
+        }
+        assert!(
+            req.path
+                .ends_with("/work-items/00000000-0000-0000-0000-000000000007/tree/?recursive=true"),
+            "unexpected path {}",
+            req.path
+        );
+        CannedResponse::ok(ENG_7_TREE)
+    }))
+    .await;
+    let client = client(&fake);
+    let out = pidash::cli::issue::issue_tree(&client, "ENG-7", true, true)
+        .await
+        .expect("tree");
+    let idents: Vec<&str> = out["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["identifier"].as_str().unwrap())
+        .collect();
+    assert_eq!(idents, ["ENG-9"]);
+    assert_eq!(out["rollup"]["total"], 3);
+}
+
 #[tokio::test]
 async fn resolve_state_name_is_case_insensitive() {
     let fake = start_fake(Box::new(|req| {

@@ -3344,6 +3344,39 @@ class IssueRelationUnrelateAPIEndpoint(_IssueRelationAgentBase):
         return self._write(request, slug, project_id, issue_id, relations.unrelate)
 
 
+class IssueTreeAPIEndpoint(_IssueRelationAgentBase):
+    """A work item's children with a state-group rollup (PDASHOSS01-405)."""
+
+    model = Issue
+    use_read_replica = True
+
+    @work_item_docs(
+        operation_id="get_work_item_tree",
+        summary="Get a work item's children with a progress rollup",
+        description="The work item plus its children (every descendant with `recursive=true`) and a rollup: `total`, `done` (completed or cancelled), `open`, and counts `by_state_group`. Each child carries `id, identifier, name, state, state_group, priority, parent, depth, assignees, active_run`. Children in projects the caller is not a member of are omitted.",  # noqa E501
+        parameters=[ISSUE_ID_PARAMETER],
+        responses={
+            200: OpenApiResponse(description="Work item tree with rollup"),
+            400: INVALID_REQUEST_RESPONSE,
+            404: ISSUE_NOT_FOUND_RESPONSE,
+        },
+    )
+    def get(self, request, slug, project_id, issue_id):
+        from pi_dash.orchestration.issue_tree import issue_tree
+
+        raw = (request.query_params.get("recursive") or "false").strip().lower()
+        if raw not in ("true", "false", "1", "0"):
+            return Response(
+                {"error": "recursive must be true or false"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        issue = self._source(slug, project_id, issue_id)
+        return Response(
+            issue_tree(issue, self._visible(request, slug), recursive=raw in ("true", "1")),
+            status=status.HTTP_200_OK,
+        )
+
+
 class IssueWorkpadAPIEndpoint(BaseAPIView):
     """Read/write the agent workpad for a single work item.
 

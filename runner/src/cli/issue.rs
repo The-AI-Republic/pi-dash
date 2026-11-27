@@ -124,6 +124,18 @@ pub enum IssueCommand {
     /// `not_related` (not an error). Prints `{issue, relation_type, removed,
     /// not_related, relations}`.
     Unrelate(RelateArgs),
+    /// Show a work item's children with a progress rollup — the answer to
+    /// "how far along is this epic?" in one call. Prints `{issue, recursive,
+    /// rollup, children, truncated}`: `rollup` is `{total, done, open,
+    /// by_state_group}` where `done` counts completed AND cancelled children
+    /// (both are closed); each child is `{id, identifier, name, state,
+    /// state_group, priority, parent, depth, assignees: [{id,
+    /// display_name}], active_run: {id, status} | null}`. `--recursive`
+    /// walks every descendant (depth-first, `depth` 1 = direct child) and
+    /// rolls them all up; `--open` lists only the children not yet closed
+    /// while the rollup still counts them all. At most 1000 children are
+    /// returned; `truncated` is true past that.
+    Tree(TreeArgs),
     /// List a work item's relations grouped by type from its side
     /// (`blocked_by`, `blocking`, `relates_to`, …), each item `{id, identifier,
     /// name, state, state_group}`. Prints `{issue, relations}`.
@@ -131,6 +143,21 @@ pub enum IssueCommand {
         /// Project-scoped identifier, e.g. `ENG-42`.
         identifier: String,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct TreeArgs {
+    /// Project-scoped identifier of the parent, e.g. `ENG-42`.
+    pub identifier: String,
+
+    /// Include every descendant, not just the direct children.
+    #[arg(long)]
+    pub recursive: bool,
+
+    /// List only children whose state group is not `completed` or
+    /// `cancelled`. The rollup still counts every child.
+    #[arg(long)]
+    pub open: bool,
 }
 
 /// Relation flags for `relate` / `unrelate`. Each names the relation from the
@@ -537,6 +564,7 @@ pub async fn run(args: IssueArgs, paths: &crate::util::paths::Paths) -> i32 {
         IssueCommand::Relate(a) => cmd_relate(&client, a, RelationOp::Relate).await,
         IssueCommand::Unrelate(a) => cmd_relate(&client, a, RelationOp::Unrelate).await,
         IssueCommand::Relations { identifier } => cmd_relations(&client, &identifier).await,
+        IssueCommand::Tree(a) => cmd_tree(&client, a).await,
     };
     match result {
         Ok(()) => 0,
@@ -1853,6 +1881,55 @@ pub async fn issue_relations(client: &ApiClient, identifier: &str) -> Result<Val
     client.get(&path).await
 }
 
+async fn cmd_tree(client: &ApiClient, args: TreeArgs) -> Result<(), CliError> {
+    let resp = issue_tree(client, &args.identifier, args.recursive, args.open).await?;
+    println!(
+        "{}",
+        serde_json::to_string(&resp).expect("serialize JSON value")
+    );
+    Ok(())
+}
+
+/// `GET .../work-items/<id>/tree/[?recursive=true]` — the parent, its
+/// children and the state-group rollup. With `open_only` the `children`
+/// list keeps only items outside the closed groups; `rollup` is untouched.
+pub async fn issue_tree(
+    client: &ApiClient,
+    identifier: &str,
+    recursive: bool,
+    open_only: bool,
+) -> Result<Value, CliError> {
+    let issue = resolve_issue(client, identifier).await?;
+    let path = tree_path(
+        &client.env.workspace_slug,
+        &issue.project_id,
+        &issue.id,
+        recursive,
+    );
+    let mut resp = client.get(&path).await?;
+    if open_only {
+        keep_open_children(&mut resp);
+    }
+    Ok(resp)
+}
+
+fn tree_path(workspace_slug: &str, project_id: &str, issue_id: &str, recursive: bool) -> String {
+    let query = if recursive { "?recursive=true" } else { "" };
+    format!("workspaces/{workspace_slug}/projects/{project_id}/work-items/{issue_id}/tree/{query}")
+}
+
+/// Drop closed children (`completed` / `cancelled`) from a tree payload.
+fn keep_open_children(resp: &mut Value) {
+    if let Some(children) = resp.get_mut("children").and_then(Value::as_array_mut) {
+        children.retain(|child| {
+            !matches!(
+                child.get("state_group").and_then(Value::as_str),
+                Some("completed" | "cancelled")
+            )
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2815,6 +2892,58 @@ mod tests {
     struct TestCli {
         #[command(flatten)]
         issue: IssueArgs,
+    }
+
+    #[test]
+    fn tree_parses_identifier_and_flags() {
+        let parsed = TestCli::try_parse_from(["pidash", "tree", "ENG-42"]).expect("parse tree");
+        match parsed.issue.command {
+            IssueCommand::Tree(a) => {
+                assert_eq!(a.identifier, "ENG-42");
+                assert!(!a.recursive && !a.open);
+            }
+            other => panic!("expected tree, got {other:?}"),
+        }
+        let parsed = TestCli::try_parse_from(["pidash", "tree", "ENG-42", "--recursive", "--open"])
+            .expect("parse tree --recursive --open");
+        match parsed.issue.command {
+            IssueCommand::Tree(a) => assert!(a.recursive && a.open),
+            other => panic!("expected tree, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tree_path_adds_recursive_only_when_asked() {
+        assert_eq!(
+            tree_path("acme", "p1", "i1", false),
+            "workspaces/acme/projects/p1/work-items/i1/tree/"
+        );
+        assert_eq!(
+            tree_path("acme", "p1", "i1", true),
+            "workspaces/acme/projects/p1/work-items/i1/tree/?recursive=true"
+        );
+    }
+
+    #[test]
+    fn keep_open_children_drops_completed_and_cancelled_only() {
+        let mut resp = json!({
+            "rollup": {"total": 4, "done": 2, "open": 2},
+            "children": [
+                {"identifier": "ENG-1", "state_group": "completed"},
+                {"identifier": "ENG-2", "state_group": "started"},
+                {"identifier": "ENG-3", "state_group": "cancelled"},
+                {"identifier": "ENG-4", "state_group": null},
+            ],
+        });
+        keep_open_children(&mut resp);
+        let left: Vec<&str> = resp["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["identifier"].as_str().unwrap())
+            .collect();
+        assert_eq!(left, ["ENG-2", "ENG-4"]);
+        assert_eq!(resp["rollup"]["total"], 4);
     }
 
     #[test]
