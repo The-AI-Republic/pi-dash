@@ -104,7 +104,7 @@ pub async fn resolve_project(
 /// its UUID in any spelling the server accepts (any case, with or without
 /// hyphens), compared as parsed UUIDs rather than strings.
 fn project_matches(project: &ProjectRow, needle: &str) -> bool {
-    if project.identifier.eq_ignore_ascii_case(needle) || project.id == needle {
+    if project.identifier.to_uppercase() == needle.to_uppercase() || project.id == needle {
         return true;
     }
     match (
@@ -204,6 +204,13 @@ mod project_match_tests {
         assert!(project_matches(&p, "eng"));
         assert!(project_matches(&p, "ENG"));
         assert!(!project_matches(&p, "OPS"));
+    }
+
+    #[test]
+    fn project_matches_unicode_identifier_case_insensitively() {
+        let p = row("00000000-0000-0000-0000-0000000000aa", "ÉQUIPE");
+        assert!(project_matches(&p, "équipe"));
+        assert!(project_matches(&p, "Équipe"));
     }
 
     #[test]
