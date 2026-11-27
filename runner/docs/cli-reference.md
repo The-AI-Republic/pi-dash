@@ -46,12 +46,12 @@ state, state_group}`) plus `has_open_blockers` (true while any
   `pidash issue relations <identifier>`.
   Single-item reads also carry `active_run` while a run occupies the
   issue's run slot: `{id, status, runner_id, created_at, assigned_at,
-started_at, age_seconds, runner_last_heartbeat_at, branch}` (`branch`
+  started_at, age_seconds, runner_last_heartbeat_at, branch}` (`branch`
   is the run's working branch, `null` until one is known); the key is
   absent when no run is active.
 - `pidash issue busy <identifier>` — check whether an agent run owns the
   issue's branch **before you push to it**. Prints `{issue, busy,
-owned_by_caller, branch, active_run, advice}`. `busy` is `true` while
+  owned_by_caller, branch, active_run, advice}`. `busy` is `true` while
   another agent run is active on the issue (from `queued` on);
   `owned_by_caller` is `true` when that run is your own (`PIDASH_RUN_ID`),
   and then `busy` is `false`. `branch` is `active_run.branch`, else the
