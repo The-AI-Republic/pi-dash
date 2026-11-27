@@ -52,6 +52,7 @@ ISSUE_ROW_KEYS = {
     "assigned_runner",
     "assigned_runner_detail",
     "dispatch_wait",
+    "state_detail",
     "assignees",
     "labels",
 }
@@ -75,6 +76,34 @@ def test_issue_list_shape(api, world):
     assert set(row) == ISSUE_ROW_KEYS, f"row keys changed: {sorted(set(row) ^ ISSUE_ROW_KEYS)}"
     assert row["name"] == "Contract issue"
     assert row["sequence_id"] == 1
+
+
+def test_issue_list_state_detail(api, world, seeder):
+    """PDASHOSS01-404: rows carry ``state_detail: {name, group}`` next to the
+    bare ``state`` UUID (``null`` without a state), and ``fields=state_detail``
+    returns only that object."""
+    url = issue_url(world)
+    bare = api.get(url, params={"fields": "state,state_detail"}).json()["results"]
+    assert bare == [{"state": None, "state_detail": None}]
+
+    state = seeder.create_state(
+        world["workspace"]["id"], world["project"]["id"], name="Done", group="completed"
+    )
+    patched = api.patch(issue_url(world, world["issue"]["id"]), json={"state": state["id"]})
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["state_detail"] == {"name": "Done", "group": "completed"}
+
+    only = api.get(url, params={"fields": "state_detail"})
+    assert only.status_code == 200
+    assert only.json()["results"] == [{"state_detail": {"name": "Done", "group": "completed"}}]
+
+    picked = api.get(url, params={"fields": "id,sequence_id,name,state,state_detail,parent"}).json()
+    (row,) = picked["results"]
+    assert list(row) == ["id", "state_detail", "name", "sequence_id", "parent", "state"]
+    assert row["state"] == state["id"]
+
+    detail = api.get(issue_url(world, world["issue"]["id"])).json()
+    assert detail["state_detail"] == {"name": "Done", "group": "completed"}
 
 
 def test_issue_create_shape(api, world):

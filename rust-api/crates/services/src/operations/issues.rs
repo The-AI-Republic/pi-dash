@@ -4256,6 +4256,12 @@ async fn render_moved_issue_api(
     let assigned_runner_detail = fetch_assigned_runner_detail(pool, issue.assigned_runner_id)
         .await
         .map_err(|_| Error::ServerError)?;
+    let state_detail = crate::read::fetch_state_detail_parts(
+        &pidash_db::pool::sea_orm_connection(pool),
+        issue.state_id,
+    )
+    .await
+    .map_err(|_| Error::ServerError)?;
     let created_by = issue.created_by_id.map(|id| id.to_string());
     let updated_by = issue.updated_by_id.map(|id| id.to_string());
     let url = crate::v1_work_items::shape_issue::issue_url(
@@ -4303,6 +4309,9 @@ async fn render_moved_issue_api(
         assigned_runner: assigned_runner.as_deref(),
         assigned_runner_detail: assigned_runner_detail.as_ref(),
         dispatch_wait: None,
+        state_detail: state_detail
+            .as_ref()
+            .map(|(name, group)| crate::v1_work_items::shape_issue::StateDetail { name, group }),
     };
     let input = RepresentationInput {
         row: &row,

@@ -166,11 +166,11 @@ pub use work_items::{
     expand_state, expand_user, expand_workspace, fetch_assignee_ids, fetch_assignee_rows,
     fetch_blocker_rows, fetch_comment_direct, fetch_comment_list_ascending,
     fetch_comment_list_rows, fetch_expanded_labels, fetch_grouped_rows, fetch_issue_for_write,
-    fetch_label_ids, fetch_project_for_write, render_decoded, render_write_response,
-    requested_names, row_datetime, row_datetime_opt, row_string, row_string_opt, row_uuid,
-    row_uuid_opt, BlockerRows, CommentDbRow, DecodedComment, DecodedIssue, OwnedAssigneeRow,
-    OwnedRelationItem, RenderRequest, WriteProject, COMMENT_COLUMNS, ISSUE_EXTRA_COLS,
-    ISSUE_SELECT_COLS,
+    fetch_label_ids, fetch_project_for_write, fetch_state_detail_parts, render_decoded,
+    render_write_response, requested_names, row_datetime, row_datetime_opt, row_string,
+    row_string_opt, row_uuid, row_uuid_opt, BlockerRows, CommentDbRow, DecodedComment,
+    DecodedIssue, OwnedAssigneeRow, OwnedRelationItem, RenderRequest, WriteProject,
+    COMMENT_COLUMNS, ISSUE_EXTRA_COLS, ISSUE_SELECT_COLS,
 };
 pub use workspace::{workspace_of, workspace_row, workspace_slug};
 

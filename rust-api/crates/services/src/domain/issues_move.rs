@@ -821,6 +821,15 @@ impl MoveStore for SeaMoveStore<'_> {
             .map_err(store_error)
     }
 
+    async fn representation_state_detail(
+        &self,
+        state_id: Option<Uuid>,
+    ) -> Result<Option<(String, String)>, StoreError> {
+        crate::read::fetch_state_detail_parts(&self.conn, state_id)
+            .await
+            .map_err(store_error)
+    }
+
     async fn target_default_state(
         &self,
         target_project_id: Uuid,

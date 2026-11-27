@@ -138,6 +138,8 @@ use serde_json::{Map, Value};
 use crate::app_project::ser_workflow::{state_lite_to_representation, StateLiteRow};
 use crate::v1_projects::ser_collab::{user_lite_to_representation, UserLiteRow};
 
+#[cfg(test)]
+use super::shape_issue::StateDetail;
 use super::shape_issue::{IssueRow, BASE_EXPANSION_NAMES};
 use super::{filter_fields, python_number_str, FieldSpec, FilterError};
 
@@ -1105,6 +1107,10 @@ mod tests {
             assigned_runner: None,
             assigned_runner_detail: None,
             dispatch_wait: None,
+            state_detail: Some(StateDetail {
+                name: "Todo",
+                group: "unstarted",
+            }),
         }
     }
 

@@ -123,7 +123,8 @@ use crate::orchestration::blockers::{summary_list, BlockerRow};
 use crate::runner_sessions::pubsub::{send_to_runner, PubsubStore};
 use crate::v1_projects::tasks::{model_activity_kwargs, MODEL_ACTIVITY_TASK};
 use crate::v1_work_items::shape_issue::{
-    issue_url, render_issue, BlockerSummary, IssueRow, RepresentationInput, SummaryItem,
+    issue_url, render_issue, BlockerSummary, IssueRow, RepresentationInput, StateDetail,
+    SummaryItem,
 };
 
 // ---------------------------------------------------------------------------
@@ -926,6 +927,13 @@ pub trait MoveStore {
         runner_id: Option<Uuid>,
     ) -> Result<Option<serde_json::Value>, StoreError>;
 
+    /// `state_detail` parts `(name, group)` for the `current_instance`
+    /// render (PDASHOSS01-404): `None` when the issue has no state.
+    async fn representation_state_detail(
+        &self,
+        state_id: Option<Uuid>,
+    ) -> Result<Option<(String, String)>, StoreError>;
+
     /// Default non-triage state (`dispatch::tools::CREATE_SAVE_DEFAULT_STATE_SQL`).
     async fn target_default_state(
         &self,
@@ -1595,6 +1603,7 @@ async fn render_current_instance<S: MoveStore>(
     let runner_detail = store
         .representation_assigned_runner_detail(issue.assigned_runner_id)
         .await?;
+    let state_detail = store.representation_state_detail(issue.state_id).await?;
     let created_by_s = issue.created_by_id.map(|id| id.to_string());
     let updated_by_s = issue.updated_by_id.map(|id| id.to_string());
     let created_at_s = serialize_drf_datetime(issue.created_at);
@@ -1675,6 +1684,9 @@ async fn render_current_instance<S: MoveStore>(
         assigned_runner: runner_s.as_deref(),
         assigned_runner_detail: runner_detail.as_ref(),
         dispatch_wait: None,
+        state_detail: state_detail
+            .as_ref()
+            .map(|(name, group)| StateDetail { name, group }),
     };
     let input = RepresentationInput {
         row: &row,
@@ -2246,6 +2258,14 @@ mod tests {
             Ok(None)
         }
 
+        async fn representation_state_detail(
+            &self,
+            _state_id: Option<Uuid>,
+        ) -> Result<Option<(String, String)>, StoreError> {
+            self.log("representation_state_detail");
+            Ok(None)
+        }
+
         async fn target_default_state(
             &self,
             _target_project_id: Uuid,
@@ -2693,7 +2713,7 @@ mod tests {
             MoveResult::AlreadyThere(_) => panic!("expected a move"),
         };
         let calls = store.calls.borrow();
-        let head = &calls[..14];
+        let head = &calls[..15];
         assert_eq!(
             head,
             [
@@ -2708,13 +2728,14 @@ mod tests {
                 "representation_blocking",
                 "representation_has_open_blockers",
                 "representation_assigned_runner_detail",
+                "representation_state_detail",
                 "target_default_state",
                 "lock_source_issue",
                 "advisory_lock_project",
             ]
         );
         assert_eq!(
-            &calls[14..27],
+            &calls[15..28],
             [
                 "lock_handoff_runs",
                 "max_target_sequence",
@@ -2732,12 +2753,12 @@ mod tests {
             ]
         );
         assert_eq!(
-            &calls[27..29],
+            &calls[28..30],
             ["moved_comment_ids", "moved_description_ids"]
         );
-        assert_eq!(calls[29..41], ["repoint_related"; 12]);
-        assert_eq!(&calls[41..], ["moved_issue"]);
-        assert_eq!(calls.len(), 42);
+        assert_eq!(calls[30..42], ["repoint_related"; 12]);
+        assert_eq!(&calls[42..], ["moved_issue"]);
+        assert_eq!(calls.len(), 43);
 
         // Repoint order is Python's call order.
         assert_eq!(*store.repoints.borrow(), REPOINT_ORDER);

@@ -2446,6 +2446,12 @@ async fn expand_issue(
     )
     .await
     .map_err(|_| Denial::ServerError)?;
+    let state_detail = pidash_services::read::fetch_state_detail_parts(
+        &pidash_db::pool::sea_orm_connection(pool),
+        row.state_id,
+    )
+    .await
+    .map_err(|_| Denial::ServerError)?;
     let type_id = row.type_id.map(|id| id.to_string());
     // `get_url` (`serializers/issue.py:423-434`): present and absolute, or
     // the key is omitted — never null, never relative.
@@ -2509,6 +2515,9 @@ async fn expand_issue(
         assigned_runner: assigned_runner.as_deref(),
         assigned_runner_detail: assigned_runner_detail.as_ref(),
         dispatch_wait: None,
+        state_detail: state_detail
+            .as_ref()
+            .map(|(name, group)| shape::StateDetail { name, group }),
     };
     let assignee_ids = fetch_assignee_ids(pool, issue_id).await?;
     let assignee_refs: Vec<&str> = assignee_ids.iter().map(String::as_str).collect();

@@ -32,9 +32,10 @@ use crate::v1_work_items::{filter_fields, FieldSpec};
 /// and unread here, so they stay out of the select list.
 pub const ISSUE_SELECT_COLS: &str = r#""issues"."id", "issues"."created_at", "issues"."updated_at", "issues"."deleted_at", "issues"."point", "issues"."name", "issues"."description_html", "issues"."description_binary", "issues"."priority", "issues"."complexity_score", "issues"."start_date", "issues"."target_date", "issues"."sequence_id", "issues"."sort_order", "issues"."completed_at", "issues"."archived_at", "issues"."is_draft", "issues"."external_source", "issues"."external_id", "issues"."git_work_branch", "issues"."created_via", "issues"."agent_executor", "issues"."work_type", "issues"."created_by_id", "issues"."updated_by_id", "issues"."project_id", "issues"."workspace_id", "issues"."parent_id", "issues"."state_id", "issues"."estimate_point_id", "issues"."type_id", "issues"."assigned_pod_id", "issues"."assigned_runner_id""#;
 
-/// The joined extras every read path selects: the URL parts and the state
-/// group (the completed-arm check on writes).
-pub const ISSUE_EXTRA_COLS: &str = r#""projects"."identifier" AS "project_identifier", "workspaces"."slug" AS "workspace_slug", "states"."group" AS "state_group""#;
+/// The joined extras every read path selects: the URL parts, the state
+/// group (the completed-arm check on writes) and the state name (with the
+/// group, the `state_detail` object — PDASHOSS01-404).
+pub const ISSUE_EXTRA_COLS: &str = r#""projects"."identifier" AS "project_identifier", "workspaces"."slug" AS "workspace_slug", "states"."group" AS "state_group", "states"."name" AS "state_name""#;
 
 /// The `dispatch_wait` for one issue (design §14.3): the active QUEUED
 /// pinned run's wait object, `None` when there is none — exactly
@@ -266,6 +267,40 @@ pub struct DecodedIssue {
     pub project_identifier: String,
     pub workspace_slug: String,
     pub state_group: Option<String>,
+    /// The joined `states.name` (`None` when the issue has no state).
+    pub state_name: Option<String>,
+}
+
+impl DecodedIssue {
+    /// The `state_detail` object's parts from the `states` join: `None`
+    /// when the issue has no state (LEFT JOIN miss).
+    pub fn state_detail(&self) -> Option<shape::StateDetail<'_>> {
+        match (self.state_name.as_deref(), self.state_group.as_deref()) {
+            (Some(name), Some(group)) => Some(shape::StateDetail { name, group }),
+            _ => None,
+        }
+    }
+}
+
+/// `state_detail` parts by state id (PDASHOSS01-404) for render paths
+/// that hold an issue model rather than a joined read row: `(name,
+/// group)`, `None` when the issue has no state or the row is gone. No
+/// `deleted_at` scope — Django reads `obj.state` through the FK
+/// descriptor's base manager.
+pub async fn fetch_state_detail_parts(
+    db: &impl ConnectionTrait,
+    state_id: Option<Uuid>,
+) -> Result<Option<(String, String)>, sea_orm::DbErr> {
+    let Some(state_id) = state_id else {
+        return Ok(None);
+    };
+    states::Entity::find_by_id(state_id)
+        .select_only()
+        .column(states::Column::Name)
+        .column(states::Column::Group)
+        .into_tuple::<(String, String)>()
+        .one(db)
+        .await
 }
 
 /// Owned `relations_summary` rows: `(identifier, state, state_group)`
@@ -520,7 +555,7 @@ async fn file_asset_url(pool: &PgPool, asset_id: &Uuid) -> Result<Option<String>
 }
 
 /// Decode one list/detail row selected with [`ISSUE_SELECT_COLS`] plus the
-/// `project_identifier` / `workspace_slug` / `state_group` extras.
+/// `project_identifier` / `workspace_slug` / `state_group` / `state_name` extras.
 pub fn decode_issue(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<DecodedIssue, Error> {
     let created_at_dt = row_datetime(row, "created_at")?;
     Ok(DecodedIssue {
@@ -561,6 +596,7 @@ pub fn decode_issue(row: &sqlx::postgres::PgRow, tz: &Tz) -> Result<DecodedIssue
         project_identifier: row_string(row, "project_identifier")?,
         workspace_slug: row_string(row, "workspace_slug")?,
         state_group: row_string_opt(row, "state_group")?,
+        state_name: row_string_opt(row, "state_name")?,
     })
 }
 
@@ -1439,6 +1475,7 @@ pub async fn render_decoded(
         assigned_runner: decoded.assigned_runner.as_deref(),
         assigned_runner_detail: assigned_runner_detail.as_ref(),
         dispatch_wait: dispatch_wait.as_ref(),
+        state_detail: decoded.state_detail(),
     };
 
     // `assignees` / `labels` (`issue.py:442-468`): ids always when kept,
@@ -1698,6 +1735,7 @@ pub async fn fetch_issue_for_write(
         project_identifier: String,
         workspace_slug: String,
         state_group: Option<String>,
+        state_name: Option<String>,
     }
     let db = pidash_db::pool::sea_orm_connection(pool);
     let row: Option<IssueWriteRow> = issues::Entity::find()
@@ -1747,6 +1785,7 @@ pub async fn fetch_issue_for_write(
         .column_as(projects::Column::Identifier, "project_identifier")
         .column_as(workspaces::Column::Slug, "workspace_slug")
         .column_as(states::Column::Group, "state_group")
+        .column_as(states::Column::Name, "state_name")
         .limit(1)
         .into_model::<IssueWriteRow>()
         .one(&db)
@@ -1795,6 +1834,7 @@ pub async fn fetch_issue_for_write(
         project_identifier: row.project_identifier,
         workspace_slug: row.workspace_slug,
         state_group: row.state_group,
+        state_name: row.state_name,
     })
 }
 
@@ -2689,6 +2729,25 @@ mod live {
             .expect("renders");
         assert_eq!(rendered["id"], Value::String(world.issue_id.to_string()));
         assert_eq!(rendered["name"], Value::String("Seed issue".to_owned()));
+        assert_eq!(
+            rendered["state_detail"],
+            serde_json::json!({"name": "Seed Backlog", "group": "backlog"})
+        );
+        assert_eq!(
+            fetch_state_detail_parts(
+                &pidash_db::pool::sea_orm_connection(&db),
+                Some(world.state_id)
+            )
+            .await
+            .expect("state lookup"),
+            Some(("Seed Backlog".to_owned(), "backlog".to_owned()))
+        );
+        assert_eq!(
+            fetch_state_detail_parts(&pidash_db::pool::sea_orm_connection(&db), None)
+                .await
+                .expect("no state"),
+            None
+        );
         let err = fetch_issue_for_write(
             &db,
             &world.workspace_slug,
@@ -2741,6 +2800,11 @@ mod live {
         assert_eq!(
             rendered["project"]["identifier"],
             Value::String("SEED".to_owned())
+        );
+        // PDASHOSS01-404: the `states` join feeds `state_detail`.
+        assert_eq!(
+            rendered["state_detail"],
+            serde_json::json!({"name": "Seed Backlog", "group": "backlog"})
         );
     }
 
