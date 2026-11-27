@@ -2601,11 +2601,15 @@ async fn state_list_unknown_project_names_the_project() {
 }
 
 const MISSING_UUID: &str = "00000000-0000-4000-8000-000000000000";
+const MISSING_UUID_COMPACT: &str = "00000000000040008000000000000000";
+const SECRET_UUID: &str = "22222222-2222-4222-8222-222222222222";
 const DENIED_UUID: &str = "11111111-1111-4111-8111-111111111111";
 
 /// Like the real servers: the states route checks project membership
 /// before existence, so any UUID the caller is not a member of gets 403.
-/// Project detail then tells a missing project (404) from a denied one.
+/// Project detail hides secret projects from non-members, so it answers
+/// 404 for both a missing project and a secret one the caller has not
+/// joined; only a visible project (`DENIED_UUID`) answers 200.
 fn states_forbidden_handler() -> Handler {
     Box::new(|req| {
         let forbidden = CannedResponse {
@@ -2613,7 +2617,9 @@ fn states_forbidden_handler() -> Handler {
             status_text: "Forbidden",
             body: r#"{"detail":"You do not have permission to perform this action."}"#.into(),
         };
-        if req.path == format!("/api/v1/workspaces/acme/projects/{MISSING_UUID}/") {
+        let hidden = [MISSING_UUID, MISSING_UUID_COMPACT, SECRET_UUID]
+            .map(|id| format!("/api/v1/workspaces/acme/projects/{id}/"));
+        if hidden.contains(&req.path) {
             CannedResponse {
                 status: 404,
                 status_text: "Not Found",
@@ -2647,18 +2653,58 @@ async fn state_list_forbidden(
     (resp, paths)
 }
 
+/// States 403 + detail 404 cannot tell a missing project from a secret
+/// one the caller has not joined, so the error names the project but
+/// stays a permission error (exit 3, HTTP 403), never "not found".
+fn assert_hidden_project_error(
+    resp: Result<serde_json::Value, pidash::api_client::CliError>,
+    name: &str,
+) {
+    let err = resp.expect_err("hidden or missing uuid fails");
+    assert_eq!(err.exit_code, EXIT_AUTH);
+    assert_eq!(err.status, Some(403));
+    assert_eq!(
+        err.message,
+        format!("project '{name}' not found or not accessible")
+    );
+}
+
 #[tokio::test]
 async fn state_list_unknown_project_uuid_names_the_project() {
     for (positional, flag) in [(Some(MISSING_UUID), None), (None, Some(MISSING_UUID))] {
         let (resp, paths) = state_list_forbidden(positional, flag).await;
-        let err = resp.expect_err("unknown uuid fails");
-        assert_eq!(err.exit_code, EXIT_NOT_FOUND);
-        assert_eq!(err.message, format!("project '{MISSING_UUID}' not found"));
+        assert_hidden_project_error(resp, MISSING_UUID);
         assert_eq!(
             paths,
             vec![
                 format!("/api/v1/workspaces/acme/projects/{MISSING_UUID}/states/"),
                 format!("/api/v1/workspaces/acme/projects/{MISSING_UUID}/"),
+            ]
+        );
+    }
+}
+
+#[tokio::test]
+async fn state_list_secret_project_uuid_is_not_reported_as_missing() {
+    for (positional, flag) in [(Some(SECRET_UUID), None), (None, Some(SECRET_UUID))] {
+        let (resp, _) = state_list_forbidden(positional, flag).await;
+        assert_hidden_project_error(resp, SECRET_UUID);
+    }
+}
+
+#[tokio::test]
+async fn state_list_compact_project_uuid_takes_the_uuid_error_path() {
+    for (positional, flag) in [
+        (Some(MISSING_UUID_COMPACT), None),
+        (None, Some(MISSING_UUID_COMPACT)),
+    ] {
+        let (resp, paths) = state_list_forbidden(positional, flag).await;
+        assert_hidden_project_error(resp, MISSING_UUID_COMPACT);
+        assert_eq!(
+            paths,
+            vec![
+                format!("/api/v1/workspaces/acme/projects/{MISSING_UUID_COMPACT}/states/"),
+                format!("/api/v1/workspaces/acme/projects/{MISSING_UUID_COMPACT}/"),
             ]
         );
     }
