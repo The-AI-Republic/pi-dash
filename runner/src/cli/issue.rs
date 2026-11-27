@@ -651,8 +651,8 @@ async fn cmd_create(
                     CliError::new(
                         EXIT_SERVER,
                         format!(
-                            "work item {id} was created, but the response carries no \
-                             sequence_id to build its identifier from"
+                            "work item {id} was created, but its identifier could not be \
+                             determined from the response; do not retry the create"
                         ),
                     )
                 })?;
