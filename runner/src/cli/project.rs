@@ -88,32 +88,33 @@ pub async fn list_projects(client: &ApiClient) -> Result<Vec<ProjectRow>, CliErr
     project_rows_from_value(resp)
 }
 
+/// Read one project by identifier or UUID through `GET projects/{ref}/`.
+/// The server resolves `project_ref` exactly as it does for the work-item
+/// routes (identifier in any case, UUID in any spelling), independent of
+/// list paging and of archived filtering. An unknown project is a 404
+/// (exit 4).
+pub async fn get_project(client: &ApiClient, project_ref: &str) -> Result<ProjectRow, CliError> {
+    let path = format!(
+        "workspaces/{}/projects/{}/",
+        client.env.workspace_slug,
+        project_ref.trim()
+    );
+    let resp = client.get(&path).await?;
+    serde_json::from_value(resp)
+        .map_err(|e| CliError::new(EXIT_UNKNOWN, format!("invalid project JSON: {e}")))
+}
+
 pub async fn resolve_project(
     client: &ApiClient,
     project_ref: &str,
 ) -> Result<ProjectRow, CliError> {
     let needle = project_ref.trim();
+    let needle_upper = needle.to_uppercase();
     let projects = list_projects(client).await?;
     projects
         .into_iter()
-        .find(|p| project_matches(p, needle))
+        .find(|p| p.id == needle || p.identifier.to_uppercase() == needle_upper)
         .ok_or_else(|| CliError::new(EXIT_NOT_FOUND, format!("project {needle:?} not found")))
-}
-
-/// Whether `needle` names `project`: its identifier (case-insensitive) or
-/// its UUID in any spelling the server accepts (any case, with or without
-/// hyphens), compared as parsed UUIDs rather than strings.
-fn project_matches(project: &ProjectRow, needle: &str) -> bool {
-    if project.identifier.to_uppercase() == needle.to_uppercase() || project.id == needle {
-        return true;
-    }
-    match (
-        uuid::Uuid::parse_str(&project.id),
-        uuid::Uuid::parse_str(needle),
-    ) {
-        (Ok(id), Ok(wanted)) => id == wanted,
-        _ => false,
-    }
 }
 
 pub async fn default_project(client: &ApiClient) -> Result<Option<ProjectRow>, CliError> {
@@ -185,42 +186,4 @@ fn project_rows_from_value(resp: Value) -> Result<Vec<ProjectRow>, CliError> {
     }
     serde_json::from_value(resp)
         .map_err(|e| CliError::new(EXIT_UNKNOWN, format!("invalid project list JSON: {e}")))
-}
-
-#[cfg(test)]
-mod project_match_tests {
-    use super::*;
-
-    fn row(id: &str, identifier: &str) -> ProjectRow {
-        serde_json::from_value(serde_json::json!({
-            "id": id, "identifier": identifier, "name": "n"
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn project_matches_identifier_case_insensitively() {
-        let p = row("00000000-0000-0000-0000-0000000000aa", "ENG");
-        assert!(project_matches(&p, "eng"));
-        assert!(project_matches(&p, "ENG"));
-        assert!(!project_matches(&p, "OPS"));
-    }
-
-    #[test]
-    fn project_matches_unicode_identifier_case_insensitively() {
-        let p = row("00000000-0000-0000-0000-0000000000aa", "ÉQUIPE");
-        assert!(project_matches(&p, "équipe"));
-        assert!(project_matches(&p, "Équipe"));
-    }
-
-    #[test]
-    fn project_matches_any_uuid_spelling() {
-        let p = row("0000000a-0000-0000-0000-0000000000aa", "ENG");
-        assert!(project_matches(&p, "0000000a-0000-0000-0000-0000000000aa"));
-        assert!(project_matches(&p, "0000000A-0000-0000-0000-0000000000AA"));
-        let unhyphenated = "0000000A-0000-0000-0000-0000000000AA".replace('-', "");
-        assert!(project_matches(&p, &unhyphenated));
-        assert!(!project_matches(&p, "not-a-uuid"));
-        assert!(!project_matches(&p, "0000000b-0000-0000-0000-0000000000aa"));
-    }
 }

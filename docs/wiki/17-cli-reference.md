@@ -349,7 +349,7 @@ child=$(pidash issue create --project ENG --title "Follow-up: flaky test" --outp
 pidash issue relate "$child" --blocked-by ENG-42
 ```
 
-The project is resolved before the work item is created, so an unknown `--project` exits `4` without creating anything.
+The project is read (`GET projects/<ref>/`, the same identifier-or-UUID resolution the create uses) before the work item is created, so an unknown `--project` exits `4` without creating anything.
 
 ### `pidash issue list --project <P>`
 

@@ -1385,6 +1385,14 @@ async fn page_get_rejects_a_non_uuid_page_id_before_any_request() {
 const PAGE_ID: &str = "00000000-0000-0000-0000-0000000000f1";
 const PARENT_PAGE_ID: &str = "00000000-0000-0000-0000-0000000000f2";
 
+fn not_found() -> CannedResponse {
+    CannedResponse {
+        status: 404,
+        status_text: "Not Found",
+        body: r#"{"error":"Not found."}"#.into(),
+    }
+}
+
 fn created(body: &str) -> CannedResponse {
     CannedResponse {
         status: 201,
@@ -1838,14 +1846,32 @@ const ISSUE_CREATED: &str = r#"{"id":"00000000-0000-0000-0000-000000000001","pro
 const ISSUE_PROJECTS: &str =
     r#"[{"id":"00000000-0000-0000-0000-0000000000aa","identifier":"ENG","name":"Engineering"}]"#;
 
-/// `issue create` resolves the project (GET `projects/`) before it POSTs.
+const ISSUE_PROJECT_DETAIL: &str =
+    r#"{"id":"00000000-0000-0000-0000-0000000000aa","identifier":"ENG","name":"Engineering"}"#;
+
+/// `issue create` reads the project (GET `projects/{ref}/`) before it
+/// POSTs. Like the server, the fake resolves the ref as the identifier in
+/// any case or the UUID in any spelling, and 404s anything else.
 fn issue_create_handler() -> Handler {
     Box::new(|req| {
         if req.method == "GET" && req.path.ends_with("/projects/") {
-            CannedResponse::ok(ISSUE_PROJECTS)
-        } else {
-            created(ISSUE_CREATED)
+            return CannedResponse::ok(ISSUE_PROJECTS);
         }
+        if req.method == "GET" {
+            let reference = req
+                .path
+                .strip_prefix("/api/v1/workspaces/acme/projects/")
+                .and_then(|r| r.strip_suffix('/'))
+                .unwrap_or_default();
+            let by_uuid =
+                reference.to_lowercase().replace('-', "") == ISSUE_PROJECT_ID.replace('-', "");
+            return if by_uuid || reference.eq_ignore_ascii_case("ENG") {
+                CannedResponse::ok(ISSUE_PROJECT_DETAIL)
+            } else {
+                not_found()
+            };
+        }
+        created(ISSUE_CREATED)
     })
 }
 
@@ -2054,6 +2080,78 @@ async fn issue_create_unknown_project_exits_not_found_without_creating() {
             .iter()
             .all(|r| r.method != "POST"),
         "no issue is created for a project that does not resolve"
+    );
+}
+
+/// A project outside the first `projects/` page (or archived, so the list
+/// hides it) still resolves: create reads `GET projects/{ref}/`, which the
+/// server resolves the same way as the work-item POST.
+#[tokio::test]
+async fn issue_create_resolves_a_project_the_list_does_not_return() {
+    let fake = start_fake(Box::new(|req| {
+        if req.method == "GET" && req.path == "/api/v1/workspaces/acme/projects/" {
+            CannedResponse::ok(r#"{"results":[],"next_cursor":"1000:1:0"}"#)
+        } else if req.method == "GET" && req.path == "/api/v1/workspaces/acme/projects/ENG/" {
+            CannedResponse::ok(ISSUE_PROJECT_DETAIL)
+        } else if req.method == "POST" {
+            created(ISSUE_CREATED)
+        } else {
+            not_found()
+        }
+    }))
+    .await;
+
+    let out = run_pidash(
+        &fake,
+        &[
+            "issue",
+            "create",
+            "--project",
+            "ENG",
+            "--title",
+            "X",
+            "--output",
+            "id",
+        ],
+        "",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    assert_eq!(out.stdout, "ENG-123\n");
+}
+
+/// When the project lookup itself fails, nothing is created.
+#[tokio::test]
+async fn issue_create_project_lookup_failure_does_not_create() {
+    let fake = start_fake(Box::new(|req| {
+        if req.method == "POST" {
+            created(ISSUE_CREATED)
+        } else {
+            CannedResponse {
+                status: 500,
+                status_text: "Internal Server Error",
+                body: r#"{"error":"boom"}"#.into(),
+            }
+        }
+    }))
+    .await;
+
+    let out = run_pidash(
+        &fake,
+        &["issue", "create", "--project", "ENG", "--title", "X"],
+        "",
+    )
+    .await;
+
+    assert_ne!(out.code, Some(0), "stderr: {}", out.stderr);
+    assert!(
+        fake.recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|r| r.method != "POST"),
+        "no issue is created when the project lookup fails"
     );
 }
 

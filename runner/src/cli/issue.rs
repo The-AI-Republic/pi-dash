@@ -593,12 +593,11 @@ async fn cmd_create(
     // fails fast without resolving the project.
     let description = load_description(&args.description, std::io::stdin())?;
     let project_ref = resolve_project_ref(client, paths, args.project.as_deref()).await?;
-    // Resolve the project before the POST: its canonical identifier builds
-    // the new item's `PROJ-123` key, and an unknown project fails here
-    // instead of after an issue was created.
-    let project_identifier = project::resolve_project(client, &project_ref)
-        .await?
-        .identifier;
+    // Read the project before the POST: its canonical identifier builds the
+    // new item's `PROJ-123` key, and an unknown project fails here instead
+    // of after an issue was created. The detail route resolves the ref the
+    // same way the POST does, so this never rejects a ref the POST accepts.
+    let project_identifier = project::get_project(client, &project_ref).await?.identifier;
 
     // Resolve the network-dependent fields first, then hand the already-resolved
     // values to the pure body builder so the URL/body contract is unit-testable.
