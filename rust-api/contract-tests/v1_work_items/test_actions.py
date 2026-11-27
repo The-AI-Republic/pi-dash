@@ -107,6 +107,47 @@ def test_issue_detail_carries_active_run(api, world, seeder):
         assert block["id"] == run["id"]
         assert block["status"] == "running"
         assert block["age_seconds"] >= 0
+        # No branch recorded on the issue or pinned on the run yet.
+        assert block["branch"] is None
+    else:
+        assert "active_run" not in detail
+
+
+def test_issue_detail_active_run_names_its_branch(api, world, seeder):
+    """The active run reports its working branch (PDASHOSS01-407, DIFF-44).
+
+    Rust: the issue's git_work_branch when set, else the branch pinned in
+    the run's run_config. Django has no active_run block.
+    """
+    pod = seeder.create_pod(world["workspace"]["id"], world["project"]["id"])
+    run = seeder.create_agent_run(
+        world["workspace"]["id"], world["owner"]["id"], pod["id"], world["issue"]["id"]
+    )
+    url = issue_url(world, world["issue"]["id"])
+    seeder.db.execute(
+        "UPDATE agent_run SET run_config = %s WHERE id = %s",
+        ('{"git_work_branch": "feat/pinned"}', run["id"]),
+    )
+    response = api.get(url)
+    assert response.status_code == 200, response.text
+    detail = response.json()
+    if is_rust():
+        assert detail["active_run"]["id"] == run["id"]
+        assert detail["active_run"]["branch"] == "feat/pinned"
+    else:
+        assert "active_run" not in detail
+
+    patched = api.patch(url, json={"git_work_branch": "pi-dash/eng-7"})
+    assert patched.status_code == 200, patched.text
+    response = api.get(url)
+    assert response.status_code == 200, response.text
+    detail = response.json()
+    assert detail["git_work_branch"] == "pi-dash/eng-7"
+    if is_rust():
+        block = detail["active_run"]
+        assert block["id"] == run["id"]
+        assert block["status"] == "running"
+        assert block["branch"] == "pi-dash/eng-7"
     else:
         assert "active_run" not in detail
 

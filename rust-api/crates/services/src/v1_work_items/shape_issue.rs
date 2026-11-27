@@ -1250,6 +1250,11 @@ pub struct ActiveRunSummary {
     pub started_at: Option<String>,
     pub age_seconds: i64,
     pub runner_last_heartbeat_at: Option<String>,
+    /// The run's working branch (PDASHOSS01-407): the issue's
+    /// `git_work_branch` when set, else the branch pinned in the run's
+    /// `run_config` at dispatch, else `null`. Lets an outside agent see
+    /// the branch is owned before pushing to it.
+    pub branch: Option<String>,
 }
 
 /// Caller-resolved grouped relations (`grouped_relations(instance,
@@ -2921,6 +2926,7 @@ mod tests {
             started_at: Some("2026-10-02T23:00:05+00:00".to_string()),
             age_seconds: 720,
             runner_last_heartbeat_at: Some("2026-10-02T23:10:00+00:00".to_string()),
+            branch: Some("pi-dash/eng-7".to_string()),
         };
         let no_rows: &[UserLiteRow] = &[];
         let no_expansions: &[(&str, Option<Value>)] = &[];
@@ -2954,6 +2960,9 @@ mod tests {
             block["runner_last_heartbeat_at"].as_str().unwrap(),
             "2026-10-02T23:10:00+00:00"
         );
+        // PDASHOSS01-407: the run's working branch, so an outside agent
+        // can tell the branch is owned before pushing.
+        assert_eq!(block["branch"].as_str().unwrap(), "pi-dash/eng-7");
         // `?fields=id,name` excludes the block; explicit
         // `?fields=active_run` includes it on single payloads.
         let restricted = render(Some(&includes(&["id", "name"])), false);

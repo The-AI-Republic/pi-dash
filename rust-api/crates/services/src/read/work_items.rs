@@ -99,6 +99,7 @@ async fn fetch_assigned_runner_detail(
 async fn fetch_active_run(
     pool: &PgPool,
     issue_id: Uuid,
+    issue_branch: &str,
 ) -> Result<Option<shape::ActiveRunSummary>, Error> {
     use pidash_db::entity::{agent_run, runner};
     use sea_orm::EntityTrait;
@@ -111,6 +112,7 @@ async fn fetch_active_run(
         created_at: sea_orm::prelude::DateTimeWithTimeZone,
         assigned_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
         started_at: Option<sea_orm::prelude::DateTimeWithTimeZone>,
+        run_config: serde_json::Value,
     }
 
     use pidash_types::runner_runs::AgentRunStatus;
@@ -136,6 +138,7 @@ async fn fetch_active_run(
         .column_as(agent_run::Column::CreatedAt, "created_at")
         .column_as(agent_run::Column::AssignedAt, "assigned_at")
         .column_as(agent_run::Column::StartedAt, "started_at")
+        .column_as(agent_run::Column::RunConfig, "run_config")
         .filter(agent_run::Column::WorkItemId.eq(issue_id))
         .filter(agent_run::Column::Status.is_in(statuses))
         .order_by_desc(agent_run::Column::CreatedAt)
@@ -155,6 +158,7 @@ async fn fetch_active_run(
         None => None,
     };
     let created = run.created_at.with_timezone(&Utc);
+    let branch = active_run_branch(issue_branch, &run.run_config);
     Ok(Some(shape::ActiveRunSummary {
         id: run.id.to_string(),
         status: run.status,
@@ -170,7 +174,25 @@ async fn fetch_active_run(
         runner_last_heartbeat_at: heartbeat
             .as_ref()
             .map(crate::integrations::serializers::isoformat),
+        branch,
     }))
+}
+
+/// The active run's working branch (PDASHOSS01-407). The issue's current
+/// `git_work_branch` wins: a run records it after its first push, so it is
+/// the freshest. Otherwise the branch pinned in the run's `run_config`
+/// snapshot at dispatch (`git_work_branch`, `null` when none was pinned).
+fn active_run_branch(issue_branch: &str, run_config: &serde_json::Value) -> Option<String> {
+    let issue_branch = issue_branch.trim();
+    if !issue_branch.is_empty() {
+        return Some(issue_branch.to_owned());
+    }
+    run_config
+        .get("git_work_branch")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_owned)
 }
 
 /// Attached code reviews (NEWPIDASH-366): the issue's
@@ -1606,7 +1628,7 @@ pub async fn render_decoded(
     // is omitted when no run occupies the slot.
     let run_gate = !req.is_list && (requested.is_empty() || requested.contains(&"active_run"));
     let active_run = if run_gate {
-        fetch_active_run(pool, issue_id).await?
+        fetch_active_run(pool, issue_id, &decoded.git_work_branch).await?
     } else {
         None
     };
@@ -2286,6 +2308,30 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn active_run_branch_prefers_the_issue_branch_then_the_run_snapshot() {
+        // PDASHOSS01-407: the issue's live branch wins over the dispatch
+        // snapshot; blank values fall through; nothing known is `None`.
+        let pinned = serde_json::json!({"git_work_branch": "feat/pinned"});
+        assert_eq!(
+            active_run_branch("pi-dash/eng-7", &pinned).as_deref(),
+            Some("pi-dash/eng-7")
+        );
+        assert_eq!(
+            active_run_branch("", &pinned).as_deref(),
+            Some("feat/pinned")
+        );
+        assert_eq!(
+            active_run_branch("  ", &serde_json::json!({"git_work_branch": null})),
+            None
+        );
+        assert_eq!(
+            active_run_branch("", &serde_json::json!({"git_work_branch": ""})),
+            None
+        );
+        assert_eq!(active_run_branch("", &serde_json::json!({})), None);
+    }
 
     #[test]
     fn relations_pool_qualifies_columns_and_filters_membership_in_where() {
