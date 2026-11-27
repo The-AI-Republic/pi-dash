@@ -123,15 +123,39 @@ pub async fn list_states(
         "workspaces/{}/projects/{}/states/",
         client.env.workspace_slug, project_id
     );
-    client.get(&path).await.map_err(|e| match named_project {
-        Some(name) if e.exit_code == EXIT_NOT_FOUND => {
-            let mut err = CliError::new(EXIT_NOT_FOUND, format!("project '{name}' not found"));
-            err.detail = e.detail;
-            err.status = e.status;
-            err
+    let err = match client.get(&path).await {
+        Ok(resp) => return Ok(resp),
+        Err(e) => e,
+    };
+    let Some(name) = named_project else {
+        return Err(err);
+    };
+    if err.exit_code == EXIT_NOT_FOUND {
+        return Err(project_not_found(&name, err));
+    }
+    // Both servers check project membership on the states route before
+    // they check that a UUID exists, so an unknown UUID answers 403. Ask
+    // project detail (workspace-member readable) whether it exists, and
+    // keep the 403 unless that says 404: a real denial must stay one.
+    if err.status == Some(403) && looks_like_uuid(&name) {
+        let detail = format!(
+            "workspaces/{}/projects/{}/",
+            client.env.workspace_slug, name
+        );
+        if let Err(probe) = client.get(&detail).await
+            && probe.exit_code == EXIT_NOT_FOUND
+        {
+            return Err(project_not_found(&name, probe));
         }
-        _ => e,
-    })
+    }
+    Err(err)
+}
+
+fn project_not_found(name: &str, source: CliError) -> CliError {
+    let mut err = CliError::new(EXIT_NOT_FOUND, format!("project '{name}' not found"));
+    err.detail = source.detail;
+    err.status = source.status;
+    err
 }
 
 /// `<PROJ>-<number>`, e.g. `ENG-42`: the shape of a work-item identifier.
