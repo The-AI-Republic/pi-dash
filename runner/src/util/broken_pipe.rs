@@ -40,6 +40,20 @@ pub fn install() {
     }));
 }
 
+/// For stdout writes that return an error instead of panicking (clap's
+/// `print_help`): exit with [`EXIT_BROKEN_PIPE`] on a broken pipe, and
+/// return any other result unchanged.
+pub fn exit_on_broken_pipe<T>(result: io::Result<T>) -> io::Result<T> {
+    if is_broken_pipe_error(&result) {
+        std::process::exit(EXIT_BROKEN_PIPE);
+    }
+    result
+}
+
+fn is_broken_pipe_error<T>(result: &io::Result<T>) -> bool {
+    matches!(result, Err(err) if err.kind() == ErrorKind::BrokenPipe)
+}
+
 fn is_stdout_broken_pipe(info: &PanicHookInfo<'_>) -> bool {
     let payload = info.payload();
     let message = payload
@@ -55,7 +69,7 @@ fn is_stdout_broken_pipe(info: &PanicHookInfo<'_>) -> bool {
 /// the same rendering of every OS error that maps to
 /// [`ErrorKind::BrokenPipe`] on this platform; that keeps the check exact
 /// without depending on the error text of any one OS.
-pub fn is_stdout_broken_pipe_message(message: &str) -> bool {
+fn is_stdout_broken_pipe_message(message: &str) -> bool {
     let Some(cause) = message.strip_prefix(STDOUT_PANIC_PREFIX) else {
         return false;
     };
@@ -99,6 +113,17 @@ mod tests {
     fn ignores_broken_pipe_on_stderr() {
         let message = format!("failed printing to stderr: {}", broken_pipe_cause());
         assert!(!is_stdout_broken_pipe_message(&message));
+    }
+
+    #[test]
+    fn only_a_broken_pipe_error_counts() {
+        assert!(is_broken_pipe_error::<()>(&Err(io::Error::from(
+            ErrorKind::BrokenPipe
+        ))));
+        assert!(!is_broken_pipe_error::<()>(&Err(io::Error::from(
+            ErrorKind::PermissionDenied
+        ))));
+        assert!(!is_broken_pipe_error(&Ok(())));
     }
 
     #[test]

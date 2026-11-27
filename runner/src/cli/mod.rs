@@ -508,7 +508,10 @@ async fn run_default(paths: &crate::util::paths::Paths) -> Result<()> {
     if in_agent_run() && !operator_bypassed() {
         print!("{}", agent_help());
     } else {
-        Cli::command().print_help()?;
+        // `print_help` writes through a fallible writer rather than
+        // `println!`, so a closed stdout comes back as an error the panic
+        // hook never sees; exit the same quiet way.
+        crate::util::broken_pipe::exit_on_broken_pipe(Cli::command().print_help())?;
         println!();
     }
     Ok(())

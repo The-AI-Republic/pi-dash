@@ -40,35 +40,21 @@ fn serve_json(listener: TcpListener, body: String) {
     });
 }
 
-#[cfg(unix)]
-fn killed_by_sigpipe(status: &std::process::ExitStatus) -> bool {
-    use std::os::unix::process::ExitStatusExt;
-    status.signal() == Some(13)
-}
-
-#[cfg(not(unix))]
-fn killed_by_sigpipe(_status: &std::process::ExitStatus) -> bool {
-    false
-}
-
-#[test]
-fn workspace_me_with_closed_stdout_exits_quietly() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    // Large enough that no pipe buffer could absorb it.
-    let body = serde_json::json!({ "id": "u-1", "padding": "x".repeat(256 * 1024) }).to_string();
-    serve_json(listener, body);
-
-    let config_dir = tempfile::tempdir().unwrap();
+/// Run `pidash <args>` with its stdout read end closed before it prints,
+/// and return its exit status and stderr.
+fn run_with_closed_stdout(
+    config_dir: &std::path::Path,
+    envs: &[(&str, String)],
+    args: &[&str],
+) -> (std::process::ExitStatus, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_pidash"))
-        .env("PIDASH_CONFIG_DIR", config_dir.path())
-        .env("PIDASH_DATA_DIR", config_dir.path().join("data"))
-        .env("PIDASH_API_URL", format!("http://{addr}"))
-        .env("PIDASH_WORKSPACE_SLUG", "acme")
-        .env("PIDASH_TOKEN", "test-token")
+        .env("PIDASH_CONFIG_DIR", config_dir)
+        .env("PIDASH_DATA_DIR", config_dir.join("data"))
+        .envs(envs.iter().map(|(k, v)| (*k, v.as_str())))
         .env_remove("PIDASH_RUN_ID")
+        .env_remove("PIDASH_ALLOW_OPERATOR")
         .env_remove("RUST_BACKTRACE")
-        .args(["workspace", "me"])
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -85,14 +71,51 @@ fn workspace_me_with_closed_stdout_exits_quietly() {
         .unwrap()
         .read_to_string(&mut stderr)
         .unwrap();
-    let status = child.wait().unwrap();
+    (child.wait().unwrap(), stderr)
+}
 
+/// No panic or error text on stderr, and exit status 141 (128 + SIGPIPE).
+fn assert_quiet_broken_pipe_exit(status: std::process::ExitStatus, stderr: &str) {
     assert!(
         !stderr.contains("panicked") && !stderr.contains("Broken pipe"),
         "expected no panic text on stderr, got: {stderr}"
     );
-    assert!(
-        matches!(status.code(), Some(0) | Some(141)) || killed_by_sigpipe(&status),
-        "expected exit 0 or 141, got {status:?} (stderr: {stderr})"
+    assert!(stderr.is_empty(), "expected empty stderr, got: {stderr}");
+    assert_eq!(
+        status.code(),
+        Some(141),
+        "expected exit 141, got {status:?} (stderr: {stderr})"
     );
+}
+
+#[test]
+fn workspace_me_with_closed_stdout_exits_quietly() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    // Large enough that no pipe buffer could absorb it.
+    let body = serde_json::json!({ "id": "u-1", "padding": "x".repeat(256 * 1024) }).to_string();
+    serve_json(listener, body);
+
+    let config_dir = tempfile::tempdir().unwrap();
+    let (status, stderr) = run_with_closed_stdout(
+        config_dir.path(),
+        &[
+            ("PIDASH_API_URL", format!("http://{addr}")),
+            ("PIDASH_WORKSPACE_SLUG", "acme".to_string()),
+            ("PIDASH_TOKEN", "test-token".to_string()),
+        ],
+        &["workspace", "me"],
+    );
+    assert_quiet_broken_pipe_exit(status, &stderr);
+}
+
+/// Bare `pidash` on a configured host prints clap's help through a
+/// fallible writer, not `println!`, so the panic hook alone does not
+/// cover it.
+#[test]
+fn bare_pidash_help_with_closed_stdout_exits_quietly() {
+    let config_dir = tempfile::tempdir().unwrap();
+    std::fs::write(config_dir.path().join("config.toml"), "").unwrap();
+    let (status, stderr) = run_with_closed_stdout(config_dir.path(), &[], &[]);
+    assert_quiet_broken_pipe_exit(status, &stderr);
 }
