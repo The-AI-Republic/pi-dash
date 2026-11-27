@@ -356,8 +356,8 @@ pub struct PatchArgs {
 
     /// Target state — either the exact state name (case-insensitive) or a state UUID.
     /// Agent runs start on a state *change*: naming the state the issue is
-    /// already in queues no run, and the output then carries a
-    /// `state_unchanged` object pointing at `pidash issue run-ai`.
+    /// already in is not expected to queue a run, and the output then carries
+    /// an advisory `state_unchanged` object pointing at `pidash issue run-ai`.
     #[arg(long)]
     pub state: Option<String>,
 
@@ -1418,9 +1418,14 @@ fn payload_state_id(raw: &Value) -> Option<&str> {
 /// note the caller sees the same 200 as a real move and waits for a run that
 /// never comes — typically when re-patching an In Progress issue whose
 /// earlier run stopped itself to wait on a blocker (PDASHOSS01-406). Adds a
-/// `state_unchanged` object (dispatched `false`, reason, the state, and the
-/// `run-ai` command to use) and leaves the server payload otherwise intact.
+/// `state_unchanged` object (`dispatch_expected: false`, reason, the state,
+/// and a hint naming `run-ai`) and leaves the server payload otherwise intact.
 /// Says nothing when no state was requested or the prior state is unknown.
+///
+/// Advisory only: the comparison is against the state read by the pre-patch
+/// GET, not the server's own prev/new check at save time. If another client
+/// moved the issue in between, this patch is a real transition and may queue
+/// a run, so the note says "expected", never that nothing was dispatched.
 fn annotate_state_patch(
     mut resp: Value,
     prior: &Value,
@@ -1437,11 +1442,12 @@ fn annotate_state_patch(
         map.insert(
             "state_unchanged".to_string(),
             serde_json::json!({
-                "dispatched": false,
+                // Advisory (see above): derived from the pre-patch read.
+                "dispatch_expected": false,
                 "reason": "state_unchanged",
                 "state": before,
                 "hint": format!(
-                    "The work item was already in this state, so no state transition fired and no agent run was queued. To start a run now, use `pidash issue run-ai {identifier}`."
+                    "The work item was already in this state when read just before the patch, so this patch is not expected to fire a state transition or queue an agent run (unless another client changed the state in between). If no run is active and you are allowed to start runs, `pidash issue run-ai {identifier}` starts one."
                 ),
             }),
         );
@@ -1923,7 +1929,7 @@ mod tests {
         let resp = json!({"id": "i1", "state": in_progress, "name": "Task"});
         let out = annotate_state_patch(resp, &prior, Some(&in_progress.to_uppercase()), "ENG-7");
         let note = &out["state_unchanged"];
-        assert_eq!(note["dispatched"], json!(false));
+        assert_eq!(note["dispatch_expected"], json!(false));
         assert_eq!(note["reason"], json!("state_unchanged"));
         assert_eq!(note["state"], json!(in_progress));
         let hint = note["hint"].as_str().unwrap();
