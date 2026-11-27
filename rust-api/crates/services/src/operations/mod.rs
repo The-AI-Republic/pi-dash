@@ -23,6 +23,7 @@ pub mod comments;
 mod common;
 pub mod deps;
 pub mod error;
+pub mod issue_tree;
 pub mod issues;
 pub mod pull_requests;
 pub mod relations;

@@ -95,6 +95,10 @@ djangorestframework 3.15.2, Django 4.2.30.
   `APIKeyAuthenticationExtension.get_security_definition`).
   Method: httpx GETs; YAML parsed with `yaml.safe_load`, JSON with
   `r.json()`; equality asserted on the parsed docs.
+  PDASHOSS01-405 added `GET .../work-items/{issue_id}/tree/` (136 paths,
+  210 operations): its essentials are copied verbatim from a live
+  `?format=json` capture of that branch's Django. The rendering
+  bytes/sha256 recorded above are still from the NEWPIDASH-60 capture.
 
 ## FX-OPENAPI-05 handler behaviour goldens
 
@@ -132,8 +136,9 @@ djangorestframework 3.15.2, Django 4.2.30.
 - `FX-OPENAPI-06.routes_golden.json` — byte copy of
   `rust-api/contract-tests/v1_openapi/routes_golden.json` from PIDASHCONV-81
   (`54254ec8`, PR #479; re-recorded PIDASHCONV-1090, NEWPIDASH-34 and
-  NEWPIDASH-60): 135 paths, sha256
-  `6de0073de566bf28e6c97805a2786cb7380a0481e67d47025b29acdfa6990dde`.
+  NEWPIDASH-60; +`work-items/{issue_id}/tree/` by PDASHOSS01-405): 136
+  paths, sha256
+  `f8cfe5aa8e95bd5e64f4905026f91d968caee6888195878f829c6ce9662c7a9d`.
   Regen rule (from `test_routes_golden.py`, never blanket-update):
   `REGEN_GOLDEN=1 pytest v1_openapi/test_routes_golden.py` + reviewed
   diff. The live capture in FX-OPENAPI-04 asserted route-map equality

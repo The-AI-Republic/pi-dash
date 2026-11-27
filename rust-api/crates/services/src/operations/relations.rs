@@ -158,7 +158,7 @@ impl ResolvedIssue {
 /// and [`fetch_source`]: the `IssueManager` scope plus triage, archive
 /// and draft guards. The triage guard keeps stateless rows open: `group
 /// IS NULL` is a separate positive arm because `<>` excludes NULLs.
-fn live_manager_scope() -> Condition {
+pub(super) fn live_manager_scope() -> Condition {
     Condition::all()
         .add(issues::Column::DeletedAt.is_null())
         .add(
@@ -178,7 +178,7 @@ fn live_manager_scope() -> Condition {
 /// the raw `EXISTS` becomes an `INNER JOIN` on `project_members` — the
 /// row multiplicity it adds is unobservable: the callers take `.first()`
 /// (identical duplicate rows) or key by `id` in a `HashMap`.
-fn visible_pool_query(slug: &str, user_id: &Uuid) -> Select<issues::Entity> {
+pub(super) fn visible_pool_query(slug: &str, user_id: &Uuid) -> Select<issues::Entity> {
     issues::Entity::find()
         .join(JoinType::LeftJoin, issues::Relation::States.def())
         .join(JoinType::InnerJoin, issues::Relation::Projects.def())

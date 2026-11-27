@@ -242,6 +242,9 @@ pub enum V1WorkItemsRoute {
     /// `IssueRelationGroupedAPIEndpoint` (`views/issue.py:3197`,
     /// gate inherited from `_IssueRelationAgentBase`, `:3151`).
     RelationGrouped,
+    /// `.../work-items/<id>/tree/` (GET): `IssueTreeAPIEndpoint`
+    /// (PDASHOSS01-405, gate inherited from `_IssueRelationAgentBase`).
+    Tree,
     /// `.../relations/relate/` (`:203`, POST):
     /// `IssueRelationRelateAPIEndpoint` (`views/issue.py:3220`).
     RelationRelate,
@@ -892,6 +895,7 @@ mod tests {
             ),
             (R::RelationList, &["GET", "POST"], G::ProjectEntity),
             (R::RelationGrouped, &["GET"], G::ProjectEntity),
+            (R::Tree, &["GET"], G::ProjectEntity),
             (R::RelationRelate, &["POST"], G::ProjectEntity),
             (R::RelationUnrelate, &["POST"], G::ProjectEntity),
             (R::Workpad, &["GET", "PATCH"], G::ProjectEntity),
@@ -909,8 +913,8 @@ mod tests {
             (R::PageDetail, &["GET", "PATCH"], G::ProjectEntity),
             (R::PageArchive, &["POST", "DELETE"], G::ProjectEntity),
         ];
-        // 12 deprecated twins + 27 work-items + 2 label + 3 page.
-        assert_eq!(cases.len(), 44);
+        // 12 deprecated twins + 28 work-items + 2 label + 3 page.
+        assert_eq!(cases.len(), 45);
         for (route, methods, gate) in cases {
             for method in *methods {
                 assert_eq!(gate_for(*route, method), *gate, "{route:?} {method}");

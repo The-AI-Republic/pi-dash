@@ -423,6 +423,13 @@ pub fn owned_relation_grouped(
     owned(router, &["GET"])
 }
 
+/// The tree path owns GET (`urls/work_item.py`, PDASHOSS01-405).
+pub fn owned_issue_tree(
+    router: axum::routing::MethodRouter<AppState>,
+) -> axum::routing::MethodRouter<AppState> {
+    owned(router, &["GET"])
+}
+
 /// The relate path owns POST (`urls/work_item.py:204-205`).
 pub fn owned_relation_relate(
     router: axum::routing::MethodRouter<AppState>,
@@ -1359,6 +1366,77 @@ async fn relation_grouped_inner(
     let mut out = Map::with_capacity(2);
     out.insert("issue".to_owned(), Value::String(source.identifier()));
     out.insert("relations".to_owned(), Value::Object(relations));
+    let body = serde_json::to_string(&out).map_err(|_| Denial::ServerError)?;
+    Ok(json_response(StatusCode::OK, body))
+}
+
+/// `GET .../work-items/<id>/tree/` (`IssueTreeAPIEndpoint.get`,
+/// PDASHOSS01-405): the gate, then the `recursive` check (400 before the
+/// source lookup, as the view orders them), then
+/// `orchestration.issue_tree.issue_tree` over the caller's visible pool.
+pub async fn get_issue_tree(
+    State(state): State<AppState>,
+    OriginalUri(original): OriginalUri,
+    Path((slug, project_id, issue_id)): Path<(String, String, String)>,
+    axum::extract::Query(query): axum::extract::Query<pidash_compat::http::QueryMap>,
+    headers: HeaderMap,
+) -> Response {
+    if !crate::runner_runs::is_uuid_path_segment(&issue_id) {
+        return proxy_request(&state, "GET", original.to_string()).await;
+    }
+    let issue_id = issue_id.parse::<Uuid>().expect("checked segment");
+    let recursive = pidash_compat::http::query_last(&query, "recursive");
+    match issue_tree_inner(
+        &state,
+        &headers,
+        &slug,
+        &project_id,
+        &issue_id,
+        recursive.as_deref(),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(denial) => denial.into_response(),
+    }
+}
+
+async fn issue_tree_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+    project_id_raw: &str,
+    issue_id: &Uuid,
+    recursive_raw: Option<&str>,
+) -> Result<Response, Denial> {
+    let pre = preamble(state, headers, slug).await?;
+    let project_id = rewrite_project_id(&pre.pool, slug, project_id_raw).await?;
+    let workspace_id = pre.workspace_id.ok_or(Denial::Forbidden)?;
+    require_entity_gate(
+        &pre.pool,
+        &workspace_id,
+        slug,
+        &pre.actor.id,
+        &project_id,
+        V1WorkItemsRoute::Tree,
+        "GET",
+    )
+    .await?;
+    let _tz = activate_timezone(pre.actor.timezone.as_deref())?;
+    let Some(recursive) = operations::issue_tree::parse_recursive(recursive_raw) else {
+        return Err(Denial::BadError(
+            "recursive must be true or false".to_owned(),
+        ));
+    };
+    let out = operations::issue_tree::issue_tree(
+        &pre.pool,
+        slug,
+        &pre.actor.id,
+        &project_id,
+        issue_id,
+        recursive,
+    )
+    .await?;
     let body = serde_json::to_string(&out).map_err(|_| Denial::ServerError)?;
     Ok(json_response(StatusCode::OK, body))
 }

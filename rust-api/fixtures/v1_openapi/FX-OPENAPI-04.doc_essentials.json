@@ -1,6 +1,6 @@
 {
   "_trace": "live GET /api/schema/ (+ ?format=json) against Django with ENABLE_DRF_SPECTACULAR=1 (routes pi_dash/urls.py:31-44); securityScheme rendered from utils/openapi/auth.py:15-34 (APIKeyAuthenticationExtension.get_security_definition)",
-  "_method": "httpx GET http://127.0.0.1:8000/api/schema/ (+ ?format=json) against Django with ENABLE_DRF_SPECTACULAR=1 (pi_dash.settings.test, scratch DB pidash_n60_test); YAML parsed with yaml.safe_load, JSON with r.json(); equality asserted on the parsed docs. Re-recorded by NEWPIDASH-60 (engine/machine-identity + workspaces runners/ drift, origin/main f92fe3c07).",
+  "_method": "httpx GET http://127.0.0.1:8000/api/schema/ (+ ?format=json) against Django with ENABLE_DRF_SPECTACULAR=1 (pi_dash.settings.test, scratch DB pidash_n60_test); YAML parsed with yaml.safe_load, JSON with r.json(); equality asserted on the parsed docs. Re-recorded by NEWPIDASH-60 (engine/machine-identity + workspaces runners/ drift, origin/main f92fe3c07). PDASHOSS01-405 added GET work-items/{issue_id}/tree/ (essentials from live Django ?format=json on that branch; the rendering bytes/sha above are the prior capture).",
   "openapi_version": "3.0.3",
   "default_rendering": {
     "url": "/api/schema/",
@@ -19,8 +19,8 @@
   },
   "doc_equality_proof": {
     "parsed_equal": true,
-    "yaml_paths": 135,
-    "json_paths": 135
+    "yaml_paths": 136,
+    "json_paths": 136
   },
   "route_map_matches_golden": true,
   "security_schemes": {
@@ -15091,6 +15091,84 @@
           },
           "200": {
             "description": "removed / not_related plus grouped relations"
+          },
+          "400": {
+            "description": "Invalid request data provided"
+          }
+        }
+      }
+    },
+    "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/tree/": {
+      "get": {
+        "operationId": "get_work_item_tree",
+        "tags": ["Work Items"],
+        "summary": "Get a work item's children with a progress rollup",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "issue_id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Issue ID",
+            "required": true,
+            "examples": {
+              "ExampleIssueID": {
+                "value": "550e8400-e29b-41d4-a716-446655440000",
+                "summary": "Example issue ID",
+                "description": "A typical issue UUID"
+              }
+            }
+          },
+          {
+            "in": "path",
+            "name": "project_id",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Either the project's UUID or its workspace-scoped identifier (e.g. ``ENG``). Identifier matching is case-insensitive.",
+            "required": true,
+            "examples": {
+              "uuid": {
+                "value": "00000000-0000-0000-0000-000000000000",
+                "summary": "UUID form"
+              },
+              "slug": {
+                "value": "ENG",
+                "summary": "Workspace-scoped identifier"
+              }
+            }
+          },
+          {
+            "in": "path",
+            "name": "slug",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Workspace slug",
+            "required": true,
+            "examples": {
+              "ExampleWorkspace": {
+                "value": "my-workspace",
+                "summary": "Example workspace",
+                "description": "A typical workspace slug"
+              }
+            }
+          }
+        ],
+        "responses": {
+          "401": {
+            "description": "Authentication credentials were not provided or are invalid."
+          },
+          "403": {
+            "description": "Permission denied. User lacks required permissions."
+          },
+          "404": {
+            "description": "Issue not found"
+          },
+          "200": {
+            "description": "Work item tree with rollup"
           },
           "400": {
             "description": "Invalid request data provided"

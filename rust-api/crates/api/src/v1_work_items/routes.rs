@@ -57,9 +57,9 @@ use super::handlers_pr_links::{
 };
 
 use super::handlers_relations::{
-    get_relation_grouped, get_relation_list, get_workpad, owned_relation_grouped,
-    owned_relation_list, owned_relation_relate, owned_relation_unrelate, owned_workpad,
-    patch_workpad, post_relate, post_relation, post_unrelate,
+    get_issue_tree, get_relation_grouped, get_relation_list, get_workpad, owned_issue_tree,
+    owned_relation_grouped, owned_relation_list, owned_relation_relate, owned_relation_unrelate,
+    owned_workpad, patch_workpad, post_relate, post_relation, post_unrelate,
 };
 
 use super::handlers_move_search::{
@@ -106,6 +106,11 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/relations/unrelate/",
             owned_relation_unrelate(axum::routing::post(post_unrelate)),
+        )
+        // `work_item.py` — work-item tree with rollup (get, PDASHOSS01-405).
+        .route(
+            "/api/v1/workspaces/{slug}/projects/{project_id}/work-items/{issue_id}/tree/",
+            owned_issue_tree(axum::routing::get(get_issue_tree)),
         )
         // `work_item.py:214-216` — workpad (get + patch).
         .route(
