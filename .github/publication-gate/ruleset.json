@@ -1,0 +1,20 @@
+{
+  "name": "publication-gate: all tags",
+  "target": "tag",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": ["~ALL"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    { "type": "creation" },
+    { "type": "update" },
+    { "type": "deletion" },
+    { "type": "non_fast_forward" }
+  ],
+  "bypass_actors": [
+    { "actor_id": "PUBLISHER_APP_ID", "actor_type": "Integration", "bypass_mode": "always" }
+  ]
+}

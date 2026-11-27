@@ -1,14 +1,20 @@
 # Releasing Pi Dash
 
 Pi Dash ships two independently-versioned components, each with its own
-release pipeline. Tag the right prefix from `main` and CI takes it from there.
+release pipeline. Both go through the publication gate
+(`.github/publication-gate/README.md`): you start a workflow with a commit
+that is already on `main`, CI builds, finishes, scans and tests the candidate,
+and after a release owner approves the `release-publisher` environment the
+publisher creates the tag and publishes exactly what was scanned. Do not push
+release tags yourself; the tag ruleset refuses them, and a tag push no longer
+starts any workflow.
 
 ## Tag scheme
 
-| Component                                          | Tag prefix           | Triggers                                               | Builds                                                                                                                                                                    |
+| Component                                          | Tag prefix           | Workflow (`workflow_dispatch`)                         | Builds                                                                                                                                                                    |
 | -------------------------------------------------- | -------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Runner CLI** (the `pidash` command)              | `pidash-v<semver>`   | `.github/workflows/release.yml` (cargo-dist)           | Cross-platform binaries (macOS arm64, Linux arm64/x86_64), Homebrew formula, GitHub Release with installer scripts                                                        |
-| **Pi Dash platform** (the 6 service Docker images) | `platform-v<semver>` | `.github/workflows/build-branch.yml` (Branch Build CE) | Multi-arch Docker images pushed to `airepublic/pi-dash-{frontend,backend,space,admin,live,proxy}`, GitHub Release with `setup.sh` + `docker-compose.yml` for self-hosters |
+| **Pi Dash platform** (the 6 service Docker images) | `v<semver>`          | `.github/workflows/build-branch.yml` (Branch Build CE) | Multi-arch Docker images pushed to `airepublic/pi-dash-{frontend,backend,space,admin,live,proxy}`, GitHub Release with `setup.sh` + `docker-compose.yml` for self-hosters |
 
 Versions are independent. The runner is currently `0.1.x`; the platform
 follows `package.json` (`1.x.x`). Don't try to align them — each component
@@ -23,18 +29,18 @@ gets a fix or feature on its own cadence.
    name = "pidash"
    version = "0.1.2"   # was 0.1.1
    ```
-3. Commit, tag, push:
+3. Land the bump on `main` through a pull request, then start the release
+   with the merged commit:
    ```bash
-   git checkout main && git pull
-   # edit runner/Cargo.toml ...
-   git commit -am "chore(runner): bump version to 0.1.2"
-   git tag pidash-v0.1.2
-   git push origin main pidash-v0.1.2
-   ```
-4. CI does the rest. Watch:
-   ```bash
+   git fetch origin
+   gh workflow run Release --ref main \
+     -f tag=pidash-v0.1.2 \
+     -f sha="$(git rev-parse origin/main)"
    gh run watch
    ```
+4. CI builds, finishes and scans the candidate, then waits for a release
+   owner to approve the `release-publisher` environment. The publisher then
+   creates `pidash-v0.1.2` at that commit and publishes the scanned files.
 5. When green, the GitHub Release will be at
    `https://github.com/The-AI-Republic/pi-dash/releases/tag/pidash-v0.1.2`
    with a `pidash-installer.sh` and platform-specific archives.
@@ -74,32 +80,31 @@ provides.
      "version": "1.4.0"
    }
    ```
-3. Commit, tag, push:
+3. Land the bump on `main` through a pull request, then start the build
+   with the merged commit:
    ```bash
-   git checkout main && git pull
-   # edit package.json ...
-   git commit -am "chore(platform): bump version to 1.4.0"
-   git tag platform-v1.4.0
-   git push origin main platform-v1.4.0
+   git fetch origin
+   gh workflow run "Branch Build CE" --ref main \
+     -f sha="$(git rev-parse origin/main)" \
+     -f build_type=Release \
+     -f releaseVersion=v1.4.0 \
+     -f isPrerelease=false
    ```
 4. CI does the rest:
-   - Builds 6 Docker images in parallel (multi-arch via QEMU)
-   - Pushes them to Docker Hub with three tags each: `:v1.4.0`, `:stable`, `:latest`
+   - Builds the Docker images in parallel (multi-arch via QEMU) into
+     archives, and scans them with the self-host assets
+   - After a release owner approves `release-publisher`, pushes the scanned
+     images to Docker Hub with three tags each: `:v1.4.0`, `:stable`, `:latest`
    - Builds the AIO image (if the `airepublic/pi-dash-aio-community` repo
      exists; CI will fail this single job otherwise without affecting the
      other 6)
-   - Creates a GitHub Release with the platform `setup.sh` and current
+   - Creates the `v1.4.0` tag and a GitHub Release with the platform `setup.sh` and current
      `docker-compose.yml` so self-hosters can `curl … | bash` install
 
 ## Prereleases
 
-Suffix the version with anything starting with `-` followed by a letter:
-
-```bash
-git tag pidash-v0.1.2-rc.1
-# or
-git tag platform-v1.4.0-beta.2
-```
+Suffix the version with anything starting with `-` followed by a letter,
+for example `-f tag=pidash-v0.1.2-rc.1` or `-f releaseVersion=v1.4.0-beta.2`.
 
 Both pipelines treat any `-<alpha>` suffix as a prerelease — the GitHub
 Release is marked as a prerelease, and Docker images skip the `:stable` /
@@ -107,9 +112,14 @@ Release is marked as a prerelease, and Docker images skip the `:stable` /
 
 ## What you need set up before the first real release
 
+First, the publication gate's one-time setup in
+`.github/publication-gate/README.md` (publisher App, environments, tag
+ruleset). Every credential below is a secret of the `release-publisher`
+environment, not a repository secret.
+
 For runner release advisories:
 
-1. **AWS SSM credentials in GitHub Actions secrets for this repo**
+1. **AWS SSM credentials in the `release-publisher` environment**
    - `AWS_ACCESS_KEY_ID`
    - `AWS_SECRET_ACCESS_KEY`
    - IAM permission: `ssm:PutParameter` on
@@ -119,11 +129,11 @@ For runner release advisories:
 
 For platform releases (cargo-dist runner releases already work):
 
-1. **Docker Hub credentials in GitHub Actions secrets**
+1. **Docker Hub credentials in the `release-publisher` environment**
    - `DOCKERHUB_USERNAME`
    - `DOCKERHUB_TOKEN` — Personal Access Token with Read & Write on
      `airepublic/*` repos
-   - Set at: <https://github.com/The-AI-Republic/pi-dash/settings/secrets/actions>
+   - Set at: <https://github.com/The-AI-Republic/pi-dash/settings/environments>
 
 2. **The 6 Docker Hub repos must exist** under the `airepublic` namespace:
    `pi-dash-frontend`, `pi-dash-backend`, `pi-dash-space`, `pi-dash-admin`,
@@ -132,12 +142,13 @@ For platform releases (cargo-dist runner releases already work):
 
 ## Smoke-testing the platform pipeline before tagging
 
-Before pushing the very first `platform-v*` tag, run a non-release build
-manually to validate the workflow still works:
+Before the first platform release, run a non-release build to validate the
+workflow still works:
 
 ```bash
 gh workflow run "Branch Build CE" \
   --ref main \
+  -f sha="$(git rev-parse origin/main)" \
   -f build_type=Build \
   -f releaseVersion=v0.0.0 \
   -f isPrerelease=false \
@@ -146,8 +157,9 @@ gh workflow run "Branch Build CE" \
 gh run watch
 ```
 
-This builds and pushes 6 dev-tagged images to `airepublic/*:main`. If it
-works, real tag-triggered releases will too.
+This builds and scans the images and, once `release-publisher` is approved,
+pushes dev-tagged images to `airepublic/*:main`. If it works, releases will
+too.
 
 ## Rolling back a release
 

@@ -5,65 +5,98 @@
 #
 # CI that:
 #
-# * checks for a Git Tag that looks like a release
-# * builds artifacts with cargo-dist (archives, installers, hashes)
-# * uploads those artifacts to temporary workflow zip
-# * on success, uploads the artifacts to a GitHub Release
+# * builds a release candidate with cargo-dist (archives, installers, hashes)
+#   from a commit that is already on main
+# * finishes every transformation (pinned install wrappers, release notes)
+#   so the candidate is byte-for-byte what will be published
+# * scans and smoke-tests that final candidate
+# * hands it to the protected publisher, which creates the release tag and
+#   publishes exactly the scanned files
 #
-# Note that the GitHub Release will be created with a generated
-# title/body based on your changelogs.
+# Publication gate (.github/publication-gate/README.md): nothing here runs
+# on a tag push. A release starts from workflow_dispatch with the tag to
+# create and the commit to build; only the `publish` job, in the protected
+# `release-publisher` environment, can create the tag or the GitHub Release.
+# Creating a release tag by any other means publishes nothing.
 
 name: Release
 permissions:
-  "contents": "write"
+  contents: read
 
-# This task will run whenever you push a git tag that looks like a version
-# like "1.0.0", "v0.1.0-prerelease.1", "my-app/0.1.0", "releases/v1.0.0", etc.
-# Various formats will be parsed into a VERSION and an optional PACKAGE_NAME, where
-# PACKAGE_NAME must be the name of a Cargo package in your workspace, and VERSION
-# must be a Cargo-style SemVer Version (must have at least major.minor.patch).
-#
-# If PACKAGE_NAME is specified, then the announcement will be for that
-# package (erroring out if it doesn't have the given version or isn't cargo-dist-able).
-#
-# If PACKAGE_NAME isn't specified, then the announcement will be for all
-# (cargo-dist-able) packages in the workspace with that version (this mode is
-# intended for workspaces with only one dist-able package, or with all dist-able
-# packages versioned/released in lockstep).
-#
-# If you push multiple tags at once, separate instances of this workflow will
-# spin up, creating an independent announcement for each one. However, GitHub
-# will hard limit this to 3 tags per commit, as it will assume more tags is a
-# mistake.
-#
-# If there's a prerelease-style suffix to the version, then the release(s)
-# will be marked as a prerelease.
 on:
   pull_request:
-  push:
-    tags:
-      # Runner-only release tag scheme. The runner Cargo package is named
-      # `pidash`; cargo-dist parses the `pidash-` prefix as the package
-      # selector. Platform / Docker image releases use the
-      # `platform-v*.*.*` pattern handled by build-branch.yml and
-      # intentionally do not match this workflow.
-      - 'pidash-v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Runner release tag to create, shaped pidash-vX.Y.Z[-pre]"
+        required: true
+        type: string
+      sha:
+        description: "Full commit SHA on main to build and release"
+        required: true
+        type: string
 
 jobs:
+  # Check the request before anything is built: the tag is a runner release
+  # tag that does not exist yet, and the commit is already on main (reviewed
+  # and merged), so the candidate is built from a staged, gated ref.
+  stage:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: "ubuntu-22.04"
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      sha: ${{ steps.check.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: check
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^pidash-v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::tag must look like pidash-vX.Y.Z[-pre], got '$TAG'"; exit 1
+          fi
+          if [[ ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::sha must be a full 40-character commit SHA"; exit 1
+          fi
+          git fetch --quiet origin main
+          if ! git merge-base --is-ancestor "$SHA" origin/main; then
+            echo "::error::$SHA is not on main; only merged commits can be released"; exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+            echo "::error::$TAG already exists; release tags are never moved"; exit 1
+          fi
+          version="$(git show "$SHA:runner/Cargo.toml" | sed -n 's/^version *= *"\(.*\)"/\1/p' | head -n1)"
+          if [ "pidash-v$version" != "$TAG" ]; then
+            echo "::error::runner/Cargo.toml at $SHA is version $version, which does not match $TAG"; exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
   # Run 'cargo dist plan' (or host) to determine what tasks we need to do
   plan:
+    needs:
+      - stage
+    # Pull requests only plan; a dispatch plans the staged candidate.
+    if: ${{ always() && (github.event_name == 'pull_request' || needs.stage.result == 'success') }}
     runs-on: "ubuntu-22.04"
     outputs:
       val: ${{ steps.plan.outputs.manifest }}
-      tag: ${{ !github.event.pull_request && github.ref_name || '' }}
-      tag-flag: ${{ !github.event.pull_request && format('--tag={0}', github.ref_name) || '' }}
-      publishing: ${{ !github.event.pull_request }}
+      tag: ${{ needs.stage.outputs.tag }}
+      sha: ${{ needs.stage.outputs.sha }}
+      tag-flag: ${{ needs.stage.outputs.tag && format('--tag={0}', needs.stage.outputs.tag) || '' }}
+      publishing: ${{ github.event_name == 'workflow_dispatch' }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          ref: ${{ needs.stage.outputs.sha || github.sha }}
       - name: Install cargo-dist
         # Hand-patched (cargo-dist generates this file; "ci" is in allow-dirty).
         #
@@ -140,7 +173,7 @@ jobs:
       # but also really annoying to build CI around when it needs secrets to work right.)
       - id: plan
         run: |
-          cargo dist ${{ (!github.event.pull_request && format('host --steps=create --tag={0}', github.ref_name)) || 'plan' }} --output-format=json > plan-dist-manifest.json
+          cargo dist ${{ (needs.stage.outputs.tag && format('host --steps=create --tag={0}', needs.stage.outputs.tag)) || 'plan' }} --output-format=json > plan-dist-manifest.json
           echo "cargo dist ran successfully"
           cat plan-dist-manifest.json
           echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
@@ -181,6 +214,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          ref: ${{ needs.plan.outputs.sha || github.sha }}
       - name: Install cargo-dist
         # Hand-patched (cargo-dist generates this file; "ci" is in allow-dirty).
         #
@@ -319,6 +353,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          ref: ${{ needs.plan.outputs.sha || github.sha }}
       - name: Install cached cargo-dist
         uses: actions/download-artifact@v4
         with:
@@ -351,125 +386,222 @@ jobs:
           path: |
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
-  # Determines if we should publish/announce
-  host:
+  # Finish the candidate: every byte that will be published is produced
+  # here, before the scan. Nothing in this job can publish anything.
+  candidate:
     needs:
       - plan
       - build-local-artifacts
       - build-global-artifacts
-    # Only run if we're "publishing", and only if local and global didn't fail (skipped is fine)
+    # Only when publishing, and only if local and global didn't fail (skipped is fine)
     if: ${{ always() && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"
     outputs:
-      val: ${{ steps.host.outputs.manifest }}
+      manifest-digest: ${{ steps.record.outputs.digest }}
+    env:
+      TAG: ${{ needs.plan.outputs.tag }}
+      SHA: ${{ needs.plan.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
-      - name: Install cached cargo-dist
-        uses: actions/download-artifact@v4
-        with:
-          name: cargo-dist-cache
-          path: ~/.cargo/bin/
-      - run: chmod +x ~/.cargo/bin/cargo-dist
-      # Fetch artifacts from scratch-storage
+          ref: ${{ needs.plan.outputs.sha }}
       - name: Fetch artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: artifacts-*
-          path: target/distrib/
+          path: candidate/files
           merge-multiple: true
-      - id: host
+      - name: Remove build-only manifests
+        run: |
+          # The granular manifests and the plan are build bookkeeping, not
+          # release assets.
+          rm -f candidate/files/*-dist-manifest.json candidate/files/plan-dist-manifest.json candidate/files/dist-manifest.json
+      # The install.sh / install.ps1 wrappers ship alongside the cargo-dist
+      # artifacts so the documented one-liners
+      # (…/releases/latest/download/install.sh and …/install.ps1) resolve.
+      # Each wrapper drops the binary via the matching cargo-dist installer
+      # (pidash-installer.sh / pidash-installer.ps1) and immediately launches
+      # `pidash auth login`.
+      #
+      # The wrappers carry `latest` in their download URLs, so pin them to
+      # this tag (including install.ps1's MSI fallback link, which must name
+      # the same release's MSI). The grep fails the job if any pidash-* asset
+      # URL is still on `latest`, so a wrapper edit that stops matching can't
+      # silently break pinning.
+      - name: Pin install wrappers to this release
         shell: bash
         run: |
-          cargo dist host ${{ needs.plan.outputs.tag-flag }} --steps=upload --steps=release --output-format=json > dist-manifest.json
-          echo "artifacts uploaded and released successfully"
-          cat dist-manifest.json
-          echo "manifest=$(jq -c "." dist-manifest.json)" >> "$GITHUB_OUTPUT"
-      - name: "Upload dist-manifest.json"
-        uses: actions/upload-artifact@v4
-        with:
-          # Overwrite the previous copy
-          name: artifacts-dist-manifest
-          path: dist-manifest.json
-      # Create a GitHub Release while uploading all files to it
-      - name: "Download GitHub Artifacts"
-        uses: actions/download-artifact@v4
-        with:
-          pattern: artifacts-*
-          path: artifacts
-          merge-multiple: true
-      - name: Cleanup
-        run: |
-          # Remove the granular manifests
-          rm -f artifacts/*-dist-manifest.json
-      - name: Create GitHub Release
-        env:
-          PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
-          ANNOUNCEMENT_TITLE: "${{ fromJson(steps.host.outputs.manifest).announcement_title }}"
-          ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
-          RELEASE_COMMIT: "${{ github.sha }}"
-        run: |
-          # Write and read notes from a file to avoid quoting breaking things
-          echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
-
-          gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
-
-      # Hand-added (cargo-dist doesn't know about this): publish the
-      # install.sh / install.ps1 wrappers alongside the cargo-dist
-      # artifacts so the documented one-liners
-      # (…/releases/latest/download/install.sh and …/install.ps1)
-      # resolve. Each wrapper drops the binary via the matching
-      # cargo-dist installer (pidash-installer.sh / pidash-installer.ps1)
-      # and immediately launches `pidash auth login`.
-      #
-      # The wrappers ship with `latest` baked into their download URLs
-      # so a plain upload would mean that even a tag-pinned wrapper
-      # (…/releases/download/pidash-v0.1.0/install.sh) would silently
-      # fetch the latest binary. sed the actual tag in before upload
-      # so pinning works as documented — including install.ps1's MSI
-      # fallback link, which must name the same release's MSI. The grep
-      # fails the step if any pidash-* asset URL is still on `latest`, so
-      # a wrapper edit that stops matching can't silently break pinning.
-      - name: Upload install wrappers
-        run: |
-          sed -i "s|/releases/latest/download/pidash-installer.sh|/releases/download/${{ needs.plan.outputs.tag }}/pidash-installer.sh|" runner/install.sh
-          sed -i "s|/releases/latest/download/pidash-installer.ps1|/releases/download/${{ needs.plan.outputs.tag }}/pidash-installer.ps1|" runner/install.ps1
-          sed -i "s|/releases/latest/download/pidash-x86_64-pc-windows-msvc.msi|/releases/download/${{ needs.plan.outputs.tag }}/pidash-x86_64-pc-windows-msvc.msi|" runner/install.ps1
-          if grep -n "releases/latest/download/pidash-" runner/install.sh runner/install.ps1; then
+          set -euo pipefail
+          cp runner/install.sh runner/install.ps1 candidate/files/
+          sed -i "s|/releases/latest/download/pidash-installer.sh|/releases/download/${TAG}/pidash-installer.sh|" candidate/files/install.sh
+          sed -i "s|/releases/latest/download/pidash-installer.ps1|/releases/download/${TAG}/pidash-installer.ps1|" candidate/files/install.ps1
+          sed -i "s|/releases/latest/download/pidash-x86_64-pc-windows-msvc.msi|/releases/download/${TAG}/pidash-x86_64-pc-windows-msvc.msi|" candidate/files/install.ps1
+          if grep -n "releases/latest/download/pidash-" candidate/files/install.sh candidate/files/install.ps1; then
             echo "::error::install wrapper still references a 'latest' pidash-* asset (lines above); update the sed rewrites"
             exit 1
           fi
-          gh release upload "${{ needs.plan.outputs.tag }}" runner/install.sh runner/install.ps1 --clobber
+      - name: Write the release text
+        env:
+          PRERELEASE: ${{ fromJson(needs.plan.outputs.val).announcement_is_prerelease }}
+          ANNOUNCEMENT_TITLE: ${{ fromJson(needs.plan.outputs.val).announcement_title }}
+          ANNOUNCEMENT_BODY: ${{ fromJson(needs.plan.outputs.val).announcement_github_body }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p candidate/release
+          printf '%s\n' "$ANNOUNCEMENT_TITLE" > candidate/release/title.txt
+          printf '%s\n' "$ANNOUNCEMENT_BODY" > candidate/release/notes.md
+          printf '%s\n' "$PRERELEASE" > candidate/release/prerelease.txt
+      - id: record
+        name: Record the candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest="$(python3 .github/publication-gate/gate.py build-manifest candidate --tag "$TAG" --sha "$SHA")"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-candidate
+          path: candidate
+          if-no-files-found: error
 
-  publish-runner-version-advisory:
-    # Publish the Cloud advisory source of truth only. Do not restart EC2,
-    # redeploy the API, or mutate MIN_RUNNER_VERSION from a normal release.
+  # Scan and test the final candidate: the published files, the release text
+  # and the source tree of the commit the tag will point at.
+  scan:
     needs:
       - plan
-      - host
-    if: ${{ always() && needs.host.result == 'success' && fromJson(needs.host.outputs.val).announcement_is_prerelease == false }}
+      - candidate
+    environment: publication-scan
     runs-on: "ubuntu-22.04"
+    outputs:
+      manifest-digest: ${{ steps.approve.outputs.digest }}
     env:
-      AWS_REGION: us-west-2
-      RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+      TAG: ${{ needs.plan.outputs.tag }}
+      SHA: ${{ needs.plan.outputs.sha }}
+      CANDIDATE_DIGEST: ${{ needs.candidate.outputs.manifest-digest }}
+      PYTHONDONTWRITEBYTECODE: "1"
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          path: source
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-candidate
+          path: candidate
+      - name: Candidate is intact
+        run: python3 source/.github/publication-gate/gate.py verify-manifest candidate --expect-digest "$CANDIDATE_DIGEST"
+      # The denylist is visible only to the two steps that need it.
+      - name: Scanner rejects a planted leak
+        env:
+          PUBLICATION_DENYLIST: ${{ secrets.PUBLICATION_DENYLIST }}
+        run: python3 source/.github/publication-gate/gate.py self-test --denylist-env PUBLICATION_DENYLIST --require-denylist
+      - name: Scan the candidate and its source tree
+        env:
+          PUBLICATION_DENYLIST: ${{ secrets.PUBLICATION_DENYLIST }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir tree
+          git -C source archive "$SHA" | tar -x -C tree
+          cd source
+          python3 .github/publication-gate/gate.py scan --denylist-env PUBLICATION_DENYLIST --require-denylist ../candidate ../tree
+      - name: Smoke-test the Linux archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="candidate/files/pidash-x86_64-unknown-linux-gnu.tar.xz"
+          test -f "$archive" || { echo "::error::$archive is missing from the candidate"; exit 1; }
+          mkdir smoke
+          tar -xJf "$archive" -C smoke
+          bin="$(find smoke -type f -name pidash -perm -u+x | head -n1)"
+          test -n "$bin" || { echo "::error::no pidash binary in $archive"; exit 1; }
+          out="$("$bin" --version)"
+          echo "$out"
+          case "$out" in
+            *"${TAG#pidash-v}"*) ;;
+            *) echo "::error::binary reports '$out', expected version ${TAG#pidash-v}"; exit 1 ;;
+          esac
+          ( cd candidate/files && sha256sum -c --ignore-missing --quiet *.sha256 ) || {
+            echo "::error::a published checksum does not match its file"; exit 1; }
+      - id: approve
+        name: Approve this exact candidate
+        run: |
+          digest="$(python3 -c 'import json,sys; sys.path.insert(0,"source/.github/publication-gate"); import gate; print(gate.manifest_digest(json.load(open("candidate/publication-manifest.json"))))')"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Approved candidate manifest $digest"
+
+  # The protected publisher: the only job that holds publish credentials and
+  # the only identity the tag ruleset lets create a release tag. It runs after
+  # a reviewer approves the `release-publisher` environment, and publishes
+  # only the files the scan approved.
+  publish:
+    needs:
+      - plan
+      - scan
+    environment: release-publisher
+    if: ${{ !cancelled() && needs.scan.result == 'success' }}
+    runs-on: "ubuntu-22.04"
+    permissions:
+      contents: read
+    env:
+      TAG: ${{ needs.plan.outputs.tag }}
+      SHA: ${{ needs.plan.outputs.sha }}
+      APPROVED_DIGEST: ${{ needs.scan.outputs.manifest-digest }}
+      PUBLISHER_APP_ID: ${{ vars.PUBLISHER_APP_ID }}
+      AWS_REGION: us-west-2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          path: source
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-candidate
+          path: candidate
+      - name: Publish only what was scanned
+        run: python3 source/.github/publication-gate/gate.py verify-manifest candidate --expect-digest "$APPROVED_DIGEST"
+      - id: app-token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: ${{ vars.PUBLISHER_APP_ID }}
+          private-key: ${{ secrets.PUBLISHER_APP_PRIVATE_KEY }}
+      - name: Tag ruleset is live
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: python3 source/.github/publication-gate/gate.py check-live-ruleset --repo "$GITHUB_REPOSITORY" --app-id "$PUBLISHER_APP_ID"
+      - name: Create the release tag and publish the candidate
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The tag is created here, by the publisher, at the scanned commit.
+          # No workflow starts on tag creation, so this does not publish twice.
+          gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA" >/dev/null
+          flags=()
+          if [ "$(cat candidate/release/prerelease.txt)" = "true" ]; then flags+=(--prerelease); fi
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag "${flags[@]}" \
+            --title "$(cat candidate/release/title.txt)" \
+            --notes-file candidate/release/notes.md \
+            candidate/files/*
+      # Publish the Cloud advisory source of truth only. Do not restart EC2,
+      # redeploy the API, or mutate MIN_RUNNER_VERSION from a normal release.
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        if: ${{ fromJson(needs.plan.outputs.val).announcement_is_prerelease == false }}
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
-
       - name: Publish latest runner version to Cloud SSM
+        if: ${{ fromJson(needs.plan.outputs.val).announcement_is_prerelease == false }}
         shell: bash
         run: |
           set -euo pipefail
-          VERSION="${RELEASE_TAG#pidash-v}"
-          if [ -z "$VERSION" ] || [ "$VERSION" = "$RELEASE_TAG" ]; then
-            echo "::error::expected runner tag shaped pidash-vX.Y.Z, got '$RELEASE_TAG'"
+          VERSION="${TAG#pidash-v}"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "$TAG" ]; then
+            echo "::error::expected runner tag shaped pidash-vX.Y.Z, got '$TAG'"
             exit 1
           fi
 
@@ -482,19 +614,3 @@ jobs:
               --overwrite
             echo "Published LATEST_RUNNER_VERSION=$VERSION to /pidash/config/${target}/"
           done
-
-  announce:
-    needs:
-      - plan
-      - host
-    # use "always() && ..." to allow us to wait for all publish jobs while
-    # still allowing individual publish jobs to skip themselves (for prereleases).
-    # "host" however must run to completion, no skipping allowed!
-    if: ${{ always() && needs.host.result == 'success' }}
-    runs-on: "ubuntu-22.04"
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive

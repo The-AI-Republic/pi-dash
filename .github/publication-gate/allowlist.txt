@@ -1,0 +1,3 @@
+# Scanner allowlist: `<rule> <path-glob>`, one per line, each with a reason
+# in a comment above it. Prefer fixing the file; never allowlist a real
+# credential. Changes here go through normal review like any code.

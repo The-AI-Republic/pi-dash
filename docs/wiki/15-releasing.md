@@ -10,7 +10,7 @@ Pi Dash has two independent release streams:
 ### Tooling
 
 - `cargo-dist` — orchestrates the build matrix and packaging. Config in `dist-workspace.toml`.
-- `.github/workflows/release.yml` — the GitHub Actions workflow triggered by SemVer tags.
+- `.github/workflows/release.yml` — the GitHub Actions workflow, started by hand with the tag to create and a commit on `main`; it goes through the publication gate (`.github/publication-gate/README.md`).
 - `runner/install.sh` / `runner/install.ps1` — opinionated wrapper installers (do auto-auth after install).
 - The bare cargo-dist installers (`pidash-installer.sh`, `pidash-installer.ps1`, MSI) are also published — used by CI / base images that want to install without auto-auth.
 
@@ -29,12 +29,11 @@ Plus shell, PowerShell, and MSI installer scripts.
 ### Tag & ship
 
 ```bash
-# In runner/Cargo.toml, bump version to X.Y.Z, commit.
-git tag pidash-vX.Y.Z          # tag prefix matters — workflow filters on it
-git push origin pidash-vX.Y.Z
+# Bump runner/Cargo.toml to X.Y.Z and merge that to main, then:
+gh workflow run Release --ref main -f tag=pidash-vX.Y.Z -f sha="$(git rev-parse origin/main)"
 ```
 
-The workflow builds, signs, and publishes to GitHub Releases.
+The workflow builds, finishes and scans the candidate. After a release owner approves the `release-publisher` environment, the publisher creates the tag and publishes the scanned files to GitHub Releases. Do not push release tags yourself: the tag ruleset refuses them, and no workflow starts on a tag push.
 
 ### Prereleases
 

@@ -1,0 +1,68 @@
+# Publication gate policy check. Runs on every pull request into main, so a
+# change cannot add a tag-triggered publish, a publish credential outside the
+# protected publisher, or a weaker tag ruleset without failing here.
+#
+# The policy checker is the base branch's, checked out into its own
+# directory and run isolated (python -I), so a pull request can neither
+# relax the rules it is checked against nor plant a module the checker
+# imports. No pull request code runs in that job. The pull request's own
+# gate tests run in a separate job. Edits to this file and to the gate need
+# a code owner's review (CODEOWNERS).
+name: publication-gate
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    name: publication gate policy
+    runs-on: ubuntu-22.04
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Check out the change
+        uses: actions/checkout@v4
+        with:
+          path: change
+          persist-credentials: false
+      - name: Check out the base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.base_ref || 'main' }}
+          path: base
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -I -m pip install --quiet "pyyaml==6.0.2"
+      - name: Policy, as the base branch defines it
+        run: |
+          set -euo pipefail
+          if [ -f base/.github/publication-gate/gate.py ]; then
+            python -I base/.github/publication-gate/gate.py check-policy --repo-root change
+          else
+            # Bootstrap only: the gate is not on the base branch yet.
+            echo "No checker on the base branch yet; using the change's."
+            python -I change/.github/publication-gate/gate.py check-policy --repo-root change
+          fi
+
+  tests:
+    name: publication gate tests
+    runs-on: ubuntu-22.04
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --quiet "pyyaml==6.0.2"
+      - name: Gate unit tests
+        run: python -m unittest discover -s .github/publication-gate/tests -v
