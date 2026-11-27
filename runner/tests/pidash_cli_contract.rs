@@ -1966,6 +1966,63 @@ async fn issue_patch_description_file_sends_the_file_as_markdown() {
     );
 }
 
+const SAME_STATE: &str = "11111111-2222-3333-4444-555555555555";
+
+/// PDASHOSS01-406: `issue patch --state` naming the state the issue is
+/// already in prints the advisory `state_unchanged` note from `cmd_patch`.
+#[tokio::test]
+async fn issue_patch_same_state_prints_state_unchanged_note() {
+    let detail = format!(
+        r#"{{"id":"{ISSUE_ID}","project":"{ISSUE_PROJECT_ID}","name":"demo","state":"{SAME_STATE}"}}"#
+    );
+    let fake = start_fake(Box::new(move |_req| CannedResponse::ok(detail.clone()))).await;
+
+    let out = run_pidash(
+        &fake,
+        &["issue", "patch", "ENG-1", "--state", SAME_STATE],
+        "",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let printed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    let note = &printed["state_unchanged"];
+    assert_eq!(note["dispatch_expected"], serde_json::json!(false));
+    assert_eq!(note["state"], serde_json::json!(SAME_STATE));
+    assert!(
+        note["hint"]
+            .as_str()
+            .unwrap()
+            .contains("pidash issue run-ai ENG-1"),
+        "{note}"
+    );
+    let recorded = fake.recorded.lock().unwrap();
+    assert_eq!(
+        body_json(&recorded[1]),
+        serde_json::json!({"state": SAME_STATE})
+    );
+}
+
+/// A `--state` that differs from the issue's current state prints no note.
+#[tokio::test]
+async fn issue_patch_real_state_change_prints_no_note() {
+    let detail = format!(
+        r#"{{"id":"{ISSUE_ID}","project":"{ISSUE_PROJECT_ID}","name":"demo","state":"aaaaaaaa-2222-3333-4444-555555555555"}}"#
+    );
+    let fake = start_fake(Box::new(move |_req| CannedResponse::ok(detail.clone()))).await;
+
+    let out = run_pidash(
+        &fake,
+        &["issue", "patch", "ENG-1", "--state", SAME_STATE],
+        "",
+    )
+    .await;
+
+    assert_eq!(out.code, Some(0), "stderr: {}", out.stderr);
+    let printed: serde_json::Value = serde_json::from_str(out.stdout.trim()).unwrap();
+    assert!(printed.get("state_unchanged").is_none(), "{printed}");
+}
+
 #[tokio::test]
 async fn issue_patch_description_file_dash_reads_stdin() {
     let fake = start_fake(issue_patch_handler()).await;
