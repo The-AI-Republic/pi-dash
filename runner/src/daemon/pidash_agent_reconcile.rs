@@ -391,12 +391,8 @@ mod tests {
             },
             &[],
         );
-        ctx.engine = crate::pidash_agent::manager::PidashAgentManager::new(
-            Some(url),
-            paths.clone(),
-            tokens,
-            None,
-        );
+        ctx.engine =
+            crate::pidash_agent::manager::PidashAgentManager::new(Some(url), paths.clone(), tokens, None);
         ctx
     }
 
