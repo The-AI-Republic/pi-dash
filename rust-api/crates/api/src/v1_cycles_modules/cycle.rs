@@ -91,7 +91,10 @@ use sea_orm::{
 use serde_json::Value;
 use sqlx::PgPool;
 
-use super::module::{check_max_length, CoerceFail};
+use super::module::{
+    check_max_length, fetch_state_detail, fetch_state_details, render_state_detail, CoerceFail,
+    StateDetail,
+};
 use pidash_auth::permissions::project;
 use pidash_compat::response::{json_created, json_ok, no_content};
 use pidash_db::entity::{
@@ -1589,8 +1592,19 @@ pub async fn expand_issue_full(
     };
     let slug = workspace_slug(pool, &detail.workspace_id).await?;
     let url = issue_url(state, &slug, &identifier, detail.sequence_id);
+    let state_detail = fetch_state_detail(pool, detail.state_id)
+        .await
+        .map_err(|error| db_error(error, "state-detail"))?;
     let mut rendered = render_issue(
-        pool, &detail, &assignees, &labels, url, timezone, None, None,
+        pool,
+        &detail,
+        &assignees,
+        &labels,
+        state_detail.as_ref(),
+        url,
+        timezone,
+        None,
+        None,
     )
     .await?;
     // Single-item `IssueSerializer` appends the blocker keys
@@ -1798,17 +1812,20 @@ pub async fn render_issue(
     detail: &IssueDetail,
     assignees: &[uuid::Uuid],
     labels: &[uuid::Uuid],
+    state_detail: Option<&StateDetail>,
     url: Option<String>,
     timezone: &Tz,
     fields: Option<&[String]>,
     expand: Option<&[String]>,
 ) -> Result<Value, Denial> {
-    let mut map = serde_json::Map::with_capacity(36);
+    let mut map = serde_json::Map::with_capacity(37);
     map.insert("id".to_owned(), render_uuid(&detail.id));
     map.insert("type_id".to_owned(), render_uuid_opt(&detail.type_id));
     if let Some(url) = url {
         map.insert("url".to_owned(), Value::String(url));
     }
+    // Declared method field after `url` (PDASHOSS01-404).
+    map.insert("state_detail".to_owned(), render_state_detail(state_detail));
     map.insert(
         "created_at".to_owned(),
         Value::String(crate::serializer::render_datetime_in(
@@ -5312,20 +5329,34 @@ pub async fn list_cycle_issues_inner(
     let window = page_window(query, rows.len())?;
     let fields = fields_param(query, "fields");
     let expand = fields_param(query, "expand");
+    let details = rows[window.start..window.stop]
+        .iter()
+        .map(|row| IssueDetail::decode(row, "cycle-issues-list"))
+        .collect::<Result<Vec<_>, _>>()?;
+    // One `states` read for the page's `state_detail` objects.
+    let state_details = fetch_state_details(
+        &pre.pool,
+        details.iter().filter_map(|detail| detail.state_id),
+    )
+    .await
+    .map_err(|error| db_error(error, "state-detail"))?;
     let mut results = Vec::new();
-    for row in &rows[window.start..window.stop] {
-        let detail = IssueDetail::decode(row, "cycle-issues-list")?;
+    for detail in &details {
         let assignees = fetch_assignees(&pre.pool, &detail.id).await?;
         let labels = fetch_issue_labels(&pre.pool, &detail.id).await?;
         let url = identifier
             .as_deref()
             .and_then(|identifier| issue_url(state, slug, identifier, detail.sequence_id));
+        let state_detail = detail
+            .state_id
+            .and_then(|state_id| state_details.get(&state_id));
         results.push(
             render_issue(
                 &pre.pool,
-                &detail,
+                detail,
                 &assignees,
                 &labels,
+                state_detail,
                 url,
                 &timezone,
                 fields.as_deref(),
@@ -7134,6 +7165,111 @@ mod tests {
     use axum::http::StatusCode;
     use std::collections::HashMap;
     use tower::ServiceExt;
+
+    /// PDASHOSS01-404: `state_detail` renders right after `url`, is `null`
+    /// without a state, and `?fields=state_detail` keeps only that object.
+    #[tokio::test]
+    async fn render_issue_carries_state_detail() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused@127.0.0.1:1/unused")
+            .expect("lazy pool");
+        let now = chrono::Utc::now();
+        let detail = IssueDetail {
+            id: uuid::Uuid::new_v4(),
+            created_at: now,
+            updated_at: now,
+            deleted_at: None,
+            point: None,
+            name: "n".to_owned(),
+            description_html: String::new(),
+            description_binary: None,
+            priority: None,
+            complexity_score: None,
+            start_date: None,
+            target_date: None,
+            sequence_id: 1,
+            sort_order: 1.0,
+            completed_at: None,
+            archived_at: None,
+            is_draft: false,
+            external_source: None,
+            external_id: None,
+            git_work_branch: String::new(),
+            created_via: None,
+            agent_executor: None,
+            work_type: None,
+            created_by: None,
+            updated_by: None,
+            project_id: uuid::Uuid::new_v4(),
+            workspace_id: uuid::Uuid::new_v4(),
+            parent_id: None,
+            state_id: Some(uuid::Uuid::new_v4()),
+            estimate_point_id: None,
+            type_id: None,
+            assigned_pod_id: None,
+        };
+        let done: StateDetail = ("Done".to_owned(), "completed".to_owned());
+        let tz = chrono_tz::Tz::UTC;
+        let full = render_issue(
+            &pool,
+            &detail,
+            &[],
+            &[],
+            Some(&done),
+            Some("https://x/1".to_owned()),
+            &tz,
+            None,
+            None,
+        )
+        .await
+        .expect("render");
+        let keys: Vec<&str> = full
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            &keys[..5],
+            ["id", "type_id", "url", "state_detail", "created_at"]
+        );
+        assert_eq!(
+            full["state_detail"],
+            serde_json::json!({"name": "Done", "group": "completed"})
+        );
+        let fields = vec!["state_detail".to_owned()];
+        let only = render_issue(
+            &pool,
+            &detail,
+            &[],
+            &[],
+            Some(&done),
+            None,
+            &tz,
+            Some(&fields),
+            None,
+        )
+        .await
+        .expect("render");
+        assert_eq!(
+            only,
+            serde_json::json!({"state_detail": {"name": "Done", "group": "completed"}})
+        );
+        let stateless = render_issue(
+            &pool,
+            &detail,
+            &[],
+            &[],
+            None,
+            None,
+            &tz,
+            Some(&fields),
+            None,
+        )
+        .await
+        .expect("render");
+        assert_eq!(stateless, serde_json::json!({"state_detail": null}));
+    }
 
     fn origin_state(app_base_url: Option<&str>, web_url: Option<&str>) -> AppState {
         let mut settings = pidash_db::config::Settings::test_defaults();

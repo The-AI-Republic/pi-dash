@@ -1237,8 +1237,19 @@ async fn render_issue_full(
     // non-null column.)
     let identifier = identifier.ok_or(Denial::ServerError)?;
     let url = cycle_mod::issue_url(state, slug, &identifier, issue.sequence_id);
+    let state_detail = crate::v1_cycles_modules::module::fetch_state_detail(pool, issue.state_id)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let mut rendered = cycle_mod::render_issue(
-        pool, &detail, &assignees, &labels, url, timezone, None, None,
+        pool,
+        &detail,
+        &assignees,
+        &labels,
+        state_detail.as_ref(),
+        url,
+        timezone,
+        None,
+        None,
     )
     .await
     .map_err(cycle_denial)?;
