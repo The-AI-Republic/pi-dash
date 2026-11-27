@@ -68,7 +68,9 @@ total_count, next_cursor, prev_cursor, next_page_results, results:
     `--fields id,sequence_id,name,state,parent` for a small payload. Each
     item's `state` is the state UUID; `state_detail` is `{name, group}` for
     it (null when the item has no state), so `--fields state_detail` is
-    enough to count done children without a `pidash state list` join.
+    enough to count done children without a `pidash state list` join. Pass
+    `--state-group all` with it: the default `open` filter leaves the done
+    children out.
     Example: `pidash issue list --project ENG --parent ENG-12 --state Backlog --fields id,sequence_id,name,state`
     lists the Backlog sub-issues of `ENG-12` in one call — prefer this over
     paging the whole project and calling `pidash issue get <identifier>` on each item.
